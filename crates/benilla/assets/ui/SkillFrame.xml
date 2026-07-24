@@ -1,0 +1,627 @@
+<Ui>
+    <!--
+        benilla's Skills tab (decision 0437 phase 4): the 1.12 `SkillFrame`, transcribed from the
+        reference FrameXML `SkillFrame.{xml,lua}` (session scratchpad `ref-ui/`, decision 0246
+        discipline — never committed) onto our own engine/feeds. Geometry/art-paths below are QUOTED
+        from the ref (line citations inline, into that same `SkillFrame.xml`/`.lua`); the Lua is
+        transcribed logic turned onto benilla's Era API (`GetNumSkillLines`/`GetSkillLineInfo`/
+        `Expand`/`CollapseSkillHeader`/`SetSelectedSkill`/`GetSelectedSkill`, decision 0437's skills
+        seam, `crates/benilla-ui/src/script/skills.rs`, built alongside this file).
+
+        A CHILD PAGE of `BenillaCharacterFrame` (ref: `parent="CharacterFrame"`, `id="4"`), shown/
+        hidden by `CharacterFrame_ShowSubFrame` exactly like `BenillaPaperDollFrame` — but NOT a
+        physically nested `<Frame>` the way PaperDollFrame is: PaperDollFrame is declared INSIDE
+        CharacterFrame.xml's own `<Frames>` tree (a real engine parent/child), while this page is a
+        SEPARATE file's top-level `<Frame>` (CharacterFrame.xml is shared-tree with another session
+        this pass, so only its tab machinery is touched here — not its frame tree). `parent=` is
+        transcribed for fidelity but is a NO-OP in this engine (grepped `benilla-ui/src/loader`: the
+        XML `parent` attribute is read nowhere — only physical `<Frames>` nesting creates a real
+        parent). Position instead rides `<Anchors relativeTo="BenillaCharacterFrame">` (a NAMED
+        lookup, works regardless of tree position, the same mechanism every sibling-anchor in this
+        codebase already uses) — loaded right after `CharacterFrame.xml` in the load list so it
+        paints ON TOP of it (later file = higher z, the established house convention every top-level
+        window already relies on implicitly). Because a true engine Hide-cascade doesn't reach a
+        non-child, `CharacterFrame.xml`'s own `BenillaCharacterFrame_OnHide` was extended (its own
+        header comment) to loop-hide every `BENILLA_CHARACTERFRAME_SUBFRAMES` entry — the fix this
+        page's non-nested shape requires, done once so later non-nested tabs (Pet/Reputation/Honor)
+        inherit it for free.
+
+        NO OWN PORTRAIT (matches the ref: `ref-ui/SkillFrame.xml` l.130-213 draws no portrait Texture
+        at all): the shared quadrant background art below (`UI-Character-General-TopLeft/TopRight`,
+        the SAME "General" variant the ref uses, l.136-159) carries the SAME baked-in portrait-ring
+        cutout every PaperDollInfoFrame quadrant variant shares, so `BenillaCharacterFrame`'s own
+        portrait/name/level (drawn at a lower z, underneath) shows through unchanged — exactly the
+        ref's own real-client compositing (SkillFrame is a nested child there too, relying on the
+        same cutout rather than redrawing the portrait itself).
+
+        FLAT layout (TrainerFrame.xml/TradeSkillFrame.xml's own house constraint): this window has no
+        DETAIL FontStrings needing a nested child Frame in the first place — the minimal detail pane
+        (below) is a single StatusBar instance whose own name/rank FontStrings live on ITS OWN Layers
+        (a StatusBar, like a Button, renders its own Layers fine — only a plain child `<Frame>` loses
+        them), the exact `BenillaTradeSkillRankFrame` shape TradeSkillFrame.xml already proved.
+
+        v1 DEVIATIONS (each re-cited at its own site below):
+          1. THE DETAIL PANE IS MINIMAL-PLUS-DESCRIPTION-PLUS-ABANDON: the selected skill's rank
+             StatusBar + name + the DESCRIPTION BODY (`BenillaSkillDetailDescriptionText` — ref
+             `SkillDetailDescriptionText`/`SKILL_DESCRIPTION`, real since `GetSkillLineInfo`'s 13th
+             return carries `SkillLine.dbc` col 12) + the ABANDON BUTTON
+             (`BenillaSkillDetailUnlearnButton` → the `UNLEARN_SKILL` confirm → `AbandonSkill` →
+             `CMSG_UNLEARN_SKILL`; the isAbandonable predicate is `SkillRaceClassInfo.flags & 0x20`
+             — the server's own gate, real 5875 data: primary professions only). STILL OMITTED:
+             the training-point spend row (the ref's `LeftArrow`/`RightArrow`/`LearnSkillButton`/
+             `SkillDetailCostText`, all driven by `stepCost`/`rankCost`, which `GetSkillLineInfo`
+             always reports nil/0 — 0437's own named out-of-scope: 1.12 training points are dead
+             data).
+          2. NO SORT CHECKBOX (ref l.215-241's own XML-commented-out "Replace once code is ready..."
+             `SkillSortButton`): the ref itself ships this dead/commented, so there is nothing to
+             transcribe (TradeSkillFrame.xml's own "ref's own dead code is dropped" precedent).
+          3. NO ACCEPT/CANCEL BUTTONS (ref l.318-357's `SkillFrameAcceptButton`/`SkillFrameCancelButton`,
+             the latter ALSO commented dead in the ref): both back the training-point economy (Accept/
+             CancelSkillUps) this pane doesn't ship, AND this page has no window of its own to close —
+             `BenillaCharacterFrame`'s single shared close X (CharacterFrame.xml) already covers every
+             tab, matching `BenillaPaperDollFrame`'s own lack of a per-page close button.
+          4. THE RANK TEXT FORMAT IS THE REF'S BYTE-EXACT ONE, not the task brief's own paraphrase:
+             `ref-ui/SkillFrame.lua` l.178-186 builds `rank .. " (" .. color .. modifier .. close ..
+             ")/" .. max` (e.g. "57 (|cff20ff20+3|r)/75") — transcribed verbatim (the reference
+             file is the authority on the tuple/format, the brief's prose is a summary).
+          5. NO FILLBAR (ref's `$parentFillBar`, driven by `numTempPoints`): [`GetSkillLineInfo`]
+             always reports `numTempPoints = 0` (skills.rs's own module doc — 1.12 training points are
+             dead data), so the fill bar could never show — dropped outright, `TradeSkillFrame.xml`'s
+             OWN `BenillaTradeSkillRankFrame` (the identical StatusBar shape) already sets this local
+             precedent for the same reason.
+          6. NO HOVER TOOLTIP on a row: the ref's own `SkillFrame.lua` calls `GameTooltip` NOWHERE
+             (grepped the full reference file) — a skill line is pure descriptor state, nothing to
+             preview. Unlike Trainer/TradeSkill, this window needs no `GameTooltip:Set*Item` channel.
+          7. `LockHighlight`/`UnlockHighlight` ENGINE GAP (TalentFrame.xml/TradeSkillFrame.xml's own
+             "no engine equivalent" posture, grepped `benilla-ui/src/script/button.rs` — ships
+             texture-pairs/SetText/Enable/Disable/RegisterForClicks/SetButtonState/Click only): the
+             persistent selection glow is `BenillaSkillHighlight`, the separate overlay Frame
+             Trainer/TradeSkillFrame already use, moved onto the selected row's StatusBar.
+          8. GlobalStrings this window itself needs: NONE beyond the tab label `SKILLS` (already
+             declared in CharacterFrame.xml, quoted there byte-exact with its GlobalStrings.lua line
+             cite) — the ref's own `SkillFrame.lua` reads no other GlobalString.
+
+        Rows repaint on `SKILL_LINES_CHANGED` (registered here; `crates/benilla/src/ui_char.rs`'s
+        `watch_skill_ups`/`feed_skills` already fire it) and on `OnShow` (ref `SkillFrame_OnShow`,
+        l.4-6). The list is the house faux-scroll kit (ScrollTemplates.xml, the TrainerFrame/
+        TradeSkillFrame precedent) over 12 fixed row slots (ref `SKILLS_TO_DISPLAY = 12`,
+        `SkillFrame.lua:1` — the ref's own row count, and this page shares the ref's own 384×512
+        coordinate space since it fills the identical CharacterFrame page area).
+    -->
+    <Script><![CDATA[
+        -- ── Constants (ref SkillFrame.lua:1-2) ──────────────────────────────────────────────────────
+        local SKILLFRAME_SKILLS_DISPLAYED = 12 -- SKILLS_TO_DISPLAY
+        local SKILLFRAME_SKILL_HEIGHT = 15     -- SKILLFRAME_SKILL_HEIGHT
+
+        -- GlobalStrings (ref GlobalStrings.lua:3478), chunk-local per the codebase idiom — safe
+        -- because only THIS chunk's functions read it; the nil-"All" trap (TradeSkillFrame.xml's
+        -- deviation notes) is the inline-XML-handler case, and no inline handler references it.
+        -- Its earlier ABSENCE here made format() throw in UpdateDetail on every row selection —
+        -- half of the 2026-07-17 "tabs are flaky" report (the silent-error half).
+        local SKILL_DESCRIPTION = "|cffffffff%s|r %s"
+        local UNLEARN_SKILL = "Do you want to unlearn %s?"      -- GlobalStrings.lua:4446
+        local UNLEARN = "Unlearn"                               -- GlobalStrings.lua:4445
+        local UNLEARN_SKILL_TOOLTIP = "Unlearn this profession" -- GlobalStrings.lua:4447
+
+        -- Paint the rank StatusBar `bar` + its `SkillName`/`SkillRank` FontStrings for one skill-line
+        -- ENTRY row (never a header — callers guard that): the ref's own bar-fill + rank-text half of
+        -- `SkillFrame_SetStatusBar` (l.76-187) and the detail's twin `SkillDetailFrame_SetStatusBar`
+        -- (l.161-187, l.370-399) — the SAME formatting either pane uses, factored once here since our
+        -- minimal detail pane (deviation 1) needs nothing else from that function.
+        function BenillaSkillFrame_PaintBar(bar, skillName, skillRank, skillModifier, skillMaxRank)
+            local nameText = getglobal(bar:GetName() .. "SkillName")
+            local rankText = getglobal(bar:GetName() .. "SkillRank")
+            nameText:SetText(skillName)
+            nameText:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+            rankText:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            if skillMaxRank == 0 then
+                -- A 1.12 proficiency line the app reports as 0/0 (SkillEntry's own doc) — barless
+                -- plain text, deviation-free reading of the ref's own "skillMaxRank == 1" gray-bar
+                -- intent, adapted to our app's 0/0 shape (this file's header comment, no-fillbar note).
+                bar:SetMinMaxValues(0, 1)
+                bar:SetValue(0)
+                bar:SetStatusBarColor(0, 0, 0, 0)
+                rankText:SetText("")
+            else
+                bar:SetStatusBarColor(0.0, 0.0, 1.0, 0.5)
+                bar:SetMinMaxValues(0, skillMaxRank)
+                bar:SetValue(skillRank)
+                -- ref SkillFrame.lua:178-186, transcribed byte-exact (this file's header comment,
+                -- deviation 4).
+                if skillModifier == 0 then
+                    rankText:SetText(skillRank .. "/" .. skillMaxRank)
+                else
+                    local color = RED_FONT_COLOR_CODE
+                    if skillModifier > 0 then
+                        color = GREEN_FONT_COLOR_CODE .. "+"
+                    end
+                    rankText:SetText(skillRank .. " (" .. color .. skillModifier .. FONT_COLOR_CODE_CLOSE .. ")/" .. skillMaxRank)
+                end
+            end
+        end
+
+        -- Fill the detail pane (deviation 1) for the current `GetSelectedSkill()`, or blank it
+        -- when nothing is selected / the selection isn't a visible entry. The description body is
+        -- the ref's own (ref SkillFrame.lua l.211-217 hide/show alongside the bar; l.262 the
+        -- SKILL_DESCRIPTION format): `skillType` stays "" in EVERY reachable 1.12 branch — the
+        -- ref's single assignment ("Tertiary Skill:") is commented out in the reference itself —
+        -- so the format's first slot renders empty, byte-faithful. The unlearn button rides the
+        -- same fill (ref l.220-226): shown only for an abandonable line, carrying the name the
+        -- confirm popup formats and the index its accept abandons.
+        function BenillaSkillFrame_UpdateDetail()
+            local bar = getglobal("BenillaSkillDetailBar")
+            local desc = getglobal("BenillaSkillDetailDescriptionText")
+            local unlearn = getglobal("BenillaSkillDetailUnlearnButton")
+            local index = GetSelectedSkill()
+            if index == 0 then
+                bar:Hide()
+                desc:Hide()
+                unlearn:Hide()
+                return
+            end
+            local skillName, isHeader, _, skillRank, _, skillModifier, skillMaxRank, isAbandonable = GetSkillLineInfo(index)
+            if not skillName or isHeader then
+                bar:Hide()
+                desc:Hide()
+                unlearn:Hide()
+                return
+            end
+            bar:Show()
+            BenillaSkillFrame_PaintBar(bar, skillName, skillRank, skillModifier, skillMaxRank)
+            if isAbandonable then
+                unlearn.skillName = skillName
+                unlearn.index = index
+                unlearn:Show()
+            else
+                unlearn:Hide()
+            end
+            local skillType = ""
+            local skillDescription = select(13, GetSkillLineInfo(index)) or ""
+            desc:SetText(format(SKILL_DESCRIPTION, skillType, skillDescription))
+            desc:Show()
+        end
+
+        -- ── The abandon confirm + the unlearn button's handlers ──────────────────────────────────
+        -- The dialog is ref StaticPopup.lua:1121-1133 verbatim (minus the vestigial TEXT()
+        -- wrapper); its OnAccept receives dialog.data — the visible index the button stashed.
+        -- CANCEL stays the bare GlobalStrings global (DeathFrame.xml's own convention — the app
+        -- loads the real GlobalStrings.lua before any window file). The handlers are chunk
+        -- functions, NOT inline bodies, so the chunk-local strings above are visible to them
+        -- (the nil-"All" chunk-boundary rule, TradeSkillFrame.xml's deviation notes).
+        StaticPopupDialogs["UNLEARN_SKILL"] = {
+            text = UNLEARN_SKILL,
+            button1 = UNLEARN,
+            button2 = CANCEL,
+            OnAccept = function(index)
+                AbandonSkill(index)
+            end,
+            timeout = 60,
+            exclusive = 1,
+            whileDead = 1,
+            showAlert = 1,
+            hideOnEscape = 1
+        }
+
+        function BenillaSkillUnlearnButton_OnClick(btn)
+            local dialog = StaticPopup_Show("UNLEARN_SKILL", btn.skillName)
+            if dialog then
+                dialog.data = btn.index
+            end
+        end
+
+        function BenillaSkillUnlearnButton_OnEnter(btn)
+            GameTooltip:SetOwner(btn, "ANCHOR_RIGHT")
+            GameTooltip:SetText(UNLEARN_SKILL_TOOLTIP)
+        end
+
+        -- Paint list slot `i` (1..12) from the visible row at `index` (ref SkillFrame_SetStatusBar,
+        -- l.24-188 — the header branch, l.55-69, and the entry branch, l.76-187, collapsed: the
+        -- skillCostType coloring + stepCost/rankCost training-up arrows never apply here, since
+        -- GetSkillLineInfo always reports them nil/0, this file's header comment deviation 1).
+        function BenillaSkillFrame_SetRow(i, index, numRows)
+            local bar = getglobal("BenillaSkillRankFrame" .. i)
+            local label = getglobal("BenillaSkillTypeLabel" .. i)
+
+            if index > numRows then
+                bar:Hide()
+                bar.skillIndex = nil
+                label:Hide()
+                label.skillIndex = nil
+                return
+            end
+
+            local skillName, isHeader, isExpanded, skillRank, _, skillModifier, skillMaxRank = GetSkillLineInfo(index)
+
+            if isHeader then
+                bar:Hide()
+                bar.skillIndex = nil
+                label:Show()
+                label.skillIndex = index
+                label:SetText(skillName)
+                if isExpanded then
+                    label:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                else
+                    label:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                end
+                return
+            end
+
+            label:Hide()
+            label.skillIndex = nil
+            bar:Show()
+            bar.skillIndex = index
+            BenillaSkillFrame_PaintBar(bar, skillName, skillRank, skillModifier, skillMaxRank)
+        end
+
+        -- The list page (ref SkillFrame_UpdateSkills, l.402-448 — the dead
+        -- `UnitCharacterPoints("player")`/`SkillFrame.UpdatedSkillPoints` read, l.437-440, whose
+        -- result nothing downstream ever consumes even in the ref itself, is dropped — the
+        -- TradeSkillFrame.xml "ref's own dead code is dropped" precedent).
+        function BenillaSkillFrame_Update()
+            local numRows = GetNumSkillLines()
+            local scrollFrame = getglobal("BenillaSkillListScrollFrame")
+            BenillaFauxScrollFrame_Update(scrollFrame, numRows, SKILLFRAME_SKILLS_DISPLAYED, SKILLFRAME_SKILL_HEIGHT)
+            local offset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+
+            local highlight = getglobal("BenillaSkillHighlight")
+            highlight:Hide()
+            local selected = GetSelectedSkill()
+
+            for i = 1, SKILLFRAME_SKILLS_DISPLAYED do
+                local index = i + offset
+                BenillaSkillFrame_SetRow(i, index, numRows)
+                if selected == index and index <= numRows then
+                    highlight:SetPoint("TOPLEFT", getglobal("BenillaSkillRankFrame" .. i), "TOPLEFT", -5, 0)
+                    highlight:Show()
+                end
+            end
+
+            -- The collapse-all tab's +/- icon (ref l.417-429's own numHeaders/notExpanded scan).
+            local allExpanded = true
+            for i = 1, numRows do
+                local _, isHeader, isExpanded = GetSkillLineInfo(i)
+                if isHeader and not isExpanded then
+                    allExpanded = false
+                end
+            end
+            local collapseAll = getglobal("BenillaSkillCollapseAllButton")
+            if numRows == 0 then
+                collapseAll:Disable()
+            else
+                collapseAll:Enable()
+            end
+            if allExpanded then
+                collapseAll.collapsed = nil
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+            else
+                collapseAll.collapsed = 1
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+            end
+
+            BenillaSkillFrame_UpdateDetail()
+        end
+
+        -- A rank-bar click selects it (ref SkillBar_OnClick, l.450-455).
+        function BenillaSkillRankFrame_OnClick(bar)
+            local index = bar.skillIndex
+            if not index then
+                return
+            end
+            SetSelectedSkill(index)
+            BenillaSkillFrame_Update()
+        end
+
+        -- A header click folds/unfolds its group (ref SkillLabelTemplate's own OnClick, l.72-80).
+        function BenillaSkillTypeLabel_OnClick(label)
+            local index = label.skillIndex
+            if not index then
+                return
+            end
+            local _, _, isExpanded = GetSkillLineInfo(index)
+            if isExpanded then
+                CollapseSkillHeader(index)
+                -- A fold reshuffles visible indices — an UNLEARN_SKILL confirm armed for a row
+                -- that no longer holds the selection must not fire against the wrong line (ref
+                -- SkillLabelTemplate's own OnClick, ref SkillFrame.xml l.72-78).
+                local dialog = StaticPopup_FindVisible("UNLEARN_SKILL")
+                if dialog and dialog.data ~= GetSelectedSkill() then
+                    StaticPopup_Hide("UNLEARN_SKILL")
+                end
+            else
+                ExpandSkillHeader(index)
+            end
+            BenillaSkillFrame_Update()
+        end
+
+        -- The collapse-all tab (ref SkillFrameCollapseAllButton's own isExpanded flag, l.303-309,
+        -- driven the TrainerFrame.xml BenillaTrainerCollapseAllButton way since this engine's
+        -- CollapseSkillHeader(0)/ExpandSkillHeader(0) already fold/unfold every group at once).
+        function BenillaSkillCollapseAllButton_OnClick()
+            local b = getglobal("BenillaSkillCollapseAllButton")
+            if b.collapsed then
+                ExpandSkillHeader(0)
+            else
+                CollapseSkillHeader(0)
+                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaSkillListScrollFrame"), 0)
+            end
+            BenillaSkillFrame_Update()
+        end
+
+        -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux
+        -- kit (TrainerFrame.xml's own note: the engine bubbles a spin up the parent chain).
+        function BenillaSkillFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaSkillListScrollFrame"), delta)
+        end
+
+        -- ── Lifecycle (ref SkillFrame_OnLoad/_OnShow/_OnEvent, l.4-22, collapsed to the events this
+        -- page's feed actually fires: CHARACTER_POINTS_CHANGED backs the training-point economy this
+        -- pane doesn't ship, this file's header comment deviation 1). ─────────────────────────────────
+        function BenillaSkillFrame_OnLoad(frame)
+            frame:RegisterEvent("SKILL_LINES_CHANGED")
+            getglobal("BenillaSkillListScrollFrame").updateFunc = BenillaSkillFrame_Update
+            -- The description body hangs under the detail bar — anchored here, not in XML,
+            -- because the bar is a child frame declared after the page's layers and anchors
+            -- resolve at SetPoint time (an XML forward reference silently lands on the page;
+            -- the MailFrame error-text OnLoad precedent, ref MailFrame.xml l.1040).
+            BenillaSkillDetailDescriptionText:SetPoint("TOPLEFT", "BenillaSkillDetailBar", "BOTTOMLEFT", -2, -10)
+        end
+
+        function BenillaSkillFrame_OnShow()
+            BenillaSkillFrame_Update()
+        end
+
+        function BenillaSkillFrame_OnEvent(frame)
+            if event == "SKILL_LINES_CHANGED" and frame:IsVisible() then
+                BenillaSkillFrame_Update()
+            end
+        end
+    ]]></Script>
+
+    <!--
+        The rank StatusBar row (ref SkillStatusBarTemplate, l.4-65 — the FillBar dropped, this file's
+        header comment deviation 5): 271×15, name+rank overlaid, the Border child Button for OnClick
+        + hover highlight (TradeSkillFrame.xml's own BenillaTradeSkillRankFrame shape, verbatim).
+    -->
+    <StatusBar name="BenillaSkillRankTemplate" virtual="true" hidden="true" drawLayer="BACKGROUND" minValue="0" maxValue="1" defaultValue="0">
+        <Size><AbsDimension x="271" y="15"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentSkillName" inherits="GameFontNormalSmall">
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="6" y="1"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentSkillRank" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="128" y="0"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentSkillName" relativePoint="RIGHT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentBackground"><Color r="1.0" g="1.0" b="1.0" a="0.2"/></Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentBorder">
+                <Size><AbsDimension x="281" y="32"/></Size>
+                <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorder"/>
+                <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorderHighlight"/>
+                <Scripts><OnClick>BenillaSkillRankFrame_OnClick(self:GetParent())</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <BarTexture name="$parentBar" file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+        <BarColor r="0.25" g="0.25" b="0.75"/>
+    </StatusBar>
+
+    <!--
+        The category header row (ref SkillLabelTemplate, l.66-129, minus the DisabledTexture — this
+        window never Disable()s a header): 285×14, the +/- fold icon + name text.
+    -->
+    <Button name="BenillaSkillHeaderTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="285" y="14"/></Size>
+        <Scripts><OnClick>BenillaSkillTypeLabel_OnClick(self)</OnClick></Scripts>
+        <NormalTexture file="Interface\Buttons\UI-MinusButton-UP">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <ButtonText>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="25" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontHighlight" justifyH="LEFT"/>
+    </Button>
+
+    <Frame name="BenillaSkillFrame" enableMouse="true" parent="BenillaCharacterFrame" hidden="true" id="4">
+        <!-- The real 384×512 page. No <Anchors relativeTo> substitute for true parenting exists
+             (this file's header comment) — pinned to BenillaCharacterFrame's own TOPLEFT by name. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFrame" relativePoint="TOPLEFT"/></Anchors>
+        <!-- Transcribed for fidelity (ref l.131-133); no loader wiring exists yet for the hit-rect
+             shrink (TradeSkillFrame.xml's own "transcribe the hook even if nothing drives it yet"
+             posture, TalentFrame.xml's precedent). -->
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <!-- The shared quadrant background (ref l.136-183): NO portrait redraw here (this file's
+                 header comment) — "General" TopLeft/TopRight (the same variant every PaperDollInfoFrame
+                 page shares, carrying the portrait-ring cutout) + SkillFrame's own BotLeft/BotRight. -->
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\UI-Character-General-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\SkillFrame-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\PaperDollInfoFrame\SkillFrame-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <!-- The divider bar below the list, above the detail pane (ref l.186-211's own
+                 TOPLEFT(15,-290); nudged to -305 here to clear this file's own 12-row chain, whose
+                 last row sits slightly lower than the ref's fixed-slot geometry — a pixel-fit
+                 adjustment, not a structural deviation). -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaSkillHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="256" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-305"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="75" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaSkillHorizontalBarLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
+                </Texture>
+                <!-- The detail pane's description body (ref SkillDetailDescriptionText, l.579-591:
+                     GameFontHighlightSmall, 275 wide, justified LEFT/TOP). The ref hangs it inside
+                     its SkillDetailScrollChildFrame; this page's flat layout (header comment) has
+                     no such child, so it hangs under the detail bar instead — the same pane
+                     position, minus the (never-needed for one sentence) scroll machinery. The
+                     anchor is set in BenillaSkillFrame_OnLoad, NOT here: the bar is a child frame
+                     declared below and an XML forward reference silently lands on the page. -->
+                <FontString name="BenillaSkillDetailDescriptionText" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP" hidden="true">
+                    <Size><AbsDimension x="275" y="0"/></Size>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
+                 row below out-ranks it in hit-testing, and sized to the LIST REGION ONLY (rows span
+                 y -79..-295, x 22..309), NEVER the whole page: unlike the trainer's standalone
+                 window, this page is BenillaCharacterFrame's LAST child, so a full-page catcher
+                 out-ranks every EARLIER CharacterFrame child — it ate the tab row and the close X
+                 whenever Skills was up (the 2026-07-17 "can't switch back to Character" report;
+                 character_tests.rs's tab_round_trip_with_a_selected_skill_by_point is the repro). -->
+            <Button name="BenillaSkillWheelCatcher">
+                <Size><AbsDimension x="290" y="222"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="-76"/></Offset></Anchor></Anchors>
+                <Scripts><OnMouseWheel>BenillaSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
+            </Button>
+
+            <!-- The expand/collapse-all tab (ref SkillFrameExpandButtonFrame, l.242-317 — the SAME
+                 QuestLogSortTab art TrainerFrame.xml's own BenillaTrainerExpandButtonFrame uses). -->
+            <Frame name="BenillaSkillExpandButtonFrame">
+                <Size><AbsDimension x="54" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-49"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <Texture name="BenillaSkillExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture name="BenillaSkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="38" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillExpandTabLeft" relativePoint="RIGHT"/></Anchors></Texture>
+                    <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillExpandTabMiddle" relativePoint="RIGHT"/></Anchors></Texture>
+                </Layer></Layers>
+                <Frames>
+                    <Button name="BenillaSkillCollapseAllButton" text="ALL">
+                        <Size><AbsDimension x="40" y="22"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaSkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></NormalTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></HighlightTexture>
+                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="18" y="0"/></Offset></Anchor></Anchors></ButtonText>
+                        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                        <Scripts><OnClick>BenillaSkillCollapseAllButton_OnClick()</OnClick></Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The persistent selection highlight (Trainer/TradeSkillFrame's own precedent, this
+                 file's header comment deviation 7): 281×15, ARTWORK-layer UI-Listbox-Highlight2.
+                 Declared BEFORE the rows so the row text paints OVER the glow (same z-tiebreak). -->
+            <Frame name="BenillaSkillHighlightFrame" hidden="true">
+                <Size><AbsDimension x="281" y="15"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture name="BenillaSkillHighlight" file="Interface\Buttons\UI-Listbox-Highlight2">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- 12 header-row slots (ref SkillTypeLabel1..12, l.358-465): 285×14, row1 LEFT of
+                 TOPLEFT(22,-86); rows 2-12 chain by (0,-18). -->
+            <Button name="BenillaSkillTypeLabel1" inherits="BenillaSkillHeaderTemplate">
+                <Anchors><Anchor point="LEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-86"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaSkillTypeLabel2" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel1"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel3" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel2"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel4" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel3"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel5" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel4"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel6" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel5"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel7" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel6"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel8" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel7"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel9" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel8"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel10" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel9"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel11" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel10"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaSkillTypeLabel12" inherits="BenillaSkillHeaderTemplate"><Anchors><Anchor point="LEFT" relativeTo="BenillaSkillTypeLabel11"><Offset><AbsDimension x="0" y="-18"/></Offset></Anchor></Anchors></Button>
+
+            <!-- 12 rank-bar slots (ref SkillRankFrame1..12, l.746-853): 271×15, row1 TOPLEFT(38,-79);
+                 rows 2-12 chain BOTTOMLEFT→TOPLEFT by (0,-3) — the SAME 18px pitch as the label chain
+                 (15 bar height + 3 gap). -->
+            <StatusBar name="BenillaSkillRankFrame1" inherits="BenillaSkillRankTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-79"/></Offset></Anchor></Anchors>
+            </StatusBar>
+            <StatusBar name="BenillaSkillRankFrame2" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame3" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame4" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame5" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame6" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame7" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame8" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame9" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame10" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame11" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+            <StatusBar name="BenillaSkillRankFrame12" inherits="BenillaSkillRankTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSkillRankFrame11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors></StatusBar>
+
+            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+                 container over the 12 rows; only its right-hand Slider scroll bar renders. Sized to the
+                 12-row span (SKILLFRAME_SKILLS_DISPLAYED × 18px pitch), TrainerFrame.xml's own
+                 same-TOPLEFT-as-row1 convention. updateFunc set in BenillaSkillFrame_OnLoad. -->
+            <Frame name="BenillaSkillListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                <Size><AbsDimension x="296" y="216"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-79"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The minimal detail pane (this file's header comment, deviation 1): the selected
+                 skill's own rank StatusBar + name — no description/abandon/spend row. Reuses the SAME
+                 rank template the list rows use (its Border click is harmless here: no .skillIndex is
+                 ever set on this instance, so BenillaSkillRankFrame_OnClick's guard no-ops it). -->
+            <StatusBar name="BenillaSkillDetailBar" inherits="BenillaSkillRankTemplate" hidden="true">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="38" y="-325"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <!-- The unlearn (abandon) button (ref $parentUnlearnButton, ref SkillFrame.xml
+                         l.705-737, verbatim art/geometry): the red circle-slash right of the bar's
+                         Border, shown by UpdateDetail only for an abandonable line. HitRectInsets
+                         transcribed-inert (no loader wiring — CharacterFrame.xml's engine-gap note).
+                         Handlers are chunk functions (the chunk-boundary rule — OnEnter reads the
+                         chunk-local UNLEARN_SKILL_TOOLTIP). -->
+                    <Button name="BenillaSkillDetailUnlearnButton" hidden="true">
+                        <Size><AbsDimension x="32" y="32"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="BenillaSkillDetailBarBorder" relativePoint="RIGHT">
+                                <Offset><AbsDimension x="-2" y="-1"/></Offset>
+                            </Anchor>
+                        </Anchors>
+                        <HitRectInsets><AbsInset left="9" right="7" top="-7" bottom="10"/></HitRectInsets>
+                        <Scripts>
+                            <OnClick>BenillaSkillUnlearnButton_OnClick(self)</OnClick>
+                            <OnEnter>BenillaSkillUnlearnButton_OnEnter(self)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                        </Scripts>
+                        <NormalTexture file="Interface\Buttons\CancelButton-Up"/>
+                        <PushedTexture file="Interface\Buttons\CancelButton-Down"/>
+                        <HighlightTexture file="Interface\Buttons\CancelButton-Highlight" alphaMode="ADD"/>
+                    </Button>
+                </Frames>
+            </StatusBar>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaSkillFrame_OnLoad(self)</OnLoad>
+            <OnShow>BenillaSkillFrame_OnShow()</OnShow>
+            <OnEvent>BenillaSkillFrame_OnEvent(self)</OnEvent>
+            <OnMouseWheel>BenillaSkillFrame_OnMouseWheel(arg1)</OnMouseWheel>
+        </Scripts>
+    </Frame>
+</Ui>

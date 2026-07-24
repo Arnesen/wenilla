@@ -1,0 +1,410 @@
+<Ui>
+    <!--
+        The player buff/debuff bar (decisions 0255/0257 — the player aura arc). Geometry, textures,
+        colours, and every timing constant are QUOTED from the real 1.12 BuffFrame (extracted
+        Interface\FrameXML\BuffFrame.xml/.lua), turned onto benilla's own aura feed. Same shape as
+        UnitFrames.xml: the reference's data path was two 1.12-only calls (GetPlayerBuff +
+        GetPlayerBuffTexture/…Applications/…DispelType/…TimeLeft) that we did NOT implement; our
+        engine exposes the one Era aura function instead (decision 0068), so the handlers here read
+        UnitBuff/UnitDebuff and the countdown rides GetTime(), exactly as the cast bar does.
+
+        SCOPE (decision 0255): the LOCAL PLAYER only, durations always visible. The reference's
+        temporary-weapon-enchant frame (TemporaryEnchantFrame / TempEnchant1-2) and the
+        SHOW_BUFF_DURATIONS CVar toggle are deliberately out — there is no weapon-enchant wire yet,
+        and the director's call is "durations visible, no setting". So the bar is hard-anchored to the
+        reference's *durations-shown, no-enchant* steady state: 16 buff buttons (two rows of 8) above 8
+        debuff buttons, rows 45px apart (30px icon + a 15px duration gutter), right-aligned under the
+        minimap at UIParent TOPRIGHT (-175,-13) — the point the reference's BuffFrame snaps to when no
+        temp enchant is present (BuffFrame_Enchant_OnUpdate's no-enchant branch).
+
+        ORDER IS STATE. The list UnitBuff/UnitDebuff enumerate is the app's insertion-ordered display
+        cache (crate::ui_aura, decision 0257): a new aura appends at the end, a dropped one repacks —
+        NOT ascending slot. Button N simply shows the Nth buff/debuff of that list; the bar's identity
+        is the app's, not this file's.
+
+        DURATION / PERMANENCE. expirationTime (UnitBuff's 6th return) is 0 for a permanent aura — the
+        1.12 wire sends no duration packet for one (byte-verified, decision 0257), which is exactly the
+        reference's "until cancelled". So `expirationTime > 0` is our untilCancelled test: a timed aura
+        counts down and flashes under 31s; a permanent one shows no timer and never flashes.
+
+        RIGHT-CLICK CANCEL. RegisterForClicks("RightButtonUp") + CancelUnitBuff (the Era name for the
+        reference's CancelPlayerBuff) — resolved within the button's own filter so a debuff button's id
+        never resolves against the buff list. The server cancels by spell id and refuses anything the
+        wire's cancelable bit didn't allow, so a debuff right-click is a silent no-op, as in 1.12.
+
+        DEVIATIONS from the reference .lua (noted, not bugs):
+        - The count and duration FontStrings are BLANKED ("") rather than hidden — an empty string
+          draws nothing, same look. A site that predates region Show/Hide (region.rs has the real
+          pair now, and the loader honours hidden= on regions); equivalent either way.
+    -->
+    <Script><![CDATA[
+        -- The reference's flash cadence + thresholds (BuffFrame.lua l.1-14). An aura in its last 31s
+        -- pulses between full and BUFF_MIN_ALPHA; its duration text turns highlight-white under 60s.
+        BUFF_FLASH_TIME_ON = 0.75
+        BUFF_FLASH_TIME_OFF = 0.75
+        BUFF_MIN_ALPHA = 0.3
+        BUFF_WARNING_TIME = 31
+        BUFF_DURATION_WARNING_TIME = 60
+
+        -- The dispel-class border tints (BuffFrame.lua l.9-14); "none" is the undispellable red the
+        -- debuff overlay wears by default. UnitDebuff's debuffType return keys this table.
+        DebuffTypeColor = {
+            ["none"]    = { r = 0.80, g = 0.00, b = 0.00 },
+            ["Magic"]   = { r = 0.20, g = 0.60, b = 1.00 },
+            ["Curse"]   = { r = 0.60, g = 0.00, b = 1.00 },
+            ["Disease"] = { r = 0.60, g = 0.40, b = 0.00 },
+            ["Poison"]  = { r = 0.00, g = 0.60, b = 0.00 },
+        }
+
+        -- SecondsToTimeAbbrev + its GlobalStrings (UIParent.lua l.1034 / GlobalStrings.lua). We load
+        -- no UIParent/GlobalStrings, so define them here (guarded, in case a later file ships them).
+        DAY_ONELETTER_ABBR    = DAY_ONELETTER_ABBR    or "%d d"
+        HOUR_ONELETTER_ABBR   = HOUR_ONELETTER_ABBR   or "%d h"
+        MINUTE_ONELETTER_ABBR = MINUTE_ONELETTER_ABBR or "%d m"
+        SECOND_ONELETTER_ABBR = SECOND_ONELETTER_ABBR or "%d s"
+
+        if not SecondsToTimeAbbrev then
+            function SecondsToTimeAbbrev(seconds)
+                if seconds > 86400 then
+                    return format(DAY_ONELETTER_ABBR, ceil(seconds / 86400))
+                elseif seconds > 3600 then
+                    return format(HOUR_ONELETTER_ABBR, ceil(seconds / 3600))
+                elseif seconds > 60 then
+                    return format(MINUTE_ONELETTER_ABBR, ceil(seconds / 60))
+                end
+                return format(SECOND_ONELETTER_ABBR, seconds)
+            end
+        end
+
+        -- The frame-wide flash pulse (BuffFrame_OnLoad / _OnUpdate, BuffFrame.lua l.17-56). One
+        -- BUFF_ALPHA_VALUE is computed per frame and every low-on-time button reads it, so they blink
+        -- in unison. The bar also seats each duration string under its button here.
+        function BenillaBuffFrame_OnLoad(frame)
+            BuffFrameFlashTime = 0
+            BuffFrameFlashState = 1
+            BUFF_ALPHA_VALUE = 1
+            for i = 0, 23 do
+                getglobal("BuffButton" .. i .. "Duration"):SetPoint("TOP", "BuffButton" .. i, "BOTTOM", 0, 0)
+            end
+        end
+
+        function BenillaBuffFrame_OnUpdate(elapsed)
+            BuffFrameFlashTime = BuffFrameFlashTime - elapsed
+            if BuffFrameFlashTime < 0 then
+                local overtime = -BuffFrameFlashTime
+                if BuffFrameFlashState == 0 then
+                    BuffFrameFlashState = 1
+                    BuffFrameFlashTime = BUFF_FLASH_TIME_ON
+                else
+                    BuffFrameFlashState = 0
+                    BuffFrameFlashTime = BUFF_FLASH_TIME_OFF
+                end
+                if overtime < BuffFrameFlashTime then
+                    BuffFrameFlashTime = BuffFrameFlashTime - overtime
+                end
+            end
+
+            if BuffFrameFlashState == 1 then
+                BUFF_ALPHA_VALUE = (BUFF_FLASH_TIME_ON - BuffFrameFlashTime) / BUFF_FLASH_TIME_ON
+            else
+                BUFF_ALPHA_VALUE = BuffFrameFlashTime / BUFF_FLASH_TIME_ON
+            end
+            BUFF_ALPHA_VALUE = (BUFF_ALPHA_VALUE * (1 - BUFF_MIN_ALPHA)) + BUFF_MIN_ALPHA
+        end
+
+        -- A button caches its filter (set in the template OnLoad), its per-filter id (the XML `id`,
+        -- 1-based to match our UnitBuff/UnitDebuff index), takes right-clicks, and listens for the
+        -- aura change. The first paint hides it until the feed reports an aura.
+        function BenillaBuffButton_OnLoad(button)
+            button:RegisterForClicks("RightButtonUp")
+            button:RegisterEvent("UNIT_AURA")
+            BenillaBuffButton_Update(button)
+        end
+
+        function BenillaBuffButton_OnEvent(button)
+            if arg1 == "player" then
+                BenillaBuffButton_Update(button)
+            end
+        end
+
+        -- Pull the button's aura (Nth of its filter, in the app's display order) and repaint the
+        -- discrete parts: icon, stack count, debuff-border tint. Stash the expiration for the
+        -- per-frame countdown. No aura ⇒ hide the button (which hides its icon/border with it) and
+        -- blank its duration string.
+        function BenillaBuffButton_Update(button)
+            local id = button:GetID()
+            local name, icon, count, debuffType, duration, expirationTime
+            if button.buffFilter == "HARMFUL" then
+                name, icon, count, debuffType, duration, expirationTime = UnitDebuff("player", id)
+            else
+                name, icon, count, debuffType, duration, expirationTime = UnitBuff("player", id)
+            end
+
+            local durationText = getglobal(button:GetName() .. "Duration")
+            if not name then
+                button:Hide()
+                durationText:SetText("")
+                return
+            end
+            button:SetAlpha(1.0)
+            button:Show()
+
+            getglobal(button:GetName() .. "Icon"):SetTexture(icon or BENILLA_FALLBACK_ICON)
+            button.expirationTime = expirationTime
+
+            -- Debuff border, tinted by dispel class (harmful buttons only — helpful ones have no
+            -- $parentBorder, so getglobal is nil and we skip it).
+            local border = getglobal(button:GetName() .. "Border")
+            if border then
+                local color = DebuffTypeColor[debuffType] or DebuffTypeColor["none"]
+                border:SetVertexColor(color.r, color.g, color.b)
+            end
+
+            -- Stack count, shown only above 1 (BuffButton_Update l.95-102).
+            local countText = getglobal(button:GetName() .. "Count")
+            if count and count > 1 then
+                countText:SetText(count)
+            else
+                countText:SetText("")
+            end
+        end
+
+        -- Per-frame: count the stashed expiration down against GetTime(), flash in the last 31s, and
+        -- write the abbreviated timer (highlight-white under 60s). expirationTime == 0 is a permanent
+        -- aura (no duration on the wire) — our "until cancelled": no timer, no flash.
+        function BenillaBuffButton_OnUpdate(button)
+            local durationText = getglobal(button:GetName() .. "Duration")
+            local expirationTime = button.expirationTime
+            if not expirationTime or expirationTime <= 0 then
+                button:SetAlpha(1.0)
+                durationText:SetText("")
+                return
+            end
+
+            local timeLeft = expirationTime - GetTime()
+            if timeLeft < 0 then
+                timeLeft = 0
+            end
+            if timeLeft < BUFF_WARNING_TIME then
+                button:SetAlpha(BUFF_ALPHA_VALUE)
+            else
+                button:SetAlpha(1.0)
+            end
+
+            durationText:SetText(SecondsToTimeAbbrev(timeLeft))
+            if timeLeft < BUFF_DURATION_WARNING_TIME then
+                durationText:SetVertexColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            else
+                durationText:SetVertexColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+            end
+        end
+
+        -- Right-click cancels (BuffButton_OnClick → CancelPlayerBuff). Resolve within the button's own
+        -- filter so a debuff button's id can't reach into the buff list; the app sends CMSG_CANCEL_AURA
+        -- for a cancelable buff and drops the rest.
+        -- Hover: the aura tooltip through the engine channel (decision 0274 P2 — the verified
+        -- aura variant: white AuraDescription + the SetPlayerBuff-only remaining line). The
+        -- OnUpdate re-poll keeps the remaining line ticking while hovered. Anchor: the ref's
+        -- BuffButton hangs the plate BELOW-left (ref BuffFrame.xml l.37 ANCHOR_BOTTOMLEFT —
+        -- the buff row sits at the screen's top-right, so the tooltip drops under it).
+        function BenillaBuffButton_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            GameTooltip:SetOwner(button, "ANCHOR_BOTTOMLEFT")
+            GameTooltip:SetPlayerBuff(button:GetID(), button.buffFilter)
+        end
+
+        function BenillaBuffButton_OnLeave(button)
+            GameTooltip:Hide()
+        end
+
+        function BenillaBuffButton_OnClick(button)
+            CancelUnitBuff("player", button:GetID(), button.buffFilter)
+        end
+    ]]></Script>
+
+    <!-- 30x30 icon + a bottom-right stack count. BuffButtonTemplate, BuffFrame.xml l.4-44 (minus the
+         tooltip OnEnter/OnLeave — a later arc). -->
+    <Button name="BenillaBuffButtonTemplate" virtual="true">
+        <Size><AbsDimension x="30" y="30"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+                <FontString name="$parentCount" inherits="NumberFontNormal">
+                    <Anchors>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEvent>BenillaBuffButton_OnEvent(this)</OnEvent>
+            <OnUpdate>BenillaBuffButton_OnUpdate(this)</OnUpdate>
+            <OnClick>BenillaBuffButton_OnClick(this)</OnClick>
+            <OnEnter>BenillaBuffButton_OnEnter(this)</OnEnter>
+            <OnLeave>BenillaBuffButton_OnLeave(this)</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- Helpful variant: filter HELPFUL, no border (BuffButtonHelpful, l.50-57). -->
+    <Button name="BenillaBuffButtonHelpful" inherits="BenillaBuffButtonTemplate" virtual="true">
+        <Scripts>
+            <OnLoad>
+                this.buffFilter = "HELPFUL"
+                BenillaBuffButton_OnLoad(this)
+            </OnLoad>
+        </Scripts>
+    </Button>
+
+    <!-- Harmful variant: filter HARMFUL + the dispel-tinted border overlay (BuffButtonHarmful,
+         l.58-82). 33x32 UI-Debuff-Overlays, the exact reference TexCoords, tint set at runtime. -->
+    <Button name="BenillaBuffButtonHarmful" inherits="BenillaBuffButtonTemplate" virtual="true">
+        <Layers>
+            <Layer level="OVERLAY">
+                <Texture name="$parentBorder" file="Interface\Buttons\UI-Debuff-Overlays">
+                    <Size><AbsDimension x="33" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <TexCoords left="0.296875" right="0.5703125" top="0" bottom="0.515625"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                this.buffFilter = "HARMFUL"
+                BenillaBuffButton_OnLoad(this)
+            </OnLoad>
+        </Scripts>
+    </Button>
+
+    <!-- The duration text under a button: the ref routes these through a virtual FontString
+         template (BuffButtonDurationTemplate, l.45-49 — GameFontNormalSmall + a bare TOP anchor),
+         but region TEMPLATES are not in the v1 loader's object model (inherits= on a FontString
+         resolves Font objects only), and the anchor is re-seated by BenillaBuffFrame_OnLoad
+         anyway — so each instance inherits the Font object directly. Same resolved font, no
+         indirection; the loader gap is the named v1 limit, warned once if reintroduced. -->
+    <!--
+        The bar. Right-aligned under the minimap (UIParent TOPRIGHT -175,-13). 16 helpful buttons in
+        two rows of 8 (ids 1-16), then 8 harmful (ids 1-8), rows 45px apart: button0 top-right;
+        buttons 1-7 step left (-5 gap); button8 opens row 2 under button0 (-15 gutter for the timer);
+        button16 opens the debuff row under button8. The 24 duration strings live in the frame's
+        ARTWORK layer (over the icons' BACKGROUND), named to pair with their button.
+    -->
+    <Frame name="BuffFrame" parent="UIParent" frameStrata="LOW" toplevel="true">
+        <Size><AbsDimension x="50" y="50"/></Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="UIParent" relativePoint="TOPRIGHT">
+                <Offset><AbsDimension x="-175" y="-13"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="BuffButton0Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton1Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton2Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton3Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton4Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton5Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton6Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton7Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton8Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton9Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton10Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton11Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton12Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton13Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton14Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton15Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton16Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton17Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton18Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton19Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton20Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton21Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton22Duration" inherits="GameFontNormalSmall"/>
+                <FontString name="BuffButton23Duration" inherits="GameFontNormalSmall"/>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Row 0: helpful buttons 0-7, right to left. -->
+            <Button name="BuffButton0" inherits="BenillaBuffButtonHelpful" id="1">
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton1" inherits="BenillaBuffButtonHelpful" id="2">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton0" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton2" inherits="BenillaBuffButtonHelpful" id="3">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton1" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton3" inherits="BenillaBuffButtonHelpful" id="4">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton2" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton4" inherits="BenillaBuffButtonHelpful" id="5">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton3" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton5" inherits="BenillaBuffButtonHelpful" id="6">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton4" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton6" inherits="BenillaBuffButtonHelpful" id="7">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton5" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton7" inherits="BenillaBuffButtonHelpful" id="8">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton6" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <!-- Row 1: helpful buttons 8-15. Button8 opens the row under button0, with the 15px timer gutter. -->
+            <Button name="BuffButton8" inherits="BenillaBuffButtonHelpful" id="9">
+                <Anchors><Anchor point="TOP" relativeTo="BuffButton0" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton9" inherits="BenillaBuffButtonHelpful" id="10">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton8" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton10" inherits="BenillaBuffButtonHelpful" id="11">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton9" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton11" inherits="BenillaBuffButtonHelpful" id="12">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton10" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton12" inherits="BenillaBuffButtonHelpful" id="13">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton11" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton13" inherits="BenillaBuffButtonHelpful" id="14">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton12" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton14" inherits="BenillaBuffButtonHelpful" id="15">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton13" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton15" inherits="BenillaBuffButtonHelpful" id="16">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton14" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <!-- Row 2: harmful buttons 16-23. Button16 opens the debuff row under button8, right-aligned. -->
+            <Button name="BuffButton16" inherits="BenillaBuffButtonHarmful" id="1">
+                <Anchors><Anchor point="TOPRIGHT" relativeTo="BuffButton8" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton17" inherits="BenillaBuffButtonHarmful" id="2">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton16" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton18" inherits="BenillaBuffButtonHarmful" id="3">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton17" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton19" inherits="BenillaBuffButtonHarmful" id="4">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton18" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton20" inherits="BenillaBuffButtonHarmful" id="5">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton19" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton21" inherits="BenillaBuffButtonHarmful" id="6">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton20" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton22" inherits="BenillaBuffButtonHarmful" id="7">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton21" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BuffButton23" inherits="BenillaBuffButtonHarmful" id="8">
+                <Anchors><Anchor point="RIGHT" relativeTo="BuffButton22" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBuffFrame_OnLoad(this)</OnLoad>
+            <OnUpdate>BenillaBuffFrame_OnUpdate(arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

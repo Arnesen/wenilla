@@ -1,0 +1,440 @@
+use super::RegionHandle;
+
+/// A `CSimpleEditBox`'s runtime state — the byte-verified text/cursor/selection/flags model of
+/// RF-0082 (`rf82-editbox-runtime.md`). Offsets below are the client's **E-base** (the CScriptObject
+/// `this`), the base the runtime input/text handlers address the object through.
+///
+/// The client stores text as a NUL-terminated `char*` with a parallel per-byte class array; benilla
+/// holds it as a Rust `String` and keeps every byte offset ([`cursor`](Self::cursor)/
+/// [`sel_start`](Self::sel_start)/[`sel_end`](Self::sel_end)) snapped to a UTF-8 char boundary — the
+/// same invariant the client's boundary-snap (`0x77bd30`) maintains.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditBoxState {
+    /// The real text buffer (`E+0x32c`, `char*`). `GetText`/`GetNumber` read this; `password` masks
+    /// only the *display*, never this buffer (RF-0082 §3).
+    pub text: String,
+    /// The insertion caret as a byte offset into [`text`](Self::text) (`E+0x36c`; sole setter
+    /// clamps to `[0, len]`). Always on a char boundary.
+    pub cursor: usize,
+    /// Selection anchor (`E+0x35c`) — equal to [`sel_end`](Self::sel_end) (and the cursor) when no
+    /// text is selected. Byte offset, char-boundary-snapped.
+    pub sel_start: usize,
+    /// Selection end (`E+0x360`). A non-empty selection is `sel_start != sel_end`; every insert
+    /// replaces it first (RF-0082 §3).
+    pub sel_end: usize,
+    /// `autoFocus` (`flags@E+0x318` bit0): consulted **only** in the keyboard self-acquire guard —
+    /// it does NOT focus on show (RF-0082 §1). The box grabs focus the first time a key/char event
+    /// reaches it while nothing is focused, and processes that same event.
+    pub auto_focus: bool,
+    /// `multiLine` (bit1): Enter inserts a newline (rather than firing `OnEnterPressed`) and `\n` is
+    /// accepted into the buffer.
+    pub multi_line: bool,
+    /// `numeric` (bit2): an insert containing ANY char outside `'0'..='9'` is aborted wholesale
+    /// (not per-char filtered) — RF-0082 §3.
+    pub numeric: bool,
+    /// `password` (bit3): the display string is one `'*'` per *character* (the mask, `E+0x334`); the
+    /// real text is untouched.
+    pub password: bool,
+    /// `ignoreArrows` (bit4): LEFT/RIGHT (and UP/DOWN) are consumed but do nothing unless Ctrl is
+    /// held (RF-0082 §4, guard `0x77b18e`).
+    pub ignore_arrows: bool,
+    /// `maxLetters` (`E+0x340`, 0 = unlimited): after each insert, trim from the end while the
+    /// *letter* (char) count exceeds this (RF-0082 §3).
+    pub max_letters: usize,
+    /// `maxBytes` (`E+0x33c`; the client's `-1` sentinel = unlimited → `None` here): trim from the
+    /// end while the byte length exceeds this, applied before `maxLetters`.
+    pub max_bytes: Option<usize>,
+    /// The implicit FontString the text renders through (`E+0x324`, the EditBox's analogue of
+    /// ButtonText) — created lazily on first text mutation, or wired from a declared `<FontString>`.
+    pub text_region: Option<RegionHandle>,
+    /// The submitted-line history (`AddHistoryLine`; the XML `historyLines` cap) — oldest first,
+    /// newest last; UP recalls older from the end, DOWN newer. The exact recall keys + draft
+    /// model are INFERRED (wow-re's rf82 flags the 1.12 history controller as an untraced
+    /// observer, `0x77b730`) — plain UP/DOWN with the in-progress line restored past the newest
+    /// entry; on the chat-arc wow-re dispatch list (decision 0288).
+    pub history: Vec<String>,
+    /// `historyLines` — max entries kept (drop-oldest on add). `0` = history off (the widget
+    /// default; ChatFrame's edit box declares 32).
+    pub history_max: usize,
+    /// The active recall position while browsing (an index into [`Self::history`]); `None` = live
+    /// editing. Any typed edit or `SetText` ends browsing.
+    pub history_pos: Option<usize>,
+    /// The live line stashed when browsing starts, restored when DOWN walks past the newest entry.
+    pub history_draft: Option<String>,
+    /// `SetTextInsets(l, r, t, b)` / XML `<TextInsets>` — the text region's rect shrink inside the
+    /// box (the chat edit box drives its left inset past the "Say:" header every header change).
+    /// Applied as the text region's two corner anchors (`script::editbox::set_text_insets`).
+    pub text_insets: [f32; 4],
+    /// The focused box's per-byte cumulative advance table — the host's answer to the advance
+    /// measure request: `advances[i]` = laid-out width of `display[..i]` (len+1 entries; a
+    /// continuation byte repeats its lead's value). This is the metrics seam that makes
+    /// click→index (`0x77d0d0`), drag-select, and the scroll window engine-local — the real
+    /// client reads the same geometry off its embedded render object. Empty until answered.
+    pub advances: Vec<f32>,
+    /// Cache key of [`Self::advances`] (display text + font identity hash) — the same staleness
+    /// discipline as the FontString measure round-trip.
+    pub advances_key: u64,
+    /// The wrapped-row starts of the DISPLAY string — answered with [`Self::advances`] by the
+    /// host, which runs the same wrap pass the draw uses. `rows[i]` is the byte where row `i`
+    /// begins; row `i` covers `rows[i]..rows[i+1]` (last row to end of display). Always at least
+    /// `[0]`; a single-line box stays exactly `[0]`. The 2-D caret/click law
+    /// ([`Self::caret_row_x`]/[`Self::index_at_pos`]) reads it; bytes swallowed at a break (the
+    /// dropped trailing separator, the `\n` itself) belong to the row they end.
+    pub rows: Vec<usize>,
+    /// The row pitch in px (the snapped font em — the same `N·S` block law the host's measure
+    /// uses), answered with [`Self::advances`]. `0.0` until answered.
+    pub cell_h: f32,
+    /// First visible byte of the display window (`E+0x348` display/scroll start index) — the
+    /// char-granular h-scroll. Clamped each read so the cursor stays inside the window
+    /// (`0x77da80`'s early-out hides the caret outside `[start, start+visible]`).
+    pub scroll_start: usize,
+    /// A LeftButton press landed inside the box and hasn't released (`E+0x364`
+    /// mouse-drag-active): every mouse move maps to a char index and extends the selection there,
+    /// cursor following (`0x77a860`).
+    pub drag_active: bool,
+    /// Caret blink half-period in seconds (`E+0x370`; ctor default **0.5**, the XML `blinkSpeed`
+    /// attr overrides).
+    pub blink_period: f32,
+    /// Blink accumulator (`E+0x374`): += dt while focused; crossing the period toggles
+    /// [`Self::caret_shown`] and resets.
+    pub blink_accum: f32,
+    /// The blink phase — caret visible this half-period. Every cursor/text/selection change
+    /// resets it to `true` with a fresh accumulator (the client's click path calls the dirty
+    /// flush's blink reset before placing the cursor).
+    pub caret_shown: bool,
+    /// The selection highlight tint (`SetHighlightColor`, the `E+0x350` texture trio's color;
+    /// ctor default **0xFF606060** — opaque medium gray). RGBA 0..1.
+    pub highlight_color: [f32; 4],
+}
+
+impl Default for EditBoxState {
+    fn default() -> Self {
+        EditBoxState {
+            text: String::new(),
+            cursor: 0,
+            sel_start: 0,
+            sel_end: 0,
+            auto_focus: false,
+            multi_line: false,
+            numeric: false,
+            password: false,
+            ignore_arrows: false,
+            max_letters: 0,
+            max_bytes: None,
+            text_region: None,
+            history: Vec::new(),
+            history_max: 0,
+            history_pos: None,
+            history_draft: None,
+            text_insets: [0.0; 4],
+            advances: Vec::new(),
+            advances_key: 0,
+            rows: vec![0],
+            cell_h: 0.0,
+            scroll_start: 0,
+            drag_active: false,
+            blink_period: 0.5,
+            blink_accum: 0.0,
+            caret_shown: true,
+            highlight_color: [96.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0],
+        }
+    }
+}
+
+impl EditBoxState {
+    /// `AddHistoryLine`: append (drop-oldest past [`Self::history_max`]) and end any browse in
+    /// progress. Empty lines and a zero cap are no-ops.
+    pub fn add_history_line(&mut self, line: &str) {
+        if self.history_max == 0 || line.is_empty() {
+            return;
+        }
+        self.history.push(line.to_string());
+        let over = self.history.len().saturating_sub(self.history_max);
+        if over > 0 {
+            self.history.drain(..over);
+        }
+        self.history_pos = None;
+        self.history_draft = None;
+    }
+
+    /// One UP (`older = true`) or DOWN step through the history. Returns the text the box should
+    /// now show: entering browse mode stashes the live draft; stepping past the newest entry
+    /// leaves browse mode and returns the draft. `None` = nothing to do (no history / already at
+    /// the oldest / not browsing on DOWN).
+    pub fn history_step(&mut self, older: bool) -> Option<String> {
+        if self.history.is_empty() {
+            return None;
+        }
+        match (self.history_pos, older) {
+            (None, true) => {
+                self.history_draft = Some(self.text.clone());
+                self.history_pos = Some(self.history.len() - 1);
+            }
+            (None, false) => return None,
+            (Some(0), true) => return None, // already at the oldest — hold
+            (Some(p), true) => self.history_pos = Some(p - 1),
+            (Some(p), false) if p + 1 < self.history.len() => self.history_pos = Some(p + 1),
+            (Some(_), false) => {
+                // Past the newest — back to the stashed live line.
+                self.history_pos = None;
+                return Some(self.history_draft.take().unwrap_or_default());
+            }
+        }
+        self.history_pos.map(|p| self.history[p].clone())
+    }
+
+    /// A typed edit or programmatic `SetText` ends any history browse (the recalled line becomes
+    /// an ordinary draft; the stash is dropped).
+    pub fn end_history_browse(&mut self) {
+        self.history_pos = None;
+        self.history_draft = None;
+    }
+
+    // ── selection / geometry law (RF-0082 §4 + the diffed mouse/caret leaves) ────────────────
+
+    /// The DISPLAY string — what the box draws, what the advance table indexes, and what
+    /// hit-tests run against: the text itself, or one `'*'` per character under `password`
+    /// (the `E+0x334` mask; both draw `0x77da80` and hit-test `0x77d0d0` branch on the flag).
+    pub fn display(&self) -> String {
+        if self.password {
+            "*".repeat(self.text.chars().count())
+        } else {
+            self.text.clone()
+        }
+    }
+
+    /// TEXT byte offset → DISPLAY byte offset (identity unless `password`, where each char is
+    /// one `'*'` byte).
+    pub fn text_to_display(&self, byte: usize) -> usize {
+        if self.password {
+            self.text[..byte.min(self.text.len())].chars().count()
+        } else {
+            byte
+        }
+    }
+
+    /// DISPLAY byte offset → TEXT byte offset (inverse of [`Self::text_to_display`]).
+    pub fn display_to_text(&self, dbyte: usize) -> usize {
+        if self.password {
+            self.text
+                .char_indices()
+                .nth(dbyte)
+                .map_or(self.text.len(), |(b, _)| b)
+        } else {
+            dbyte
+        }
+    }
+
+    /// The char-boundary DISPLAY index nearest pixel `x` (x measured from the text origin, i.e.
+    /// the advance table's zero — the caller adds the scroll window's offset first). Walks the
+    /// cumulative table over char boundaries; nearest-boundary rounding (INFERRED — `0x77d0d0`'s
+    /// exact rounding is undiffed; nearest is the Windows-edit convention). Empty table (host
+    /// hasn't answered yet) → end of text.
+    pub fn index_at_x(&self, x: f32) -> usize {
+        let display = self.display();
+        self.index_at_x_in(x, 0, display.len(), &display)
+    }
+
+    /// [`Self::index_at_x`] restricted to the boundary range `[start, end]` of `display` —
+    /// the per-row walk of the 2-D law ([`Self::index_at_pos`]). `x` is measured from
+    /// `advances[start]`.
+    fn index_at_x_in(&self, x: f32, start: usize, end: usize, display: &str) -> usize {
+        if self.advances.len() != display.len() + 1 {
+            return end;
+        }
+        let origin = self.advances[start];
+        let mut prev = start;
+        for b in display[start..end]
+            .char_indices()
+            .map(|(b, _)| start + b)
+            .skip(1)
+            .chain([end])
+        {
+            if self.advances[b] - origin >= x {
+                // x lies between boundaries `prev` and `b` — pick the nearer.
+                return if x - (self.advances[prev] - origin) <= (self.advances[b] - origin) - x {
+                    prev
+                } else {
+                    b
+                };
+            }
+            prev = b;
+        }
+        end
+    }
+
+    /// The wrapped row index containing DISPLAY byte `b` — the last row whose start is ≤ `b`
+    /// (a byte exactly on a wrap boundary belongs to the row it *starts*, so the caret lands at
+    /// the head of the new row, where typing continues).
+    pub fn row_of(&self, b: usize) -> usize {
+        match self.rows.binary_search(&b) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+    }
+
+    /// Row `i`'s DISPLAY byte range `[start, end)` — `end` is the next row's start (the swallowed
+    /// break bytes live at the tail of this range), or the display length for the last row.
+    pub fn row_range(&self, i: usize, display_len: usize) -> (usize, usize) {
+        let start = self.rows.get(i).copied().unwrap_or(0);
+        let end = self.rows.get(i + 1).copied().unwrap_or(display_len);
+        (start, end.max(start))
+    }
+
+    /// The caret's wrapped position: `(row, x)` with `x` the advance from the row's start —
+    /// the 2-D twin of the single-line `advances[cursor]` read. Row 0 / x 0 until the host has
+    /// answered the advance table.
+    pub fn caret_row_x(&self, cursor_d: usize) -> (usize, f32) {
+        let display = self.display();
+        if self.advances.len() != display.len() + 1 {
+            return (0, 0.0);
+        }
+        let cursor_d = cursor_d.min(display.len());
+        let row = self.row_of(cursor_d);
+        let start = self.rows.get(row).copied().unwrap_or(0).min(display.len());
+        (row, self.advances[cursor_d] - self.advances[start])
+    }
+
+    /// The char-boundary DISPLAY index nearest point `(x, y)` — the multiline click law
+    /// (`0x77d0d0`'s 2-D half): `y` (px down from the text region's top) picks the row by the
+    /// answered pitch, `x` walks that row's advances. Degrades to the 1-D walk while the rows/
+    /// pitch are unanswered (single-line boxes stay exactly the old behavior). The row's END
+    /// boundary excludes trailing break bytes only in x (clicking past a wrapped row's ink lands
+    /// at the wrap point).
+    pub fn index_at_pos(&self, x: f32, y: f32) -> usize {
+        let display = self.display();
+        if self.rows.len() <= 1 || self.cell_h <= 0.0 {
+            return self.index_at_x(x);
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = ((y / self.cell_h).floor().max(0.0) as usize).min(self.rows.len() - 1);
+        let (start, end) = self.row_range(row, display.len());
+        self.index_at_x_in(
+            x,
+            start.min(display.len()),
+            end.min(display.len()),
+            &display,
+        )
+    }
+
+    /// The word-jump target from the cursor (Ctrl+arrow — the client walks its per-byte class
+    /// array `E+0x330`; benilla approximates the classes with alphanumeric runs, INFERRED):
+    /// forward = end of the current/next alnum run; back = start of the current/previous one.
+    pub fn word_boundary(&self, forward: bool) -> usize {
+        let bytes = self.text.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b >= 0x80;
+        if forward {
+            let mut i = self.cursor;
+            while i < bytes.len() && !is_word(bytes[i]) {
+                i += 1;
+            }
+            while i < bytes.len() && is_word(bytes[i]) {
+                i += 1;
+            }
+            i
+        } else {
+            let mut i = self.cursor;
+            while i > 0 && !is_word(bytes[i - 1]) {
+                i -= 1;
+            }
+            while i > 0 && is_word(bytes[i - 1]) {
+                i -= 1;
+            }
+            i
+        }
+    }
+
+    /// Show the caret and restart its blink cycle — the client's dirty flush resets the blink on
+    /// every cursor/text/selection change (and the click path calls it before placing the cursor).
+    pub fn reset_blink(&mut self) {
+        self.caret_shown = true;
+        self.blink_accum = 0.0;
+    }
+
+    /// Clamp the scroll window (`E+0x348`, a DISPLAY-byte start index) so the caret stays inside
+    /// `avail` pixels: window start ≤ cursor, and the cursor's advance fits within the window's
+    /// width. Whole-char steps (the client scrolls its display window by characters, never
+    /// sub-pixel). No-op until the host has answered the advance table.
+    pub fn clamp_scroll(&mut self, avail: f32) {
+        if self.multi_line {
+            // A multiline box wraps instead of windowing (the client's h-scroll `E+0x348` is the
+            // single-line mechanism; multiline scrolls via its parent ScrollFrame).
+            self.scroll_start = 0;
+            return;
+        }
+        let display = self.display();
+        if self.advances.len() != display.len() + 1 || avail <= 0.0 {
+            return;
+        }
+        let cursor_d = self.text_to_display(self.cursor);
+        // Snap a stale start (text shrank / mid-char) back onto a boundary.
+        self.scroll_start = self.scroll_start.min(display.len());
+        while self.scroll_start > 0 && !display.is_char_boundary(self.scroll_start) {
+            self.scroll_start -= 1;
+        }
+        if cursor_d < self.scroll_start {
+            self.scroll_start = cursor_d;
+            return;
+        }
+        while self.advances[cursor_d] - self.advances[self.scroll_start] > avail {
+            // Advance the window one char; the loop is bounded by cursor_d.
+            let mut next = self.scroll_start + 1;
+            while next < display.len() && !display.is_char_boundary(next) {
+                next += 1;
+            }
+            if next > cursor_d {
+                break;
+            }
+            self.scroll_start = next;
+        }
+    }
+}
+
+#[cfg(test)]
+mod row_law_tests {
+    use super::*;
+
+    /// "the quick brown" wrapped after "quick" (the break's space swallowed): rows [0, 10],
+    /// advances 7 px per byte, 14 px pitch.
+    fn two_row_box() -> EditBoxState {
+        EditBoxState {
+            text: "the quick brown".into(),
+            multi_line: true,
+            advances: (0..=15).map(|i| i as f32 * 7.0).collect(),
+            rows: vec![0, 10],
+            cell_h: 14.0,
+            ..EditBoxState::default()
+        }
+    }
+
+    #[test]
+    fn the_caret_seats_by_row_and_row_local_x() {
+        let eb = two_row_box();
+        assert_eq!(eb.caret_row_x(5), (0, 35.0));
+        // A cursor exactly on the wrap boundary heads the NEW row (typing continues there).
+        assert_eq!(eb.caret_row_x(10), (1, 0.0));
+        assert_eq!(eb.caret_row_x(15), (1, 35.0));
+    }
+
+    #[test]
+    fn a_click_picks_its_row_then_walks_it() {
+        let eb = two_row_box();
+        // Row 1 (y past one pitch), x 21 → boundary 3 within the row → byte 13.
+        assert_eq!(eb.index_at_pos(21.0, 20.0), 13);
+        // Above the block clamps to row 0; below clamps to the last row.
+        assert_eq!(eb.index_at_pos(0.0, -5.0), 0);
+        assert_eq!(eb.index_at_pos(9999.0, 999.0), 15);
+        // Clicking past a wrapped row's ink lands at its wrap point, not the next row.
+        assert_eq!(eb.index_at_pos(9999.0, 5.0), 10);
+    }
+
+    #[test]
+    fn a_single_line_box_degrades_to_the_1d_walk() {
+        let eb = EditBoxState {
+            text: "abc".into(),
+            advances: vec![0.0, 7.0, 14.0, 21.0],
+            ..EditBoxState::default()
+        };
+        assert_eq!(eb.index_at_pos(15.0, 500.0), 2);
+    }
+}

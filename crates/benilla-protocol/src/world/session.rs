@@ -1,0 +1,721 @@
+use std::net::{TcpStream, ToSocketAddrs};
+
+use anyhow::{anyhow, bail, Context, Result};
+use benilla_srp::vanilla_header::{HeaderCrypto, ProofSeed};
+use benilla_srp::{NormalizedString, SESSION_KEY_LENGTH};
+
+use crate::messages::{self, opcode, Character, ServerPacket};
+
+use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
+use super::reader::WorldReader;
+use super::writer::WorldWriter;
+use super::{recv_packet, send_packet};
+
+/// Socket read timeout for the handshake phase only (connect → `player_login`), where each step
+/// waits for one specific server reply and silence means the session is dead (decision 0065).
+/// Generous — a local vmangos answers in milliseconds; this only bounds the pathological stall.
+const HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The server requires Warden, which benilla does not implement — raised by
+/// [`WorldSession::connect`] and recoverable through the `anyhow` chain with
+/// `err.downcast_ref::<WardenRequired>()`, so the login screen can say so plainly.
+///
+/// VERIFIED (vmangos `src/game/Anticheat/WardenAnticheat/Warden.cpp`): every Warden request arms a
+/// response clock (`BeginTimeoutClock`, `Warden.ClientResponseDelay` — default 30 s in
+/// `World.cpp`), and `Warden::Update` kicks unconditionally when it expires — not subject to the
+/// penalty config, and regardless of module/maiev mode. So a client that cannot answer cannot stay
+/// in the world: refusing at the handshake is the honest outcome, not a policy choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WardenRequired;
+
+impl std::fmt::Display for WardenRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this server requires the Warden anticheat, which benilla does not implement"
+        )
+    }
+}
+
+impl std::error::Error for WardenRequired {}
+
+/// An authenticated world-server session with 1.12 header obfuscation active.
+pub struct WorldSession {
+    stream: TcpStream,
+    crypto: HeaderCrypto,
+    /// The roster's guid → race, remembered from [`Self::char_enum`] so [`Self::player_login`]
+    /// can derive the character's faction tongue without the caller's help.
+    roster_races: std::collections::HashMap<u64, u8>,
+    /// The language chat sends speak — the logged-in character's faction tongue
+    /// ([`messages::faction_language`]), set automatically by [`Self::player_login`]. Load-bearing:
+    /// vmangos drops any chat whose language the character doesn't know (dot-commands included) —
+    /// hardcoded Common silently ate every Horde character's chat and commands once.
+    chat_language: u32,
+}
+
+impl WorldSession {
+    /// Connect to the world server and complete the auth handshake, leaving header obfuscation
+    /// enabled. `username` must be the same account used at logon; `session_key` is what
+    /// [`crate::logon`] returned.
+    pub fn connect(
+        addr: impl ToSocketAddrs,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+    ) -> Result<Self> {
+        let mut stream = TcpStream::connect(addr).context("connecting to world server")?;
+        // Handshake reads wait for one specific reply each — silence is failure, so bound them
+        // (decision 0065). A server that stays connected but never answers must not wedge the net
+        // thread forever. Cleared in `into_split` for the streaming phase (a quiet world is legal).
+        stream
+            .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+            .context("setting handshake read timeout")?;
+
+        // 1. SMSG_AUTH_CHALLENGE (unencrypted) carries the server seed.
+        let server_seed = match recv_packet(&mut stream, None)? {
+            ServerPacket::AuthChallenge { server_seed } => server_seed,
+            other => bail!("expected SMSG_AUTH_CHALLENGE, got {}", other.name()),
+        };
+
+        // 2. Bind the session key to (server_seed, our client_seed) → proof + header crypto.
+        let username_n =
+            NormalizedString::new(username).map_err(|e| anyhow!("invalid username: {e}"))?;
+        let seed = ProofSeed::new();
+        let client_seed = seed.seed();
+        let (client_proof, crypto) =
+            seed.into_client_header_crypto(&username_n, session_key, server_seed);
+
+        // 3. CMSG_AUTH_SESSION goes out unencrypted; obfuscation begins immediately after.
+        let body = messages::auth_session(
+            u32::from(crate::CLIENT_BUILD),
+            &username.to_uppercase(),
+            client_seed,
+            &client_proof,
+        );
+        send_packet(&mut stream, None, opcode::CMSG_AUTH_SESSION, &body)
+            .context("sending CMSG_AUTH_SESSION")?;
+
+        let mut session = WorldSession {
+            stream,
+            crypto,
+            roster_races: Default::default(),
+            chat_language: messages::LANGUAGE_COMMON,
+        };
+
+        // 4. Wait for SMSG_AUTH_RESPONSE. Usually the first encrypted packet, but not always first
+        // on the wire, so skip interleaved packets (as `char_enum` does) rather than demanding
+        // AUTH_RESPONSE lead. Each read is still bounded by the handshake timeout, so a server that
+        // never answers still fails per decision 0065.
+        //
+        // SMSG_WARDEN_DATA among them ends the connection here: it means the server runs Warden,
+        // whose response clock kicks us ~30 s later no matter what else we do ([`WardenRequired`]).
+        // Refusing at the handshake trades an unplayable 30-second kick/reconnect cycle for one
+        // honest message at the login screen.
+        loop {
+            match session.recv()? {
+                ServerPacket::AuthResponse { result } if result == messages::AUTH_OK => break,
+                ServerPacket::AuthResponse { result } => {
+                    bail!("world auth rejected: result {result:#x}")
+                }
+                ServerPacket::Other {
+                    opcode: opcode::SMSG_WARDEN_DATA,
+                } => return Err(WardenRequired.into()),
+                _ => continue,
+            }
+        }
+
+        Ok(session)
+    }
+
+    /// Set a read timeout on the underlying socket (e.g. so a debug read-loop can stop when the
+    /// world goes quiet). `None` clears it (blocking reads).
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        self.stream
+            .set_read_timeout(timeout)
+            .context("setting world socket read timeout")
+    }
+
+    /// Read + decrypt + parse one server packet.
+    pub fn recv(&mut self) -> Result<ServerPacket> {
+        recv_packet(&mut self.stream, Some(self.crypto.decrypter()))
+    }
+
+    /// Send a client packet (encrypted header + plaintext body).
+    fn send(&mut self, opcode: u16, body: &[u8]) -> Result<()> {
+        send_packet(
+            &mut self.stream,
+            Some(self.crypto.encrypter()),
+            opcode,
+            body,
+        )
+    }
+
+    /// Request the character list and return it (remembering each character's race, so
+    /// [`Self::player_login`] can pick the right chat tongue).
+    pub fn char_enum(&mut self) -> Result<Vec<Character>> {
+        self.send(opcode::CMSG_CHAR_ENUM, &[])?;
+        loop {
+            match self.recv()? {
+                ServerPacket::CharEnum { characters } => {
+                    self.roster_races = characters.iter().map(|c| (c.guid, c.race)).collect();
+                    return Ok(characters);
+                }
+                // Warden can land either side of SMSG_AUTH_RESPONSE depending on when the server
+                // arms it, so the roster step refuses it too — same reason as `connect`.
+                ServerPacket::Other {
+                    opcode: opcode::SMSG_WARDEN_DATA,
+                } => return Err(WardenRequired.into()),
+                // The server interleaves account-data / tutorial / cache packets here; skip them.
+                _ => continue,
+            }
+        }
+    }
+
+    /// Create a character (the create screen's request, or the create-if-empty starter that unblocks
+    /// `PLAYER_LOGIN` on a fresh account). Returns the `SMSG_CHAR_CREATE` result byte (`WorldResult`)
+    /// for the caller to inspect ([`messages::CHAR_CREATE_SUCCESS`], a `CHAR_NAME_*` code, …).
+    pub fn create_character(&mut self, req: &messages::CharCreateReq) -> Result<u8> {
+        self.send(opcode::CMSG_CHAR_CREATE, &messages::char_create(req))?;
+        loop {
+            match self.recv()? {
+                ServerPacket::CharCreate { result } => return Ok(result),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Delete a character (`CMSG_CHAR_DELETE`, full u64 guid — only valid at character select,
+    /// never while in-world). Returns the `SMSG_CHAR_DELETE` result byte
+    /// ([`messages::CHAR_DELETE_SUCCESS`] on success) for the caller to inspect.
+    pub fn delete_character(&mut self, guid: u64) -> Result<u8> {
+        self.send(opcode::CMSG_CHAR_DELETE, &messages::full_guid(guid))?;
+        loop {
+            match self.recv()? {
+                ServerPacket::CharDelete { result } => return Ok(result),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Send `CMSG_PLAYER_LOGIN` to enter the world as the given character. Also adopts the
+    /// character's faction tongue for every subsequent chat send (session and split writer alike):
+    /// vmangos drops chat — dot-commands included — spoken in a language the character doesn't
+    /// know, so the tongue must follow the pick. Falls back to Common when the guid wasn't in the
+    /// enumerated roster (no [`Self::char_enum`] this connection).
+    pub fn player_login(&mut self, guid: u64) -> Result<()> {
+        self.chat_language = self
+            .roster_races
+            .get(&guid)
+            .map_or(messages::LANGUAGE_COMMON, |&race| {
+                messages::faction_language(race)
+            });
+        self.send(opcode::CMSG_PLAYER_LOGIN, &messages::full_guid(guid))
+    }
+
+    /// Declare `guid` as the unit this client controls. vmangos drops all `MSG_MOVE_*` until the
+    /// client is a *confirmed mover*, which this establishes (the real client sends it at login).
+    pub fn set_active_mover(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_SET_ACTIVE_MOVER, &messages::full_guid(guid))
+    }
+
+    /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
+    /// unsplit twin of [`WorldWriter::complete_cinematic`], for the CLI/probe path.
+    pub fn complete_cinematic(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_COMPLETE_CINEMATIC, &[])
+    }
+
+    /// Walk our player forward `info`-style: begin moving (`MSG_MOVE_START_FORWARD`).
+    pub fn start_forward(&mut self, pos: [f32; 3], orientation: f32) -> Result<()> {
+        self.send(
+            opcode::MSG_MOVE_START_FORWARD,
+            &messages::movement(&movement_info(pos, orientation, MOVEMENT_FLAG_FORWARD)),
+        )
+    }
+
+    /// Continue moving (`MSG_MOVE_HEARTBEAT`).
+    pub fn heartbeat(&mut self, pos: [f32; 3], orientation: f32) -> Result<()> {
+        self.send(
+            opcode::MSG_MOVE_HEARTBEAT,
+            &messages::movement(&movement_info(pos, orientation, MOVEMENT_FLAG_FORWARD)),
+        )
+    }
+
+    /// Stop (`MSG_MOVE_STOP`, no movement flags).
+    pub fn stop(&mut self, pos: [f32; 3], orientation: f32) -> Result<()> {
+        self.send(
+            opcode::MSG_MOVE_STOP,
+            &messages::movement(&movement_info(pos, orientation, 0)),
+        )
+    }
+
+    /// Answer a `SMSG_FORCE_*_SPEED_CHANGE` at rest — the unsplit twin of
+    /// [`WorldWriter::force_speed_change_ack`], for the `--speed` probe: echo the mover guid +
+    /// counter + exact speed with a stationary `MovementInfo`. A wrong shape (packed guid, missing
+    /// counter, off-by-0.01 speed) is rejected by the server's pending-change matcher — the probe's
+    /// pass is the server logging no mismatch and the next change arriving with counter+1.
+    pub fn force_speed_ack(
+        &mut self,
+        kind: messages::SpeedKind,
+        guid: u64,
+        counter: u32,
+        speed: f32,
+        pos: [f32; 3],
+        orientation: f32,
+    ) -> Result<()> {
+        self.send(
+            kind.ack_opcode(),
+            &messages::force_speed_ack(guid, counter, &movement_info(pos, orientation, 0), speed),
+        )
+    }
+
+    /// Acknowledge a finished server spline (`CMSG_MOVE_SPLINE_DONE`) — the unsplit twin of
+    /// [`WorldWriter::move_spline_done`], for the `--charge` probe: after the server drives us with a
+    /// self `SMSG_MONSTER_MOVE`, echo its `spline_id` at the endpoint (at rest) so the server clears
+    /// its spline-pending state and relocates us. A malformed body throws in the server's parser and
+    /// drops the session — so a surviving stream is the live proof the wire is right.
+    pub fn move_spline_done(
+        &mut self,
+        pos: [f32; 3],
+        orientation: f32,
+        spline_id: u32,
+    ) -> Result<()> {
+        self.send(
+            opcode::CMSG_MOVE_SPLINE_DONE,
+            &messages::move_spline_done(&movement_info(pos, orientation, 0), spline_id),
+        )
+    }
+
+    /// Ask a player's name (`CMSG_NAME_QUERY`) — the unsplit twin of [`WorldWriter::name_query`],
+    /// for the CLI/probe path. The answer arrives in the stream as `SMSG_NAME_QUERY_RESPONSE`.
+    pub fn name_query(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_NAME_QUERY, &messages::full_guid(guid))
+    }
+
+    /// Ask a creature template's name (`CMSG_CREATURE_QUERY`) — the unsplit twin of
+    /// [`WorldWriter::creature_query`].
+    pub fn creature_query(&mut self, entry: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_CREATURE_QUERY,
+            &messages::creature_query(entry, guid),
+        )
+    }
+
+    /// Cast a spell (`CMSG_CAST_SPELL`) — the unsplit twin of [`WorldWriter::cast_spell`], for the
+    /// CLI/probe path. `target: None` = self/implicit; the verdict arrives as `SMSG_CAST_RESULT`.
+    pub fn cast_spell(&mut self, spell_id: u32, target: Option<u64>) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell(spell_id, target),
+        )
+    }
+
+    /// Cast an OPEN_LOCK spell at a **GameObject** (`CMSG_CAST_SPELL`) — the unsplit twin of
+    /// [`WorldWriter::cast_spell_gameobject`], for a probe's live chest-loot verification (decision
+    /// 0239): cast e.g. 3365 "Opening" / 2575 "Mining" at a lockable GO and expect
+    /// `SMSG_LOOT_RESPONSE`.
+    pub fn cast_spell_gameobject(&mut self, spell_id: u32, go_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_gameobject(spell_id, go_guid),
+        )
+    }
+
+    /// Ask an item template (`CMSG_ITEM_QUERY_SINGLE`) — the unsplit twin of
+    /// [`WorldWriter::item_query`]. Answered by `SMSG_ITEM_QUERY_SINGLE_RESPONSE`.
+    pub fn item_query(&mut self, entry: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_ITEM_QUERY_SINGLE,
+            &messages::item_query(entry, guid),
+        )
+    }
+
+    /// Use an item by bag position (`CMSG_USE_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::use_item`], for the probe's live use-item verification.
+    pub fn use_item(&mut self, bag_index: u8, slot: u8, spell_slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_USE_ITEM,
+            &messages::use_item(bag_index, slot, spell_slot),
+        )
+    }
+
+    /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::auto_equip_item`], for the probe's live equip verification.
+    pub fn auto_equip_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_AUTOEQUIP_ITEM,
+            &messages::auto_equip_item(bag_index, slot),
+        )
+    }
+
+    /// Swap two player-array slots (`CMSG_SWAP_INV_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::swap_inv_item`], for the probe's live backpack-move verification.
+    pub fn swap_inv_item(&mut self, src_slot: u8, dst_slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_SWAP_INV_ITEM,
+            &messages::swap_inv_item(src_slot, dst_slot),
+        )
+    }
+
+    /// Ask a vendor's stock (`CMSG_LIST_INVENTORY`) — the unsplit twin of
+    /// [`WorldWriter::list_inventory`], for the probe's live vendor verification. Answered by
+    /// `SMSG_LIST_INVENTORY` (a `VendorInventory` event).
+    pub fn list_inventory(&mut self, vendor_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_LIST_INVENTORY,
+            &messages::list_inventory(vendor_guid),
+        )
+    }
+
+    /// Buy from a vendor (`CMSG_BUY_ITEM`) — the unsplit twin of [`WorldWriter::buy_item`]; `entry`
+    /// is the item template id, not the vendor row's `muid`.
+    pub fn buy_item(&mut self, vendor_guid: u64, entry: u32, count: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUY_ITEM,
+            &messages::buy_item(vendor_guid, entry, count),
+        )
+    }
+
+    /// Sell an item to a vendor (`CMSG_SELL_ITEM`) — the unsplit twin of [`WorldWriter::sell_item`];
+    /// `count` 0 = the whole stack.
+    pub fn sell_item(&mut self, vendor_guid: u64, item_guid: u64, count: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_SELL_ITEM,
+            &messages::sell_item(vendor_guid, item_guid, count),
+        )
+    }
+
+    /// Buy a sold item back (`CMSG_BUYBACK_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::buyback_item`]; `slot` is the absolute buyback slot 69–80.
+    pub fn buyback_item(&mut self, vendor_guid: u64, slot: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUYBACK_ITEM,
+            &messages::buyback_item(vendor_guid, slot),
+        )
+    }
+
+    /// Repair at a vendor (`CMSG_REPAIR_ITEM`) — the unsplit twin of [`WorldWriter::repair_item`];
+    /// `item_guid` 0 = repair everything.
+    pub fn repair_item(&mut self, vendor_guid: u64, item_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_REPAIR_ITEM,
+            &messages::repair_item(vendor_guid, item_guid),
+        )
+    }
+
+    /// Right-click a pure banker (`CMSG_BANKER_ACTIVATE`) — opens the bank window, answered by
+    /// `SMSG_SHOW_BANK` (a `ShowBank` event). Decision 0604.
+    pub fn banker_activate(&mut self, banker_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_BANKER_ACTIVATE,
+            &messages::banker_activate(banker_guid),
+        )
+    }
+
+    /// Buy the next bank bag slot (`CMSG_BUY_BANK_SLOT`) — the server buys slot
+    /// `purchased_count + 1` and debits the price itself; success is silent (the
+    /// `PLAYER_BYTES_2` bank-bag-count byte advances via `UPDATE_OBJECT`), failure answers
+    /// `SMSG_BUY_BANK_SLOT_RESULT` (a `BuyBankSlotResult` event). Decision 0604.
+    pub fn buy_bank_slot(&mut self, banker_guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_BUY_BANK_SLOT,
+            &messages::buy_bank_slot(banker_guid),
+        )
+    }
+
+    /// Deposit a bag item into the bank (`CMSG_AUTOBANK_ITEM`) — moves the item at player-array
+    /// position `(bag, slot)` into the first free bank slot. Decision 0604.
+    pub fn autobank_item(&mut self, bag: u8, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_AUTOBANK_ITEM,
+            &messages::autobank_item(bag, slot),
+        )
+    }
+
+    /// Auto-move at the bank (`CMSG_AUTOSTORE_BANK_ITEM`) — withdraws `(bag, slot)` to inventory
+    /// when it names a bank position, else deposits it (vmangos `HandleAutoStoreBankItemOpcode`,
+    /// `ItemHandler.cpp:971`). Decision 0604.
+    pub fn autostore_bank_item(&mut self, bag: u8, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_AUTOSTORE_BANK_ITEM,
+            &messages::autostore_bank_item(bag, slot),
+        )
+    }
+
+    /// Ask an NPC's questgiver dialog status (`CMSG_QUESTGIVER_STATUS_QUERY`) — answered by
+    /// `SMSG_QUESTGIVER_STATUS`, the overhead `!`/`?` marker's value.
+    pub fn questgiver_status_query(&mut self, npc: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_STATUS_QUERY,
+            &messages::questgiver_status_query(npc),
+        )
+    }
+
+    /// Open a questgiver dialog (`CMSG_QUESTGIVER_HELLO`) — the unsplit twin for the probe's live
+    /// quest verification. The same `SendPreparedGossip` server path as gossip-hello.
+    pub fn questgiver_hello(&mut self, npc: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_HELLO,
+            &messages::questgiver_hello(npc),
+        )
+    }
+
+    /// Ask a quest's detail panel (`CMSG_QUESTGIVER_QUERY_QUEST`) — answered by
+    /// `SMSG_QUESTGIVER_QUEST_DETAILS`.
+    pub fn questgiver_query_quest(&mut self, npc: u64, quest: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_QUERY_QUEST,
+            &messages::questgiver_query_quest(npc, quest),
+        )
+    }
+
+    /// Accept a quest (`CMSG_QUESTGIVER_ACCEPT_QUEST`) — adds it to the log; the server closes the
+    /// gossip window.
+    pub fn questgiver_accept_quest(&mut self, npc: u64, quest: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_ACCEPT_QUEST,
+            &messages::questgiver_accept_quest(npc, quest),
+        )
+    }
+
+    /// Ask for a quest's turn-in progress panel (`CMSG_QUESTGIVER_COMPLETE_QUEST`) — answered by
+    /// `SMSG_QUESTGIVER_REQUEST_ITEMS` (or OFFER_REWARD when there are no required items).
+    pub fn questgiver_complete_quest(&mut self, npc: u64, quest: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_COMPLETE_QUEST,
+            &messages::questgiver_complete_quest(npc, quest),
+        )
+    }
+
+    /// Advance from progress to the reward panel (`CMSG_QUESTGIVER_REQUEST_REWARD`) — answered by
+    /// `SMSG_QUESTGIVER_OFFER_REWARD`.
+    pub fn questgiver_request_reward(&mut self, npc: u64, quest: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_REQUEST_REWARD,
+            &messages::questgiver_request_reward(npc, quest),
+        )
+    }
+
+    /// Choose a reward and finish the quest (`CMSG_QUESTGIVER_CHOOSE_REWARD`, `reward` = choice
+    /// index) — answered by `SMSG_QUESTGIVER_QUEST_COMPLETE` + the XP/money/item grants.
+    pub fn questgiver_choose_reward(&mut self, npc: u64, quest: u32, reward: u32) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTGIVER_CHOOSE_REWARD,
+            &messages::questgiver_choose_reward(npc, quest, reward),
+        )
+    }
+
+    /// Ask a quest's full template (`CMSG_QUEST_QUERY`) — the unsplit twin of
+    /// [`WorldWriter::quest_query`]; the quest-log detail pane's ask-once source, distinct from
+    /// [`Self::questgiver_query_quest`] (which needs an NPC guid, not just the quest id). Answered
+    /// by `SMSG_QUEST_QUERY_RESPONSE` (a `QuestTemplate` event).
+    pub fn quest_query(&mut self, quest_id: u32) -> Result<()> {
+        self.send(opcode::CMSG_QUEST_QUERY, &messages::quest_query(quest_id))
+    }
+
+    /// Abandon a quest-log slot (`CMSG_QUESTLOG_REMOVE_QUEST`) — the unsplit twin of
+    /// [`WorldWriter::questlog_remove_quest`]; no ack SMSG, the server clears the
+    /// `PLAYER_QUEST_LOG` slot fields directly.
+    pub fn questlog_remove_quest(&mut self, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_QUESTLOG_REMOVE_QUEST,
+            &messages::questlog_remove_quest(slot),
+        )
+    }
+
+    /// Send a `/say` line — the unsplit twin of [`WorldWriter::send_chat`]; the probe CLI drives GM
+    /// dot-commands (`.go xyz …`) through it. Same body rules as the writer: spoken in the
+    /// character's own tongue (set by [`Self::player_login`]) — the server rejects `Universal`
+    /// from clients, and rejects a tongue the character doesn't know.
+    pub fn send_chat(&mut self, message: &str) -> Result<()> {
+        self.send(
+            opcode::CMSG_MESSAGECHAT,
+            &messages::messagechat(messages::CHAT_TYPE_SAY, self.chat_language, message),
+        )
+    }
+
+    /// Echo a same-map teleport ack — the unsplit twin of [`WorldWriter::teleport_ack`] (without it
+    /// the server freezes our movement after a `.go`).
+    pub fn teleport_ack(&mut self, guid: u64, counter: u32) -> Result<()> {
+        self.send(
+            opcode::MSG_MOVE_TELEPORT_ACK,
+            &messages::teleport_ack(guid, counter, client_uptime_ms()),
+        )
+    }
+
+    /// Acknowledge a server root/unroot on our mover (`SMSG_FORCE_MOVE_[UN]ROOT` → the matching
+    /// `CMSG_FORCE_MOVE_[UN]ROOT_ACK`) — the unsplit twin of [`WorldWriter::move_root_ack`], for the
+    /// `--death` probe: the server roots us at death and unroots us at release, and observers never
+    /// see the change until we echo the counter (+ our current pose) back.
+    pub fn move_root_ack(
+        &mut self,
+        guid: u64,
+        counter: u32,
+        rooted: bool,
+        flags: u32,
+        pos: [f32; 3],
+        orientation: f32,
+    ) -> Result<()> {
+        let info = movement_info(pos, orientation, flags);
+        self.send(
+            if rooted {
+                opcode::CMSG_FORCE_MOVE_ROOT_ACK
+            } else {
+                opcode::CMSG_FORCE_MOVE_UNROOT_ACK
+            },
+            &messages::move_flag_ack(guid, counter, &info, None),
+        )
+    }
+
+    /// Acknowledge a water-walk grant/removal on our mover (`SMSG_MOVE_WATER_WALK`/`LAND_WALK` →
+    /// `CMSG_MOVE_WATER_WALK_ACK`) — the unsplit twin of [`WorldWriter::water_walk_ack`], for the
+    /// `--death` probe: the ghost form grants walk-on-water at release and removes it at revive.
+    pub fn water_walk_ack(
+        &mut self,
+        guid: u64,
+        counter: u32,
+        on: bool,
+        flags: u32,
+        pos: [f32; 3],
+        orientation: f32,
+    ) -> Result<()> {
+        let info = movement_info(pos, orientation, flags);
+        self.send(
+            opcode::CMSG_MOVE_WATER_WALK_ACK,
+            &messages::move_flag_ack(guid, counter, &info, Some(on)),
+        )
+    }
+
+    /// Release the spirit (`CMSG_REPOP_REQUEST`, empty body) — the unsplit twin of
+    /// [`WorldWriter::repop_request`], for the `--death` probe's live release verification.
+    pub fn repop_request(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_REPOP_REQUEST, &[])
+    }
+
+    /// Ask where our corpse is (`MSG_CORPSE_QUERY`, empty request) — the unsplit twin of
+    /// [`WorldWriter::corpse_query`], for the `--death` probe. Answered by the same opcode (a
+    /// [`SessionEvent::CorpseQuery`](crate::SessionEvent::CorpseQuery)).
+    pub fn corpse_query(&mut self) -> Result<()> {
+        self.send(opcode::MSG_CORPSE_QUERY, &[])
+    }
+
+    /// Ask the graveyard's Spirit Healer for the immediate res (`CMSG_SPIRIT_HEALER_ACTIVATE`,
+    /// full guid) — the unsplit twin of [`WorldWriter::spirit_healer_activate`], for the
+    /// `--spirit` probe's live durability-loss verification. The server resurrects at 50% health
+    /// and pushes the 25% durability loss as item values-deltas.
+    pub fn spirit_healer_activate(&mut self, npc: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_SPIRIT_HEALER_ACTIVATE,
+            &messages::spirit_healer_activate(npc),
+        )
+    }
+
+    /// Start melee auto-attack (`CMSG_ATTACKSWING`, full guid) — the unsplit twin of
+    /// [`WorldWriter::attack_swing`]. Echoed as `SMSG_ATTACKSTART`; each completed swing arrives as
+    /// `SMSG_ATTACKERSTATEUPDATE`.
+    pub fn attack_swing(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_ATTACKSWING, &messages::attack_swing(guid))
+    }
+
+    /// Set our target (`CMSG_SET_SELECTION`, full guid) — the unsplit twin of
+    /// [`WorldWriter::set_selection`], for probe fidelity (the client selects before it casts).
+    pub fn set_selection(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_SET_SELECTION, &messages::full_guid(guid))
+    }
+
+    /// Open a loot window (`CMSG_LOOT`) — the unsplit twin of [`WorldWriter::loot`], for the
+    /// probe's live loot verification. Answered by `SMSG_LOOT_RESPONSE` (either shape).
+    pub fn loot(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_LOOT, &messages::loot(guid))
+    }
+
+    /// Use a world GameObject (`CMSG_GAMEOBJ_USE`) — the unsplit twin of [`WorldWriter::gameobj_use`],
+    /// for a probe's live GO-interaction verification (decision 0236 phase 3's chest-loot capture).
+    /// The server answers on the type's own system (`SMSG_LOOT_RESPONSE` for a chest, gossip/quest for
+    /// a questgiver GO) or not at all.
+    pub fn gameobj_use(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_GAMEOBJ_USE, &messages::gameobj_use(guid))
+    }
+
+    /// Ask for a GameObject template's head (`CMSG_GAMEOBJECT_QUERY`) — the unsplit twin of
+    /// [`WorldWriter::gameobject_query`], for the CLI/probe path. Answered by
+    /// `SMSG_GAMEOBJECT_QUERY_RESPONSE`.
+    pub fn gameobject_query(&mut self, entry: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_GAMEOBJECT_QUERY,
+            &messages::gameobject_query(entry, guid),
+        )
+    }
+
+    /// Take one loot-window row (`CMSG_AUTOSTORE_LOOT_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::autostore_loot_item`]; `loot_slot` is the wire's 0-based row index from the
+    /// `SMSG_LOOT_RESPONSE` this answers.
+    pub fn autostore_loot_item(&mut self, loot_slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_AUTOSTORE_LOOT_ITEM,
+            &messages::autostore_loot_item(loot_slot),
+        )
+    }
+
+    /// Take the loot's coin pile (`CMSG_LOOT_MONEY`, empty body) — the unsplit twin of
+    /// [`WorldWriter::loot_money`]. Answered by `SMSG_LOOT_MONEY_NOTIFY` + `SMSG_LOOT_CLEAR_MONEY`.
+    pub fn loot_money(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_LOOT_MONEY, &messages::loot_money())
+    }
+
+    /// Close the loot window (`CMSG_LOOT_RELEASE`) — the unsplit twin of
+    /// [`WorldWriter::loot_release`]; the server ignores `guid` and releases its own stored loot
+    /// target. Answered by `SMSG_LOOT_RELEASE_RESPONSE`.
+    pub fn loot_release(&mut self, guid: u64) -> Result<()> {
+        self.send(opcode::CMSG_LOOT_RELEASE, &messages::loot_release(guid))
+    }
+
+    /// Split into independent read/write halves (separate cloned sockets + crypto halves) so a reader
+    /// thread can stream updates while another path sends our movement. Call after [`Self::player_login`].
+    pub fn into_split(self) -> Result<(WorldReader, WorldWriter)> {
+        // The handshake is over — clear its read timeout (decision 0065): the streaming phase reads
+        // block indefinitely (a quiet world is legal; connection liveness is the caller's loop).
+        self.stream
+            .set_read_timeout(None)
+            .context("clearing handshake read timeout")?;
+        let read_stream = self
+            .stream
+            .try_clone()
+            .context("cloning world socket for split")?;
+        let (encrypter, decrypter) = self.crypto.split();
+        Ok((
+            WorldReader {
+                stream: read_stream,
+                decrypter,
+            },
+            WorldWriter {
+                stream: self.stream,
+                encrypter,
+                chat_language: self.chat_language,
+            },
+        ))
+    }
+
+    /// Cleanly leave the world back to character-select: send `CMSG_LOGOUT_REQUEST` and wait for
+    /// `SMSG_LOGOUT_COMPLETE` (instant for GM / rested). The server persists the character on logout,
+    /// so a follow-up [`Self::char_enum`] reflects the saved position. Requires a read timeout (so the
+    /// poll loop can give up); returns once logged out or `timeout` elapses.
+    pub fn logout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.send(opcode::CMSG_LOGOUT_REQUEST, &[])?;
+        let deadline = std::time::Instant::now() + timeout;
+        let mut denied = false;
+        while std::time::Instant::now() < deadline {
+            match self.recv() {
+                Ok(ServerPacket::LogoutComplete) => return Ok(()),
+                Ok(ServerPacket::LogoutResponse { result }) => {
+                    // A non-success result means the server refused (combat, etc.).
+                    denied = result != messages::LOGOUT_SUCCESS;
+                }
+                Ok(_) => {}
+                Err(_) => {} // read-timeout tick — keep polling until the deadline
+            }
+        }
+        if denied {
+            bail!("logout refused by server (in combat / not allowed)")
+        }
+        bail!("timed out waiting for SMSG_LOGOUT_COMPLETE")
+    }
+}

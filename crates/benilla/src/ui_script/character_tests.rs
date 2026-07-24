@@ -1,0 +1,848 @@
+//! The shipped **character window** driven end-to-end, engine-only (no Bevy): the real
+//! `assets/ui/CharacterFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml` and fed
+//! a synthetic player snapshot + combat-stats + one equipped item — mirroring `questlog_tests.rs`'s
+//! harness for the paper-doll slice (decision 0208 phase 1a).
+//!
+//! NOTE (session state, not a property of this file): at the time this test was written, the
+//! `benilla` crate's non-test code (`ui_unit.rs`, `ui_script/mod.rs`'s `demo_unit_feed`) had not yet
+//! been updated for `UnitState`'s new `race`/`class`/`class_file`/`race_file`/`sex` fields (a
+//! concurrent, unrelated change landing in `benilla-ui/src/script/unit.rs` this same session) — so
+//! `cargo test -p benilla` could not compile AT ALL, for reasons entirely outside this file. Every
+//! assertion below was independently cross-verified against the real `benilla-ui` engine through a
+//! throwaway external harness (a scratch Cargo project depending on `benilla-ui` by path) before
+//! landing here, so its correctness doesn't rest on `cargo test -p benilla` having run — but that
+//! command itself is still owed once the unrelated breakage clears, per this crate's own gates.
+
+use benilla_ui::script::{
+    ExtractedQuad, InvSlotView, InventorySlots, PlayerCombatStats, QuadContent, ScriptValue,
+    SoundRequest, UiScript, UnitState,
+};
+
+/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error (the questlog/panel
+/// tests' loader, duplicated so this file is self-contained).
+fn load_xml(s: &UiScript, file: &str) {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/ui")
+            .join(file),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "{file}: loader errors: {:?}",
+        report.errors
+    );
+}
+
+/// A Night Elf Warrior, level 12 — the fixture every test below shares for the level/name line.
+fn player_unit() -> UnitState {
+    UnitState {
+        exists: true,
+        name: Some("Benilla".into()),
+        health: 100,
+        max_health: 100,
+        level: 12,
+        power_type: 0,
+        power: 50,
+        max_power: 50,
+        dead: false,
+        reaction: 0,
+        race: Some("Night Elf".into()),
+        race_file: Some("NightElf".into()),
+        class: Some("Warrior".into()),
+        class_file: Some("WARRIOR".into()),
+        sex: 2,
+        is_player: true,
+        ..Default::default()
+    }
+}
+
+/// A minimal combat-stats snapshot: STR effective 15 (a +2 pos buff, so the stat line shows green),
+/// 120 armor (school 0), 3 arcane resistance (school 6), a mainhand-only melee weapon (2.6s speed,
+/// 10-15 damage, 80 AP) and NO ranged weapon equipped (exercises the "N/A" ranged fallback).
+fn combat_stats() -> PlayerCombatStats {
+    PlayerCombatStats {
+        stats: [15, 12, 20, 8, 9],
+        stat_pos: [2, 0, 0, 0, 0],
+        resistances: [120, 5, 0, 0, 0, 0, 3],
+        min_damage: 10.0,
+        max_damage: 15.0,
+        attack_power: 80,
+        main_attack_time_ms: 2600,
+        main_weapon_skill: (300, 5),
+        ..Default::default()
+    }
+}
+
+/// One item in the head slot (inventory slot id 1, per `GetInventorySlotInfo("HeadSlot")`) —
+/// everything else stays empty (exercises the empty-slot art + slot-name tooltip fallback).
+/// `equip_slots: vec![1]` — fits ONLY the head slot, decision 0208 phase 1b's fit rule.
+fn inventory_with_head_item() -> InventorySlots {
+    let mut slots: InventorySlots = Default::default();
+    slots[1] = Some(InvSlotView {
+        durability: None,
+        flags: 0,
+        item_id: 1234,
+        icon: Some("Interface\\Icons\\INV_Helmet_01".into()),
+        count: 1,
+        quality: 2,
+        name: Some("Test Helm".into()),
+        link: Some("|cff1eff00|Hitem:1234:0:0:0|h[Test Helm]|h|r".into()),
+        locked: false,
+        equip_slots: vec![1],
+        creator: None,
+    });
+    slots
+}
+
+/// A one-item backpack whose slot 1 item fits ONLY the head slot (`equip_slots: vec![1]`) — the
+/// bag-side half of the doll-interaction tests below.
+fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        benilla_ui::script::ContainerSlot {
+            durability: None,
+            texture: Some("Interface\\Icons\\INV_Helmet_02".into()),
+            count: 1,
+            quality: Some(3),
+            item_id: 2000,
+            link: Some("|cff0070dd|Hitem:2000:0:0:0|h[Another Helm]|h|r".into()),
+            locked: false,
+            equip_slots: vec![1],
+            cooldown: None,
+            readable: false,
+            creator: None,
+            flags: 0,
+        },
+    );
+    benilla_ui::script::ContainerState {
+        name: Some("Backpack".into()),
+        num_slots: 16,
+        slots,
+    }
+}
+
+/// The loader itself: every file the window depends on parses and materializes with no errors —
+/// 59 frames (the container + tab + paper-doll page: 19 slots + ammo + 5 attribute rows + armor/
+/// attack/damage/ranged rows + 5 resistance frames + the model pane + its 2 rotate buttons + chrome).
+#[test]
+fn shipped_character_frame_loads_clean() {
+    let s = UiScript::new().unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+}
+
+/// The whole contract in one end-to-end drive: `ToggleCharacter` (the 'C' binding's entry point)
+/// opens through `ShowUIPanel`, the level/name lines read the player snapshot, the stat/armor/
+/// resistance lines read the combat-stats snapshot (with the ref's own buff-coloring), the ranged
+/// block falls back to N/A with no ranged weapon, an equipped item's icon renders once
+/// `UNIT_INVENTORY_CHANGED` fires, rotating the model pane advances the booth yaw + plays the kit,
+/// and a second toggle closes it again — each transition its own sound.
+#[test]
+fn shipped_character_frame_drives_end_to_end() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+    s.set_inventory_slots(inventory_with_head_item());
+
+    // Hidden at load: no sound queued (never transitions on startup).
+    assert!(
+        s.take_sounds().is_empty(),
+        "no sound at load (never transitions)"
+    );
+    assert!(!s
+        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
+        .unwrap());
+
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
+        "opening plays igCharacterInfoOpen"
+    );
+
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterNameText:GetText()")
+            .unwrap(),
+        "Benilla"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterLevelText:GetText()")
+            .unwrap(),
+        "Level 12 Night Elf Warrior"
+    );
+    // STR effective 15, posBuff 2 > 0 → green (ref PaperDollFrame_SetStats).
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterStatFrame1StatText:GetText()")
+            .unwrap(),
+        "|cff20ff2015|r"
+    );
+    // The labels are the TEMPLATE's own $parentLabel, filled from Lua exactly like the ref
+    // (PaperDollFrame_SetStats l.140 for the attributes, _OnLoad l.7-13 for the fixed rows) —
+    // never a re-declared region in an instance, which this engine renders as a SECOND
+    // anchorless default-font FontString (the white/overlapping-label regression).
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterStatFrame1Label:GetText()")
+            .unwrap(),
+        "Strength:"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterAttackFrameLabel:GetText()")
+            .unwrap(),
+        "Melee Attack"
+    );
+    // Geometry resolves below (GetLeft is nil until the first resolve).
+    s.resolve();
+    // The template's label sits LEFT-anchored at its row's left edge.
+    assert_eq!(
+        s.eval::<f32>("return BenillaCharacterStatFrame1Label:GetLeft()")
+            .unwrap(),
+        s.eval::<f32>("return BenillaCharacterStatFrame1:GetLeft()")
+            .unwrap(),
+    );
+    // Exactly ONE region carries the label text, in the small gold font (GameFontNormalSmall:
+    // 10px, 1.0/0.82/0) — a duplicate or a default-font fallback both fail here.
+    let quads = s.extract();
+    let strength_labels: Vec<_> = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color,
+                font_height,
+                ..
+            } if t == "Strength:" => Some((*color, *font_height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        strength_labels.len(),
+        1,
+        "exactly one Strength: label region, got {}",
+        strength_labels.len()
+    );
+    let (color, height) = strength_labels[0];
+    assert_eq!(height, Some(10.0), "GameFontNormalSmall is 10px");
+    let c = color.expect("the label carries the font object's color");
+    assert!(
+        (c[0] - 1.0).abs() < 1e-3 && (c[1] - 0.82).abs() < 1e-3 && c[2].abs() < 1e-3,
+        "gold NORMAL_FONT_COLOR, got {c:?}"
+    );
+    // Armor (school 0) reads straight off UnitArmor's base.
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterArmorFrameStatText:GetText()")
+            .unwrap(),
+        "120"
+    );
+    // MagicResFrame1 = id 6 (arcane) — resistances[6] = 3.
+    assert_eq!(
+        s.eval::<String>("return BenillaMagicResText1:GetText()")
+            .unwrap(),
+        "3"
+    );
+    // No ranged weapon in this fixture: the N/A fallback (ref PaperDollFrame_SetRangedAttack).
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterRangedAttackFrameStatText:GetText()")
+            .unwrap(),
+        "N/A"
+    );
+
+    // The equipped head item's icon shows once UNIT_INVENTORY_CHANGED fires (the real app's own
+    // sequencing: a snapshot push is followed by the event, never inferred from the push alone).
+    s.fire_event(
+        "UNIT_INVENTORY_CHANGED",
+        vec![ScriptValue::Str("player".into())],
+    );
+    assert!(
+        s.errors().is_empty(),
+        "inventory refresh errors: {:?}",
+        s.errors()
+    );
+    s.resolve();
+    let head_icon = s.extract().iter().any(|q| {
+        matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains("INV_Helmet_01"))
+    });
+    assert!(head_icon, "the head slot renders the equipped item's icon");
+
+    // Hovering an EMPTY slot (Neck, never populated) shows the slot-name tooltip fallback.
+    let neck_center = {
+        let l: f32 = s.eval("return BenillaCharacterNeckSlot:GetLeft()").unwrap();
+        let r: f32 = s
+            .eval("return BenillaCharacterNeckSlot:GetRight()")
+            .unwrap();
+        let t: f32 = s.eval("return BenillaCharacterNeckSlot:GetTop()").unwrap();
+        let b: f32 = s
+            .eval("return BenillaCharacterNeckSlot:GetBottom()")
+            .unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+    s.mouse_move(neck_center.0, neck_center.1);
+    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the empty Neck slot shows a tooltip"
+    );
+
+    // Hovering a resistance icon WRAPS its long subtext at the tooltip wrap column — the ref
+    // passes wrap=1 on every stat/resistance subtext AddLine (ref-PaperDollFrame.xml:115 and
+    // siblings); a transcription that drops the flag renders the ~380px sentence as one
+    // unwrapped line (the director's tooltip max-width report).
+    let res_center = {
+        let l: f32 = s.eval("return BenillaMagicResFrame1:GetLeft()").unwrap();
+        let r: f32 = s.eval("return BenillaMagicResFrame1:GetRight()").unwrap();
+        let t: f32 = s.eval("return BenillaMagicResFrame1:GetTop()").unwrap();
+        let b: f32 = s.eval("return BenillaMagicResFrame1:GetBottom()").unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+    s.mouse_move(res_center.0, res_center.1);
+    assert!(s.errors().is_empty(), "res hover errors: {:?}", s.errors());
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "the resistance icon shows a tooltip"
+    );
+    s.resolve();
+    let quads = s.extract();
+    let sub_rect = quads
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Text { text: Some(t), .. }
+                if t.starts_with("Increases the ability to resist") =>
+            {
+                q.rect
+            }
+            _ => None,
+        })
+        .expect("the resistance subtext line renders");
+    let w = sub_rect.right - sub_rect.left;
+    assert!(
+        w <= benilla_ui::widget::TOOLTIP_WRAP_WIDTH + 0.5,
+        "the subtext line wraps at the tooltip wrap column, got width {w}"
+    );
+
+    // Rotating the model pane advances the booth yaw from the ref's default 0.61 by +0.03/click and
+    // plays the rotate kit (ref UIParent.lua:1421-1442).
+    s.run("BenillaPaperDollModel_RotateRight(BenillaCharacterModelFrame)")
+        .unwrap();
+    assert!(
+        (s.paperdoll_yaw() - 0.64).abs() < 0.001,
+        "yaw = {}",
+        s.paperdoll_yaw()
+    );
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igInventoryRotateCharacter".into())]
+    );
+
+    // ToggleCharacter() again closes it through HideUIPanel, playing the close kit.
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert!(s.errors().is_empty(), "close errors: {:?}", s.errors());
+    assert!(!s
+        .eval::<bool>("return BenillaCharacterFrame:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoClose".into())],
+        "closing plays igCharacterInfoClose"
+    );
+}
+
+/// Regression — the close button's z-order (the reported "missing red X"): the character window
+/// carries no border art of its own; its whole frame-and-background IS `BenillaPaperDollFrame`'s
+/// BACKGROUND layer, a full-window page created AFTER the close button. Every frame defaults to
+/// level 0, so within the window draw order is creation order (`order.rs`) — the page's art painted
+/// over the earlier-created button and it vanished. The button's `OnLoad` raises its frame level
+/// (the same idiom `BenillaCharacterNameFrame` uses), so its art must paint AFTER every one of the
+/// page's own quads. Checked on the real extracted draw order, not merely the level integer.
+#[test]
+fn close_button_draws_above_the_paper_doll_page() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    // The window must be SHOWN for extract() to emit quads (hidden="true" by default).
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    s.resolve();
+
+    // extract() returns quads already sorted ascending by draw order, so index == paint order.
+    let quads = s.extract();
+    let owner = |q: &ExtractedQuad| s.quad_owner_name(q.target);
+
+    // The window's page art draws first; its LAST quad is the top-most page pixel.
+    let page_last = quads
+        .iter()
+        .rposition(|q| owner(q).as_deref() == Some("BenillaPaperDollFrame"))
+        .expect("the paper-doll page renders its background art");
+
+    // The close button's red-X normal texture must render at all …
+    let close_x = quads
+        .iter()
+        .position(|q| {
+            owner(q).as_deref() == Some("BenillaCharacterFrameCloseButton")
+                && matches!(&q.content,
+                    QuadContent::Texture { path: Some(p), .. } if p.contains("MinimizeButton-Up"))
+        })
+        .expect("the close button renders its normal (red-X) texture");
+
+    // … and it must paint AFTER the page — otherwise it's buried, the reported bug.
+    assert!(
+        close_x > page_last,
+        "close button (draw #{close_x}) must paint after the paper-doll page (last at #{page_last})"
+    );
+}
+
+/// Before the app's first player snapshot lands, `UnitRace`/`UnitClass` answer nil,nil (this
+/// engine's own timing — unlike the real client's synchronous local data, this codebase's race/
+/// class stream in). The level line's "?" placeholders (CharacterFrame.xml's own `SetLevel`
+/// comment) keep `format()` from erroring outright, rather than the window failing to open at all.
+#[test]
+fn level_line_survives_no_player_snapshot_yet() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+
+    // No set_unit("player", ...) call at all — UnitLevel/UnitRace/UnitClass answer their absent
+    // shapes (0 / nil,nil / nil,nil, `unit.rs`'s own contract).
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
+    assert_eq!(
+        s.eval::<String>("return BenillaCharacterLevelText:GetText()")
+            .unwrap(),
+        "Level 0 ? ?"
+    );
+
+    // A stray extractor's frame-count sanity check: some frame renders (the window itself), no
+    // panics anywhere in the drive.
+    let quads: Vec<ExtractedQuad> = {
+        s.resolve();
+        s.extract()
+    };
+    assert!(!quads.is_empty());
+}
+
+/// Decision 0208 phase 1b, end to end: clicking an OCCUPIED doll slot picks the item up onto the
+/// cursor (the SAME payload `GetCursorInfo`/`CursorHasItem` read) and dims the slot's icon
+/// (`IsInventoryItemLocked` — the held-here derivation, no server round-trip). A second click on
+/// the SAME slot cancels: the cursor empties and the dim clears.
+#[test]
+fn clicking_an_occupied_doll_slot_picks_it_up_and_locks_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+    s.set_inventory_slots(inventory_with_head_item());
+    // The window must be SHOWN for `extract()` to emit its quads below (hidden="true" by
+    // default) — the icon-dim check needs a real render pass, not just the engine-side state.
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    s.take_sounds();
+    s.resolve();
+
+    assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
+    assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
+
+    s.run(r#"BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, "LeftButton")"#)
+        .unwrap();
+    assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
+
+    assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
+    let (kind, id) = s
+        .eval::<(String, i64)>("local k, id = GetCursorInfo() return k, id")
+        .unwrap();
+    assert_eq!((kind.as_str(), id), ("item", 1234));
+    assert!(
+        s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap(),
+        "the picked slot locks"
+    );
+    // The icon vertex-dims (the bag slots' own convention, this file's own Update comment).
+    s.resolve();
+    let head_icon_dim = s.extract().iter().any(|q| {
+        matches!(&q.content, QuadContent::Texture { path: Some(p), color: Some(c), .. }
+            if p.contains("INV_Helmet_01") && c[0] < 0.5)
+    });
+    assert!(head_icon_dim, "the picked slot's icon dims");
+
+    // Clicking the SAME slot again cancels — mirrors the bag's own same-slot-cancel contract.
+    s.run(r#"BenillaPaperDollSlot_OnClick(BenillaCharacterHeadSlot, "LeftButton")"#)
+        .unwrap();
+    assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
+    assert!(!s.eval::<bool>("return IsInventoryItemLocked(1)").unwrap());
+}
+
+/// Decision 0208 phase 1b's `CURSOR_UPDATE` highlight: holding a BAG item that fits ONLY the
+/// head slot locks the head slot's highlight and leaves every other slot unlocked (the neck slot
+/// checked here) — the wiring test for `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight`
+/// (a Lua-level spy, since no `GetVertexColor` getter exists to read the emulated tint back —
+/// this file's own header comment on the emulation).
+#[test]
+fn cursor_update_highlights_fitting_doll_slots_while_holding_a_bag_item() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+    s.resolve();
+
+    s.run(
+        r#"
+        lockHighlighted, unlockHighlighted = {}, {}
+        local origLock, origUnlock = BenillaPaperDollSlot_LockHighlight, BenillaPaperDollSlot_UnlockHighlight
+        BenillaPaperDollSlot_LockHighlight = function(b) lockHighlighted[b:GetName()] = true; origLock(b) end
+        BenillaPaperDollSlot_UnlockHighlight = function(b) unlockHighlighted[b:GetName()] = true; origUnlock(b) end
+        "#,
+    )
+    .unwrap();
+
+    s.set_container(0, Some(backpack_with_fitting_helm()));
+    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    s.tick(0.0); // dispatches the queued CURSOR_UPDATE to every registered doll slot
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+
+    assert!(
+        s.eval::<bool>("return lockHighlighted['BenillaCharacterHeadSlot'] == true")
+            .unwrap(),
+        "the fitting slot locks its highlight"
+    );
+    assert!(
+        s.eval::<bool>("return unlockHighlighted['BenillaCharacterNeckSlot'] == true")
+            .unwrap(),
+        "a non-fitting slot stays unhighlighted"
+    );
+}
+
+/// The model pane's click-with-payload path (ref `CharacterModelFrame_OnMouseUp`): a left-click
+/// release on the model pane while holding a fitting BAG item auto-equips it — the queued
+/// `(bag, slot)` source, cursor cleared.
+#[test]
+fn model_pane_click_auto_equips_a_held_bag_item() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    s.take_sounds();
+    s.resolve();
+
+    s.set_container(0, Some(backpack_with_fitting_helm()));
+    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
+
+    let center = {
+        let l: f32 = s
+            .eval("return BenillaCharacterModelFrame:GetLeft()")
+            .unwrap();
+        let r: f32 = s
+            .eval("return BenillaCharacterModelFrame:GetRight()")
+            .unwrap();
+        let t: f32 = s
+            .eval("return BenillaCharacterModelFrame:GetTop()")
+            .unwrap();
+        let b: f32 = s
+            .eval("return BenillaCharacterModelFrame:GetBottom()")
+            .unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+    s.mouse_button(center.0, center.1, "LeftButton", true);
+    s.mouse_button(center.0, center.1, "LeftButton", false);
+    assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
+
+    assert!(!s.eval::<bool>("return CursorHasItem()").unwrap());
+    assert_eq!(s.take_container_autoequips(), vec![(0, 1)]);
+}
+
+/// A BROKEN equipped item (durability 0) paints its doll slot red — the icon AND the slot ring,
+/// both the ref's 0.9,0,0 (PaperDollItemSlotButton_Update l.670-676; director-directed with the
+/// armor guy). Repairing it restores both to white.
+#[test]
+fn broken_equipped_item_tints_its_doll_slot_red() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+
+    let mut inv = inventory_with_head_item();
+    inv[1].as_mut().unwrap().durability = Some((0, 40));
+    s.set_inventory_slots(inv);
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    s.fire_event(
+        "UNIT_INVENTORY_CHANGED",
+        vec![ScriptValue::Str("player".into())],
+    );
+    assert!(s.errors().is_empty(), "update errors: {:?}", s.errors());
+    s.resolve();
+    let color_of = |s: &mut UiScript, needle: &str| {
+        s.extract().iter().find_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                color,
+                ..
+            } if p.contains(needle) => Some(color.unwrap_or([1.0, 1.0, 1.0, 1.0])),
+            _ => None,
+        })
+    };
+    let red = [0.9, 0.0, 0.0, 1.0];
+    assert_eq!(
+        color_of(&mut s, "INV_Helmet_01"),
+        Some(red),
+        "the broken helm's icon paints red"
+    );
+    // The head slot's ring (its NormalTexture Quickslot2 art) paints red too. Other doll slots
+    // share the art but rest white — assert the red one exists among them.
+    let ring_red = s.extract().iter().any(|q| {
+        matches!(&q.content,
+        QuadContent::Texture { path: Some(p), color: Some(c), .. }
+            if p.contains("Quickslot2") && (c[0] - 0.9).abs() < 1e-5 && c[1] == 0.0)
+    });
+    assert!(ring_red, "the broken slot's ring paints red");
+
+    // Repaired: both restore to white.
+    let mut inv = inventory_with_head_item();
+    inv[1].as_mut().unwrap().durability = Some((40, 40));
+    s.set_inventory_slots(inv);
+    s.fire_event(
+        "UNIT_INVENTORY_CHANGED",
+        vec![ScriptValue::Str("player".into())],
+    );
+    s.resolve();
+    assert_eq!(
+        color_of(&mut s, "INV_Helmet_01"),
+        Some([1.0, 1.0, 1.0, 1.0]),
+        "repair restores the icon"
+    );
+    let ring_red = s.extract().iter().any(|q| {
+        matches!(&q.content,
+        QuadContent::Texture { path: Some(p), color: Some(c), .. }
+            if p.contains("Quickslot2") && (c[0] - 0.9).abs() < 1e-5 && c[1] == 0.0)
+    });
+    assert!(!ring_red, "repair restores the ring");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// The director's own gesture, by screen point (2026-07-17 report: "tab switching flaky, can't
+/// switch back to Character from Skills"): open the window, click the Skills tab, click a skill
+/// row (arming the detail pane), click the Character tab, and round-trip once more — every click
+/// routed through the pointer pipeline (`mouse_move`/`mouse_button`) exactly as the app does, so
+/// a frame silently eating the tab row's clicks (or a handler error breaking the chain) fails
+/// HERE, not on the director's screen. Zero collected handler errors allowed anywhere.
+#[test]
+fn tab_round_trip_with_a_selected_skill_by_point() {
+    use benilla_ui::script::{SkillEntry, SkillsState};
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    load_xml(&s, "SkillFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_skills(SkillsState {
+        entries: vec![
+            SkillEntry {
+                skill_id: 95,
+                name: "Defense".into(),
+                value: 12,
+                max: 60,
+                modifier: 0,
+                category_id: 6,
+                category_name: "Weapon Skills".into(),
+                category_order: 1,
+                description: "Defensive expertise.".into(),
+                abandonable: false,
+            },
+            SkillEntry {
+                skill_id: 164,
+                name: "Blacksmithing".into(),
+                value: 62,
+                max: 75,
+                modifier: 0,
+                category_id: 11,
+                category_name: "Professions".into(),
+                category_order: 2,
+                description: "Working with metals.".into(),
+                // The real 5875 split: primary professions carry SkillRaceClassInfo 0x20.
+                abandonable: true,
+            },
+        ],
+    });
+
+    // The center of the unique visible Text quad `text` — resolves layout first, so it's always
+    // the CURRENT rect. Panics with the visible-text inventory if absent (a paint regression).
+    fn text_center(s: &mut UiScript, text: &str) -> (f32, f32) {
+        s.resolve();
+        let quads = s.extract();
+        let rect = quads
+            .iter()
+            .find_map(|q| match &q.content {
+                QuadContent::Text { text: Some(t), .. } if t == text => q.rect,
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let visible: Vec<String> = quads
+                    .iter()
+                    .filter_map(|q| match &q.content {
+                        QuadContent::Text { text: Some(t), .. } => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                panic!("no visible text quad {text:?}; visible texts: {visible:?}");
+            });
+        (
+            (rect.left + rect.right) * 0.5,
+            (rect.bottom + rect.top) * 0.5,
+        )
+    }
+    fn click(s: &mut UiScript, (x, y): (f32, f32)) {
+        s.mouse_move(x, y);
+        s.mouse_button(x, y, "LeftButton", true);
+        s.mouse_button(x, y, "LeftButton", false);
+    }
+    let shown = |s: &mut UiScript, name: &str| {
+        s.eval::<bool>(&format!("return {name}:IsVisible()"))
+            .unwrap()
+    };
+
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    assert!(
+        shown(&mut s, "BenillaPaperDollFrame"),
+        "opens on the doll page"
+    );
+
+    // Tab to Skills — by point, the director's gesture.
+    let tab2 = text_center(&mut s, "Skills");
+    click(&mut s, tab2);
+    assert!(
+        shown(&mut s, "BenillaSkillFrame"),
+        "Skills tab shows the page"
+    );
+    assert!(!shown(&mut s, "BenillaPaperDollFrame"), "doll page yields");
+
+    // Select a skill row — arms the detail pane (the report's precondition).
+    let row = text_center(&mut s, "Blacksmithing");
+    click(&mut s, row);
+    assert!(
+        s.eval::<i64>("return GetSelectedSkill()").unwrap() > 0,
+        "the row click selects"
+    );
+    assert!(shown(&mut s, "BenillaSkillDetailBar"), "detail bar arms");
+    // The description body renders through the SKILL_DESCRIPTION format (skillType is "" in every
+    // reachable 1.12 branch) — the nil-global half of the report, pinned.
+    assert_eq!(
+        s.eval::<String>("return BenillaSkillDetailDescriptionText:GetText()")
+            .unwrap(),
+        "|cffffffff|r Working with metals.",
+        "the detail description renders via SKILL_DESCRIPTION"
+    );
+
+    // The abandon slice: a primary profession offers the unlearn button; its confirm formats the
+    // name; accepting queues the CMSG_UNLEARN_SKILL intent BY SKILL ID and removes nothing
+    // locally (the server's SetSkill(id,0,0) round trip owns the removal).
+    assert!(
+        shown(&mut s, "BenillaSkillDetailUnlearnButton"),
+        "the unlearn button shows for a profession"
+    );
+    s.run("BenillaSkillDetailUnlearnButton:Click()").unwrap();
+    assert!(
+        shown(&mut s, "StaticPopup1"),
+        "the UNLEARN_SKILL confirm opens"
+    );
+    assert_eq!(
+        s.eval::<String>("return StaticPopup1Text:GetText()")
+            .unwrap(),
+        "Do you want to unlearn Blacksmithing?"
+    );
+    s.run("StaticPopup1Button1:Click()").unwrap();
+    assert_eq!(
+        s.take_skill_abandons(),
+        vec![164],
+        "accept queues the skill id"
+    );
+    assert!(!shown(&mut s, "StaticPopup1"), "accept closes the confirm");
+    assert_eq!(
+        s.eval::<i64>("return GetNumSkillLines()").unwrap(),
+        4,
+        "nothing is removed locally"
+    );
+
+    // A weapon line never offers it.
+    let defense = text_center(&mut s, "Defense");
+    click(&mut s, defense);
+    assert!(
+        !shown(&mut s, "BenillaSkillDetailUnlearnButton"),
+        "no unlearn button for Defense"
+    );
+    // Restore the profession selection so the round trip below leaves familiar state.
+    let row = text_center(&mut s, "Blacksmithing");
+    click(&mut s, row);
+
+    // Tab BACK to Character — the reported failure.
+    let tab1 = text_center(&mut s, "Character");
+    assert_eq!(
+        s.hit_test_name(tab1.0, tab1.1).as_deref(),
+        Some("BenillaCharacterFrameTab1"),
+        "the Character tab OWNS its point while Skills is up (the wheel catcher must not)"
+    );
+    click(&mut s, tab1);
+    assert!(
+        shown(&mut s, "BenillaPaperDollFrame"),
+        "the Character tab switches back (the 2026-07-17 report)"
+    );
+    assert!(!shown(&mut s, "BenillaSkillFrame"), "Skills page yields");
+
+    // Once more around — "flaky" only shows up on repetition.
+    let tab2 = text_center(&mut s, "Skills");
+    click(&mut s, tab2);
+    assert!(shown(&mut s, "BenillaSkillFrame"), "second trip to Skills");
+    let tab1 = text_center(&mut s, "Character");
+    click(&mut s, tab1);
+    assert!(shown(&mut s, "BenillaPaperDollFrame"), "second trip back");
+
+    assert!(
+        s.errors().is_empty(),
+        "zero handler errors across the whole trip: {:?}",
+        s.errors()
+    );
+}

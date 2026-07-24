@@ -1,0 +1,582 @@
+//! M2 → model asset loader.
+//!
+//! Decodes a WoW M2 (`*.m2`) into an [`M2Model`]: one [`ModelSubmesh`] per render batch, each carrying
+//! a [`Mesh`](bevy::mesh::Mesh) **labeled sub-asset** (baked to Bevy space via [`crate::coords`]) plus
+//! the batch's texture as a `Handle<Image>` **dependency** (through the `mpq://` source).
+//!
+//! Deliberately app-independent: builds **meshes + texture handles + metadata only**, not materials
+//! (the WoW lighting material is an app concern built at spawn) — so this asset is shared verbatim by
+//! doodads, creatures, GameObjects, and the star model. Creature **skin variations** (`Monster1/2/3`)
+//! are blank here (no `skins` passed) and resolved at the spawn site from `CreatureDisplayInfo`; this
+//! loads the model's own embedded (hardcoded) textures.
+//!
+//! References use `.mdx`/`.mdl`, but the physical archive file is `.m2`; callers map the extension when
+//! forming the `mpq://…m2` load path (the loader registers for `m2`).
+
+use benilla_formats::{
+    hand_grip_finger_poses, parse_m2_animations, parse_m2_attachments, parse_m2_bounds,
+    parse_m2_collision_hull, parse_m2_global_sequence_bones, parse_m2_lights,
+    parse_m2_particle_emitters, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
+    parse_m2_render_submeshes, parse_m2_skeleton, CollisionMesh, M2Bounds, M2Light,
+    ParticleEmitterDef,
+};
+use bevy::animation::graph::AnimationGraph;
+use bevy::asset::io::Reader;
+use bevy::asset::{Asset, AssetLoader, LoadContext};
+use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+use bevy::prelude::*;
+use bevy::reflect::TypePath;
+
+use crate::bone_target_id;
+use crate::coords::wow_to_bevy;
+use crate::model::{
+    arm_subtree_roots, billboard_info, build_animation_clip, build_attachments, build_global_bones,
+    build_grip_clip, build_skeleton, build_skinned_submesh_mesh, build_submesh_mesh,
+    finger_subtree_roots, in_subtree, skeleton_pivots, upper_subtree_root, AnimClip,
+    ModelAnimations, ModelAttachment, ModelSkeleton, ModelSubmesh,
+};
+
+/// A loaded M2 model: its render batches + authored bounds (the distance-fade size source) + the
+/// coarse collision hull (the app bakes a collider from it per placement) + its particle emitters.
+#[derive(Asset, TypePath, Clone)]
+pub struct M2Model {
+    pub submeshes: Vec<ModelSubmesh>,
+    /// Authored bounding sphere/box (model-local yards) — the reference's distance-fade size. `None`
+    /// if the header bounds couldn't be read.
+    pub bounds: Option<M2Bounds>,
+    /// The doodad's collision hull in raw WoW model space (trunk/solid; ≪ render mesh). `None` when the
+    /// model carries no hull (`nBoundingTriangles == 0` — many small props are collide-iff-hull).
+    pub collision: Option<CollisionMesh>,
+    /// Particle emitters (flames, glows, smoke). Each carries its parsed def (positions in raw WoW
+    /// model space) + its resolved texture handle. Empty for most models; one or two for campfires.
+    pub emitters: Vec<ModelEmitter>,
+    /// Ribbon emitters (weapon trails, wisp streamers, missile trails — wow-re
+    /// `ribbon-emitter-spec.md`). Same shape as the particle emitters: parsed def + resolved trail
+    /// texture + the host bone's pivot for joint riding. Empty for nearly everything (176 models
+    /// corpus-wide author one).
+    pub ribbons: Vec<ModelRibbon>,
+    /// M2 light blocks (raw WoW model space + the host bone's rest pivot). The spawn site turns each
+    /// casting `type==1` (point) light into a Bevy `PointLight` that lays the faithful dynamic
+    /// hot-spot on every lit surface (decisions 0016/0273). Empty for nearly all models; one on fire
+    /// props (campfire/firepit/cooker/forge) — and one on the held torch every torch-bearing NPC
+    /// carries.
+    pub lights: Vec<ModelLight>,
+    /// The model's rest skeleton in Bevy space (decision 0019) — the joint tree the skinned creature
+    /// path spawns one entity per bone from. Empty for a boneless model.
+    pub skeleton: ModelSkeleton,
+    /// The matching inverse bind poses (`translate(−pivot)` per bone), shared across every instance of
+    /// this model; each skinned submesh references it from its `SkinnedMesh`. A labeled sub-asset.
+    pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
+    /// The model's animations, ready to play (decision 0019) — one shared `AnimationGraph` with every
+    /// sequence's clip. `None` for a model with no animated sequences (static props, boneless models).
+    /// Built once here; each creature instance drives it with its own `AnimationPlayer`.
+    pub animations: Option<ModelAnimations>,
+    /// The **file-order-first sequence's authored duration** (seconds, one full pass) — carried even
+    /// when no clip builds ([`ModelAnimations`] drops sequences that move no bone, and a model whose
+    /// sequences all sit still has no `animations` at all). The real client's effect-completion
+    /// clock runs one pass of the armed sequence regardless of bone keys or the LOOP flag
+    /// (byte-verified, wow-re `ceffect-selfterm.md`: the fire is the CM2 advance `0x7194f8`, a pure
+    /// end-boundary compare; loop is tested only *after* it) — the spell-fx self-termination reads
+    /// this. Named approximation: the client arms `animationLookup[0]`'s sequence, not strictly the
+    /// file-order-first one; they coincide on every effect model probed (single-sequence models).
+    /// `None` for a model with no sequences at all.
+    pub first_seq_span: Option<f32>,
+    /// The model's attachment points (decision 0072 — held items): weapon/shield hand slots, sheath
+    /// points, etc. Each carries the bone it rides + its bind-pose-relative offset (see
+    /// [`ModelAttachment`]). Empty for a model with no attachment table (most doodads/WMO props).
+    pub attachments: Vec<ModelAttachment>,
+    /// The animation-event table's positional markers (`$CSL`/`$CSR`/`$CST` casting hands, `$BWR`
+    /// ranged release, …), baked like [`Self::attachments`] and queried by 4CC first-match — the
+    /// client's `0x7130e0`/`0x7131b0` surface. Empty for a model with no events.
+    pub markers: Vec<crate::ModelMarker>,
+    /// The model's authored **portrait camera** (`benilla_formats::M2PortraitCamera` baked to Bevy
+    /// space) — the exact rig the real client renders the unit-frame portrait through (VERIFIED,
+    /// wow-re portrait-render §4: `cameraLookup[0]`, `lookAt` + authored perspective, no engine-side
+    /// framing on top). `None` for a model with no camera table (props, a few creatures).
+    pub portrait_camera: Option<PortraitCamera>,
+    /// The camera **table's first record** — the glue screens' `Model:SetCamera(0)` rig (the
+    /// create/select background scenes; their camera *lookup* is the 0xffff none sentinel, so
+    /// `portrait_camera` sees nothing there). Same Bevy-space conversion as `portrait_camera`.
+    pub camera0: Option<PortraitCamera>,
+    /// A bow's `$WTT`/`$WTB` bowstring anchors (wow-re `nocked-ammo-cancel.md` §G2), baked to Bevy
+    /// space: `[top, bottom]` as `(bone index, model-local position)` — the two limb-tip points the
+    /// engine-drawn string spans. `None` for every non-bow model.
+    pub string_anchors: Option<[(u16, Vec3); 2]>,
+    /// MD20 header `GlobalModelFlags` (`+0x10`). Bits `&3` are the **terrain-conform gate**
+    /// (wow-re `terrain-tilt.md`, §5 byte-verified): `1` = pitch to the ground slope (every
+    /// mount + most quadrupeds), `3` = pitch **and** roll (kodo/crab/spider), `0`/`2` = level.
+    /// The entity layer reads it to conform a standing model to the terrain under it.
+    pub global_flags: u32,
+}
+
+/// An M2's authored portrait-camera rig in Bevy space (see [`M2Model::portrait_camera`]): eye/target
+/// in model-local yards at scale 1 (the client bakes portraits with root scale reset to 1), the
+/// projection scalars straight from the record.
+#[derive(Clone, Copy)]
+pub struct PortraitCamera {
+    pub eye: Vec3,
+    pub target: Vec3,
+    /// Roll about the eye→target axis (radians) — rotates the up vector; `0.0` on every portrait
+    /// camera audited (kept for fidelity, not observed nonzero).
+    pub roll: f32,
+    /// The record's FOV (radians), verbatim — a **diagonal** angle in the client's convention;
+    /// the consumer builds the client's diagonal-FOV projection at the portrait's fixed 4/3
+    /// aspect from it (`benilla`'s `WowPortraitProjection`; wow-re portrait-render §4 corrected).
+    pub fov: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// One particle emitter of an [`M2Model`]: the parsed [`ParticleEmitterDef`] plus its resolved
+/// particle texture as a `Handle<Image>` dependency (loaded through the `mpq://` source, like a
+/// submesh albedo). The app's particle system simulates + renders it at the spawn site.
+#[derive(Clone)]
+pub struct ModelEmitter {
+    pub def: ParticleEmitterDef,
+    pub texture: Option<Handle<Image>>,
+    /// The host bone's (`def.bone`) pivot, **raw WoW model space** (0130 phase 4). `def.position` is
+    /// model-space; `position − bone_pivot` is the same point in the bone's own frame — the offset
+    /// an emitter riding a live joint composes through the joint's transform. Rest pose is identity
+    /// about the pivot, so the static path (`placement · position`) is the exact special case.
+    /// `[0; 3]` when the bone index is out of range (or the model is boneless).
+    pub bone_pivot: [f32; 3],
+    /// The **recursion model** (`def.recursion_model`) as a loaded dependency: its own emitters
+    /// become this emitter's CHILD emitters (wow-re `part-child-recursion.md`), wired by the
+    /// app's particle system once the asset resolves. `None` when unauthored.
+    pub recursion: Option<Handle<M2Model>>,
+    /// The **geometry model** (`def.geometry_model`) as a loaded dependency: this emitter's
+    /// particles render as 3-D instances of it instead of billboard quads (wow-re
+    /// `part-model-particles.md`). `None` when unauthored.
+    pub geometry: Option<Handle<M2Model>>,
+}
+
+/// A model reference inside an M2 record (`.mdx`/`.mdl`, mixed case, backslashes) → its
+/// `mpq://…m2` load URL — the same extension remap the client's loader does (the physical
+/// archive file is `.m2`).
+fn m2_dep_url(raw: &str) -> String {
+    let p = raw.to_ascii_lowercase().replace('\\', "/");
+    let stem = p
+        .strip_suffix(".mdx")
+        .or_else(|| p.strip_suffix(".mdl"))
+        .or_else(|| p.strip_suffix(".m2"))
+        .unwrap_or(&p);
+    format!("mpq://{stem}.m2")
+}
+
+/// One ribbon emitter of an [`M2Model`]: the parsed [`benilla_formats::RibbonEmitterDef`] plus its
+/// resolved trail texture and — like [`ModelEmitter::bone_pivot`] — the host bone's rest pivot, so
+/// the spawn site can ride the bone's joint with `position − pivot` in the joint frame (the
+/// reference transforms the bone-local position by the live bone matrix each frame, `0x718960`).
+#[derive(Clone)]
+pub struct ModelRibbon {
+    pub def: benilla_formats::RibbonEmitterDef,
+    pub texture: Option<Handle<Image>>,
+    pub bone_pivot: [f32; 3],
+}
+
+/// One M2 light block of an [`M2Model`]: the raw [`M2Light`] record plus — like
+/// [`ModelEmitter::bone_pivot`] — its host bone's rest pivot, so a light on an ANIMATING model can
+/// ride that bone's joint with `position − pivot` in the joint frame. The reference does exactly
+/// this every frame (`0x718960` transforms the def position by the live bone matrix before
+/// registering the light), which is how a torch's glow tracks the hand that swings it.
+#[derive(Clone, Copy)]
+pub struct ModelLight {
+    pub def: M2Light,
+    pub bone_pivot: [f32; 3],
+}
+
+/// Bevy [`AssetLoader`] decoding `*.m2` → [`M2Model`].
+#[derive(Default, TypePath)]
+pub struct M2ModelLoader;
+
+impl AssetLoader for M2ModelLoader {
+    type Asset = M2Model;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &(),
+        ctx: &mut LoadContext<'_>,
+    ) -> Result<M2Model, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
+
+        // `dir` only feeds creature skin-variation resolution, which is inert here (we pass no skins —
+        // skins are applied at the spawn site from CreatureDisplayInfo), so an empty dir is correct.
+        let subs = parse_m2_render_submeshes(&bytes, "", &[]).map_err(to_io)?;
+        let bounds = parse_m2_bounds(&bytes).ok();
+        // The collision hull (collide-iff-hull): keep only a non-empty mesh so the spawn site can skip
+        // hull-less props cheaply.
+        let collision = parse_m2_collision_hull(&bytes)
+            .ok()
+            .filter(|c| !c.is_empty());
+
+        let mut submeshes = Vec::with_capacity(subs.len());
+        for (i, sub) in subs.iter().enumerate() {
+            let mesh = ctx.add_labeled_asset(format!("submesh{i}"), build_submesh_mesh(sub));
+            // The skinned twin (decision 0019): same geometry + JOINT_INDEX/JOINT_WEIGHT. Built for
+            // every M2 (the loader can't know the model's role); only the creature path uses it, so a
+            // doodad/GameObject model carries an unused skinned mesh — a bounded interim cost (the first
+            // deferred optimisation is building this lazily, or unifying all M2s onto the skinned path).
+            let skinned_mesh = ctx.add_labeled_asset(
+                format!("submesh{i}_skinned"),
+                build_skinned_submesh_mesh(sub),
+            );
+            // Embedded texture → an mpq:// dependency (WorldArt, the loader default). Lowercase the
+            // path: Bevy's loader lookup is case-sensitive, and these tables carry uppercase `.BLP`
+            // (the `BlpImageLoader` registers `blp`), so an uppercase extension silently falls back to
+            // type-based resolution — which is ambiguous with Bevy's built-in image loader and spams a
+            // "Multiple AssetLoaders found" warning per texture. Lowercasing also dedupes case variants.
+            let texture = sub.texture.as_deref().map(|t| {
+                ctx.load::<Image>(format!(
+                    "mpq://{}",
+                    t.replace('\\', "/").to_ascii_lowercase()
+                ))
+            });
+            submeshes.push(ModelSubmesh {
+                mesh,
+                skinned_mesh,
+                texture,
+                skin_slot: sub.skin_slot,
+                geoset_id: sub.geoset_id,
+                char_slot: sub.char_slot,
+                blend: sub.blend,
+                two_sided: sub.two_sided,
+                interior: false,        // M2 has no interior/exterior group concept
+                emissive: sub.emissive, // M2 UNLIT (0x01) glass/glow → fullbright
+                sidn: None,             // WMO-only (MOMT SIDN night glow)
+                window: false,          // WMO-only (MOMT WINDOW interior light)
+                additive: sub.additive, // M2 blend 3/4 → additive (glow cards)
+                no_depth_write: sub.no_depth_write, // M2 render flag 0x10
+                no_depth_test: sub.no_depth_test, // M2 render flag 0x08
+                fog_policy: sub.fog_policy, // M2 render flag 0x02 / the per-blend fog table
+                billboard: billboard_info(sub), // glow cards / chains face the camera
+                alpha_anim: sub.alpha_anim.clone().map(std::sync::Arc::new),
+                uv_anim: sub.uv_anim.clone().map(std::sync::Arc::new),
+                rgb_anim: sub.rgb_anim.clone().map(std::sync::Arc::new),
+                wmo_batch: None,                // M2 batches have no MOBA section
+                ground_quad: sub.ground_quad(), // flat ground-ring quads → the fx decal lane
+            });
+        }
+        // M2 light blocks (raw — wow-m2's light parse reads the wrong vanilla record shape). The spawn
+        // site filters to casting point lights ([`M2Light::casts`]). Empty for nearly all models.
+        // The bone-pivot bake is below, once the skeleton is parsed.
+        let light_defs = parse_m2_lights(&bytes);
+
+        // The rest skeleton (decision 0019): bake the raw bone tree to Bevy-space joints + the matching
+        // inverse bind poses. A boneless model yields an empty skeleton + an empty bindpose set (the
+        // skinned mesh then carries no joint attributes, so it never takes the SKINNED path).
+        let skeleton_raw = parse_m2_skeleton(&bytes).unwrap_or_default();
+
+        // Particle emitters: resolve each emitter's texture to an `mpq://` image dependency (same
+        // lowercase normalisation as submesh albedos), and bake its host bone's pivot so the spawn
+        // site can ride a live joint (see [`ModelEmitter::bone_pivot`]). Absent on most models.
+        let emitters = parse_m2_particle_emitters(&bytes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|def| {
+                let texture = def.texture.as_deref().map(|t| {
+                    ctx.load::<Image>(format!(
+                        "mpq://{}",
+                        t.replace('\\', "/").to_ascii_lowercase()
+                    ))
+                });
+                let bone_pivot = skeleton_raw
+                    .bones
+                    .get(def.bone as usize)
+                    .map_or([0.0; 3], |b| b.pivot);
+                // The recursion/geometry models load as ordinary mpq:// M2 dependencies —
+                // children wiring and model-particle instancing happen app-side on resolve.
+                let recursion = def
+                    .recursion_model
+                    .as_deref()
+                    .map(|p| ctx.load::<M2Model>(m2_dep_url(p)));
+                let geometry = def
+                    .geometry_model
+                    .as_deref()
+                    .map(|p| ctx.load::<M2Model>(m2_dep_url(p)));
+                ModelEmitter {
+                    def,
+                    texture,
+                    bone_pivot,
+                    recursion,
+                    geometry,
+                }
+            })
+            .collect();
+
+        // Ribbon emitters (trails): same texture resolution + bone-pivot bake as the particles.
+        let ribbons = benilla_formats::parse_m2_ribbon_emitters(&bytes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|def| {
+                let texture = def.texture.as_deref().map(|t| {
+                    ctx.load::<Image>(format!(
+                        "mpq://{}",
+                        t.replace('\\', "/").to_ascii_lowercase()
+                    ))
+                });
+                let bone_pivot = skeleton_raw
+                    .bones
+                    .get(def.bone as usize)
+                    .map_or([0.0; 3], |b| b.pivot);
+                ModelRibbon {
+                    def,
+                    texture,
+                    bone_pivot,
+                }
+            })
+            .collect();
+
+        // M2 lights: the same host-bone pivot bake, so a light on an animating model (the torch in
+        // an NPC's hand) can ride its bone's joint instead of freezing at the rest-pose spot.
+        let lights = light_defs
+            .into_iter()
+            .map(|def| ModelLight {
+                bone_pivot: skeleton_raw
+                    .bones
+                    .get(def.bone as usize)
+                    .map_or([0.0; 3], |b| b.pivot),
+                def,
+            })
+            .collect();
+        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw);
+        let inverse_bindposes = ctx.add_labeled_asset(
+            "inverse_bindposes".to_string(),
+            SkinnedMeshInverseBindposes::from(inverse_bindposes),
+        );
+
+        // The attachment-point table (decision 0072 — held items): the same bind-pose pivots
+        // `build_skeleton` used above, so a held item's offset is exactly consistent with the joint
+        // it's spawned under. Empty for a boneless/attachment-less model.
+        let attachments = build_attachments(
+            &parse_m2_attachments(&bytes).unwrap_or_default(),
+            &skeleton_pivots(&skeleton_raw),
+        );
+        // The event-marker table, same bake (the missile-launch $CSL/$CSR/$CST/$BWR points).
+        let markers = crate::model::build_markers(
+            &benilla_formats::parse_m2_event_markers(&bytes).unwrap_or_default(),
+            &skeleton_pivots(&skeleton_raw),
+        );
+
+        // The animations (decision 0019): build each sequence's clip into one shared `AnimationGraph`
+        // (the bench scrubs them; gameplay plays Stand). All as labeled sub-assets. `None` unless at
+        // least one sequence produced an animated clip.
+        let sequences = parse_m2_animations(&bytes);
+        let first_seq_span = sequences.first().map(|a| a.duration).filter(|d| *d > 0.0);
+        let animations = {
+            let mut graph = AnimationGraph::new();
+            let root = graph.root;
+            // Per-arm mask groups for the client's per-slot one-shots (the draw/stow plays each
+            // hand's ceremony on its own arm subtree, over the gait). Each arm's subtree root is the
+            // **shoulder-keybone ancestor of the hand attachment's bone** (attachment id 1 = right
+            // hand, 2 = left; keybones 2/3 = the shoulders — data-driven, no left/right guessing).
+            // Every joint *outside* an arm joins that arm's mask group, so a node masked with group
+            // 0 (or 1) animates only the right (or left) arm.
+            let arm_roots = arm_subtree_roots(&skeleton_raw, &attachments);
+            if let Some((right_root, left_root)) = arm_roots {
+                for i in 0..skeleton_raw.bones.len() {
+                    let target = bone_target_id(i as u16);
+                    if !in_subtree(&skeleton_raw, i, right_root) {
+                        graph.add_target_to_mask_group(target, 0);
+                    }
+                    if !in_subtree(&skeleton_raw, i, left_root) {
+                        graph.add_target_to_mask_group(target, 1);
+                    }
+                }
+            }
+            // The upper-body one-shot mask group (decision 0087): group 2 collects every joint
+            // *outside* the SpineLow subtree (the legs + pelvis), so a clip masked with it animates
+            // only the upper body — the general form of the per-arm ceremony above, one subtree wider.
+            let upper_root = upper_subtree_root(&skeleton_raw);
+            if let Some(upper_root) = upper_root {
+                for i in 0..skeleton_raw.bones.len() {
+                    if !in_subtree(&skeleton_raw, i, upper_root) {
+                        graph.add_target_to_mask_group(bone_target_id(i as u16), 2);
+                    }
+                }
+            }
+            // Per-hand **finger** mask groups (3 = right hand, 4 = left) for the weapon grip: a clip
+            // masked with group 3 (or 4) animates only that hand's finger key-bone subtrees, so the
+            // `HandsClosed` pose curls the fingers while the arm keeps its gait (wow-re
+            // `hand-grip-mechanism.md`). Empty per hand for a model with no finger key-bones (beasts).
+            let finger_roots = finger_subtree_roots(&skeleton_raw);
+            for i in 0..skeleton_raw.bones.len() {
+                let target = bone_target_id(i as u16);
+                if !finger_roots[0].is_empty()
+                    && !finger_roots[0]
+                        .iter()
+                        .any(|&r| in_subtree(&skeleton_raw, i, r))
+                {
+                    graph.add_target_to_mask_group(target, 3);
+                }
+                if !finger_roots[1].is_empty()
+                    && !finger_roots[1]
+                        .iter()
+                        .any(|&r| in_subtree(&skeleton_raw, i, r))
+                {
+                    graph.add_target_to_mask_group(target, 4);
+                }
+            }
+            let mut clips = Vec::new();
+            // The doodad-animation content gate (decision 0130, `ModelAnimations::first_seq`): the
+            // file-order-first sequence's clip index, kept only when that sequence really MOVES a bone
+            // (>1 key on some track). A constant 1-key pose still builds a clip below, but looping it
+            // is visually the static mesh — the spawn site must not pay a skin + player for it.
+            let mut first_seq = None;
+            for (i, anim) in sequences.iter().enumerate() {
+                if let Some(clip) = build_animation_clip(anim, &skeleton) {
+                    if i == 0
+                        && anim.bones.iter().any(|b| {
+                            b.translation.len() > 1 || b.rotation.len() > 1 || b.scale.len() > 1
+                        })
+                    {
+                        first_seq = Some(clips.len());
+                    }
+                    let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
+                    let node = graph.add_clip(clip.clone(), 1.0, root);
+                    // The sheath family gets per-arm masked variants ([`AnimClip::arm_nodes`]).
+                    let arm_nodes =
+                        (matches!(anim.anim_id, 89 | 90) && arm_roots.is_some()).then(|| {
+                            (
+                                graph.add_clip_with_mask(clip.clone(), 1 << 0, 1.0, root),
+                                graph.add_clip_with_mask(clip.clone(), 1 << 1, 1.0, root),
+                            )
+                        });
+                    // The upper-body masked variant ([`AnimClip::upper_node`]): the masked destination
+                    // for a one-shot routed over a live base (swing/emote — the route is chosen per play
+                    // in `creature_anim`). Built for every clip when the model has a split key-bone, so
+                    // any one-shot id can take the masked route; `None` on the −1-sentinel models.
+                    let upper_node = upper_root
+                        .map(|_| graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root));
+                    clips.push(AnimClip {
+                        anim_id: anim.anim_id,
+                        node,
+                        looping: anim.looping,
+                        duration: anim.duration,
+                        move_speed: anim.move_speed,
+                        blend_time: anim.blend_time,
+                        // Into the mesh vertices' frame, so the pick's world math is one transform.
+                        bounds_center: wow_to_bevy(anim.bounds_center),
+                        bounds_radius: anim.bounds_radius,
+                        // The axis mapping flips signs, so min/max are re-derived componentwise.
+                        bounds_min: wow_to_bevy(anim.bounds_min).min(wow_to_bevy(anim.bounds_max)),
+                        bounds_max: wow_to_bevy(anim.bounds_min).max(wow_to_bevy(anim.bounds_max)),
+                        events: anim.events.clone().into(),
+                        arm_nodes,
+                        upper_node,
+                        frequency: anim.frequency,
+                        replay: (anim.min_replay, anim.max_replay),
+                    });
+                }
+            }
+            // The per-hand weapon-grip nodes ([`ModelAnimations::hand_close`]): a purpose-built grip clip
+            // — each finger key-bone posed at its **clamped** `HandsClosed` value — masked to one hand's
+            // finger subtrees (group 3 = right, 4 = left). Built separately from the sequence clips above
+            // because the general in-band read drops the weapon-hand fingers (keyed off the HandsClosed
+            // frame); [`hand_grip_finger_poses`] clamps them, scoped to the grip (wow-re
+            // `hand-grip-mechanism.md`). `None` per hand for a model with no finger key-bones / no grip pose.
+            let mut hand_close: [Option<bevy::animation::graph::AnimationNodeIndex>; 2] =
+                [None, None];
+            // Every bone in a finger subtree — the key-bone AND its child segments (the fingertip joints),
+            // so the whole finger curls, not just its base (HandsClosed keys the tips too, ~51° vs ~30°).
+            let finger_bones: Vec<u16> = (0..skeleton_raw.bones.len())
+                .filter(|&i| {
+                    finger_roots
+                        .iter()
+                        .flatten()
+                        .any(|&r| in_subtree(&skeleton_raw, i, r))
+                })
+                .map(|i| i as u16)
+                .collect();
+            let grip_poses = hand_grip_finger_poses(&bytes, &finger_bones);
+            if !grip_poses.is_empty() {
+                let grip =
+                    ctx.add_labeled_asset("grip_clip".to_string(), build_grip_clip(&grip_poses));
+                if !finger_roots[0].is_empty() {
+                    hand_close[0] = Some(graph.add_clip_with_mask(grip.clone(), 1 << 3, 1.0, root));
+                }
+                if !finger_roots[1].is_empty() {
+                    hand_close[1] = Some(graph.add_clip_with_mask(grip.clone(), 1 << 4, 1.0, root));
+                }
+            }
+            // The model's baked PlayableAnimationLookup (decision 0082): parsed straight off the M2
+            // header alongside the sequences above, so a model lacking a requested clip can resolve
+            // to its own baked substitute at play time (`ModelAnimations::resolve`) instead of the
+            // creature driver silently doing nothing.
+            let playable_animation_lookup =
+                parse_m2_playable_animation_lookup(&bytes).unwrap_or_default();
+            // Global-sequence channels alone are enough to carry `ModelAnimations`: a model whose
+            // sequences produced no clips can still pulse/flicker on its free-running loops (the
+            // doodad `GlobalSeqOnly` tier, decision 0130) — dropping them because `clips` came up
+            // empty would silently freeze it.
+            let global_bones =
+                build_global_bones(&parse_m2_global_sequence_bones(&bytes), &skeleton);
+            (!clips.is_empty() || !global_bones.is_empty()).then(|| {
+                let graph = ctx.add_labeled_asset("anim_graph".to_string(), graph);
+                ModelAnimations {
+                    graph,
+                    clips,
+                    playable_animation_lookup,
+                    hand_close,
+                    global_bones,
+                    first_seq,
+                }
+            })
+        };
+
+        // The authored portrait camera (raw WoW model space → Bevy, same pure rotation the meshes
+        // bake through, so eye/target land in exactly the submeshes' frame) — and the camera
+        // table's first record, the glue screens' `SetCamera(0)` rig.
+        let to_bevy = |c: benilla_formats::M2PortraitCamera| PortraitCamera {
+            eye: wow_to_bevy(c.position),
+            target: wow_to_bevy(c.target),
+            roll: c.roll,
+            fov: c.fov,
+            near: c.near_clip,
+            far: c.far_clip,
+        };
+        let portrait_camera = parse_m2_portrait_camera(&bytes).map(to_bevy);
+        let camera0 = benilla_formats::parse_m2_camera(&bytes, 0).map(to_bevy);
+
+        // The bowstring anchors (bows only): raw WoW positions → Bevy, the meshes' frame.
+        let string_anchors = benilla_formats::parse_m2_string_anchors(&bytes).map(|a| {
+            [
+                (a.top.0, wow_to_bevy(a.top.1)),
+                (a.bottom.0, wow_to_bevy(a.bottom.1)),
+            ]
+        });
+
+        // The header GlobalModelFlags word sits at a fixed offset (MD20 magic @0, +0x10) — a
+        // bare scalar the sectioned parsers never touch.
+        let global_flags = bytes
+            .get(0x10..0x14)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+
+        Ok(M2Model {
+            submeshes,
+            bounds,
+            collision,
+            emitters,
+            ribbons,
+            lights,
+            skeleton,
+            inverse_bindposes,
+            animations,
+            first_seq_span,
+            attachments,
+            markers,
+            portrait_camera,
+            camera0,
+            string_anchors,
+            global_flags,
+        })
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["m2"]
+    }
+}

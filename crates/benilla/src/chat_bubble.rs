@@ -1,0 +1,651 @@
+//! **Chat bubbles** — `CGChatBubbleFrame` (wow-re `object-layer/scratch/chat-bubble.md`,
+//! §5-verified 2026-07-11; decision 0288's phase-9 tail, landed by decision 0598): the
+//! over-the-head speech bubble a chat line spawns, a **2-D overlay** like the V-plate
+//! ([`crate::vplates`]) and unlike the world-pass overhead *names* ([`crate::nameplates`]).
+//!
+//! The pinned law, transcribed:
+//! - **Spawn** (`0x608ac0`, one caller — the SMSG_MESSAGECHAT display path): the sender GUID
+//!   typed-looks-up to a live unit or no bubble; CVar select `ChatBubbles` (party lines:
+//!   `ChatBubblesParty`); non-empty text; **no active V-plate on the unit** (`0x608adc` —
+//!   mutual exclusion both ways: a live bubble in turn suppresses the floating overhead name,
+//!   [`BubblesActive`]); the local player resolves; 3-D dist² ≤ 400 (20 yd). Self is NOT
+//!   excluded. **Replace, never queue**: a new line tears the old bubble down first.
+//! - **Lifetime** (`0x4b1810`): word-count-scaled, self-vs-other asymmetric —
+//!   `2750 + 750·(words−1)` ms for others, `1500 + 500·(words−1)` for the local player
+//!   (your own bubbles are shorter-lived); words = space/tab-run count. 250 ms linear fade-in;
+//!   at `create + duration + 250` a permanent 250 ms fade-out, then the frame recycles. The
+//!   20 yd gate re-tests **every frame**: out of range fades out *recoverable*, back in range
+//!   fades back in.
+//! - **Geometry** (`0x4b0940`/`0x4b1600`): the classic `Backdrop` construct —
+//!   `ChatBubble-Background` flat fill, `ChatBubble-Backdrop` 8-piece edge
+//!   ([`benilla_ui::script::backdrop::pieces`], the same engine geometry FrameXML backdrops
+//!   use), `ChatBubble-Tail` a separate square of side = the border-unit, TOPRIGHT on the
+//!   frame's BOTTOM + (0, border/4). Border-unit = insets = edge-size = **16/1024 of the
+//!   screen width** (`G44·16/(S·1024)`); text = `NAMEPLATE_FONT` at 0.01 gx, wrap hard-capped
+//!   at **0.2 gx**, floor 2·border-unit; the frame hugs the text layout ± **0.01 gx** on all
+//!   four sides; text colored by chatType (the 94-entry table ≡ [`default_color`]), rendered
+//!   PLAIN (`||`→`|`, color/hyperlink escapes stripped — [`sanitize`]).
+//! - **Anchor** (`0x4b0c30`): `worldZ = unit.z + attachmentHeight·modelScale + 0.7`, projected
+//!   by the plate/name projector, seated **BOTTOM at the point, growing upward** (the mirror
+//!   of the plate, which hangs down).
+//!
+//! Named divergences (all deliberate, decisions 0598/0599):
+//! - **`ChatBubblesParty` defaults ON** (binary default "0") — the director asked for `/p`
+//!   bubbles; same posture as [`crate::vplates::VPlateMode`].
+//! - **The v1 kind set is SAY/YELL/PARTY + monster say/yell.** The byte gate is
+//!   "sender resolves", not a type whitelist, which *implies* guild/officer/whisper/emote
+//!   bubbles too — but that category claim is INFERRED on an OPEN wire-type remap
+//!   (chat-bubble.md §1) and contradicts the remembered reference look, so the uncontested
+//!   set ships and a capture can widen it ([`bubble_cvar`]).
+//! - **The anchor height is the posed overhead attachment** ([`overhead_anchor`], the
+//!   `0x608640` chain) rather than the client's `0x711a20` model-attachment query — the
+//!   attachment behind `0x711a20` is not identified in the note (INFERRED equivalence; both
+//!   are "the head-region attachment height, model-scaled").
+//! - **Sizes ride the plates' damped diagonal basis** ([`plate_basis`], decisions 0185/0186)
+//!   so bubble text and plate text stay the same em at every window — the same director-pinned
+//!   deviation from the unbounded byte law.
+//! - **No per-frame occlusion fade**: the client also fades a bubble whose speaker model isn't
+//!   render-visible (`0x7103d0`/`0x6704c0`); v1 re-tests distance only. Residual named in 0598.
+//!
+//! (0598 briefly shipped the plate-blocks-bubble gate UN-transcribed — bubbles stacked over our
+//! then-always-on plates. 0599 restored the faithful gate and booted friendly plates OFF
+//! instead, so friendly/party bubbles have room the reference way.)
+
+use std::collections::HashMap;
+
+use bevy::ecs::entity::EntityHashSet;
+use bevy::prelude::*;
+
+use benilla_ui::layout::Rect as GxRect;
+use benilla_ui::script::{pieces, Backdrop, Insets};
+use benilla_ui::script::{JustifyH, JustifyV, Outline};
+
+use crate::assets::{AssetSet, WorldAssets};
+use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
+use crate::net::{Guid, NetEntity, SelfGuid, SelfPlayer};
+use crate::player::WorldCamera;
+use crate::ui_chat::{default_color, ChatEventKind};
+use crate::ui_pass::{UiQuad, UiQuadAppend, UiQuads, UvRect};
+use crate::ui_text::{layout_text_quads, measure_text, FontSpec, Justify, UiFontAtlas};
+use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
+
+/// The two CVars (registrar `0x603280`): `ChatBubbles` ships "1"; `ChatBubblesParty` ships
+/// "0" — flipped ON here (the director's ask: `/p` bubbles), a deliberate deviation like
+/// [`crate::vplates::VPlateMode`]'s boot default.
+const CHAT_BUBBLES: bool = true;
+const CHAT_BUBBLES_PARTY: bool = true;
+
+/// The bubble art (`0x4b0940` ctor) — the shared tooltip-family textures.
+const BG_TEXTURE: &str = "Interface\\Tooltips\\ChatBubble-Background";
+const EDGE_TEXTURE: &str = "Interface\\Tooltips\\ChatBubble-Backdrop";
+const TAIL_TEXTURE: &str = "Interface\\Tooltips\\ChatBubble-Tail";
+
+/// The 0.7 yd lift over the attachment height (`[0x7ffd7c]` = 0.699999988).
+const LIFT: f32 = 0.7;
+/// The spawn + per-frame range gate: dist² ≤ 400 (20 yd, `[0x806798]` — same as the plates).
+const MAX_DIST_SQ: f32 = 400.0;
+/// The fade ramps: 250 ms linear, in and out (`0x4b0ea0`/`0x4b0ee0`).
+const FADE_SECS: f32 = 0.25;
+/// `NAMEPLATE_FONT` at 0.01 gx — the same em law as the plate name.
+const TEXT_H: f32 = 0.01;
+/// The auto-fit body margin: text layout ± 0.01 gx on all four sides (`0x3c23d70a`).
+const MARGIN: f32 = 0.01;
+/// The text wrap hard cap, gx (`[0x80679c]` = 0.2).
+const WRAP_W: f32 = 0.2;
+/// Border-unit = edge-size = insets = tail side: 16/1024 of the screen WIDTH
+/// (`G44·16.0/(S·1024.0)` — G44/S nets the width in the diagonal gx basis).
+const BORDER_FRAC: f32 = 16.0 / 1024.0;
+
+/// Paint order inside the overlays lane: the whole bubble sits UNDER the V-plates' 4..8 band
+/// (same-unit overlap can't happen — the mutual exclusion — so this only orders cross-unit
+/// stacking). The tail draws over the frame's bottom edge piece: its art carries the border
+/// lines that make the seam read continuous.
+const Z_BG: u64 = 0;
+const Z_EDGE: u64 = 1;
+const Z_TAIL: u64 = 2;
+const Z_TEXT: u64 = 3;
+
+/// Which CVar gates this chat kind's bubble — `None` = the kind never bubbles in v1.
+/// PARTY selects `ChatBubblesParty`, every other bubbling kind `ChatBubbles` (`0x608b0d`).
+/// Guild/officer/whisper/emote are structurally implied by the byte gate but INFERRED on an
+/// OPEN remap (module doc) — out until a capture confirms.
+fn bubble_cvar(kind: ChatEventKind) -> Option<bool> {
+    use ChatEventKind as K;
+    match kind {
+        K::Party => Some(CHAT_BUBBLES_PARTY),
+        K::Say | K::Yell | K::MonsterSay | K::MonsterYell => Some(CHAT_BUBBLES),
+        _ => None,
+    }
+}
+
+/// The space/tab-run word counter (`0x4b1810`): maximal runs of non-space/tab characters.
+fn word_count(text: &str) -> u32 {
+    let mut words = 0u32;
+    let mut in_word = false;
+    for b in text.bytes() {
+        let sep = b == b' ' || b == b'\t';
+        if !sep && !in_word {
+            words += 1;
+        }
+        in_word = !sep;
+    }
+    words
+}
+
+/// The duration law (`0x4b1810`): `base + perWord·(words−1)` ms — 2750/750 for someone else,
+/// 1500/500 for the local player (your own bubbles are shorter-lived). Empty → 0.
+fn duration_secs(words: u32, is_self: bool) -> f32 {
+    if words == 0 {
+        return 0.0;
+    }
+    let (base, per) = if is_self { (1500, 500) } else { (2750, 750) };
+    (base + per * (words - 1)) as f32 / 1000.0
+}
+
+/// The bubble-text sanitize: `||` stays an escaped literal pipe, `|cAARRGGBB`/`|r` color
+/// escapes and the `|H…|h`/`|h` hyperlink wrappers strip (their display text stays) — bubble
+/// text is always plain, colored solely by chatType. Output remains in ESCAPED form (literal
+/// pipes as `||`) because the glyph layout's own markup parser consumes it downstream.
+fn sanitize(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'|' {
+            // Copy the whole non-escape run at once (UTF-8 safe: '|' is single-byte).
+            let start = i;
+            while i < b.len() && b[i] != b'|' {
+                i += 1;
+            }
+            out.push_str(&text[start..i]);
+            continue;
+        }
+        match b.get(i + 1) {
+            Some(b'|') => {
+                out.push_str("||");
+                i += 2;
+            }
+            Some(b'c') | Some(b'C') if i + 10 <= b.len() => i += 10,
+            Some(b'r') | Some(b'R') => i += 2,
+            Some(b'H') => {
+                // Skip the opener through its `|h`; the display text then flows until the
+                // closing `|h`, which the arm below drops.
+                i += 2;
+                while i < b.len() && !(b[i] == b'|' && b.get(i + 1) == Some(&b'h')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            Some(b'h') => i += 2,
+            // A dangling or unknown escape renders as a literal pipe + the rest.
+            _ => {
+                out.push_str("||");
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The border-unit in logical px for this viewport: 16/1024 of the screen width, carried
+/// through the damped size basis (so it shrinks in step with plate/text sizes past the knee).
+fn border_px(viewport: Vec2, basis: f32) -> f32 {
+    let width_gx = viewport.x / viewport.length();
+    gx_px(width_gx * BORDER_FRAC, basis).max(1.0)
+}
+
+/// The bubble-spawn requests this frame — fed by the chat feed's wire arm (the reference
+/// spawns in the SMSG display path, the same moment the line routes) and drained by
+/// [`drive_bubbles`]. Push-side filtered so guild/system spam never queues strings.
+#[derive(Resource, Default)]
+pub(crate) struct BubbleQueue(Vec<(u64, ChatEventKind, String)>);
+
+impl BubbleQueue {
+    /// Queue a routed wire line for a bubble. Drops non-bubbling kinds, disabled CVars, and
+    /// senderless lines here; the live-unit/range/plate gates run in the driver.
+    pub(crate) fn push(&mut self, sender_guid: u64, kind: ChatEventKind, text: &str) {
+        if sender_guid == 0 || !bubble_cvar(kind).unwrap_or(false) {
+            return;
+        }
+        self.0.push((sender_guid, kind, text.to_string()));
+    }
+}
+
+/// One live bubble (the `CGChatBubbleFrame` + its `CGUnit+0xe64` handle, folded together).
+struct Bubble {
+    /// Sanitized display text ([`sanitize`] — plain, escapes stripped).
+    text: String,
+    /// The chatType color (the 94-entry table), client-space sRGB 0..1.
+    color: [f32; 3],
+    /// `Time::elapsed_secs` at spawn.
+    born: f32,
+    /// The steady window past the fade-in ([`duration_secs`]).
+    duration: f32,
+    /// Current fade alpha 0..1 — ramped 250 ms linear toward the eligibility verdict.
+    alpha: f32,
+}
+
+/// The live bubbles, keyed by speaker guid (a unit carries at most one — replace, never queue).
+#[derive(Resource, Default)]
+struct Bubbles(HashMap<u64, Bubble>);
+
+/// The units carrying a live bubble this frame — the `ShouldShowName` exclusivity verdict the
+/// overhead-name driver reads (`+0xe64` ≠ 0 suppresses the floating name), the mirror of
+/// [`VPlates`].
+#[derive(Resource, Default)]
+pub(crate) struct BubblesActive(pub(crate) EntityHashSet);
+
+/// The bubble art, warmed at boot like the plate art (a first bubble must not draw texture-less).
+/// The edge strip needs REPEAT addressing (its runs tile UVs past 1); bg and tail clamp.
+#[derive(Resource)]
+struct BubbleArt {
+    bg: Handle<Image>,
+    edge: Handle<Image>,
+    tail: Handle<Image>,
+}
+
+fn load_bubble_art(
+    mut commands: Commands,
+    assets: Option<ResMut<WorldAssets>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(mut assets) = assets else {
+        return; // no game data (bare test app) — drive_bubbles tolerates the missing resource
+    };
+    let bg = assets.sprite_texture(BG_TEXTURE, &mut images);
+    let edge = assets.sprite_texture_tiled(EDGE_TEXTURE, &mut images);
+    let tail = assets.sprite_texture(TAIL_TEXTURE, &mut images);
+    let (Some(bg), Some(edge), Some(tail)) = (bg, edge, tail) else {
+        warn!("chat_bubble: bubble art missing from the patch chain — bubbles will not draw");
+        return;
+    };
+    commands.insert_resource(BubbleArt { bg, edge, tail });
+}
+
+/// Spawn, tick, and draw, every frame: drain the queue through the spawn gate (`0x608ac0`),
+/// ramp each live bubble's fade against its lifetime + the per-frame 20 yd re-test
+/// (`0x4b0c30`), publish the name-suppression verdict, and append the draw list — backdrop
+/// pieces, tail, wrapped chatType-colored text — bottom-seated on the projected anchor.
+/// Runs after [`VPlateSet`] (the spawn gate reads this frame's plate verdict), inside the
+/// [`UiQuadAppend`] window.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
+fn drive_bubbles(
+    mut queue: ResMut<BubbleQueue>,
+    mut bubbles: ResMut<Bubbles>,
+    mut active: ResMut<BubblesActive>,
+    vplates: Res<VPlates>,
+    self_guid: Res<SelfGuid>,
+    units: Query<(Entity, &Guid, &Transform), With<NetEntity>>,
+    self_q: Query<&Transform, With<SelfPlayer>>,
+    camera: Query<(&Camera, &Transform), With<WorldCamera>>,
+    mut atlas: Option<ResMut<UiFontAtlas>>,
+    mut quads: ResMut<UiQuads>,
+    art: Option<Res<BubbleArt>>,
+    // The overhead-anchor inputs ([`overhead_anchor`]).
+    anchor_q: (
+        Query<&BoneAttach>,
+        Query<&OverheadFallback>,
+        Query<&GlobalTransform>,
+        Query<(), With<crate::entities::mount::MountChild>>,
+    ),
+    time: Res<Time>,
+) {
+    active.0.clear();
+    let now = time.elapsed_secs();
+    let step = time.delta_secs() / FADE_SECS;
+    let self_tf = self_q.single().ok();
+    // The typed sender lookup (`0x468460`): guid → live unit. Linear over the streamed set,
+    // like the plate walk — both populations are 20 yd-bounded and small.
+    let find = |guid: u64| units.iter().find(|(_, g, _)| g.0 == guid);
+
+    // ── The spawn/replace gate (`0x608ac0`) ─────────────────────────────────────────────────
+    for (guid, kind, raw) in queue.0.drain(..) {
+        let text = sanitize(&raw);
+        let words = word_count(&text);
+        if words == 0 {
+            continue; // empty text → duration 0 → no bubble
+        }
+        let Some((entity, _, tf)) = find(guid) else {
+            continue; // sender not resolvable to a live unit → NO bubble
+        };
+        // An active V-plate blocks bubble creation (`0x608adc` — the mutual exclusion,
+        // faithful; restored by 0599 after 0598 briefly stacked them). Friendly plates boot
+        // OFF (0599's other half), so friendly/party bubbles have room; a plated hostile
+        // yelling shows no bubble, exactly like the reference with plates toggled on.
+        if vplates.0.contains(&entity) {
+            continue;
+        }
+        let Some(self_tf) = self_tf else {
+            continue; // the local player must resolve
+        };
+        if (tf.translation - self_tf.translation).length_squared() > MAX_DIST_SQ {
+            continue; // 20 yd at spawn
+        }
+        let is_self = self_guid.0 == Some(guid);
+        let c = default_color(kind);
+        // Replace, never queue: the insert tears the old bubble down (`0x608c00`) and the
+        // fresh one fades in from 0.
+        bubbles.0.insert(
+            guid,
+            Bubble {
+                text,
+                color: [
+                    f32::from(c[0]) / 255.0,
+                    f32::from(c[1]) / 255.0,
+                    f32::from(c[2]) / 255.0,
+                ],
+                born: now,
+                duration: duration_secs(words, is_self),
+                alpha: 0.0,
+            },
+        );
+    }
+    if bubbles.0.is_empty() {
+        return;
+    }
+
+    // ── Tick + draw ─────────────────────────────────────────────────────────────────────────
+    let cam = camera.single().ok();
+    let art = art.as_deref();
+    let trace = std::env::var("WOW_BUBBLE_TRACE").as_deref() == Ok("1");
+    let mut dead = Vec::new();
+    for (guid, b) in bubbles.0.iter_mut() {
+        let Some((entity, _, tf)) = find(*guid) else {
+            dead.push(*guid); // the speaker despawned — the unit teardown takes its bubble
+            continue;
+        };
+        if now >= b.born + b.duration + FADE_SECS {
+            // The permanent fade-out (`0x4b0ee0(1)`) — at 0 the frame recycles.
+            b.alpha -= step;
+            if b.alpha <= 0.0 {
+                dead.push(*guid);
+                continue;
+            }
+        } else {
+            // Per-frame re-eligibility: the same 20 yd gate, recoverable — out of range fades
+            // out, back in range fades back in. (The client also fades on the speaker model's
+            // render visibility — the v1 residual, module doc.)
+            let eligible = self_tf
+                .is_some_and(|s| (tf.translation - s.translation).length_squared() <= MAX_DIST_SQ);
+            b.alpha = if eligible {
+                (b.alpha + step).min(1.0)
+            } else {
+                (b.alpha - step).max(0.0)
+            };
+        }
+        // The live handle (`+0xe64` ≠ 0): the name suppression holds while the bubble EXISTS,
+        // faded or not.
+        active.0.insert(entity);
+        if b.alpha <= 0.0 {
+            continue;
+        }
+        let (Some((cam, cam_pose)), Some(atlas), Some(art)) = (cam, atlas.as_deref_mut(), art)
+        else {
+            continue; // no camera/atlas/art — lifetimes still tick, nothing draws
+        };
+        // World anchor: unit position, Z lifted by the posed attachment height + 0.7 yd —
+        // seated BOTTOM at the projected point, growing upward. A point behind the camera
+        // draws nothing (state kept — it fades back the moment it projects again).
+        let anchor = overhead_anchor(
+            entity,
+            tf,
+            &anchor_q.0,
+            &anchor_q.1,
+            &anchor_q.2,
+            &anchor_q.3,
+        );
+        let seat_world = Vec3::new(tf.translation.x, anchor.y + LIFT, tf.translation.z);
+        let cam_tf = GlobalTransform::from(*cam_pose);
+        let Ok(seat) = cam.world_to_viewport(&cam_tf, seat_world) else {
+            continue;
+        };
+        let Some(viewport) = cam.logical_viewport_size() else {
+            continue;
+        };
+        draw_bubble(atlas, &mut quads, art, b, seat, viewport, trace);
+    }
+    for g in dead {
+        bubbles.0.remove(&g);
+    }
+}
+
+/// Append one bubble's draw list: the Backdrop pieces (bg fill inset by the border-unit +
+/// the 8-piece edge), the tail square, and the wrapped, centered, chatType-colored text.
+fn draw_bubble(
+    atlas: &mut UiFontAtlas,
+    quads: &mut UiQuads,
+    art: &BubbleArt,
+    b: &Bubble,
+    seat: Vec2,
+    viewport: Vec2,
+    trace: bool,
+) {
+    let basis = plate_basis(viewport);
+    let border = border_px(viewport, basis);
+    let margin = gx_px(MARGIN, basis);
+
+    // Shape at the nearest baked atlas size, then rescale to the exact window-derived em —
+    // the plate-text recipe (`crate::vplates::plate_text`).
+    let px = text_px(TEXT_H, basis);
+    let shaped = atlas.snap_size(px);
+    if shaped <= 0.0 {
+        return;
+    }
+    let s = px / shaped;
+    let spec = FontSpec {
+        path: None, // NAMEPLATE_FONT — Friz Quadrata, the atlas default
+        height: Some(shaped),
+        outline: Outline::None,
+        paint_halo: true,
+        alpha_gradient: None,
+    };
+    // The wrap law (`0x4b1600` tail): single-line width > 0.2 gx → hard-cap (forces wrap);
+    // else max(measured, 2·border-unit). All in shaped space, rescaled after.
+    let cap_s = gx_px(WRAP_W, basis) / s;
+    let floor_s = (2.0 * border) / s;
+    let (line_w, _) = measure_text(atlas, &b.text, None, spec);
+    let box_w_s = if line_w > cap_s {
+        cap_s
+    } else {
+        line_w.max(floor_s)
+    };
+    let (_, box_h_s) = measure_text(atlas, &b.text, Some(box_w_s), spec);
+    let (text_w, text_h) = ((box_w_s * s).ceil(), (box_h_s * s).ceil());
+
+    // The auto-fit body: the frame hugs the text layout ± the flat margin; BOTTOM-center on
+    // the seat, growing upward. Snapped to whole logical px (the plate divergence — a
+    // fractional corner bilinear-smears the border art).
+    let w = text_w + 2.0 * margin;
+    let h = text_h + 2.0 * margin;
+    let left = (seat.x - w * 0.5).round();
+    let bottom = seat.y.round();
+    let frame = Rect::new(left, bottom - h, left + w, bottom);
+    let alpha = b.alpha;
+
+    // The Backdrop construct (`0x4b0a35 → 0x76a5d0`): one value feeds the 4 insets and both
+    // edge-size fields. The engine's `pieces` speaks y-up — negate y across the seam.
+    let bd = Backdrop {
+        bg_file: Some(BG_TEXTURE.to_string()),
+        edge_file: Some(EDGE_TEXTURE.to_string()),
+        tile: false,
+        tile_size: 0.0,
+        edge_size: border,
+        insets: Insets {
+            left: border,
+            right: border,
+            top: border,
+            bottom: border,
+        },
+        bg_color: [1.0; 4],
+        border_color: [1.0; 4],
+    };
+    let up = GxRect::new(-frame.max.y, frame.min.x, -frame.min.y, frame.max.x);
+    for p in pieces(up, &bd) {
+        // Every bubble piece is axis-aligned (equal insets make the BR-inset quirk vacuous):
+        // corners [TL,TR,BR,BL] y-up → a y-down rect from TL/BR, UVs riding their corners.
+        let rect = Rect::new(
+            p.corners[0][0],
+            -p.corners[0][1],
+            p.corners[2][0],
+            -p.corners[2][1],
+        );
+        quads.overlays.push(UiQuad {
+            rect,
+            z_key: if p.is_bg { Z_BG } else { Z_EDGE },
+            texture: Some(if p.is_bg {
+                art.bg.clone()
+            } else {
+                art.edge.clone()
+            }),
+            uv: UvRect::from_corners(p.uvs),
+            color: [1.0, 1.0, 1.0, alpha],
+            ..default()
+        });
+    }
+    // The tail (`0x4b0af1`): a border-unit square, TOPRIGHT on the frame's BOTTOM lifted
+    // border/4 INTO the body — the overlap that makes the seam read continuous.
+    let tail_top = frame.max.y - border * 0.25;
+    let cx = (frame.min.x + frame.max.x) * 0.5;
+    quads.overlays.push(UiQuad {
+        rect: Rect::new(cx - border, tail_top, cx, tail_top + border),
+        z_key: Z_TAIL,
+        texture: Some(art.tail.clone()),
+        uv: UvRect::FULL,
+        color: [1.0, 1.0, 1.0, alpha],
+        ..default()
+    });
+    // The text: centered in the margin box, wrapped at the shaped-space cap, rescaled around
+    // the box center to the exact em (uniform, so wrap points survive the rescale).
+    let center = Vec2::new(cx, (frame.min.y + frame.max.y) * 0.5);
+    let mut text_quads = layout_text_quads(
+        atlas,
+        &b.text,
+        Rect::from_center_size(center, Vec2::new(box_w_s, box_h_s)),
+        [b.color[0], b.color[1], b.color[2], alpha],
+        Justify {
+            h: JustifyH::Center,
+            v: JustifyV::Middle,
+        },
+        Z_TEXT,
+        spec,
+    );
+    for q in text_quads.iter_mut() {
+        q.rect = Rect::new(
+            center.x + (q.rect.min.x - center.x) * s,
+            center.y + (q.rect.min.y - center.y) * s,
+            center.x + (q.rect.max.x - center.x) * s,
+            center.y + (q.rect.max.y - center.y) * s,
+        );
+    }
+    if trace {
+        eprintln!(
+            "bubble-trace: viewport={viewport:?} frame=({:.1},{:.1})..({:.1},{:.1}) border={border:.1} alpha={alpha:.2} text={:?}",
+            frame.min.x, frame.min.y, frame.max.x, frame.max.y, b.text
+        );
+    }
+    quads.overlays.append(&mut text_quads);
+}
+
+/// The bubble stage — [`crate::nameplates`] orders after it (the bubble/name exclusion reads
+/// [`BubblesActive`]), exactly as it orders after [`VPlateSet`] for the plate verdict.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BubbleSet;
+
+pub(crate) struct ChatBubblePlugin;
+
+impl Plugin for ChatBubblePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<BubbleQueue>()
+            .init_resource::<Bubbles>()
+            .init_resource::<BubblesActive>()
+            .add_systems(Startup, load_bubble_art.after(AssetSet::Open))
+            // After the V-plate drive (the spawn gate reads this frame's plate verdict),
+            // inside the UI-quad append window; the name driver orders after [`BubbleSet`]
+            // (the bubble/name exclusion reads this frame's verdict).
+            .add_systems(
+                Update,
+                drive_bubbles
+                    .after(VPlateSet)
+                    .in_set(UiQuadAppend)
+                    .in_set(BubbleSet),
+            );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The word counter is a space/tab-run law — not Unicode whitespace, not collapse-free.
+    #[test]
+    fn word_count_is_the_space_tab_run_law() {
+        assert_eq!(word_count(""), 0);
+        assert_eq!(word_count("   \t "), 0);
+        assert_eq!(word_count("hi"), 1);
+        assert_eq!(word_count("  hi   there\tfriend  "), 3);
+        assert_eq!(word_count("a\u{a0}b"), 1, "NBSP is not a separator");
+    }
+
+    /// The duration bytes: others 2750 + 750·(n−1), self 1500 + 500·(n−1), empty 0.
+    #[test]
+    fn duration_matches_the_byte_law() {
+        assert_eq!(duration_secs(0, false), 0.0);
+        assert_eq!(duration_secs(1, false), 2.75);
+        assert_eq!(duration_secs(4, false), 5.0);
+        assert_eq!(duration_secs(1, true), 1.5);
+        assert_eq!(duration_secs(3, true), 2.5);
+    }
+
+    /// Bubble text is plain: color/hyperlink escapes strip (display text stays), `||` stays
+    /// escaped for the downstream markup parser, a dangling pipe renders literally.
+    #[test]
+    fn sanitize_strips_escapes_keeps_display_text() {
+        assert_eq!(sanitize("hello"), "hello");
+        assert_eq!(sanitize("a||b"), "a||b");
+        assert_eq!(sanitize("|cffff0000red|r plain"), "red plain");
+        assert_eq!(
+            sanitize("look |Hitem:19019|h[Thunderfury]|h!"),
+            "look [Thunderfury]!"
+        );
+        assert_eq!(sanitize("dangling |"), "dangling ||");
+        assert_eq!(sanitize("|x odd"), "||x odd");
+    }
+
+    /// The v1 kind set: say/yell + monster say/yell on `ChatBubbles`, party on
+    /// `ChatBubblesParty` (benilla default ON — the 0598 deviation); everything else out
+    /// pending the OPEN remap capture.
+    #[test]
+    fn the_kind_set_is_the_uncontested_v1() {
+        use ChatEventKind as K;
+        for k in [K::Say, K::Yell, K::MonsterSay, K::MonsterYell] {
+            assert_eq!(bubble_cvar(k), Some(true));
+        }
+        assert_eq!(bubble_cvar(K::Party), Some(true), "the director's /p ask");
+        for k in [
+            K::Guild,
+            K::Officer,
+            K::Whisper,
+            K::Emote,
+            K::TextEmote,
+            K::System,
+            K::Channel,
+            K::MonsterEmote,
+        ] {
+            assert_eq!(bubble_cvar(k), None, "{k:?} must not bubble in v1");
+        }
+    }
+
+    /// The border-unit lands the byte constants: 16 px at 1024-wide 4:3 (G44·16/(S·1024)
+    /// nets width/64), damped past the plate knee like every other size.
+    #[test]
+    fn border_unit_is_a_64th_of_the_width() {
+        let vp = Vec2::new(1024.0, 768.0);
+        assert_eq!(border_px(vp, plate_basis(vp)), 16.0);
+        let wide = Vec2::new(2560.0, 1440.0);
+        let b = border_px(wide, plate_basis(wide));
+        assert!(
+            b > 16.0 && b < 40.0,
+            "damped growth between the native pin and the faithful 40 px, got {b}"
+        );
+    }
+}

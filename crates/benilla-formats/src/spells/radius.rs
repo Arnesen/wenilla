@@ -1,0 +1,88 @@
+//! `SpellRadius.dbc` — the `$a` token's yard source (`EffectRadiusIndex` →
+//! [`crate::spells::SpellDisplay::effect_radius_index`]; the 0276 verdict pins the token's read
+//! as `[+0x160]` → SpellRadius.dbc). Pinned on the extracted 5875 file: 24 records × 4 fields
+//! `{id, radius f32, radiusPerLevel f32, radiusMax f32}` — row 13 = 10.0 yd (the classic
+//! Arcane Explosion radius), row 8 = 5.0, row 10 = 30.0.
+
+use std::collections::HashMap;
+
+use crate::Chain;
+use anyhow::{Context, Result};
+use benilla_dbc::{FieldType, Schema, SchemaField};
+
+use crate::dbc::{f32_at, parse, u32_at};
+
+/// One `SpellRadius.dbc` row (yards; per-level scaling is 0 on every 5875 row).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpellRadius {
+    pub radius: f32,
+    pub per_level: f32,
+    pub max: f32,
+}
+
+/// `SpellRadius.dbc`, by row id.
+#[derive(Default)]
+pub struct SpellRadiusCatalog {
+    rows: HashMap<u32, SpellRadius>,
+}
+
+impl SpellRadiusCatalog {
+    pub fn get(&self, index: u32) -> Option<&SpellRadius> {
+        self.rows.get(&index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Load `SpellRadius.dbc` off the patch chain.
+pub fn load_spell_radii(chain: &mut Chain) -> Result<SpellRadiusCatalog> {
+    let bytes = chain
+        .read_file("DBFilesClient\\SpellRadius.dbc")
+        .context("reading SpellRadius.dbc")?;
+    let mut schema = Schema::new("SpellRadius");
+    schema.add_field(SchemaField::new("ID", FieldType::UInt32));
+    schema.add_field(SchemaField::new("Radius", FieldType::Float32));
+    schema.add_field(SchemaField::new("RadiusPerLevel", FieldType::Float32));
+    schema.add_field(SchemaField::new("RadiusMax", FieldType::Float32));
+    let set = parse(&bytes, schema, "SpellRadius.dbc")?;
+    let mut rows = HashMap::new();
+    for r in set.records() {
+        let Some(id) = u32_at(r, 0) else { continue };
+        rows.insert(
+            id,
+            SpellRadius {
+                radius: f32_at(r, 1).unwrap_or(0.0),
+                per_level: f32_at(r, 2).unwrap_or(0.0),
+                max: f32_at(r, 3).unwrap_or(0.0),
+            },
+        );
+    }
+    Ok(SpellRadiusCatalog { rows })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SpellRadius.dbc` on the real data — the module doc's own probe rows. Skips without
+    /// client data.
+    #[test]
+    fn real_spell_radii_read_the_probed_rows() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let radii = load_spell_radii(&mut chain).expect("load SpellRadius");
+        assert_eq!(radii.get(13).map(|r| r.radius), Some(10.0));
+        assert_eq!(radii.get(8).map(|r| r.radius), Some(5.0));
+        assert_eq!(radii.get(10).map(|r| r.radius), Some(30.0));
+    }
+}

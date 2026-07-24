@@ -1,0 +1,1202 @@
+//! The shipped **merchant window** driven end-to-end, engine-only (no Bevy): the real
+//! `assets/ui/MerchantFrame.xml` (+ `GameTooltip.xml` for the hover chain) loaded behind
+//! `UiPanels.xml` and fed synthetic stock — the phase-4 vendor arc's machine checks (decision
+//! 0081/0084). Split from `panel_tests` (which keeps gossip + the slot manager itself) along the
+//! folder's one-file-per-window convention.
+
+use benilla_ui::script::{
+    ContainerState, ExtractedQuad, ItemStatsHead, MerchantItem, MerchantState, QuadContent,
+    ScriptValue, SoundRequest, UiScript,
+};
+
+/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error and returning the
+/// frame count it materialized (each test file keeps its own small copy — the folder's pattern).
+fn load_xml(s: &UiScript, file: &str) -> usize {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/ui")
+            .join(file),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "{file}: loader errors: {:?}",
+        report.errors
+    );
+    report.frames
+}
+
+/// Find a bare frame's own rect via its `QuadContent::Frame` entry (every frame emits one, at its
+/// resolved rect, whether or not it paints anything itself — `UiScript::extract`'s doc).
+fn frame_rect(quads: &[ExtractedQuad], w: f32, h: f32) -> benilla_ui::layout::Rect {
+    quads
+        .iter()
+        .find_map(|q| match &q.content {
+            QuadContent::Frame => q
+                .rect
+                .filter(|r| (r.width() - w).abs() < 0.5 && (r.height() - h).abs() < 0.5),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no bare-frame quad sized {w}x{h}"))
+}
+
+/// Load the real `assets/ui/MerchantFrame.xml` (the shipped vendor window) behind `UiPanels.xml`
+/// into a bare engine and drive it with a synthetic 2-item stock + a purse — the whole phase-4
+/// chain minus Bevy (decision 0081), now over the UIPanel slot manager (decision 0084): the
+/// hidden→shown lifecycle on MERCHANT_SHOW goes through ShowUIPanel (landing at the left slot),
+/// both rows' icons + a price + the money line rendering, a row click queuing the right buy
+/// intent, and MERCHANT_CLOSED hiding it through HideUIPanel, vacating the left slot.
+#[test]
+fn shipped_merchant_frame_drives_end_to_end() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The named virtual Font objects the re-skinned rows/title inherit through — loaded first at
+    // runtime (ui_script's shipped list) so `inherits="GameFontNormalSmall"` resolves here too.
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+                                     // The window's frame census: window 1 + item rows 12 (10 merchant + the 2 buyback-only) +
+                                     // close 1 + row-price coin slots 36 + purse coin slots 3 + the buyback slot 1 + its 3 coins +
+                                     // the repair pair 2 + the page pair 2 + the tab pair 2 = 63 (the title/quadrant art are
+                                     // FontString/Texture layers, not frames).
+    assert_eq!(
+        load_xml(&s, "MerchantFrame.xml"),
+        63,
+        "window + 12 rows + close + 39 coin slots + buyback slot + repair/page/tab pairs"
+    );
+
+    // Hidden by default: no vendor icon on screen.
+    s.resolve();
+    let has_icon = |quads: &[ExtractedQuad], needle: &str| {
+        quads.iter().any(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
+            })
+    };
+    assert!(
+        !has_icon(&s.extract(), "INV_Drink_18"),
+        "merchant window starts hidden"
+    );
+
+    // The app's feed: a purse + a two-item stock (one unlimited, one finite).
+    s.set_money(12_345); // 1g 23s 45c
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Refreshing Spring Water".into()),
+                texture: Some("Interface\\Icons\\INV_Drink_18".into()),
+                price: 25,
+                quantity: 1,
+                num_available: -1,
+                item_id: 159,
+                stats: None,
+            },
+            MerchantItem {
+                name: Some("Linen Bandage".into()),
+                texture: Some("Interface\\Icons\\INV_Misc_Bandage_01".into()),
+                price: 100,
+                quantity: 1,
+                num_available: 5,
+                item_id: 1251,
+                stats: None,
+            },
+        ],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The window is shown (ShowUIPanel put it on the left slot), both row icons rendered, a price
+    // + the purse line painted.
+    assert!(s
+        .eval::<bool>("return BenillaMerchantFrame:IsVisible()")
+        .unwrap());
+    s.resolve();
+    let quads = s.extract();
+    assert!(has_icon(&quads, "INV_Drink_18"), "row 1 icon visible");
+    assert!(
+        has_icon(&quads, "INV_Misc_Bandage_01"),
+        "row 2 icon visible"
+    );
+    let has_text = |t: &str| {
+        quads
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
+    };
+    // Prices + purse now render as coin icons (Interface\MoneyFrame\UI-MoneyIcons) + numbers, the
+    // real SmallMoneyFrame look, not "Xg Ys Zc" text. Row 1 costs 25c → the number "25" + a copper
+    // coin; the purse (12345 = 1g 23s 45c) shows "1"/"23"/"45" over gold/silver/copper coins.
+    assert!(has_icon(&quads, "UI-MoneyIcons"), "coin icons render");
+    assert!(has_text("25"), "row 1 price shows the copper count '25'");
+    assert!(
+        has_text("23") && has_text("45"),
+        "purse shows its silver/copper counts"
+    );
+
+    // Item 4: every one of the 10 slots always renders its plate art — the empty-slot socket + the
+    // dark label plate — whether the row is filled or not. The 2 filled rows keep the socket
+    // full-bright; the 8 empty rows dim it to 0.4 (ref MerchantFrame.lua l.108/115).
+    let socket_colors: Vec<[f32; 4]> = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                color,
+                ..
+            } if p.contains("UI-EmptySlot") => Some(color.unwrap_or([1.0; 4])),
+            _ => None,
+        })
+        .collect();
+    // 10 merchant rows + the buyback slot (rows 11/12 are hidden on the merchant tab).
+    assert_eq!(
+        socket_colors.len(),
+        11,
+        "10 merchant rows + the buyback slot render their socket plate"
+    );
+    assert_eq!(
+        socket_colors.iter().filter(|c| c[0] > 0.9).count(),
+        2,
+        "the 2 filled rows keep the socket full-bright"
+    );
+    assert_eq!(
+        socket_colors
+            .iter()
+            .filter(|c| (c[0] - 0.4).abs() < 0.01)
+            .count(),
+        9,
+        "the 8 empty rows + the empty buyback slot dim the socket to 0.4"
+    );
+    assert_eq!(
+        quads
+            .iter()
+            .filter(
+                |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("UI-Merchant-LabelSlots"))
+            )
+            .count(),
+        11,
+        "10 row label plates + the buyback slot's render"
+    );
+
+    // The slot anchor actually applied: the window's rect top-left sits at (0, 664) — screen
+    // height 768 minus the left slot's 104px drop (pin §4's extract-rect assertion). The re-skinned
+    // window has no solid-colour fill (the real quadrant art is opaque), so it's found by its own
+    // 384×512 frame quad rather than a background texture.
+    let win = frame_rect(&quads, 384.0, 512.0);
+    assert_eq!(
+        (win.left, win.top),
+        (0.0, 664.0),
+        "merchant window landed at the left slot (TOPLEFT UIParent, 0, -104)"
+    );
+
+    // The four quadrant slabs ARE the window art (ref-MerchantFrame.xml l.146-176): 256-wide left
+    // halves, 128-wide right halves, each 256 tall, pinned to their corner, each sampling its whole
+    // texture (no TexCoords — the ref uses those only on the bottom-border/repair art we omit).
+    let quad_of = |needle: &str| {
+        quads
+            .iter()
+            .find(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                        if p.contains(needle))
+            })
+            .unwrap_or_else(|| panic!("no texture quad for {needle}"))
+    };
+    let quad_rect = |needle: &str, w: f32, h: f32| {
+        let q = quad_of(needle);
+        assert!(
+            matches!(
+                &q.content,
+                QuadContent::Texture {
+                    tex_coords: None,
+                    ..
+                }
+            ),
+            "{needle} quadrant samples its whole texture (no TexCoords)"
+        );
+        let r = q.rect.unwrap_or_else(|| panic!("no rect for {needle}"));
+        assert!(
+            (r.width() - w).abs() < 0.5 && (r.height() - h).abs() < 0.5,
+            "{needle} is {w}×{h}, got {}×{}",
+            r.width(),
+            r.height()
+        );
+        r
+    };
+    let tl = quad_rect("UI-Merchant-TopLeft", 256.0, 256.0);
+    assert_eq!(
+        (tl.left, tl.top),
+        (win.left, win.top),
+        "TopLeft quadrant pinned to the window's TOPLEFT"
+    );
+    let tr = quad_rect("UI-Merchant-TopRight", 128.0, 256.0);
+    assert_eq!(
+        (tr.right, tr.top),
+        (win.right, win.top),
+        "TopRight quadrant pinned to the window's TOPRIGHT"
+    );
+    let bl = quad_rect("UI-Merchant-BotLeft", 256.0, 256.0);
+    assert_eq!(
+        (bl.left, bl.bottom),
+        (win.left, win.bottom),
+        "BotLeft quadrant pinned to the window's BOTTOMLEFT"
+    );
+    let br = quad_rect("UI-Merchant-BotRight", 128.0, 256.0);
+    assert_eq!(
+        (br.right, br.bottom),
+        (win.right, win.bottom),
+        "BotRight quadrant pinned to the window's BOTTOMRIGHT"
+    );
+
+    let tex_rect = |needle: &str| {
+        quads
+            .iter()
+            .find(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                        if p.contains(needle))
+            })
+            .and_then(|q| q.rect)
+            .unwrap_or_else(|| panic!("no texture quad for {needle}"))
+    };
+    let text_rect = |t: &str| {
+        quads
+            .iter()
+            .find(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
+            .and_then(|q| q.rect)
+            .unwrap_or_else(|| panic!("no text quad for {t:?}"))
+    };
+
+    // The icon sits at the row-left as a ~37px square — NOT stretched across the whole row (the
+    // smeared-merchant regression this whole change fixes).
+    let icon_rect = tex_rect("INV_Drink_18");
+    assert!(
+        (icon_rect.width() - 37.0).abs() < 0.5 && (icon_rect.height() - 37.0).abs() < 0.5,
+        "row-left icon is a 37px square, got {}×{}",
+        icon_rect.width(),
+        icon_rect.height()
+    );
+
+    // Name (upper) and price coins (lower) stack the real name-over-money way (ref l.34/99-106): the
+    // name FontString's box sits above the price number, so their rects don't overlap. (The engine
+    // quad carries the full name string — word wrapping into lines is the app-side ui_text pass.)
+    let name_rect = text_rect("Refreshing Spring Water");
+    let price_rect = text_rect("25");
+    // Rects are y-up (top > bottom): the name's interval sits entirely above the price's.
+    let overlap = name_rect.left < price_rect.right
+        && price_rect.left < name_rect.right
+        && name_rect.bottom < price_rect.top
+        && price_rect.bottom < name_rect.top;
+    assert!(
+        !overlap,
+        "name {name_rect:?} must not overlap price {price_rect:?}"
+    );
+    assert!(
+        name_rect.bottom >= price_rect.top,
+        "name {name_rect:?} sits above price {price_rect:?}"
+    );
+
+    // RIGHT-click row 1 → BuyMerchantItem(1); LEFT-click does NOT buy (pickup pending the cursor
+    // arc). The icon center lies inside the row button.
+    let (cx, cy) = (
+        (icon_rect.left + icon_rect.right) * 0.5,
+        (icon_rect.bottom + icon_rect.top) * 0.5,
+    );
+    s.mouse_button(cx, cy, "LeftButton", true);
+    s.mouse_button(cx, cy, "LeftButton", false);
+    assert!(
+        s.take_merchant_buys().is_empty(),
+        "left-click does not buy (pickup pending the cursor arc)"
+    );
+    s.mouse_button(cx, cy, "RightButton", true);
+    s.mouse_button(cx, cy, "RightButton", false);
+    assert_eq!(s.take_merchant_buys(), vec![(1, 1)]);
+
+    // MERCHANT_CLOSED hides the window through HideUIPanel — the icons go away and the left slot
+    // vacates.
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    s.resolve();
+    assert!(
+        !has_icon(&s.extract(), "INV_Drink_18"),
+        "MERCHANT_CLOSED hides the window"
+    );
+    assert!(
+        s.eval::<bool>("return GetLeftFrame() == nil").unwrap(),
+        "HideUIPanel vacated the left slot"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The vendor window's open/close kits — the window-sound convention (decision 0090). The real
+/// MerchantFrame.xml frame Scripts play igCharacterInfoOpen on OnShow (l.721) and igCharacterInfoClose
+/// on OnHide (l.714); MERCHANT_SHOW → ShowUIPanel → Show() fires OnShow, MERCHANT_CLOSED → HideUIPanel
+/// → Hide() fires OnHide. Nothing queues at load (the frame is authored hidden="true").
+#[test]
+fn merchant_show_hide_plays_open_and_close_kits() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+
+    // Hidden at load: no open sound (never transitions on startup).
+    assert!(
+        s.take_sounds().is_empty(),
+        "no sound at load (never transitions)"
+    );
+
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
+        "opening the vendor window plays igCharacterInfoOpen"
+    );
+
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoClose".into())],
+        "closing the vendor window plays igCharacterInfoClose"
+    );
+}
+
+/// With the bag loaded, opening the vendor also opens your bags (the real MerchantFrame_OnShow →
+/// OpenBackpack, decision 0095; ALL equipped bags since decision 0561 — here only the backpack
+/// exists), so the backpack kit plays ALONGSIDE the panel kit — the "two sounds go together" the
+/// director heard. On close, CloseBackpack hides the bag it opened, so both close kits play. The
+/// bag's own OnShow/OnHide fire first (OpenBackpack shows it before the panel sound), so the
+/// backpack kit leads each pair.
+#[test]
+fn vendor_open_opens_the_backpack_and_layers_the_sound() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+    let _ = s.take_sounds(); // ignore anything from load (frames are hidden; nothing should)
+
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![
+            SoundRequest::KitName("igBackPackOpen".into()),
+            SoundRequest::KitName("igCharacterInfoOpen".into()),
+        ],
+        "vendor open opens the backpack (bag kit) then plays its own panel kit"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "the backpack is open alongside the vendor"
+    );
+
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![
+            SoundRequest::KitName("igBackPackClose".into()),
+            SoundRequest::KitName("igCharacterInfoClose".into()),
+        ],
+        "vendor close closes the backpack it opened, both close kits play"
+    );
+}
+
+/// A backpack the player already had open is NOT closed when the vendor closes (the real
+/// `backpackWasOpen` guard): opening the vendor over an already-open bag plays only the panel kit,
+/// and closing plays only the panel close kit — the bag stays.
+#[test]
+fn vendor_leaves_an_already_open_backpack_alone() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+
+    // Open the bag first (the 'B' toggle), then the vendor over it.
+    s.run("BenillaBagToggle_OnClick()").unwrap();
+    let _ = s.take_sounds();
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
+        "bag already open → only the panel kit on vendor open"
+    );
+
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoClose".into())],
+        "the pre-opened bag is left open → only the panel close kit"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "the player's own open bag survives the vendor closing"
+    );
+}
+
+/// The all-bags divergence (decision 0561, director's call): the vendor opens EVERY equipped bag
+/// with it — not only the backpack like the ref's OpenBackpack — and closes every bag it opened.
+/// Backpack + one equipped bag in slot 2 (bags 1/3/4 unequipped → no window): MERCHANT_SHOW opens
+/// both windows, MERCHANT_CLOSED closes both.
+#[test]
+fn vendor_opens_and_closes_all_equipped_bags() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
+    s.set_container(
+        2,
+        Some(ContainerState {
+            name: Some("Small Pouch".into()),
+            num_slots: 6,
+            slots: std::collections::HashMap::new(),
+        }),
+    );
+
+    let shown =
+        |s: &mut UiScript, name: &str| s.eval::<bool>(&format!("return {name}:IsShown()")).unwrap();
+
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(shown(&mut s, "BenillaBagFrame"), "backpack opens");
+    assert!(
+        shown(&mut s, "BenillaBagFrame2"),
+        "the equipped bag opens with the vendor"
+    );
+    assert!(
+        !shown(&mut s, "BenillaBagFrame1"),
+        "an unequipped slot's window stays hidden"
+    );
+
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert!(
+        !shown(&mut s, "BenillaBagFrame") && !shown(&mut s, "BenillaBagFrame2"),
+        "every bag the vendor opened closes with it"
+    );
+}
+
+/// Switching vendors (right-click vendor B while vendor A's window is open) is a real close+open —
+/// the client's ShowUIPanel early-returns when the frame is visible, so the open kit only re-plays
+/// after a hide (decision 0096). The feed fires MERCHANT_CLOSED then MERCHANT_SHOW; this drives that
+/// exact sequence over the shipped XML and asserts BOTH the close-then-open kit order AND that the
+/// MERCHANT_CLOSED's OnHide queued a close intent — the intent the feed then consumes so the drain
+/// doesn't clear the vendor it just re-opened to.
+#[test]
+fn merchant_switch_plays_close_then_open_and_queues_the_consumable_close() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+
+    // Vendor A open.
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    let _ = s.take_sounds();
+    let _ = s.take_merchant_close();
+
+    // The switch to vendor B — the feed's close+open sequence.
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    assert_eq!(
+        s.take_sounds(),
+        vec![
+            SoundRequest::KitName("igCharacterInfoClose".into()),
+            SoundRequest::KitName("igCharacterInfoOpen".into()),
+        ],
+        "switching vendors plays the close then the open kit"
+    );
+    assert!(
+        s.take_merchant_close(),
+        "the switch's MERCHANT_CLOSED queued a CloseMerchant intent — the feed must consume it so \
+         the re-opened vendor is not cleared by the drain"
+    );
+}
+
+/// The vendor hover chain over the shipped XML (MerchantFrame + GameTooltip): the row highlight is
+/// scoped to the 37px icon (the real ItemButtonTemplate's own-button glow — never the whole 153px
+/// row), the tooltip anchors at the icon's TOPRIGHT (the real client's owner is the 37px
+/// ItemButton; ours walks the ANCHOR_RIGHT offset back), and `SetMerchantItem` renders the real
+/// item-tooltip stat head — quality-coloured name, slot|type, damage|speed + dps, armor, block —
+/// with no buy-price line (the price is on the row). Leaving the row hides it all.
+#[test]
+fn shipped_merchant_hover_scopes_highlight_and_anchors_item_tooltip() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    // The quality→colour table (BENILLA_LOOT_QUALITY_COLORS) ships in LootFrame.xml; at runtime
+    // every FrameXML file loads before any hover fires, so load it here too.
+    load_xml(&s, "LootFrame.xml");
+    load_xml(&s, "MerchantFrame.xml");
+
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Vendor Blade".into()),
+                texture: Some("Interface\\Icons\\INV_Sword_04".into()),
+                price: 8000,
+                quantity: 1,
+                num_available: -1,
+                item_id: 2131,
+                // An uncommon main-hand sword: 5.0–9.0 physical at 2600ms.
+                stats: Some(ItemStatsHead {
+                    quality: 2,
+                    inventory_type: 21,
+                    class: 2,
+                    subclass: 7,
+                    dmg_min: 5.0,
+                    dmg_max: 9.0,
+                    dmg_type: 0,
+                    delay_ms: 2600,
+                    armor: 0,
+                    block: 0,
+                    sell_price: 0,
+                }),
+            },
+            MerchantItem {
+                name: Some("Chipped Buckler".into()),
+                texture: Some("Interface\\Icons\\INV_Shield_09".into()),
+                price: 124,
+                quantity: 1,
+                num_available: -1,
+                item_id: 2129,
+                // A common shield: armor + block, no damage.
+                stats: Some(ItemStatsHead {
+                    quality: 1,
+                    inventory_type: 14,
+                    class: 4,
+                    subclass: 6,
+                    dmg_min: 0.0,
+                    dmg_max: 0.0,
+                    dmg_type: 0,
+                    delay_ms: 0,
+                    armor: 85,
+                    block: 1,
+                    sell_price: 0,
+                }),
+            },
+        ],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.resolve();
+
+    let rect_of_tex = |quads: &[ExtractedQuad], needle: &str| {
+        quads
+            .iter()
+            .find(|q| {
+                matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle))
+            })
+            .and_then(|q| q.rect)
+            .unwrap_or_else(|| panic!("no texture quad for {needle}"))
+    };
+    let has_text = |quads: &[ExtractedQuad], t: &str| {
+        quads
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
+    };
+
+    // Before any hover: no highlight, no tooltip lines.
+    let quads = s.extract();
+    assert!(
+        !quads.iter().any(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                if p.contains("ButtonHilight-Square"))
+        }),
+        "no highlight before hover"
+    );
+    assert!(!has_text(&quads, "Main Hand"), "no tooltip before hover");
+    let sword_icon = rect_of_tex(&quads, "INV_Sword_04");
+
+    // Hover the row over its NAME PLATE (well right of the icon): the whole row is the button, but
+    // the highlight must still cover only the 37px icon at the row's TOPLEFT.
+    let (hx, hy) = (
+        sword_icon.right + 60.0,
+        (sword_icon.bottom + sword_icon.top) * 0.5,
+    );
+    s.mouse_move(hx, hy);
+    assert!(s.errors().is_empty(), "OnEnter errors: {:?}", s.errors());
+    s.resolve();
+    let quads = s.extract();
+    let hl = rect_of_tex(&quads, "ButtonHilight-Square");
+    assert!(
+        (hl.width() - 37.0).abs() < 0.5 && (hl.height() - 37.0).abs() < 0.5,
+        "highlight is the 37px icon square, got {}×{}",
+        hl.width(),
+        hl.height()
+    );
+    assert_eq!(
+        (hl.left, hl.top),
+        (sword_icon.left, sword_icon.top),
+        "highlight sits on the icon, not the row"
+    );
+
+    // The tooltip: the real item stat head, name coloured by quality (uncommon green — the
+    // BENILLA_LOOT_QUALITY_COLORS[2] the loot window shares).
+    for line in [
+        "Vendor Blade",
+        "Main Hand",
+        "Sword",
+        "5 - 9 Damage",
+        "Speed 2.60",
+        "(2.7 damage per second)",
+    ] {
+        assert!(has_text(&quads, line), "tooltip line {line:?} missing");
+    }
+    // Two "Vendor Blade" quads exist — the merchant row's own gold name and the tooltip's header
+    // line; the tooltip's is the quality-green one.
+    let name_colors: Vec<[f32; 4]> = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Text {
+                text: Some(t),
+                color: Some(c),
+                ..
+            } if t == "Vendor Blade" => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        name_colors
+            .iter()
+            .any(|c| (c[0] - 0.12).abs() < 0.01 && (c[1] - 1.0).abs() < 0.01 && c[2].abs() < 0.01),
+        "the tooltip name line is quality-green, got {name_colors:?}"
+    );
+    assert!(
+        !quads.iter().any(|q| {
+            matches!(&q.content, QuadContent::Text { text: Some(t), .. }
+                if t.starts_with("Buy Price"))
+        }),
+        "the tooltip carries no buy-price line"
+    );
+
+    // Anchored at the icon: the tooltip's BOTTOMLEFT sits on the icon's TOPRIGHT (the −116 offset
+    // walks ANCHOR_RIGHT from the 153px row back to the 37px icon). The corner (an anchor-law
+    // fact, independent of the frame's own size) is what's under test — not the size itself, so
+    // read it straight off the real global by name (GameTooltip is the frame's actual Lua name
+    // since decision 0274) instead of hunting quads by a guessed frame size.
+    let (tip_left, tip_bottom): (f32, f32) = s
+        .eval("return GameTooltip:GetLeft(), GameTooltip:GetBottom()")
+        .unwrap();
+    assert_eq!(
+        (tip_left, tip_bottom),
+        (sword_icon.right, sword_icon.top),
+        "tooltip BOTTOMLEFT sits on the icon's TOPRIGHT"
+    );
+
+    // Hover row 2 (the shield): armor/block lines, the slot|type pair, row 1's lines gone.
+    let shield_icon = rect_of_tex(&quads, "INV_Shield_09");
+    s.mouse_move(
+        (shield_icon.left + shield_icon.right) * 0.5,
+        (shield_icon.bottom + shield_icon.top) * 0.5,
+    );
+    assert!(
+        s.errors().is_empty(),
+        "row-2 OnEnter errors: {:?}",
+        s.errors()
+    );
+    s.resolve();
+    let quads = s.extract();
+    for line in [
+        "Chipped Buckler",
+        "Off Hand",
+        "Shield",
+        "85 Armor",
+        "1 Block",
+    ] {
+        assert!(
+            has_text(&quads, line),
+            "shield tooltip line {line:?} missing"
+        );
+    }
+    assert!(!has_text(&quads, "Main Hand"), "row 1's tooltip cleared");
+
+    // Leave the window entirely: tooltip + highlight gone.
+    s.mouse_move(1000.0, 10.0);
+    s.resolve();
+    let quads = s.extract();
+    assert!(!has_text(&quads, "Off Hand"), "tooltip hidden on leave");
+    assert!(
+        !quads.iter().any(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                if p.contains("ButtonHilight-Square"))
+        }),
+        "highlight gone on leave"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Pin the real SmallMoneyFrame *shrink* (MoneyFrame.lua l.202 `SetWidth(GetTextWidth() +
+/// iconWidth)`, l.269 `frame:SetWidth`) that `BenillaMoney_Set` reproduces from the app's
+/// digit-advance feed ([`benilla_ui::script::UiScript::set_digit_advances`]): price groups pack
+/// number+coin with the real 4px spacing and start left-flush at the plate's left edge whatever
+/// the leading denomination (the "silver rows indent" bug), the purse packs the same
+/// right-to-left off its RIGHT anchor, and collapsed denominations HIDE (never a blank
+/// fixed-width box — the "copper-to-silver gap" bug).
+#[test]
+fn money_display_shrinks_to_content_and_stays_flush() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
+    load_xml(&s, "MerchantFrame.xml");
+    // The app's synchronous number metrics (ui_script feeds NumberFontNormal's real advances once
+    // per atlas bake; a uniform 6px here keeps the arithmetic below legible).
+    s.set_digit_advances(&[6.0; 10]);
+
+    s.set_money(12_345); // 1g 23s 45c → purse digits "1" / "23" / "45"
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Refreshing Spring Water".into()),
+                texture: Some("Interface\\Icons\\INV_Drink_18".into()),
+                price: 25, // copper only → "25"
+                quantity: 1,
+                num_available: -1,
+                item_id: 159,
+                stats: None,
+            },
+            MerchantItem {
+                name: Some("Linen Bandage".into()),
+                texture: Some("Interface\\Icons\\INV_Misc_Bandage_01".into()),
+                price: 204, // 2s 4c → "2" + "4" (silver-led — the row that used to indent)
+                quantity: 1,
+                num_available: -1,
+                item_id: 1251,
+                stats: None,
+            },
+        ],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    s.resolve();
+    let quads = s.extract();
+
+    let text_rect = |t: &str| {
+        quads
+            .iter()
+            .find(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
+            .and_then(|q| q.rect)
+            .unwrap_or_else(|| panic!("no text quad for {t:?}"))
+    };
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+
+    // The real collapse HIDES unused slots: exactly 6 coin icons are on screen — row 1's copper,
+    // row 2's silver+copper, the purse's gold+silver+copper. (8 empty rows × 3 + all the unused
+    // slots of the filled displays draw nothing.)
+    let coin_icons = quads
+        .iter()
+        .filter(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                if p.contains("UI-MoneyIcons"))
+        })
+        .count();
+    assert_eq!(coin_icons, 6, "only the filled denominations draw a coin");
+
+    // Left-flush prices: both rows' leading numbers start at rowLeft + 46 (the name box's own
+    // column — 2px of breathing room off the plate border the director asked for; the ref quote
+    // was 44), whether the row leads with copper ("25") or silver ("2"). Row 1 sits at abs left
+    // 24 (window 0 + 24), row 2 at 189 (24 + 153-wide row + 12 column gap).
+    let p1 = text_rect("25");
+    let p2 = text_rect("2");
+    assert!(
+        near(p1.left - 24.0, 46.0),
+        "copper-led price starts at the plate edge, got {}",
+        p1.left - 24.0
+    );
+    assert!(
+        near(p2.left - 189.0, 46.0),
+        "silver-led price starts at the SAME plate edge (the indent bug), got {}",
+        p2.left - 189.0
+    );
+
+    // The shrink + the real 4px MONEY_BUTTON_SPACING: row 2's copper number starts exactly
+    // number-width + 13px coin + 4px gap after the silver number's left edge — no dead air from a
+    // fixed-width slot (the gap bug). "2" is 6px wide, its coin 13, the gap 4 → "4" at +23.
+    let p2c = text_rect("4");
+    assert!(
+        near(p2c.left, p2.right + 13.0 + 4.0),
+        "silver→copper packs number+coin+4px, got {} vs {}",
+        p2c.left,
+        p2.right + 13.0 + 4.0
+    );
+
+    // The purse packs the same but right-to-left, right-flush at window right -53 (the ref
+    // MerchantMoneyFrame anchor -40 minus the template's built-in 13px right pad — see the purse
+    // XML comment): copper "45" ends 13px (its coin) short of x=331, silver "23" ends its coin
+    // 4px left of copper's slot, gold "1" likewise.
+    let purse_c = text_rect("45");
+    let purse_s = text_rect("23");
+    let purse_g = text_rect("1");
+    assert!(
+        near(purse_c.right + 13.0, 384.0 - 53.0),
+        "purse copper coin right-flush at window right -53, got {}",
+        purse_c.right + 13.0
+    );
+    assert!(
+        near(purse_c.left, purse_s.right + 13.0 + 4.0),
+        "purse silver→copper packs rtl with the 4px gap, got {} vs {}",
+        purse_c.left,
+        purse_s.right + 13.0 + 4.0
+    );
+    assert!(
+        near(purse_s.left, purse_g.right + 13.0 + 4.0),
+        "purse gold→silver packs rtl with the 4px gap, got {} vs {}",
+        purse_s.left,
+        purse_g.right + 13.0 + 4.0
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // A sell changes only the coinage — no MERCHANT_UPDATE rides along. The purse repaints on the
+    // real client's PLAYER_MONEY event (the app fires it whenever the pushed money changes).
+    s.set_money(12_349); // +4c: the purse copper becomes "49"
+    s.fire_event("PLAYER_MONEY", vec![]);
+    s.resolve();
+    let quads = s.extract();
+    assert!(
+        quads
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "49")),
+        "the merchant purse live-updates on PLAYER_MONEY"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The merchant/buyback tab pair drives the two pages (ref MerchantFrame_Update l.57-64 +
+/// UpdateMerchantInfo/UpdateBuybackInfo): the merchant page shows the single most-recent buyback
+/// slot + the repair pair (enabled iff there's damage to pay for); the buyback tab retitles the
+/// window, fills the rows from GetBuybackItemInfo, and hides every merchant-only piece. Clicks
+/// queue the BuybackItem/RepairAllItems intents the app drains.
+#[test]
+fn merchant_tabs_drive_buyback_page_and_repair_pair() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    s.set_money(500);
+
+    let buyback_item = |name: &str, price: u32| MerchantItem {
+        name: Some(name.into()),
+        texture: Some("Interface\\Icons\\INV_Misc_Cape_01".into()),
+        price,
+        quantity: 1,
+        stats: Some(ItemStatsHead {
+            quality: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    s.set_merchant(Some(MerchantState {
+        items: vec![MerchantItem {
+            name: Some("Refreshing Spring Water".into()),
+            texture: Some("Interface\\Icons\\INV_Drink_18".into()),
+            price: 25,
+            quantity: 1,
+            num_available: -1,
+            item_id: 159,
+            stats: None,
+        }],
+        buyback: vec![
+            buyback_item("Bandit Cloak", 116),
+            buyback_item("Cracked Sword", 20), // most recent sale — the merchant page's slot
+        ],
+        can_repair: true,
+        repair_all_cost: 76,
+    }));
+    s.fire_event(
+        "MERCHANT_SHOW",
+        vec![ScriptValue::Str("Kurdram Stonehammer".into())],
+    );
+    assert!(s.errors().is_empty(), "show errors: {:?}", s.errors());
+
+    // Merchant page: the buyback slot shows the MOST RECENT sale; the repair pair is up and the
+    // all-button enabled (cost 76 > 0); the buyback page art is down.
+    assert!(s
+        .eval::<bool>("return BenillaMerchantBuyBackItemName:GetText() == 'Cracked Sword'")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return BenillaMerchantRepairAllButton:IsShown() and BenillaMerchantRepairAllButton:IsEnabled()")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return not BenillaMerchantItem11:IsShown() and BenillaBuybackFrameTopLeft:IsShown() == nil")
+        .unwrap());
+
+    // The slot click buys back the most recent sale (slot 2 of 2).
+    s.run("BenillaMerchantBuyBackItem_OnClick()").unwrap();
+    assert_eq!(s.take_merchant_buybacks(), vec![2]);
+
+    // Repair-all queues its intent.
+    s.run("BenillaMerchantRepairAllButton_OnClick()").unwrap();
+    assert!(s.take_repair_all());
+    s.take_sounds();
+
+    // Tab 2: the buyback page — retitled, rows off GetBuybackItemInfo, merchant-only pieces down,
+    // buyback art up, tab 2 selected (its Active slices showing).
+    s.run("BenillaMerchantFrameTab_OnClick(2)").unwrap();
+    assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BenillaMerchantNameText:GetText() == 'Merchant Buyback'")
+        .unwrap());
+    assert!(s
+        .eval::<bool>(
+            "return BenillaMerchantItem1Name:GetText() == 'Bandit Cloak' \
+             and BenillaMerchantItem2Name:GetText() == 'Cracked Sword'",
+        )
+        .unwrap());
+    assert!(s
+        .eval::<bool>(
+            "return BenillaBuybackFrameTopLeft:IsShown() == 1 \
+             and not BenillaMerchantBuyBackItem:IsShown() \
+             and not BenillaMerchantRepairAllButton:IsShown()",
+        )
+        .unwrap());
+    assert!(s
+        .eval::<bool>(
+            "return BenillaMerchantFrameTab2LeftDisabled:IsShown() == 1 \
+             and BenillaMerchantFrameTab1LeftDisabled:IsShown() == nil",
+        )
+        .unwrap());
+
+    // A row click on the buyback page buys that slot back.
+    s.run("BenillaMerchantItem_OnClick(BenillaMerchantItem1, 'LeftButton')")
+        .unwrap();
+    assert_eq!(s.take_merchant_buybacks(), vec![1]);
+
+    // Back to tab 1: the merchant row returns, the buyback art drops.
+    s.run("BenillaMerchantFrameTab_OnClick(1)").unwrap();
+    assert!(s
+        .eval::<bool>(
+            "return BenillaMerchantItem1Name:GetText() == 'Refreshing Spring Water' \
+             and BenillaBuybackFrameTopLeft:IsShown() == nil",
+        )
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The tabs fit their labels — the ref's OnShow text-fit (PanelTemplates_TabResize(0): tab width
+/// = text + the two 20px end slices, middle slices stretched to the text), run from the
+/// template's OnUpdate once the async text measure lands. Fixed 115px tabs looked wrong against
+/// the ref (director pass 2026-07-05): too wide, and the −16 overlap lost its nestle gap.
+#[test]
+fn merchant_tabs_fit_their_labels() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    s.set_money(0);
+    s.set_merchant(Some(MerchantState::default()));
+    s.fire_event("MERCHANT_SHOW", vec![ScriptValue::Str("Vendor".into())]);
+    s.resolve();
+
+    // Answer the measure round-trip for the two labels (the app's font-atlas job in-game).
+    let measures: Vec<(u32, f32, f32, u64)> = s
+        .fontstrings_needing_measure()
+        .into_iter()
+        .filter(|r| r.text == "Merchant" || r.text == "Buyback")
+        .map(|r| {
+            let w = if r.text == "Merchant" { 58.0 } else { 52.0 };
+            (r.id, w, 10.0, r.key)
+        })
+        .collect();
+    assert!(measures.len() >= 2, "both tab labels request a measure");
+    s.set_measured_text(&measures);
+    s.tick(0.016); // the template OnUpdate sees the settled width and runs the fit
+    s.resolve();
+
+    // Tab width = text + 2×20 end slices; the middle slices carry exactly the text width.
+    let (w1, w2): (f64, f64) = s
+        .eval("return BenillaMerchantFrameTab1:GetWidth(), BenillaMerchantFrameTab2:GetWidth()")
+        .unwrap();
+    assert_eq!((w1, w2), (98.0, 92.0), "text + 40, not the fixed 115");
+    let (m1, m2): (f64, f64) = s
+        .eval(
+            "return BenillaMerchantFrameTab1MiddleDisabled:GetWidth(), \
+             BenillaMerchantFrameTab2Middle:GetWidth()",
+        )
+        .unwrap();
+    assert_eq!((m1, m2), (58.0, 52.0), "middle slices stretch to the text");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Hovering a buy-tab row arms the vendor **Buy** cursor (the grayed **UnableBuy** when you can't
+/// afford the row), swaps to **Inspect** while Ctrl is held, and clears on leave — the whole reason
+/// this window exists to a first-time visitor. Drives the real `BenillaMerchantItem_OnEnter` +
+/// the frame's `OnUpdate` (a `tick`) exactly as the app does, since the coin is re-armed per frame.
+#[test]
+fn shipped_merchant_frame_arms_the_buy_cursor_on_hover() {
+    use benilla_ui::script::UiCursorMode;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MerchantFrame.xml");
+
+    // A purse of 50c: row 1 (25c) is affordable, row 2 (100c) is not.
+    s.set_money(50);
+    s.set_merchant(Some(MerchantState {
+        items: vec![
+            MerchantItem {
+                name: Some("Refreshing Spring Water".into()),
+                texture: Some("Interface\\Icons\\INV_Drink_18".into()),
+                price: 25,
+                quantity: 1,
+                num_available: -1,
+                item_id: 159,
+                stats: None,
+            },
+            MerchantItem {
+                name: Some("Linen Bandage".into()),
+                texture: Some("Interface\\Icons\\INV_Misc_Bandage_01".into()),
+                price: 100,
+                quantity: 1,
+                num_available: 5,
+                item_id: 1251,
+                stats: None,
+            },
+        ],
+        ..Default::default()
+    }));
+    s.fire_event("MERCHANT_SHOW", vec![]);
+    s.resolve();
+    assert_eq!(s.ui_cursor(), None, "no override before any hover");
+
+    // Row 1 hover: OnEnter remembers the row, the frame's OnUpdate arms the coin — affordable → Buy.
+    s.run("BenillaMerchantItem_OnEnter(BenillaMerchantItem1)")
+        .unwrap();
+    s.tick(0.016);
+    assert!(s.errors().is_empty(), "hover errors: {:?}", s.errors());
+    assert_eq!(
+        s.ui_cursor(),
+        Some(UiCursorMode::Buy),
+        "the coin arms over an affordable vendor item"
+    );
+
+    // Ctrl held over the same row → the Inspect magnifier (the OnUpdate's Ctrl leg).
+    s.set_modifiers(false, true, false);
+    s.tick(0.016);
+    assert_eq!(
+        s.ui_cursor(),
+        Some(UiCursorMode::Inspect),
+        "Ctrl-hover shows the inspect cursor"
+    );
+    s.set_modifiers(false, false, false);
+
+    // Leaving clears the override (OnLeave ResetCursor + the itemHover poll stops).
+    s.run("BenillaMerchantItem_OnLeave(BenillaMerchantItem1)")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(s.ui_cursor(), None, "leaving the row resets the cursor");
+
+    // Row 2 hover: 100c against a 50c purse → the grayed UnableBuy.
+    s.run("BenillaMerchantItem_OnEnter(BenillaMerchantItem2)")
+        .unwrap();
+    s.tick(0.016);
+    assert_eq!(
+        s.ui_cursor(),
+        Some(UiCursorMode::UnableBuy),
+        "an unaffordable vendor item grays the coin"
+    );
+
+    // Closing the window drops the override even without an OnLeave (walked out of range, panel
+    // displaced): the frame OnHide ResetCursors.
+    s.fire_event("MERCHANT_CLOSED", vec![]);
+    s.tick(0.016);
+    assert_eq!(s.ui_cursor(), None, "closing the window resets the cursor");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Reproduce the director's report (2026-07-22): the trade RECIPIENT (read-only, partner) gold shows
+/// "..." even for a single digit, while the byte-identical merchant purse renders fine. Drives the real
+/// TradeFrame recipient coin trio through extract() and asserts the number quad is the digit, not the
+/// ellipsis. If this FAILS, the bug is structural and reproduced here; if it PASSES, it is live-only.
+#[test]
+fn trade_recipient_money_renders_the_digit_not_ellipsis() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "MerchantFrame.xml"); // the BenillaMoney_* helpers
+    load_xml(&s, "TradeFrame.xml");
+    s.set_digit_advances(&[6.0; 10]);
+
+    let target = benilla_ui::script::TradeSideState {
+        gold: 5, // a partner offering 5 copper → the recipient trio should show "5"
+        ..Default::default()
+    };
+    s.set_trade(Some(benilla_ui::script::TradeState {
+        target,
+        ..Default::default()
+    }));
+    s.fire_event("TRADE_SHOW", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+    let quads = s.extract();
+
+    let has = |t: &str| {
+        quads
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(x), .. } if x == t))
+    };
+    let texts: Vec<&str> = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Text { text: Some(x), .. } => Some(x.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !has("..."),
+        "recipient money truncated to '...' (the bug). all text quads: {texts:?}"
+    );
+    assert!(
+        has("5"),
+        "recipient money shows the digit. all text quads: {texts:?}"
+    );
+}

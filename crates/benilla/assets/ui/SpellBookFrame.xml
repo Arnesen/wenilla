@@ -1,0 +1,657 @@
+<Ui>
+    <!--
+        benilla's spellbook window (decision 0216 §8, slice 5 — the P-key window, the spell
+        SOURCE for the cursor-payload arc): the 384x512 book + the 12-spell page grid + the
+        right-edge skill-line tabs + the page-turn pair, dressed from the real 1.12
+        `SpellBookFrame.xml`/`.lua` — extracted from the MPQ chain to session scratch this
+        session (director-local reference artifacts, never committed — the 0068/0138 pattern;
+        line cites below are into that extraction's own `ref-SpellBookFrame.xml`/`.lua`).
+
+        Docks the left UIPanel slot exactly like Character/Merchant/Gossip/Quest/QuestLog
+        (`UiPanels.xml`'s `UIPanelWindows["BenillaSpellBookFrame"] = { area = "left", pushable =
+        0 }`, mirroring the ref's own `SpellBookFrame` row) — so it competes for/replaces those
+        windows, never stacks with them. `ToggleSpellBook(bookType)` (ref `SpellBookFrame.lua:
+        9-50`, kept BARE — not Benilla-prefixed — matching this codebase's own `ToggleCharacter`/
+        `ToggleQuestLog` precedent) is the show/hide entry point; the app's 'P' binding calls it
+        with `BOOKTYPE_SPELL` (`ui_script/input.rs`, ref `Bindings.xml:582-583`).
+
+        ONE deliberate naming deviation from the ref, applied consistently: every frame this file
+        defines is Benilla-prefixed (`BenillaSpellBookFrame`, `BenillaSpellButton1`, …) — the
+        same posture every other window in this codebase already takes.
+
+        The book MODEL (tabs = skill lines, the flat slot list, offsets) is built entirely by the
+        app from `PlayerActions.spells` through the `Spell.dbc`/`SkillLine.dbc` join
+        (`crate::ui_spellbook`) and pushed through `benilla_ui::script::spellbook`'s snapshot seam
+        — this file only ever reads it through `GetNumSpellTabs`/`GetSpellTabInfo`/`GetSpellName`/
+        `GetSpellTexture`/`IsSpellPassive`, exactly the ref's own Era API shape. `BOOKTYPE_SPELL`/
+        `BOOKTYPE_PET` are installed by the ENGINE (`spellbook.rs`'s `install()`), not this file's
+        own `<Script>` — the one deliberate exception to the ref's own home for them
+        (`SpellBookFrame.lua:5-6`), so the engine's OWN tests can exercise the pet-deferral path
+        without this XML (see that module's doc for the full reasoning). `SPELLS_PER_PAGE`/
+        `MAX_SKILLLINE_TABS`/`SPELLBOOK_PAGENUMBERS` stay here — genuine per-window UI state, the
+        ref's own home for them.
+
+        Named deferrals/OMITs (each re-cited at its own site below):
+          - The PET spellbook: no pets stream yet (decision 0216's own scope note). The ref's
+            Spell/Pet toggle tab row (`SpellBookFrameTabButton1/2/3`, `HasPetSpells()`-gated) is
+            dropped OUTRIGHT — this window only ever shows the one book that exists, the 0138
+            merchant-tab precedent ("tabs arrive with their pages"). `LEARNED_SPELL_IN_TAB`'s tab
+            flash (`SpellBookTabFlashFrame`, `CheckButtonGlow`) is dropped with it — no such event
+            exists yet (no "just learned a spell" signal split out of the general `SPELLS_CHANGED`
+            diff).
+          - Cooldowns (`GetSpellCooldown`/`CooldownFrameTemplate`) and pet autocast
+            (`GetSpellAutocast`/`ToggleSpellAutocast`/`UI-AutoCastableOverlay`/the `AutoCast`
+            model): no cooldown feed exists (the same named gap as CharacterFrame's own item
+            cooldowns), and autocast is pet-only. Right-click pet-autocast toggle
+            (`SpellButton_OnClick`'s `arg1 ~= "LeftButton"` branch) is out of scope this slice
+            per the same brief — every click routes straight to cast/pickup.
+          - The "currently casting" checked ring (`SpellButton_UpdateSelection`/`IsCurrentCast`,
+            `CURRENT_SPELL_CAST_CHANGED`): no cast-selection tracking exists for the spellbook
+            yet — the `CheckedTexture` art ships (harmless, matches the ref) but nothing ever
+            calls `SetChecked(1)` on a spell button this slice.
+          - The MacroFrame branch (`SpellButton_OnClick`'s shift-click "already in a macro editor"
+            fork): no macro window exists — shift-click always falls to the ref's own "else"
+            (`PickupSpell`), exactly what the ref itself does whenever no MacroFrame is visible.
+          - `GameTooltip:SetSpell(id, bookType)` (the full spell-effect/cost/range tooltip): no
+            such content channel exists (the item-stats precedent's own gap — no spell-stat feed).
+            `BenillaSpellButton_OnEnter` shows a plain name + rank two-liner instead
+            (`GetSpellName`'s own two return values) — the `this.updateTooltip`/`OnUpdate`
+            re-poll loop is dropped with it (nothing about a static name/rank line changes
+            per-frame the way a live cooldown would).
+          - `maxLines="3"` on `$parentSpellName` (word-wrap line cap): no such FontString
+            attribute is modeled (grepped `benilla-ui/src/loader/widgets.rs`) — the name just
+            wraps unbounded inside its box width, a harmless cosmetic gap on the rare long name.
+          - `UpdateMicroButtons()`/`MultiActionBar_ShowAllGrids/_HideAllGrids()` (ref
+            `SpellBookFrame_OnShow`/`_OnHide`): no micro-button bar or multi-bar grid-show
+            mechanism exists in this engine yet — dropped, the same class of gap CharacterFrame's
+            own OnShow/OnHide already carry.
+
+        Sounds (decision 0090): `igSpellBookOpen`/`igSpellBookClose` on show/hide (ref
+        `SpellBookFrame_Update`/`_OnHide`, VERIFIED present in the real `SoundEntries.dbc` this
+        session), `igAbiliityPageTurn` (the ref's own literal spelling — VERIFIED as the real
+        registered kit name, id 836, `Sound\interface\iAbilitiesTurnPage{A,B,C}.wav`; not a typo
+        to "fix") on both page-turn clicks.
+    -->
+    <Script><![CDATA[
+        -- ── GlobalStrings values this window uses (ref-GlobalStrings.lua, cited per line — the
+        -- `X = X or "..."` idiom matches CastingBar.xml/CharacterFrame.xml's own convention) ────
+        SPELLBOOK = SPELLBOOK or "Spellbook"      -- :3820
+        PAGE_NUMBER = PAGE_NUMBER or "Page %d"    -- :2981
+
+        -- ── This window's own constants (ref SpellBookFrame.lua:1-7, Benilla-prefixed where the
+        -- ref's own name would collide with the engine's BOOKTYPE_SPELL/BOOKTYPE_PET globals —
+        -- this file's header comment on that one deviation) ─────────────────────────────────────
+        SPELLS_PER_PAGE = 12
+        MAX_SKILLLINE_TABS = 8
+        SPELLBOOK_PAGENUMBERS = {}
+
+        -- ── The window: toggle (ref ToggleSpellBook, l.9-50) ─────────────────────────────────────
+        -- Kept BARE (not Benilla-prefixed) — the addon-facing entry point, matching this
+        -- codebase's own ToggleCharacter/ToggleQuestLog precedent. The ref's `HasPetSpells()`
+        -- short-circuit (blocking a toggle INTO an empty pet book) is dropped outright — this
+        -- file's header comment, the pet book is never fed so `bookType` is always
+        -- BOOKTYPE_SPELL in practice. The ref's own DUPLICATED prev/next enable/disable (once
+        -- inside the `currentPage > maxPages` clamp branch, once again unconditionally right
+        -- after — both produce the identical end state) collapses to the ONE
+        -- BenillaSpellBook_UpdatePageArrows() call already shared by every other page-turn site
+        -- below — a redundant-code cleanup, not a behavior change.
+        function ToggleSpellBook(bookType)
+            local isVisible = BenillaSpellBookFrame:IsVisible()
+            HideUIPanel(BenillaSpellBookFrame)
+            if (not isVisible or (BenillaSpellBookFrame.bookType ~= bookType)) then
+                BenillaSpellBookFrame.bookType = bookType
+                ShowUIPanel(BenillaSpellBookFrame)
+            end
+            BenillaSpellBook_ClampPage()
+            BenillaSpellBook_UpdatePageArrows()
+            BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, BenillaSpellBook_GetCurrentPage()))
+        end
+
+        -- Clamp the selected tab's page back onto range (ref's own inline logic inside
+        -- ToggleSpellBook, l.22-26) — split out so both ToggleSpellBook and a future re-entry
+        -- share it, rather than inlining it twice.
+        function BenillaSpellBook_ClampPage()
+            local currentPage, maxPages = BenillaSpellBook_GetCurrentPage()
+            if currentPage > maxPages then
+                SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] = maxPages
+                BenillaUpdateSpells()
+            end
+        end
+
+        function BenillaSpellBookFrame_OnLoad(frame)
+            frame:RegisterEvent("SPELLS_CHANGED")
+            -- LEARNED_SPELL_IN_TAB OMITTED — this file's header comment.
+            frame.bookType = BOOKTYPE_SPELL
+            for i = 1, MAX_SKILLLINE_TABS do
+                SPELLBOOK_PAGENUMBERS[i] = 1
+            end
+            BenillaSpellBookSkillLineTab_OnClick(1)
+        end
+
+        -- ref SpellBookFrame_OnEvent (l.75-92), the SPELLS_CHANGED branch only (LEARNED_SPELL_IN_TAB
+        -- OMITTED, header comment).
+        function BenillaSpellBookFrame_OnEvent(frame)
+            if event == "SPELLS_CHANGED" and frame:IsVisible() then
+                BenillaSpellBookFrame_Update()
+                BenillaSpellBook_UpdatePageArrows()
+            end
+        end
+
+        -- ref SpellBookFrame_OnShow (l.94-105): UpdateMicroButtons/MultiActionBar_ShowAllGrids
+        -- OMITTED (header comment); the tab-flash UIFrameFlash call goes with LEARNED_SPELL_IN_TAB.
+        function BenillaSpellBookFrame_OnShow()
+            BenillaSpellBookFrame_Update(1)
+        end
+
+        -- ref SpellBookFrame_Update (l.107-164): the Spell/Pet toggle-tab hide loop and the
+        -- HasPetSpells()/petTitle branch are DROPPED outright (header comment — no pet book, no
+        -- toggle row exists at all this slice).
+        function BenillaSpellBookFrame_Update(showing)
+            if showing then
+                BenillaSpellBookSkillLineTab_OnClick(BenillaSpellBookFrame.selectedSkillLine)
+                BenillaUpdateSpells()
+            end
+            local numSkillLineTabs = GetNumSpellTabs()
+            for i = 1, MAX_SKILLLINE_TABS do
+                local skillLineTab = getglobal("BenillaSpellBookSkillLineTab" .. i)
+                if i <= numSkillLineTabs then
+                    local name, texture = GetSpellTabInfo(i)
+                    skillLineTab:SetNormalTexture(texture)
+                    skillLineTab.tooltip = name
+                    skillLineTab:Show()
+                    skillLineTab:SetChecked(BenillaSpellBookFrame.selectedSkillLine == i)
+                else
+                    skillLineTab:Hide()
+                end
+            end
+            BenillaSpellBookTitleText:SetText(SPELLBOOK)
+            if showing then
+                PlaySound("igSpellBookOpen")
+            end
+        end
+
+        -- ref SpellBookFrame_OnHide (l.186-204): UpdateMicroButtons/MultiActionBar_HideAllGrids
+        -- and the tab-flash cleanup OMITTED (header comment); always the spell-book close kit
+        -- (no pet book to branch on).
+        function BenillaSpellBookFrame_OnHide()
+            PlaySound("igSpellBookClose")
+        end
+
+        -- UpdateSpells(): the ref's OWN global (`SpellBookFrame.lua:26/116/411/426/450` — never
+        -- DEFINED in this session's extraction, a base-UI/C-level helper outside this file)
+        -- transcribed here as BenillaUpdateSpells(): refresh every spell button on the current
+        -- page (this file's own convention: explicit button params, not ambient `this`).
+        function BenillaUpdateSpells()
+            for i = 1, SPELLS_PER_PAGE do
+                BenillaSpellButton_UpdateButton(getglobal("BenillaSpellButton" .. i))
+            end
+        end
+
+        -- ── The spell button (ref SpellButton_*, l.206-404) ──────────────────────────────────────
+        -- CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE/PET_BAR_UPDATE/CURRENT_SPELL_CAST_CHANGED/
+        -- SPELL_UPDATE_COOLDOWN are all OMITTED (header comment: no craft/trade-skill window, no
+        -- pet bar, no cast-selection tracking, no cooldown feed) — SPELLS_CHANGED alone drives a
+        -- refresh.
+        function BenillaSpellButton_OnLoad(button)
+            button:RegisterEvent("SPELLS_CHANGED")
+            button:RegisterForDrag("LeftButton")
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            BenillaSpellButton_UpdateButton(button)
+        end
+
+        function BenillaSpellButton_OnEvent(button)
+            if event == "SPELLS_CHANGED" then
+                BenillaSpellButton_UpdateButton(button)
+            end
+        end
+
+        -- ref SpellButton_OnEnter (l.235-244): the engine's SetSpell — the byte-verified spell
+        -- line law (decision 0276: cost|range one line, casttime|cooldown one line, passives
+        -- omit it, the $-substituted gold description; no rank column from the book — the
+        -- verified showRank=0).
+        function BenillaSpellButton_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            local id = BenillaSpellBook_GetSpellID(button:GetID())
+            if not GetSpellName(id, BenillaSpellBookFrame.bookType) then
+                return
+            end
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetSpell(id, BenillaSpellBookFrame.bookType)
+        end
+
+        -- ref SpellButton_OnClick (l.263-290): the MacroFrame branch and the right-click pet
+        -- autocast fork are both OMITTED (header comment) — shift-click always picks up (the
+        -- ref's own "no MacroFrame visible" fallthrough), every other click casts. The
+        -- `id > MAX_SPELLS` guard is dropped too: GetSpellName/CastSpell/PickupSpell already
+        -- answer nil/no-op for any id past the book's real length, so the extra guard checks
+        -- nothing a MAX_SPELLS constant would add here.
+        function BenillaSpellButton_OnClick(button, drag)
+            local id = BenillaSpellBook_GetSpellID(button:GetID())
+            button:SetChecked("false")
+            if drag or IsShiftKeyDown() then
+                PickupSpell(id, BenillaSpellBookFrame.bookType)
+            else
+                CastSpell(id, BenillaSpellBookFrame.bookType)
+                -- SpellButton_UpdateSelection() OMITTED — header comment, no cast-selection ring.
+            end
+        end
+
+        -- ref SpellButton_UpdateButton (l.307-404): the cooldown sweep, autocast overlay/model,
+        -- and the "currently casting" checked-ring call are all OMITTED (header comment). Passive
+        -- gates CastSpell engine-side (spellbook.rs), not here — this only grays the presentation.
+        function BenillaSpellButton_UpdateButton(button)
+            if not button:IsVisible() then
+                return
+            end
+            if GameTooltip:IsOwned(button) then
+                BenillaSpellButton_OnEnter(button)
+            end
+            if not BenillaSpellBookFrame.selectedSkillLine then
+                BenillaSpellBookFrame.selectedSkillLine = 1
+            end
+            local temp, tabTexture, offset, numSpells = GetSpellTabInfo(BenillaSpellBookFrame.selectedSkillLine)
+            offset = offset or 0
+            numSpells = numSpells or 0
+            BenillaSpellBookFrame.selectedSkillLineOffset = offset
+            local id = BenillaSpellBook_GetSpellID(button:GetID())
+            local name = button:GetName()
+            local iconTexture = getglobal(name .. "IconTexture")
+            local spellString = getglobal(name .. "SpellName")
+            local subSpellString = getglobal(name .. "SubSpellName")
+            if id > (offset + numSpells) then
+                button:Disable()
+                iconTexture:Hide()
+                spellString:Hide()
+                subSpellString:Hide()
+                button:SetChecked(0)
+                getglobal(name .. "NormalTexture"):SetVertexColor(1.0, 1.0, 1.0)
+                return
+            else
+                button:Enable()
+            end
+            local texture = GetSpellTexture(id, BenillaSpellBookFrame.bookType)
+            local highlightTexture = getglobal(name .. "Highlight")
+            local normalTexture = getglobal(name .. "NormalTexture")
+            if (not texture) or (texture == "") then
+                iconTexture:Hide()
+                spellString:Hide()
+                subSpellString:Hide()
+                highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+                button:SetChecked(0)
+                normalTexture:SetVertexColor(1.0, 1.0, 1.0)
+                return
+            end
+            local spellName, subSpellName = GetSpellName(id, BenillaSpellBookFrame.bookType)
+            local isPassive = IsSpellPassive(id, BenillaSpellBookFrame.bookType)
+            if isPassive then
+                normalTexture:SetVertexColor(0, 0, 0)
+                highlightTexture:SetTexture("Interface\\Buttons\\UI-PassiveHighlight")
+                spellString:SetTextColor(PASSIVE_SPELL_FONT_COLOR.r, PASSIVE_SPELL_FONT_COLOR.g, PASSIVE_SPELL_FONT_COLOR.b)
+            else
+                normalTexture:SetVertexColor(1.0, 1.0, 1.0)
+                highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+                spellString:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+            end
+            iconTexture:SetTexture(texture)
+            iconTexture:SetVertexColor(1.0, 1.0, 1.0) -- no cooldown/enable feed: always full bright
+            spellString:SetText(spellName)
+            subSpellString:SetText(subSpellName)
+            if subSpellName and subSpellName ~= "" then
+                spellString:SetPoint("LEFT", button, "RIGHT", 4, 4)
+            else
+                spellString:SetPoint("LEFT", button, "RIGHT", 4, 2)
+            end
+            iconTexture:Show()
+            spellString:Show()
+            subSpellString:Show()
+        end
+
+        -- ── Page turn (ref PrevPageButton_OnClick/NextPageButton_OnClick, l.406-434) ─────────────
+        -- Always the spell-book page-turn kit (no pet book to branch on, header comment).
+        function BenillaSpellBookPrevPageButton_OnClick()
+            local pageNum = BenillaSpellBook_GetCurrentPage() - 1
+            SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] = pageNum
+            BenillaSpellBook_UpdatePageArrows()
+            BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, pageNum))
+            BenillaUpdateSpells()
+            PlaySound("igAbiliityPageTurn")
+        end
+
+        function BenillaSpellBookNextPageButton_OnClick()
+            local pageNum = BenillaSpellBook_GetCurrentPage() + 1
+            SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] = pageNum
+            BenillaSpellBook_UpdatePageArrows()
+            BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, pageNum))
+            BenillaUpdateSpells()
+            PlaySound("igAbiliityPageTurn")
+        end
+
+        -- ── The skill-line tabs (ref SpellBookSkillLineTab_OnClick, l.436-457) ───────────────────
+        function BenillaSpellBookSkillLineTab_OnClick(id)
+            local update
+            if not id then
+                update = 1
+                id = this:GetID()
+            end
+            BenillaSpellBookFrame.selectedSkillLine = id
+            local name, texture, offset, numSpells = GetSpellTabInfo(id)
+            BenillaSpellBookFrame.selectedSkillLineOffset = offset or 0
+            BenillaSpellBookFrame.selectedSkillLineNumSpells = numSpells or 0
+            BenillaSpellBook_UpdatePageArrows()
+            BenillaSpellBookFrame_Update()
+            BenillaSpellBookPageText:SetText(format(PAGE_NUMBER, BenillaSpellBook_GetCurrentPage()))
+            if update then
+                BenillaUpdateSpells()
+            end
+        end
+
+        -- ref SpellBook_GetSpellID (l.459-465): the pet-book `return id` branch is DROPPED
+        -- outright (header comment — bookType is always BOOKTYPE_SPELL, dead code for this
+        -- window). This is the book-id the engine's own byte-verified seam expects verbatim
+        -- (`benilla-ui/src/script/spellbook.rs`'s own module doc).
+        function BenillaSpellBook_GetSpellID(id)
+            return id + (BenillaSpellBookFrame.selectedSkillLineOffset or 0)
+                + (SPELLS_PER_PAGE * ((SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] or 1) - 1))
+        end
+
+        -- ref SpellBook_UpdatePageArrows (l.467-479).
+        function BenillaSpellBook_UpdatePageArrows()
+            local currentPage, maxPages = BenillaSpellBook_GetCurrentPage()
+            if currentPage == 1 then
+                BenillaSpellBookPrevPageButton:Disable()
+            else
+                BenillaSpellBookPrevPageButton:Enable()
+            end
+            if currentPage == maxPages then
+                BenillaSpellBookNextPageButton:Disable()
+            else
+                BenillaSpellBookNextPageButton:Enable()
+            end
+        end
+
+        -- ref SpellBook_GetCurrentPage (l.481-493): the pet-book branch is DROPPED outright
+        -- (header comment). `maxPages` is clamped to at least 1 (a defensive addition this file's
+        -- own — an empty/not-yet-fed book must still show ONE (empty) page rather than disabling
+        -- both page buttons into a currentPage=1 > maxPages=0 dead state).
+        function BenillaSpellBook_GetCurrentPage()
+            local currentPage = SPELLBOOK_PAGENUMBERS[BenillaSpellBookFrame.selectedSkillLine] or 1
+            local temp, texture, offset, numSpells = GetSpellTabInfo(BenillaSpellBookFrame.selectedSkillLine)
+            local maxPages = max(ceil((numSpells or 0) / SPELLS_PER_PAGE), 1)
+            return currentPage, maxPages
+        end
+    ]]></Script>
+
+    <!--
+        The skill-line tab (ref SpellBookSkillLineTabTemplate, l.4-39): 32x32, the
+        SpellBook-SkillLineTab 64x64 backdrop offset (-3,11), an empty NormalTexture placeholder
+        (filled at runtime by SetNormalTexture — SetNormalTexture creates the region lazily on
+        first call, `benilla-ui/src/script/button.rs`'s `ensure_slot`, verified this session), the
+        ADD highlight + CheckedTexture ring for the SELECTED tab.
+    -->
+    <CheckButton name="BenillaSpellBookSkillLineTabTemplate" virtual="true">
+        <Size><AbsDimension x="32" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\SpellBook\SpellBook-SkillLineTab">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-3" y="11"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <NormalTexture/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaSpellBookSkillLineTab_OnClick()</OnClick>
+            <OnEnter>
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                if self.tooltip then
+                    GameTooltip:SetText(self.tooltip)
+                    GameTooltip:Show()
+                end
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </CheckButton>
+
+    <!--
+        The spell button (ref SpellButtonTemplate, l.74-201): 37x37, the UI-Spellbook-SpellBackground
+        64x64 backdrop offset (-3,3), the icon (setAllPoints, hidden until fed), the name/rank
+        FontStrings anchored off the button's own RIGHT edge, the UI-Quickslot2 ring + Depress push +
+        ADD highlight + the (currently-unused, header comment) CheckedTexture ring. Cooldown
+        ($parentCooldown, CooldownFrameTemplate) and the AutoCast overlay/model are OMITTED (this
+        file's header comment — no cooldown feed, pet-only autocast).
+    -->
+    <CheckButton name="BenillaSpellButtonTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentBackground" file="Interface\Spellbook\UI-Spellbook-SpellBackground">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-3" y="3"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="BORDER">
+                <Texture name="$parentIconTexture" setAllPoints="true" hidden="true"/>
+                <!-- maxLines="3" unmodeled (this file's header comment) — wraps unbounded instead. -->
+                <FontString name="$parentSpellName" inherits="GameFontNormal" hidden="true" justifyH="LEFT">
+                    <Size><AbsDimension x="103" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="$parentSubSpellName" inherits="SubSpellFont" hidden="true" justifyH="LEFT">
+                    <Size><AbsDimension x="79" y="18"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentSpellName" relativePoint="BOTTOMLEFT">
+                            <Offset><AbsDimension x="0" y="4"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaSpellButton_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaSpellButton_OnEvent(self)</OnEvent>
+            <OnClick>BenillaSpellButton_OnClick(self)</OnClick>
+            <OnShow>BenillaSpellButton_UpdateButton(self)</OnShow>
+            <!-- The reference routes both drag entries to the plain click path with drag=1
+                 (SpellButtonTemplate l.169-174) — the bag/doll/action slots' own precedent. -->
+            <OnDragStart>BenillaSpellButton_OnClick(self, 1)</OnDragStart>
+            <OnReceiveDrag>BenillaSpellButton_OnClick(self, 1)</OnReceiveDrag>
+            <OnEnter>BenillaSpellButton_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors><Anchor point="CENTER"/></Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture name="$parentHighlight" file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+    </CheckButton>
+
+    <Frame name="BenillaSpellBookFrame" hidden="true">
+        <!-- The real 384x512 window (ref l.202-205). No <Anchors> — ShowUIPanel/SetLeftFrame
+             SetPoints this to the left slot on open (UiPanels.xml's own convention). -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <!-- HitRectInsets: transcribed for fidelity; no loader wiring exists yet (CharacterFrame's
+             own precedent note) — a harmless no-op today. -->
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="70"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\Spellbook\Spellbook-Icon">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-8"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The four quadrant plates, anchored off the frame's own corners exactly like
+                     the ref (l.231-263) — simpler than CharacterFrame's TOPLEFT-offset scheme
+                     since the ref itself uses the corner anchors directly here. -->
+                <Texture file="Interface\Spellbook\UI-SpellbookPanel-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\Spellbook\UI-SpellbookPanel-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\Spellbook\UI-SpellbookPanel-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\Spellbook\UI-SpellbookPanel-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+                <FontString name="BenillaSpellBookTitleText" inherits="GameFontNormal" text="SPELLBOOK">
+                    <Anchors>
+                        <Anchor point="CENTER"><Offset><AbsDimension x="6" y="230"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="BenillaSpellBookPageText" inherits="GameFontNormal">
+                    <Size><AbsDimension x="102" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="BOTTOM"><Offset><AbsDimension x="-14" y="96"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Close: the house minimize-button art (no UIPanelCloseButton template ships —
+                 Gossip/Bag/Merchant/CharacterFrame's own precedent), the same TOPRIGHT(-44,-25)
+                 position as every other window's close button. -->
+            <Button name="BenillaSpellBookFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-44" y="-25"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts>
+                    <OnClick>HideUIPanel(BenillaSpellBookFrame)</OnClick>
+                </Scripts>
+            </Button>
+
+            <Button name="BenillaSpellBookPrevPageButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativeTo="BenillaSpellBookFrame" relativePoint="BOTTOMLEFT">
+                        <Offset><AbsDimension x="50" y="105"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString inherits="GameFontNormal" justifyH="LEFT" text="PREV">
+                            <Anchors><Anchor point="LEFT" relativeTo="BenillaSpellBookPrevPageButton" relativePoint="RIGHT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts><OnClick>BenillaSpellBookPrevPageButton_OnClick()</OnClick></Scripts>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
+                <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+            </Button>
+            <Button name="BenillaSpellBookNextPageButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativeTo="BenillaSpellBookFrame" relativePoint="BOTTOMLEFT">
+                        <Offset><AbsDimension x="314" y="105"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString inherits="GameFontNormal" justifyH="RIGHT" text="NEXT">
+                            <Anchors><Anchor point="RIGHT" relativeTo="BenillaSpellBookNextPageButton" relativePoint="LEFT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts><OnClick>BenillaSpellBookNextPageButton_OnClick()</OnClick></Scripts>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
+                <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+            </Button>
+
+            <!-- The 12-spell page grid (ref l.387-494): 2 columns x 6 rows, ids assigned the
+                 ref's own column-major pattern (col1 ids 1-6, col2 ids 7-12) — SpellBook_GetSpellID
+                 reads a button's `id=` as its within-page/within-tab 1-based position, not its
+                 screen order. -->
+            <CheckButton name="BenillaSpellButton1" inherits="BenillaSpellButtonTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="34" y="-85"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton2" inherits="BenillaSpellButtonTemplate" id="7">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton1"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton3" inherits="BenillaSpellButtonTemplate" id="2">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton4" inherits="BenillaSpellButtonTemplate" id="8">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton3"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton5" inherits="BenillaSpellButtonTemplate" id="3">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton6" inherits="BenillaSpellButtonTemplate" id="9">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton5"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton7" inherits="BenillaSpellButtonTemplate" id="4">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton8" inherits="BenillaSpellButtonTemplate" id="10">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton7"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton9" inherits="BenillaSpellButtonTemplate" id="5">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton10" inherits="BenillaSpellButtonTemplate" id="11">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton9"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton11" inherits="BenillaSpellButtonTemplate" id="6">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellButton12" inherits="BenillaSpellButtonTemplate" id="12">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellButton11"><Offset><AbsDimension x="157" y="0"/></Offset></Anchor></Anchors>
+            </CheckButton>
+
+            <!-- The right-edge skill-line tabs, up to MAX_SKILLLINE_TABS (8) — ref l.495-566. -->
+            <CheckButton name="BenillaSpellBookSkillLineTab1" inherits="BenillaSpellBookSkillLineTabTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-32" y="-65"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab2" inherits="BenillaSpellBookSkillLineTabTemplate" id="2">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab3" inherits="BenillaSpellBookSkillLineTabTemplate" id="3">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab4" inherits="BenillaSpellBookSkillLineTabTemplate" id="4">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab5" inherits="BenillaSpellBookSkillLineTabTemplate" id="5">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab6" inherits="BenillaSpellBookSkillLineTabTemplate" id="6">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab7" inherits="BenillaSpellBookSkillLineTabTemplate" id="7">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+            <CheckButton name="BenillaSpellBookSkillLineTab8" inherits="BenillaSpellBookSkillLineTabTemplate" id="8">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaSpellBookSkillLineTab7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+            </CheckButton>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaSpellBookFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaSpellBookFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaSpellBookFrame_OnShow()</OnShow>
+            <OnHide>BenillaSpellBookFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

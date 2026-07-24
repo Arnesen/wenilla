@@ -1,0 +1,21 @@
+<Ui>
+    <!--
+        The shared cooldown-frame machine — the ref's own file split (Cooldown.lua/Cooldown.xml,
+        loaded before every consumer): CooldownFrame_SetTimer drives BOTH the action buttons
+        (ActionBar.xml) and the bag slots (BagFrame.xml), exactly as the reference shares it.
+        The ref's Model template + OnUpdateModel scrub/finish-flash machine live inside our
+        native <Cooldown> widget instead (decision 0263), armed by SetCooldown.
+    -->
+    <Script><![CDATA[
+        -- Ref Cooldown.lua's CooldownFrame_SetTimer, transcribed: show-and-arm only when all three
+        -- are positive, else hide.
+        function CooldownFrame_SetTimer(this, start, duration, enable)
+            if ( start > 0 and duration > 0 and enable > 0 ) then
+                this:SetCooldown(start, duration)
+                this:Show()
+            else
+                this:Hide()
+            end
+        end
+    ]]></Script>
+</Ui>

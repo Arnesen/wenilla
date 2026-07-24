@@ -1,0 +1,136 @@
+<Ui>
+    <!--
+        The chat-link tooltip (decision 0274 P4) - ref ItemRef.xml/ItemRef.lua, quoted: a
+        standalone GameTooltip instance parked above the bottom center that SetItemRef fills via
+        SetHyperlink when a chat item link is clicked, plus its corner close button. The plate is
+        the shared tooltip plate (GameTooltip.xml has the art + Thicken rationale); the ref gets
+        it from GameTooltipTemplate.
+
+        Departures, each named:
+        - No drag (ref: movable + RegisterForDrag + StartMoving/StopMovingOrSizing +
+          ValidateFramePosition): benilla has no user-moved-frame affordance yet - the window
+          sits on its declared anchor.
+        - SetItemRef's player-link branch lands here (ref l.3-46): left-click whispers,
+          right-click opens the name-only FRIEND dropdown (FriendsFrame_ShowDropdown, the
+          minimal FriendsFrame stand-in below), shift-click inserts into the chat editbox. The
+          ref's shift-click friends/ignore popup fills + SendWho("n-"..name) wait on the
+          friends/who arc (both guarded). The ITEM branch's Ctrl-DressUp needs a dressing room.
+        - No UIPanelWindows row (the ref has none either): ShowUIPanel's unregistered branch is
+          a plain Show, and SetHyperlink's own empty-gate shows/hides the plate.
+    -->
+    <Script><![CDATA[
+        -- ref ItemRef.lua SetItemRef (l.2-63): the chat-link click router. `link` is the payload
+        -- inside |H...|h ("item:2947:0:0:0" / "player:Name"), `text` the full escaped link,
+        -- `button` the mouse button.
+        function SetItemRef(link, text, button)
+            if strsub(link, 1, 6) == "player" then
+                local name = strsub(link, 8)
+                if name and strlen(name) > 0 then
+                    -- ref l.6-7: collapse a space-separated name to its last token (a no-op for
+                    -- the single-token names 1.12 uses).
+                    name = gsub(name, "([^%s]*)%s+([^%s]*)%s+([^%s]*)", "%3")
+                    name = gsub(name, "([^%s]*)%s+([^%s]*)", "%2")
+                    if IsShiftKeyDown() then
+                        -- ref fills a visible ADD_IGNORE/ADD_FRIEND/… popup editbox first (those
+                        -- dialogs are the friends/ignore arc, deferred), else the chat editbox,
+                        -- else SendWho (the /who arc, deferred) — we take the ref's editbox tail,
+                        -- both branches guarded.
+                        if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                            ChatFrameEditBox:Insert(name)
+                        elseif SendWho then
+                            SendWho("n-"..name)
+                        end
+                    elseif button == "RightButton" then
+                        FriendsFrame_ShowDropdown(name, 1)
+                    else
+                        ChatFrame_SendTell(name)
+                    end
+                end
+                return
+            end
+            if IsControlKeyDown() then
+                -- ref: DressUpItemLink(text) - no dressing room exists.
+                return
+            end
+            if IsShiftKeyDown() then
+                if ChatFrameEditBox and ChatFrameEditBox:IsVisible() then
+                    ChatFrameEditBox:Insert(text)
+                end
+                return
+            end
+            ShowUIPanel(ItemRefTooltip)
+            if not ItemRefTooltip:IsVisible() then
+                ItemRefTooltip:SetOwner(UIParent, "ANCHOR_PRESERVE")
+            end
+            ItemRefTooltip:SetHyperlink(link)
+        end
+
+        -- Minimal FriendsFrame stand-in for the chat-name right-click menu (ref FriendsFrame.lua
+        -- l.35-47). The full social window (friends/ignore/who tabs) is a later arc; this hosts
+        -- only the name-only FRIEND dropdown the chat links share with the unit popups.
+        function FriendsFrame_ShowDropdown(name, connected)
+            HideDropDownMenu(1)
+            if connected then
+                FriendsDropDown.initialize = FriendsFrameDropDown_Initialize
+                FriendsDropDown.displayMode = "MENU"
+                FriendsDropDown.name = name
+                ToggleDropDownMenu(1, nil, FriendsDropDown, "cursor")
+            end
+        end
+
+        function FriendsFrameDropDown_Initialize()
+            UnitPopup_ShowMenu(getglobal(UIDROPDOWNMENU_OPEN_MENU), "FRIEND", nil, FriendsDropDown.name)
+        end
+    ]]></Script>
+
+    <GameTooltip name="ItemRefTooltip" frameStrata="HIGH" hidden="true">
+        <Size><AbsDimension x="128" y="64"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="80"/></Offset></Anchor>
+        </Anchors>
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentThicken">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- ref ItemRefCloseButton (ItemRef.xml l.17-36, quoted): the corner minimize-style
+                 close; OnLoad's SetPadding(16) keeps it off the text. -->
+            <Button name="ItemRefCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="1" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>HideUIPanel(ItemRefTooltip)</OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                GameTooltip_OnLoad(self)
+                self:SetPadding(16)
+            </OnLoad>
+            <OnHide>GameTooltip_OnHide(this)</OnHide>
+        </Scripts>
+    </GameTooltip>
+
+    <!-- The chat-name dropdown host (ref FriendsFrame's FriendsDropDown): a bare UIDropDownMenu
+         the SetItemRef player branch toggles at the cursor. UIDropDownMenuTemplate + UnitPopup
+         both load before this file (the ui_script load order). -->
+    <Frame name="FriendsDropDown" parent="UIParent" inherits="UIDropDownMenuTemplate" hidden="true"/>
+</Ui>

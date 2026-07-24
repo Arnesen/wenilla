@@ -1,0 +1,123 @@
+//! `SheatheSoundLookups.dbc` — the draw/stow sound table (the client's runtime
+//! `AUSHEATHSOUNDHASH`; wow-re sound node, wave2-CD).
+//!
+//! Layout — VERIFIED against build 5875 (header + full dump with SoundEntries name joins,
+//! 2026-07-03): **33 × 7 × 28 B**: `ID(0), ItemClass(1), ItemSubclass(2), Material(3),
+//! _col4(4), SheatheSound(5), UnsheatheSound(6)`. The data forms three families:
+//! shields (class 4, subclasses 5/6, material 0 → kits 696/701 `SHEATHINGSHIELD*`), metal
+//! weapons (class 2 × subclasses 0–14, material 1 → 698/700 `SHEATHINGMETALWEAPON*`) and wood
+//! weapons (material 2 → 697/699 `SHEATHINGWOODWEAPON*`), plus one material-0 weapon default
+//! row (→ wood). Column 4 is 0 on shield rows and 1 on weapon rows — meaning unrecorded,
+//! unused here.
+
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use benilla_dbc::{FieldType, Schema, SchemaField};
+
+use crate::dbc::{parse, u32_at};
+use crate::Chain;
+
+/// One row's kit pair.
+#[derive(Clone, Copy)]
+pub struct SheatheSounds {
+    /// Stowing the item (SoundEntries kit).
+    pub sheathe: u32,
+    /// Drawing it.
+    pub unsheathe: u32,
+}
+
+/// `(ItemClass, ItemSubclass, Material)` → the kit pair.
+pub struct SheatheSoundCatalog {
+    rows: HashMap<(u32, u32, u32), SheatheSounds>,
+}
+
+impl SheatheSoundCatalog {
+    /// The kit pair for an item, preferring the exact material row and falling back to any
+    /// material carried for that `(class, subclass)` (players' item material isn't on the wire —
+    /// the caller passes its best guess), then to the class's subclass-0 row: the 5875 table
+    /// only covers weapon subclasses 0–14, so daggers (15) and other stragglers ring like a
+    /// generic weapon of their material (INTERIM — the client's hash-miss behavior is
+    /// unrecorded).
+    pub fn get(&self, class: u32, subclass: u32, material: u32) -> Option<SheatheSounds> {
+        [subclass, 0]
+            .iter()
+            .find_map(|&sc| {
+                [material, 1, 2, 0]
+                    .iter()
+                    .find_map(|&m| self.rows.get(&(class, sc, m)))
+            })
+            .copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+fn schema() -> Schema {
+    let mut s = Schema::new("SheatheSoundLookups");
+    for i in 0..7 {
+        s.add_field(SchemaField::new(format!("f{i}"), FieldType::UInt32));
+    }
+    s
+}
+
+/// Read `SheatheSoundLookups.dbc` off the patch chain.
+pub fn load_sheathe_sound_catalog(chain: &mut Chain) -> Result<SheatheSoundCatalog> {
+    let bytes = chain
+        .read_file("DBFilesClient\\SheatheSoundLookups.dbc")
+        .context("reading SheatheSoundLookups.dbc")?;
+    let rs = parse(&bytes, schema(), "SheatheSoundLookups")?;
+    let mut rows = HashMap::with_capacity(rs.records().len());
+    for r in rs.records() {
+        let g = |i: usize| u32_at(r, i).unwrap_or(0);
+        rows.insert(
+            (g(1), g(2), g(3)),
+            SheatheSounds {
+                sheathe: g(5),
+                unsheathe: g(6),
+            },
+        );
+    }
+    Ok(SheatheSoundCatalog { rows })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real 5875 table: a metal 1H sword (2/7/1) draws with 700 and stows with 698; a
+    /// shield (4/6) hits the shield pair; the material fallback resolves an unknown material.
+    /// Skips without client data.
+    #[test]
+    fn real_sheathe_sounds_decode() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_sheathe_sound_catalog(&mut chain).expect("load sheathe sounds");
+        assert_eq!(cat.len(), 33);
+
+        let sword = cat.get(2, 7, 1).expect("metal 1H sword");
+        assert_eq!((sword.sheathe, sword.unsheathe), (698, 700));
+
+        let staff_wood = cat.get(2, 10, 2).expect("wood staff");
+        assert_eq!((staff_wood.sheathe, staff_wood.unsheathe), (697, 699));
+
+        let shield = cat.get(4, 6, 0).expect("shield");
+        assert_eq!((shield.sheathe, shield.unsheathe), (696, 701));
+
+        // Daggers (15) have NO row in 5875 — they fall back to the class's subclass-0 metal
+        // pair (and an unlisted material to the material chain).
+        let dagger = cat.get(2, 15, 1).expect("dagger falls back to subclass 0");
+        assert_eq!((dagger.sheathe, dagger.unsheathe), (698, 700));
+        assert!(cat.get(2, 15, 7).is_some(), "weird material still resolves");
+    }
+}

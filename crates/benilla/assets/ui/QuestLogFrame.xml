@@ -1,0 +1,1760 @@
+<Ui>
+    <!--
+        benilla's quest log window (decision 0088 arc, the quest-log slice — the sibling of
+        `QuestFrame.xml`'s questgiver window, dressed from the real 1.12 `QuestLogFrame.xml`/
+        `QuestLogFrame.lua` (scratchpad `ref-framexml/QUESTLOG-PIN.md`; section cites below are into
+        that pin, `file:line` cites are into the pin's own extracted `QuestLogFrame.xml`/`.lua`). One
+        `BenillaQuestLogFrame` carries BOTH the list page and the detail page — FLAT layout (decision
+        0088 §2, quoted in `QuestFrame.xml`'s header): a child frame shown at runtime does not render
+        its own `<Layers>` FontStrings in this engine, so every FontString/Button here lives directly
+        on the one always-visible window, never on a nested sub-frame. `enableMouse`/`toplevel`/
+        `movable` are LoadXML no-ops in this engine (`loader.rs` warn-once gaps) — omitted here exactly
+        as `QuestFrame.xml` omits them; they cost nothing since Buttons are mouse-enabled by
+        construction regardless (`widget/mod.rs`'s ctor comment).
+
+        Docks the left UIPanel slot exactly like Gossip/Merchant/Quest (`UiPanels.xml`
+        `UIPanelWindows["BenillaQuestLogFrame"] = { area = "left", pushable = 0 }`, pin §8's
+        `UIParent.lua l.25` quote) — so it competes for/replaces those windows, never stacks with
+        them. UNLIKE those windows this is not an NPC session: no `CloseX()` on hide, no range guard;
+        it is durable player state the app can push at any time (`benilla-ui`'s `quest_log.rs` module
+        doc). `ToggleQuestLog()` (pin §8, `QuestLogFrame.lua:24-30`) is the show/hide entry point the
+        app's 'L' binding already calls (`ui_script/mod.rs`).
+
+        Faux-scroll (pin §2): 6 title rows (`QUESTS_DISPLAYED`), a Lua-side `questLogOffset` upvalue
+        standing in for the real `QuestLogListScrollFrame`/`FauxScrollFrame_Update` (no real
+        ScrollFrame/FauxScrollFrame engine exists yet) — `<OnMouseWheel>` adjusts it directly. The
+        wheel handler lives on the window Frame itself: the engine bubbles a spin UP the parent chain
+        (`script/pointer.rs` `mouse_wheel`), so a spin over a title row (no handler of its own) rises to
+        this window and scrolls. (A bare `<Frame>` is not a mouse HIT target — only
+        Button/CheckButton/EditBox/ScrollingMessageFrame are, `widget/mod.rs`'s ctor comment, and
+        `enableMouse` is a no-op stub — but it is still a valid bubble ANCESTOR: bubbling checks for the
+        handler, not mouse-enablement.) The `BenillaQuestLogWheelCatcher` BUTTON, declared FIRST so every
+        real row out-ranks it in hit-testing (`order::hit_test` walks the draw-order-descending list),
+        now only gives the list's EMPTY tail a hit-target whose spin also bubbles here.
+
+        v1 scope/deviations from the pin (each cited again at its own widget below):
+          - The LIST page still has no real ScrollFrame — `questLogOffset`'s faux-scroll stands in
+            (this comment's own "Faux-scroll" paragraph above); real real-estate accounting there
+            would need a genuine header/collapse model this v1 doesn't ship. The DETAIL page now
+            DOES sit on a real ScrollFrame (`BenillaQuestLogDetailScroll`, decision 0112's mechanism)
+            — a quest with many objectives/a long description/many rewards scrolls and clips at the
+            pane's own edge instead of running past the window's bottom (pin §3's doNotScroll
+            asymmetry is implemented — see `BenillaQuestLogDetail_Update`'s own comment).
+          - Difficulty coloring is the ref's own `QuestDifficultyColor` table + `GetDifficultyColor`
+            (QUOTED, l.14-20 + l.584-599) over the real `GetQuestGreenRange()` binding — see the
+            function's own comment. (The old `BenillaQuestDifficultyColor` INTERIM and its
+            approximated thresholds are retired.)
+          - No headers ship (`benilla-ui`'s `quest_log.rs`: flat entries only, headers need the
+            QuestSort/AreaTable DBC join) — the header branch below is dead code today, kept for when
+            that join lands rather than re-derived then.
+          - No party share/push, no timed-quest countdown, no reward-spell row — still-named v1 stubs
+            in `benilla-ui`'s `quest_log.rs`. Quest-watch tracking (this comment's own arc) IS wired.
+          - `GetQuestLogRequiredMoney()` exists on the Lua surface (pin §3/§6) but is not wired to a
+            detail-pane line — rare in vanilla (ferry-style quests), a documented v1 gap.
+          - `EmptyQuestLogFrame` (pin §2, a whole separate book-art frame) is simplified to one
+            centered FontString + hidden rows on this same window.
+          - The abandon confirm is the ref's `ABANDON_QUEST` entry on the shared StaticPopup
+            engine (UiPanels.xml, decision 0308 §3).
+          - Quest-watch toggle is SHIFT+left-click, the ref's own fork (pin §5,
+            `QuestLogTitleButton_OnClick`, `QuestLogFrame.lua:469-505`). The modifier plumbing this
+            note once named as the missing engine slice (`IsShiftKeyDown` + the app's per-frame
+            mirror) landed with the cursor arc; the interim right-click substitute is retired.
+          - **The two ref watch errors (`QUEST_WATCH_NO_OBJECTIVES`/`QUEST_WATCH_TOO_MANY`,
+            `UIErrorsFrame:AddMessage`) have no seam to reach `BenillaErrorsFrame` from Lua**: that
+            frame only reacts to the `UI_ERROR_MESSAGE` *event*, and firing an event is a method on
+            `UiScript` (`fire_event`) — there is no Lua-callable "fire this event"/"post this error"
+            global anywhere in this engine (grepped; every `UI_ERROR_MESSAGE` fire in this codebase is
+            Rust-side, e.g. `ui_merchant.rs`/`ui_action.rs`). The two guards below therefore no-op
+            silently instead of erroring — a real (if narrow) gap: right-clicking a no-objectives or
+            6th-watch row does nothing visible rather than explaining why. Worth a small Lua-callable
+            error-post global as a follow-up once a second caller wants one too.
+    -->
+    <Script><![CDATA[
+        BENILLA_QUESTLOG_ROWS = 6            -- QUESTS_DISPLAYED (pin §2, QuestLogFrame.lua:1)
+        BENILLA_QUESTLOG_MAX_DISPLAY = 20     -- MAX_QUESTLOG_QUESTS (pin §2, :6) — display cap only
+        BENILLA_QUESTLOG_MAX_OBJECTIVES = 10  -- MAX_OBJECTIVES (pin §3, QuestLogFrame.lua:3)
+        -- Reward/choice row cap: the SAME v1 cap `QuestFrame.xml`'s BENILLA_QUEST_MAX_ITEMS uses (the
+        -- ref's own MAX_NUM_ITEMS is 10, QuestFrame.lua:2 — we halve it there too).
+        BENILLA_QUESTLOG_MAX_ITEMS = 6
+        -- MAX_WATCHABLE_QUESTS (pin §2/§5, QuestLogFrame.lua:8) — the SAME cap `quest_log.rs`'s
+        -- AddQuestWatch already enforces engine-side; this is just this file's own guard so the
+        -- right-click handler can skip the AddQuestWatch call (and its error) locally.
+        BENILLA_QUESTLOG_MAX_WATCHES = 5
+        -- The tracker HUD's flat line pool (ref MAX_QUESTWATCH_LINES, QuestLogFrame.lua:7):
+        -- one rolling pool across every watch, dynamically re-chained each paint — the ref's own
+        -- model (the old fixed 5×(1+4) per-slot grid predated region Show/Hide/SetPoint).
+        BENILLA_QUESTWATCH_LINES = 30
+
+        -- The detail pane's ScrollFrame child-resize sum (`BenillaQuestLogDetail_ResizeChild`'s own
+        -- comment) — fixed offsets/row heights transcribed from this chain's own FontString/SetPoint
+        -- comments below, gathered here with the file's other constants.
+        BENILLA_QUESTLOG_DETAIL_TOP = 5        -- child TOPLEFT -> QuestTitle (ref :624-635, offset 5,-5)
+        BENILLA_QUESTLOG_DETAIL_OBJ_GAP = 10    -- ObjectivesText->Objective1 AND last objective/
+                                                 -- ObjectivesText->DescriptionTitle (both -10, XML/Lua)
+        BENILLA_QUESTLOG_DETAIL_OBJ_ROW = 12    -- one objective line (Objective1's own comment)
+        BENILLA_QUESTLOG_DETAIL_OBJ_STEP = 2    -- gap between objective lines
+        BENILLA_QUESTLOG_DETAIL_BOTTOM_PAD = 10 -- v1: a little breathing room past the last row
+        -- The detail pane's minimal scrollbar (`BenillaQuestLogDetailScroll_SyncBar`'s own comment).
+        BENILLA_QUESTLOG_SCROLL_STEP = 20        -- px per wheel notch / arrow click
+        BENILLA_QUESTLOG_SCROLL_TRACK_H = 229    -- ScrollFrame height 261 - 16 (up) - 16 (down)
+        BENILLA_QUESTLOG_SCROLL_THUMB_H = 16
+
+        -- The faux-scroll offset (pin §2's FauxScrollFrame stand-in) — a plain chunk-local upvalue
+        -- every function below closes over, the same pattern `UiPanels.xml`'s `slots` table uses.
+        local questLogOffset = 0
+
+        -- The detail pane's last-computed resize inputs (`BenillaQuestLogDetail_ResizeChild`'s own
+        -- comment on WHY a re-check is needed at all: `GetHeight()` on the auto-height FontStrings
+        -- is one tick stale on the FIRST populate of brand-new text — the host measures it only on
+        -- the NEXT `resolve()`/measure round-trip, which lands after this Lua tick already returned.
+        -- Detail_Update has no reason to run again once the quest log's data stops changing, so
+        -- nothing would ever ask for the now-correct height — these upvalues let the ScrollFrame's
+        -- own `<OnUpdate>` re-ask every frame (cheaply — see that handler's own comment) using the
+        -- SAME inputs the last full populate computed, until the measured heights catch up and the
+        -- resize stops changing.
+        local detailObjAnchorIndex = 0
+        local detailRewardHeight = 18
+        -- The last height actually applied via SetHeight — lets the OnUpdate re-check below skip
+        -- SetHeight/UpdateScrollChildRect (and the OnScrollRangeChanged repaint it fires) entirely
+        -- once the resize has converged and stopped changing, rather than redoing that work every
+        -- single frame forever while the window sits open.
+        local detailLastAppliedHeight = nil
+
+        -- ── Difficulty coloring ──────────────────────────────────────────────────────────────────
+        -- QUOTED from ref-QuestLogFrame.lua: the table (l.14-20) and GetDifficultyColor (l.584-599,
+        -- "Used for quests and enemy coloration" — the ref's own comment; the TARGET FRAME's level
+        -- number colors through this exact function too, TargetFrame_CheckLevel l.130). The
+        -- green→grey boundary is the real GetQuestGreenRange() binding (benilla-ui unit.rs — the
+        -- byte-verified grey band the plate/tooltip share; the binding's own byte read is under
+        -- the 2026-07-17 wow-re §5). This retires the BenillaQuestDifficultyColor INTERIM and its
+        -- approximated -2/-10 thresholds. One deviation: the ref assigns its scratch `color` as a
+        -- GLOBAL (vanilla Lua sloppiness); ours is local.
+        QuestDifficultyColor = { }
+        QuestDifficultyColor["impossible"]    = { r = 1.00, g = 0.10, b = 0.10 }
+        QuestDifficultyColor["verydifficult"] = { r = 1.00, g = 0.50, b = 0.25 }
+        QuestDifficultyColor["difficult"]     = { r = 1.00, g = 1.00, b = 0.00 }
+        QuestDifficultyColor["standard"]      = { r = 0.25, g = 0.75, b = 0.25 }
+        QuestDifficultyColor["trivial"]       = { r = 0.50, g = 0.50, b = 0.50 }
+        QuestDifficultyColor["header"]        = { r = 0.7,  g = 0.7,  b = 0.7  }
+
+        function GetDifficultyColor(level)
+            local color
+            local levelDiff = level - UnitLevel("player")
+            if ( levelDiff >= 5 ) then
+                color = QuestDifficultyColor["impossible"]
+            elseif ( levelDiff >= 3 ) then
+                color = QuestDifficultyColor["verydifficult"]
+            elseif ( levelDiff >= -2 ) then
+                color = QuestDifficultyColor["difficult"]
+            elseif ( -levelDiff <= GetQuestGreenRange() ) then
+                color = QuestDifficultyColor["standard"]
+            else
+                color = QuestDifficultyColor["trivial"]
+            end
+            return color
+        end
+
+        -- ── The list page ────────────────────────────────────────────────────────────────────────
+        -- `mouseButton` is arg1 off RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        -- (BenillaQuestLogTitleTemplate's OnLoad). The watch toggle is SHIFT+left-click, the ref's
+        -- own fork (QuestLogFrame.lua:469-505) — the modifier plumbing this file's header once
+        -- named as the missing engine slice landed with the cursor arc (0216/0218 follow-up), so
+        -- the documented right-click substitute is retired.
+        function BenillaQuestLogTitle_OnClick(button, mouseButton)
+            local index = button.questIndex
+            if not index then return end
+            local _, _, _, isHeader, isCollapsed = GetQuestLogTitle(index)
+            if isHeader then
+                -- pin §5, QuestLog_SetSelection (QuestLogFrame.lua:321-329): a header never becomes
+                -- the selection, it only (un)collapses. No header ever ships in v1 (module doc,
+                -- `benilla-ui/src/script/quest_log.rs`) so Expand/CollapseQuestHeader don't exist yet
+                -- — guarded rather than assumed absent forever.
+                if isCollapsed and type(ExpandQuestHeader) == "function" then
+                    ExpandQuestHeader(index)
+                elseif type(CollapseQuestHeader) == "function" then
+                    CollapseQuestHeader(index)
+                end
+                return
+            end
+            -- pin §5, QuestLogTitleButton_OnClick (QuestLogFrame.lua:469-501): shift-click toggles
+            -- the watch. Guard order matches the ref exactly: already watched → unwatch,
+            -- unconditionally; else zero objectives (QUEST_WATCH_NO_OBJECTIVES) or the watch list
+            -- full (QUEST_WATCH_TOO_MANY) put the ref's red line on the errors frame
+            -- (BenillaErrorsFrame_AddMessage — the ref's UIErrorsFrame:AddMessage call sites,
+            -- lua:490/495), else watch it. The ref calls QuestWatch_Update() itself
+            -- right after each Add/RemoveQuestWatch (same two call sites) — it does NOT lean on
+            -- the QUEST_LOG_UPDATE/QUEST_WATCH_UPDATE events alone for this, since neither engine
+            -- fires an event off a plain Add/RemoveQuestWatch call; we mirror that exactly.
+            if mouseButton == "LeftButton" and IsShiftKeyDown() then
+                local title = GetQuestLogTitle(index)
+                if IsQuestWatched(index) then
+                    -- Clearing the timer too: a lingering timed entry would later expire and
+                    -- silently unwatch a re-added MANUAL watch.
+                    if title then BENILLA_QUEST_WATCH_TIMERS[title] = nil end
+                    RemoveQuestWatch(index)
+                    BenillaQuestWatch_Update()
+                elseif GetNumQuestLeaderBoards(index) == 0 then
+                    -- ref QUEST_WATCH_NO_OBJECTIVES, red, straight onto the errors frame
+                    -- (the ref calls UIErrorsFrame:AddMessage the same way).
+                    BenillaErrorsFrame_AddMessage("This quest has no objectives to track", 1.0, 0.1, 0.1)
+                elseif GetNumQuestWatches() >= BENILLA_QUESTLOG_MAX_WATCHES then
+                    -- ref QUEST_WATCH_TOO_MANY, red.
+                    BenillaErrorsFrame_AddMessage("You may only watch " .. BENILLA_QUESTLOG_MAX_WATCHES .. " quests at a time", 1.0, 0.1, 0.1)
+                else
+                    -- A manual watch is PERMANENT (ref: QUEST_WATCH_NO_EXPIRE) — drop any timed
+                    -- entry the auto-watch may have armed for it.
+                    if title then BENILLA_QUEST_WATCH_TIMERS[title] = nil end
+                    AddQuestWatch(index)
+                    BenillaQuestWatch_Update()
+                end
+            end
+            -- pin §5: every click (shifted/right-clicked or not) ends in select + a full repaint.
+            SelectQuestLogEntry(index)
+            BenillaQuestLogFrame_Update()
+        end
+
+        -- The fold-all tab (ref QuestLogCollapseAllButton_OnClick, QuestLogFrame.lua:554-563):
+        -- index 0 = every header; the tab's own +/- icon tracks the all-state.
+        function BenillaQuestLogCollapseAllButton_OnClick()
+            local b = getglobal("BenillaQuestLogCollapseAllButton")
+            if b.allCollapsed then
+                b.allCollapsed = nil
+                b:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                ExpandQuestHeader(0)
+            else
+                b.allCollapsed = 1
+                b:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                CollapseQuestHeader(0)
+            end
+        end
+
+        -- pin §2's QuestLog_SetFirstValidSelection/QuestLog_GetFirstSelectableQuest
+        -- (QuestLogFrame.lua:293-296, :565-582): if nothing is selected, pick the first non-header row.
+        function BenillaQuestLog_SetFirstValidSelection()
+            if GetQuestLogSelection() ~= 0 then return end
+            local numEntries = GetNumQuestLogEntries()
+            for i = 1, numEntries do
+                local _, _, _, isHeader = GetQuestLogTitle(i)
+                if not isHeader then
+                    SelectQuestLogEntry(i)
+                    return
+                end
+            end
+        end
+
+        function BenillaQuestLogList_Update()
+            local numEntries, numQuests = GetNumQuestLogEntries()
+            -- Ref QuestLogFrame.lua:123-124 with QUEST_LOG_COUNT_TEMPLATE inlined verbatim
+            -- (GlobalStrings.lua:3236): gold "Quests:" label, white count via the |cff markup; the
+            -- pill's middle piece then shrinks to the text (ref sizes it every update). The >10
+            -- guard skips the first-ever paint, where the host hasn't measured the string yet
+            -- (GetWidth 0 would collapse the pill; the next update — and every one after — sizes it).
+            getglobal("BenillaQuestLogCount"):SetText(string.format("Quests: |cffffffff%d/%d|r", numQuests, BENILLA_QUESTLOG_MAX_DISPLAY))
+            local countWidth = getglobal("BenillaQuestLogCount"):GetWidth()
+            if countWidth and countWidth > 10 then
+                getglobal("BenillaQuestLogCountMiddle"):SetWidth(countWidth)
+            end
+
+            -- v1 empty state (pin §2 drives a whole separate EmptyQuestLogFrame; simplified here to
+            -- one message string + hidden rows, see this file's header comment). NOTE: throughout
+            -- this file "hiding" text is a blank SetText(""), never a Show/Hide call — exactly how
+            -- `QuestFrame.xml`'s BenillaQuest_HideAll blanks its texts instead of hiding them. That
+            -- convention predates region Show/Hide (`region.rs` has the real pair now, and the
+            -- loader honours hidden= on regions); an empty string draws nothing, so it is equivalent
+            -- either way and the idiom stays for consistency with the sibling windows.
+            local abandonButton = getglobal("BenillaQuestLogAbandonButton")
+            if numEntries == 0 then
+                getglobal("BenillaQuestLogEmptyText"):SetText("Your quest log is empty.")
+                abandonButton:Disable()
+            else
+                getglobal("BenillaQuestLogEmptyText"):SetText("")
+                abandonButton:Enable()
+            end
+
+            -- Clamp the faux-scroll offset (pin §2's FauxScrollFrame_Update clamp).
+            local maxOffset = numEntries - BENILLA_QUESTLOG_ROWS
+            if maxOffset < 0 then maxOffset = 0 end
+            if questLogOffset > maxOffset then questLogOffset = maxOffset end
+            if questLogOffset < 0 then questLogOffset = 0 end
+
+            local selection = GetQuestLogSelection()
+
+            for i = 1, BENILLA_QUESTLOG_ROWS do
+                local button = getglobal("BenillaQuestLogTitle" .. i)
+                local index = i + questLogOffset
+                if index <= numEntries then
+                    local title, level, tag, isHeader, isCollapsed, isComplete = GetQuestLogTitle(index)
+                    local text = title or ""
+                    if isHeader then
+                        -- Ref QuestLogFrame.lua:146-159: a header shows the plus/minus fold icon
+                        -- (its NormalTexture — the row template declares the 16x16 LEFT+3 slot),
+                        -- the plus-glow hover art, no indent, no tag, no watch check.
+                        if isCollapsed then
+                            button:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                        else
+                            button:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                        end
+                        button.foldHighlight:SetTexture("Interface\\Buttons\\UI-PlusButton-Hilight")
+                    else
+                        -- Ref l.161-166: quest rows clear both state slots and indent two spaces.
+                        text = "  " .. text
+                        button:SetNormalTexture("")
+                        button.foldHighlight:SetTexture("")
+                        if isComplete == 1 then
+                            text = text .. " (Complete)"
+                        elseif isComplete == -1 then
+                            text = text .. " (Failed)"
+                        end
+                    end
+                    -- pin §2: the ref recolors via a SEPARATE right-side tag FontString; one combined
+                    -- string (title + tag suffix, above) is our v1 simplification — see this widget's
+                    -- own template comment.
+                    button.text:SetText(text)
+                    button.questIndex = index
+                    if isHeader then
+                        local c = QuestDifficultyColor["header"]
+                        button.text:SetTextColor(c.r, c.g, c.b)
+                    else
+                        local c = GetDifficultyColor(level)
+                        button.text:SetTextColor(c.r, c.g, c.b)
+                    end
+                    -- pin §2's $parentCheck: the per-row watch checkbox. SetTexture(path)/
+                    -- SetTexture(nil) as the show/hide toggle — the icon-slot blanking pattern
+                    -- (`BenillaBagSlot_Update` etc.). (Regions DO have Show/Hide these days —
+                    -- region.rs; this site just predates it and the pattern is equivalent.)
+                    if not isHeader and IsQuestWatched(index) then
+                        button.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+                    else
+                        button.check:SetTexture(nil)
+                    end
+                    button:Show()
+                else
+                    button.questIndex = nil
+                    button:Hide()
+                end
+            end
+
+            -- The selection highlight follows the row only while it is inside the visible scroll
+            -- window (pin §5, QuestLog_SetSelection QuestLogFrame.lua:330-340) — a selection scrolled
+            -- off-screen still holds state, but the highlight itself doesn't show until the list
+            -- scrolls back to it. Ref l.337-339 verbatim: the glow rides at (5,0) on the row and is
+            -- vertex-colored to the row's own difficulty color (that green bar in the ref shot IS
+            -- this vertex color on the white ADD gradient).
+            local hl = getglobal("BenillaQuestLogSelectHighlight")
+            if selection > questLogOffset and selection <= questLogOffset + BENILLA_QUESTLOG_ROWS
+                and selection <= numEntries then
+                local selButton = getglobal("BenillaQuestLogTitle" .. (selection - questLogOffset))
+                local _, selLevel, _, selIsHeader = GetQuestLogTitle(selection)
+                if selIsHeader then
+                    local c = QuestDifficultyColor["header"]
+                    getglobal("BenillaQuestLogSkillHighlight"):SetVertexColor(c.r, c.g, c.b)
+                else
+                    local c = GetDifficultyColor(selLevel)
+                    getglobal("BenillaQuestLogSkillHighlight"):SetVertexColor(c.r, c.g, c.b)
+                end
+                hl:SetPoint("TOPLEFT", selButton, "TOPLEFT", 5, 0)
+                hl:Show()
+            else
+                hl:Hide()
+            end
+        end
+
+        function BenillaQuestLogFrame_OnMouseWheel(delta)
+            -- WoW wheel convention: +1 per notch up, -1 down (ChatFrame.xml's own handler quotes the
+            -- same convention). Up = earlier entries (offset toward 0); down = later entries.
+            if delta > 0 then
+                questLogOffset = questLogOffset - 1
+            else
+                questLogOffset = questLogOffset + 1
+            end
+            BenillaQuestLogList_Update()
+        end
+
+        -- ── The detail page ──────────────────────────────────────────────────────────────────────
+        -- The detail pane's real ScrollFrame (decision 0112's mechanism, landed this session — this
+        -- window used to be a fixed layout that simply clipped past the window's bottom edge, this
+        -- file's header comment). `BenillaQuestLogDetailScroll`'s ScrollChild is
+        -- `BenillaQuestLogDetailChild`: every FontString/Button below that used to live flat on
+        -- `BenillaQuestLogFrame` now lives on that child instead (the 0088 §2 flat-frame constraint
+        -- this file's header comment quoted DIED with the 0112 resolver fixpoint — child frames
+        -- render their own `<Layers>` regions again), so its subtree clips at the ScrollFrame's own
+        -- rect and scrolls independent of the rest of the window.
+        --
+        -- The child has no *reported* height from the engine (a Frame's height is its own SetSize —
+        -- the resolver never grows a frame to fit content that overflows it, `script/mod.rs`'s
+        -- region-resolution comment), so `BenillaQuestLogDetail_ResizeChild` below sums one by hand
+        -- from the same fixed offsets/row heights this chain's own comments already cite, plus each
+        -- auto-height FontString's OWN `GetHeight()` (region.rs: measured from the host font atlas
+        -- once text is set — confirmed live, not a guess). That measurement is a FRAME LATE relative
+        -- to *this* call (Lua runs before `resolve()`/the measure round-trip each tick, `ui_script/
+        -- mod.rs`'s drive loop) — a BRAND-NEW selection's text sizes off zero (never yet measured)
+        -- on this very populate, understating the true height. Nothing guarantees a SECOND populate
+        -- ever runs for the same stable selection (`QUEST_LOG_UPDATE` only fires on an actual data
+        -- change — `ui_quest_log.rs`'s diffed feed — not every tick), so relying on "the next
+        -- update self-heals it" silently under-sizes the child forever once the log goes quiet
+        -- (caught on the ui-questlog capture: the reward text visibly clipped with the scrollbar
+        -- never appearing). The honest fix is `BenillaQuestLogDetail_OnUpdate` below: it re-sums
+        -- every frame the window is open (cheap — its own comment) until the measurement lands and
+        -- the sum stops changing, which converges within a couple of frames of any repaint. A
+        -- same-frame exact answer isn't available without an engine-side "resize to fit" primitive;
+        -- this converges honestly instead of asserting a fiction.
+
+        -- A FontString's content height for the resize sum: blank text is a TRUE 0 regardless of
+        -- what GetHeight() answers. Needed because `measured` (region.rs) is a one-way cache keyed
+        -- off the LAST non-blank text — SetText("") never clears it (this engine has no live "0,0"
+        -- the instant a string blanks, unlike the real client's font engine), so a freshly-blanked
+        -- FontString would otherwise still report its previous text's height. A NON-blank string
+        -- still reports last tick's measurement (this function's own header comment on the lag).
+        function BenillaQuestLogDetail_TextHeight(fontString)
+            local text = fontString:GetText()
+            if not text or text == "" then return 0 end
+            return fontString:GetHeight()
+        end
+
+        -- Sums the child's needed height from this ONE chain's own fixed offsets (cited per term,
+        -- each already documented at its own FontString/SetPoint above) + every auto-height
+        -- FontString's measured `GetHeight()` + `rewardSectionHeight` (BenillaQuestLogRewards_Update's
+        -- own return — its header-through-money layout has its own conditional branches, cheaper to
+        -- total right where those branches already live than to re-derive them here). Then
+        -- `UpdateScrollChildRect()` so the scrollbar (BenillaQuestLogDetailScroll_SyncBar) hears the
+        -- new range.
+        function BenillaQuestLogDetail_ResizeChild(objAnchorIndex, rewardSectionHeight)
+            detailObjAnchorIndex = objAnchorIndex
+            detailRewardHeight = rewardSectionHeight
+            local title = getglobal("BenillaQuestLogQuestTitle")
+            local objectivesText = getglobal("BenillaQuestLogObjectivesText")
+            local description = getglobal("BenillaQuestLogDescription")
+
+            local objSpan
+            if objAnchorIndex > 0 then
+                objSpan = BENILLA_QUESTLOG_DETAIL_OBJ_GAP
+                    + objAnchorIndex * BENILLA_QUESTLOG_DETAIL_OBJ_ROW
+                    + (objAnchorIndex - 1) * BENILLA_QUESTLOG_DETAIL_OBJ_STEP
+                    + BENILLA_QUESTLOG_DETAIL_OBJ_GAP
+            else
+                objSpan = BENILLA_QUESTLOG_DETAIL_OBJ_GAP
+            end
+
+            local height = BENILLA_QUESTLOG_DETAIL_TOP
+                + BenillaQuestLogDetail_TextHeight(title)
+                + 5 -- QuestTitle -> ObjectivesText
+                + BenillaQuestLogDetail_TextHeight(objectivesText)
+                + objSpan
+                + 18 -- DescriptionTitle: fixed span regardless of text (its own comment)
+                + 5  -- DescriptionTitle -> Description
+                + BenillaQuestLogDetail_TextHeight(description)
+                + 15 -- Description -> RewardTitleText
+                + rewardSectionHeight
+                + BENILLA_QUESTLOG_DETAIL_BOTTOM_PAD
+
+            if height ~= detailLastAppliedHeight then
+                detailLastAppliedHeight = height
+                getglobal("BenillaQuestLogDetailChild"):SetHeight(height)
+                getglobal("BenillaQuestLogDetailScroll"):UpdateScrollChildRect()
+            end
+        end
+
+        -- The re-check `BenillaQuestLogDetailScroll`'s own `<OnUpdate>` calls every frame the log
+        -- window is open (`UiScript::tick`'s OnUpdate gate gates it on effective-visibility, so this
+        -- costs nothing while the window is closed): re-sums the SAME inputs the last full populate
+        -- computed (`BenillaQuestLogDetail_ResizeChild`'s own header comment on why a single populate
+        -- isn't enough — the auto-height FontStrings' `GetHeight()` only reflects a NEW text's real
+        -- measurement one tick after this function first set it). `ResizeChild`'s own
+        -- detailLastAppliedHeight guard makes every one of these calls a no-op once the resize has
+        -- converged (no host measurement changed since the last check).
+        function BenillaQuestLogDetail_OnUpdate()
+            BenillaQuestLogDetail_ResizeChild(detailObjAnchorIndex, detailRewardHeight)
+        end
+
+        -- Steps the detail ScrollFrame by `delta` px — the wheel handler and both scrollbar arrow
+        -- buttons share this one path; SetVerticalScroll's own clamp (benilla-ui's `scrollframe.rs`)
+        -- does the range-bounding, this function just supplies the signed step.
+        function BenillaQuestLogDetailScroll_Step(delta)
+            local sf = getglobal("BenillaQuestLogDetailScroll")
+            sf:SetVerticalScroll(sf:GetVerticalScroll() + delta)
+        end
+
+        -- Repaints the minimal scrollbar (this window's own scrollbar comment: VISUAL only, no
+        -- drag) from the CURRENT offset/range — wired to both OnVerticalScroll (the value changed)
+        -- and OnScrollRangeChanged (the content resized), the ref UIPanelScrollFrameTemplate's own
+        -- pair (UIPanelTemplates.xml). Hides the whole bar when nothing overflows (range 0); disables
+        -- either arrow at its own end, mirroring the ref's identical two Enable/Disable calls off a
+        -- real Slider's min/max (there's no Slider here — this window's own comment on why).
+        function BenillaQuestLogDetailScroll_SyncBar()
+            local sf = getglobal("BenillaQuestLogDetailScroll")
+            local value = sf:GetVerticalScroll()
+            local range = sf:GetVerticalScrollRange()
+            local bar = getglobal("BenillaQuestLogDetailScrollBar")
+            if range <= 0 then
+                bar:Hide()
+                return
+            end
+            bar:Show()
+            if value > 0 then
+                getglobal("BenillaQuestLogDetailScrollUp"):Enable()
+            else
+                getglobal("BenillaQuestLogDetailScrollUp"):Disable()
+            end
+            if value < range then
+                getglobal("BenillaQuestLogDetailScrollDown"):Enable()
+            else
+                getglobal("BenillaQuestLogDetailScrollDown"):Disable()
+            end
+            local travel = BENILLA_QUESTLOG_SCROLL_TRACK_H - BENILLA_QUESTLOG_SCROLL_THUMB_H
+            local frac = value / range
+            getglobal("BenillaQuestLogDetailScrollThumb"):SetPoint(
+                "TOPLEFT", getglobal("BenillaQuestLogDetailScrollTrack"), "TOPLEFT", 0, -(frac * travel))
+        end
+
+        function BenillaQuestLogDetail_Clear()
+            getglobal("BenillaQuestLogQuestTitle"):SetText("")
+            getglobal("BenillaQuestLogObjectivesText"):SetText("")
+            getglobal("BenillaQuestLogDescriptionTitle"):SetText("")
+            getglobal("BenillaQuestLogDescription"):SetText("")
+            for i = 1, BENILLA_QUESTLOG_MAX_OBJECTIVES do
+                getglobal("BenillaQuestLogObjective" .. i):SetText("")
+            end
+            getglobal("BenillaQuestLogRewardTitleText"):SetText("")
+            getglobal("BenillaQuestLogItemChooseText"):SetText("")
+            getglobal("BenillaQuestLogItemReceiveText"):SetText("")
+            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
+                getglobal("BenillaQuestLogChoice" .. i):Hide()
+                getglobal("BenillaQuestLogReward" .. i):Hide()
+            end
+            BenillaMoney_Clear("BenillaQuestLogMoney")
+            -- Nothing selected: the header-only span (BenillaQuestLogRewards_Update's own
+            -- haveAnyReward==false case, 18px) is the right resize input here too.
+            BenillaQuestLogDetail_ResizeChild(0, 18)
+        end
+
+        -- Fill + show one reward/choice row. `getter` is GetQuestLogChoiceInfo or
+        -- GetQuestLogRewardInfo (pin §6): both answer the shared 5-tuple `name, texture, count,
+        -- quality, usable` — the same shape QuestFrame.xml's GetQuestItemInfo(kind, index) answers
+        -- for the questgiver panels, just under quest-log-specific getter names instead of one
+        -- kind-dispatched function.
+        function BenillaQuestLogItem_Set(button, getter, index)
+            local name, texture, count, quality, usable, itemId = getter(index)
+            button.index = index
+            button.itemId = itemId
+            button.quality = quality
+            button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
+            button.name:SetText(name or "...")
+            if (count or 1) > 1 then button.count:SetText(count) else button.count:SetText("") end
+            local r, g, b = 1, 1, 1
+            if quality and BenillaTooltip_QualityColor then r, g, b = BenillaTooltip_QualityColor(quality) end
+            button.name:SetTextColor(r, g, b)
+            button:Show()
+        end
+
+        -- The reward-panel layout, ported verbatim from the ref's shared `QuestFrameItems_Update`
+        -- (QuestFrame.lua:311-522, the same routine the live QuestFrame reward panel uses) — this
+        -- window's v1 subset of it: no spell-reward row (GetQuestLogRewardSpell has no v1 caller,
+        -- QuestLogFrame.xml's header comment), capped at BENILLA_QUESTLOG_MAX_ITEMS (6, half the ref's
+        -- MAX_NUM_ITEMS=10, same halving QuestFrame.xml's own BENILLA_QUEST_MAX_ITEMS does). Every
+        -- SetPoint below mirrors the ref's own line-for-line (cited per block) — this is the mechanism
+        -- the ref itself uses; a static XML band was never right, and now that a runtime SetPoint
+        -- re-propagates to dependents (commit d0c23c5) we don't need to fake it with fixed offsets.
+        --
+        -- RETURNS the section's own total height (RewardTitleText's top to the lowest visible row's
+        -- bottom) for `BenillaQuestLogDetail_ResizeChild` to add onto the rest of the chain — this is
+        -- the one place that already knows every conditional branch (choices-only / fixed-only /
+        -- money-only / any combination), cheaper to total right here than to re-derive elsewhere.
+        function BenillaQuestLogRewards_Update()
+            local numChoices = GetNumQuestLogChoices()
+            local numRewards = GetNumQuestLogRewards()
+            local money = GetQuestLogRewardMoney()
+
+            -- pin §3 / QuestFrame.lua:343-349: QuestLogRewardTitleText shown only if
+            -- numRewards+numChoices+money > 0. Text is toggled rather than Show/Hide — see
+            -- BenillaQuestLogList_Update's comment on this file's blank-text convention.
+            local header = getglobal("BenillaQuestLogRewardTitleText")
+            local haveAnyReward = numChoices > 0 or numRewards > 0 or (money and money > 0)
+            if haveAnyReward then
+                header:SetText("Rewards")
+            else
+                header:SetText("")
+            end
+
+            -- ── Choosable rewards (QuestFrame.lua:367-413): 2-per-row under ItemChooseText. Row 1
+            -- anchors below the header text (-3,-5); each following ODD index anchors BOTTOMLEFT of
+            -- the row two back (0,-2) — starts a new row; each EVEN index anchors TOPRIGHT of the
+            -- previous (1,0) — sits beside it. ──
+            local chooseText = getglobal("BenillaQuestLogItemChooseText")
+            local lastChoice = math.min(numChoices, BENILLA_QUESTLOG_MAX_ITEMS)
+            if numChoices > 0 then
+                chooseText:SetText("You may choose one of these rewards:")
+            else
+                chooseText:SetText("")
+            end
+            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
+                local choice = getglobal("BenillaQuestLogChoice" .. i)
+                if i <= lastChoice then
+                    BenillaQuestLogItem_Set(choice, GetQuestLogChoiceInfo, i)
+                    if i == 1 then
+                        choice:SetPoint("TOPLEFT", chooseText, "BOTTOMLEFT", -3, -5)
+                    elseif i % 2 == 1 then
+                        choice:SetPoint("TOPLEFT", getglobal("BenillaQuestLogChoice" .. (i - 2)), "BOTTOMLEFT", 0, -2)
+                    else
+                        choice:SetPoint("TOPLEFT", getglobal("BenillaQuestLogChoice" .. (i - 1)), "TOPRIGHT", 1, 0)
+                    end
+                else
+                    choice:Hide()
+                end
+            end
+
+            -- ── "You will receive:" / "You will also receive:" (QuestFrame.lua:454-473): shown
+            -- whenever there's a fixed reward OR money, even with zero fixed-reward rows (money-only).
+            -- Anchored below the LAST CHOICE ROW'S LEFT COLUMN (the shorter of the two columns) when
+            -- choices exist, else below the Rewards header directly. ──
+            local receiveText = getglobal("BenillaQuestLogItemReceiveText")
+            local haveFixed = numRewards > 0 or (money and money > 0)
+            if haveFixed then
+                if numChoices > 0 then
+                    receiveText:SetText("You will also receive:")
+                    local anchorIndex = lastChoice
+                    if anchorIndex % 2 == 0 then anchorIndex = anchorIndex - 1 end
+                    receiveText:SetPoint("TOPLEFT", getglobal("BenillaQuestLogChoice" .. anchorIndex), "BOTTOMLEFT", 3, -5)
+                else
+                    receiveText:SetText("You will receive:")
+                    receiveText:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 3, -5)
+                end
+            else
+                receiveText:SetText("")
+            end
+
+            -- ── Fixed rewards (QuestFrame.lua:474-513): row 1 anchors below ItemReceiveText (-3,-5);
+            -- the same odd/even 2-per-row pattern as the choice rows above, chained off each other. ──
+            local lastReward = math.min(numRewards, BENILLA_QUESTLOG_MAX_ITEMS)
+            for i = 1, BENILLA_QUESTLOG_MAX_ITEMS do
+                local reward = getglobal("BenillaQuestLogReward" .. i)
+                if i <= lastReward then
+                    BenillaQuestLogItem_Set(reward, GetQuestLogRewardInfo, i)
+                    if i == 1 then
+                        reward:SetPoint("TOPLEFT", receiveText, "BOTTOMLEFT", -3, -5)
+                    elseif i % 2 == 1 then
+                        reward:SetPoint("TOPLEFT", getglobal("BenillaQuestLogReward" .. (i - 2)), "BOTTOMLEFT", 0, -2)
+                    else
+                        reward:SetPoint("TOPLEFT", getglobal("BenillaQuestLogReward" .. (i - 1)), "TOPRIGHT", 1, 0)
+                    end
+                else
+                    reward:Hide()
+                end
+            end
+
+            -- Money: a STATIC XML anchor (LEFT of ItemReceiveText's RIGHT, +15,0 — ref
+            -- QuestLogFrame.xml:896-903) tracks receiveText's runtime SetPoint above via the resolver's
+            -- fixpoint re-propagation; only the coin fill/clear is Lua's job here.
+            if money and money > 0 then
+                BenillaMoney_Set("BenillaQuestLogMoney", money, true)
+            else
+                BenillaMoney_Clear("BenillaQuestLogMoney")
+            end
+
+            -- The section's total height, mirroring the branches above term-for-term (a money-only
+            -- coin row adds no height of its own — it rides receiveText's own row, LEFT of it, not
+            -- a new one — this window's own coin-anchor comment just above).
+            local height = 18 -- RewardTitleText: fixed span regardless of text (its own comment)
+            if haveAnyReward then
+                if numChoices > 0 then
+                    local numChoiceRows = math.ceil(lastChoice / 2)
+                    height = height
+                        + 5 -- header -> chooseText
+                        + BenillaQuestLogDetail_TextHeight(chooseText)
+                        + 5 -- chooseText -> choice row 1
+                        + numChoiceRows * 41 + (numChoiceRows - 1) * 2
+                end
+                if haveFixed then
+                    height = height + 5 -- (last choice row, or the header) -> receiveText
+                        + BenillaQuestLogDetail_TextHeight(receiveText)
+                    if numRewards > 0 then
+                        local numRewardRows = math.ceil(lastReward / 2)
+                        height = height + 5 -- receiveText -> reward row 1
+                            + numRewardRows * 41 + (numRewardRows - 1) * 2
+                    end
+                end
+            end
+            return height
+        end
+
+        -- pin §3/§5's doNotScroll asymmetry (QuestLogFrame.lua:348/455-457, QUESTLOG-PIN.md's own
+        -- section on it): a MANUAL reselect (`BenillaQuestLogTitle_OnClick`, no arg here) always
+        -- snaps the detail pane's scroll back to the top; the QUEST_LOG_UPDATE data-refresh path
+        -- (`BenillaQuestLogFrame_OnEvent` below) passes `doNotScroll=true` so a quest updating while
+        -- already being read doesn't yank the player's scroll position out from under them.
+        function BenillaQuestLogDetail_Update(doNotScroll)
+            local selection = GetQuestLogSelection()
+            if selection == 0 or selection > GetNumQuestLogEntries() then
+                BenillaQuestLogDetail_Clear()
+                if not doNotScroll then
+                    getglobal("BenillaQuestLogDetailScroll"):SetVerticalScroll(0)
+                end
+                return
+            end
+
+            -- pin §3, QuestLog_UpdateQuestDetails (QuestLogFrame.lua:349-356): title from
+            -- GetQuestLogTitle's FIRST return only; " - (Failed)" appended when failed.
+            local title = GetQuestLogTitle(selection)
+            if IsCurrentQuestFailed() then
+                title = (title or "") .. " - (Failed)"
+            end
+            getglobal("BenillaQuestLogQuestTitle"):SetText(title or "")
+
+            -- pin §3: description is GetQuestLogQuestText()'s FIRST return, the objectives FLAVOR
+            -- paragraph (not the leaderboard lines) is the second.
+            local description, objectivesText = GetQuestLogQuestText()
+            getglobal("BenillaQuestLogObjectivesText"):SetText(objectivesText or "")
+            getglobal("BenillaQuestLogDescription"):SetText(description or "")
+            -- Lua-managed header (ref text=QUEST_DESCRIPTION is static since the ref always has a real
+            -- selection whenever this pane is even visible; our flat window keeps the same FontString
+            -- alive with no selection, so THIS function — not a static `text=` — owns "Description",
+            -- blanked by BenillaQuestLogDetail_Clear on the empty-log path).
+            getglobal("BenillaQuestLogDescriptionTitle"):SetText("Description")
+
+            local numObjectives = GetNumQuestLeaderBoards()
+            for i = 1, BENILLA_QUESTLOG_MAX_OBJECTIVES do
+                local line = getglobal("BenillaQuestLogObjective" .. i)
+                if i <= numObjectives then
+                    local text, kind, finished = GetQuestLogLeaderBoard(i)
+                    local display = text
+                    if not display or display == "" then display = kind or "" end
+                    -- Ref QuestLogFrame.lua:389-394 verbatim: finished objectives go (0.2,0.2,0.2)
+                    -- with the "(Complete)" suffix, unfinished stay (0,0,0) — both on the parchment.
+                    if finished then
+                        display = display .. " (Complete)"
+                        line:SetTextColor(0.2, 0.2, 0.2)
+                    else
+                        line:SetTextColor(0, 0, 0)
+                    end
+                    line:SetText(display)
+                else
+                    line:SetText("")
+                end
+            end
+
+            -- pin §3, QuestLog_UpdateQuestDetails (QuestLogFrame.lua:414-424): DescriptionTitle is
+            -- runtime-SetPoint'd off the LAST actually-used objective slot, not a static chain off
+            -- Objective10 — a quest with fewer than 10 objectives would otherwise drag this header
+            -- down by however much dead space the unused tail slots add (this window's own comment
+            -- on the FontString). No RequiredMoney branch here (this file's documented v1 gap: no
+            -- widget backs GetQuestLogRequiredMoney yet); no timer branch (no timed-quest countdown,
+            -- same v1 gap as QuestLogObjective1's own fixed anchor) — those two ref branches collapse
+            -- to the ref's own final "else" (anchor to ObjectivesText) whenever they don't apply.
+            local objAnchorIndex = math.min(numObjectives, BENILLA_QUESTLOG_MAX_OBJECTIVES)
+            local descTitle = getglobal("BenillaQuestLogDescriptionTitle")
+            if objAnchorIndex > 0 then
+                descTitle:SetPoint("TOPLEFT", getglobal("BenillaQuestLogObjective" .. objAnchorIndex), "BOTTOMLEFT", 0, -10)
+            else
+                descTitle:SetPoint("TOPLEFT", getglobal("BenillaQuestLogObjectivesText"), "BOTTOMLEFT", 0, -10)
+            end
+
+            local rewardHeight = BenillaQuestLogRewards_Update()
+            BenillaQuestLogDetail_ResizeChild(objAnchorIndex, rewardHeight)
+            if not doNotScroll then
+                getglobal("BenillaQuestLogDetailScroll"):SetVerticalScroll(0)
+            end
+        end
+
+        -- ── The always-visible quest-watch tracker (BenillaQuestWatchFrame) ─────────────────────────
+        -- Ref QuestWatch_Update (QuestLogFrame.lua:602-663), transcribed onto the flat 30-line pool
+        -- (the frame's own XML comment): every paint re-anchors each used line — a quest TITLE drops
+        -- -5 below the previous line (ref -4 under its 13px boxes; ours are measured 12s, same
+        -- pitch), an OBJECTIVE drops -1 (ref 0) — writes " - "-prefixed objective rows colored by
+        -- the ref law (finished WHITE, unfinished 0.8-gray; the title dark-gold 0.75/0.61/0 until
+        -- every objective completes, then full gold), sizes the frame to the content (width
+        -- maxW+10 growing LEFT off the TOPRIGHT anchor, height lines×13), recolors the log
+        -- window's Track dot, and hides the pool's trailing lines. `GetQuestIndexForWatch(w)`
+        -- answers each watch's CURRENT log index (it follows the quest across a log shuffle —
+        -- `quest_log.rs`'s id-keyed watch set), exactly like the ref.
+        function BenillaQuestWatch_Update()
+            local watchTextIndex = 1
+            local maxWidth = 0
+            for i = 1, GetNumQuestWatches() do
+                local questIndex = GetQuestIndexForWatch(i)
+                if questIndex then
+                    local numObjectives = GetNumQuestLeaderBoards(questIndex)
+                    if numObjectives > 0 then
+                        local titleLine = getglobal("BenillaQuestWatchLine" .. watchTextIndex)
+                        titleLine:SetText(GetQuestLogTitle(questIndex) or "")
+                        if watchTextIndex > 1 then
+                            titleLine:ClearAllPoints()
+                            titleLine:SetPoint("TOPLEFT", getglobal("BenillaQuestWatchLine" .. (watchTextIndex - 1)), "BOTTOMLEFT", 0, -5)
+                        end
+                        titleLine:Show()
+                        if titleLine:GetStringWidth() > maxWidth then maxWidth = titleLine:GetStringWidth() end
+                        watchTextIndex = watchTextIndex + 1
+                        local objectivesCompleted = 0
+                        for j = 1, numObjectives do
+                            local text, kind, finished = GetQuestLogLeaderBoard(j, questIndex)
+                            if not text or text == "" then text = kind or "" end
+                            local line = getglobal("BenillaQuestWatchLine" .. watchTextIndex)
+                            line:SetText(" - " .. text)
+                            if finished then
+                                line:SetTextColor(1, 1, 1)
+                                objectivesCompleted = objectivesCompleted + 1
+                            else
+                                line:SetTextColor(0.8, 0.8, 0.8)
+                            end
+                            line:ClearAllPoints()
+                            line:SetPoint("TOPLEFT", getglobal("BenillaQuestWatchLine" .. (watchTextIndex - 1)), "BOTTOMLEFT", 0, -1)
+                            line:Show()
+                            if line:GetStringWidth() > maxWidth then maxWidth = line:GetStringWidth() end
+                            watchTextIndex = watchTextIndex + 1
+                        end
+                        if objectivesCompleted == numObjectives then
+                            titleLine:SetTextColor(1, 0.82, 0)
+                        else
+                            titleLine:SetTextColor(0.75, 0.61, 0)
+                        end
+                    end
+                end
+            end
+            -- The log window's Track dot (the ref's tracking-indicator tail): green with ≥1
+            -- watch, red with none.
+            if GetNumQuestWatches() > 0 then
+                getglobal("BenillaQuestLogTrackTracking"):SetVertexColor(0, 1.0, 0)
+            else
+                getglobal("BenillaQuestLogTrackTracking"):SetVertexColor(1.0, 0, 0)
+            end
+            local frame = getglobal("BenillaQuestWatchFrame")
+            if watchTextIndex == 1 then
+                frame:Hide()
+                return
+            end
+            frame:Show()
+            frame:SetHeight(watchTextIndex * 13)
+            if maxWidth > 0 then frame:SetWidth(maxWidth + 10) end
+            -- The GetStringWidth reads above are extract-measured — a frame stale after a text
+            -- change — so the OnUpdate sizing tail re-reads them for two frames and converges.
+            frame.used_lines = watchTextIndex - 1
+            frame.resize_pending = 2
+            for i = watchTextIndex, BENILLA_QUESTWATCH_LINES do
+                getglobal("BenillaQuestWatchLine" .. i):Hide()
+            end
+        end
+
+        -- ── Auto quest watching (ref QuestLogFrame.lua:702-786; AUTO_QUEST_WATCH defaults "1" —
+        -- "Quests are automatically watched for 5 minutes when you achieve a quest objective.").
+        -- BENILLA_QUEST_PROGRESS(questLogIndex) — our own engine event — arms a 300 s timed
+        -- watch: a manual shift-click watch is permanent (no timer entry) and never downgraded,
+        -- fresh progress re-arms a timed one, expiry unwatches, and a full watch list evicts the
+        -- timed entry nearest expiry (never a manual one). Timers key by quest TITLE (stable
+        -- across log shuffles; the engine's watch set is id-keyed — the ref's index-keyed
+        -- QUEST_WATCH_LIST bookkeeping is transcribed to its observable law, not its
+        -- iterate-while-mutating quirks).
+        --
+        -- Why NOT the native QUEST_WATCH_UPDATE the ref Lua consumes: the §5-verified engine
+        -- (wow-re quest-update-ui-feedback-law.md, handler 0x5e5ad0) fires that event with the
+        -- quest's 1-based WATCH-LIST position — 0 when unwatched — while the ref's
+        -- AutoQuestWatch_Update(arg1) treats arg1 as a quest-LOG index: the shipped 1.12 chain
+        -- is broken at exactly that seam (an unwatched quest's progress arrives as 0, and
+        -- AddQuestWatch(0) no-ops), so the advertised auto-watch never actually adds a quest.
+        -- We keep the advertised behavior — the feature the option tooltip documents — off the
+        -- benilla event that carries what the Lua needed; a deliberate intent-over-letter
+        -- divergence (the fold-back decision record).
+        BENILLA_AUTO_QUEST_WATCH = true
+        BENILLA_QUEST_WATCH_TIMER = 300
+        BENILLA_QUEST_WATCH_TIMERS = {}
+
+        function BenillaQuestWatch_RemoveByTitle(title)
+            for w = 1, GetNumQuestWatches() do
+                local questIndex = GetQuestIndexForWatch(w)
+                if questIndex and GetQuestLogTitle(questIndex) == title then
+                    RemoveQuestWatch(questIndex)
+                    return
+                end
+            end
+        end
+
+        function BenillaAutoQuestWatch_Update(questIndex)
+            if not BENILLA_AUTO_QUEST_WATCH or not questIndex then return end
+            local title = GetQuestLogTitle(questIndex)
+            if not title then return end
+            if IsQuestWatched(questIndex) then
+                if BENILLA_QUEST_WATCH_TIMERS[title] then
+                    BENILLA_QUEST_WATCH_TIMERS[title] = BENILLA_QUEST_WATCH_TIMER
+                end
+                return
+            end
+            if GetNumQuestLeaderBoards(questIndex) == 0 then return end
+            if GetNumQuestWatches() >= BENILLA_QUESTLOG_MAX_WATCHES then
+                local lowestTitle, lowestTimer = nil, BENILLA_QUEST_WATCH_TIMER + 1
+                for t, timer in pairs(BENILLA_QUEST_WATCH_TIMERS) do
+                    if timer < lowestTimer then lowestTitle, lowestTimer = t, timer end
+                end
+                if not lowestTitle then return end -- every slot is a manual watch: no eviction
+                BENILLA_QUEST_WATCH_TIMERS[lowestTitle] = nil
+                BenillaQuestWatch_RemoveByTitle(lowestTitle)
+            end
+            AddQuestWatch(questIndex)
+            BENILLA_QUEST_WATCH_TIMERS[title] = BENILLA_QUEST_WATCH_TIMER
+        end
+
+        function BenillaAutoQuestWatch_OnUpdate(elapsed)
+            local expired = nil
+            for title, timer in pairs(BENILLA_QUEST_WATCH_TIMERS) do
+                if timer - elapsed <= 0 then
+                    expired = expired or {}
+                    table.insert(expired, title)
+                else
+                    BENILLA_QUEST_WATCH_TIMERS[title] = timer - elapsed
+                end
+            end
+            if expired then
+                for _, title in ipairs(expired) do
+                    BENILLA_QUEST_WATCH_TIMERS[title] = nil
+                    BenillaQuestWatch_RemoveByTitle(title)
+                end
+                BenillaQuestWatch_Update()
+                BenillaQuestLogList_Update() -- the log's row ticks follow (ref: QuestLog_Update)
+            end
+        end
+
+        function BenillaQuestWatchFrame_OnLoad(frame)
+            -- Repaints on all three: QUEST_LOG_UPDATE (every log change — the ref's own
+            -- QuestLog_OnEvent repaints QuestWatch_Update() off it too, QuestLogFrame.lua:57-70),
+            -- the native QUEST_WATCH_UPDATE (arg1 = the WATCH-LIST index, 0 if unwatched — kept
+            -- for repaint + any future addon, never for auto-watch: the divergence comment
+            -- above), and BENILLA_QUEST_PROGRESS (arg1 = the quest-LOG index) which feeds the
+            -- auto-watch.
+            frame:RegisterEvent("QUEST_LOG_UPDATE")
+            frame:RegisterEvent("QUEST_WATCH_UPDATE")
+            frame:RegisterEvent("BENILLA_QUEST_PROGRESS")
+            BenillaQuestWatch_Update()
+        end
+
+        function BenillaQuestWatchFrame_OnEvent(frame)
+            if event == "BENILLA_QUEST_PROGRESS" then
+                BenillaAutoQuestWatch_Update(arg1)
+                BenillaQuestWatch_Update()
+            elseif event == "QUEST_WATCH_UPDATE" or event == "QUEST_LOG_UPDATE" then
+                BenillaQuestWatch_Update()
+            end
+        end
+
+        -- The watch frame's OnUpdate carries the ref's auto-watch timer decay (ref
+        -- QuestLogFrame.xml:1140-1144 — the ALWAYS-VISIBLE frame hosts it, so timers tick with
+        -- the log closed; hidden-with-no-watches is safe, an empty watch set has no timers) plus
+        -- our sizing-convergence tail (BenillaQuestWatch_Update's own comment).
+        function BenillaQuestWatchFrame_OnUpdate(frame, elapsed)
+            BenillaAutoQuestWatch_OnUpdate(elapsed or 0)
+            if frame.resize_pending and frame.resize_pending > 0 then
+                frame.resize_pending = frame.resize_pending - 1
+                local maxw = 0
+                for i = 1, (frame.used_lines or 0) do
+                    local w = getglobal("BenillaQuestWatchLine" .. i):GetStringWidth()
+                    if w > maxw then maxw = w end
+                end
+                if maxw > 0 then frame:SetWidth(maxw + 10) end
+            end
+        end
+
+        -- ── Window lifecycle ─────────────────────────────────────────────────────────────────────
+        -- `doNotScroll` (pin §5's asymmetry, threaded through to `BenillaQuestLogDetail_Update`):
+        -- absent/falsy for a manual call (a row click, the window's own OnShow); `true` from the
+        -- QUEST_LOG_UPDATE event handler below.
+        function BenillaQuestLogFrame_Update(doNotScroll)
+            BenillaQuestLog_SetFirstValidSelection()
+            BenillaQuestLogList_Update()
+            -- pin §5, QuestLog_OnEvent (QuestLogFrame.lua:57-63): the detail pane only repaints while
+            -- the window is visible — the list rebuild above runs unconditionally either way.
+            if getglobal("BenillaQuestLogFrame"):IsVisible() then
+                BenillaQuestLogDetail_Update(doNotScroll)
+            end
+        end
+
+        function BenillaQuestLogFrame_OnLoad(frame)
+            frame:RegisterEvent("QUEST_LOG_UPDATE")
+        end
+
+        function BenillaQuestLogFrame_OnEvent(frame)
+            if event == "QUEST_LOG_UPDATE" then
+                -- pin §5: the event-driven refresh path passes doNotScroll=true (QuestLogFrame.lua:62
+                -- passes `1`) — a quest updating while already being read must not yank the reader's
+                -- scroll position back to the top.
+                BenillaQuestLogFrame_Update(true)
+            end
+        end
+
+        -- pin §8, QuestLogFrame.lua:24-30 — the app's 'L' binding already calls this
+        -- (ui_script/mod.rs).
+        function ToggleQuestLog()
+            local frame = getglobal("BenillaQuestLogFrame")
+            if frame:IsVisible() then
+                HideUIPanel(frame)
+            else
+                ShowUIPanel(frame)
+            end
+        end
+
+        function BenillaQuestLogCloseButton_OnClick()
+            HideUIPanel(getglobal("BenillaQuestLogFrame"))
+        end
+
+        -- ── The abandon two-step (mark on click → confirm on Yes) — the ref's ABANDON_QUEST
+        -- entry on the shared StaticPopup engine (UiPanels.xml, decision 0308 §3), verbatim from
+        -- StaticPopup.lua:749-761: ABANDON_QUEST_CONFIRM 'Abandon "%s"?' (GlobalStrings.lua:5),
+        -- OnAccept = AbandonQuest() + the igQuestLogAbandonQuest kit. exclusive is v1-inert
+        -- (engine header note). ──────────────────────────────────────────────────────────────────
+        StaticPopupDialogs["ABANDON_QUEST"] = {
+            text = "Abandon \"%s\"?", -- ABANDON_QUEST_CONFIRM
+            button1 = "Yes",          -- YES
+            button2 = "No",           -- NO
+            OnAccept = function()
+                AbandonQuest()
+                PlaySound("igQuestLogAbandonQuest")
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+            hideOnEscape = 1,
+        }
+
+        function BenillaQuestLogAbandonButton_OnClick()
+            if GetQuestLogSelection() == 0 then return end
+            -- pin §4, QuestLogFrame.xml:463-472: SetAbandonQuest() pins the click-time selection;
+            -- GetAbandonQuestItems() is always nil in v1 (`quest_log.rs`), so only the plain
+            -- ABANDON_QUEST popup path exists — never ABANDON_QUEST_WITH_ITEMS. (Ref
+            -- QuestLogFrame.lua's own click handler shows the same dialog with the name arg.)
+            SetAbandonQuest()
+            StaticPopup_Show("ABANDON_QUEST", GetAbandonQuestName() or "")
+        end
+    ]]></Script>
+
+    <!--
+        One reward/choice item row — a byte-for-byte copy of `QuestFrame.xml`'s
+        `BenillaQuestItemTemplate` (ref `QuestItemTemplate`, QuestFrameTemplates.xml l.85-166),
+        DUPLICATED rather than inherited across files: this window's own tests load only its own
+        dependency list (Fonts/UiPanels/MerchantFrame — the money helpers), the same per-window
+        isolation this repo's other `*_tests.rs` already keep (e.g. `bag_tests.rs` loads
+        `MerchantFrame.xml` for its money helper only, never `QuestFrame.xml`). The real client also
+        keeps a SEPARATE `QuestLogRewardItemTemplate` from the live `QuestItemTemplate` (pin §3) — so
+        this mirrors the ref's own duplication, not just an engine workaround. Keep the two shapes in
+        sync by hand if either is revisited.
+    -->
+    <Button name="BenillaQuestLogItemTemplate" virtual="true" hidden="true">
+        <!-- Ref-verbatim geometry (QuestFrameTemplates.xml:85-138): a bare 39×39 icon at TOPLEFT
+             (no slot-well texture behind it — the earlier `UI-EmptySlot` here was our own addition
+             and read as a heavy black box on the parchment), the name plate overlapping the icon's
+             right edge by 10, and the name in GameFontHighlight (12px — not the Small variant). -->
+        <Size><AbsDimension x="147" y="41"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIconTexture">
+                    <Size><AbsDimension x="39" y="39"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture name="$parentNameFrame" file="Interface\QuestFrame\UI-QuestItemNameFrame">
+                    <Size><AbsDimension x="128" y="64"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentIconTexture" relativePoint="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+                <FontString name="$parentName" inherits="GameFontHighlight" justifyH="LEFT">
+                    <Size><AbsDimension x="90" y="36"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentNameFrame"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                    <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentIconTexture"><Offset><AbsDimension x="-4" y="1"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <!-- No HighlightTexture: the ref QuestLogRewardItemTemplate (QuestLogFrame.xml:108-123)
+             adds only tooltip/click scripts to QuestItemTemplate — reward rows never glow on
+             hover, exactly like the giver window's twin template. -->
+        <Scripts>
+            <OnLoad>
+                local n = self:GetName()
+                self.icon = getglobal(n .. "IconTexture")
+                self.name = getglobal(n .. "Name")
+                self.count = getglobal(n .. "Count")
+            </OnLoad>
+            <!-- The shared id-keyed item tooltip (ref QuestLogRewardItemTemplate OnEnter →
+                 GameTooltip:SetQuestLogItem — the same C++ renderer every item hover uses). -->
+            <OnEnter>
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetItemById(self.itemId, self.name:GetText(), self.quality)
+                GameTooltip:Show()
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!--
+        One list row (pin §2's QuestLogTitleButtonTemplate, QuestLogFrame.xml:4-107, ~300×16). Text
+        lives on a NAMED `$parentText` FontString (not the auto ButtonText slot — same convention
+        `GossipFrame.xml`'s `BenillaGossipRowTemplate` uses for its `$parentLabel`), so it can carry
+        an explicit LEFT justify. v1 simplification: the ref's Complete/Failed tag rides a SEPARATE
+        right-justified `$parentTag` FontString the client shrinks the title to make room for; we
+        append the tag straight onto the one title string instead (`BenillaQuestLogList_Update`) —
+        simpler, no dynamic width math, costs only the tag not being right-flush.
+        State art is now ref-verbatim (QuestLogTitleButtonTemplate, ref QuestLogFrame.xml:68-107):
+        the 16x16 plus/minus fold icon slot at LEFT+3 is the button's NormalTexture (the Lua swaps
+        Plus/Minus per header fold state and CLEARS it on quest rows — SetNormalTexture("")), the
+        16x16 UI-PlusButton-Hilight at the same spot is the ONLY hover art (quest rows clear it
+        too — the ref has NO row-wide hover glow), and the text starts at LEFT+20 (the real
+        indent; quest rows add the ref's own two-space prefix on top). The PERSISTENT selection bar
+        is the separate `BenillaQuestLogSelectHighlight` frame `BenillaQuestLogList_Update` moves.
+
+        `$parentCheck` (pin §2, ref `QuestLogFrame.xml:34-45`) is the per-row watch checkbox — a 16×16
+        `UI-CheckBox-Check`, no `file=` here (where the ref uses `hidden="true"`): it starts with
+        NO texture bound and is entirely SetTexture-driven from first paint. That shape dates from
+        before Texture regions had Show/Hide; `region.rs` has the real pair now and the loader
+        honours `hidden=` on regions, so the ref's exact shape is available here if this ever wants
+        it — the bind-driven form works and is left alone. SEAT (the director's
+        ref A/B — the first build parked it in a left gutter): the ref places the check just past
+        the TITLE'S INK — `QuestLog.lua:211/224` computes `LEFT of the row + dummyTextWidth + 24`,
+        and with the ref's text inset of 20 that nets to `ink end + 4`. We get the same geometry
+        from the anchor graph instead of the Lua dummy-measure hack: the title FontString is
+        width-less (its resolved rect hugs its host-measured ink — the measure round-trip), and
+        the check anchors LEFT → the title's RIGHT at +4. Known deviation, unchanged: the ref
+        shrinks the title width to fit the right-justified tag (its `textWidth` cap); our combined
+        title+tag string means a "(Complete)" row seats the check after the tag, not between
+        title and tag.
+    -->
+    <Button name="BenillaQuestLogTitleTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="300" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentText" inherits="GameFontNormal" justifyH="LEFT">
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <Texture name="$parentCheck">
+                    <Size><AbsDimension x="16" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentText" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-MinusButton-UP">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <Scripts>
+            <OnLoad>
+                self.text = getglobal(self:GetName() .. "Text")
+                self.check = getglobal(self:GetName() .. "Check")
+                -- Via the state-texture getter (era API), not getglobal: the loader doesn't yet
+                -- publish a named state texture's `name=` as a global (known gap — Layers regions
+                -- publish, state slots don't).
+                self.foldHighlight = self:GetHighlightTexture()
+                -- Both buttons must reach OnClick (the default set is LeftButtonUp only) — the same
+                -- convention `BagFrame.xml`'s `BenillaBagSlot_OnLoad` uses for its own left/right split.
+                self:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            </OnLoad>
+            <OnClick>BenillaQuestLogTitle_OnClick(self, arg1)</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- A panel action button (Abandon/Exit/Yes/No) — the UIPanelButtonTemplate face from
+         `QuestFrame.xml`'s `BenillaQuestPanelButtonTemplate`, duplicated for the same per-window
+         test-isolation reason as `BenillaQuestLogItemTemplate` above. UNLIKE the giver window's
+         template this one is NOT hidden="true": the giver's panel-switch Lua re-Show()s each
+         panel's pair every switch, but this window's Abandon/Exit are always-visible chrome (ref
+         QuestLogFrame.xml:451/482) with no code path that would ever Show() them — inheriting
+         hidden left them invisible (0109 look fix; caught on the ui-questlog capture). -->
+    <Button name="BenillaQuestLogPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="80" y="22"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaQuestLogFrame" hidden="true">
+        <!-- The real 384×512 window (pin §1). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints this
+             to the left slot on open, exactly like Gossip/Merchant/Quest. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- pin §1: 64×64 book icon, TOPLEFT (4,-4). -->
+                <Texture file="Interface\QuestFrame\UI-QuestLog-BookIcon">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="4" y="-4"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- pin §1: the four book-panel quadrants, each pinned to its corner, whole-texture. -->
+                <Texture file="Interface\QuestFrame\UI-QuestLog-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestLog-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"/></Anchors></Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestLog-BotLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+                <Texture file="Interface\QuestFrame\UI-QuestLog-BotRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/></Anchors></Texture>
+
+                <!-- pin §1: title, TOP (0,-15), GameFontHighlight, text token QUEST_LOG → "Quest Log". -->
+                <FontString name="BenillaQuestLogTitleText" inherits="GameFontHighlight" justifyH="CENTER" text="Quest Log">
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- pin §1, transcribed byte-for-byte (ref QuestLogFrame.xml:204-243): the quest-count
+                     pill is the Common-Input-Border 3-texture trio + a FontString RIGHT of the right
+                     piece — REPLACING this window's old bare text at (-30,-16), which sat inside the
+                     close X's hit area and visually collided with it. -->
+                <Texture name="BenillaQuestLogCountRight" file="Interface\Common\Common-Input-Border">
+                    <Size><AbsDimension x="8" y="20"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-47" y="-41"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
+                </Texture>
+                <Texture name="BenillaQuestLogCountMiddle" file="Interface\Common\Common-Input-Border">
+                    <Size><AbsDimension x="100" y="20"/></Size>
+                    <Anchors><Anchor point="RIGHT" relativeTo="BenillaQuestLogCountRight" relativePoint="LEFT"/></Anchors>
+                    <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+                </Texture>
+                <Texture name="BenillaQuestLogCountLeft" file="Interface\Common\Common-Input-Border">
+                    <Size><AbsDimension x="8" y="20"/></Size>
+                    <Anchors><Anchor point="RIGHT" relativeTo="BenillaQuestLogCountMiddle" relativePoint="LEFT"/></Anchors>
+                    <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+                </Texture>
+                <FontString name="BenillaQuestLogCount" inherits="GameFontNormalSmall" justifyH="RIGHT">
+                    <Anchors><Anchor point="RIGHT" relativeTo="BenillaQuestLogCountRight" relativePoint="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- v1 empty state (pin §2's EmptyQuestLogFrame, simplified — this file's header
+                     comment): one centered message over the row area. No `text=`/`hidden=` here —
+                     `BenillaQuestLogList_Update` owns this entirely via SetText(""), this file's
+                     blank-text convention (see that function's comment). -->
+                <FontString name="BenillaQuestLogEmptyText" inherits="GameFontNormal" justifyH="CENTER">
+                    <Size><AbsDimension x="300" y="0"/></Size>
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-90"/></Offset></Anchor></Anchors>
+                </FontString>
+
+                <!-- Detail page (pin §3): NOW lives on `BenillaQuestLogDetailChild`, a real
+                     ScrollFrame's scroll child (`BenillaQuestLogDetailScroll`, below in this window's
+                     own `<Frames>`) — the 0088 §2 flat-frame constraint this file used to quote here
+                     DIED with the 0112 resolver fixpoint (child frames render their own `<Layers>`
+                     regions again), so the whole chain (QuestTitle → ItemReceiveText, the choice/
+                     reward Buttons, the money coins) moved there verbatim; only the FIRST element's
+                     anchor changed (the child's own TOPLEFT, ref :624-635's offset 5,-5 — see the
+                     child's own comment). Nothing detail-page-shaped remains in this window's own
+                     `<Layers>`. -->
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The scroll-wheel catcher (this file's header comment) — MUST be first so every real
+                 widget below out-ranks it in hit-testing. -->
+            <Button name="BenillaQuestLogWheelCatcher">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
+                </Anchors>
+                <Scripts><OnMouseWheel>BenillaQuestLogFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
+            </Button>
+
+            <!-- pin §1: the top-right close X (UIPanelCloseButton in the ref; our engine ships no such
+                 template — QuestFrame.xml/BagFrame.xml already draw it by hand on the same art). -->
+            <Button name="BenillaQuestLogCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaQuestLogCloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- The "All" fold-all tab (ref QuestLogExpandButtonFrame/QuestLogCollapseAllButton,
+                 QuestLogFrame.xml:247-323): the sort-tab art trio behind a row-template button at
+                 (70,-48) — its own +/- NormalTexture slot doubles as the all-state icon. The ref's
+                 sibling "Track Quest" checkbox (QuestLogTrack) is a named deferral: our watch
+                 toggle is the row right-click until the track-checkbox arc lands. -->
+            <Frame name="BenillaQuestLogExpandButtonFrame">
+                <Size><AbsDimension x="54" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-48"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <Button name="BenillaQuestLogCollapseAllButton" inherits="BenillaQuestLogTitleTemplate" hidden="false" text="All">
+                        <Size><AbsDimension x="40" y="22"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="BenillaQuestLogExpandTabLeft" file="Interface\QuestFrame\UI-QuestLogSortTab-Left">
+                                    <Size><AbsDimension x="8" y="32"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-6" y="8"/></Offset></Anchor></Anchors>
+                                </Texture>
+                                <Texture name="BenillaQuestLogExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle">
+                                    <Size><AbsDimension x="38" y="32"/></Size>
+                                    <Anchors><Anchor point="LEFT" relativeTo="BenillaQuestLogExpandTabLeft" relativePoint="RIGHT"/></Anchors>
+                                </Texture>
+                                <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right">
+                                    <Size><AbsDimension x="8" y="32"/></Size>
+                                    <Anchors><Anchor point="LEFT" relativeTo="BenillaQuestLogExpandTabMiddle" relativePoint="RIGHT"/></Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnClick>BenillaQuestLogCollapseAllButton_OnClick()</OnClick>
+                        </Scripts>
+                        <!-- The tab label sits beside its own +/- icon slot (the ref row template's
+                             ButtonText geometry: LEFT+20 next to the 16px icon at LEFT+3), gold —
+                             the engine's default label centered "All" OVER the icon (director's
+                             img-12 misalignment). -->
+                        <ButtonText>
+                            <Size><AbsDimension x="0" y="10"/></Size>
+                            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="20" y="0"/></Offset></Anchor></Anchors>
+                        </ButtonText>
+                        <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+                        <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The "Track Quest" watch indicator (ref QuestLogTrack, QuestLogFrame.xml:324-369):
+                 an INDICATOR, not a button — the 20×20 UI-RadioButton pair (base = the left
+                 quarter, the dot = the second quarter) with the dot vertex-colored by
+                 `BenillaQuestWatch_Update`: red when nothing is watched, green when ≥1 is (ref
+                 `QuestWatch_Update`'s tracking-indicator tail). Watching itself stays the row
+                 shift-click (`QUEST_WATCH_TOOLTIP`, served on hover). Ref HitRectInsets
+                 (right −80, stretching the hover over the label) is an engine gap — the hover
+                 rect is the 20×20 dot only. -->
+            <Frame name="BenillaQuestLogTrack" enableMouse="true">
+                <Size><AbsDimension x="20" y="20"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="BenillaQuestLogExpandButtonFrame" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="5" y="10"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="$parentTitle" inherits="GameFontHighlightSmall" text="Track Quest">
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"/></Anchors>
+                        </FontString>
+                        <Texture file="Interface\Buttons\UI-RadioButton">
+                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
+                        </Texture>
+                        <Texture name="BenillaQuestLogTrackTracking" file="Interface\Buttons\UI-RadioButton">
+                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>
+                        getglobal("BenillaQuestLogTrackTracking"):SetVertexColor(1.0, 0, 0)
+                    </OnLoad>
+                    <OnEnter>
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetText("Shift-click a quest to add or remove a quest from your quest watch list.", nil, nil, nil, nil, 1)
+                    </OnEnter>
+                    <OnLeave>
+                        GameTooltip:Hide()
+                    </OnLeave>
+                </Scripts>
+            </Frame>
+
+            <!-- The persistent selection highlight (ref QuestLogHighlightFrame, QuestLogFrame.xml:
+                 522-534): 293×16, ARTWORK-layer ADD `UI-QuestLogTitleHighlight`, declared BEFORE the
+                 title rows so the row text paints OVER the glow (same parent + same frameLevel ⇒
+                 declaration order is the z-tiebreak; the old `frameLevel="8"` put the glow ON TOP of
+                 the title text and washed it out — 0112's capture gate caught the wash, this scrub
+                 found the cause). Moved onto the selected row (at the ref's (5,0)) and vertex-colored
+                 to the row's difficulty color by `BenillaQuestLogList_Update` (ref lua l.337-339). -->
+            <Frame name="BenillaQuestLogSelectHighlight" hidden="true">
+                <Size><AbsDimension x="293" y="16"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture name="BenillaQuestLogSkillHighlight" file="Interface\QuestFrame\UI-QuestLogTitleHighlight" alphaMode="ADD">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- pin §2, transcribed byte-for-byte (ref QuestLogFrame.xml:535-588): 6 title rows,
+                 300×16, row1 TOPLEFT of the frame at (19,-75); rows 2-6 chain TOPLEFT→prior BOTTOMLEFT
+                 at (0,+1) — a TIGHT 1px OVERLAP, not a gap (the ref's own offset is positive). -->
+            <Button name="BenillaQuestLogTitle1" inherits="BenillaQuestLogTitleTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-75"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaQuestLogTitle2" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogTitle1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaQuestLogTitle3" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogTitle2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaQuestLogTitle4" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogTitle3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaQuestLogTitle5" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogTitle4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+            <Button name="BenillaQuestLogTitle6" inherits="BenillaQuestLogTitleTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogTitle5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors></Button>
+
+            <!-- The detail pane's real ScrollFrame (decision 0112's mechanism): 300×261, TOPLEFT of
+                 this window at (19,-175) — the ref's own `QuestLogDetailScrollFrame` position, this
+                 file's "Detail chain start" arithmetic that used to live above (list bottom-left
+                 (19,-168) - 7 = (19,-175)). Mouse-wheel-interactive by construction (no wheel-catcher
+                 needed — `widget/mod.rs`'s ScrollFrame ctor comment), and declared AFTER
+                 `BenillaQuestLogWheelCatcher` in this `<Frames>` list so it out-ranks the catcher for
+                 any wheel/click landing inside its own rect (this file's header comment on hit-test
+                 z-order) — scrolling over the detail text no longer scrolls the LIST underneath it,
+                 a latent mix-up the flat layout had no way to avoid. -->
+            <ScrollFrame name="BenillaQuestLogDetailScroll">
+                <Size><AbsDimension x="300" y="261"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="19" y="-175"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <!-- The scroll child (`SetScrollChild`'d in this ScrollFrame's own OnLoad below):
+                         300 wide, matching the ref's `QuestLogDetailScrollChildFrame`; HEIGHT is
+                         runtime-set by `BenillaQuestLogDetail_ResizeChild` (a Frame's height is only
+                         ever its own SetSize — the resolver never grows one to fit overflowing
+                         content, that function's own comment) — 261 here is just a sane starting size
+                         before the first Detail_Update ever runs. Every widget below is the SAME
+                         detail chain this window used to carry flat on itself (this window's own
+                         "Detail page" comment) — only QuestTitle's own anchor changed, to the CHILD's
+                         TOPLEFT (ref :624-635's offset 5,-5) now that it's the origin of its own
+                         subtree; everything downstream still chains by NAME exactly as before (anchor
+                         resolution is name-keyed, not parent-scoped — unaffected by which frame owns
+                         which region). -->
+                    <Frame name="BenillaQuestLogDetailChild">
+                        <Size><AbsDimension x="300" y="261"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <FontString name="BenillaQuestLogQuestTitle" inherits="QuestTitleFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="285" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="BenillaQuestLogObjectivesText" inherits="QuestFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="275" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogQuestTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- No `hidden=` on these 10 (a no-op on a region anyway — same reasoning as the
+                                     empty-state text above): each starts textless (no `text=` attribute) and stays
+                                     that way until `BenillaQuestLogDetail_Update` fills the ones in use.
+                                     Objective1's (0,-10) COLLAPSES the ref's two hops — ObjectivesText→QuestLogTimerText
+                                     (0,-10) then →QuestLogObjective1 (0,-10), QuestLogFrame.xml:648-670 — into one: we
+                                     ship no timer text (no timed-quest countdown yet, this file's header comment), so
+                                     there's no intermediate row to occupy that first -10, and stacking both would
+                                     double the gap the ref never shows for an untimed quest. Revisit (re-insert the
+                                     timer row at its own -10 slot) once GetQuestLogTimeLeft() is wired.
+
+                                     Height is EXPLICIT 12 (GameFontNormalSmall is 10px, `Fonts.xml`), NOT the ref's
+                                     auto "y=0" — a deliberate v1 deviation: a FontString anchored by a single point
+                                     with an explicit height of exactly 0 and no text ever measured (this engine only
+                                     host-measures a FontString with non-empty text — `UiScript::fontstrings_needing_
+                                     measure`'s own doc) resolves its far edge to `combine_edge`'s span==0 branch,
+                                     which is UNSET, so `resolve()`'s region pass falls the WHOLE unconstrained edge
+                                     back to the OWNER FRAME's edge (`script/mod.rs`'s region-resolution comment) —
+                                     not "zero height", the owner's own far edge. The ref's own equivalent never sees
+                                     this: it :Hide()s unused objective strings entirely (pin §3, QuestLogFrame.lua:
+                                     400-402) — Show/Hide aside — and presumably never lets an anchored-through
+                                     FontString sit at a true zero measured height. This engine's region model has no
+                                     Show/Hide for a bare FontString (this file's own recurring comment on
+                                     `region.rs`), so hiding isn't an option; a fixed nonzero height is the narrowest
+                                     fix that keeps the WHOLE ref chain verbatim. Blank slots now occupy a small
+                                     fixed 12px instead of true 0 — an accepted, minor v1 footprint difference from
+                                     the ref, not a fidelity claim (and exactly why `BenillaQuestLogDetail_ResizeChild`
+                                     sums this fixed 12px per row rather than measuring these ten). -->
+                                <FontString name="BenillaQuestLogObjective1" inherits="QuestFontNormalSmall" justifyH="LEFT">
+                                    <Size><AbsDimension x="285" y="12"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjectivesText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="BenillaQuestLogObjective2" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective3" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective4" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective5" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective6" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective7" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective8" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective9" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+                                <FontString name="BenillaQuestLogObjective10" inherits="QuestFontNormalSmall" justifyH="LEFT"><Size><AbsDimension x="285" y="12"/></Size><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjective9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors></FontString>
+
+                                <!-- Verbatim ref chain continues (QuestLogFrame.xml:785-833), EXCEPT
+                                     `BenillaQuestLogDescriptionTitle` itself: the ref does NOT anchor its
+                                     `QuestLogDescriptionTitle` to a static `QuestLogObjective10` — it re-`SetPoint`s
+                                     it at RUNTIME in `QuestLog_UpdateQuestDetails` off the LAST *actually used*
+                                     objective slot (`QuestLogFrame.lua:414-424`: `QuestLogObjective`..numObjectives,
+                                     or `QuestLogObjectivesText` when numObjectives is 0 — there's also a
+                                     RequiredMoney branch we don't model, this file's documented v1 gap).
+                                     `BenillaQuestLogDetail_Update` ports the ref's runtime SetPoint; the anchor
+                                     below is a load-bearing-free PLACEHOLDER (immediately overwritten whenever a
+                                     selection exists) — same convention the reward/choice Buttons use. Height
+                                     stays EXPLICIT 18 (QuestTitleFont, `Fonts.xml` — matching `RewardTitleText`'s
+                                     own explicit 18 below, which the ref ITSELF gives a nonzero height): the same
+                                     zero-height-owner-fallback rationale as the Objective slots above applies
+                                     whenever the log has zero rewards+choices+money (`RewardTitleText` blanks to ""
+                                     too) — this header must resolve a real span regardless of its own text (and is
+                                     why `BenillaQuestLogDetail_ResizeChild` sums a fixed 18 for it too, never
+                                     `GetHeight()`). -->
+                                <FontString name="BenillaQuestLogDescriptionTitle" inherits="QuestTitleFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="285" y="18"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogObjectivesText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="BenillaQuestLogDescription" inherits="QuestFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="270" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogDescriptionTitle" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- No `text=`/`hidden=` — `BenillaQuestLogRewards_Update` owns this text entirely
+                                     (toggles "Rewards" / "" — this file's blank-text convention). -->
+                                <FontString name="BenillaQuestLogRewardTitleText" inherits="QuestTitleFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="300" y="18"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-15"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- REWARD_CHOICES (ref QuestLogFrame.xml:821-832) — our literal transcription of the
+                                     token's string. Lua-managed (`BenillaQuestLogRewards_Update` toggles the text). -->
+                                <FontString name="BenillaQuestLogItemChooseText" inherits="QuestFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="295" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogRewardTitleText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <!-- QuestLogItemReceiveText (ref :833-837) — unlike the ref's own bare `<Anchor
+                                     point="TOPLEFT"/>` (it's entirely SetPoint-driven at runtime, QuestFrame.lua:
+                                     460/467/470), `BenillaQuestLogRewards_Update` re-SetPoints this one too — see that
+                                     function. No static `relativeTo` here is load-bearing, only a safe placeholder. -->
+                                <FontString name="BenillaQuestLogItemReceiveText" inherits="QuestFont" justifyH="LEFT">
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogRewardTitleText" relativePoint="BOTTOMLEFT"/></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- Choice + fixed reward rows (pin §3/§6). Static XML anchors below are placeholders
+                                 ONLY (bare TOPLEFT-of-parent-ish, never read while hidden) —
+                                 `BenillaQuestLogRewards_Update` SetPoints every shown row every repaint, porting
+                                 `QuestFrameItems_Update`'s own SetPoint math verbatim (QuestFrame.lua:311-522,
+                                 cited per-line in that function). -->
+                            <Button name="BenillaQuestLogChoice1" inherits="BenillaQuestLogItemTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogItemChooseText" relativePoint="BOTTOMLEFT"/></Anchors>
+                            </Button>
+                            <Button name="BenillaQuestLogChoice2" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogChoice1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogChoice3" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogChoice2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogChoice4" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogChoice3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogChoice5" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogChoice4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogChoice6" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogChoice5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+                            <Button name="BenillaQuestLogReward1" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogItemReceiveText" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogReward2" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogReward1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogReward3" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogReward2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogReward4" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogReward3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogReward5" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogReward4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+                            <Button name="BenillaQuestLogReward6" inherits="BenillaQuestLogItemTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogReward5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+                            <!-- Reward money (pin §3, GetQuestLogRewardMoney) — ref QuestLogMoneyFrame anchors LEFT
+                                 to QuestLogItemReceiveText's RIGHT, offset (15,0) (QuestLogFrame.xml:896-903). -->
+                            <Frame name="BenillaQuestLogMoneyCoin1">
+                                <Size><AbsDimension x="13" y="13"/></Size>
+                                <Anchors><Anchor point="LEFT" relativeTo="BenillaQuestLogItemReceiveText" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor></Anchors>
+                                <Layers><Layer level="OVERLAY">
+                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
+                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                                </Layer></Layers>
+                            </Frame>
+                            <Frame name="BenillaQuestLogMoneyCoin2">
+                                <Size><AbsDimension x="13" y="13"/></Size>
+                                <Anchors><Anchor point="LEFT" relativeTo="BenillaQuestLogMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                                <Layers><Layer level="OVERLAY">
+                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
+                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                                </Layer></Layers>
+                            </Frame>
+                            <Frame name="BenillaQuestLogMoneyCoin3">
+                                <Size><AbsDimension x="13" y="13"/></Size>
+                                <Anchors><Anchor point="LEFT" relativeTo="BenillaQuestLogMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                                <Layers><Layer level="OVERLAY">
+                                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
+                                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                                </Layer></Layers>
+                            </Frame>
+                        </Frames>
+                    </Frame>
+
+                    <!-- A minimal ref-shaped scrollbar (ref UIPanelScrollFrameTemplate/
+                         UIPanelScrollBarTemplate, UIPanelTemplates.xml): up/down step buttons + a
+                         thumb texture positioned from GetVerticalScroll/GetVerticalScrollRange. VISUAL
+                         only — no drag: this engine has no Slider widget (no drag-capture affordance
+                         anywhere yet, the same class of gap this file's header comment already notes
+                         for modifier keys), so the ref's real `Slider` track is a named DEFERRED
+                         follow-up, not modeled here; the wheel + the two arrow buttons are the only
+                         interactive paths to scroll, which is already the ENTIRE ask (the ref's own
+                         mouse-drag-the-thumb affordance is the one piece missing). Hidden whenever
+                         nothing overflows (`BenillaQuestLogDetailScroll_SyncBar`). -->
+                    <Frame name="BenillaQuestLogDetailScrollBar" hidden="true">
+                        <Size><AbsDimension x="16" y="261"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogDetailScroll" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Frames>
+                            <Button name="BenillaQuestLogDetailScrollUp">
+                                <Size><AbsDimension x="16" y="16"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+                                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+                                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
+                                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+                                <Scripts><OnClick>BenillaQuestLogDetailScroll_Step(-BENILLA_QUESTLOG_SCROLL_STEP)</OnClick></Scripts>
+                            </Button>
+                            <Button name="BenillaQuestLogDetailScrollDown">
+                                <Size><AbsDimension x="16" y="16"/></Size>
+                                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+                                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+                                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
+                                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+                                <Scripts><OnClick>BenillaQuestLogDetailScroll_Step(BENILLA_QUESTLOG_SCROLL_STEP)</OnClick></Scripts>
+                            </Button>
+                            <!-- The track: BENILLA_QUESTLOG_SCROLL_TRACK_H (229) tall, between the two
+                                 arrow buttons (261 - 16 - 16). The thumb texture is a plain child
+                                 region SetPoint'd by BenillaQuestLogDetailScroll_SyncBar off the
+                                 CURRENT GetVerticalScroll()/GetVerticalScrollRange() fraction. -->
+                            <Frame name="BenillaQuestLogDetailScrollTrack">
+                                <Size><AbsDimension x="16" y="229"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestLogDetailScrollUp" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Layers><Layer level="OVERLAY">
+                                    <Texture name="BenillaQuestLogDetailScrollThumb" file="Interface\Buttons\UI-ScrollBar-Knob">
+                                        <Size><AbsDimension x="16" y="16"/></Size>
+                                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                                        <!-- The ref thumb samples the knob art's CENTER quarter
+                                             (UIPanelScrollBarButton's TexCoords, UIPanelTemplates.xml
+                                             :104-106 + :160-164) — full UVs squash the 32px canvas
+                                             into 16px and the knob reads half-size (director's
+                                             "scroll cube is too small"). -->
+                                        <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
+                                    </Texture>
+                                </Layer></Layers>
+                            </Frame>
+                        </Frames>
+                    </Frame>
+                </Frames>
+                <Scripts>
+                    <OnLoad>self:SetScrollChild(getglobal("BenillaQuestLogDetailChild"))</OnLoad>
+                    <OnMouseWheel>
+                        if arg1 > 0 then
+                            BenillaQuestLogDetailScroll_Step(-BENILLA_QUESTLOG_SCROLL_STEP)
+                        else
+                            BenillaQuestLogDetailScroll_Step(BENILLA_QUESTLOG_SCROLL_STEP)
+                        end
+                    </OnMouseWheel>
+                    <OnVerticalScroll>BenillaQuestLogDetailScroll_SyncBar()</OnVerticalScroll>
+                    <OnScrollRangeChanged>BenillaQuestLogDetailScroll_SyncBar()</OnScrollRangeChanged>
+                    <!-- BenillaQuestLogDetail_OnUpdate's own comment: the FIRST populate of a
+                         freshly-selected quest's text sizes off a one-tick-stale (zero, brand-new
+                         text) GetHeight() — nothing else re-asks once the quest log's data itself
+                         stops changing, so this keeps re-checking every frame the window is open
+                         until the real measurement lands and the resize stops changing (its own
+                         guard makes every further call here a no-op). -->
+                    <OnUpdate>BenillaQuestLogDetail_OnUpdate()</OnUpdate>
+                </Scripts>
+            </ScrollFrame>
+
+            <!-- pin §4, transcribed byte-for-byte (ref QuestLogFrame.xml:451-498): Abandon 125×21 at
+                 (17,54), Exit 77×21 at (-43,54). numEntries==0 disables Abandon. -->
+            <Button name="BenillaQuestLogAbandonButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Abandon Quest">
+                <Size><AbsDimension x="125" y="21"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="17" y="54"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaQuestLogAbandonButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaQuestLogExitButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Exit">
+                <Size><AbsDimension x="77" y="21"/></Size>
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-43" y="54"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>HideUIPanel(getglobal("BenillaQuestLogFrame"))</OnClick></Scripts>
+            </Button>
+            <!-- Share Quest (ref QuestFramePushQuestButton, QuestLogFrame.xml:499-521): 123×21 flush
+                 LEFT of Exit. Party quest-sharing is a named deferral (no QuestLogPushQuest wire yet),
+                 so this ships permanently DISABLED — exactly how the ref presents it solo (its lua
+                 disables it whenever the party can't receive the quest); the button existing is what
+                 fills the bottom row's middle slot the frame art reserves for it. -->
+            <Button name="BenillaQuestLogPushQuestButton" inherits="BenillaQuestLogPanelButtonTemplate" text="Share Quest">
+                <Size><AbsDimension x="123" y="21"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaQuestLogExitButton" relativePoint="LEFT"/></Anchors>
+                <Scripts><OnLoad>self:Disable()</OnLoad></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaQuestLogFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaQuestLogFrame_OnEvent(self)</OnEvent>
+            <!-- The list wheel lives on the WINDOW, not just the child catcher: the engine bubbles a
+                 spin up the PARENT chain (script/pointer.rs mouse_wheel), so a spin over a quest-title
+                 row (no OnMouseWheel of its own) must reach this window to scroll — a sibling catcher
+                 never sees it (bubbling reaches ancestors, not siblings). The BenillaQuestLogWheelCatcher
+                 button now only gives the list's empty tail a hit-target that also bubbles here. (The
+                 detail ScrollFrame keeps its own OnMouseWheel and is unaffected.) -->
+            <OnMouseWheel>BenillaQuestLogFrame_OnMouseWheel(arg1)</OnMouseWheel>
+            <!-- pin §1, QuestLog_OnShow/OnHide (QuestLogFrame.lua:85-95), wired via the frame's
+                 OnShow/OnHide (QuestLogFrame.xml:949-954) — the window-sound convention (decision
+                 0090). Note the SoundKit-name vs on-disk-filename trap the pin calls out (§1): the
+                 kit names below are `igQuestLog*`, the shipped waves are `iQuestLogOpenA`/
+                 `iQuestLogCloseA` (no "g") — PlaySound takes the KIT name, so this is correct as
+                 written, flagged only so a future filename-based lookup doesn't "fix" it wrongly.
+                 Never fires at load (hidden="true"). -->
+            <OnShow>PlaySound("igQuestLogOpen") BenillaQuestLogFrame_Update()</OnShow>
+            <OnHide>PlaySound("igQuestLogClose")</OnHide>
+        </Scripts>
+    </Frame>
+
+
+    <!--
+        The quest-watch tracker HUD (pin's `QuestWatchFrame`, ref `QuestLogFrame.xml:968-1146`) — a
+        SEPARATE always-on-screen frame, not part of `BenillaQuestLogFrame` (this file's "The
+        always-visible quest-watch tracker" script comment): it's screen-anchored, never docks a
+        UIPanel slot, has no close button/ESC handling, and repaints off its own events whether or
+        not the log window is even open — a HUD element, exactly like the ref's. Kept in THIS file
+        rather than a separate `QuestWatchFrame.xml`: the ref itself defines it in `QuestLogFrame.xml`
+        too (it's the log's own on-screen echo, driven by the same Lua functions/getters as the log
+        window above), and this file's tests already load nothing else — a second file would need its
+        own duplicate test-harness load list for zero isolation benefit (contrast the
+        `BenillaQuestLogItemTemplate`/`BenillaQuestLogPanelButtonTemplate` duplication above, which
+        buys real per-window test isolation).
+
+        v1 placement: TOPRIGHT of the screen, offset (-10,-170) — no minimap frame exists in benilla
+        yet (the ref anchors 10px below `MinimapCluster`'s bottom edge), so this is a plain guess at
+        clearing where one would land (a classic-sized minimap runs roughly 140px tall from the
+        corner). FOR THE DIRECTOR'S EYE: revisit once a minimap ships, or sooner if this reads wrong
+        on screen.
+
+        280 wide (the ref's own `QuestWatchFrame` width) with NO Backdrop (the ref's tracker floats
+        bare text over the world, no border/background) — matches `BenillaErrorsFrame`'s bare-text
+        convention, not `BenillaQuestLogAbandonConfirm`'s dialog chrome. `BENILLA_QUESTLOG_MAX_WATCHES`
+        (5, `quest_log.rs`'s own `AddQuestWatch` cap) × `BENILLA_QUESTWATCH_MAX_OBJECTIVES` (4, this
+        file's v1 cap — see that constant's own comment) pre-declares a FIXED 5×(1+4) grid of
+        FontStrings — the flat-frame constraint (no dynamic creation at runtime), so every slot exists
+        up front and `BenillaQuestWatch_Update` only ever SetTexts/colors them, never creates one.
+    -->
+    <!-- The always-on quest-watch tracker HUD (ref QuestWatchFrame, QuestLogFrame.xml:963-1146
+         + QuestWatch_Update, QuestLogFrame.lua:602-663), transcribed: TOPRIGHT hangs off the
+         MinimapCluster's BOTTOMRIGHT (+10 up — the cluster art overhangs), an empty 13px
+         GameFontNormal spacer (the ref's never-written QuestWatchQuestName) seats the first line,
+         and ONE FLAT POOL of 30 lines (MAX_QUESTWATCH_LINES) carries titles and objectives alike —
+         the Lua re-anchors each line every paint (titles drop -4 extra; the pool squeezes, no
+         fixed per-quest slots). Lines are the ref's GameFontHighlight; the XML chain offset is -1
+         because our lines are measured (y=0 -> ink height 12) where the ref pins 13px boxes:
+         12 + 1 = the ref pitch. Width/height follow the content (SetWidth maxW+10 / SetHeight
+         lines*13) so the left-aligned column hugs the minimap's right edge like the ref; the
+         GetWidth reads are extract-measured (one frame stale), so the sizing tail re-runs from
+         OnUpdate for two frames after each repaint (`resize_pending`) and converges next frame. -->
+    <Frame name="BenillaQuestWatchFrame">
+        <Size><AbsDimension x="280" y="20"/></Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="MinimapCluster" relativePoint="BOTTOMRIGHT">
+                <Offset><AbsDimension x="0" y="10"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="BenillaQuestWatchQuestName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="0" y="13"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </FontString>
+                <FontString name="BenillaQuestWatchLine1" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchQuestName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine2" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine3" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine4" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine5" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine6" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine7" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine8" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine9" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine10" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine11" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine12" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine13" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine12" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine14" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine15" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine16" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine17" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine16" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine18" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine19" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine20" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine21" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine20" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine22" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine21" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine23" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine22" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine24" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine23" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine25" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine24" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine26" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine25" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine27" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine26" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine28" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine27" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine29" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine28" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+                <FontString name="BenillaQuestWatchLine30" inherits="GameFontHighlight" justifyH="LEFT"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaQuestWatchLine29" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors></FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaQuestWatchFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaQuestWatchFrame_OnEvent(self)</OnEvent>
+            <OnUpdate>BenillaQuestWatchFrame_OnUpdate(self, arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

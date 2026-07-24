@@ -1,0 +1,220 @@
+<Ui>
+    <!--
+        UIParent itself (ref UIParent.xml l.5, quoted): the real, full-screen, invisible root
+        frame the reference UI hangs everything on. Until now benilla shipped only this file's
+        Lua (the manage pass below) and no frame - so the Lua global `UIParent` was nil, and
+        every ref-quoted `SetOwner(UIParent, ...)` / `GameTooltip_SetDefaultAnchor(this,
+        UIParent)` died before it could place anything (the world tooltip stayed parked on its
+        load-time anchor - the "tooltip on my character" bug). String anchors ("UIParent" in
+        SetPoint) had silently fallen back to the screen root, which has the same rect, so only
+        the *global* was ever missing. No enableMouse: the hit test gates on it (pointer.rs), so
+        the full-screen plate swallows nothing. The ref's OnLoad/OnEvent (UIParent_OnLoad's
+        global event routing) is not ours to ship - no consumer yet.
+
+        Known seam, stated: the real client PARENTS every FrameXML frame under UIParent (scale/
+        visibility cascade); benilla's top-level frames still attach to the screen root. Same
+        rect, so anchors agree - re-parenting is a separate arc if a cascade consumer appears.
+    -->
+    <Frame name="UIParent" setAllPoints="true" frameStrata="MEDIUM"/>
+
+    <!--
+        The UIParent bottom-stack position manager - UIPARENT_MANAGED_FRAME_POSITIONS and
+        UIParent_ManageFramePositions(), transcribed from the extracted 1.12 UIParent.lua
+        l.1560-1697 (patch-2.MPQ via mpqx, byte-diffed against this install's own chain;
+        decision 0272). The reference never leaves a bottom-anchored HUD frame on its static
+        XML anchor: every layout pass re-anchors it to a base offset plus per-bar deltas -
+        either bottom multibar, the pet/stance bar, the reputation watch bar - fired from those
+        bars' OnShow/OnHide (ref BonusActionBarFrame.xml:350-355 et al.) and applied once at
+        startup. The loader's post-load call (ui_script/mod.rs) is our startup seam; the stance
+        bar's OnShow/OnHide (StanceBar.xml) is the one live re-fire today.
+
+        Departures, each named:
+        - Lua 5.1 dialect (the 1.12 client ran 5.0): pairs() iteration, table.insert for
+          tinsert, _G[name] = v for setglobal, and the ref's undeclared `hasBottomRight`
+          declared local (it is never read).
+        - The ref gates the bottom flags on its interface-option globals
+          SHOW_MULTI_ACTIONBAR_1/2; benilla's bottom bars are always-on with no options state
+          (decision 0270), so the flags read the bars' own visibility - identical values, no
+          parallel global to drift.
+        - Frame names: our stance bar is BenillaShapeshiftBarFrame (0270), substituted in the
+          pet-bar visibility check. Rows whose frames don't exist here (GroupLootFrame1,
+          TutorialFrameParent, FramerateLabel, ChatFrame2, MultiBarBottomLeft - ours is
+          BenillaMultiBarBottomLeft, statically anchored per 0270, like ShapeshiftBarFrame)
+          no-op through the ref's own `if ( frame )` guard and self-activate if the frames
+          ever land under those names.
+        - MultiBarLeft/MultiBarRight (the vertical bars), PetActionBarFrame,
+          ReputationWatchBar, MainMenuExpBar, and MainMenuBarMaxLevelBar don't exist yet:
+          nil-guarded (the ref reads them bare only because it always creates them).
+        - No IsUserPlaced/IsObjectType/SIMPLE_CHAT legs on the SetPoint: benilla has no
+          user-placed frames and no simple-chat option, so the ref's guarded SetPoint
+          collapses to the plain one.
+        - The ref function's trailing custom positioning (BattlefieldMinimapTab, the
+          shapeshift-bar texture swap) is out of scope - none of those frames exist.
+        - The isVar globals (CONTAINER_OFFSET_*, PETACTIONBAR_YPOS, BATTLEFIELD_TAB_OFFSET_Y)
+          are pre-declared to their base values below - the ref declares them in
+          ContainerFrame.lua/PetActionBarFrame.lua, which we don't ship - so the ref's
+          `if ( frame )` guard (getglobal on a var row yields the number) behaves identically.
+          Nothing consumes them yet; they are set for the day the bag anchors do.
+    -->
+    <Script><![CDATA[
+        -- Declared by the ref's ContainerFrame.lua / PetActionBarFrame.lua / WorldStateFrame.lua
+        -- (files we don't ship); the manage pass below overwrites them every run.
+        CONTAINER_OFFSET_X = 0
+        CONTAINER_OFFSET_Y = 70
+        BATTLEFIELD_TAB_OFFSET_Y = 210
+        PETACTIONBAR_YPOS = 97
+
+        UIPARENT_MANAGED_FRAME_POSITIONS = {}
+        -- Frames
+        UIPARENT_MANAGED_FRAME_POSITIONS["MultiBarBottomLeft"] = {baseY = 17, reputation = 9, maxLevel = -5, anchorTo = "ActionButton1", point = "BOTTOMLEFT", rpoint = "TOPLEFT"}
+        UIPARENT_MANAGED_FRAME_POSITIONS["GroupLootFrame1"] = {baseY = 60, bottomEither = 42, pet = 42, reputation = 9}
+        UIPARENT_MANAGED_FRAME_POSITIONS["TutorialFrameParent"] = {baseY = 55, bottomEither = 47, pet = 42, reputation = 9}
+        UIPARENT_MANAGED_FRAME_POSITIONS["FramerateLabel"] = {baseY = 64, bottomEither = 42, pet = 42, reputation = 9}
+        UIPARENT_MANAGED_FRAME_POSITIONS["CastingBarFrame"] = {baseY = 60, bottomEither = 40, pet = 40, reputation = 9}
+        UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame1"] = {baseY = 85, bottomLeft = 17, pet = 17, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMLEFT", rpoint = "BOTTOMLEFT", xOffset = 32}
+        UIPARENT_MANAGED_FRAME_POSITIONS["ChatFrame2"] = {baseY = 85, bottomRight = 17, rightLeft = -88, rightRight = -43, reputation = 9, maxLevel = -5, anchorTo = "UIParent", point = "BOTTOMRIGHT", rpoint = "BOTTOMRIGHT", xOffset = -32}
+        UIPARENT_MANAGED_FRAME_POSITIONS["ShapeshiftBarFrame"] = {baseY = 0, bottomLeft = 45, reputation = 9, maxLevel = -5, anchorTo = "MainMenuBar", point = "BOTTOMLEFT", rpoint = "TOPLEFT", xOffset = 30}
+
+        -- Vars
+        UIPARENT_MANAGED_FRAME_POSITIONS["CONTAINER_OFFSET_X"] = {baseX = 0, rightLeft = 90, rightRight = 45, isVar = "xAxis"}
+        UIPARENT_MANAGED_FRAME_POSITIONS["CONTAINER_OFFSET_Y"] = {baseY = 70, bottomEither = 27, bottomRight = 0, reputation = 9, isVar = "yAxis", pet = 23}
+        UIPARENT_MANAGED_FRAME_POSITIONS["BATTLEFIELD_TAB_OFFSET_Y"] = {baseY = 210, bottomRight = 40, reputation = 9, isVar = "yAxis"}
+        UIPARENT_MANAGED_FRAME_POSITIONS["PETACTIONBAR_YPOS"] = {baseY = 97, bottomLeft = 43, reputation = 9, maxLevel = -5, isVar = "yAxis"}
+
+        function UIParent_ManageFramePositions()
+            -- Frames that affect offsets in y axis
+            local yOffsetFrames = {}
+            -- Frames that affect offsets in x axis
+            local xOffsetFrames = {}
+
+            -- Set up flags. Departure: the bottom flags read the always-on bars' visibility,
+            -- not the ref's SHOW_MULTI_ACTIONBAR_1/2 option globals (0270 ships no such state).
+            local bottomLeftShown = BenillaMultiBarBottomLeft and BenillaMultiBarBottomLeft:IsShown()
+            local bottomRightShown = BenillaMultiBarBottomRight and BenillaMultiBarBottomRight:IsShown()
+            if ( bottomLeftShown or bottomRightShown ) then
+                table.insert(yOffsetFrames, "bottomEither")
+            end
+            if ( bottomRightShown ) then
+                table.insert(yOffsetFrames, "bottomRight")
+            end
+            if ( bottomLeftShown ) then
+                table.insert(yOffsetFrames, "bottomLeft")
+            end
+
+            if ( MultiBarLeft and MultiBarLeft:IsShown() ) then
+                table.insert(xOffsetFrames, "rightLeft")
+            elseif ( MultiBarRight and MultiBarRight:IsShown() ) then
+                table.insert(xOffsetFrames, "rightRight")
+            end
+
+            if ( ( PetActionBarFrame and PetActionBarFrame:IsShown() ) or ( BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) ) then
+                table.insert(yOffsetFrames, "pet")
+            end
+            if ( ReputationWatchBar and MainMenuExpBar and ReputationWatchBar:IsShown() and MainMenuExpBar:IsShown() ) then
+                table.insert(yOffsetFrames, "reputation")
+            end
+            if ( MainMenuBarMaxLevelBar and MainMenuBarMaxLevelBar:IsShown() ) then
+                table.insert(yOffsetFrames, "maxLevel")
+            end
+
+            -- Iterate through frames and set anchors according to the flags set
+            local frame, xOffset, yOffset, anchorTo, point, rpoint
+            for index, value in pairs(UIPARENT_MANAGED_FRAME_POSITIONS) do
+                frame = getglobal(index)
+                if ( frame ) then
+                    -- Always start with base as the base offset or default to zero if no "none" specified
+                    xOffset = 0
+                    if ( value["baseX"] ) then
+                        xOffset = value["baseX"]
+                    elseif ( value["xOffset"] ) then
+                        xOffset = value["xOffset"]
+                    end
+                    yOffset = 0
+                    if ( value["baseY"] ) then
+                        yOffset = value["baseY"]
+                    end
+
+                    -- Iterate through frames that affect y offsets
+                    local hasBottomLeft, hasPetBar, hasBottomRight
+                    for flag, flagValue in pairs(yOffsetFrames) do
+                        if ( value[flagValue] ) then
+                            if ( flagValue == "bottomLeft" ) then
+                                hasBottomLeft = 1
+                            elseif ( flagValue == "pet" ) then
+                                hasPetBar = 1
+                            elseif ( flagValue == "bottomRight" ) then
+                                hasBottomRight = 1
+                            end
+                            yOffset = yOffset + value[flagValue]
+                        end
+                    end
+
+                    if ( hasBottomLeft and hasPetBar ) then
+                        yOffset = yOffset + 23
+                    end
+
+                    -- Iterate through frames that affect x offsets
+                    for flag, flagValue in pairs(xOffsetFrames) do
+                        if ( value[flagValue] ) then
+                            xOffset = xOffset + value[flagValue]
+                        end
+                    end
+
+                    -- Set up anchoring info
+                    anchorTo = value["anchorTo"]
+                    point = value["point"]
+                    rpoint = value["rpoint"]
+                    if ( not anchorTo ) then
+                        anchorTo = "UIParent"
+                    end
+                    if ( not point ) then
+                        point = "BOTTOM"
+                    end
+                    if ( not rpoint ) then
+                        rpoint = "BOTTOM"
+                    end
+
+                    -- Anchor frame
+                    if ( value["isVar"] ) then
+                        if ( value["isVar"] == "xAxis" ) then
+                            _G[index] = xOffset
+                        else
+                            _G[index] = yOffset
+                        end
+                    else
+                        frame:SetPoint(point, anchorTo, rpoint, xOffset, yOffset)
+                    end
+                end
+            end
+
+            -- The under-minimap right stack (ref l.1740-1770): anchorY walks down capture bars →
+            -- quest timer → durability → quest watch, each shown frame pushing the next one down
+            -- by its own height. benilla ships the durability + quest-watch arms (below); the two
+            -- feeders above them (capture bars, quest timer) don't exist yet, so anchorY starts at
+            -- the ref's initial 0. The reference never leaves DurabilityFrame on its static XML
+            -- anchor (whose +40 hangs the side glyphs off-screen — director-caught): every pass
+            -- seats it at -CONTAINER_OFFSET_X, minus 20 more when a showSeparate glyph
+            -- (shield/off-weapon/ranged) extends the art to the right — then drops the quest
+            -- tracker to the running anchorY so the two never collide at the same corner.
+            local anchorY = 0
+            if ( DurabilityFrame ) then
+                local durabilityOffset = 0
+                if ( DurabilityShield:IsShown() or DurabilityOffWeapon:IsShown() or DurabilityRanged:IsShown() ) then
+                    durabilityOffset = 20
+                end
+                DurabilityFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X-durabilityOffset, anchorY)
+                if ( DurabilityFrame:IsShown() ) then
+                    anchorY = anchorY - DurabilityFrame:GetHeight()
+                end
+            end
+            -- QuestWatchFrame is last in the ref's walk (l.1770), seated at the running anchorY so
+            -- it drops below the durability guy when he shows instead of overlapping him (both
+            -- anchor this same MinimapCluster corner — director-caught). benilla's tracker is
+            -- BenillaQuestWatchFrame; nil-guarded because the durability-only test harness (and
+            -- any config without a quest log) ships no such frame.
+            if ( BenillaQuestWatchFrame ) then
+                BenillaQuestWatchFrame:SetPoint("TOPRIGHT", "MinimapCluster", "BOTTOMRIGHT", -CONTAINER_OFFSET_X, anchorY)
+            end
+        end
+    ]]></Script>
+</Ui>

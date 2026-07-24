@@ -1,0 +1,178 @@
+<Ui>
+    <!--
+        benilla's reusable **faux-scroll** kit (decisions 0247/0250/0251): a draggable scroll bar over
+        the `Slider` primitive (0250) plus the fixed-row "faux scroll" Lua layer — the reference's
+        `FauxScrollFrame`, which never really scrolls a child: it re-binds a fixed set of row buttons to
+        a moving data offset. First customer: the class trainer's skill-line list (TrainerFrame.xml).
+        The quest log's chunk-local faux-scroll upvalue is a later migration onto this.
+
+        DESIGN — collapsed from the real client's three-part decomposition (0250: FauxScrollFrame =
+        ScrollFrame + Slider + Lua). The real `FauxScrollFrameTemplate` routes the scrollbar's value
+        through its parent `ScrollFrame` (`OnValueChanged → parent:SetVerticalScroll(v)`; the
+        ScrollFrame's `OnVerticalScroll` then derives `offset = floor(v/itemHeight + 0.5)`). That
+        ScrollFrame adds exactly one thing over the Slider: a *scroll-range clamp* on the value. We
+        don't need it — the offset comes straight off the Slider value here — and in benilla it would be
+        a liability: the clamp reads the scroll child's RESOLVED height, which lags a tick behind the
+        `SetHeight` the faux update does, so a content resize + scroll in one tick could clamp against a
+        stale range. So benilla's faux frame is a plain `<Frame>` + a `Slider`: fewer moving parts, no
+        dependency on within-tick resolved rects, and the identical on-screen result (a smooth,
+        pixel-granularity thumb whose position maps 1:1 to the scroll offset). See 0251 for the full
+        rationale + the divergence from 0250's described (real-client) shape.
+
+        VALUE MODEL. The scrollbar's value is in PIXELS: `[0, (numItems − numToDisplay) * itemHeight]`,
+        `valueStep = itemHeight`. The row offset is `floor(value / itemHeight + 0.5)` — sub-pixel
+        rounding, so the thumb (drawn at the raw value fraction) and the list (drawn at the rounded
+        offset) never visibly disagree. The frame carries `frame.offset` (the top visible row, 0-based)
+        and `frame.updateFunc` (the owner's list-repaint, set by the owner's OnLoad).
+    -->
+    <Script><![CDATA[
+        -- Step the bar one row (the slider's valueStep) — the sensible step for an item list (the
+        -- generic ref scrollbar steps half its height; a discrete row list wants one). Silent by
+        -- design: the ref plays UChatScrollButton only on the arrow *buttons'* OnClick, never on the
+        -- wheel (ScrollFrameTemplate_OnMouseWheel is soundless). Both the wheel and the arrows call
+        -- this, so the click lives on the arrow OnClick, keeping wheel-scroll silent.
+        function BenillaFauxScrollBar_Step(scrollBar, dir)
+            local step = scrollBar:GetValueStep()
+            if step <= 0 then step = 1 end
+            scrollBar:SetValue(scrollBar:GetValue() + dir * step)
+        end
+
+        -- Grey the up arrow at the top and the down arrow at the bottom (ref
+        -- ScrollFrame_OnScrollRangeChanged's arrow handling), from the slider's own value/range.
+        function BenillaFauxScrollBar_UpdateArrows(scrollBar)
+            local minV, maxV = scrollBar:GetMinMaxValues()
+            local val = scrollBar:GetValue()
+            local up = getglobal(scrollBar:GetName() .. "ScrollUpButton")
+            local down = getglobal(scrollBar:GetName() .. "ScrollDownButton")
+            if val <= minV then up:Disable() else up:Enable() end
+            if val >= maxV then down:Disable() else down:Enable() end
+        end
+
+        -- The scrollbar's OnValueChanged: derive the row offset from the (pixel) value and, only when
+        -- it actually moved, repaint the owner's list. The change-gate is load-bearing: the owner's
+        -- repaint calls _Update below, which SetValue()s the thumb back to offset*itemHeight — a value
+        -- that maps to the SAME offset, so this handler no-ops and the cycle stops after one hop (the
+        -- Slider's own SetValue change-gate stops the value side, decision 0250).
+        function BenillaFauxScrollBar_OnValueChanged(scrollBar, value)
+            local frame = scrollBar:GetParent()
+            local step = scrollBar:GetValueStep()
+            if step <= 0 then step = 1 end
+            local newOffset = floor(value / step + 0.5)
+            if newOffset ~= frame.offset then
+                frame.offset = newOffset
+                if frame.updateFunc then frame.updateFunc() end
+            end
+            BenillaFauxScrollBar_UpdateArrows(scrollBar)
+        end
+
+        -- OnLoad: a fresh faux frame is at the top with an empty range (ref ScrollFrame_OnLoad).
+        function BenillaFauxScrollFrame_OnLoad(frame)
+            frame.offset = 0
+            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+            scrollBar:SetMinMaxValues(0, 0)
+            scrollBar:SetValueStep(1)
+            scrollBar:SetValue(0)
+        end
+
+        -- The offset getters/setters the owner's list code reads (ref FauxScrollFrame_GetOffset /
+        -- _SetOffset). _SetOffset syncs the thumb too, so a programmatic reset (top-of-list on open)
+        -- moves the bar.
+        function BenillaFauxScrollFrame_GetOffset(frame)
+            return frame.offset or 0
+        end
+
+        function BenillaFauxScrollFrame_SetOffset(frame, offset)
+            frame.offset = offset
+            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+            scrollBar:SetValue(offset * scrollBar:GetValueStep())
+        end
+
+        -- Reconcile the bar to a freshly-sized list (ref FauxScrollFrame_Update): clamp the offset into
+        -- range, set the pixel range + step, seat the thumb at the current offset, and show the bar only
+        -- when the list overflows the visible rows. Called by the owner's list-repaint each pass.
+        function BenillaFauxScrollFrame_Update(frame, numItems, numToDisplay, itemHeight)
+            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+            local maxOffset = numItems - numToDisplay
+            if maxOffset < 0 then maxOffset = 0 end
+            if not frame.offset or frame.offset > maxOffset then frame.offset = maxOffset end
+            if frame.offset < 0 then frame.offset = 0 end
+
+            scrollBar:SetValueStep(itemHeight)
+            scrollBar:SetMinMaxValues(0, maxOffset * itemHeight)
+            scrollBar:SetValue(frame.offset * itemHeight)
+            BenillaFauxScrollBar_UpdateArrows(scrollBar)
+
+            if numItems > numToDisplay then
+                scrollBar:Show()
+            else
+                scrollBar:Hide()
+            end
+        end
+
+        -- A wheel spin over the list → one row (WoW convention: +1 up, −1 down). Called from the
+        -- owner window's OnMouseWheel (the engine bubbles the spin up the parent chain, so the handler
+        -- lives on the window, not a child — TrainerFrame.xml's own note).
+        function BenillaFauxScrollFrame_OnMouseWheel(frame, delta)
+            local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
+            BenillaFauxScrollBar_Step(scrollBar, -delta)
+        end
+    ]]></Script>
+
+    <!--
+        The scroll bar: a `Slider` (0250) 16px wide, its up/down step buttons pinned above/below the
+        track, and the knob thumb. The value is in pixels (see the header); the thumb draws at the
+        value fraction along the track (engine-side, decision 0250 §4), draggable (§5). The step-button
+        + knob art is the stock 1.12 scrollbar kit, each texture cropped to its centred 16px (the
+        `0.25..0.75` TexCoords the ref's `UIPanelScrollBarButton` applies).
+    -->
+    <Slider name="BenillaScrollBarTemplate" virtual="true">
+        <Size><AbsDimension x="16" y="0"/></Size>
+        <Frames>
+            <Button name="$parentScrollUpButton">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors><Anchor point="BOTTOM" relativePoint="TOP"/></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
+                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+                <Scripts><OnClick>BenillaFauxScrollBar_Step(this:GetParent(), 1); PlaySound("UChatScrollButton")</OnClick></Scripts>
+            </Button>
+            <Button name="$parentScrollDownButton">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors><Anchor point="TOP" relativePoint="BOTTOM"/></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Up"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
+                <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
+                <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
+                <Scripts><OnClick>BenillaFauxScrollBar_Step(this:GetParent(), -1); PlaySound("UChatScrollButton")</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnValueChanged>BenillaFauxScrollBar_OnValueChanged(self, arg1)</OnValueChanged>
+        </Scripts>
+        <ThumbTexture name="$parentThumbTexture" file="Interface\Buttons\UI-ScrollBar-Knob">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/>
+        </ThumbTexture>
+    </Slider>
+
+    <!--
+        The faux-scroll container: a plain `<Frame>` carrying the offset state + a right-hand scroll bar
+        (inset 16px top/bottom so the arrow buttons sit inside the track span — the ref
+        UIPanelScrollFrameTemplate's scrollbar anchors). An owner instantiates this and, in its own
+        OnLoad, sets `frame.updateFunc` to its list-repaint.
+    -->
+    <Frame name="BenillaFauxScrollFrameTemplate" virtual="true">
+        <Frames>
+            <Slider name="$parentScrollBar" inherits="BenillaScrollBarTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor>
+                    <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="16"/></Offset></Anchor>
+                </Anchors>
+            </Slider>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaFauxScrollFrame_OnLoad(self)</OnLoad>
+        </Scripts>
+    </Frame>
+</Ui>

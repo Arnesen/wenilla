@@ -1,0 +1,786 @@
+<Ui>
+    <!--
+        benilla's class/profession trainer window (decisions 0237/0247/0251), a faithful port of the
+        TBC-backported `Blizzard_TrainerUI` addon the director's client runs (0246): a client-sorted,
+        collapsible **skill-line tree** with a **dropdown** state filter and a real **scroll bar**. The
+        window art/geometry are the real 1.12 `ClassTrainerFrame` (MerchantFrame.xml's four-quadrant-slab
+        idiom); the list/sort/collapse/filter logic is transcribed from `Blizzard_TrainerUI.lua` onto
+        benilla's engine (`crates/benilla-ui/src/script/trainer.rs`, which builds the tree — decision
+        0247) + the shared faux-scroll kit (ScrollTemplates.xml, decision 0251). This REPLACES the
+        earlier flat-list placeholder (git has it): flat state-as-category rows + inline sort checkboxes
+        + a chunk-local scroll offset, which stood in until the tree/scrollbar/dropdown landed.
+
+        Modeled on the two known-good dressed windows for the framing:
+          - MerchantFrame.xml — the 384×512 four-quadrant window art (no <Backdrop>: the art IS the
+            frame), the NPC-session lifecycle (RegisterEvent trio + PLAYER_MONEY, SHOW/UPDATE/CLOSED
+            dispatch, OnShow/OnHide PlaySound with CloseTrainer() on hide), the "npc" model-portrait
+            binding, and the BenillaMoney_* coin rig (detail cost + player purse). The close X reuses
+            the minimize-button art (this engine ships no UIPanelCloseButton).
+          - QuestLogFrame.xml — the list-row Button template shape ($parent-named child regions wired in
+            <OnLoad>) and the persistent selection-highlight Frame (a child Frame whose ARTWORK Texture
+            renders when Show()n, moved onto the selected visible row).
+
+        WHAT'S NEW vs. the placeholder (decision 0247's tree, 0251's scroll bar):
+          - THE LIST IS A TREE. GetTrainerServiceInfo(i) now returns interleaved "header" rows (a skill
+            line's name, +/- fold) and service rows (name/state), 1-based into the VISIBLE tree. Update
+            renders each row by type; a header click folds its group, a service click selects it.
+          - THE FILTER IS A DROPDOWN. BenillaTrainerFilterDropDown (over UIDropDownMenu.xml's kit) with
+            three keepShownOnClick check rows (Available/Unavailable/Already Known) driving the engine's
+            state-visibility filter — replacing the three inline sort checkboxes. "Already Known" starts
+            OFF (the backport's TRAINER_FILTER_USED default), set once in OnLoad.
+          - THE SCROLL BAR IS REAL. BenillaTrainerListScrollFrame (BenillaFauxScrollFrameTemplate): a
+            draggable Slider bar + up/down step arrows over the fixed 11 rows (the faux-scroll re-binds
+            rows to a moving offset — it never really scrolls a child). The wheel still lives on the
+            WINDOW (the engine bubbles a spin up the parent chain, so a spin over a row reaches here).
+          - COLLAPSE WORKS. The "All" tab collapses/expands every group (Collapse/ExpandTrainerSkillLine(0));
+            its +/- icon reflects whether all groups are folded (the backport's numHeaders/notExpanded).
+
+        FLAT layout (both windows' note): a child <Frame> shown at runtime does not render its own
+        <Layers> FontStrings in this engine, so the detail-pane FontStrings + the title/greeting live on
+        BenillaTrainerFrame's OWN <Layers>, never on a nested sub-frame. Per-row regions live on the row
+        Button template (Buttons render their own Layers). The detail is a FIXED (non-scrolling) pane
+        (our descriptions are empty for now) — no real ScrollFrame, unlike the ref's DetailScrollFrame.
+
+        Adaptations / deviations (flagged):
+          - TITLE: the trainer's NAME rides arg1 of TRAINER_SHOW/UPDATE (the app resolves the creature
+            name ask-once via the NameCache — the MerchantFrame vendor-name precedent); "Trainer" until
+            it lands.
+          - PORTRAIT: the "npc" unit-token model bake (MerchantFrame's binding — the interaction NPC's face).
+          - GlobalStrings the ref reads (REQUIRES_LABEL, TRAINER_REQ_*, COSTS_LABEL, the labels) are
+            defined LOCALLY below as the byte-exact 1.12 enUS values (interface.MPQ GlobalStrings.lua,
+            line-cited); NORMAL/GRAY/HIGHLIGHT_FONT_COLOR are Fonts.xml globals.
+          - The affordability RED-TINT of the cost coins (ref SetMoneyFrameColor) is BenillaMoney_SetColor.
+          - The profession-confirm StaticPopup is skipped for v1 (Train buys directly); a later refinement.
+
+        Registers at the left UIPanel slot like Gossip/Merchant/Quest/QuestLog (UiPanels.xml) — opening
+        it competes for/replaces those. It IS an NPC session: CloseTrainer() fires on hide, and the
+        standardized range guard (crate::ui_session) client-side-closes it when the player walks away.
+    -->
+    <Script><![CDATA[
+        -- ── GlobalStrings / labels the ref reads (byte-exact 1.12 enUS, interface.MPQ) ────────────────
+        -- Chunk-local upvalues: the global functions below close over them; inline XML handlers (separate
+        -- chunks) can't, so every handler routes to a function here. `_RED` variants redden only the
+        -- number/name (met = white, unmet = red), exactly as the real requirements line reads.
+        local PARENS_TEMPLATE = "(%s)"                      -- GlobalStrings.lua:2468
+        local REQUIRES_LABEL  = "Requires:"                 -- REQUIRES_LABEL (2768)
+        local COSTS_LABEL     = "Cost:"                     -- COSTS_LABEL (667)
+        local UNKNOWN_LABEL   = "Unknown"                   -- UNKNOWN (3860)
+        local FILTER_LABEL    = "Filter"                    -- FILTER (1297)
+        local TRAINER_REQ_LEVEL          = "Level |cffffffff%d|r"        -- TRAINER_REQ_LEVEL (3739)
+        local TRAINER_REQ_LEVEL_RED      = "Level |cffff2020%d|r"        -- TRAINER_REQ_LEVEL_RED (3740)
+        local TRAINER_REQ_SKILL_RANK     = "%s (|cffffffff%d|r)"         -- TRAINER_REQ_SKILL_RANK (3741)
+        local TRAINER_REQ_SKILL_RANK_RED = "%s (|cffff2020%d|r)"         -- TRAINER_REQ_SKILL_RANK_RED (3742)
+        local TRAINER_REQ_ABILITY        = "|cffffffff%s|r"             -- TRAINER_REQ_ABILITY (3737)
+        local TRAINER_REQ_ABILITY_RED    = "|cffff2020%s|r"             -- TRAINER_REQ_ABILITY_RED (3738)
+        local LABEL_AVAILABLE   = "Available"               -- AVAILABLE (84)
+        local LABEL_UNAVAILABLE = "Unavailable"             -- UNAVAILABLE (3840)
+        local LABEL_USED        = "Already Known"           -- USED (3868)
+        -- The font colour codes the dropdown rows wrap their labels in (GlobalStrings.lua: the *_CODE
+        -- family) — green/red/gray, closed with |r.
+        local GREEN_CODE = "|cff20ff20"
+        local RED_CODE   = "|cffff2020"
+        local GRAY_CODE  = "|cff808080"
+        local CODE_CLOSE = "|r"
+
+        -- CLASS_TRAINER_SKILLS_DISPLAYED / CLASS_TRAINER_SKILL_HEIGHT (ref Blizzard_TrainerUI.lua:2-3).
+        local BENILLA_TRAINER_ROWS = 11
+        local BENILLA_TRAINER_ROW_HEIGHT = 16
+
+        -- ── Detail pane ─────────────────────────────────────────────────────────────────────────────
+        -- Nothing selected → blank every detail region: a FontString "hides" via SetText(""), while the
+        -- icon Button + coin frames Hide. Predates region Show/Hide (region.rs has the real pair now);
+        -- equivalent either way, so the blank-text idiom stays.
+        function BenillaTrainer_HideDetails()
+            getglobal("BenillaTrainerSkillName"):SetText("")
+            getglobal("BenillaTrainerSkillRequirements"):SetText("")
+            getglobal("BenillaTrainerSkillDescription"):SetText("")
+            getglobal("BenillaTrainerCostLabel"):SetText("")
+            getglobal("BenillaTrainerSkillIcon"):Hide()
+            BenillaMoney_Clear("BenillaTrainerDetailMoney")
+            getglobal("BenillaTrainerTrainButton"):Disable()
+        end
+
+        -- Fill the detail pane for the selected service `id` (1-based visible index) — the transcribed
+        -- ClassTrainer_SetSelection detail half: name/sub name, the Requires: string (built term-for-term
+        -- as the ref does), the icon, the cost coins + label, the description, and Train's enable state.
+        function BenillaTrainer_ShowDetails(id)
+            local name = GetTrainerServiceInfo(id)
+            getglobal("BenillaTrainerSkillName"):SetText(name or UNKNOWN_LABEL)
+            -- The detail header shows the spell NAME only — no "(Rank N)" beside it. A deliberate
+            -- divergence from the ref (which sets a ClassTrainerSubSkillName subtext here): the rank is
+            -- already on the spell's list row, so a second copy floated to the right of the name just
+            -- read as clutter (director's call).
+
+            local icon = getglobal("BenillaTrainerSkillIcon")
+            icon:SetNormalTexture(GetTrainerServiceIcon(id) or BENILLA_FALLBACK_ICON)
+            icon:Show()
+
+            -- Requirements string (ref term-for-term): level gate, skill gate, each prerequisite ability;
+            -- each red when unmet (hasReq nil). Our feed has no pet-learn / step requirements.
+            local requirements = ""
+            local separator = ""
+            local reqLevel = GetTrainerServiceLevelReq(id)
+            if reqLevel and reqLevel > 1 then
+                separator = ", "
+                if (UnitLevel("player") or 0) >= reqLevel then
+                    requirements = requirements .. format(TRAINER_REQ_LEVEL, reqLevel)
+                else
+                    requirements = requirements .. format(TRAINER_REQ_LEVEL_RED, reqLevel)
+                end
+            end
+            local skill, rank, hasReq = GetTrainerServiceSkillReq(id)
+            if skill then
+                if hasReq then
+                    requirements = requirements .. separator .. format(TRAINER_REQ_SKILL_RANK, skill, rank)
+                else
+                    requirements = requirements .. separator .. format(TRAINER_REQ_SKILL_RANK_RED, skill, rank)
+                end
+                separator = ", "
+            end
+            local numReq = GetTrainerServiceNumAbilityReq(id)
+            for i = 1, numReq do
+                local ability, abilityHas = GetTrainerServiceAbilityReq(id, i)
+                if ability then
+                    if abilityHas then
+                        requirements = requirements .. separator .. format(TRAINER_REQ_ABILITY, ability)
+                    else
+                        requirements = requirements .. separator .. format(TRAINER_REQ_ABILITY_RED, ability)
+                    end
+                    separator = ", "
+                end
+            end
+            if requirements ~= "" then
+                getglobal("BenillaTrainerSkillRequirements"):SetText(REQUIRES_LABEL .. " " .. requirements)
+            else
+                getglobal("BenillaTrainerSkillRequirements"):SetText("")
+            end
+
+            -- Cost (ref): a free service shows no coins/label; otherwise the "Cost:" label + coins,
+            -- reddened when unaffordable (BenillaMoney_SetColor: white when GetMoney() >= cost, else red).
+            local moneyCost = GetTrainerServiceCost(id)
+            if moneyCost and moneyCost > 0 then
+                getglobal("BenillaTrainerCostLabel"):SetText(COSTS_LABEL)
+                BenillaMoney_Set("BenillaTrainerDetailMoney", moneyCost, true)
+                if (GetMoney() or 0) >= moneyCost then
+                    BenillaMoney_SetColor("BenillaTrainerDetailMoney", 1.0, 1.0, 1.0)
+                else
+                    BenillaMoney_SetColor("BenillaTrainerDetailMoney", 1.0, 0.1, 0.1)
+                end
+            else
+                getglobal("BenillaTrainerCostLabel"):SetText("")
+                BenillaMoney_Clear("BenillaTrainerDetailMoney")
+            end
+
+            getglobal("BenillaTrainerSkillDescription"):SetText(GetTrainerServiceDescription(id))
+
+            -- Train enable (ref): only an available AND affordable service. The talent/profession-point
+            -- gate is dropped (talentPts always 0; the profession-confirm is a later refinement).
+            local _, _, serviceType = GetTrainerServiceInfo(id)
+            local affordable = (GetMoney() or 0) >= (moneyCost or 0)
+            if serviceType == "available" and affordable then
+                getglobal("BenillaTrainerTrainButton"):Enable()
+            else
+                getglobal("BenillaTrainerTrainButton"):Disable()
+            end
+        end
+
+        -- ── The list page ────────────────────────────────────────────────────────────────────────────
+        -- Pick the first learnable (available) service, else the first non-header service (ref
+        -- ClassTrainer_SelectFirstLearnableSkill — the backport hardcodes index 2, the first service
+        -- under the first header; we find it, robust to which group leads / a leading collapsed group).
+        local function selectFirstService()
+            local n = GetNumTrainerServices()
+            for i = 1, n do
+                local _, _, serviceType = GetTrainerServiceInfo(i)
+                if serviceType == "available" then
+                    SelectTrainerService(i)
+                    return
+                end
+            end
+            for i = 1, n do
+                local _, _, serviceType = GetTrainerServiceInfo(i)
+                if serviceType ~= "header" then
+                    SelectTrainerService(i)
+                    return
+                end
+            end
+        end
+
+        -- Set the collapse-all tab's +/- icon from whether every group is folded (ref
+        -- ClassTrainerFrame_Update's numHeaders/notExpanded tail).
+        local function updateCollapseAllIcon(numServices)
+            local numHeaders, notExpanded = 0, 0
+            for i = 1, numServices do
+                local name, _, serviceType, isExpanded = GetTrainerServiceInfo(i)
+                if name and serviceType == "header" then
+                    numHeaders = numHeaders + 1
+                    if not isExpanded then notExpanded = notExpanded + 1 end
+                end
+            end
+            local b = getglobal("BenillaTrainerCollapseAllButton")
+            if numHeaders > 0 and notExpanded == numHeaders then
+                b.collapsed = 1
+                b:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+            else
+                b.collapsed = nil
+                b:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+            end
+        end
+
+        function BenillaTrainerFrame_Update()
+            getglobal("BenillaTrainerGreetingText"):SetText(GetTrainerGreetingText())
+            BenillaMoney_Set("BenillaTrainerMoney", GetMoney())
+
+            local numServices = GetNumTrainerServices()
+            if numServices == 0 then
+                getglobal("BenillaTrainerCollapseAllButton"):Disable()
+            else
+                getglobal("BenillaTrainerCollapseAllButton"):Enable()
+            end
+
+            -- The faux-scroll bar reconciles to the row count, then hands back the top-row offset.
+            local scrollFrame = getglobal("BenillaTrainerListScrollFrame")
+            BenillaFauxScrollFrame_Update(scrollFrame, numServices, BENILLA_TRAINER_ROWS, BENILLA_TRAINER_ROW_HEIGHT)
+            local skillOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+
+            getglobal("BenillaTrainerSkillHighlight"):Hide()
+
+            -- Fill the visible rows (ref ClassTrainerFrame_Update's row loop). Header rows show the skill
+            -- line name + a +/- fold; service rows blank the fold, indent the name two spaces, and colour
+            -- name+subtext by state (available green / used gray / unavailable red).
+            for i = 1, BENILLA_TRAINER_ROWS do
+                local button = getglobal("BenillaTrainerService" .. i)
+                local index = i + skillOffset
+                if index <= numServices then
+                    local name, subText, serviceType, isExpanded = GetTrainerServiceInfo(index)
+                    if not name then name = UNKNOWN_LABEL end
+                    if serviceType == "header" then
+                        button.name:SetText(name)
+                        button.name:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
+                        button.subtext:SetText("")
+                        if isExpanded then
+                            button:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                        else
+                            button:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                        end
+                        button.foldHighlight:SetTexture("Interface\\Buttons\\UI-PlusButton-Hilight")
+                    else
+                        button:SetNormalTexture("")
+                        button.foldHighlight:SetTexture("")
+                        button.name:SetText("  " .. name)
+                        if subText and subText ~= "" then
+                            button.subtext:SetText(format(PARENS_TEMPLATE, subText))
+                        else
+                            button.subtext:SetText("")
+                        end
+                        if serviceType == "available" then
+                            button.name:SetTextColor(0, 1.0, 0)
+                            button.subR, button.subG, button.subB = 0, 0.6, 0
+                        elseif serviceType == "used" then
+                            button.name:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+                            button.subR, button.subG, button.subB = 0.5, 0.5, 0.5
+                        else
+                            button.name:SetTextColor(0.9, 0, 0)
+                            button.subR, button.subG, button.subB = 0.6, 0, 0
+                        end
+                        button.subtext:SetTextColor(button.subR, button.subG, button.subB)
+                    end
+                    button.serviceIndex = index
+                    button:Show()
+                else
+                    button.serviceIndex = nil
+                    button.name:SetText("")
+                    button.subtext:SetText("")
+                    button:SetNormalTexture("")
+                    button.foldHighlight:SetTexture("")
+                    button:Hide()
+                end
+            end
+
+            -- Selection highlight + detail (ref l.146-186). The glow rides the selected SERVICE row while
+            -- it is inside the visible window; a header selection shows no glow. The detail fills only for
+            -- a selected service.
+            local selection = GetTrainerSelectionIndex()
+            local selType
+            if selection >= 1 and selection <= numServices then
+                _, _, selType = GetTrainerServiceInfo(selection)
+            end
+            if selType and selType ~= "header"
+                and selection > skillOffset and selection <= skillOffset + BENILLA_TRAINER_ROWS then
+                local selButton = getglobal("BenillaTrainerService" .. (selection - skillOffset))
+                local hl = getglobal("BenillaTrainerSkillHighlight")
+                local tex = getglobal("BenillaTrainerSkillHighlightTexture")
+                if selType == "available" then
+                    tex:SetVertexColor(0, 1.0, 0)
+                elseif selType == "used" then
+                    tex:SetVertexColor(0.5, 0.5, 0.5)
+                else
+                    tex:SetVertexColor(0.9, 0, 0)
+                end
+                hl:SetPoint("TOPLEFT", selButton, "TOPLEFT", 0, 0)
+                hl:Show()
+                -- The selected row's text goes white (HIGHLIGHT) — a deliberate divergence from the ref,
+                -- which whitens only the subtext + LockHighlight and leaves the name state-coloured: the
+                -- director wants the whole selected row legible against its colour glow (a red/gray glow
+                -- swallows red/gray text). Runs AFTER the per-row state colouring above, so it wins for
+                -- the selected row; subR/subG/subB go white too so a hover-then-leave keeps it white.
+                selButton.name:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                selButton.subtext:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                selButton.subR, selButton.subG, selButton.subB =
+                    HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b
+            end
+
+            if selType and selType ~= "header" then
+                BenillaTrainer_ShowDetails(selection)
+            else
+                BenillaTrainer_HideDetails()
+            end
+
+            updateCollapseAllIcon(numServices)
+        end
+
+        -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux kit.
+        function BenillaTrainerFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaTrainerListScrollFrame"), delta)
+        end
+
+        -- A row click: a header folds/unfolds its group (Collapse/ExpandTrainerSkillLine take the header's
+        -- display index); a service selects (ref ClassTrainerSkillButton_OnClick + SetSelection's header
+        -- branch). Left-button only.
+        function BenillaTrainerSkillButton_OnClick(button, mouseButton)
+            if mouseButton ~= "LeftButton" then return end
+            local index = button.serviceIndex
+            if not index then return end
+            local _, _, serviceType, isExpanded = GetTrainerServiceInfo(index)
+            if serviceType == "header" then
+                if isExpanded then
+                    CollapseTrainerSkillLine(index)
+                else
+                    ExpandTrainerSkillLine(index)
+                end
+            else
+                SelectTrainerService(index)
+            end
+            BenillaTrainerFrame_Update()
+        end
+
+        -- Hover recolors a service row's subtext to HIGHLIGHT, restoring its state colour on leave (ref
+        -- ClassTrainerSkillButton_OnEnter/OnLeave). Harmless over a header (its subtext is blank).
+        function BenillaTrainerSkillButton_OnEnter(button)
+            button.subtext:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+        end
+
+        function BenillaTrainerSkillButton_OnLeave(button)
+            button.subtext:SetTextColor(button.subR or 0.5, button.subG or 0.5, button.subB or 0.5)
+        end
+
+        -- ── The Train button ─────────────────────────────────────────────────────────────────────────
+        -- Buy the selected service, then repaint (the row flips to "used" once the app pushes the fresh
+        -- snapshot). The tradeskill profession-confirm dialog is a later refinement.
+        function BenillaTrainerTrainButton_OnClick()
+            BuyTrainerService(GetTrainerSelectionIndex())
+            BenillaTrainerFrame_Update()
+        end
+
+        -- ── The state-filter dropdown (ref ClassTrainerFrameFilterDropDown_*) ────────────────────────
+        function BenillaTrainerFilterDropDown_OnLoad()
+            UIDropDownMenu_Initialize(BenillaTrainerFilterDropDown, BenillaTrainerFilterDropDown_Initialize)
+            UIDropDownMenu_SetText(FILTER_LABEL, BenillaTrainerFilterDropDown)
+            UIDropDownMenu_SetWidth(96, BenillaTrainerFilterDropDown)
+        end
+
+        function BenillaTrainerFilterDropDown_Initialize()
+            local function addRow(kind, label, code)
+                local info = {}
+                info.text = code .. label .. CODE_CLOSE
+                info.value = kind
+                info.func = BenillaTrainerFilterDropDown_OnClick
+                info.checked = GetTrainerServiceTypeFilter(kind) and 1 or nil
+                info.keepShownOnClick = 1
+                UIDropDownMenu_AddButton(info)
+            end
+            addRow("available", LABEL_AVAILABLE, GREEN_CODE)
+            addRow("unavailable", LABEL_UNAVAILABLE, RED_CODE)
+            addRow("used", LABEL_USED, GRAY_CODE)
+        end
+
+        -- A row's func fires with the row button as `this` (this.value / this.checked = the PRE-click
+        -- state, since benilla's kit doesn't auto-toggle the check). Flip the engine filter, re-init the
+        -- open menu to refresh its checks (keepShownOnClick keeps it up), reset scroll, repaint.
+        function BenillaTrainerFilterDropDown_OnClick()
+            if this.checked then
+                SetTrainerServiceTypeFilter(this.value, 0)
+            else
+                SetTrainerServiceTypeFilter(this.value, 1)
+            end
+            UIDropDownMenu_Initialize(BenillaTrainerFilterDropDown, BenillaTrainerFilterDropDown_Initialize)
+            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+            BenillaTrainerFrame_Update()
+        end
+
+        -- ── The collapse-all tab ─────────────────────────────────────────────────────────────────────
+        -- Fold / unfold every group (Collapse/ExpandTrainerSkillLine(0), ref
+        -- ClassTrainerCollapseAllButton_OnClick).
+        function BenillaTrainerCollapseAllButton_OnClick()
+            local b = getglobal("BenillaTrainerCollapseAllButton")
+            if b.collapsed then
+                b.collapsed = nil
+                ExpandTrainerSkillLine(0)
+            else
+                b.collapsed = 1
+                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+                CollapseTrainerSkillLine(0)
+            end
+            BenillaTrainerFrame_Update()
+        end
+
+        -- ── The NPC-session lifecycle (MerchantFrame.xml's own shape) ────────────────────────────────
+        function BenillaTrainerFrame_OnLoad(frame)
+            -- The NPC portrait: the "npc" unit token → the trainer's live model bake
+            -- (crates/benilla/src/portrait, InteractNpc) — MerchantFrame's own binding.
+            SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
+            frame:RegisterEvent("TRAINER_SHOW")
+            frame:RegisterEvent("TRAINER_UPDATE")
+            frame:RegisterEvent("TRAINER_CLOSED")
+            frame:RegisterEvent("PLAYER_MONEY")
+            -- The faux-scroll frame repaints the list through this window's Update.
+            getglobal("BenillaTrainerListScrollFrame").updateFunc = BenillaTrainerFrame_Update
+            -- The backport's default state filter: Available + Unavailable on, Already Known OFF
+            -- (TRAINER_FILTER_USED = 0). Set once; the engine persists a user's later toggles.
+            SetTrainerServiceTypeFilter("available", 1)
+            SetTrainerServiceTypeFilter("unavailable", 1)
+            SetTrainerServiceTypeFilter("used", 0)
+        end
+
+        function BenillaTrainerFrame_SetTitle(name)
+            if name and name ~= "" then
+                getglobal("BenillaTrainerTitleText"):SetText(name)
+            else
+                getglobal("BenillaTrainerTitleText"):SetText("Trainer")
+            end
+        end
+
+        function BenillaTrainerFrame_OnEvent(frame)
+            if event == "TRAINER_SHOW" then
+                -- Fresh session: top of the list, a first selection (ref ClassTrainerFrame_Show).
+                BenillaTrainerFrame_SetTitle(arg1)
+                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTrainerListScrollFrame"), 0)
+                if GetTrainerSelectionIndex() == 0 then
+                    selectFirstService()
+                end
+                BenillaTrainerFrame_Update()
+                ShowUIPanel(frame)
+            elseif event == "TRAINER_UPDATE" then
+                BenillaTrainerFrame_SetTitle(arg1)
+                -- Re-anchor the selection if it fell off the (possibly shorter) list.
+                if GetTrainerSelectionIndex() == 0 then
+                    selectFirstService()
+                end
+                BenillaTrainerFrame_Update()
+            elseif event == "TRAINER_CLOSED" then
+                HideUIPanel(frame)
+            elseif event == "PLAYER_MONEY" then
+                BenillaMoney_Set("BenillaTrainerMoney", GetMoney())
+                -- A buy changes affordability without a TRAINER_UPDATE — repaint the detail's cost tint.
+                if BenillaTrainerFrame:IsVisible() then
+                    BenillaTrainerFrame_Update()
+                end
+            end
+        end
+
+        function BenillaTrainerCloseButton_OnClick()
+            CloseTrainer()
+            HideUIPanel(getglobal("BenillaTrainerFrame"))
+        end
+    ]]></Script>
+
+    <!--
+        One row (ref ClassTrainerSkillButtonTemplate): a 293×16 text row — the +/- fold slot at the left
+        (used for header rows, blanked per-row for services), the name, and the rank subtext beside it.
+        NO item icon (the list rows carry none; the spell icon is the DETAIL pane's). <OnLoad> wires the
+        child regions + the fold highlight onto `self` (the QuestLogFrame.xml row-template shape).
+    -->
+    <Button name="BenillaTrainerServiceTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="293" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="160" y="0"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentSubText" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="100" y="0"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="188" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <!-- The +/- fold slot + its hover glow: meaningful for header rows (Update sets +/- there),
+             blanked for services. -->
+        <NormalTexture file="Interface\Buttons\UI-MinusButton-UP">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <Scripts>
+            <OnLoad>
+                self.name = getglobal(self:GetName() .. "Name")
+                self.subtext = getglobal(self:GetName() .. "SubText")
+                self.foldHighlight = self:GetHighlightTexture()
+            </OnLoad>
+            <OnClick>BenillaTrainerSkillButton_OnClick(self, arg1)</OnClick>
+            <OnEnter>BenillaTrainerSkillButton_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaTrainerSkillButton_OnLeave(self)</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!--
+        A money coin slot (copied from MerchantFrame.xml's rig): BenillaMoney_Set fills three,
+        highest-denomination-first (ltr) or copper-first (rtl), shrinking each to its number + 13px coin.
+    -->
+    <Frame name="BenillaTrainerCoinTemplate" virtual="true">
+        <Size><AbsDimension x="13" y="13"/></Size>
+        <Layers><Layer level="OVERLAY">
+            <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors></Texture>
+            <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+        </Layer></Layers>
+    </Frame>
+
+    <!-- A panel action button (Train/Exit): the UIPanelButtonTemplate face, label via text=. -->
+    <Button name="BenillaTrainerPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="80" y="22"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaTrainerFrame" hidden="true">
+        <!-- The real 384×512 window. No <Anchors> — ShowUIPanel SetPoints this to the left slot. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Layers>
+            <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref), BACKGROUND so the window art's ring frames it.
+                 Bound in OnLoad via SetPortraitTexture(region, "npc") — the trainer's live model bake. -->
+            <Layer level="BACKGROUND">
+                <Texture name="$parentPortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <!-- The four quadrant slabs that ARE the window art (ref): 256-wide left halves, 128-wide
+                 right halves, each 256 tall, pinned to their corner, whole-texture. -->
+            <Layer level="BORDER">
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/></Anchors></Texture>
+                <!-- Title: the NPC's name, fed as arg1 of TRAINER_SHOW/UPDATE via the NameCache; the
+                     static "Trainer" shows until the creature-name query lands. -->
+                <FontString name="BenillaTrainerTitleText" inherits="GameFontNormal" justifyH="CENTER" text="Trainer">
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- Greeting (GetTrainerGreetingText), GameFontHighlight LEFT/TOP, 260×26, TOPLEFT (76,-38). -->
+                <FontString name="BenillaTrainerGreetingText" inherits="GameFontHighlight" justifyH="LEFT" justifyV="TOP">
+                    <Size><AbsDimension x="260" y="26"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="76" y="-38"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+            <!-- The horizontal divider between the list and the detail pane (ref): 256+75 wide, 16 tall,
+                 TOPLEFT (15,-275), sampled from UI-ClassTrainer-HorizontalBar by TexCoord. -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaTrainerHorizontalBar" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="256" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-275"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="75" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerHorizontalBar" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
+                </Texture>
+            </Layer>
+            <!-- The FIXED detail-pane FontStrings (ref DetailScrollChildFrame), flattened onto this
+                 window's own Layers (the flat-layout gap). Blanked/filled by Hide/ShowDetails. -->
+            <Layer level="OVERLAY">
+                <FontString name="BenillaTrainerSkillName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="150" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="68" y="-293"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTrainerSkillRequirements" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="290" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerSkillName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTrainerCostLabel" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="-340"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTrainerSkillDescription" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="300" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerCostLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The scroll-wheel catcher (this file's header note) — MUST be first so every real row
+                 below out-ranks it in hit-testing; it gives the list's EMPTY tail a hit-target whose
+                 spin also bubbles to the window. -->
+            <Button name="BenillaTrainerWheelCatcher">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
+                </Anchors>
+                <Scripts><OnMouseWheel>BenillaTrainerFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
+            </Button>
+
+            <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT (-29,-8); the minimize-button
+                 art stands in). -->
+            <Button name="BenillaTrainerCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaTrainerCloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- The expand/collapse-all tab (ref ClassTrainerExpandButtonFrame): a tab-shaped frame
+                 carrying the collapse-all button — now functional (Collapse/ExpandTrainerSkillLine(0)). -->
+            <Frame name="BenillaTrainerExpandButtonFrame">
+                <Size><AbsDimension x="54" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-70"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <Texture name="BenillaTrainerExpandTabLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-ExpandTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                    <Texture name="BenillaTrainerExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="38" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerExpandTabMiddle" relativePoint="RIGHT"/></Anchors></Texture>
+                </Layer></Layers>
+                <Frames>
+                    <Button name="BenillaTrainerCollapseAllButton" text="All">
+                        <Size><AbsDimension x="40" y="22"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></NormalTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></HighlightTexture>
+                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="18" y="0"/></Offset></Anchor></Anchors></ButtonText>
+                        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                        <Scripts><OnClick>BenillaTrainerCollapseAllButton_OnClick()</OnClick></Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The state-filter dropdown (ref ClassTrainerFrameFilterDropDown): the UIDropDownMenu capsule
+                 whose three keepShownOnClick check rows drive the engine's state-visibility filter —
+                 replacing the three inline sort checkboxes. TOPRIGHT (-26,-64), the ref's spot. -->
+            <Frame name="BenillaTrainerFilterDropDown" inherits="UIDropDownMenuTemplate">
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-26" y="-64"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>BenillaTrainerFilterDropDown_OnLoad()</OnLoad>
+                    <OnShow>BenillaTrainerFilterDropDown_OnLoad()</OnShow>
+                </Scripts>
+            </Frame>
+
+            <!-- The persistent selection highlight (ref ClassTrainerSkillHighlightFrame): 293×16,
+                 ARTWORK-layer UI-Listbox-Highlight2. Declared BEFORE the rows so the row text paints OVER
+                 the glow (same parent + level ⇒ declaration order is the z-tiebreak). Moved onto the
+                 selected visible service row + vertex-colored by state. -->
+            <Frame name="BenillaTrainerSkillHighlight" hidden="true">
+                <Size><AbsDimension x="293" y="16"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture name="BenillaTrainerSkillHighlightTexture" file="Interface\Buttons\UI-Listbox-Highlight2">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- 11 tree rows (ref ClassTrainerSkill1..11): 293×16, row1 TOPLEFT (22,-100); rows 2-11 chain
+                 TOPLEFT→prior BOTTOMLEFT with no gap. -->
+            <Button name="BenillaTrainerService1" inherits="BenillaTrainerServiceTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-100"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaTrainerService2" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService3" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService4" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService5" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService6" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService7" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService8" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService9" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService8" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService10" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService9" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTrainerService11" inherits="BenillaTrainerServiceTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTrainerService10" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+                 container over the 11 rows; only its right-hand Slider scroll bar renders. Sized to the
+                 11-row span so the bar sits in the window's right gutter. updateFunc is set in
+                 BenillaTrainerFrame_OnLoad. -->
+            <Frame name="BenillaTrainerListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                <Size><AbsDimension x="293" y="176"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-100"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The detail spell icon (ref ClassTrainerSkillIcon): a 37×37 button over a 64×64 UI-EmptySlot
+                 ring, at the detail area's top-left. Icon via SetNormalTexture; Hide()n when unselected. -->
+            <Button name="BenillaTrainerSkillIcon" hidden="true">
+                <Size><AbsDimension x="37" y="37"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="26" y="-291"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <Texture file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="64" y="64"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor></Anchors></Texture>
+                </Layer></Layers>
+            </Button>
+
+            <!-- The detail cost coins (ref ClassTrainerDetailMoneyFrame), left-to-right off the "Cost:"
+                 label; BenillaMoney_Set("BenillaTrainerDetailMoney", cost, true) fills them. Coin1's LEFT
+                 pins to the label's RIGHT (not a magic absolute x): each coin auto-shrinks to numW+13 and
+                 its number left-aligns at this LEFT edge, growing rightward — so the number abuts the
+                 ":" with a fixed 4px gap regardless of the amount's digit count (the ref's cost-label →
+                 money-frame anchoring; the old absolute x reserved a wide 1-vs-2-digit gap). -->
+            <Frame name="BenillaTrainerDetailMoneyCoin1" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerCostLabel" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTrainerDetailMoneyCoin2" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerDetailMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTrainerDetailMoneyCoin3" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTrainerDetailMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The player purse (ref ClassTrainerMoneyFrame): the rightmost coin (Coin1) pins its
+                 BOTTOMRIGHT to the window BOTTOMLEFT + (180, 86); Coin2/Coin3 chain left. Filled
+                 copper-first by BenillaMoney_Set("BenillaTrainerMoney", GetMoney()). -->
+            <Frame name="BenillaTrainerMoneyCoin1" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="180" y="86"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTrainerMoneyCoin2" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaTrainerMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTrainerMoneyCoin3" inherits="BenillaTrainerCoinTemplate">
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaTrainerMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The Train button (ref ClassTrainerTrainButton): UIPanelButton face + "Train", 80×22, in
+                 the detail area's bottom-right. Enabled only for an affordable available service. -->
+            <Button name="BenillaTrainerTrainButton" inherits="BenillaTrainerPanelButtonTemplate" text="Train">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="184" y="-409"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaTrainerTrainButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <!-- The Exit button (ref ClassTrainerCancelButton): hides the window; OnHide fires CloseTrainer(). -->
+            <Button name="BenillaTrainerCancelButton" inherits="BenillaTrainerPanelButtonTemplate" text="Exit">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="265" y="-409"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>HideUIPanel(getglobal("BenillaTrainerFrame"))</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <!-- The NPC-session lifecycle (MerchantFrame.xml's shape): OnHide calls CloseTrainer() — it ends
+             the client-side session whenever this window hides for ANY reason (ESC, close X, Exit,
+             TRAINER_CLOSED, or another left-slot window displacing it). The list wheel lives on the
+             WINDOW (the engine bubbles a spin up the parent chain, so a spin over a row reaches here). -->
+        <Scripts>
+            <OnLoad>BenillaTrainerFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaTrainerFrame_OnEvent(self)</OnEvent>
+            <OnMouseWheel>BenillaTrainerFrame_OnMouseWheel(arg1)</OnMouseWheel>
+            <OnShow>PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnHide>CloseTrainer(); PlaySound("igCharacterInfoClose")</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

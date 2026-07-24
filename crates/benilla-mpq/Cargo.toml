@@ -1,0 +1,16 @@
+[package]
+name = "benilla-mpq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Read-only MPQ archive reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+
+[dependencies]
+# Bounds-checked byte readers + the allocation-cap guard (decision 0064). MPQ migrates minimally: the
+# hand-rolled rd_u16/rd_u32 move to ByteExt and the header/block-table/sector allocations get capped;
+# nothing else here changes (this crate is StormLib-pinned and deliberately not churned further).
+benilla-bytes = { path = "../benilla-bytes" }
+# zlib/inflate for the ZLIB (0x02) sector codec. miniz_oxide backend (pure Rust); no C, no archive
+# writing. Any other codec the differential pass turns up in real 1.12.1 data (e.g. PKWARE-DCL 0x08)
+# gets vendored alongside; `decompress` errors loudly on an unknown method so nothing is missed.
+flate2 = "1.1"

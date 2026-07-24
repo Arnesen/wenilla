@@ -1,0 +1,12 @@
+[package]
+name = "benilla-visual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Perceptual image diff for the Phase-5 visual A/B render harness (decision 0008)"
+
+[dependencies]
+anyhow.workspace = true
+# PNG-only image IO + the RgbImage buffer the metrics run over. No Bevy — this is the pure-math half of
+# the harness, so it compiles fast and runs under `cargo test --workspace`.
+image = { version = "0.25", default-features = false, features = ["png"] }

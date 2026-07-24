@@ -1,0 +1,237 @@
+//! Drives the REAL `assets/ui/TalentFrame.xml` through the engine — the first test that
+//! executes the transcribed talent Lua at all (before this, the window's machinery only ever
+//! ran inside a live client session; both of the director's day-one reports — no prereq branch
+//! lines, no tooltip on first hover — slipped through that gap).
+//!
+//! The harness loads the same file chain the app does (`ui_script/mod.rs`'s list, cut to the
+//! talent window's dependency prefix), pushes a synthetic two-talent page shaped like the
+//! warrior's Improved Rend → Deep Wounds column, opens the window, and asserts at three
+//! depths: the Lua-visible state (`TALENT_BRANCH_ARRAY`), the logical frame state (`IsShown`),
+//! and the extract the renderer actually draws (branch/arrow quads with their atlas coords).
+
+use benilla_ui::script::{
+    QuadContent, SpellTooltipView, TalentPrereqView, TalentTabView, TalentUiState, TalentView,
+    UiScript,
+};
+
+const UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/ui");
+
+/// The talent window's load prefix — the app's own order (`ui_script/mod.rs`), members only.
+const FILES: [&str; 5] = [
+    "Fonts.xml",
+    "UiPanels.xml",
+    "GameTooltip.xml",
+    "ScrollTemplates.xml",
+    "TalentFrame.xml",
+];
+
+fn load_ui(script: &UiScript) {
+    let dir = std::path::Path::new(UI_DIR);
+    // The app's provider shape: backslash paths, dir-relative, basename fallback.
+    let provider = |req: &str| -> Option<String> {
+        let norm = req.replace('\\', "/");
+        let base = norm.rsplit('/').next().unwrap_or(&norm);
+        std::fs::read_to_string(dir.join(&norm))
+            .or_else(|_| std::fs::read_to_string(dir.join(base)))
+            .ok()
+    };
+    for file in FILES {
+        let text = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| {
+            panic!("reading {file}: {e}");
+        });
+        let doc = benilla_ui::framexml::parse(&text).unwrap_or_else(|e| {
+            panic!("parsing {file}: {e}");
+        });
+        let report = benilla_ui::loader::load(script, &doc, &provider);
+        assert!(
+            report.errors.is_empty(),
+            "{file} loaded with errors: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// The Improved Rend → Deep Wounds shape: a rank-3 prereq two tiers straight up the same
+/// column, the empty cell between them carrying the vertical branch (the classic vanilla look).
+/// `points_spent` decides the line's color: ≥10 unlocks tier 3 (yellow, `1`); fewer leaves it
+/// locked (gray, `-1`) — the reference draws the branch EITHER way.
+fn fixture(points_spent: u32) -> TalentUiState {
+    let rend = TalentView {
+        name: "Improved Rend".into(),
+        texture: Some("Interface\\Icons\\Ability_Gouge".into()),
+        tier: 1,
+        column: 3,
+        rank: 3,
+        max_rank: 3,
+        exceptional: false,
+        meets_prereq: true,
+        prereqs: Vec::new(),
+        display_spell: 201,
+        next_spell: 0,
+        req_lines: Vec::new(),
+        learnable: false,
+    };
+    let deep_wounds = TalentView {
+        name: "Deep Wounds".into(),
+        texture: Some("Interface\\Icons\\Ability_BackStab".into()),
+        tier: 3,
+        column: 3,
+        rank: 0,
+        max_rank: 3,
+        exceptional: false,
+        meets_prereq: true,
+        prereqs: vec![TalentPrereqView {
+            tier: 1,
+            column: 3,
+            learnable: true,
+        }],
+        display_spell: 301,
+        next_spell: 0,
+        req_lines: Vec::new(),
+        learnable: true,
+    };
+    TalentUiState {
+        tabs: vec![TalentTabView {
+            name: "Arms".into(),
+            background: "WarriorArms".into(),
+            points_spent,
+        }],
+        talents: vec![vec![rend, deep_wounds]],
+        points: (2, 0),
+    }
+}
+
+fn view(name: &str, desc: &str) -> SpellTooltipView {
+    SpellTooltipView {
+        name: name.into(),
+        description: desc.into(),
+        ..Default::default()
+    }
+}
+
+fn open_window(points_spent: u32) -> UiScript {
+    let mut script = UiScript::new().expect("engine");
+    script.set_screen_size(1024.0, 768.0);
+    load_ui(&script);
+    script.set_talents(fixture(points_spent));
+    script.run("ToggleTalentFrame()").expect("toggle");
+    script
+}
+
+#[test]
+fn branch_lines_draw_for_a_same_column_prereq() {
+    let mut script = open_window(10);
+    // Depth 1 — the Lua machinery: Update ran, the branch array carries the vertical chain
+    // (tier 1's down-edge, the empty tier-2 cell's up+down, the button's own top arrow).
+    script
+        .run(
+            r#"
+            assert(BenillaTalentFrame:IsVisible(), "window visible")
+            local a = TALENT_BRANCH_ARRAY
+            assert(a[1][3].down == 1, "tier1 down, got " .. tostring(a[1][3].down))
+            assert(a[2][3].up == 1, "tier2 up, got " .. tostring(a[2][3].up))
+            assert(a[2][3].down == 1, "tier2 down, got " .. tostring(a[2][3].down))
+            assert(a[3][3].topArrow == 1, "tier3 topArrow, got " .. tostring(a[3][3].topArrow))
+            "#,
+        )
+        .expect("branch array");
+    // Depth 2 — the pooled textures took the work: at least one branch + one arrow shown.
+    script
+        .run(
+            r#"
+            assert(BenillaTalentFrameBranch1:IsShown(), "branch 1 shown")
+            assert(BenillaTalentFrameArrow1:IsShown(), "arrow 1 shown")
+            "#,
+        )
+        .expect("pool state");
+    // Depth 3 — the renderer sees them: branch/arrow quads in the extract, cropped into the
+    // atlas (a full-sheet [0,1] crop means SetTexCoord never landed).
+    script.resolve();
+    let quads = script.extract();
+    let branch = quads
+        .iter()
+        .filter_map(|q| match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                tex_coords,
+                ..
+            } if p.contains("UI-TalentBranches") => Some(*tex_coords),
+            _ => None,
+        })
+        .next();
+    let Some(tex_coords) = branch else {
+        panic!("no UI-TalentBranches quad in the extract");
+    };
+    assert!(
+        tex_coords.is_some_and(|c| c.edges() != [0.0, 1.0, 0.0, 1.0]),
+        "branch quad must be atlas-cropped, got {tex_coords:?}"
+    );
+    assert!(
+        quads.iter().any(|q| matches!(
+            &q.content,
+            QuadContent::Texture { path: Some(p), .. } if p.contains("UI-TalentArrows")
+        )),
+        "no UI-TalentArrows quad in the extract"
+    );
+}
+
+#[test]
+fn tooltip_is_complete_on_the_first_hover() {
+    let mut script = open_window(10);
+    // The app's feed owes the store every talent spell view up front (the spellbook's own
+    // arrival-driven contract) — with the views in place, the FIRST OnEnter must render the
+    // full tooltip: name line, description, the green hint.
+    script.set_spell_tooltip(201, view("Improved Rend", "Bleed harder."));
+    script.set_spell_tooltip(301, view("Deep Wounds", "Bleed on crit."));
+    script
+        .run(
+            r#"
+            BenillaTalentButton_OnEnter(BenillaTalentFrameTalent2)
+            assert(GameTooltip:IsShown(), "tooltip shown on first hover")
+            assert(GameTooltipTextLeft1:GetText() == "Deep Wounds",
+                "name line, got " .. tostring(GameTooltipTextLeft1:GetText()))
+            "#,
+        )
+        .expect("first hover");
+}
+
+#[test]
+fn tooltip_miss_still_shows_the_rank_line() {
+    let mut script = open_window(10);
+    // The store is EMPTY (no views pushed): the ask-once fallback must still show a box with
+    // the talent head — never a blank hover — and record the ask for the app's resolver.
+    script
+        .run(
+            r#"
+            BenillaTalentButton_OnEnter(BenillaTalentFrameTalent2)
+            assert(GameTooltip:IsShown(), "tooltip shown on a store miss")
+            assert(GameTooltipTextLeft1:GetText() == "Rank 0/3",
+                "rank fallback, got " .. tostring(GameTooltipTextLeft1:GetText()))
+            "#,
+        )
+        .expect("miss hover");
+    let asks = script.take_spell_tooltip_asks();
+    assert!(
+        asks.contains(&301),
+        "the miss records the ask, got {asks:?}"
+    );
+}
+
+#[test]
+fn a_locked_tier_still_draws_the_branch_gray() {
+    // The director's own day-one state: 2 points spent, tier 3 locked — the reference draws
+    // the chain anyway, gray (the `-1` keys of the texcoord tables; a typo'd negative key
+    // would error the draw loop and hide every line while the grid stays perfect).
+    let script = open_window(2);
+    script
+        .run(
+            r#"
+            local a = TALENT_BRANCH_ARRAY
+            assert(a[1][3].down == -1, "tier1 down gray, got " .. tostring(a[1][3].down))
+            assert(a[3][3].topArrow == -1, "tier3 topArrow gray, got " .. tostring(a[3][3].topArrow))
+            assert(BenillaTalentFrameBranch1:IsShown(), "gray branch shown")
+            assert(BenillaTalentFrameArrow1:IsShown(), "gray arrow shown")
+            "#,
+        )
+        .expect("gray branch");
+}

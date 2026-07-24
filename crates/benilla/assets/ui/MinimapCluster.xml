@@ -1,0 +1,441 @@
+<!--
+    The HUD minimap cluster — transcribed from the 1.12 FrameXML Minimap.xml (decision 0203
+    phase 1). The <Minimap> widget itself is the engine-rendered map hole: benilla-ui carries its
+    rect + zoom, and the app (`minimap.rs`) fills it with the streamed tile window, the
+    MinimapMask circle, and the player arrow; everything in THIS file is the chrome the reference
+    authors around that hole, at the reference's own geometry and art.
+
+    IN (this file): the cluster frame (192×192, TOPRIGHT), MinimapBorderTop, the zone-text button
+    (label fed by MINIMAP_ZONE_CHANGED → GetMinimapZoneText()), the minimap show/hide toggle, the
+    140×140 <Minimap> widget, MinimapBackdrop's round border art, the zoom in/out buttons
+    driving Minimap:SetZoom() with the reference's enable/disable-at-bounds law + sounds, and the
+    unread-mail icon (MiniMapMailFrame, decision 0544 P3 — the mail arc's arrival layer) driven by
+    UPDATE_PENDING_MAIL + HasNewMail(), and the tracking icon (MiniMapTrackingFrame) driven by
+    PLAYER_AURAS_CHANGED + GetTrackingTexture() (the aura rebuild's tracking-global law, `ui_aura`).
+
+    OUT (no wire / later arc slices, per 0203): meeting stone and battlefield buttons;
+    the ping model + MINIMAP_PING; the day/night indicator; the rotate-minimap CVar. The
+    reference's minimapPlayerModel/.mdx arrow renders app-side from its .blp for now (0203 flags
+    the simplification). The reference's <HitRectInsets> on the cluster is dropped (the loader
+    doesn't model it; only enlarges the mouse-blocking hull).
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        -- ref-Minimap.lua ToggleMinimap(), verbatim (the toggle button hides the MAP, not the chrome).
+        function ToggleMinimap()
+            if ( Minimap:IsVisible() ) then
+                PlaySound("igMiniMapClose");
+                Minimap:Hide();
+            else
+                PlaySound("igMiniMapOpen");
+                Minimap:Show();
+            end
+        end
+
+        -- ref-Minimap.lua Minimap_Update(), verbatim — the PVP tint rides GetZonePVPInfo
+        -- (decision 0287; closes the "zone PVP state we don't track yet" reduction that kept
+        -- the label gold), plus the ref's refresh-while-hovered tooltip block.
+        function Minimap_Update()
+            MinimapZoneText:SetText(GetMinimapZoneText());
+            local pvpType, factionName, isArena = GetZonePVPInfo();
+            if ( isArena ) then
+                MinimapZoneText:SetTextColor(1.0, 0.1, 0.1);
+            elseif ( pvpType == "friendly" ) then
+                MinimapZoneText:SetTextColor(0.1, 1.0, 0.1);
+            elseif ( pvpType == "hostile" ) then
+                MinimapZoneText:SetTextColor(1.0, 0.1, 0.1);
+            elseif ( pvpType == "contested" ) then
+                MinimapZoneText:SetTextColor(1.0, 0.7, 0);
+            else
+                MinimapZoneText:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
+            end
+
+            if ( GameTooltip:IsOwned(MinimapZoneTextButton) ) then
+                GameTooltip:SetOwner(MinimapZoneTextButton, "ANCHOR_LEFT");
+                GameTooltip:AddLine(GetMinimapZoneText(), "", 1.0, 1.0, 1.0);
+                if ( (pvpType == "friendly") or (pvpType == "hostile") ) then
+                    GameTooltip:AddLine(format(FACTION_CONTROLLED_TERRITORY, factionName), "", 1.0, 1.0, 1.0);
+                elseif ( pvpType == "contested" ) then
+                    GameTooltip:AddLine(CONTESTED_TERRITORY, "", 1.0, 1.0, 1.0);
+                elseif ( pvpType == "arena" ) then
+                    GameTooltip:AddLine(FREE_FOR_ALL_TERRITORY, "", 1.0, 1.0, 1.0);
+                end
+                GameTooltip:Show();
+            end
+        end
+
+        -- ref-Minimap.lua zoom clicks, verbatim: step the widget, re-arm both buttons, disable
+        -- the one at its bound.
+        function Minimap_ZoomInClick()
+            MinimapZoomOut:Enable();
+            PlaySound("igMiniMapZoomIn");
+            Minimap:SetZoom(Minimap:GetZoom() + 1);
+            if ( Minimap:GetZoom() == (Minimap:GetZoomLevels() - 1) ) then
+                MinimapZoomIn:Disable();
+            end
+        end
+
+        function Minimap_ZoomOutClick()
+            MinimapZoomIn:Enable();
+            PlaySound("igMiniMapZoomOut");
+            Minimap:SetZoom(Minimap:GetZoom() - 1);
+            if ( Minimap:GetZoom() == 0 ) then
+                MinimapZoomOut:Disable();
+            end
+        end
+
+        -- ref-Minimap.lua Minimap_OnEvent's MINIMAP_UPDATE_ZOOM branch, verbatim: re-sync both
+        -- buttons to the CURRENT zoom. The app fires MINIMAP_UPDATE_ZOOM when the active zoom index
+        -- switches (stepping inside/outside flips to the other, independent level), so the +/- greying
+        -- follows the map you are actually on instead of the one you left.
+        function Minimap_UpdateZoom()
+            MinimapZoomIn:Enable();
+            MinimapZoomOut:Enable();
+            local zoom = Minimap:GetZoom();
+            if ( zoom == (Minimap:GetZoomLevels() - 1) ) then
+                MinimapZoomIn:Disable();
+            elseif ( zoom == 0 ) then
+                MinimapZoomOut:Disable();
+            end
+        end
+
+        -- Byte-exact 1.12 enUS GlobalString (GlobalStrings.lua:2122) — the unread-mail tooltip.
+        local HAVE_MAIL = "You have unread mail";
+
+        -- ref-Minimap.xml MiniMapMailFrame's OnEvent, verbatim logic (l.281-289): UPDATE_PENDING_MAIL
+        -- is the ONLY event the reference registers on this frame — no MAIL_INBOX_UPDATE/MAIL_CLOSED
+        -- exists there despite the icon logically depending on inbox state. benilla's arrival feed
+        -- (`ui_mail::feed_mail`, decision 0544 P3) fires UPDATE_PENDING_MAIL on every HasNewMail()
+        -- value transition, which already covers a read-to-empty inbox — so mirroring just this one
+        -- event is faithful, not a simplification.
+        function MiniMapMailFrame_OnEvent()
+            if ( event == "UPDATE_PENDING_MAIL" ) then
+                if ( HasNewMail() ) then
+                    this:Show();
+                else
+                    this:Hide();
+                end
+            end
+        end
+
+        -- ref-Minimap.xml l.290-293, verbatim.
+        function MiniMapMailFrame_OnEnter()
+            GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
+            GameTooltip:SetText(HAVE_MAIL);
+        end
+
+    ]]></Script>
+    <Frame name="MinimapCluster" frameStrata="BACKGROUND" enableMouse="true" parent="UIParent">
+        <Size>
+            <AbsDimension x="192" y="192"/>
+        </Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="MinimapBorderTop" file="Interface\Minimap\UI-Minimap-Border">
+                    <Size>
+                        <AbsDimension x="192" y="32"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOPRIGHT"/>
+                    </Anchors>
+                    <TexCoords left="0.25" right="1.0" top="0.0" bottom="0.125"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="MinimapZoneTextButton">
+                <Size>
+                    <AbsDimension x="128" y="12"/>
+                </Size>
+                <Anchors>
+                    <Anchor point="CENTER">
+                        <Offset>
+                            <AbsDimension x="-3" y="83"/>
+                        </Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="MinimapZoneText" inherits="GameFontNormal" nonspacewrap="true">
+                            <Size>
+                                <AbsDimension x="128" y="12"/>
+                            </Size>
+                            <Anchors>
+                                <Anchor point="TOP"/>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>
+                        GameTooltip:SetOwner(this, "ANCHOR_LEFT");
+                        GameTooltip:AddLine(GetMinimapZoneText(), "", 1.0, 1.0, 1.0);
+                        local pvpType, factionName, isArena = GetZonePVPInfo();
+                        if ( (pvpType == "friendly") or (pvpType == "hostile") ) then
+                            GameTooltip:AddLine(format(FACTION_CONTROLLED_TERRITORY, factionName), "", 1.0, 1.0, 1.0);
+                        elseif ( pvpType == "contested" ) then
+                            GameTooltip:AddLine(CONTESTED_TERRITORY, "", 1.0, 1.0, 1.0);
+                        end
+                        if ( isArena ) then
+                            GameTooltip:AddLine(FREE_FOR_ALL_TERRITORY, "", 1.0, 1.0, 1.0);
+                        end
+                        GameTooltip:Show();
+                    </OnEnter>
+                    <OnLeave>
+                        GameTooltip:Hide();
+                    </OnLeave>
+                </Scripts>
+            </Button>
+            <Button name="MinimapToggleButton">
+                <Size>
+                    <AbsDimension x="32" y="32"/>
+                </Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="TOPRIGHT">
+                        <Offset>
+                            <AbsDimension x="-15" y="-13"/>
+                        </Offset>
+                    </Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        ToggleMinimap();
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture alphaMode="ADD" file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight"/>
+            </Button>
+            <Minimap name="Minimap" enableMouse="true">
+                <Size>
+                    <AbsDimension x="140" y="140"/>
+                </Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="TOP">
+                        <Offset>
+                            <AbsDimension x="9" y="-92"/>
+                        </Offset>
+                    </Anchor>
+                </Anchors>
+                <Frames>
+                    <!-- ref-Minimap.xml l.109-174, verbatim — the tracking icon (the mail frame's
+                         nesting precedent: a child of the round Minimap WIDGET, whose TOPLEFT the
+                         (-15,0) anchor hangs off). Driven by PLAYER_AURAS_CHANGED →
+                         GetTrackingTexture(): the reference's aura-cache rebuild diverts a
+                         tracking-effect aura (Find Minerals, Track Beasts, …) out of the buff bar
+                         into a tracking global this icon shows (byte-verified — the {0x2c,0x2d,0x97}
+                         effect exclusion; `ui_aura` mirrors the law). Right-click cancels the
+                         tracking aura, exactly the reference's CancelTrackingBuff. -->
+                    <Frame name="MiniMapTrackingFrame" enableMouse="true" hidden="true">
+                        <Size>
+                            <AbsDimension x="33" y="33"/>
+                        </Size>
+                        <Anchors>
+                            <Anchor point="TOPLEFT">
+                                <Offset>
+                                    <AbsDimension x="-15" y="0"/>
+                                </Offset>
+                            </Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="MiniMapTrackingIcon">
+                                    <Size>
+                                        <AbsDimension x="26" y="26"/>
+                                    </Size>
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT">
+                                            <Offset>
+                                                <AbsDimension x="7" y="-6"/>
+                                            </Offset>
+                                        </Anchor>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                            <Layer level="OVERLAY">
+                                <Texture name="MiniMapTrackingBorder" file="Interface\Minimap\MiniMap-TrackingBorder">
+                                    <Size>
+                                        <AbsDimension x="64" y="64"/>
+                                    </Size>
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>
+                                this:RegisterEvent("PLAYER_AURAS_CHANGED");
+                            </OnLoad>
+                            <OnEvent>
+                                if ( event == "PLAYER_AURAS_CHANGED" ) then
+                                    local icon = GetTrackingTexture();
+                                    if ( icon ) then
+                                        MiniMapTrackingIcon:SetTexture(icon);
+                                        MiniMapTrackingFrame:Show();
+                                    else
+                                        MiniMapTrackingFrame:Hide();
+                                    end
+                                end
+                            </OnEvent>
+                            <OnMouseUp>
+                                if ( arg1 == "RightButton" ) then
+                                    CancelTrackingBuff();
+                                end
+                            </OnMouseUp>
+                            <OnEnter>
+                                GameTooltip:SetOwner(this, "ANCHOR_BOTTOMLEFT");
+                                GameTooltip:SetTrackingSpell();
+                            </OnEnter>
+                            <OnLeave>
+                                GameTooltip:Hide();
+                            </OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <!-- ref-Minimap.xml l.239-298, verbatim (decision 0544 P3) — the unread-mail
+                         icon. A child of the round Minimap WIDGET, not the cluster: its TOPRIGHT
+                         (21,-38) hangs off the 140×140 map's right edge, which sits well inside the
+                         cluster — hoisted to the cluster the same offset lands past the screen edge.
+                         Unprefixed (this file's own convention: every frame here keeps the
+                         reference's bare name, unlike the newer Benilla*-prefixed windows). -->
+                    <Frame name="MiniMapMailFrame" enableMouse="true" hidden="true">
+                        <Size>
+                            <AbsDimension x="33" y="33"/>
+                        </Size>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT">
+                                <Offset>
+                                    <AbsDimension x="21" y="-38"/>
+                                </Offset>
+                            </Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="MiniMapMailIcon" file="Interface\Icons\INV_Letter_15">
+                                    <Size>
+                                        <AbsDimension x="18" y="18"/>
+                                    </Size>
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT">
+                                            <Offset>
+                                                <AbsDimension x="7" y="-6"/>
+                                            </Offset>
+                                        </Anchor>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                            <Layer level="OVERLAY">
+                                <Texture name="MiniMapMailBorder" file="Interface\Minimap\MiniMap-TrackingBorder">
+                                    <Size>
+                                        <AbsDimension x="52" y="52"/>
+                                    </Size>
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>
+                                this:RegisterEvent("UPDATE_PENDING_MAIL");
+                                this:SetFrameLevel(this:GetFrameLevel()+1)
+                            </OnLoad>
+                            <OnEvent>
+                                MiniMapMailFrame_OnEvent();
+                            </OnEvent>
+                            <OnEnter>
+                                MiniMapMailFrame_OnEnter();
+                            </OnEnter>
+                            <OnLeave>
+                                GameTooltip:Hide();
+                            </OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="MinimapBackdrop">
+                        <Size>
+                            <AbsDimension x="192" y="192"/>
+                        </Size>
+                        <Anchors>
+                            <Anchor point="CENTER" relativeTo="MinimapCluster">
+                                <Offset>
+                                    <AbsDimension x="0" y="-20"/>
+                                </Offset>
+                            </Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="MinimapBorder" file="Interface\Minimap\UI-Minimap-Border">
+                                    <TexCoords left="0.25" right="1.0" top="0.125" bottom="0.875"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <Button name="MinimapZoomIn">
+                                <Size>
+                                    <AbsDimension x="32" y="32"/>
+                                </Size>
+                                <Anchors>
+                                    <Anchor point="CENTER">
+                                        <Offset>
+                                            <AbsDimension x="77" y="-13"/>
+                                        </Offset>
+                                    </Anchor>
+                                </Anchors>
+                                <Scripts>
+                                    <OnClick>
+                                        Minimap_ZoomInClick();
+                                    </OnClick>
+                                </Scripts>
+                                <NormalTexture file="Interface\Minimap\UI-Minimap-ZoomInButton-Up"/>
+                                <PushedTexture file="Interface\Minimap\UI-Minimap-ZoomInButton-Down"/>
+                                <DisabledTexture file="Interface\Minimap\UI-Minimap-ZoomInButton-Disabled"/>
+                                <HighlightTexture alphaMode="ADD" file="Interface\Minimap\UI-Minimap-ZoomButton-Highlight"/>
+                            </Button>
+                            <Button name="MinimapZoomOut">
+                                <Size>
+                                    <AbsDimension x="32" y="32"/>
+                                </Size>
+                                <Anchors>
+                                    <Anchor point="CENTER">
+                                        <Offset>
+                                            <AbsDimension x="51" y="-41"/>
+                                        </Offset>
+                                    </Anchor>
+                                </Anchors>
+                                <Scripts>
+                                    <OnClick>
+                                        Minimap_ZoomOutClick();
+                                    </OnClick>
+                                </Scripts>
+                                <NormalTexture file="Interface\Minimap\UI-Minimap-ZoomOutButton-Up"/>
+                                <PushedTexture file="Interface\Minimap\UI-Minimap-ZoomOutButton-Down"/>
+                                <DisabledTexture file="Interface\Minimap\UI-Minimap-ZoomOutButton-Disabled"/>
+                                <HighlightTexture alphaMode="ADD" file="Interface\Minimap\UI-Minimap-ZoomButton-Highlight"/>
+                            </Button>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </Minimap>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                Minimap_Update();
+                -- Seed the +/- state from the live zoom (default index 3 ⇒ both enabled) rather than
+                -- hardcoding a zoom-0 "can't zoom out" — the client's default is 3, not the widest.
+                Minimap_UpdateZoom();
+                this:RegisterEvent("MINIMAP_ZONE_CHANGED");
+                this:RegisterEvent("MINIMAP_UPDATE_ZOOM");
+            </OnLoad>
+            <OnEvent>
+                if ( event == "MINIMAP_UPDATE_ZOOM" ) then
+                    Minimap_UpdateZoom();
+                else
+                    Minimap_Update();
+                end
+            </OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

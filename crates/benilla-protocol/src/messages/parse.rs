@@ -1,0 +1,875 @@
+//! The opcode→[`ServerPacket`] dispatch: [`parse_server`] decodes one server packet body (already
+//! decrypted + sized) into its variant, delegating per-domain payloads to the domain children
+//! (`spells`, `quest`, `loot`, …). One match arm per opcode — which opcode carries what stays
+//! readable in one place.
+
+use std::io::{self, Read};
+
+use crate::wire::{
+    read_cstring, read_f32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8, Vector3d,
+};
+
+use super::{
+    bank, channel, chat, death, gameobject, gossip, group, items, loot, mail, monster_move,
+    movement, opcode, quest, spells, taxi, trade, trainer, update_object, vendor, Character,
+    CreatureQueryInfo, ServerPacket, SpeedKind,
+};
+
+/// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
+/// identical across all six kinds (VERIFIED vmangos `SendSpeedChangeToController`, the 5875
+/// `> 1_9_4` branch). The kind is the opcode's; the caller's arm names it.
+fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
+    Ok(ServerPacket::ForceSpeedChange {
+        guid: read_packed_guid(r)?,
+        kind,
+        counter: read_u32_le(r)?,
+        speed: read_f32_le(r)?,
+    })
+}
+
+/// Read one `SMSG_SPLINE_SET_*_SPEED` body — `[packed guid][f32 speed]` (VERIFIED vmangos
+/// `MovementPacketSender::SendSpeedChangeToAll` + the mid-spline observer branch, the 5875
+/// `> 1_8_4` layout). Observer-only: no counter, no ack (decision 0441).
+fn read_spline_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
+    Ok(ServerPacket::SplineSpeedChange {
+        guid: read_packed_guid(r)?,
+        kind,
+        speed: read_f32_le(r)?,
+    })
+}
+
+/// Read one `MSG_MOVE_SET_*_SPEED` body — `[packed guid][MovementInfo][f32 speed]` (VERIFIED
+/// vmangos `SendSpeedChangeToObservers`, the finalized-spline branch): a freely-moving player's
+/// speed change, carrying a fresh pose alongside (decision 0441). No ack.
+fn read_move_set_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPacket> {
+    let guid = read_packed_guid(r)?;
+    let info = movement::read_movement_info(r)?;
+    Ok(ServerPacket::MoveSetSpeed {
+        guid,
+        kind,
+        flags: info.flags,
+        position: info.position,
+        orientation: info.orientation,
+        pitch: info.pitch,
+        time: info.timestamp,
+        fall_time: info.fall_time,
+        jump: info.jump,
+        transport: info.transport,
+        speed: read_f32_le(r)?,
+    })
+}
+
+/// True for a relayed player-movement opcode — one the server rebroadcasts as
+/// `[packed guid][MovementInfo]` (every opcode bound to vmangos `HandleMovementOpcodes`, VERIFIED
+/// `Opcodes.cpp`). Excludes `MSG_MOVE_TELEPORT_ACK` / `MSG_MOVE_WORLDPORT_ACK`, which share the family
+/// but carry different bodies and are decoded by their own arms.
+const fn is_movement_relay(o: u16) -> bool {
+    matches!(
+        o,
+        opcode::MSG_MOVE_START_FORWARD
+            | opcode::MSG_MOVE_START_BACKWARD
+            | opcode::MSG_MOVE_STOP
+            | opcode::MSG_MOVE_START_STRAFE_LEFT
+            | opcode::MSG_MOVE_START_STRAFE_RIGHT
+            | opcode::MSG_MOVE_STOP_STRAFE
+            | opcode::MSG_MOVE_JUMP
+            | opcode::MSG_MOVE_START_TURN_LEFT
+            | opcode::MSG_MOVE_START_TURN_RIGHT
+            | opcode::MSG_MOVE_STOP_TURN
+            | opcode::MSG_MOVE_START_PITCH_UP
+            | opcode::MSG_MOVE_START_PITCH_DOWN
+            | opcode::MSG_MOVE_STOP_PITCH
+            | opcode::MSG_MOVE_SET_RUN_MODE
+            | opcode::MSG_MOVE_SET_WALK_MODE
+            | opcode::MSG_MOVE_FALL_LAND
+            | opcode::MSG_MOVE_START_SWIM
+            | opcode::MSG_MOVE_STOP_SWIM
+            | opcode::MSG_MOVE_SET_FACING
+            | opcode::MSG_MOVE_SET_PITCH
+            | opcode::MSG_MOVE_HEARTBEAT
+    )
+}
+
+/// Parse a server packet body (already decrypted + sized) by opcode.
+pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
+    let mut r = body;
+    Ok(match opcode {
+        opcode::SMSG_AUTH_CHALLENGE => ServerPacket::AuthChallenge {
+            server_seed: read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_AUTH_RESPONSE => ServerPacket::AuthResponse {
+            result: read_u8(&mut r)?,
+        },
+        opcode::SMSG_CHAR_ENUM => {
+            let count = read_u8(&mut r)?;
+            let mut characters = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                characters.push(Character::read(&mut r)?);
+            }
+            ServerPacket::CharEnum { characters }
+        }
+        opcode::SMSG_CHAR_DELETE => ServerPacket::CharDelete {
+            result: read_u8(&mut r)?,
+        },
+        opcode::SMSG_CHAR_CREATE => ServerPacket::CharCreate {
+            result: read_u8(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_OBJECT => ServerPacket::UpdateObject {
+            objects: update_object::read_update_object(&mut r)?,
+        },
+        opcode::SMSG_DESTROY_OBJECT => ServerPacket::DestroyObject {
+            guid: read_u64_le(&mut r)?,
+        },
+        opcode::SMSG_TRIGGER_CINEMATIC => ServerPacket::TriggerCinematic {
+            cinematic_id: read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_COMPRESSED_UPDATE_OBJECT => {
+            let _decompressed_size = read_u32_le(&mut r)?;
+            let mut decoder = flate2::read::ZlibDecoder::new(r);
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed)?;
+            let mut dr = decompressed.as_slice();
+            ServerPacket::UpdateObject {
+                objects: update_object::read_update_object(&mut dr)?,
+            }
+        }
+        opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r)?,
+        opcode::MSG_MOVE_TELEPORT_ACK => {
+            let guid = read_packed_guid(&mut r)?;
+            let counter = read_u32_le(&mut r)?;
+            let info = movement::read_movement_info(&mut r)?;
+            ServerPacket::Teleport {
+                guid,
+                counter,
+                position: info.position,
+                orientation: info.orientation,
+            }
+        }
+        opcode::SMSG_NEW_WORLD => {
+            let map = read_u32_le(&mut r)?;
+            let position = Vector3d::read(&mut r)?;
+            let orientation = read_f32_le(&mut r)?;
+            ServerPacket::NewWorld {
+                map,
+                position,
+                orientation,
+            }
+        }
+        opcode::SMSG_LOGIN_VERIFY_WORLD => {
+            let map = read_u32_le(&mut r)?;
+            let position = Vector3d::read(&mut r)?;
+            let orientation = read_f32_le(&mut r)?;
+            ServerPacket::LoginVerifyWorld {
+                map,
+                position,
+                orientation,
+            }
+        }
+        opcode::SMSG_TRANSFER_PENDING => {
+            // `u32 newMapId` +, iff the player rides a transport through the transfer,
+            // `{u32 transportEntry, u32 oldMapId}` (VERIFIED vmangos `Misc.cpp:493-501`). The
+            // block's PRESENCE is load-bearing: it decides whether the follow-up NEW_WORLD's
+            // coordinates are boat-local or world (decision 0455).
+            let map = read_u32_le(&mut r)?;
+            let transport = if r.is_empty() {
+                None
+            } else {
+                let entry = read_u32_le(&mut r)?;
+                let old_map = read_u32_le(&mut r)?;
+                Some((entry, old_map))
+            };
+            ServerPacket::TransferPending { map, transport }
+        }
+        opcode::SMSG_TRANSFER_ABORTED => ServerPacket::TransferAborted {
+            reason: read_u8(&mut r)?,
+        },
+        opcode::SMSG_LOGIN_SETTIMESPEED => {
+            // The vanilla packed DateTime bit layout (LSB up): minute:6, hour:5, weekday:3,
+            // day-of-month:6, month:4, year:5. The day serial flattens it with the packed
+            // convention's fixed 31-day months / 372-day years — monotonic across the dates a
+            // server actually serves, which is all the celestial moon-phase precession needs.
+            let datetime = read_u32_le(&mut r)?;
+            let timescale = read_f32_le(&mut r)?;
+            let (day, month, year) = (
+                (datetime >> 14) & 0x3F,
+                (datetime >> 20) & 0x0F,
+                (datetime >> 24) & 0x1F,
+            );
+            ServerPacket::TimeSpeed {
+                hours: ((datetime >> 6) & 0x1F) as u8,
+                minutes: (datetime & 0x3F) as u8,
+                day_serial: year * 372 + month * 31 + day,
+                timescale,
+            }
+        }
+        opcode::SMSG_BINDPOINTUPDATE => {
+            // vmangos BindpointUpdate::AppendBodyTo (Packets/Misc.cpp): x, y, z, mapId, areaId.
+            let position = Vector3d::read(&mut r)?;
+            let map = read_u32_le(&mut r)?;
+            let area = read_u32_le(&mut r)?;
+            ServerPacket::BindPoint {
+                position,
+                map,
+                area,
+            }
+        }
+        opcode::SMSG_SET_PROFICIENCY => {
+            // vmangos SetProficiency::AppendBodyTo (Packets/Skill.cpp): u8 itemClass + u32 mask.
+            let item_class = read_u8(&mut r)?;
+            let subclass_mask = read_u32_le(&mut r)?;
+            ServerPacket::SetProficiency {
+                item_class,
+                subclass_mask,
+            }
+        }
+        opcode::SMSG_PLAY_SOUND => ServerPacket::PlaySound {
+            sound_id: read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_PLAY_MUSIC => ServerPacket::PlayMusic {
+            music_id: read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_PLAY_OBJECT_SOUND => ServerPacket::PlayObjectSound {
+            sound_id: read_u32_le(&mut r)?,
+            guid: read_u64_le(&mut r)?,
+        },
+        opcode::SMSG_WEATHER => ServerPacket::Weather {
+            weather_type: read_u32_le(&mut r)?,
+            grade: read_f32_le(&mut r)?,
+            sound_id: read_u32_le(&mut r)?,
+            instant: read_u8(&mut r)? != 0,
+        },
+        opcode::SMSG_TEXT_EMOTE => {
+            let guid = read_u64_le(&mut r)?;
+            let text_emote = read_u32_le(&mut r)?;
+            let _emote_num = read_u32_le(&mut r)?;
+            let namelen = read_u32_le(&mut r)?;
+            for _ in 0..namelen {
+                read_u8(&mut r)?; // the target's name — chat consumes it later; audio keys on ids
+            }
+            ServerPacket::TextEmote { guid, text_emote }
+        }
+        opcode::SMSG_EMOTE => {
+            let emote_id = read_u32_le(&mut r)?;
+            let guid = read_u64_le(&mut r)?;
+            ServerPacket::Emote { guid, emote_id }
+        }
+        opcode::SMSG_ITEM_QUERY_SINGLE_RESPONSE => {
+            let (entry, info) = items::read_item_query_response(&mut r)?;
+            ServerPacket::ItemQueryResponse {
+                entry,
+                info: info.map(Box::new),
+            }
+        }
+        opcode::SMSG_MESSAGECHAT => ServerPacket::MessageChat(chat::read_message_chat(&mut r)?),
+        opcode::SMSG_CHANNEL_NOTIFY => {
+            ServerPacket::ChannelNotify(channel::read_channel_notify(&mut r)?)
+        }
+        opcode::SMSG_CHANNEL_LIST => {
+            let (name, flags, members) = channel::read_channel_list(&mut r)?;
+            ServerPacket::ChannelList {
+                channel: name,
+                flags,
+                members,
+            }
+        }
+        opcode::SMSG_CHAT_PLAYER_NOT_FOUND => ServerPacket::ChatPlayerNotFound {
+            name: chat::read_chat_player_not_found(&mut r)?,
+        },
+        opcode::SMSG_CHAT_WRONG_FACTION => ServerPacket::ChatWrongFaction,
+        opcode::SMSG_NOTIFICATION => ServerPacket::Notification {
+            text: chat::read_notification(&mut r)?,
+        },
+        opcode::SMSG_PLAYED_TIME => {
+            let (total, level) = chat::read_played_time(&mut r)?;
+            ServerPacket::PlayedTime { total, level }
+        }
+        opcode::MSG_RANDOM_ROLL => {
+            let (min, max, roll, guid) = chat::read_random_roll(&mut r)?;
+            ServerPacket::RandomRoll {
+                min,
+                max,
+                roll,
+                guid,
+            }
+        }
+        opcode::SMSG_INVENTORY_CHANGE_FAILURE => {
+            let (reason, required_level, item_guid) = items::read_inventory_change_failure(&mut r)?;
+            ServerPacket::InventoryChangeFailure {
+                reason,
+                required_level,
+                item_guid,
+            }
+        }
+        opcode::SMSG_INITIAL_SPELLS => {
+            let (spell_ids, cooldowns) = spells::read_initial_spells(&mut r)?;
+            ServerPacket::InitialSpells {
+                spell_ids,
+                cooldowns,
+            }
+        }
+        opcode::SMSG_ACTION_BUTTONS => ServerPacket::ActionButtons {
+            buttons: spells::read_action_buttons(&mut r)?,
+        },
+        opcode::SMSG_LEARNED_SPELL => ServerPacket::LearnedSpell {
+            spell_id: spells::read_learned_spell(&mut r)?,
+        },
+        opcode::SMSG_SUPERCEDED_SPELL => {
+            let (old_spell_id, new_spell_id) = spells::read_superceded_spell(&mut r)?;
+            ServerPacket::SupercededSpell {
+                old_spell_id,
+                new_spell_id,
+            }
+        }
+        opcode::SMSG_CAST_RESULT => {
+            let (spell_id, outcome) = spells::read_cast_result(&mut r)?;
+            ServerPacket::CastResult { spell_id, outcome }
+        }
+        opcode::SMSG_ATTACKSTART => {
+            let (attacker, victim) = spells::read_attack_start(&mut r)?;
+            ServerPacket::AttackStart { attacker, victim }
+        }
+        opcode::SMSG_ATTACKSTOP => {
+            let (attacker, victim) = spells::read_attack_stop(&mut r)?;
+            ServerPacket::AttackStop { attacker, victim }
+        }
+        opcode::SMSG_ATTACKERSTATEUPDATE => {
+            ServerPacket::AttackerState(spells::read_attacker_state(&mut r)?)
+        }
+        opcode::SMSG_AI_REACTION => {
+            let (unit, reaction) = spells::read_ai_reaction(&mut r)?;
+            ServerPacket::AiReaction { unit, reaction }
+        }
+        opcode::SMSG_SPELL_START => ServerPacket::SpellStart(spells::read_spell_start(&mut r)?),
+        opcode::SMSG_SPELL_GO => ServerPacket::SpellGo(spells::read_spell_go(&mut r)?),
+        opcode::SMSG_SPELL_FAILED_OTHER => {
+            let (caster, spell_id) = spells::read_spell_failed_other(&mut r)?;
+            ServerPacket::SpellFailedOther { caster, spell_id }
+        }
+        opcode::SMSG_SPELL_DELAYED => {
+            let (caster, delay_ms) = spells::read_spell_delayed(&mut r)?;
+            ServerPacket::SpellDelayed { caster, delay_ms }
+        }
+        opcode::SMSG_CANCEL_AUTO_REPEAT => ServerPacket::CancelAutoRepeat,
+        opcode::SMSG_SPELL_COOLDOWN => {
+            let (caster, cooldowns) = spells::read_spell_cooldown(&mut r)?;
+            ServerPacket::SpellCooldownList { caster, cooldowns }
+        }
+        opcode::SMSG_ITEM_COOLDOWN => {
+            let (item_guid, spell_id) = spells::read_item_cooldown(&mut r)?;
+            ServerPacket::ItemCooldown {
+                item_guid,
+                spell_id,
+            }
+        }
+        opcode::SMSG_COOLDOWN_EVENT => {
+            let (spell_id, caster) = spells::read_cooldown_event(&mut r)?;
+            ServerPacket::CooldownEvent { spell_id, caster }
+        }
+        opcode::SMSG_CLEAR_COOLDOWN => {
+            let (spell_id, caster) = spells::read_cooldown_event(&mut r)?;
+            ServerPacket::ClearCooldown { spell_id, caster }
+        }
+        opcode::SMSG_COOLDOWN_CHEAT => ServerPacket::CooldownCheat {
+            caster: spells::read_cooldown_cheat(&mut r)?,
+        },
+        opcode::MSG_CHANNEL_START => {
+            let (spell_id, duration_ms) = spells::read_channel_start(&mut r)?;
+            ServerPacket::ChannelStart {
+                spell_id,
+                duration_ms,
+            }
+        }
+        opcode::MSG_CHANNEL_UPDATE => ServerPacket::ChannelUpdate {
+            remaining_ms: spells::read_channel_update(&mut r)?,
+        },
+        opcode::SMSG_UPDATE_AURA_DURATION => {
+            let (slot, remaining_ms) = spells::read_update_aura_duration(&mut r)?;
+            ServerPacket::UpdateAuraDuration { slot, remaining_ms }
+        }
+        opcode::SMSG_PLAY_SPELL_VISUAL => {
+            let (unit, kit_id) = spells::read_play_spell_visual(&mut r)?;
+            ServerPacket::PlaySpellVisual { unit, kit_id }
+        }
+        opcode::SMSG_SPELLNONMELEEDAMAGELOG => {
+            ServerPacket::SpellDamageLog(spells::read_spell_damage_log(&mut r)?)
+        }
+        opcode::SMSG_PERIODICAURALOG => {
+            ServerPacket::PeriodicAuraLog(spells::read_periodic_aura_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLDAMAGESHIELD => {
+            ServerPacket::DamageShield(spells::read_damage_shield(&mut r)?)
+        }
+        opcode::SMSG_SPELLHEALLOG => {
+            ServerPacket::SpellHealLog(spells::read_spell_heal_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLENERGIZELOG => {
+            ServerPacket::SpellEnergizeLog(spells::read_spell_energize_log(&mut r)?)
+        }
+        opcode::SMSG_ENVIRONMENTALDAMAGELOG => {
+            ServerPacket::EnvironmentalDamageLog(spells::read_environmental_damage_log(&mut r)?)
+        }
+        opcode::SMSG_SPELLLOGMISS => {
+            ServerPacket::SpellLogMiss(spells::read_spell_log_miss(&mut r)?)
+        }
+        opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(spells::read_xp_gain(&mut r)?),
+        opcode::SMSG_LEVELUP_INFO => ServerPacket::LevelUp(spells::read_level_up_info(&mut r)?),
+        opcode::SMSG_QUESTGIVER_STATUS => {
+            let (npc, status) = quest::read_questgiver_status(&mut r)?;
+            ServerPacket::QuestGiverStatus { npc, status }
+        }
+        opcode::SMSG_QUESTGIVER_QUEST_LIST => {
+            ServerPacket::QuestGiverQuestList(quest::read_questgiver_quest_list(&mut r)?)
+        }
+        opcode::SMSG_QUESTGIVER_QUEST_DETAILS => {
+            ServerPacket::QuestGiverDetails(quest::read_questgiver_quest_details(&mut r)?)
+        }
+        opcode::SMSG_QUESTGIVER_REQUEST_ITEMS => {
+            ServerPacket::QuestGiverRequestItems(quest::read_questgiver_request_items(&mut r)?)
+        }
+        opcode::SMSG_QUESTGIVER_OFFER_REWARD => {
+            ServerPacket::QuestGiverOfferReward(quest::read_questgiver_offer_reward(&mut r)?)
+        }
+        opcode::SMSG_QUESTGIVER_QUEST_COMPLETE => {
+            ServerPacket::QuestGiverComplete(quest::read_questgiver_quest_complete(&mut r)?)
+        }
+        opcode::SMSG_QUESTGIVER_QUEST_INVALID => ServerPacket::QuestGiverInvalid {
+            msg: quest::read_questgiver_quest_invalid(&mut r)?,
+        },
+        opcode::SMSG_QUESTGIVER_QUEST_FAILED => {
+            let (quest_id, reason) = quest::read_questgiver_quest_failed(&mut r)?;
+            ServerPacket::QuestGiverFailed { quest_id, reason }
+        }
+        opcode::SMSG_QUEST_QUERY_RESPONSE => {
+            ServerPacket::QuestQueryResponse(Box::new(quest::read_quest_query_response(&mut r)?))
+        }
+        opcode::SMSG_QUESTLOG_FULL => ServerPacket::QuestLogFull,
+        opcode::SMSG_QUESTUPDATE_COMPLETE => ServerPacket::QuestUpdateComplete {
+            quest_id: quest::read_quest_update_complete(&mut r)?,
+        },
+        opcode::SMSG_QUESTUPDATE_FAILED => ServerPacket::QuestUpdateFailed {
+            quest_id: quest::read_quest_update_failed(&mut r)?,
+        },
+        opcode::SMSG_QUESTUPDATE_FAILEDTIMER => ServerPacket::QuestUpdateFailedTimer {
+            quest_id: quest::read_quest_update_failedtimer(&mut r)?,
+        },
+        opcode::SMSG_QUESTUPDATE_ADD_KILL => {
+            let (quest_id, entry, count, required, guid) =
+                quest::read_quest_update_add_kill(&mut r)?;
+            ServerPacket::QuestUpdateAddKill {
+                quest_id,
+                entry,
+                count,
+                required,
+                guid,
+            }
+        }
+        opcode::SMSG_QUESTUPDATE_ADD_ITEM => {
+            let (item_id, count) = quest::read_quest_update_add_item(&mut r)?;
+            ServerPacket::QuestUpdateAddItem { item_id, count }
+        }
+        opcode::SMSG_GOSSIP_MESSAGE => {
+            let (npc, text_id, options, quests) = gossip::read_gossip_message(&mut r)?;
+            ServerPacket::GossipMessage {
+                npc,
+                text_id,
+                options,
+                quests,
+            }
+        }
+        opcode::SMSG_GOSSIP_COMPLETE => ServerPacket::GossipComplete,
+        opcode::SMSG_NPC_TEXT_UPDATE => {
+            let (text_id, greeting) = gossip::read_npc_text_update(&mut r)?;
+            ServerPacket::NpcText { text_id, greeting }
+        }
+        opcode::SMSG_LIST_INVENTORY => {
+            let (vendor, items) = vendor::read_list_inventory(&mut r)?;
+            ServerPacket::VendorList { vendor, items }
+        }
+        opcode::SMSG_BUY_ITEM => {
+            let (vendor, slot, new_count, purchase_count) = vendor::read_buy_item(&mut r)?;
+            ServerPacket::BuyItem {
+                vendor,
+                slot,
+                new_count,
+                purchase_count,
+            }
+        }
+        opcode::SMSG_SELL_ITEM => {
+            let (vendor, item_guid, reason) = vendor::read_sell_item(&mut r)?;
+            ServerPacket::SellItemResult {
+                vendor,
+                item_guid,
+                reason,
+            }
+        }
+        opcode::SMSG_BUY_FAILED => {
+            let (vendor, item_entry, reason) = vendor::read_buy_failed(&mut r)?;
+            ServerPacket::BuyFailed {
+                vendor,
+                item_entry,
+                reason,
+            }
+        }
+        opcode::SMSG_SHOW_BANK => {
+            let banker = bank::read_show_bank(&mut r)?;
+            ServerPacket::ShowBank { banker }
+        }
+        opcode::SMSG_BUY_BANK_SLOT_RESULT => {
+            let result = bank::read_buy_bank_slot_result(&mut r)?;
+            ServerPacket::BuyBankSlotResult { result }
+        }
+        opcode::SMSG_TRAINER_LIST => {
+            let (trainer, trainer_type, services, title) = trainer::read_trainer_list(&mut r)?;
+            ServerPacket::TrainerList {
+                trainer,
+                trainer_type,
+                services,
+                title,
+            }
+        }
+        opcode::SMSG_TRAINER_BUY_SUCCEEDED => {
+            let (trainer, spell_id) = trainer::read_trainer_buy_succeeded(&mut r)?;
+            ServerPacket::TrainerBuySucceeded { trainer, spell_id }
+        }
+        opcode::SMSG_TRAINER_BUY_FAILED => {
+            let (trainer, spell_id, error) = trainer::read_trainer_buy_failed(&mut r)?;
+            ServerPacket::TrainerBuyFailed {
+                trainer,
+                spell_id,
+                error,
+            }
+        }
+        opcode::SMSG_LOOT_RESPONSE => {
+            let (guid, body) = loot::read_loot_response(&mut r)?;
+            match body {
+                loot::LootResponseBody::Items {
+                    loot_type,
+                    gold,
+                    items,
+                } => ServerPacket::LootResponse {
+                    guid,
+                    loot_type,
+                    gold,
+                    items,
+                },
+                loot::LootResponseBody::Error { error } => ServerPacket::LootError { guid, error },
+            }
+        }
+        opcode::SMSG_LOOT_RELEASE_RESPONSE => {
+            let (guid, result) = loot::read_loot_release_response(&mut r)?;
+            ServerPacket::LootReleaseResponse { guid, result }
+        }
+        opcode::SMSG_LOOT_REMOVED => ServerPacket::LootRemoved {
+            slot: loot::read_loot_removed(&mut r)?,
+        },
+        opcode::SMSG_LOOT_MONEY_NOTIFY => ServerPacket::LootMoneyNotify {
+            amount: loot::read_loot_money_notify(&mut r)?,
+        },
+        opcode::SMSG_LOOT_CLEAR_MONEY => ServerPacket::LootClearMoney,
+        opcode::SMSG_LOOT_START_ROLL => {
+            ServerPacket::LootStartRoll(loot::read_loot_start_roll(&mut r)?)
+        }
+        opcode::SMSG_LOOT_ROLL => ServerPacket::LootRoll(loot::read_loot_roll(&mut r)?),
+        opcode::SMSG_LOOT_ROLL_WON => ServerPacket::LootRollWon(loot::read_loot_roll_won(&mut r)?),
+        opcode::SMSG_LOOT_ALL_PASSED => {
+            ServerPacket::LootAllPassed(loot::read_loot_all_passed(&mut r)?)
+        }
+        opcode::SMSG_ITEM_PUSH_RESULT => {
+            ServerPacket::ItemPushResult(loot::read_item_push_result(&mut r)?)
+        }
+        opcode::MSG_CORPSE_QUERY => {
+            ServerPacket::CorpseQuery(death::read_corpse_query_response(&mut r)?)
+        }
+        opcode::SMSG_DURABILITY_DAMAGE_DEATH => ServerPacket::DurabilityDamageDeath,
+        opcode::SMSG_CORPSE_RECLAIM_DELAY => ServerPacket::CorpseReclaimDelay {
+            delay_ms: death::read_corpse_reclaim_delay(&mut r)?,
+        },
+        opcode::SMSG_RESURRECT_REQUEST => {
+            ServerPacket::ResurrectRequest(death::read_resurrect_request(&mut r)?)
+        }
+        opcode::SMSG_SPIRIT_HEALER_CONFIRM => ServerPacket::SpiritHealerConfirm {
+            npc: death::read_spirit_healer_confirm(&mut r)?,
+        },
+        // The ack'd movement-flag family (root at death / water-walk in ghost form): the mover-
+        // addressed shape is `packed guid + u32 counter` (VERIFIED vmangos
+        // `MovementPacketSender.cpp:342-366`, the `> CLIENT_BUILD_1_9_4` branch). The app must ack
+        // with the echoed counter or observers never see the change.
+        opcode::SMSG_FORCE_MOVE_ROOT | opcode::SMSG_FORCE_MOVE_UNROOT => {
+            let guid = read_packed_guid(&mut r)?;
+            let counter = read_u32_le(&mut r)?;
+            ServerPacket::MoveRoot {
+                guid,
+                counter,
+                rooted: opcode == opcode::SMSG_FORCE_MOVE_ROOT,
+            }
+        }
+        opcode::SMSG_MOVE_WATER_WALK | opcode::SMSG_MOVE_LAND_WALK => {
+            let guid = read_packed_guid(&mut r)?;
+            let counter = read_u32_le(&mut r)?;
+            ServerPacket::WaterWalk {
+                guid,
+                counter,
+                on: opcode == opcode::SMSG_MOVE_WATER_WALK,
+            }
+        }
+        opcode::SMSG_INITIALIZE_FACTIONS => {
+            let count = read_u32_le(&mut r)?;
+            let mut standings = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let flags = read_u8(&mut r)?;
+                let standing = read_u32_le(&mut r)? as i32;
+                standings.push((flags, standing));
+            }
+            ServerPacket::InitializeFactions { standings }
+        }
+        opcode::SMSG_SET_FACTION_STANDING => {
+            let count = read_u32_le(&mut r)?;
+            let mut standings = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let list_id = read_u32_le(&mut r)?;
+                let standing = read_u32_le(&mut r)? as i32;
+                standings.push((list_id, standing));
+            }
+            ServerPacket::SetFactionStanding { standings }
+        }
+        opcode::SMSG_NAME_QUERY_RESPONSE => {
+            let guid = read_u64_le(&mut r)?;
+            let name = read_cstring(&mut r)?;
+            let _realm = read_cstring(&mut r)?; // cross-realm BG name; empty on a single realm
+            ServerPacket::NameQueryResponse {
+                guid,
+                name,
+                race: read_u32_le(&mut r)?,
+                gender: read_u32_le(&mut r)?,
+                class: read_u32_le(&mut r)?,
+            }
+        }
+        opcode::SMSG_CREATURE_QUERY_RESPONSE => {
+            let entry = read_u32_le(&mut r)?;
+            // A miss is the lone entry echoed with its top bit set — nothing follows.
+            if entry & 0x8000_0000 != 0 {
+                ServerPacket::CreatureQueryResponse {
+                    entry: entry & 0x7FFF_FFFF,
+                    info: None,
+                }
+            } else {
+                let name = read_cstring(&mut r)?;
+                for _ in 0..3 {
+                    let _ = read_cstring(&mut r)?; // name2..name4, always empty in 5875
+                }
+                let subname = read_cstring(&mut r)?;
+                // The tail (VERIFIED vmangos `HandleCreatureQueryOpcode`, 5875 = every build
+                // guard included): type_flags, type, pet_family, RANK, unk, pet_spell_list_id,
+                // display_id (u32 ×7), then civilian + racial_leader (u8 ×2). We keep `type`
+                // (the `CreatureType.dbc` id — the TAB-target filter's input), `rank` (the unit
+                // tooltip's Elite/Boss word, decision 0276's level-line law), `type_flags` (bit
+                // 0x10 hides its faction line), and the `civilian`/`racial_leader` pair (its
+                // green CIVILIAN / white LEADER lines); the rest stays alignment-only.
+                let type_flags = read_u32_le(&mut r)?;
+                let creature_type = read_u32_le(&mut r)?;
+                let _pet_family = read_u32_le(&mut r)?;
+                let rank = read_u32_le(&mut r)?;
+                let _unk = read_u32_le(&mut r)?;
+                let _pet_spell_list = read_u32_le(&mut r)?;
+                let _display_id = read_u32_le(&mut r)?;
+                let civilian = read_u8(&mut r)? != 0;
+                let racial_leader = read_u8(&mut r)? != 0;
+                ServerPacket::CreatureQueryResponse {
+                    entry,
+                    info: Some(CreatureQueryInfo {
+                        name,
+                        subname,
+                        creature_type,
+                        rank,
+                        type_flags,
+                        civilian,
+                        racial_leader,
+                    }),
+                }
+            }
+        }
+        opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE => {
+            let (entry, info) = gameobject::read_gameobject_query_response(&mut r)?;
+            ServerPacket::GameObjectQueryResponse { entry, info }
+        }
+        opcode::SMSG_LOGOUT_COMPLETE => ServerPacket::LogoutComplete,
+        opcode::SMSG_LOGOUT_RESPONSE => ServerPacket::LogoutResponse {
+            result: read_u32_le(&mut r)?,
+        },
+        // The keepalive echo: our CMSG_PING's sequence number back (vmangos `_HandlePing` — the
+        // body is the one u32 it read from us).
+        opcode::SMSG_PONG => ServerPacket::Pong {
+            sequence: read_u32_le(&mut r)?,
+        },
+        // The force-speed-change family — one arm per kind, one shared body reader (the wire shape
+        // and the mandatory ack protocol are documented on the opcode block).
+        opcode::SMSG_FORCE_WALK_SPEED_CHANGE => read_force_speed(SpeedKind::Walk, &mut r)?,
+        opcode::SMSG_FORCE_RUN_SPEED_CHANGE => read_force_speed(SpeedKind::Run, &mut r)?,
+        opcode::SMSG_FORCE_RUN_BACK_SPEED_CHANGE => read_force_speed(SpeedKind::RunBack, &mut r)?,
+        opcode::SMSG_FORCE_SWIM_SPEED_CHANGE => read_force_speed(SpeedKind::Swim, &mut r)?,
+        opcode::SMSG_FORCE_SWIM_BACK_SPEED_CHANGE => read_force_speed(SpeedKind::SwimBack, &mut r)?,
+        opcode::SMSG_FORCE_TURN_RATE_CHANGE => read_force_speed(SpeedKind::TurnRate, &mut r)?,
+        // The group/party family (see the opcode block's note; bodies in `group`).
+        opcode::SMSG_GROUP_INVITE => ServerPacket::GroupInvite {
+            inviter: group::read_group_invite(&mut r)?,
+        },
+        opcode::SMSG_GROUP_DECLINE => ServerPacket::GroupDecline {
+            name: group::read_group_decline(&mut r)?,
+        },
+        opcode::SMSG_GROUP_UNINVITE => ServerPacket::GroupUninvited,
+        opcode::SMSG_GROUP_SET_LEADER => ServerPacket::GroupLeaderChanged {
+            name: group::read_group_set_leader(&mut r)?,
+        },
+        opcode::SMSG_GROUP_DESTROYED => ServerPacket::GroupDestroyed,
+        opcode::SMSG_GROUP_LIST => {
+            let (group_type, own_flags, members, leader, loot) = group::read_group_list(&mut r)?;
+            ServerPacket::GroupList {
+                group_type,
+                own_flags,
+                members,
+                leader,
+                loot,
+            }
+        }
+        opcode::SMSG_PARTY_COMMAND_RESULT => {
+            let (operation, member, result) = group::read_party_command_result(&mut r)?;
+            ServerPacket::PartyCommandResult {
+                operation,
+                member,
+                result,
+            }
+        }
+        opcode::SMSG_PARTY_MEMBER_STATS | opcode::SMSG_PARTY_MEMBER_STATS_FULL => {
+            let (guid, info) = group::read_party_member_stats(&mut r)?;
+            ServerPacket::PartyMemberStats {
+                guid,
+                full: opcode == opcode::SMSG_PARTY_MEMBER_STATS_FULL,
+                info: Box::new(info),
+            }
+        }
+        opcode::MSG_MINIMAP_PING => {
+            let (guid, x, y) = group::read_minimap_ping(&mut r)?;
+            ServerPacket::MinimapPing { guid, x, y }
+        }
+        opcode::MSG_RAID_TARGET_UPDATE => match group::read_raid_target_update(&mut r)? {
+            group::RaidTargetUpdate::Delta { icon, guid } => {
+                ServerPacket::RaidTargetSet { icon, guid }
+            }
+            group::RaidTargetUpdate::List(entries) => ServerPacket::RaidTargetList { entries },
+        },
+        opcode::MSG_RAID_READY_CHECK => match group::read_ready_check(&mut r)? {
+            group::ReadyCheck::Started => ServerPacket::ReadyCheckRequest,
+            group::ReadyCheck::Answer { guid, ready } => {
+                ServerPacket::ReadyCheckAnswer { guid, ready }
+            }
+        },
+        // The observer speed legs (decision 0441): a unit we don't control changed speed — a
+        // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
+        // family, which carries a fresh pose too). No ack on either.
+        opcode::SMSG_SPLINE_SET_WALK_SPEED => read_spline_speed(SpeedKind::Walk, &mut r)?,
+        opcode::SMSG_SPLINE_SET_RUN_SPEED => read_spline_speed(SpeedKind::Run, &mut r)?,
+        opcode::SMSG_SPLINE_SET_RUN_BACK_SPEED => read_spline_speed(SpeedKind::RunBack, &mut r)?,
+        opcode::SMSG_SPLINE_SET_SWIM_SPEED => read_spline_speed(SpeedKind::Swim, &mut r)?,
+        opcode::SMSG_SPLINE_SET_SWIM_BACK_SPEED => read_spline_speed(SpeedKind::SwimBack, &mut r)?,
+        opcode::SMSG_SPLINE_SET_TURN_RATE => read_spline_speed(SpeedKind::TurnRate, &mut r)?,
+        opcode::MSG_MOVE_SET_WALK_SPEED => read_move_set_speed(SpeedKind::Walk, &mut r)?,
+        opcode::MSG_MOVE_SET_RUN_SPEED => read_move_set_speed(SpeedKind::Run, &mut r)?,
+        opcode::MSG_MOVE_SET_RUN_BACK_SPEED => read_move_set_speed(SpeedKind::RunBack, &mut r)?,
+        opcode::MSG_MOVE_SET_SWIM_SPEED => read_move_set_speed(SpeedKind::Swim, &mut r)?,
+        opcode::MSG_MOVE_SET_SWIM_BACK_SPEED => read_move_set_speed(SpeedKind::SwimBack, &mut r)?,
+        opcode::MSG_MOVE_SET_TURN_RATE => read_move_set_speed(SpeedKind::TurnRate, &mut r)?,
+        // Mount feedback (decision 0441): one u32 result code per attempt; error lines are a P2
+        // trimming — decoded so the wire is modelled, surfaced for the debug log.
+        opcode::SMSG_MOUNTRESULT => ServerPacket::MountResult {
+            mount: true,
+            code: read_u32_le(&mut r)?,
+        },
+        opcode::SMSG_DISMOUNTRESULT => ServerPacket::MountResult {
+            mount: false,
+            code: read_u32_le(&mut r)?,
+        },
+        // A nearby rider's flourish: one raw u64 guid (VERIFIED vmangos
+        // `HandleMountSpecialAnimOpcode` — `data << GetObjectGuid()`, full 8 bytes, not packed).
+        opcode::SMSG_MOUNTSPECIAL_ANIM => ServerPacket::MountSpecialAnim {
+            guid: read_u64_le(&mut r)?,
+        },
+        // The taxi/flight-master family (decision 0484): the map (SHOWTAXINODES), a status
+        // answer/first-visit learn (TAXINODE_STATUS), the activate verdict, and the multi-hop
+        // path ack (NEW_TAXI_PATH, empty body).
+        opcode::SMSG_SHOWTAXINODES => {
+            let (window, flightmaster, nearest_node, known) = taxi::read_show_taxi_nodes(&mut r)?;
+            ServerPacket::ShowTaxiNodes {
+                window,
+                flightmaster,
+                nearest_node,
+                known,
+            }
+        }
+        opcode::SMSG_TAXINODE_STATUS => {
+            let (guid, known) = taxi::read_taxi_node_status(&mut r)?;
+            ServerPacket::TaxiNodeStatus {
+                guid,
+                known: known != 0,
+            }
+        }
+        opcode::SMSG_ACTIVATETAXIREPLY => ServerPacket::ActivateTaxiReply {
+            code: taxi::read_activate_taxi_reply(&mut r)?,
+        },
+        opcode::SMSG_NEW_TAXI_PATH => ServerPacket::NewTaxiPath,
+        // The mail arc (decision 0544 P0): the inbox list, the send/take/return/delete verdict,
+        // the letter-body ask-once fetch, and the arrival pair (RECEIVED_MAIL + the
+        // QUERY_NEXT_MAIL_TIME reply — same opcode as our empty-body request).
+        opcode::SMSG_MAIL_LIST_RESULT => ServerPacket::MailList {
+            mails: mail::read_mail_list_result(&mut r)?,
+        },
+        opcode::SMSG_SEND_MAIL_RESULT => {
+            let (mail_id, action, error, equip_error, item) = mail::read_send_mail_result(&mut r)?;
+            ServerPacket::SendMailResult {
+                mail_id,
+                action,
+                error,
+                equip_error,
+                item,
+            }
+        }
+        opcode::SMSG_ITEM_TEXT_QUERY_RESPONSE => {
+            let (text_id, text) = mail::read_item_text_query_response(&mut r)?;
+            ServerPacket::ItemTextQueryResponse { text_id, text }
+        }
+        opcode::SMSG_RECEIVED_MAIL => {
+            let _ = mail::read_received_mail(&mut r)?;
+            ServerPacket::ReceivedMail
+        }
+        opcode::MSG_QUERY_NEXT_MAIL_TIME => ServerPacket::NextMailTime {
+            seconds: mail::read_query_next_mail_time(&mut r)?,
+        },
+        // The player-trade arc (decision 0592 P0): the state-machine status pulse and the
+        // item/gold snapshot for one window side.
+        opcode::SMSG_TRADE_STATUS => ServerPacket::TradeStatus {
+            status: trade::read_trade_status(&mut r)?,
+        },
+        opcode::SMSG_TRADE_STATUS_EXTENDED => ServerPacket::TradeStatusExtended {
+            state: Box::new(trade::read_trade_status_extended(&mut r)?),
+        },
+        // A relayed player movement packet: `[packed mover guid][MovementInfo]`, same opcode the mover
+        // sent. This is how other players' walking/turning/strafing reaches us (creatures use
+        // SMSG_MONSTER_MOVE instead). Surface the pose + live move-flags; the app extrapolates between.
+        o if is_movement_relay(o) => {
+            let guid = read_packed_guid(&mut r)?;
+            let info = movement::read_movement_info(&mut r)?;
+            ServerPacket::PlayerMove {
+                guid,
+                opcode: o,
+                flags: info.flags,
+                position: info.position,
+                orientation: info.orientation,
+                pitch: info.pitch,
+                time: info.timestamp,
+                fall_time: info.fall_time,
+                jump: info.jump,
+                transport: info.transport,
+            }
+        }
+        other => ServerPacket::Other { opcode: other },
+    })
+}

@@ -1,0 +1,12 @@
+[package]
+name = "benilla-blp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BLP2 texture decoder for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+
+[dependencies]
+benilla-bytes = { path = "../benilla-bytes" }
+# S3TC/DXT block decompression — the same fixed-point codec wow-blp uses, so DXT output is
+# byte-identical. Decompression is a deterministic algorithm (no quantization), unlike encode.
+texpresso = "2"

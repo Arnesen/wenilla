@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["sam <samuv.eth@gmail.com>"]
+
+# Shared pins live here; promote a dep the moment two crates pin the same version (the policy
+# since day one, enacted at the 0530 debt sweep). Per-crate feature additions stay in the crate.
+# `image` deliberately stays per-crate: its default-features/feature sets differ per consumer,
+# and a workspace default-features choice can't be subtracted from downstream.
+[workspace.dependencies]
+anyhow = "1.0.102"
+bevy = "0.18.1"
+clap = { version = "4.6.1", features = ["derive"] }
+
+# No `[patch.crates-io]`: the WoW format + protocol stack is fully in-repo (decision 0021), so there
+# are no warcraft-rs / wow_messages crates (or forks of them) anywhere in the tree.
+
+# Optimize *dependencies* even in dev builds. avian/parry collision math (and wgpu/bevy render) is
+# unusably slow at opt-level 0 — a plain `cargo run` crawls to <1 fps once physics is doing real work.
+# opt-level 3 on deps (the standard Bevy fix) makes debug builds playable while our own crates stay
+# lightly optimized for fast incremental rebuilds. One-time cost: deps recompile optimized the first time.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Our own crates at opt-level 1, not 0: Bevy's generic hot paths (material specialization scans,
+# query par_for_each closures) monomorphize INTO our crate, so at opt 0 they run at debug codegen
+# speed over every resident entity — measured at Stormwind as the difference between ~45 fps and a
+# pinned 60 (decision 0362). Warm incremental rebuild cost measured at ~zero. NB: FPS probe numbers
+# in decisions ≤ 0361 were taken at opt 0 and are not comparable with post-0362 probes.
+[profile.dev]
+opt-level = 1
+
+# No debuginfo trimming: `debug = "line-tables-only"` was A/B-measured (decision 0192) at zero
+# recurring win on this stack (macOS unpacked split-debuginfo; sccache; fast ld) — not worth
+# invalidating every warm target and the sccache cache for.

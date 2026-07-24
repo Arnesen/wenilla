@@ -1,0 +1,713 @@
+//! The app-side **character-window feed** (decision 0208 §3/§4): the bridge that turns our own
+//! avatar's descriptor + the item stores into the plain snapshots the paper doll's Lua bindings
+//! read, and into the Era events that drive its `OnEvent` repaints — the [`crate::ui_unit`]
+//! pattern, for the combat-stats/inventory surface.
+//!
+//! Three jobs, each frame, before the VM ticks ([`UiInput`]):
+//!
+//! - **[`PlayerCombatStats`]** from the self player's [`ObjectStore`] — the stat/resistance/
+//!   damage/attack-power fields (all OWNER_ONLY, verified streamed in 0208) plus the two resolved
+//!   weapon-skill pairs: the app picks WHICH skill line the equipped main-hand/ranged item uses
+//!   (`weapon_subclass_skill` — vmangos `Item.cpp`'s table; no weapon = unarmed 162) and reads its
+//!   `PLAYER_SKILL_INFO` triplet, so the engine-free binding just serves the pair.
+//! - **`InventorySlots`** from the inv-slot guids → [`Items`] objects → templates → the
+//!   [`ItemDisplays`] icon — index 0 the ammo slot (`PLAYER_AMMO_ID`, its count summed across the
+//!   backpack + the four equipped bags), 1..=19 the equipment slots, 20..=23 the four equipped-bag
+//!   ICONS (decision 0216 slice 2's bag bar — the bag item itself, `INV_SLOT` 19..22, not its
+//!   contents), all by the client's `GetInventorySlotInfo` ids. A slot whose template answer is
+//!   still in flight carries its `item_id` with `icon: None` and fills on a later frame (the
+//!   ask-once cache repaints via `UNIT_INVENTORY_CHANGED` when the view changes). Each equipment
+//!   slot (1..=23) also carries an `|Hitem:…|h[Name]|h` `link`, its `PendingItemOps`-derived
+//!   `locked` (decision 0208 phase 1b — the doll twin of `ui_items::feed_containers`'s bag-slot
+//!   `.locked`), and its resolved `equip_slots` (`ui_items::find_equip_slot` over the item
+//!   template's `inventoryType` — the cursor arc's "fit rule", decision 0216/0218).
+//! - **The paper-doll booth yaw**: the pane's `Model:SetRotation` transcription writes the VM-side
+//!   value ([`UiScript::paperdoll_yaw`]); the feed mirrors it onto [`PaperDollBooth`] so the booth
+//!   re-bakes at the new facing (decision 0208 §5).
+//!
+//! Events, fired on snapshot transitions (grouped by the ref's own registration set,
+//! `PaperDollFrame.lua:14-28` — arg1 `"player"`): `UNIT_STATS`, `UNIT_RESISTANCES`, `UNIT_DAMAGE`,
+//! `UNIT_ATTACK_SPEED`, `UNIT_ATTACK_POWER`, `UNIT_RANGED_ATTACK_POWER`, `UNIT_RANGEDDAMAGE`,
+//! `UNIT_ATTACK` (the weapon-skill pairs), and `UNIT_INVENTORY_CHANGED` on any slot-view change.
+//! A first snapshot counts as a transition of every group (the `ui_unit` rule).
+
+use bevy::prelude::*;
+
+use benilla_protocol::messages::PLAYER_SKILL_SLOTS;
+use benilla_ui::script::{
+    weapon_subclass_skill, InvSlotView, InventorySlots, PlayerCombatStats, ScriptValue, SkillEntry,
+    SkillsState, UiScript, EQUIPMENT_BAG, SKILL_UNARMED,
+};
+
+use crate::entities::ItemDisplays;
+use crate::items::Items;
+use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
+use crate::pending_item_ops::PendingItemOps;
+use crate::portrait::PaperDollBooth;
+use crate::ui_items::{find_equip_slot, quality_color};
+use crate::ui_script::UiInput;
+
+/// Equipment slots, 0-based (`EQUIPMENT_SLOT_*`): the inv-slot array index of the main hand,
+/// off hand, and ranged slots the weapon-skill / offhand / wand resolutions read.
+const SLOT_MAIN_HAND: u8 = 15;
+const SLOT_OFF_HAND: u8 = 16;
+const SLOT_RANGED: u8 = 17;
+/// `ItemPrototype` class 2 = weapon (vmangos `ItemPrototype.h`); the offhand-speed gate.
+const ITEM_CLASS_WEAPON: u32 = 2;
+/// Weapon subclass 19 = wand (`HasWandEquipped`).
+const SUBCLASS_WAND: u32 = 19;
+
+/// A stable comparison key for an f32 snapshot field (the event-transition diffs): quantized to
+/// 1/32 so equal wire values always compare equal and real changes always register.
+fn fixed(v: f32) -> i64 {
+    (v * 32.0).round() as i64
+}
+
+/// The feed's change-tracking memory (the [`crate::ui_unit::UnitFeedState`] shape): the last
+/// snapshots pushed, so events fire on transitions only.
+#[derive(Resource, Default)]
+struct CharFeedState {
+    last_stats: Option<PlayerCombatStats>,
+    last_inv: Option<InventorySlots>,
+}
+
+/// Adds the per-frame character-window feed. The bindings live in `benilla-ui`'s `char_stats`;
+/// this supplies their data (and the events) from ECS state.
+pub(crate) struct UiCharPlugin;
+
+impl Plugin for UiCharPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CharFeedState>().add_systems(
+            Update,
+            (
+                feed_char.before(UiInput),
+                watch_skill_ups.before(UiInput),
+                feed_skills.before(UiInput),
+                drain_skill_abandons.after(UiInput),
+            ),
+        );
+    }
+}
+
+/// The client-generated skill-up feedback (decision 0437, landed with phase 2): the server sends
+/// NO skill-up message at all — skills mutate only as `PLAYER_SKILL_INFO` descriptor deltas
+/// (verified at the vmangos source: no chat send anywhere in `UpdateSkill*`/`SetSkill`) — so the
+/// client diff-watches its own skill block, prints the byte-exact 1.12 line
+/// (`SKILL_RANK_UP`, GlobalStrings.lua:3485: "Your skill in %s has increased to %d.") on the
+/// Skill chat channel, and fires `SKILL_LINES_CHANGED` on ANY block change (the skills pane's
+/// repaint event). The login fill (empty → populated) and a character switch (self guid change)
+/// re-seed silently — the event fires, the lines don't. INTERIM (pinned to the in-flight wow-re
+/// §5, 0437 TU-E): no `SKILL_FLAG_NO_SKILLUP_MESSAGE` gate yet, and the exact chat channel of the
+/// real emitter is unconfirmed (Skill is the `ChatTypeInfo` family's own key for it).
+fn watch_skill_ups(
+    script: Option<NonSendMut<UiScript>>,
+    self_guid: Res<crate::net::SelfGuid>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    mut chat: ResMut<crate::ui_chat::ChatLog>,
+    mut prev: Local<Option<(u64, std::collections::HashMap<u16, u16>)>>,
+) {
+    let (Some(guid), Ok(store)) = (self_guid.0, self_store.single()) else {
+        return;
+    };
+    let mut cur = std::collections::HashMap::new();
+    for i in 0..PLAYER_SKILL_SLOTS {
+        if let Some(s) = store.0.player_skill(i) {
+            if s.skill_id != 0 {
+                cur.insert(s.skill_id, s.value);
+            }
+        }
+    }
+    match prev.as_ref() {
+        // First fill for this character: seed silently (no lines), announce the block once.
+        None => {
+            if cur.is_empty() {
+                return;
+            }
+            if let Some(mut script) = script {
+                script.fire_event("SKILL_LINES_CHANGED", vec![]);
+            }
+            *prev = Some((guid, cur));
+        }
+        Some((prev_guid, _)) if *prev_guid != guid => {
+            // A different character logged in — re-seed, never diff across characters.
+            if let Some(mut script) = script {
+                script.fire_event("SKILL_LINES_CHANGED", vec![]);
+            }
+            *prev = Some((guid, cur));
+        }
+        Some((_, prev_map)) => {
+            if *prev_map == cur {
+                return;
+            }
+            for (&id, &value) in &cur {
+                let name = || {
+                    skill_lines
+                        .as_ref()
+                        .and_then(|s| s.catalog.line(u32::from(id)))
+                        .map(|l| l.name.clone())
+                };
+                match prev_map.get(&id) {
+                    // A rank-up: the ERR_SKILL_UP_SI line (GlobalStrings.lua:1838).
+                    Some(&old) if value > old => {
+                        if let Some(name) = name() {
+                            chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                                crate::ui_chat::ChatEventKind::Skill,
+                                format!("Your skill in {name} has increased to {value}."),
+                            ));
+                        }
+                    }
+                    // A NEW line: the ERR_SKILL_GAINED_S line (GlobalStrings.lua:1837) — the
+                    // fold-back's second token (wow-re `tradeskill` TU-E: the watcher emits
+                    // both, first-gain vs rank-up).
+                    None => {
+                        if let Some(name) = name() {
+                            chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                                crate::ui_chat::ChatEventKind::Skill,
+                                format!("You have gained the {name} skill."),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(mut script) = script {
+                script.fire_event("SKILL_LINES_CHANGED", vec![]);
+            }
+            *prev = Some((guid, cur));
+        }
+    }
+}
+
+/// The skills-pane feed (decision 0437 phase 4): every known `PLAYER_SKILL_INFO` line resolved to
+/// a flat [`SkillEntry`] — name off `SkillLine.dbc`, group off the line's `categoryId` ×
+/// `SkillLineCategory.dbc` (name + displayOrder) — pushed via `set_skills` on change; the ENGINE
+/// groups/sorts/folds (the trainer-tree pattern). Hidden faithfully: the `Not Displayed` category
+/// (12) and any line without a `SkillLine.dbc` row. Group order and the within-group name sort
+/// are still an INTERIM — but not the 0437 §5 dispatch's: none of its six TUs covered the
+/// Skills-pane's own grouping (that dispatch resolved as decision 0446, adjudicating the
+/// crafting-book windows only). This law is unpinned, awaiting its own dispatch, named as a
+/// follow-up in decision 0530.
+fn feed_skills(
+    script: Option<NonSendMut<UiScript>>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
+    mut last: Local<Option<SkillsState>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let (Ok(store), Some(skill_lines)) = (self_store.single(), skill_lines.as_deref()) else {
+        return;
+    };
+    // The unlearn-button predicate needs the player's race/class (SkillRaceClassInfo row-match —
+    // the spellbook's own General-collapse inputs, `ui_spellbook::build_book`).
+    let (race, class) = (
+        store.0.unit_race().unwrap_or(0),
+        store.0.unit_class().unwrap_or(0),
+    );
+    let mut entries = Vec::new();
+    for i in 0..PLAYER_SKILL_SLOTS {
+        let Some(slot) = store.0.player_skill(i) else {
+            continue;
+        };
+        if slot.skill_id == 0 {
+            continue;
+        }
+        let Some(line) = skill_lines.catalog.line(u32::from(slot.skill_id)) else {
+            continue; // no SkillLine row — nothing to name it by, the client shows nothing
+        };
+        if line.category_id == benilla_formats::SKILL_CATEGORY_NOT_DISPLAYED {
+            continue;
+        }
+        let (category_name, category_order) = skill_lines
+            .catalog
+            .category(line.category_id)
+            .map(|(n, o)| (n.to_string(), o))
+            .unwrap_or_else(|| ("Other".to_string(), u32::MAX));
+        entries.push(SkillEntry {
+            skill_id: u32::from(slot.skill_id),
+            name: line.name.clone(),
+            value: u32::from(slot.value),
+            max: u32::from(slot.max),
+            modifier: i32::from(slot.temp_bonus) + i32::from(slot.perm_bonus),
+            category_id: line.category_id,
+            category_name,
+            category_order,
+            description: line.description.clone(),
+            abandonable: skill_lines
+                .catalog
+                .abandonable(u32::from(slot.skill_id), race, class),
+        });
+    }
+    let fresh = SkillsState { entries };
+    if last.as_ref() == Some(&fresh) {
+        return;
+    }
+    script.set_skills(fresh.clone());
+    *last = Some(fresh);
+}
+
+/// The abandon drain (the skills pane's unlearn button → the `UNLEARN_SKILL` popup's accept →
+/// the engine's `AbandonSkill` queue): each queued skill line id becomes one
+/// `CMSG_UNLEARN_SKILL`. Nothing else happens client-side — the server's `SetSkill(id, 0, 0)`
+/// returns as a `PLAYER_SKILL_INFO` delta and [`feed_skills`] re-pushes the shrunken list
+/// (vmangos `SkillHandler.cpp`; the gossip/trainer drains' own shape).
+fn drain_skill_abandons(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for skill_id in script.take_skill_abandons() {
+        debug!("ui_char: abandon skill line {skill_id}");
+        let _ = commands.0.send(ClientCommand::UnlearnSkill { skill_id });
+    }
+}
+
+/// Resolve one equipped slot's item template entry (`None` = empty slot, or the item object /
+/// template hasn't streamed yet).
+fn slot_entry(store: &ObjectStore, items: &Items, slot0: u8) -> Option<u32> {
+    let guid = store.0.player_inv_slot(slot0)?;
+    items.object(guid)?.object_entry()
+}
+
+/// The equipped item's weapon-skill line id: the vmangos `Item.cpp` subclass table for a class-2
+/// item, unarmed (162) for an empty hand or a non-weapon / unmapped subclass.
+fn weapon_skill_id(
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+    slot0: u8,
+) -> u32 {
+    let Some(entry) = slot_entry(store, items, slot0) else {
+        return SKILL_UNARMED;
+    };
+    let Some(t) = items.template(entry, 0, commands) else {
+        return SKILL_UNARMED; // in flight — refined next frame when the template lands
+    };
+    if t.class != ITEM_CLASS_WEAPON {
+        return SKILL_UNARMED;
+    }
+    weapon_subclass_skill(t.subclass).unwrap_or(SKILL_UNARMED)
+}
+
+/// Read a skill line's `(value, temp+perm bonus)` pair from the `PLAYER_SKILL_INFO` triplets;
+/// `(0, 0)` when the line isn't known (a ranged pair with nothing equipped).
+fn skill_pair(store: &ObjectStore, skill_id: u32) -> (u32, i32) {
+    for i in 0..PLAYER_SKILL_SLOTS {
+        if let Some(s) = store.0.player_skill(i) {
+            if u32::from(s.skill_id) == skill_id {
+                return (
+                    u32::from(s.value),
+                    i32::from(s.temp_bonus) + i32::from(s.perm_bonus),
+                );
+            }
+        }
+    }
+    (0, 0)
+}
+
+/// Build the combat-stats snapshot from the self player's descriptor (field mappings pinned in
+/// decision 0208; the absent shapes are the descriptor's zero defaults, `percent` 1.0).
+fn combat_stats(
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> PlayerCombatStats {
+    let f = &store.0;
+    let round = |v: Option<f32>| v.unwrap_or(0.0).round() as i32;
+
+    let mut stats = [0i32; 5];
+    let mut stat_pos = [0i32; 5];
+    let mut stat_neg = [0i32; 5];
+    for i in 0..5u8 {
+        stats[usize::from(i)] = f.unit_stat(i).unwrap_or(0) as i32;
+        stat_pos[usize::from(i)] = round(f.player_posstat(i));
+        stat_neg[usize::from(i)] = round(f.player_negstat(i));
+    }
+    let mut resistances = [0i32; 7];
+    let mut resistance_pos = [0i32; 7];
+    let mut resistance_neg = [0i32; 7];
+    for i in 0..7u8 {
+        resistances[usize::from(i)] = f.unit_resistance(i).unwrap_or(0);
+        resistance_pos[usize::from(i)] = round(f.player_resistance_buff_pos(i));
+        resistance_neg[usize::from(i)] = round(f.player_resistance_buff_neg(i));
+    }
+
+    let (ap_pos, ap_neg) = f.unit_attack_power_mods();
+    let (rap_pos, rap_neg) = f.unit_ranged_attack_power_mods();
+
+    // The offhand-speed gate is an offhand *weapon* (a shield doesn't swing); the wand check is
+    // the ranged item's subclass. Both read the equipped item's template (ask-once in flight →
+    // false this frame, refined when it lands).
+    let has_offhand = slot_entry(store, items, SLOT_OFF_HAND)
+        .and_then(|e| items.template(e, 0, commands))
+        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON);
+    let has_wand = slot_entry(store, items, SLOT_RANGED)
+        .and_then(|e| items.template(e, 0, commands))
+        .is_some_and(|t| t.class == ITEM_CLASS_WEAPON && t.subclass == SUBCLASS_WAND);
+
+    let main_skill = weapon_skill_id(store, items, commands, SLOT_MAIN_HAND);
+    let ranged_skill_id = slot_entry(store, items, SLOT_RANGED)
+        .and_then(|e| items.template(e, 0, commands))
+        .filter(|t| t.class == ITEM_CLASS_WEAPON)
+        .and_then(|t| weapon_subclass_skill(t.subclass));
+
+    PlayerCombatStats {
+        stats,
+        stat_pos,
+        stat_neg,
+        resistances,
+        resistance_pos,
+        resistance_neg,
+        min_damage: f.unit_min_damage().unwrap_or(0.0),
+        max_damage: f.unit_max_damage().unwrap_or(0.0),
+        min_offhand_damage: f.unit_min_offhand_damage().unwrap_or(0.0),
+        max_offhand_damage: f.unit_max_offhand_damage().unwrap_or(0.0),
+        physical_bonus_pos: f.player_mod_damage_done_pos(0).unwrap_or(0),
+        physical_bonus_neg: f.player_mod_damage_done_neg(0).unwrap_or(0),
+        damage_percent: f.player_mod_damage_done_pct(0).unwrap_or(1.0),
+        // 2000 ms is the vanilla base swing when the field hasn't streamed — keeps the ref's
+        // damage/speed division finite on the first frames.
+        main_attack_time_ms: f.unit_base_attack_time(0).unwrap_or(2000),
+        offhand_attack_time_ms: f.unit_base_attack_time(1).unwrap_or(2000),
+        has_offhand,
+        attack_power: f.unit_attack_power().unwrap_or(0),
+        attack_power_pos: i32::from(ap_pos),
+        attack_power_neg: i32::from(ap_neg),
+        ranged_attack_power: f.unit_ranged_attack_power().unwrap_or(0),
+        ranged_attack_power_pos: i32::from(rap_pos),
+        ranged_attack_power_neg: i32::from(rap_neg),
+        ranged_attack_time_ms: f.unit_ranged_attack_time().unwrap_or(2000),
+        ranged_min_damage: f.unit_min_ranged_damage().unwrap_or(0.0),
+        ranged_max_damage: f.unit_max_ranged_damage().unwrap_or(0.0),
+        main_weapon_skill: skill_pair(store, main_skill),
+        ranged_weapon_skill: ranged_skill_id.map_or((0, 0), |id| skill_pair(store, id)),
+        has_wand,
+    }
+}
+
+/// One equipped slot's view: entry + count from the item object, icon/name/quality/link/
+/// equip_slots from the ask-once template (icon `None` while the answer is in flight — the
+/// empty-slot art shows and the landing template flips the view, which fires
+/// `UNIT_INVENTORY_CHANGED`), `locked` from the app's `PendingItemOps` (decision 0208 phase 1b —
+/// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`). `slot0` is
+/// the wire `EQUIPMENT_SLOT_*`/`INV_SLOT` index (0..22 — equipment 0..18, the four equipped-bag
+/// icons 19..22); the live-API id `slot_view` reports through is `slot0 + 1` either way.
+fn slot_view(
+    store: &ObjectStore,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    commands: &NetCommands,
+    pending: &PendingItemOps,
+    names: &mut crate::names::NameCache,
+    slot0: u8,
+) -> Option<InvSlotView> {
+    let guid = store.0.player_inv_slot(slot0)?;
+    let obj = items.object(guid)?;
+    let entry = obj.object_entry()?;
+    let count = obj.item_stack_count().unwrap_or(1).max(1);
+    // A worn ammo container's contents, collected while the bag object is borrowed — applied
+    // below once the template's class says quiver.
+    let content_guids: Vec<u64> = {
+        let slots = obj.container_num_slots().unwrap_or(0).min(36) as u8;
+        (0..slots).filter_map(|s| obj.container_slot(s)).collect()
+    };
+    // The live durability pair (see the bag feed's twin) — the equipped tooltip's line.
+    let durability = obj
+        .item_durability()
+        .zip(obj.item_max_durability())
+        .filter(|&(_, max)| max > 0);
+    // ITEM_FIELD_FLAGS — the broken/alert laws' wrapped (0x08) and force-red (0x10) bits.
+    let flags = obj.item_flags().unwrap_or(0);
+    // ITEM_FIELD_CREATOR → the ask-once name cache — the equipped tooltip's "<Made by %s>"
+    // line (see the bag feed's twin in `ui_items::feed::resolve_slot`).
+    let creator = obj
+        .item_creator()
+        .filter(|&g| g != 0)
+        .and_then(|g| names.resolve(g, commands).map(str::to_string));
+    let t = items.template(entry, guid, commands);
+    let (name, quality, display, link, equip_slots, class) = match t {
+        Some(t) => (
+            Some(t.name.clone()),
+            t.quality as i32,
+            t.display_info_id,
+            Some(format!(
+                "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
+                quality_color(t.quality),
+                entry,
+                t.name
+            )),
+            find_equip_slot(t.inventory_type),
+            t.class,
+        ),
+        None => (None, 0, 0, None, Vec::new(), 0),
+    };
+    // The quiver's bag-bar count is what's INSIDE it: the ref's `GetInventoryItemCount("player",
+    // bagSlot)` returns the ammo left in a worn ammo container — the "162" on the bag bar — and
+    // the item's own stack (1) for any other bag, which the count text then hides. Gated on
+    // ITEM_CLASS_QUIVER 11 (INFERRED from the ref UI's observable behavior — regular bags never
+    // show a contents sum; named in the decision record).
+    let count = if class == 11 {
+        content_guids
+            .iter()
+            .filter_map(|&g| items.object(g))
+            .map(|o| o.item_stack_count().unwrap_or(1).max(1))
+            .sum()
+    } else {
+        count
+    };
+    let icon = icons
+        .and_then(|i| i.catalog.get(display))
+        .and_then(|d| d.icon.clone());
+    let live_id = u32::from(slot0) + 1;
+    Some(InvSlotView {
+        item_id: entry,
+        icon,
+        count,
+        quality,
+        name,
+        link,
+        durability,
+        flags,
+        locked: pending.contains(EQUIPMENT_BAG, live_id),
+        equip_slots,
+        creator,
+    })
+}
+
+/// Total carried ammo matching `ammo_id`: the backpack's 16 slots + the four equipped bags'
+/// contents (`GetInventoryItemCount("player", ammo)` counts what you can actually shoot — bank
+/// and buyback never join).
+fn ammo_count(store: &ObjectStore, items: &Items, ammo_id: u32) -> u32 {
+    let mut n = 0;
+    let mut add = |guid: Option<u64>| {
+        if let Some(o) = guid.and_then(|g| items.object(g)) {
+            if o.object_entry() == Some(ammo_id) {
+                n += o.item_stack_count().unwrap_or(1);
+            }
+        }
+    };
+    for i in 0..16u8 {
+        add(store.0.player_pack_slot(i));
+    }
+    for b in 19..23u8 {
+        if let Some(bag) = store.0.player_inv_slot(b).and_then(|g| items.object(g)) {
+            let slots = bag.container_num_slots().unwrap_or(0).min(36) as u8;
+            for s in 0..slots {
+                if let Some(o) = bag.container_slot(s).and_then(|g| items.object(g)) {
+                    if o.object_entry() == Some(ammo_id) {
+                        n += o.item_stack_count().unwrap_or(1);
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Build the 24-wide inventory snapshot: `[0]` ammo, `[1..=19]` the equipment slots, `[20..=23]`
+/// the four equipped-bag icons (decision 0216 slice 2's bag bar — the bag ITEM occupying `INV_SLOT`
+/// 19..22, not its contents) — all the client's 1-based `GetInventorySlotInfo` ids over the
+/// 0-based inv-slot array.
+fn inventory_slots(
+    store: &ObjectStore,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    commands: &NetCommands,
+    pending: &PendingItemOps,
+    names: &mut crate::names::NameCache,
+) -> InventorySlots {
+    let mut inv: InventorySlots = Default::default();
+    let ammo_id = store.0.player_ammo_id().unwrap_or(0);
+    if ammo_id != 0 {
+        let t = items.template(ammo_id, 0, commands);
+        let (name, quality, display, link) = match t {
+            Some(t) => (
+                Some(t.name.clone()),
+                t.quality as i32,
+                t.display_info_id,
+                Some(format!(
+                    "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
+                    quality_color(t.quality),
+                    ammo_id,
+                    t.name
+                )),
+            ),
+            None => (None, 0, 0, None),
+        };
+        let icon = icons
+            .and_then(|i| i.catalog.get(display))
+            .and_then(|d| d.icon.clone());
+        inv[0] = Some(InvSlotView {
+            durability: None,
+            flags: 0,
+            item_id: ammo_id,
+            icon,
+            count: ammo_count(store, items, ammo_id),
+            quality,
+            name,
+            link,
+            // The ammo slot is a named deferral this slice (decision 0208 phase 1b): no click
+            // path wires it, so there's nothing for a pending op to lock and nowhere for it to
+            // fit — both stay the inert default.
+            locked: false,
+            equip_slots: Vec::new(),
+            creator: None,
+        });
+    }
+    for slot in 1..=19u8 {
+        inv[usize::from(slot)] = slot_view(store, items, icons, commands, pending, names, slot - 1);
+    }
+    // Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) — the bag bar's icon
+    // source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../SLOT_BAG_FIRST in the
+    // container feed's own numbering), same `slot_view` resolution as any equipment slot.
+    for (i, slot) in (20u8..=23).enumerate() {
+        inv[usize::from(slot)] =
+            slot_view(store, items, icons, commands, pending, names, 19 + i as u8);
+    }
+    inv
+}
+
+#[allow(clippy::too_many_arguments)]
+fn feed_char(
+    script: Option<NonSendMut<UiScript>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut items: ResMut<Items>,
+    icons: Option<Res<ItemDisplays>>,
+    commands: Res<NetCommands>,
+    mut feed: ResMut<CharFeedState>,
+    mut booth: ResMut<PaperDollBooth>,
+    pending: Res<PendingItemOps>,
+    mut names: ResMut<crate::names::NameCache>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    // The pane's Model:SetRotation transcription owns the yaw; the booth mirrors it (0208 §5).
+    booth.yaw = script.paperdoll_yaw();
+
+    let Some(store) = self_q.iter().next() else {
+        if feed.last_stats.is_some() || feed.last_inv.is_some() {
+            script.set_player_combat_stats(None);
+            script.set_inventory_slots(Default::default());
+            feed.last_stats = None;
+            feed.last_inv = None;
+        }
+        return;
+    };
+
+    let stats = combat_stats(store, &mut items, &commands);
+    if feed.last_stats.as_ref() != Some(&stats) {
+        // PUSH before firing: event dispatch runs the Lua handlers synchronously, so the snapshot
+        // must already be in the VM when they repaint (the ui_unit rule — a fire-first ordering
+        // paints the OLD values and, being transition-gated, never corrects itself).
+        let prev = feed.last_stats.take();
+        script.set_player_combat_stats(Some(stats.clone()));
+        let tok = || ScriptValue::Str("player".to_string());
+        // Group the transitions by the ref's own event registrations (PaperDollFrame.lua:14-28);
+        // a first snapshot fires every group whose data is present (the ui_unit rule).
+        let changed = |sel: fn(&PlayerCombatStats) -> Vec<i64>| {
+            prev.as_ref().is_none_or(|p| sel(p) != sel(&stats))
+        };
+        if changed(|s| {
+            let mut v: Vec<i64> = s.stats.iter().map(|&x| i64::from(x)).collect();
+            v.extend(
+                s.stat_pos
+                    .iter()
+                    .chain(s.stat_neg.iter())
+                    .map(|&x| i64::from(x)),
+            );
+            v
+        }) {
+            script.fire_event("UNIT_STATS", vec![tok()]);
+        }
+        if changed(|s| {
+            s.resistances
+                .iter()
+                .chain(s.resistance_pos.iter())
+                .chain(s.resistance_neg.iter())
+                .map(|&x| i64::from(x))
+                .collect()
+        }) {
+            script.fire_event("UNIT_RESISTANCES", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                fixed(s.min_damage),
+                fixed(s.max_damage),
+                fixed(s.min_offhand_damage),
+                fixed(s.max_offhand_damage),
+                i64::from(s.physical_bonus_pos),
+                i64::from(s.physical_bonus_neg),
+                fixed(s.damage_percent),
+            ]
+        }) {
+            script.fire_event("UNIT_DAMAGE", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                i64::from(s.main_attack_time_ms),
+                i64::from(s.offhand_attack_time_ms),
+                i64::from(s.has_offhand),
+            ]
+        }) {
+            script.fire_event("UNIT_ATTACK_SPEED", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                i64::from(s.attack_power),
+                i64::from(s.attack_power_pos),
+                i64::from(s.attack_power_neg),
+            ]
+        }) {
+            script.fire_event("UNIT_ATTACK_POWER", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                i64::from(s.ranged_attack_power),
+                i64::from(s.ranged_attack_power_pos),
+                i64::from(s.ranged_attack_power_neg),
+                i64::from(s.has_wand),
+            ]
+        }) {
+            script.fire_event("UNIT_RANGED_ATTACK_POWER", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                fixed(s.ranged_min_damage),
+                fixed(s.ranged_max_damage),
+                i64::from(s.ranged_attack_time_ms),
+            ]
+        }) {
+            script.fire_event("UNIT_RANGEDDAMAGE", vec![tok()]);
+        }
+        if changed(|s| {
+            vec![
+                i64::from(s.main_weapon_skill.0),
+                i64::from(s.main_weapon_skill.1),
+                i64::from(s.ranged_weapon_skill.0),
+                i64::from(s.ranged_weapon_skill.1),
+            ]
+        }) {
+            script.fire_event("UNIT_ATTACK", vec![tok()]);
+        }
+        feed.last_stats = Some(stats);
+    }
+
+    let inv = inventory_slots(
+        store,
+        &mut items,
+        icons.as_deref(),
+        &commands,
+        &pending,
+        &mut names,
+    );
+    if feed.last_inv.as_ref() != Some(&inv) {
+        script.set_inventory_slots(inv.clone());
+        script.fire_event(
+            "UNIT_INVENTORY_CHANGED",
+            vec![ScriptValue::Str("player".to_string())],
+        );
+        feed.last_inv = Some(inv);
+    }
+}

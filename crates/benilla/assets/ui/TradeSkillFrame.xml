@@ -1,0 +1,1286 @@
+<Ui>
+    <!--
+        benilla's crafting window (decision 0437 phase 2): the 1.12 `TradeSkillFrame`, transcribed from
+        the reference `Blizzard_TradeSkillUI.xml`/`.lua` (session scratchpad `ref-ui/`, decision 0246
+        discipline — never committed) onto our own engine/feeds. Geometry/art-paths/structure below are
+        QUOTED from the ref (line citations inline); the Lua is transcribed logic turned onto benilla's
+        Era API (`GetTradeSkillLine`/`GetNumTradeSkills`/`GetTradeSkillInfo`/reagents/tools/cooldown/
+        `DoTradeSkill`/`CloseTradeSkill`, decision 0437's engine surface, built alongside this file).
+
+        NOT an NPC session (unlike Gossip/Merchant/Trainer): the window opens client-side off your own
+        cast of an effect-47 opener spell — no NPC, no server round trip to open it (0437 §"What
+        scoping verified": `Spell_C::TryCast` special-branches on `SPELL_EFFECT_TRADE_SKILL` and
+        returns before the cast-send). It registers `TRADE_SKILL_SHOW`/`_UPDATE`/`_CLOSE`/
+        `UPDATE_TRADESKILL_RECAST` on ITSELF (ref l.40-45's `TradeSkillFrame_OnLoad` doesn't register
+        `TRADE_SKILL_SHOW` — some other FrameXML driver dispatches it directly to `TradeSkillFrame_Show`
+        in the reference addon load model; this engine has no such driver, so the window listens for its
+        own SHOW like every other benilla panel does, TrainerFrame.xml's own TRAINER_SHOW precedent).
+
+        Modeled on the two known-good dressed windows for the framing (MerchantFrame.xml's own header
+        comment, TrainerFrame.xml's own precedent for this exact art family):
+          - MerchantFrame.xml/TrainerFrame.xml — the 384×512 four-quadrant window art (no <Backdrop>:
+            the art IS the frame), the "player" portrait binding (`SetPortraitTexture(region, "player")`
+            — CharacterFrame.xml/TalentFrame.xml's own precedent for the player-token, not the "npc"
+            token those NPC-session windows use), the UIPanel slot system (carries NO hardcoded
+            <Anchors> — ShowUIPanel/SetLeftFrame SetPoints it), OnShow/OnHide PlaySound pair.
+          - TrainerFrame.xml — the FLAT layout constraint (below), the faux-scroll list kit
+            (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
+            UIPanelButtonTemplate/close-button/item-button idioms (no such templates ship in this house
+            dialect — TalentFrame.xml's own ENGINE API note), the persistent selection-highlight Frame.
+
+        FLAT layout (TrainerFrame.xml's own house constraint, restated here): a child <Frame> shown at
+        runtime does not render its own <Layers> FontStrings in this engine, so the detail-pane
+        FontStrings + the title live on BenillaTradeSkillFrame's OWN <Layers> (OVERLAY, above the
+        window's own BACKGROUND/BORDER/ARTWORK art groups), never on a nested sub-frame. The ref's
+        `TradeSkillDetailScrollFrame`/`TradeSkillDetailScrollChildFrame` therefore don't exist here —
+        the detail is a FIXED (non-scrolling) pane, computed once from the flattened ScrollFrame+
+        ScrollChild offsets (TOPLEFT 20,-234 + each child's own ref-quoted offset). Per-region regions
+        that DO need Show()/Hide() live on Button/Frame children (Buttons render their own Layers) —
+        the product icon and the 8 reagent slots.
+
+        v1 DEVIATIONS (pinned to decision 0437's in-flight wow-re §5 dispatch where noted):
+          1. GROUPED LIST, HEADERS LANDED (wow-re `tradeskill` TU-B, VERIFIED — this deviation's own
+             earlier revision named it an INTERIM pinned to the dispatch; folded back this session).
+             `GetTradeSkillInfo`'s `skillType` is `"header"` for a group row (the created item's
+             `(ItemClass, ItemSubClass)`, named from `ItemSubClass.dbc`, engine-sorted) — the ref's
+             header branch is restored below verbatim (ref l.118-127: `SetText`, the +/- fold icon +
+             hover-glow swap on `isExpanded`, `TradeSkillTypeColor["header"]` now reachable) and so is
+             `SetSelection`'s header branch (ref l.184-192: a header click folds its group and never
+             selects). `Expand/CollapseTradeSkillSubClass` are real now (engine-side); the row
+             template gained the +/- fold icon + `$parentHighlight` column this window never carried
+             in v1 (TrainerFrame.xml's own `BenillaTrainerServiceTemplate` geometry —
+             `ClassTrainerSkillButtonTemplate`, `TradeSkillSkillButtonTemplate`'s base, isn't in this
+             session's ref extraction either, TrainerFrame.xml's own reagent-slot precedent for
+             reconstructing an un-extracted inherited template).
+
+             THE COLLAPSE-ALL TAB + FILTER DROPDOWNS NOW SHIP (this deviation's own earlier revision
+             named them STILL OMITTED, a narrower remaining scope; closed this session).
+             `TradeSkillExpandButtonFrame`/`BenillaTradeSkillCollapseAllButton` (ref l.229-294,
+             `Expand/CollapseTradeSkillSubClass(0)`'s own ALL-groups semantics, already engine-side) is
+             a standalone Button — NOT this file's row template (`BenillaTradeSkillSkillButtonTemplate`'s
+             fold icon is baked in for the 293-wide list row and its `$parentName` column would overflow
+             a 40×22 tab): TrainerFrame.xml's own `BenillaTrainerCollapseAllButton` is the precedent
+             this mirrors byte-for-byte instead (its own bespoke NormalTexture/HighlightTexture/
+             ButtonText), reconstructing the same un-extracted `ClassTrainerSkillButtonTemplate` base
+             the row template ALSO stands in for, above. `BenillaTradeSkillSubClassDropDown`/
+             `BenillaTradeSkillInvSlotDropDown` (ref l.295-328) are the `UIDropDownMenuTemplate` kit
+             (`UIDropDownMenu.xml`) — TrainerFrame.xml's own `BenillaTrainerFilterDropDown` consumer is
+             the calling-convention precedent (every dropdown call below passes the frame explicitly by
+             name, never the bare `this` fallback `UIDropDownMenu_SetWidth`/`_SetText`/`_Initialize`
+             allow — the two `*DropDownButton_OnClick` handlers are the one exception, REQUIRED to read
+             the clicked row off the real `this` global the way `info.func` is invoked, ref l.406-414).
+             The engine surface these ride — `GetTradeSkillSubClasses`, `Get/SetTradeSkillSubClassFilter`,
+             `GetTradeSkillInvSlots`, `Get/SetTradeSkillInvSlotFilter` — is real and tested
+             (`tradeskill.rs`'s own module doc + test suite): each `Set*`/`Expand`/`CollapseTradeSkillSubClass`
+             raises the engine's `trade_skill_touched` flag, answered with a `TRADE_SKILL_UPDATE` event
+             the same frame (`ui_tradeskill.rs`'s `drain_trade_skill`) — so neither the dropdown click
+             handlers nor the CollapseAll click below call `BenillaTradeSkillFrame_Update()` directly,
+             matching the ref's own restraint (ref l.303-312/406-414 never do either).
+          2. THE SPELL-FOCUS TOOL NEVER REDDENS. `BuildColoredListString` (below) is transcribed
+             byte-faithful — it reds an unmet tool — but `GetTradeSkillTools`'s `hasTool` has no
+             client-side proximity check yet (0437 INTERIM, pinned to the §5 dispatch), so v1 never
+             actually reds a tool in practice. The util is ready for when the check lands.
+          3. NO DRESSING-ROOM / CHAT-LINK INSERT. The ref's Ctrl+click `DressUpItemLink` / Shift+click
+             `ChatFrameEditBox:Insert` on the product icon and reagent buttons are dropped — the
+             cursor-item arc hasn't landed (MerchantFrame.xml's own identical-shaped "a no-op here
+             until the cursor-item arc" precedent for its own left-click).
+          4. NO `SKILL_LINES_CHANGED` self-listen on the rank StatusBar (ref l.217-224): the skill-up
+             feedback/diff-watcher is 0437 phase 4, not yet built — the bar's value/color/text refresh
+             only rides this window's own SHOW/UPDATE/selection paint.
+          5. NO `PLAYER_ENTERING_WORLD` hide, matching TrainerFrame.xml's own choice for this session
+             shape (the task brief calls this optional) — opening this window is your own client-side
+             cast, not an NPC session, so a world-enter close isn't the same lifecycle concern.
+          6. The ref's own dead code is dropped, not transcribed: `TradeSkillFrame_SetSelection`'s
+             `reagentToAnchorTo`/`mod(numReagents,2)` computation (ref l.264-268) is computed then never
+             read anywhere in the reference — a real vestige, not a benilla omission (TalentFrame.xml's
+             own precedent for dropping a verified-inert ref computation). The list row width toggle
+             (ref l.106-110, `if TradeSkillListScrollFrame:IsVisible() then 293 else 323`) is similarly
+             dropped: the ScrollFrame itself is always visible in both references and ours (only its
+             *scrollbar* toggles on overflow), so the ref's own condition is always true — rows are
+             fixed at 293, TrainerFrame.xml's own row width. `SetSelection`'s header branch
+             (restored, deviation 1) drops the ref's own `TradeSkillHighlightFrame:Show()` immediately
+             followed by `:Hide()` (ref l.183/185) — not dead in the ref's own sense, but ARCHITECTURALLY
+             redundant here: the row click handler that calls `SetSelection` always calls
+             `BenillaTradeSkillFrame_Update()` right after (ref's own `TradeSkillSkillButton_OnClick`
+             shape), which unconditionally hides the highlight and only re-shows it for a matching
+             recipe selection — a header index never is one.
+          7. ENGINE API gaps (TalentFrame.xml's own "no engine equivalent" posture):
+             - `EditBox:SetNumber` has no native method (grepped `crates/benilla-ui/src`) — patched
+               onto the ONE input-box instance in `BenillaTradeSkillFrame_OnLoad`
+               (`function box:SetNumber(n) self:SetText(tostring(floor(n or 0))) end`), so every call
+               site below still reads `TradeSkillInputBox:SetNumber(...)` exactly like the reference.
+             - `Button:SetTextColor`/`:LockHighlight`/`:UnlockHighlight` have no native method (grepped;
+               `benilla-ui/src/script/button.rs` ships texture-pairs/SetText/Enable/Disable/
+               RegisterForClicks/SetButtonState/Click only) — row coloring routes through a named child
+               FontString (`$parentName`, TrainerFrame.xml's own row-template shape) instead of the
+               button itself; the persistent selection glow is the separate `BenillaTradeSkillHighlight`
+               Frame (TrainerFrame.xml's own selection-highlight precedent) instead of Lock/
+               UnlockHighlight — no independent hover glow is added beyond it (TrainerFrame's own rows
+               carry none either).
+             - `SecondsToTime`/`BuildColoredListString` (ref `UIParent.lua`) have no engine equivalent
+               (they're Lua-side FrameXML utilities, not C API) — transcribed as GUARDED GLOBALS
+               (`if not X then function X(...) ... end end`), BuffFrame.xml's own
+               `SecondsToTimeAbbrev`/`DAY_ONELETTER_ABBR` precedent for exactly this "generic
+               UIParent.lua utility other windows may also need" shape (`BuildColoredListString` is
+               shared by the reference's own Craft UI too — decision 0437 phase 3's `CraftFrame.xml`
+               reuses this same guarded definition once loaded after this file). `SecondsToTime`'s own
+               `GetText("*_ABBR", nil, n)` locale-pluralization dispatch collapses to English
+               singular/plural directly — `UiPanels.xml`'s `StaticPopupTimeUnit` is the identical-shaped
+               precedent for this SAME `GetText` call elsewhere in the reference.
+             - Lua-5.0 `arg`/`arg.n` varargs have no equivalent (`LUA_COMPAT_VARARG` isn't shipped,
+               WorldMapFrame.xml/TalentFrame.xml's own identical note) — `BuildColoredListString`'s
+               varargs use `select("#", ...)`/`select(i, ...)`, their own precedent for the
+               substitution; the new `TradeSkillFilterFrame_LoadSubClasses`/`_LoadInvSlots` (ref l.331/
+               377) use the same substitution.
+             - `TEXT(x)` (the ref's localization-tooling identity macro) has no engine equivalent and
+               needs none — it's a build-time no-op wrapper in the real client, so every `TEXT(FOO)`
+               call below (and `TRADE_SKILL_TITLE` above, already transcribed this way before this
+               session) is transcribed as the bare `FOO` local (CharacterFrame.xml's own identical
+               "needs none" note for the same macro).
+          8. GlobalStrings the ref reads (`TRADE_SKILL_TITLE`, `REQUIRES_LABEL`, `SPELL_REAGENTS`,
+             `COOLDOWN_REMAINING`, `CREATE`, `CREATE_ALL`, `EXIT`, and now `ALL`/`ALL_SUBCLASSES`/
+             `ALL_INVENTORY_SLOTS` for the CollapseAll tab + filter dropdowns) are declared LOCALLY
+             below as the byte-exact 1.12 enUS values (extracted this session with the `mpqx` bin,
+             decision 0246's extraction discipline, then grepped — line-cited per constant), the
+             TrainerFrame.xml idiom (each window keeps its own local copies rather than a shared file).
+             `RED_FONT_COLOR_CODE`/`FONT_COLOR_CODE_CLOSE`/`GRAY_FONT_COLOR`/`HIGHLIGHT_FONT_COLOR` are
+             Fonts.xml globals (CharacterFrame.xml's own precedent for reading them unqualified).
+
+        Registers at the left UIPanel slot (UiPanels.xml, `pushable = 3` — the ref Lua's own line 13),
+        ESC-closable through the standard UIPanel chain. `CloseTradeSkill()` fires on hide for ANY
+        reason (ESC, close X, Exit, `TRADE_SKILL_CLOSE`, or another left-slot window displacing it) —
+        MerchantFrame.xml's own `CloseMerchant`-on-hide precedent, adapted (no server round trip per
+        0437, purely client-side session teardown).
+    -->
+    <Script><![CDATA[
+        -- ── Constants (ref Blizzard_TradeSkillUI.lua:2-11) ──────────────────────────────────────────
+        local TRADE_SKILLS_DISPLAYED = 8      -- TRADE_SKILLS_DISPLAYED (ref l.2)
+        local MAX_TRADE_SKILL_REAGENTS = 8    -- MAX_TRADE_SKILL_REAGENTS (ref l.3)
+        local TRADE_SKILL_HEIGHT = 16         -- TRADE_SKILL_HEIGHT (ref l.4)
+
+        -- The recipe-row color table (ref l.6-11), transcribed verbatim including "header" — which is
+        -- UNREACHABLE in v1 (this file's header comment, deviation 1).
+        TradeSkillTypeColor = {}
+        TradeSkillTypeColor["optimal"] = { r = 1.00, g = 0.50, b = 0.25 }
+        TradeSkillTypeColor["medium"]  = { r = 1.00, g = 1.00, b = 0.00 }
+        TradeSkillTypeColor["easy"]    = { r = 0.25, g = 0.75, b = 0.25 }
+        TradeSkillTypeColor["trivial"] = { r = 0.50, g = 0.50, b = 0.50 }
+        TradeSkillTypeColor["header"]  = { r = 1.00, g = 0.82, b = 0 }
+
+        -- ── GlobalStrings the ref reads (byte-exact 1.12 enUS, this file's header comment cites the
+        -- extraction command) — chunk-local, the TrainerFrame.xml idiom. ─────────────────────────────
+        local TRADE_SKILL_TITLE  = "%s"                    -- TRADE_SKILL_TITLE (GlobalStrings.lua:4278)
+        local REQUIRES_LABEL     = "Requires:"             -- REQUIRES_LABEL (3339)
+        local SPELL_REAGENTS     = "Reagents: "            -- SPELL_REAGENTS (4095) -- trailing space, verbatim
+        local COOLDOWN_REMAINING = "Cooldown remaining:"   -- COOLDOWN_REMAINING (864)
+        local CREATE_LABEL       = "Create"                -- CREATE (871)
+        local CREATE_ALL_LABEL   = "Create All"            -- CREATE_ALL (874)
+        local EXIT_LABEL         = "Exit"                  -- EXIT (1933)
+        local ALL_SUBCLASSES     = "All Subclasses"        -- ALL_SUBCLASSES (48)
+        local ALL_INVENTORY_SLOTS = "All Slots"            -- ALL_INVENTORY_SLOTS (47)
+
+        -- SecondsToTime's plural pairs (ref UIParent.lua:1004-1032 calls GetText("*_ABBR", nil, n)) —
+        -- guarded GLOBALS, BuffFrame.xml's own DAY_ONELETTER_ABBR precedent (a generic UIParent.lua
+        -- utility's own supporting constants, not a window-local label).
+        DAYS_ABBR       = DAYS_ABBR       or "Day"   -- DAYS_ABBR (895)
+        DAYS_ABBR_P1    = DAYS_ABBR_P1    or "Days"  -- DAYS_ABBR_P1 (896)
+        HOURS_ABBR      = HOURS_ABBR      or "Hr"    -- HOURS_ABBR (2296)
+        HOURS_ABBR_P1   = HOURS_ABBR_P1   or "Hrs"   -- HOURS_ABBR_P1 (2297)
+        MINUTES_ABBR    = MINUTES_ABBR    or "Min"   -- MINUTES_ABBR (2693)
+        MINUTES_ABBR_P1 = MINUTES_ABBR_P1 or "Mins"  -- MINUTES_ABBR_P1 (2694)
+        SECONDS_ABBR    = SECONDS_ABBR    or "Sec"   -- SECONDS_ABBR (3405)
+        SECONDS_ABBR_P1 = SECONDS_ABBR_P1 or "Secs"  -- SECONDS_ABBR_P1 (3404)
+
+        local function pluralAbbr(n, singular, plural)
+            if n == 1 then return singular end
+            return plural
+        end
+
+        -- SecondsToTime (ref UIParent.lua:1004-1032) — guarded global (this file's header comment,
+        -- deviation 7): GetText's locale pluralization dispatch collapses to English singular/plural
+        -- directly (UiPanels.xml's StaticPopupTimeUnit is the identical-shaped precedent for the same
+        -- GetText call elsewhere in the reference).
+        if not SecondsToTime then
+            function SecondsToTime(seconds, noSeconds)
+                local time, count = "", 0
+                seconds = floor(seconds)
+                if seconds > 86400 then
+                    local t = floor(seconds / 86400)
+                    time = time .. t .. " " .. pluralAbbr(t, DAYS_ABBR, DAYS_ABBR_P1) .. " "
+                    seconds = mod(seconds, 86400)
+                    count = count + 1
+                end
+                if seconds > 3600 then
+                    local t = floor(seconds / 3600)
+                    time = time .. t .. " " .. pluralAbbr(t, HOURS_ABBR, HOURS_ABBR_P1) .. " "
+                    seconds = mod(seconds, 3600)
+                    count = count + 1
+                end
+                if count < 2 and seconds >= 60 then
+                    local t = floor(seconds / 60)
+                    time = time .. t .. " " .. pluralAbbr(t, MINUTES_ABBR, MINUTES_ABBR_P1) .. " "
+                    seconds = mod(seconds, 60)
+                    count = count + 1
+                end
+                if count < 2 and seconds > 0 and not noSeconds then
+                    time = time .. seconds .. " " .. pluralAbbr(seconds, SECONDS_ABBR, SECONDS_ABBR_P1) .. " "
+                end
+                return time
+            end
+        end
+
+        -- BuildColoredListString (ref UIParent.lua:1059-1082) — guarded global (this file's header
+        -- comment, deviation 7): odd args are text, even args say whether it's "met" (white) or not
+        -- (red |cffff2020 ... |r). GetTradeSkillTools' own alternating (name, hasTool) return is
+        -- exactly this shape. Lua-5.0 arg/arg.n replaced with select(), WorldMapFrame.xml's precedent.
+        if not BuildColoredListString then
+            function BuildColoredListString(...)
+                local n = select("#", ...)
+                if n == 0 then return nil end
+                local a1, a2 = select(1, ...)
+                local s
+                if a2 then
+                    s = a1
+                else
+                    s = RED_FONT_COLOR_CODE .. a1 .. FONT_COLOR_CODE_CLOSE
+                end
+                for i = 3, n, 2 do
+                    local text, met = select(i, ...)
+                    if met then
+                        s = s .. ", " .. text
+                    else
+                        s = s .. ", " .. RED_FONT_COLOR_CODE .. text .. FONT_COLOR_CODE_CLOSE
+                    end
+                end
+                return s
+            end
+        end
+
+        -- ── Detail pane ─────────────────────────────────────────────────────────────────────────────
+        -- No trade skills known at all (ref l.79-89): blank the whole detail pane. Regions on this
+        -- window's own Layers "hide" via SetText("") — TrainerFrame.xml's own convention, which
+        -- predates region Show/Hide (region.rs has the real pair now); equivalent either way.
+        function BenillaTradeSkillFrame_HideDetails()
+            getglobal("BenillaTradeSkillFrameTitleText"):SetText(format(TRADE_SKILL_TITLE, GetTradeSkillLine()))
+            getglobal("BenillaTradeSkillSkillName"):SetText("")
+            getglobal("BenillaTradeSkillSkillIcon"):Hide()
+            getglobal("BenillaTradeSkillSkillIconCount"):SetText("")
+            getglobal("BenillaTradeSkillRequirementLabel"):SetText("")
+            getglobal("BenillaTradeSkillRequirementText"):SetText("")
+            getglobal("BenillaTradeSkillSkillCooldown"):SetText("")
+            for i = 1, MAX_TRADE_SKILL_REAGENTS do
+                getglobal("BenillaTradeSkillReagent" .. i):Hide()
+            end
+            getglobal("BenillaTradeSkillCreateButton"):Disable()
+            getglobal("BenillaTradeSkillCreateAllButton"):Disable()
+        end
+
+        -- Fill the detail pane + the rank statusbar for the selected recipe `id` (ref
+        -- TradeSkillFrame_SetSelection, l.181-294, header branch restored — deviation 1, wow-re
+        -- `tradeskill` TU-B). Also the SOURCE of the selection highlight's color (set once here, ref
+        -- l.198-201). GetTradeSkillInfo(id) is called ONCE up top, ref's own shape (l.182) — a header
+        -- click folds its group and returns before ever selecting (ref l.184-192; the ref's own
+        -- Show()/Hide() pair here is dropped, deviation 6's own added note).
+        function BenillaTradeSkillFrame_SetSelection(id)
+            if not id or id == 0 then
+                BenillaTradeSkillFrame.selectedSkill = 0
+                BenillaTradeSkillFrame_HideDetails()
+                return
+            end
+            local skillName, skillType, numAvailable, isExpanded = GetTradeSkillInfo(id)
+            if skillType == "header" then
+                if isExpanded then
+                    CollapseTradeSkillSubClass(id)
+                else
+                    ExpandTradeSkillSubClass(id)
+                end
+                return
+            end
+            BenillaTradeSkillFrame.selectedSkill = id
+            SelectTradeSkill(id)
+            if GetTradeSkillSelectionIndex() > GetNumTradeSkills() then
+                return
+            end
+            local color = TradeSkillTypeColor[skillType]
+            if color then
+                getglobal("BenillaTradeSkillHighlight"):SetVertexColor(color.r, color.g, color.b)
+            end
+
+            -- General info (ref l.203-212).
+            local skillLineName, skillLineRank, skillLineMaxRank = GetTradeSkillLine()
+            getglobal("BenillaTradeSkillFrameTitleText"):SetText(format(TRADE_SKILL_TITLE, skillLineName))
+            local rankFrame = getglobal("BenillaTradeSkillRankFrame")
+            getglobal("BenillaTradeSkillRankFrameSkillName"):SetText(skillLineName)
+            rankFrame:SetStatusBarColor(0.0, 0.0, 1.0, 0.5)
+            getglobal("BenillaTradeSkillRankFrameBackground"):SetVertexColor(0.0, 0.0, 0.75, 0.5)
+            rankFrame:SetMinMaxValues(0, skillLineMaxRank)
+            rankFrame:SetValue(skillLineRank)
+            getglobal("BenillaTradeSkillRankFrameSkillRank"):SetText(skillLineRank .. "/" .. skillLineMaxRank)
+
+            getglobal("BenillaTradeSkillSkillName"):SetText(skillName)
+            local cooldown = GetTradeSkillCooldown(id)
+            if cooldown then
+                getglobal("BenillaTradeSkillSkillCooldown"):SetText(COOLDOWN_REMAINING .. " " .. SecondsToTime(cooldown))
+            else
+                getglobal("BenillaTradeSkillSkillCooldown"):SetText("")
+            end
+
+            local icon = getglobal("BenillaTradeSkillSkillIcon")
+            icon:Show()
+            icon:SetNormalTexture(GetTradeSkillIcon(id) or BENILLA_FALLBACK_ICON)
+            local iconCount = getglobal("BenillaTradeSkillSkillIconCount")
+            local minMade, maxMade = GetTradeSkillNumMade(id)
+            if maxMade > 1 then
+                if minMade == maxMade then
+                    iconCount:SetText(minMade)
+                else
+                    iconCount:SetText(minMade .. "-" .. maxMade)
+                end
+                if iconCount:GetWidth() > 39 then
+                    iconCount:SetText("~" .. floor((minMade + maxMade) / 2))
+                end
+            else
+                iconCount:SetText("")
+            end
+
+            -- Reagents (ref l.235-272): up to MAX_TRADE_SKILL_REAGENTS, gray-out + creatable gate.
+            local creatable = true
+            local numReagents = GetTradeSkillNumReagents(id)
+            for i = 1, MAX_TRADE_SKILL_REAGENTS do
+                local reagent = getglobal("BenillaTradeSkillReagent" .. i)
+                if i <= numReagents then
+                    local reagentName, reagentTexture, need, have = GetTradeSkillReagentInfo(id, i)
+                    if not reagentName or not reagentTexture then
+                        -- Item template not landed yet for this reagent — hide it, like the ref does
+                        -- for any nil reagent (engine API note, decision 0437).
+                        reagent:Hide()
+                    else
+                        reagent:Show()
+                        reagent.icon:SetTexture(reagentTexture)
+                        reagent.name:SetText(reagentName)
+                        have = have or 0
+                        if have < need then
+                            reagent.icon:SetVertexColor(0.5, 0.5, 0.5)
+                            reagent.name:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+                            creatable = false
+                        else
+                            reagent.icon:SetVertexColor(1.0, 1.0, 1.0)
+                            reagent.name:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                        end
+                        local haveText = have
+                        if have >= 100 then haveText = "*" end
+                        reagent.count:SetText(haveText .. " /" .. need)
+                    end
+                else
+                    reagent:Hide()
+                end
+            end
+
+            -- Requires: line (ref l.274-281). "Hidden" means both FontStrings blank
+            -- (TrainerFrame.xml's own convention — see BenillaTradeSkillFrame_HideDetails).
+            local spellFocus = BuildColoredListString(GetTradeSkillTools(id))
+            if spellFocus then
+                getglobal("BenillaTradeSkillRequirementLabel"):SetText(REQUIRES_LABEL)
+                getglobal("BenillaTradeSkillRequirementText"):SetText(spellFocus)
+            else
+                getglobal("BenillaTradeSkillRequirementLabel"):SetText("")
+                getglobal("BenillaTradeSkillRequirementText"):SetText("")
+            end
+
+            if creatable then
+                getglobal("BenillaTradeSkillCreateButton"):Enable()
+                getglobal("BenillaTradeSkillCreateAllButton"):Enable()
+            else
+                getglobal("BenillaTradeSkillCreateButton"):Disable()
+                getglobal("BenillaTradeSkillCreateAllButton"):Disable()
+            end
+
+            -- Reset the number of items to be created (ref l.293).
+            getglobal("BenillaTradeSkillInputBox"):SetNumber(GetTradeskillRepeatCount())
+        end
+
+        -- ── The list page (ref TradeSkillFrame_Update, l.75-178 — the header/expand-icon tail,
+        -- l.118-127, is restored below at the row loop; the CollapseAll Enable/Disable (l.86/94) and
+        -- the tail texture logic (l.155-178) are restored too, deviation 1 closed this session) ──────
+        function BenillaTradeSkillFrame_Update()
+            local numTradeSkills = GetNumTradeSkills()
+            if numTradeSkills == 0 then
+                BenillaTradeSkillFrame_HideDetails()
+                getglobal("BenillaTradeSkillCollapseAllButton"):Disable() -- ref l.86
+            else
+                getglobal("BenillaTradeSkillCollapseAllButton"):Enable() -- ref l.94
+            end
+
+            local scrollFrame = getglobal("BenillaTradeSkillListScrollFrame")
+            BenillaFauxScrollFrame_Update(scrollFrame, numTradeSkills, TRADE_SKILLS_DISPLAYED, TRADE_SKILL_HEIGHT)
+            local skillOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+
+            local highlight = getglobal("BenillaTradeSkillHighlight")
+            highlight:Hide()
+
+            local selection = GetTradeSkillSelectionIndex()
+            for i = 1, TRADE_SKILLS_DISPLAYED do
+                local skillIndex = i + skillOffset
+                local button = getglobal("BenillaTradeSkillSkill" .. i)
+                if skillIndex <= numTradeSkills then
+                    local skillName, skillType, numAvailable, isExpanded = GetTradeSkillInfo(skillIndex)
+                    if not skillName then
+                        button.skillIndex = nil
+                        button:Hide()
+                    else
+                        button.skillIndex = skillIndex
+                        local color = TradeSkillTypeColor[skillType]
+                        if color then
+                            button.name:SetTextColor(color.r, color.g, color.b)
+                        end
+                        -- Header row (ref l.118-127, wow-re `tradeskill` TU-B): the group name
+                        -- verbatim, no "[n]" suffix, the +/- fold icon + its hover glow swapped on
+                        -- isExpanded. UnlockHighlight() (ref l.127) is dropped — no native
+                        -- Lock/UnlockHighlight (this file's header comment, deviation 7); the
+                        -- persistent selection glow below is the separate BenillaTradeSkillHighlight
+                        -- texture, never this button's own highlight lock.
+                        if skillType == "header" then
+                            button.name:SetText(skillName)
+                            if isExpanded then
+                                button:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+                            else
+                                button:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+                            end
+                            getglobal(button:GetName() .. "Highlight"):SetTexture("Interface\\Buttons\\UI-PlusButton-Hilight")
+                        else
+                            button:SetNormalTexture("")
+                            getglobal(button:GetName() .. "Highlight"):SetTexture("")
+                            if (numAvailable or 0) == 0 then
+                                button.name:SetText(" " .. skillName)
+                            else
+                                button.name:SetText(" " .. skillName .. " [" .. numAvailable .. "]")
+                            end
+                        end
+                        button:Show()
+                        -- The selection glow only ever lands on a recipe row — SetSelection never
+                        -- selects a header (deviation 1), so `selection` can't be one's index.
+                        if selection == skillIndex then
+                            highlight:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+                            highlight:Show()
+                        end
+                    end
+                else
+                    button.skillIndex = nil
+                    button:Hide()
+                end
+            end
+
+            -- The max makeable count for Create All (ref l.166-169's own full-list scan collapses to a
+            -- direct lookup of the selected index — this file's header comment, deviation 6).
+            if selection >= 1 and selection <= numTradeSkills then
+                local _, _, numAvailable = GetTradeSkillInfo(selection)
+                BenillaTradeSkillFrame.numAvailable = numAvailable or 0
+            else
+                BenillaTradeSkillFrame.numAvailable = 0
+            end
+
+            -- Count headers + how many stay folded (ref l.156-170), to drive the CollapseAll tab's own
+            -- texture below — restored, deviation 1 closed this session.
+            local numHeaders, notExpanded = 0, 0
+            for i = 1, numTradeSkills do
+                local skillName, skillType, numAvailable, isExpanded = GetTradeSkillInfo(i)
+                if skillName and skillType == "header" then
+                    numHeaders = numHeaders + 1
+                    if not isExpanded then
+                        notExpanded = notExpanded + 1
+                    end
+                end
+            end
+            -- If all headers are not expanded then show the collapse texture, otherwise the expand one
+            -- (ref l.171-178).
+            local collapseAll = getglobal("BenillaTradeSkillCollapseAllButton")
+            if notExpanded ~= numHeaders then
+                collapseAll.collapsed = nil
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+            else
+                collapseAll.collapsed = true
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+            end
+        end
+
+        -- A row click selects it OR folds its group (ref TradeSkillSkillButton_OnClick +
+        -- SetSelection's now-restored header branch, deviation 1) — SetSelection itself forks on
+        -- the row's type, this handler doesn't need to. Left-button only.
+        function BenillaTradeSkillSkillButton_OnClick(button, mouseButton)
+            if mouseButton ~= "LeftButton" then return end
+            local index = button.skillIndex
+            if not index then return end
+            BenillaTradeSkillFrame_SetSelection(index)
+            BenillaTradeSkillFrame_Update()
+        end
+
+        -- List-row hover tooltip (the product item, keyed by row index — GameTooltip:SetTradeSkillItem
+        -- with no reagent index). Guarded against a HEADER row here rather than in the engine binding
+        -- (`super::tooltip_item`'s `SetTradeSkillItem` is outside this change's file scope — see
+        -- tradeskill.rs's own module doc "KNOWN GAP" note): a header's own visible index would
+        -- otherwise misresolve through that binding's still-flat `recipes` indexing.
+        function BenillaTradeSkillSkillButton_OnEnter(button)
+            local index = button.skillIndex
+            if not index then return end
+            local _, skillType = GetTradeSkillInfo(index)
+            if skillType == "header" then return end
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetTradeSkillItem(index)
+            GameTooltip:Show()
+        end
+
+        function BenillaTradeSkillSkillButton_OnLeave()
+            GameTooltip:Hide()
+        end
+
+        -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux
+        -- kit (TrainerFrame.xml's own note: the engine bubbles a spin up the parent chain, so the
+        -- handler lives on the window, not a child).
+        function BenillaTradeSkillFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaTradeSkillListScrollFrame"), delta)
+        end
+
+        -- ── The CollapseAll tab (ref TradeSkillCollapseAllButton_OnClick, l.303-312) — toggles between
+        -- Expand/CollapseTradeSkillSubClass(0), the ALL-groups pseudo-index (deviation 1, engine module
+        -- doc), using the button's own `.collapsed` flag (re-derived every Update() from the real
+        -- header states above, so it stays honest regardless of how a fold happened). The ref's raw
+        -- `TradeSkillListScrollFrameScrollBar:SetValue(0)` becomes this file's own
+        -- `BenillaFauxScrollFrame_SetOffset(...,0)` wrapper (already this file's own Show/OnEvent
+        -- convention). No direct `BenillaTradeSkillFrame_Update()` call — the ref doesn't call one
+        -- either; `CollapseTradeSkillSubClass`/`ExpandTradeSkillSubClass` raise the engine's touched
+        -- flag, answered with `TRADE_SKILL_UPDATE` the same frame (header comment, deviation 1). ──────
+        function BenillaTradeSkillCollapseAllButton_OnClick(self)
+            if self.collapsed then
+                self.collapsed = nil
+                ExpandTradeSkillSubClass(0)
+            else
+                self.collapsed = true
+                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+                CollapseTradeSkillSubClass(0)
+            end
+        end
+
+        -- ── The SubClass filter dropdown (ref TradeSkillSubClassDropDown_*, l.314-358). Every call
+        -- passes the dropdown frame explicitly by NAME (TrainerFrame.xml's own
+        -- BenillaTrainerFilterDropDown calling-convention precedent) rather than riding the bare `this`
+        -- fallback UIDropDownMenu_Initialize/_SetWidth/_SetSelectedID allow. ─────────────────────────
+        function BenillaTradeSkillSubClassDropDown_OnLoad()
+            UIDropDownMenu_Initialize(BenillaTradeSkillSubClassDropDown, BenillaTradeSkillSubClassDropDown_Initialize)
+            UIDropDownMenu_SetWidth(120, BenillaTradeSkillSubClassDropDown)
+            UIDropDownMenu_SetSelectedID(BenillaTradeSkillSubClassDropDown, 1)
+        end
+
+        function BenillaTradeSkillSubClassDropDown_OnShow()
+            UIDropDownMenu_Initialize(BenillaTradeSkillSubClassDropDown, BenillaTradeSkillSubClassDropDown_Initialize)
+            if GetTradeSkillSubClassFilter(0) then
+                UIDropDownMenu_SetSelectedID(BenillaTradeSkillSubClassDropDown, 1)
+            end
+        end
+
+        function BenillaTradeSkillSubClassDropDown_Initialize()
+            BenillaTradeSkillFilterFrame_LoadSubClasses(GetTradeSkillSubClasses())
+        end
+
+        -- ref TradeSkillFilterFrame_LoadSubClasses(...) (l.331-358): Lua-5.0 arg/arg.n → select() (this
+        -- file's header comment, deviation 7's BuildColoredListString precedent).
+        function BenillaTradeSkillFilterFrame_LoadSubClasses(...)
+            local n = select("#", ...)
+            local allChecked = GetTradeSkillSubClassFilter(0)
+            if n > 1 then
+                local info = {}
+                info.text = ALL_SUBCLASSES
+                info.func = BenillaTradeSkillSubClassDropDownButton_OnClick
+                info.checked = allChecked
+                UIDropDownMenu_AddButton(info)
+            end
+
+            local checked
+            for i = 1, n do
+                local name = select(i, ...)
+                if allChecked and n > 1 then
+                    checked = nil
+                    UIDropDownMenu_SetText(ALL_SUBCLASSES, BenillaTradeSkillSubClassDropDown)
+                else
+                    checked = GetTradeSkillSubClassFilter(i)
+                    if checked then
+                        UIDropDownMenu_SetText(name, BenillaTradeSkillSubClassDropDown)
+                    end
+                end
+                local info = {}
+                info.text = name
+                info.func = BenillaTradeSkillSubClassDropDownButton_OnClick
+                info.checked = checked
+                UIDropDownMenu_AddButton(info)
+            end
+        end
+
+        -- ── The InvSlot filter dropdown (ref TradeSkillInvSlotDropDown_*, l.360-404) — the SubClass
+        -- dropdown's own exact shape. ───────────────────────────────────────────────────────────────
+        function BenillaTradeSkillInvSlotDropDown_OnLoad()
+            UIDropDownMenu_Initialize(BenillaTradeSkillInvSlotDropDown, BenillaTradeSkillInvSlotDropDown_Initialize)
+            UIDropDownMenu_SetWidth(120, BenillaTradeSkillInvSlotDropDown)
+            UIDropDownMenu_SetSelectedID(BenillaTradeSkillInvSlotDropDown, 1)
+        end
+
+        function BenillaTradeSkillInvSlotDropDown_OnShow()
+            UIDropDownMenu_Initialize(BenillaTradeSkillInvSlotDropDown, BenillaTradeSkillInvSlotDropDown_Initialize)
+            if GetTradeSkillInvSlotFilter(0) then
+                UIDropDownMenu_SetSelectedID(BenillaTradeSkillInvSlotDropDown, 1)
+            end
+        end
+
+        function BenillaTradeSkillInvSlotDropDown_Initialize()
+            BenillaTradeSkillFilterFrame_LoadInvSlots(GetTradeSkillInvSlots())
+        end
+
+        -- ref TradeSkillFilterFrame_LoadInvSlots(...) (l.377-404) — the SubClass loader's own shape.
+        function BenillaTradeSkillFilterFrame_LoadInvSlots(...)
+            local n = select("#", ...)
+            local allChecked = GetTradeSkillInvSlotFilter(0)
+            if n > 1 then
+                local info = {}
+                info.text = ALL_INVENTORY_SLOTS
+                info.func = BenillaTradeSkillInvSlotDropDownButton_OnClick
+                info.checked = allChecked
+                UIDropDownMenu_AddButton(info)
+            end
+
+            local checked
+            for i = 1, n do
+                local name = select(i, ...)
+                if allChecked and n > 1 then
+                    checked = nil
+                    UIDropDownMenu_SetText(ALL_INVENTORY_SLOTS, BenillaTradeSkillInvSlotDropDown)
+                else
+                    checked = GetTradeSkillInvSlotFilter(i)
+                    if checked then
+                        UIDropDownMenu_SetText(name, BenillaTradeSkillInvSlotDropDown)
+                    end
+                end
+                local info = {}
+                info.text = name
+                info.func = BenillaTradeSkillInvSlotDropDownButton_OnClick
+                info.checked = checked
+                UIDropDownMenu_AddButton(info)
+            end
+        end
+
+        -- The two menu-row handlers (ref l.406-414): each fires as a row's `info.func`, invoked by
+        -- UIDropDownMenuButton_OnClick as `func(this.arg1, this.arg2)` with the REAL global `this`
+        -- bound to the clicked row (UIDropDownMenu.xml's own calling convention, confirmed live in
+        -- this engine — header comment, deviation 1) — no `self` parameter is passed, so `this` is
+        -- REQUIRED here, not a style choice.
+        function BenillaTradeSkillSubClassDropDownButton_OnClick()
+            UIDropDownMenu_SetSelectedID(BenillaTradeSkillSubClassDropDown, this:GetID())
+            SetTradeSkillSubClassFilter(this:GetID() - 1, 1, 1)
+        end
+
+        function BenillaTradeSkillInvSlotDropDownButton_OnClick()
+            UIDropDownMenu_SetSelectedID(BenillaTradeSkillInvSlotDropDown, this:GetID())
+            SetTradeSkillInvSlotFilter(this:GetID() - 1, 1, 1)
+        end
+
+        -- ── The detail product icon (ref TradeSkillSkillIcon OnEnter/OnClick, l.563-590 — the
+        -- Ctrl/Shift dressing-room/chat-link branches dropped, deviation 3) ─────────────────────────
+        function BenillaTradeSkillSkillIcon_OnEnter(button)
+            local selected = BenillaTradeSkillFrame.selectedSkill or 0
+            if selected ~= 0 then
+                GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                GameTooltip:SetTradeSkillItem(selected)
+                GameTooltip:Show()
+            end
+        end
+
+        -- ── The reagent slots (ref TradeSkillItemTemplate OnEnter, l.13-17 — the dressing-room/
+        -- chat-link OnClick branches dropped, deviation 3) ─────────────────────────────────────────
+        function BenillaTradeSkillReagent_OnLoad(button, index)
+            button.reagentIndex = index
+            local n = button:GetName()
+            button.icon = getglobal(n .. "Icon")
+            button.name = getglobal(n .. "Name")
+            button.count = getglobal(n .. "Count")
+        end
+
+        function BenillaTradeSkillReagent_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_TOPLEFT")
+            GameTooltip:SetTradeSkillItem(BenillaTradeSkillFrame.selectedSkill, button.reagentIndex)
+            GameTooltip:Show()
+        end
+
+        -- ── Create / Create All / the repeat-count input (ref l.668-837) ───────────────────────────
+        function BenillaTradeSkillCreateButton_OnClick()
+            local box = getglobal("BenillaTradeSkillInputBox")
+            DoTradeSkill(BenillaTradeSkillFrame.selectedSkill, box:GetNumber())
+            box:ClearFocus()
+        end
+
+        function BenillaTradeSkillCreateAllButton_OnClick()
+            local box = getglobal("BenillaTradeSkillInputBox")
+            box:SetNumber(BenillaTradeSkillFrame.numAvailable)
+            DoTradeSkill(BenillaTradeSkillFrame.selectedSkill, BenillaTradeSkillFrame.numAvailable)
+            box:ClearFocus()
+        end
+
+        function BenillaTradeSkillCancelButton_OnClick()
+            HideUIPanel(getglobal("BenillaTradeSkillFrame"))
+        end
+
+        function BenillaTradeSkillFrameIncrement_OnClick()
+            local box = getglobal("BenillaTradeSkillInputBox")
+            if box:GetNumber() < 100 then
+                box:SetNumber(box:GetNumber() + 1)
+            end
+            box:ClearFocus()
+        end
+
+        function BenillaTradeSkillFrameDecrement_OnClick()
+            local box = getglobal("BenillaTradeSkillInputBox")
+            if box:GetNumber() > 0 then
+                box:SetNumber(box:GetNumber() - 1)
+            end
+            box:ClearFocus()
+        end
+
+        -- ── The window lifecycle (MerchantFrame.xml/TrainerFrame.xml's own shape) ──────────────────
+        function BenillaTradeSkillFrame_OnLoad(frame)
+            frame.selectedSkill = 0
+            frame.numAvailable = 0
+            frame:RegisterEvent("TRADE_SKILL_SHOW")
+            frame:RegisterEvent("TRADE_SKILL_UPDATE")
+            frame:RegisterEvent("TRADE_SKILL_CLOSE")
+            frame:RegisterEvent("UPDATE_TRADESKILL_RECAST")
+            -- Registered per the ref (TradeSkillFrame_OnLoad l.43); this engine may not fire it yet —
+            -- forward-compatible, harmless (TalentFrame.xml's own identical posture for this event).
+            frame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
+
+            local scrollFrame = getglobal("BenillaTradeSkillListScrollFrame")
+            scrollFrame.updateFunc = BenillaTradeSkillFrame_Update
+
+            -- The EditBox:SetNumber engine-gap shim (this file's header comment, deviation 7): patched
+            -- onto this ONE instance so every call site above reads exactly like the reference.
+            local box = getglobal("BenillaTradeSkillInputBox")
+            function box:SetNumber(n)
+                self:SetText(tostring(floor(n or 0)))
+            end
+        end
+
+        -- Fresh session paint (ref TradeSkillFrame_Show, l.15-34 — the dropdown Close/Show dance,
+        -- l.16-20, is restored below: deviation 1 closed this session, the dropdowns ship). Hide()
+        -- then Show() re-fires each dropdown's own OnShow handler, forcing a fresh re-init/re-sync of
+        -- its selected id every time the window opens — the ref's own intent, not just a paint no-op.
+        function BenillaTradeSkillFrame_Show(frame)
+            CloseDropDownMenus()
+            getglobal("BenillaTradeSkillSubClassDropDown"):Hide()
+            getglobal("BenillaTradeSkillSubClassDropDown"):Show()
+            getglobal("BenillaTradeSkillInvSlotDropDown"):Hide()
+            getglobal("BenillaTradeSkillInvSlotDropDown"):Show()
+            getglobal("BenillaTradeSkillCreateButton"):Disable()
+            getglobal("BenillaTradeSkillCreateAllButton"):Disable()
+            if GetTradeSkillSelectionIndex() == 0 then
+                BenillaTradeSkillFrame_SetSelection(GetFirstTradeSkill())
+            else
+                BenillaTradeSkillFrame_SetSelection(GetTradeSkillSelectionIndex())
+            end
+            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+            SetPortraitTexture(getglobal("BenillaTradeSkillFramePortrait"), "player")
+            BenillaTradeSkillFrame_Update()
+            ShowUIPanel(frame)
+        end
+
+        function BenillaTradeSkillFrame_OnEvent(frame)
+            if event == "TRADE_SKILL_SHOW" then
+                BenillaTradeSkillFrame_Show(frame)
+            elseif event == "TRADE_SKILL_UPDATE" then
+                -- ref l.54-62: re-anchor the selection if it's fallen off a (possibly shorter) list.
+                local selection = GetTradeSkillSelectionIndex()
+                if selection > 1 and selection <= GetNumTradeSkills() then
+                    BenillaTradeSkillFrame_SetSelection(selection)
+                elseif GetNumTradeSkills() > 0 then
+                    BenillaTradeSkillFrame_SetSelection(GetFirstTradeSkill())
+                    BenillaFauxScrollFrame_SetOffset(getglobal("BenillaTradeSkillListScrollFrame"), 0)
+                end
+                BenillaTradeSkillFrame_Update()
+            elseif event == "TRADE_SKILL_CLOSE" then
+                HideUIPanel(frame)
+            elseif event == "UPDATE_TRADESKILL_RECAST" then
+                getglobal("BenillaTradeSkillInputBox"):SetNumber(GetTradeskillRepeatCount())
+            elseif event == "UNIT_PORTRAIT_UPDATE" then
+                if arg1 == "player" then
+                    SetPortraitTexture(getglobal("BenillaTradeSkillFramePortrait"), "player")
+                end
+            end
+        end
+
+        function BenillaTradeSkillFrameCloseButton_OnClick()
+            HideUIPanel(getglobal("BenillaTradeSkillFrame"))
+        end
+    ]]></Script>
+
+    <!--
+        One list row (ref TradeSkillSkillButtonTemplate inherits ClassTrainerSkillButtonTemplate,
+        l.343-414 for the instances): a 293×16 row — the +/- fold slot at the left (meaningful for a
+        header row, blanked for a recipe row; wow-re `tradeskill` TU-B, deviation 1) + the name text.
+        `ClassTrainerSkillButtonTemplate` isn't in this session's ref extraction (only
+        `TradeSkillSkillButtonTemplate` itself, which just inherits it, is) — TrainerFrame.xml's own
+        `BenillaTrainerServiceTemplate` geometry stands in for the un-extracted base (that file's own
+        reagent-slot precedent for reconstructing one), minus its separate rank-subtext column this
+        window's rows never carry.
+    -->
+    <Button name="BenillaTradeSkillSkillButtonTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="293" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="267" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="22" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <!-- The +/- fold slot + its hover glow (TrainerFrame.xml's own BenillaTrainerServiceTemplate
+             shape): Update sets the NormalTexture to +/- for a header row and blanks it for a recipe
+             row (ref l.122-132); the named HighlightTexture is addressed by `getglobal(name.."Highlight")`
+             the same way (ref l.126/133), rather than TrainerFrame.xml's own `self:GetHighlightTexture()`
+             cache — this file's established per-row `getglobal($parentX)` convention
+             (BenillaTradeSkillReagent_OnLoad's icon/name/count caching, below). -->
+        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture name="$parentHighlight" file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD">
+            <Size><AbsDimension x="16" y="16"/></Size>
+            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <Scripts>
+            <OnLoad>self.name = getglobal(self:GetName() .. "Name")</OnLoad>
+            <OnClick>BenillaTradeSkillSkillButton_OnClick(self, arg1)</OnClick>
+            <OnEnter>BenillaTradeSkillSkillButton_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaTradeSkillSkillButton_OnLeave()</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!--
+        One reagent slot (ref TradeSkillItemTemplate inherits QuestItemTemplate, l.11-35 — the base
+        vanilla QuestItemTemplate isn't in the session's ref extraction, so its icon/name/count shape is
+        our own content, sized to the 2-column ~290px-wide grid the ref's own anchor chain implies):
+        a 28×28 icon, the reagent name to its right, "have /need" below the name. Gray-out + the
+        SetTradeSkillItem(sel, index) hover are the ref's own SetSelection reagent loop + OnEnter.
+    -->
+    <Button name="BenillaTradeSkillReagentTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="140" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon">
+                    <Size><AbsDimension x="28" y="28"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="$parentName" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP">
+                    <Size><AbsDimension x="104" y="14"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentIcon" relativePoint="TOPRIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentCount" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>BenillaTradeSkillReagent_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- A panel action button (Create/Create All/Exit): the UIPanelButtonTemplate face locally
+         reconstructed (this house dialect ships no such template — TalentFrame.xml's own ENGINE API
+         note), TrainerFrame.xml's identical-shaped BenillaTrainerPanelButtonTemplate. -->
+    <Button name="BenillaTradeSkillPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="80" y="22"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaTradeSkillFrame" hidden="true">
+        <!-- The real 384×512 window. No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints it to the left
+             slot (MerchantFrame.xml/TrainerFrame.xml's own convention). -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <!-- Transcribed for fidelity (ref l.47-49); no loader wiring exists yet for the hit-rect
+             shrink — TalentFrame.xml's own "transcribe the hook even if nothing drives it yet"
+             posture. -->
+        <HitRectInsets><AbsInset left="0" right="34" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <!-- "player" portrait 60×60 TOPLEFT (7,-6) (ref l.51-63), BACKGROUND so the window art's
+                 ring frames it. Bound via SetPortraitTexture(region, "player") in Show/OnEvent —
+                 CharacterFrame.xml/TalentFrame.xml's own player-token precedent (this is not an NPC
+                 session, so it is NOT the "npc" token Merchant/Trainer/Gossip use). -->
+            <Layer level="BACKGROUND">
+                <Texture name="BenillaTradeSkillFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <!-- The four quadrant slabs that ARE the window art (ref l.65-97): three from
+                 ClassTrainerFrame's shared art, ONE (BotLeft) from TradeSkillFrame's own art — a real
+                 mixed art set in the reference itself, transcribed exactly as given, not "fixed" to be
+                 uniform. -->
+            <Layer level="BORDER">
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"/></Anchors></Texture>
+                <Texture file="Interface\TradeSkillFrame\UI-TradeSkill-BotLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/></Anchors></Texture>
+                <!-- Title: TRADE_SKILL_TITLE ("%s") formatted with the skill line name — set in
+                     Show/SetSelection/HideDetails; "Trade Skills" (ref's own static default, l.98) is
+                     the placeholder until the first paint. -->
+                <FontString name="BenillaTradeSkillFrameTitleText" inherits="GameFontNormal" justifyH="CENTER" text="Trade Skills">
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+            <!-- The skill-border + horizontal-divider decorative bars (ref l.108-156), sampled from the
+                 same two shared ClassTrainer/TradeSkill textures by TexCoord. -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaTradeSkillSkillBorderLeft" file="Interface\TradeSkillFrame\UI-TradeSkill-SkillBorder">
+                    <Size><AbsDimension x="256" y="8"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="63" y="-50"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture file="Interface\TradeSkillFrame\UI-TradeSkill-SkillBorder">
+                    <Size><AbsDimension x="28" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillSkillBorderLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.109375" top="0.25" bottom="0.5"/>
+                </Texture>
+                <Texture name="BenillaTradeSkillHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="256" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-221"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="75" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillHorizontalBarLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
+                </Texture>
+            </Layer>
+            <!-- The FIXED detail-pane FontStrings + header art (ref TradeSkillDetailScrollChildFrame,
+                 l.444-537), flattened onto this window's OWN Layers at OVERLAY (the flat-layout gap,
+                 this file's header comment) — computed from the ref's ScrollFrame anchor (TOPLEFT
+                 20,-234) + each region's own ScrollChild-relative offset, then chained by name like the
+                 reference chains them. Declaration order matters (same parent+level ⇒ z-tiebreak,
+                 TrainerFrame.xml's own note): the header art is declared BEFORE ReagentLabel so the
+                 "Reagents: " banner text paints over its lower edge, exactly as the reference does. -->
+            <Layer level="OVERLAY">
+                <FontString name="BenillaTradeSkillSkillName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="244" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-239"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTradeSkillRequirementLabel" inherits="GameFontHighlightSmall">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkillName" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <FontString name="BenillaTradeSkillRequirementText" inherits="GameFontHighlightSmall" justifyV="TOP" justifyH="LEFT">
+                    <Size><AbsDimension x="180" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillRequirementLabel" relativePoint="TOPRIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTradeSkillSkillCooldown" inherits="GameFontRedSmall">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillRequirementLabel" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <Texture name="BenillaTradeSkillDetailHeaderLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-DetailHeaderLeft">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="-231"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-DetailHeaderRight">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillDetailHeaderLeft" relativePoint="TOPRIGHT"/></Anchors>
+                </Texture>
+                <FontString name="BenillaTradeSkillReagentLabel" inherits="GameFontNormalSmall" text="Reagents: ">
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="28" y="-281"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The scroll-wheel catcher (TrainerFrame.xml's own note) — MUST be first so every real
+                 row below out-ranks it in hit-testing. -->
+            <Button name="BenillaTradeSkillWheelCatcher">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
+                </Anchors>
+                <Scripts><OnMouseWheel>BenillaTradeSkillFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
+            </Button>
+
+            <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT -29,-8, l.838-846; the
+                 minimize-button art stands in — this house dialect ships no such template,
+                 TrainerFrame.xml's own precedent). -->
+            <Button name="BenillaTradeSkillFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaTradeSkillFrameCloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- The skill-rank StatusBar (ref TradeSkillRankFrame, l.160-228): blue fill, "name
+                 rank/max" text, the UI-Character-Skills-Bar[Border] art. SKILL_LINES_CHANGED
+                 self-listen dropped (deviation 4). -->
+            <StatusBar name="BenillaTradeSkillRankFrame" drawLayer="BACKGROUND" minValue="0" maxValue="1" defaultValue="0">
+                <Size><AbsDimension x="268" y="15"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="73" y="-37"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString name="BenillaTradeSkillRankFrameSkillName" inherits="GameFontNormalSmall">
+                            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="6" y="1"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BenillaTradeSkillRankFrameSkillRank" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                            <Size><AbsDimension x="128" y="0"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillRankFrameSkillName" relativePoint="RIGHT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BenillaTradeSkillRankFrameBackground"><Color r="1.0" g="1.0" b="1.0" a="0.2"/></Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="BenillaTradeSkillRankFrameBorder">
+                        <Size><AbsDimension x="281" y="32"/></Size>
+                        <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorder"/>
+                    </Button>
+                </Frames>
+                <BarTexture name="BenillaTradeSkillRankFrameBar" file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+                <BarColor r="0.25" g="0.25" b="0.75"/>
+            </StatusBar>
+
+            <!-- The expand/collapse-all tab (ref TradeSkillExpandButtonFrame, l.229-294): a tab-shaped
+                 frame carrying the CollapseAll button, verbatim geometry/art. The button is a
+                 STANDALONE Button — not this file's row template (header comment, deviation 1's own
+                 note on why) — TrainerFrame.xml's own BenillaTrainerCollapseAllButton is the precedent
+                 this mirrors byte-for-byte: its own NormalTexture/HighlightTexture/ButtonText
+                 reconstructing the un-extracted ClassTrainerSkillButtonTemplate base. -->
+            <Frame name="BenillaTradeSkillExpandButtonFrame">
+                <Size><AbsDimension x="54" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-71"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <Texture name="BenillaTradeSkillExpandTabLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-ExpandTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                    <Texture name="BenillaTradeSkillExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="38" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillExpandTabMiddle" relativePoint="RIGHT"/></Anchors></Texture>
+                </Layer></Layers>
+                <Frames>
+                    <Button name="BenillaTradeSkillCollapseAllButton" text="All">
+                        <Size><AbsDimension x="40" y="22"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></NormalTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></HighlightTexture>
+                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="18" y="0"/></Offset></Anchor></Anchors></ButtonText>
+                        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                        <!-- text="All" (ALL, GlobalStrings.lua:45) rides the XML attribute — an
+                             inline OnLoad SetText(chunk_local) reads nil across the chunk boundary
+                             (TrainerFrame.xml's own BenillaTrainerCollapseAllButton precedent; the
+                             ref's own inline SetText(ALL) works only because ITS ALL is a global). -->
+                        <Scripts>
+                            <OnClick>BenillaTradeSkillCollapseAllButton_OnClick(self)</OnClick>
+                        </Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The two filter dropdowns (ref l.295-328): the UIDropDownMenuTemplate capsule
+                 (UIDropDownMenu.xml). InvSlot is id 2, TOPRIGHT (-25,-66); SubClass is id 1, RIGHT of
+                 InvSlot (35,0) — the ref's own ordering/ids, transcribed verbatim. -->
+            <Frame name="BenillaTradeSkillInvSlotDropDown" inherits="UIDropDownMenuTemplate" id="2">
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-25" y="-66"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>BenillaTradeSkillInvSlotDropDown_OnLoad()</OnLoad>
+                    <OnShow>BenillaTradeSkillInvSlotDropDown_OnShow()</OnShow>
+                </Scripts>
+            </Frame>
+            <Frame name="BenillaTradeSkillSubClassDropDown" inherits="UIDropDownMenuTemplate" id="1">
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaTradeSkillInvSlotDropDown" relativePoint="LEFT"><Offset><AbsDimension x="35" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>BenillaTradeSkillSubClassDropDown_OnLoad()</OnLoad>
+                    <OnShow>BenillaTradeSkillSubClassDropDown_OnShow()</OnShow>
+                </Scripts>
+            </Frame>
+
+            <!-- The persistent selection highlight (ref TradeSkillHighlightFrame, l.330-342): 293×16,
+                 ARTWORK-layer UI-Listbox-Highlight2. Declared BEFORE the rows so the row text paints
+                 OVER the glow (TrainerFrame.xml's own z-tiebreak note). Vertex-colored by the selected
+                 skill's TradeSkillTypeColor (SetSelection), positioned onto the selected visible row
+                 (Update). -->
+            <Frame name="BenillaTradeSkillHighlightFrame" hidden="true">
+                <Size><AbsDimension x="293" y="16"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture name="BenillaTradeSkillHighlight" file="Interface\Buttons\UI-Listbox-Highlight2">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- 8 list rows (ref TradeSkillSkill1..8, l.343-414): 293×16, row1 TOPLEFT (22,-96); rows
+                 2-8 chain TOPLEFT→prior BOTTOMLEFT with no gap. -->
+            <Button name="BenillaTradeSkillSkill1" inherits="BenillaTradeSkillSkillButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaTradeSkillSkill2" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill3" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill4" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill5" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill6" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill7" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaTradeSkillSkill8" inherits="BenillaTradeSkillSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillSkill7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+                 container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
+                 8-row span (TRADE_SKILLS_DISPLAYED × TRADE_SKILL_HEIGHT), TrainerFrame.xml's own
+                 same-TOPLEFT-as-row1 convention. updateFunc set in BenillaTradeSkillFrame_OnLoad. -->
+            <Frame name="BenillaTradeSkillListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                <Size><AbsDimension x="293" y="128"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The detail product icon (ref TradeSkillSkillIcon, l.539-591): a 37×37 button over a
+                 64×64 UI-EmptySlot ring (TrainerFrame.xml's own BenillaTrainerSkillIcon shape) at the
+                 flattened header art's top-left. Icon via SetNormalTexture; the made-count FontString
+                 rides its BOTTOMRIGHT. -->
+            <Button name="BenillaTradeSkillSkillIcon" hidden="true">
+                <Size><AbsDimension x="37" y="37"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="28" y="-237"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="64" y="64"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor></Anchors></Texture>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <FontString name="BenillaTradeSkillSkillIconCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                            <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>BenillaTradeSkillSkillIcon_OnEnter(self)</OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Button>
+
+            <!-- Up to 8 reagents, the ref's own 2-column grid + anchor chain (l.592-663): odd slots
+                 chain down the left column (TOPLEFT→prior BOTTOMLEFT, -2 gap), even slots sit LEFT of
+                 the odd slot in the same row. Reagent7 chains off Reagent6 (not Reagent5) — a literal
+                 ref quirk (this file's header comment, deviation 6's sibling note): harmless, since 6's
+                 row-mate LEFT anchor to 5 already puts it at 5's own row height. -->
+            <Button name="BenillaTradeSkillReagent1" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillReagentLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-3"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent2" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillReagent1" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent3" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillReagent1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent4" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillReagent3" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent5" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillReagent3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent6" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillReagent5" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent7" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeSkillReagent6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillReagent8" inherits="BenillaTradeSkillReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillReagent7" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaTradeSkillReagent_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+
+            <!-- The action row (ref l.668-837): Create / Create All / -/+ / the repeat-count input /
+                 Exit, all anchored off CreateButton like the reference. -->
+            <Button name="BenillaTradeSkillCreateButton" inherits="BenillaTradeSkillPanelButtonTemplate" text="Create">
+                <Anchors><Anchor point="CENTER" relativeTo="BenillaTradeSkillFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="224" y="-422"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaTradeSkillCreateButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillCancelButton" inherits="BenillaTradeSkillPanelButtonTemplate" text="Exit">
+                <Anchors><Anchor point="CENTER" relativeTo="BenillaTradeSkillFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="305" y="-422"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaTradeSkillCancelButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillCreateAllButton" inherits="BenillaTradeSkillPanelButtonTemplate" text="Create All">
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaTradeSkillCreateButton" relativePoint="LEFT"><Offset><AbsDimension x="-86" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaTradeSkillCreateAllButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaTradeSkillDecrementButton">
+                <Size><AbsDimension x="23" y="22"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillCreateAllButton" relativePoint="RIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-PrevPage-Disabled"/>
+                <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaTradeSkillFrameDecrement_OnClick()</OnClick></Scripts>
+            </Button>
+            <EditBox name="BenillaTradeSkillInputBox" letters="3" historyLines="0" numeric="true" autoFocus="false">
+                <Size><AbsDimension x="30" y="20"/></Size>
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeSkillDecrementButton" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.0625" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentRight" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/>
+                        </Texture>
+                        <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border">
+                            <Size><AbsDimension x="10" y="20"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/>
+                            </Anchors>
+                            <TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnterPressed>self:ClearFocus()</OnEnterPressed>
+                    <OnEscapePressed>self:ClearFocus()</OnEscapePressed>
+                    <OnTextChanged>
+                        if self:GetText() == "0" then
+                            self:SetText("1")
+                        end
+                    </OnTextChanged>
+                    <OnEditFocusLost>self:HighlightText(0, 0)</OnEditFocusLost>
+                    <OnEditFocusGained>self:HighlightText()</OnEditFocusGained>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
+            <Button name="BenillaTradeSkillIncrementButton">
+                <Size><AbsDimension x="23" y="22"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaTradeSkillCreateButton" relativePoint="LEFT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Down"/>
+                <DisabledTexture file="Interface\Buttons\UI-SpellbookIcon-NextPage-Disabled"/>
+                <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaTradeSkillFrameIncrement_OnClick()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <!-- The window lifecycle (MerchantFrame.xml/TrainerFrame.xml's own shape): OnHide calls
+             CloseTradeSkill() for ANY hide reason. The list wheel lives on the WINDOW (the engine
+             bubbles a spin up the parent chain). -->
+        <Scripts>
+            <OnLoad>BenillaTradeSkillFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaTradeSkillFrame_OnEvent(self)</OnEvent>
+            <OnMouseWheel>BenillaTradeSkillFrame_OnMouseWheel(arg1)</OnMouseWheel>
+            <OnShow>PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnHide>CloseTradeSkill(); PlaySound("igCharacterInfoClose")</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

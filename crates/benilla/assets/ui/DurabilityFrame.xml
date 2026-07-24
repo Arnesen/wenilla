@@ -1,0 +1,303 @@
+<Ui>
+    <!--
+        The durability alert — the "armor guy" under the minimap (director-directed this round,
+        with the doll-slot broken tint). Geometry, texture cells, colors, and the show/hide law are
+        QUOTED from the real 1.12 DurabilityFrame (extracted Interface\FrameXML\DurabilityFrame.xml
+        + .lua): 11 alert regions off one Interface\Durability\UI-Durability-Icons atlas — 8 body
+        pieces (Head, Shoulders, Chest, Waist, Legs, Feet, Wrists, Hands) that show TOGETHER when
+        any of them alerts, plus 3 showSeparate pieces (Weapon, Shield/OffWeapon, Ranged) that each
+        show only when itself alerted. The whole frame hides at zero alerts.
+
+        The feed is the engine's GetInventoryAlertStatus(1..11) (benilla-ui char_stats: statuses
+        recomputed on every inventory push; a change fires UPDATE_INVENTORY_ALERTS — the same event
+        the real engine fires). Status colors are the ref's own table: 3 = yellow {1, 0.82, 0.18}
+        (damaged; the engine's threshold is INTERIM &lt; 20% pending the wow-re dispatch on the
+        0x4c94b0 binding's delegate), 4 = red {0.93, 0.07, 0.07} (broken). Statuses 1/2 are the
+        ref's own DISABLED enchant-expiry alerts (its color rows are commented out; its enchantTimer
+        arm too) — transcribed as-is, so they color nothing here either.
+
+        The XML anchor below is the ref's authored seat, and like every managed HUD frame it is
+        DEAD ON ARRIVAL: UIParent_ManageFramePositions re-seats the frame on every pass (ref
+        UIParent.lua:1758-1768 — -CONTAINER_OFFSET_X, minus 20 more when a side glyph shows; the
+        raw +40 hangs the sword/shield glyphs off-screen, director-caught). The loader's
+        post-load manage call seats it at startup; the OnShow/OnHide below (ref verbatim) re-seat
+        it on every alert transition.
+
+        OMITTED, named: the ref's OnUpdate — its whole body is the enchantTimer countdown, and
+        the timer is dead even in the ref (SetAlerts nils it; the only line setting it is
+        commented out) — a per-frame handler for provably dead state stays out.
+        SetFrameLevel(-1) in OnLoad is kept — the guy tucks under sibling HUD.
+    -->
+    <Script>
+        <![CDATA[
+        -- ref DurabilityFrame.lua, quoted verbatim (the iteration order is the alert INDEX the
+        -- engine answers; `value.slot` names the texture).
+        INVENTORY_ALERT_STATUS_SLOTS = {
+            [1] = {slot = "Head"},
+            [2] = {slot = "Shoulders"},
+            [3] = {slot = "Chest"},
+            [4] = {slot = "Waist"},
+            [5] = {slot = "Legs"},
+            [6] = {slot = "Feet"},
+            [7] = {slot = "Wrists"},
+            [8] = {slot = "Hands"},
+            [9] = {slot = "Weapon", showSeparate = 1},
+            [10] = {slot = "Shield", showSeparate = 1},
+            [11] = {slot = "Ranged", showSeparate = 1},
+        }
+
+        INVENTORY_ALERT_COLORS = {
+            -- [1]/[2]: the ref's commented-out enchant-alert colors (green/blue) — disabled there,
+            -- disabled here. [0] = no alert.
+            [3] = {r = 1, g = 0.82, b = 0.18},
+            [4] = {r = 0.93, g = 0.07, b = 0.07},
+        }
+
+        -- ref DurabilityFrame_SetAlerts, quoted (the pairs() loop for the 1.12 `for index, value
+        -- in TABLE do` iteration; the enchantTimer arm is the ref's own disabled residue).
+        function DurabilityFrame_SetAlerts()
+            DurabilityFrame.enchantTimer = nil
+            local numAlerts = 0
+            local texture, color, showDurability
+            for index, value in pairs(INVENTORY_ALERT_STATUS_SLOTS) do
+                texture = getglobal("Durability" .. value.slot)
+                if value.slot == "Shield" then
+                    if OffhandHasWeapon() then
+                        DurabilityShield:Hide()
+                        texture = DurabilityOffWeapon
+                    else
+                        DurabilityOffWeapon:Hide()
+                        texture = DurabilityShield
+                    end
+                end
+
+                local alertStatus = GetInventoryAlertStatus(index)
+                color = INVENTORY_ALERT_COLORS[alertStatus]
+                if color then
+                    texture:SetVertexColor(color.r, color.g, color.b, 1.0)
+                    if value.showSeparate then
+                        texture:Show()
+                    else
+                        showDurability = 1
+                    end
+                    numAlerts = numAlerts + 1
+                else
+                    texture:SetVertexColor(1.0, 1.0, 1.0, 0.5)
+                    if value.showSeparate then
+                        texture:Hide()
+                    end
+                end
+            end
+            for index, value in pairs(INVENTORY_ALERT_STATUS_SLOTS) do
+                if not value.showSeparate then
+                    if showDurability then
+                        getglobal("Durability" .. value.slot):Show()
+                    else
+                        getglobal("Durability" .. value.slot):Hide()
+                    end
+                end
+            end
+
+            if numAlerts > 0 then
+                DurabilityFrame:Show()
+            else
+                DurabilityFrame:Hide()
+            end
+        end
+        ]]>
+    </Script>
+    <Frame name="DurabilityFrame" parent="UIParent" frameStrata="LOW" hidden="false">
+        <Size>
+            <AbsDimension x="60" y="65"/>
+        </Size>
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="MinimapCluster" relativePoint="BOTTOMRIGHT">
+                <Offset>
+                    <AbsDimension x="40" y="15"/>
+                </Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="DurabilityHead" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="18" y="22"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.140625" top="0" bottom="0.171875"/>
+                </Texture>
+                <Texture name="DurabilityShoulders" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="48" y="22"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityHead" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="16"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.140625" right="0.515625" top="0" bottom="0.171875"/>
+                </Texture>
+                <Texture name="DurabilityChest" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="20" y="22"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityShoulders" relativePoint="TOP">
+                            <Offset>
+                                <AbsDimension x="0" y="-7"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.515625" right="0.6640625" top="0" bottom="0.171875"/>
+                </Texture>
+                <Texture name="DurabilityWrists" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="44" y="22"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityShoulders" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="7"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.6640625" right="1.0" top="0" bottom="0.171875"/>
+                </Texture>
+                <Texture name="DurabilityHands" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="42" y="18"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityWrists" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="15"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0" right="0.328125" top="0.171875" bottom="0.3046875"/>
+                </Texture>
+                <Texture name="DurabilityWaist" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="16" y="5"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityChest" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="6"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.328125" right="0.46875" top="0.171875" bottom="0.203125"/>
+                </Texture>
+                <Texture name="DurabilityLegs" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="29" y="20"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityWaist" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="2"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.46875" right="0.6875" top="0.171875" bottom="0.3203125"/>
+                </Texture>
+                <Texture name="DurabilityFeet" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="41" y="32"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityLegs" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="8"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.6875" right="1.0" top="0.171875" bottom="0.4140625"/>
+                </Texture>
+                <Texture name="DurabilityWeapon" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="20" y="45"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="RIGHT" relativeTo="DurabilityWrists" relativePoint="LEFT">
+                            <Offset>
+                                <AbsDimension x="0" y="-6"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0" right="0.140625" top="0.3203125" bottom="0.6640625"/>
+                </Texture>
+                <Texture name="DurabilityShield" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="25" y="31"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="DurabilityWrists" relativePoint="RIGHT">
+                            <Offset>
+                                <AbsDimension x="0" y="10"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.1875" right="0.375" top="0.3203125" bottom="0.5546875"/>
+                </Texture>
+                <Texture name="DurabilityOffWeapon" file="Interface\Durability\UI-Durability-Icons" hidden="true">
+                    <Size>
+                        <AbsDimension x="20" y="45"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="DurabilityWrists" relativePoint="RIGHT">
+                            <Offset>
+                                <AbsDimension x="0" y="-6"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0" right="0.140625" top="0.3203125" bottom="0.6640625"/>
+                </Texture>
+                <Texture name="DurabilityRanged" file="Interface\Durability\UI-Durability-Icons">
+                    <Size>
+                        <AbsDimension x="28" y="38"/>
+                    </Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="DurabilityShield" relativePoint="BOTTOM">
+                            <Offset>
+                                <AbsDimension x="0" y="5"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <TexCoords left="0.1875" right="0.3984375" top="0.5546875" bottom="0.84375"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                this:SetFrameLevel(this:GetFrameLevel() - 1)
+                this:RegisterEvent("UPDATE_INVENTORY_ALERTS")
+                this:RegisterEvent("PLAYER_ENTERING_WORLD")
+            </OnLoad>
+            <OnEvent>
+                DurabilityFrame_SetAlerts()
+                -- benilla re-manages the HUD right-stack on every alert recompute. The ref keeps
+                -- the durability seat (and the quest tracker stacked under it) fresh because it
+                -- fires UIParent_ManageFramePositions from dozens of OnShow/OnHide sites; benilla
+                -- fires it from only a handful, so a showSeparate glyph that arrives AFTER the
+                -- frame is already shown — equipment streams in per-slot at login, the weapon
+                -- often breaking before the shield's slot lands — would otherwise leave
+                -- durabilityOffset stale and hang the shield off the screen's right edge
+                -- (director-caught). SetAlerts's own Show()/Hide() only re-manages on a
+                -- shown-state transition, which a mere glyph-set change is not.
+                UIParent_ManageFramePositions()
+            </OnEvent>
+            <OnShow>
+                UIParent_ManageFramePositions()
+            </OnShow>
+            <OnHide>
+                UIParent_ManageFramePositions()
+            </OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

@@ -1,0 +1,546 @@
+//! Spawning streamed placements once their model assets land: the per-frame budgeted
+//! [`spawn_loaded_placements`] driver + WMO doodad-prop resolution and the small per-placement
+//! helpers (inspector tags, fade spheres). The submesh/material/fade component assembly lives in
+//! [`assemble`] ([`spawn_model_entities`]), the per-model point lights/emitters/ribbons in [`fx`].
+
+mod assemble;
+mod fx;
+
+pub(crate) use assemble::spawn_model_entities;
+pub(crate) use fx::point_light;
+use fx::{spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for};
+
+use std::time::Instant;
+
+use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
+use benilla_assets::{AdtTile, DoodadBase, M2Model, WmoModel};
+use benilla_formats::M2Bounds;
+use bevy::prelude::*;
+
+use crate::collision::{camera_layers, walk_layers, GroundDecalSurface, PickOccluder};
+use crate::debug_panel::ModelKind;
+use crate::interact::WorldObject;
+use crate::lighting::SharedLightBuffer;
+use crate::lighting::{PropProbeSlot, PropProbes};
+use crate::liquid::{spawn_wmo_liquids, LiquidAssets};
+use crate::model_render::{m2_url, ShadeSel};
+use crate::particles::WowParticleMaterial;
+use crate::terrain::WowModelMaterial;
+use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
+
+use super::collider::{build_collider_task, placement_collider_data, PendingCollider};
+use super::{
+    doodad_ground_shade, fold_interior_probe, ModelHandle, Placements, PropLight, PropLobeLight,
+    ShadeResolve, TerrainStreamer, WmoDoodadInst, SPAWN_BUDGET,
+};
+
+/// Spawn the submesh entities for any placement whose model asset has finished loading. Each submesh
+/// gets the production [`WowModelMaterial`] (cutout + blend twin) and the same `ModelPart`/`DoodadFade`/
+/// `MeshTag` components the old spawn used — so the existing visibility/fade/lighting systems take over.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_loaded_placements(
+    mut commands: Commands,
+    placements: ResMut<Placements>,
+    m2s: Res<Assets<M2Model>>,
+    wmos: Res<Assets<WmoModel>>,
+    materials: ResMut<Assets<WowModelMaterial>>,
+    asset_server: Res<AssetServer>,
+    shared_light: Option<Res<SharedLightBuffer>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    // The shared per-kind animated liquid materials — WMO groups spawn their embedded water/lava/slime
+    // on these, same as MCLQ terrain water. Absent when the client has no data.
+    liquid_assets: Option<Res<LiquidAssets>>,
+    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
+    // Read-only: the loaded-tile map + decoded tiles, for the global MCSH ground-shade lookup at spawn.
+    // `stream_terrain` (chained before this) owns them mutably; here we only read.
+    streamer: Res<TerrainStreamer>,
+    adt_tiles: Res<Assets<AdtTile>>,
+    time: Res<Time>,
+    mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
+    mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
+    mut probes: ResMut<PropProbes>,
+) {
+    let Some(shared_light) = shared_light else {
+        return;
+    };
+    // The animated-doodad clock origin (decision 0130): per-instance phase = spawn time, as in the
+    // reference (the arm-time cursor offset), and the draw gate seeks against it on resume.
+    let now = time.elapsed_secs();
+    let light = &shared_light.0;
+    let materials = materials.into_inner();
+    let Placements {
+        by_id,
+        materials: mat_cache,
+    } = placements.into_inner();
+
+    // Per-frame spawn budget. On cold start every tile's doodads/WMOs finish decoding near-together;
+    // spawning them all in one frame builds thousands of parry trimesh colliders synchronously and
+    // freezes the window for seconds. Spend at most `SPAWN_BUDGET` per frame and resume next frame
+    // (the `spawned` flags make this re-entrant) — a self-tuning cap: cheap doodads spawn many per
+    // frame, an expensive WMO collider one. At least one spawn always happens (the check is after the
+    // work), so progress is guaranteed.
+    let deadline = Instant::now() + SPAWN_BUDGET;
+
+    'placements: for (&unique_id, p) in by_id.iter_mut() {
+        // 1. Spawn the model's own geometry once, on first load. For a WMO, also resolve its doodad
+        //    props (`p.doodads`) — spawned individually in step 2 as each prop's M2 asset arrives.
+        if !p.spawned {
+            let entities = match &p.model {
+                ModelHandle::M2(h) => {
+                    let Some(m) = m2s.get(h) else {
+                        continue; // model still loading (or missing) — try next frame
+                    };
+                    // Resolve the MCSH ground-shade the reference way: a GLOBAL world→tile→chunk lookup at
+                    // the doodad's origin, independent of which tile registered it or in what order. An ADT
+                    // map doodad on lit ground takes the boosted ADT sun level (`ShadeSel::Lit` — the
+                    // binary's 2.5, wow-re m2-interior-doodad-base-light §6).
+                    let shade =
+                        match doodad_ground_shade(&streamer, &adt_tiles, p.transform.translation) {
+                            ShadeResolve::Ready(true) => ShadeSel::Shaded,
+                            ShadeResolve::Ready(false) => ShadeSel::Lit,
+                            // The doodad's own ground tile is requested but still decoding — wait, so we don't
+                            // bake the lit fallback into a straddling tree whose true tile lands a frame later.
+                            ShadeResolve::Pending => continue,
+                        };
+                    let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
+                    let (mut ents, joints) = spawn_model_entities(
+                        &mut commands,
+                        mat_cache,
+                        materials,
+                        light,
+                        &m.submeshes,
+                        p.transform,
+                        false,
+                        shade,
+                        None, // map doodad: exterior sky lighting (no interior probe)
+                        radius,
+                        center,
+                        Some((m, now)),
+                        &mut uv_reg,
+                        &mut tint_reg,
+                        None, // world-static placement: cards bake their world pivot
+                    );
+                    // Doodad collider (avian): a static trimesh hull baked at this placement's transform,
+                    // built off-thread, as its own entity so it despawns with the placement. `None` ⇒
+                    // the model has no collision hull. A world-static doodad hull also clamps the
+                    // mouse pick (`PickOccluder` — a hull-less tree canopy stays pick-through,
+                    // matching the reference's collision-flagged-doodads-only world trace).
+                    if let Some((verts, tris)) =
+                        placement_collider_data(m.collision.as_ref(), &p.transform)
+                    {
+                        ents.push(
+                            commands
+                                .spawn((
+                                    PendingCollider::new(
+                                        build_collider_task(verts, tris),
+                                        None,
+                                        true,
+                                    ),
+                                    PickOccluder,
+                                ))
+                                .id(),
+                        );
+                    }
+                    spawn_emitters_for(
+                        &mut commands,
+                        &mut meshes,
+                        &mut particle_materials,
+                        &shared_light,
+                        &m.emitters,
+                        p.transform,
+                        joints.as_deref(),
+                        (radius, center),
+                        &mut ents,
+                    );
+                    spawn_ribbons_for(
+                        &mut commands,
+                        &mut meshes,
+                        &mut particle_materials,
+                        &shared_light,
+                        &m.ribbons,
+                        joints.as_deref(),
+                        ents.first().copied(),
+                    );
+                    spawn_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
+                    tag_world_object(
+                        &mut commands,
+                        &ents,
+                        ModelKind::Doodad,
+                        handle_label(h),
+                        unique_id,
+                        format!("emitters: {}", m.emitters.len()),
+                    );
+                    ents
+                }
+                ModelHandle::Wmo(h) => {
+                    let Some(m) = wmos.get(h) else {
+                        continue;
+                    };
+                    // WMOs carry no authored bounds → never size-fade (∞ radius), rely on the far-clip.
+                    // (`m2: None` ⇒ no anim host, so the joint half of the return is always empty.)
+                    let (mut ents, _) = spawn_model_entities(
+                        &mut commands,
+                        mat_cache,
+                        materials,
+                        light,
+                        &m.submeshes,
+                        p.transform,
+                        true,
+                        ShadeSel::Matte, // WMO lights on the FFP N·L path — the selector is unread
+                        None, // WMO groups carry their own per-submesh interior flag + batch class
+                        f32::INFINITY,
+                        Vec3::ZERO,
+                        None, // WMO group geometry is not an M2 — its doodad props animate below
+                        &mut uv_reg,
+                        &mut tint_reg,
+                        None, // world-static placement: cards bake their world pivot
+                    );
+                    // Portal visibility + interior tracking: tie every group submesh entity (the `ents`
+                    // here are exactly the submeshes, in order, before colliders/lights are appended
+                    // below) back to one per-placement instance that holds the placement transform + the
+                    // per-frame visible set. The cull is per-group, so a building with a portal graph
+                    // gets tagged; a portal-less prop keeps all groups visible but still spawns the
+                    // instance when it carries a WMOAreaTable identity — the interior down-ray
+                    // (`wmo_portal::track_current_interior`) needs it. See `crate::wmo_portal`.
+                    let has_portals = !m.portal_refs.is_empty() && !m.portal_infos.is_empty();
+                    if has_portals || m.wmo_id != 0 {
+                        let instance = commands
+                            .spawn(WmoPortalInstance {
+                                handle: h.clone(),
+                                world_from_local: p.transform.compute_affine(),
+                                name_set: p.name_set,
+                                visible: vec![true; m.group_nav.len()],
+                            })
+                            .id();
+                        if has_portals {
+                            for (&entity, &group) in ents.iter().zip(&m.submesh_group) {
+                                commands
+                                    .entity(entity)
+                                    .insert(WmoGroupVis { instance, group });
+                            }
+                        }
+                        ents.push(instance); // despawns with the placement
+                    }
+                    // The building's embedded MLIQ liquid (Stormwind's canals + fountains, the
+                    // Ironforge lava, dungeon pools): one flat animated surface per group with water,
+                    // spawned at the placement transform on the shared per-kind material. Appended
+                    // AFTER the portal-instance zip above, which requires `ents` to still be exactly the
+                    // submeshes in order.
+                    spawn_wmo_liquids(
+                        &mut commands,
+                        m.group_liquids.iter().flatten(),
+                        liquid_assets.as_deref(),
+                        &mut meshes,
+                        p.transform,
+                        &mut ents,
+                    );
+                    // Building colliders (avian): the flattened group tris baked at this placement's
+                    // transform — *two* meshes, because the client gathers different WMO faces for the
+                    // player body (walking: drops DETAIL) and the camera/LOS (drops NOCAMCOLLIDE, keeps
+                    // DETAIL). Each goes on its own collision layer so the player and camera queries pick
+                    // their audience (see `crate::collision`); a single trimesh can't be filtered per-face.
+                    if let Some((verts, tris)) =
+                        placement_collider_data(m.collision.as_ref(), &p.transform)
+                    {
+                        ents.push(
+                            commands
+                                .spawn((
+                                    PendingCollider::new(
+                                        build_collider_task(verts, tris),
+                                        Some(walk_layers()),
+                                        true,
+                                    ),
+                                    // WMO walkable faces receive the selection ring (floors, steps).
+                                    GroundDecalSurface,
+                                    // …and clamp the mouse pick: the byte-verified occluder face
+                                    // set is MOPY reject-mask 0x84, and the walk bake (reject 0x04)
+                                    // is its nearest existing bake — see `crate::collision`.
+                                    PickOccluder,
+                                ))
+                                .id(),
+                        );
+                    }
+                    if let Some((verts, tris)) =
+                        placement_collider_data(m.collision_camera.as_ref(), &p.transform)
+                    {
+                        ents.push(
+                            commands
+                                .spawn(PendingCollider::new(
+                                    build_collider_task(verts, tris),
+                                    Some(camera_layers()),
+                                    true,
+                                ))
+                                .id(),
+                        );
+                    }
+                    // Interior MOLT lights (forge fire, inn fireplaces, chapel candles) — the radiating
+                    // sources that light nearby NPCs/doodads AND the building's own walls/floor over
+                    // their baked MOCV (decision 0273).
+                    spawn_wmo_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
+                    tag_world_object(
+                        &mut commands,
+                        &ents,
+                        ModelKind::Wmo,
+                        handle_label(h),
+                        unique_id,
+                        String::new(),
+                    );
+                    // Resolve the interior props for this instance's doodad set (set 0 + the selected
+                    // set), each composed onto the WMO's world transform; their M2s load async.
+                    p.doodads = resolve_wmo_doodads(m, p.doodad_set, p.transform, &asset_server);
+                    ents
+                }
+            };
+            p.spawned = true;
+            p.entities = entities;
+            // Spent the frame's spawn budget on this model (a WMO with two collider meshes is the
+            // costly case) — defer the rest, including this placement's WMO props, to next frame.
+            if Instant::now() >= deadline {
+                break 'placements;
+            }
+        }
+
+        // 2. Spawn each WMO doodad prop as its M2 asset finishes loading (across frames). Their
+        //    entities join `p.entities`, so they despawn with the placement. Empty for M2 doodads.
+        for d in &mut p.doodads {
+            if d.spawned {
+                continue;
+            }
+            let Some(m) = m2s.get(&d.handle) else {
+                continue; // this prop's M2 still loading
+            };
+            // The verified MODD lighting: an EXTERIOR-group WMO prop samples the terrain MCSH at
+            // its footprint like the reference's per-frame refresh `0x698c50` — plain matte (sun
+            // ×1.0) on lit ground, the shaded level on MCSH-shadowed ground, and NEVER the ADT 2.5
+            // boost (§8b: its one read site is unreachable from the WMO render band). An INTERIOR
+            // prop takes its per-instance SH probe instead — the selector is unread there.
+            let shade = if matches!(d.light, PropLight::Interior { .. }) {
+                ShadeSel::Matte // interior lane; the selector is unread
+            } else {
+                match doodad_ground_shade(&streamer, &adt_tiles, d.transform.translation) {
+                    ShadeResolve::Ready(true) => ShadeSel::Shaded,
+                    ShadeResolve::Ready(false) => ShadeSel::Matte,
+                    // The prop's ground tile is still decoding — defer this prop a frame (same rule
+                    // as an ADT doodad; the per-prop `spawned` flag makes it re-entrant).
+                    ShadeResolve::Pending => continue,
+                }
+            };
+            let (radius, center) = m2_fade(&m.bounds, d.transform.scale.x);
+            // An interior prop's committed light, folded ONCE into its SH probe (the reference folds
+            // at doodad create + per-frame light commit; everything here is static, so once): the
+            // MODD-colour ambient + the diffuse lobe on the fixed interior axis + the owning group's
+            // MOLR lights windowed by their disk attenStart/attenEnd from the prop's REFERENCE POINT
+            // — the placement-transformed M2 vertex-box centre (the byte-cited `[def+0x5c]` anchor
+            // family `0x6952a0`/`0x713680`; the trace fit put it ~1.1 yd up on the abbey stand,
+            // between origin and centre — the centre satisfies every observed gain, residual OPEN).
+            let interior_slot = match &d.light {
+                PropLight::Exterior => None,
+                PropLight::Interior {
+                    ambient,
+                    diffuse,
+                    lights,
+                } => {
+                    let ref_point = d.transform.transform_point(center);
+                    let coeffs = fold_interior_probe(*ambient, *diffuse, ref_point, lights);
+                    let slot = probes.alloc(coeffs);
+                    if slot.is_none() {
+                        // Once per burst, not per prop — a city WMO can flood thousands in a frame.
+                        let (live, peak) = probes.occupancy();
+                        warn_once!(
+                            "interior-prop probe table full (live {live}, peak {peak});                              overflowing props fall back to exterior light"
+                        );
+                    }
+                    slot
+                }
+            };
+            let (mut ents, joints) = spawn_model_entities(
+                &mut commands,
+                mat_cache,
+                materials,
+                light,
+                &m.submeshes,
+                d.transform,
+                false,
+                shade,
+                interior_slot, // interior props light off their folded probe, not the sky
+                radius,
+                center,
+                Some((m, now)),
+                &mut uv_reg,
+                &mut tint_reg,
+                None, // world-static placement: cards bake their world pivot
+            );
+            // The slot frees itself when the prop despawns (streaming out) — the component hook
+            // returns it to the table whoever does the despawn.
+            if let (Some(slot), Some(&first)) = (interior_slot, ents.first()) {
+                commands.entity(first).insert(PropProbeSlot(slot));
+            }
+            // Prop collider (avian): a static trimesh from the prop's collision hull at its world
+            // transform — collide-iff-hull, exactly like a map doodad, so a weapon rack / crate / cargo
+            // net is solid to both the player and the camera while a hull-less prop (banner, small
+            // candle) isn't. Default collision layer ⇒ both audiences. Joins `ents`, so it despawns with
+            // the placement. (WMO doodad props were previously render-only — no collision at all.)
+            if let Some((verts, tris)) = placement_collider_data(m.collision.as_ref(), &d.transform)
+            {
+                ents.push(
+                    commands
+                        .spawn((
+                            PendingCollider::new(build_collider_task(verts, tris), None, true),
+                            // A world-static WMO prop's hull clamps the mouse pick like any doodad.
+                            PickOccluder,
+                        ))
+                        .id(),
+                );
+            }
+            spawn_emitters_for(
+                &mut commands,
+                &mut meshes,
+                &mut particle_materials,
+                &shared_light,
+                &m.emitters,
+                d.transform,
+                joints.as_deref(),
+                (radius, center),
+                &mut ents,
+            );
+            spawn_ribbons_for(
+                &mut commands,
+                &mut meshes,
+                &mut particle_materials,
+                &shared_light,
+                &m.ribbons,
+                joints.as_deref(),
+                ents.first().copied(),
+            );
+            spawn_lights_for(&mut commands, &m.lights, d.transform, &mut ents);
+            tag_world_object(
+                &mut commands,
+                &ents,
+                ModelKind::Doodad,
+                handle_label(&d.handle),
+                unique_id,
+                format!("emitters: {} · WMO prop", m.emitters.len()),
+            );
+            p.entities.extend(ents);
+            d.spawned = true;
+            if Instant::now() >= deadline {
+                break 'placements;
+            }
+        }
+    }
+}
+
+/// Resolve a WMO instance's visible doodad props: the global set (0, always shown) plus the
+/// placement's MODF-selected set, each prop composed onto the WMO's world transform and given its M2
+/// handle (loaded async, spawned by [`spawn_loaded_placements`] when ready). Props with an unresolved
+/// name are skipped.
+fn resolve_wmo_doodads(
+    wmo: &WmoModel,
+    doodad_set: u16,
+    wmo_world: Transform,
+    asset_server: &AssetServer,
+) -> Vec<WmoDoodadInst> {
+    // Set 0 is the always-shown global set; a non-zero placement set adds one more.
+    let mut ranges: Vec<(u32, u32)> = wmo
+        .doodad_sets
+        .first()
+        .map(|s| (s.start, s.count))
+        .into_iter()
+        .collect();
+    if doodad_set != 0 {
+        if let Some(s) = wmo.doodad_sets.get(doodad_set as usize) {
+            ranges.push((s.start, s.count));
+        }
+    }
+    let mut out = Vec::new();
+    for (start, count) in ranges {
+        for (di, d) in wmo
+            .doodads
+            .iter()
+            .enumerate()
+            .skip(start as usize)
+            .take(count as usize)
+        {
+            if d.model.is_empty() {
+                continue; // MODN name offset didn't resolve
+            }
+            let local = wmo_doodad_local(d.position, d.orientation, d.scale);
+            // Interior classification (MODR ownership) + the MODD-colour base + the owning group's
+            // MOLR refs were all resolved ONCE at asset load (`WmoModel::doodad_base`); here the
+            // placement composes the referenced lights into WORLD space so the spawn-time fold
+            // never needs the WMO asset again.
+            let light = match wmo.doodad_base.get(di) {
+                Some(DoodadBase::Interior(b)) => PropLight::Interior {
+                    ambient: b.ambient,
+                    diffuse: b.diffuse,
+                    lights: b
+                        .light_refs
+                        .iter()
+                        .filter_map(|&li| wmo.lights.get(li as usize))
+                        .filter(|l| l.is_omni())
+                        .map(|l| PropLobeLight {
+                            pos: wmo_world.transform_point(wow_to_bevy(l.position)),
+                            color_i: l.color.map(|c| c * l.intensity.max(0.0)),
+                            atten_start: l.attenuation_start,
+                            atten_end: l.attenuation_end,
+                        })
+                        .collect(),
+                },
+                _ => PropLight::Exterior,
+            };
+            out.push(WmoDoodadInst {
+                handle: asset_server.load(m2_url(&d.model)),
+                transform: wmo_world.mul_transform(local),
+                light,
+                spawned: false,
+            });
+        }
+    }
+    out
+}
+
+/// A model handle's source path as a readable label for the object inspector (the asset path without
+/// the `mpq://` source prefix). Empty if the handle carries no path.
+fn handle_label<A: Asset>(handle: &Handle<A>) -> String {
+    handle
+        .path()
+        .map(|p| p.path().to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Tag every spawned entity of a placement with its [`WorldObject`] identity (so the mouseover inspector
+/// can name it). Harmless on the non-mesh entities (colliders) — only mesh entities are ray-picked.
+fn tag_world_object(
+    commands: &mut Commands,
+    ents: &[Entity],
+    kind: ModelKind,
+    label: String,
+    id: u32,
+    detail: String,
+) {
+    let object = WorldObject {
+        kind,
+        label,
+        id,
+        detail,
+    };
+    for &e in ents {
+        commands.entity(e).insert(object.clone());
+    }
+}
+
+/// The distance-fade size for an M2: world radius = authored bounding-sphere radius × placement scale;
+/// centre = authored bbox centre in Bevy model-local space. Absent bounds ⇒ never size-fade.
+pub(crate) fn m2_fade(bounds: &Option<M2Bounds>, scale: f32) -> (f32, Vec3) {
+    match bounds {
+        Some(b) => {
+            let c = [
+                (b.bbox_min[0] + b.bbox_max[0]) * 0.5,
+                (b.bbox_min[1] + b.bbox_max[1]) * 0.5,
+                (b.bbox_min[2] + b.bbox_max[2]) * 0.5,
+            ];
+            (b.sphere_radius * scale, wow_to_bevy(c))
+        }
+        None => (f32::INFINITY, Vec3::ZERO),
+    }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "benilla-adt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ADT terrain-tile reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+
+[dependencies]
+benilla-bytes = { path = "../benilla-bytes" }

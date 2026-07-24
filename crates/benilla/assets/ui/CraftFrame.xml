@@ -1,0 +1,931 @@
+<Ui>
+    <!--
+        benilla's Enchanting window (decision 0437 phase 3): the 1.12 `CraftFrame`, transcribed from
+        the reference `Blizzard_CraftUI.xml`/`.lua` (session scratchpad `ref-ui/`, decision 0246
+        discipline — never committed) onto our own engine/feeds. Geometry/art-paths/structure below are
+        QUOTED from the ref (line citations inline); the Lua is transcribed logic turned onto benilla's
+        Era API (`GetCraftName`/`GetCraftDisplaySkillLine`/`GetNumCrafts`/`GetCraftInfo`/reagents/
+        `GetCraftSpellFocus`/`DoCraft`/`CloseCraft`, decision 0437's engine surface,
+        `crates/benilla-ui/src/script/craft.rs`). The exact twin of `TradeSkillFrame.xml` — same
+        engine-gap substitutions, same FLAT-list INTERIM, same doc conventions — this header only calls
+        out where CRAFT'S OWN ref actually differs (verified against `Blizzard_CraftUI.lua`, not
+        assumed from TradeSkill's shape).
+
+        NOT an NPC session (unlike Gossip/Merchant/Trainer): the window opens client-side off your own
+        cast of an effect-47 opener spell — no NPC, no server round trip to open it (0437 §"What
+        scoping verified", TradeSkillFrame.xml's own identical header note). It registers
+        `CRAFT_SHOW`/`CRAFT_UPDATE`/`CRAFT_CLOSE` on ITSELF (TradeSkillFrame.xml's own precedent: this
+        engine has no separate FrameXML driver that dispatches SHOW for you).
+
+        Modeled on the two known-good dressed windows for the framing (MerchantFrame.xml's own header
+        comment, TradeSkillFrame.xml's own precedent for this exact art family — both windows are
+        `ClassTrainerFrame`-styled 384×512 four-quadrant windows and share BYTE-IDENTICAL geometry for
+        every region this file also carries: the portrait, the four border quadrants' Size/Anchors, the
+        skill-border/horizontal-bar decorative art, the rank StatusBar block, the persistent selection
+        highlight, the 8-row list + its ScrollFrame, the detail header art, the reagent grid's anchor
+        chain (down to the SAME "Reagent7 anchors off Reagent6, not Reagent5" ref quirk), and the
+        Create/Exit button positions):
+          - MerchantFrame.xml/TradeSkillFrame.xml — the 384×512 four-quadrant window art (no
+            <Backdrop>: the art IS the frame), the "player" portrait binding (`SetPortraitTexture(region,
+            "player")` — ref l.89-91 confirms Craft ALSO binds "player", not "npc": this is not an NPC
+            session), the UIPanel slot system (carries NO hardcoded <Anchors> — ShowUIPanel/SetLeftFrame
+            SetPoints it), OnShow/OnHide PlaySound pair.
+          - TradeSkillFrame.xml — the FLAT layout constraint (below), the faux-scroll list kit
+            (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml), the locally-reconstructed
+            UIPanelButtonTemplate/close-button/item-button idioms (no such templates ship in this house
+            dialect — TalentFrame.xml's own ENGINE API note, restated per-window, StackSplit.xml's own
+            "own local virtual template, not a cross-file inherits" convention), the persistent
+            selection-highlight Frame, and the `button.craftIndex`/`Button:SetTextColor` engine-gap
+            substitutions (deviation 7 below).
+
+        FLAT layout (TradeSkillFrame.xml's own house constraint, restated here): a child <Frame> shown
+        at runtime does not render its own <Layers> FontStrings in this engine, so the detail-pane
+        FontStrings + the title live on BenillaCraftFrame's OWN <Layers> (OVERLAY, above the window's
+        own BACKGROUND/BORDER/ARTWORK art groups), never on a nested sub-frame. The ref's
+        `CraftDetailScrollFrame`/`CraftDetailScrollChildFrame` therefore don't exist here — the detail
+        is a FIXED (non-scrolling) pane, computed once from the flattened ScrollFrame+ScrollChild
+        offsets (TOPLEFT 20,-234 + each child's own ref-quoted offset — BYTE-IDENTICAL to TradeSkill's
+        own detail-scroll anchor, since both refs place it there). Per-region regions that DO need
+        Show()/Hide() live on Button/StatusBar/Texture children (those render their own Layers) — the
+        rank bar, the detail icon, and the 8 reagent slots.
+
+        v1 DEVIATIONS (pinned to decision 0437's in-flight wow-re §5 dispatch where noted):
+          1. FLAT LIST, NO HEADERS. `GetCraftInfo`'s `craftType` is never `"header"` in v1 (the engine
+             API contract) — the ref's header BRANCH (the row's fold icon/texture swap, the row-text
+             21px-right reposition loop) is still dropped outright, not even as a no-op:
+             `Expand`/`CollapseCraftSkillLine` exist but are wired as true engine-side NO-OPS
+             (`craft.rs`'s own module doc + `Expand/CollapseCraftSkillLine` comment) — the 1.12 craft
+             list is single-group, so the real client's own header path is unexercised here; a click
+             changes nothing observable beyond the button's own local state.
+             `CraftExpandButtonFrame`/`CraftCollapseAllButton` (ref l.265-325) now SHIP, for fidelity —
+             this deviation's own earlier revision omitted them entirely; closed this session
+             (TradeSkillFrame.xml's own identical CollapseAll tab, restored there the same session).
+             `BenillaCraftFrame_Update`'s own restored tail (ref l.248-282, minus the row-text-reposition
+             loop, still dropped above) counts headers to size the tab's texture — since `GetCraftInfo`
+             never returns `"header"`, that count is always 0, so the tail's own `numHeaders > 0` branch
+             (ref l.270) always takes the ELSE arm: `BenillaCraftExpandButtonFrame` ends up HIDDEN in
+             practice, a faithful-but-currently-inert outcome (this file's own deviation 2 "ships for
+             fidelity, never actually visible yet" shape). `CraftTypeColor["header"]`/`["used"]`/
+             `["none"]` are kept in the transcribed color table for fidelity but are unreachable this way
+             (TradeSkillFrame.xml's own identical posture). v1 still ships no filter dropdowns.
+          2. THE SPELL-FOCUS TOOL NEVER REDDENS. `BuildColoredListString` is REUSED, not redefined — it
+             is already a true Lua GLOBAL after `TradeSkillFrame.xml` loads (`if not
+             BuildColoredListString then function BuildColoredListString(...) ... end end`, no `local`),
+             and `TradeSkillFrame.xml`'s own header comment names this file as the second consumer.
+             `CraftFrame.xml` is loaded AFTER `TradeSkillFrame.xml` in `ui_script/mod.rs`'s load list, so
+             this file calls it directly with no guard/redefinition. It reds an unmet tool byte-faithfully,
+             but `GetCraftSpellFocus`'s `hasTool` has no client-side proximity check yet (0437 INTERIM,
+             pinned to the §5 dispatch, TradeSkillFrame.xml's own identical note) — v1 never actually
+             reds a tool in practice.
+          3. NO DRESSING-ROOM / CHAT-LINK INSERT. The ref's Ctrl+click `DressUpItemLink` / Shift+click
+             `ChatFrameEditBox:Insert` on `CraftIcon`/`CraftReagent*` (ref l.44-51, 555-563) are dropped
+             — the cursor-item arc hasn't landed (MerchantFrame.xml's/TradeSkillFrame.xml's own identical
+             "a no-op here until the cursor-item arc" precedent). `CraftIcon`'s `this.hasItem = 1`
+             OnLoad flag (ref l.553) is dropped too — it is read only by `UIParent.lua`'s own generic
+             Ctrl-click dressing-room handler (grepped), which this dropped branch never reaches; a real,
+             now-inert vestige, not a benilla omission.
+          4. NO `SKILL_LINES_CHANGED` self-listen on the rank StatusBar (ref l.253-260, TradeSkillFrame's
+             own identical deviation): the skill-up feedback/diff-watcher is 0437 phase 4, not yet built
+             — the bar's value/color/text refresh only rides this window's own SHOW/UPDATE/selection
+             paint.
+          5. NO `PLAYER_ENTERING_WORLD` hide (TradeSkillFrame.xml's own identical choice for this session
+             shape) — opening this window is your own client-side cast, not an NPC session.
+          6. NO BEAST TRAINING / NO TRAINING POINTS (0437's own scope line — the pet arc owns Beast
+             Training's CraftFrame use). Every ref region/branch that exists ONLY to serve a pet ability
+             row is omitted, not stubbed: `CraftFramePointsLabel`/`CraftFramePointsText`
+             (`Craft_UpdateTrainingPoints`, ref l.428-438), the per-row `Craft<n>Cost` FontString (always
+             blank in v1 since `GetCraftInfo`'s `trainingPointCost` is a hardcoded `0` — `craft.rs`'s own
+             module doc), and the Requirements line's pet-level fallback branch (`requiredLevel`, also a
+             hardcoded `0` — ref l.364-369, unreachable). `UNIT_PET_TRAINING_POINTS` is not registered
+             (nothing left to drive it). `GetCraftButtonToken()` always returns `"CREATE"` — Beast
+             Training's `"TRAIN"` token is the only other value the ref ever returns, and that branch is
+             out of scope (`craft.rs`'s own note).
+          7. ENGINE API gaps (TradeSkillFrame.xml's own "no engine equivalent" posture, restated per
+             substitution actually used here):
+             - `Button:SetTextColor`/`:LockHighlight`/`:UnlockHighlight` have no native method (grepped;
+               `benilla-ui/src/script/button.rs` ships texture-pairs/SetText/Enable/Disable/
+               RegisterForClicks/SetButtonState/Click only) — row coloring routes through a named child
+               FontString (`$parentName`/`$parentSubText`) instead of the button's own inherited text
+               region (the ref's `Craft<n>Text`/`Craft<n>SubText`, `ClassTrainerSkillButtonTemplate`'s
+               auto-created text object); the persistent selection glow is the separate
+               `BenillaCraftHighlightFrame` (TradeSkillFrame.xml's own selection-highlight precedent)
+               instead of Lock/UnlockHighlight — no independent hover glow beyond it, and (verified
+               against Craft's OWN ref, unlike TradeSkill's row template) `CraftButtonTemplate` never
+               overrides `OnEnter` for a tooltip either — this window's list rows carry NO hover tooltip
+               at all, faithfully (TradeSkill's own row hover IS a real ref behavior; Craft's is not).
+             - `Button:GetID()`/`:SetID()` have no native method (same grep) — the ref's
+               `craftButton:SetID(craftIndex)` + `this:GetID()` pair becomes a plain Lua field,
+               `button.craftIndex`, set in the Update loop and read by the click handler
+               (`ClassTrainerSkillButtonTemplate`'s own `this.r/g/b`-restoring `OnLeave` — a color dance
+               made moot by the FontString substitution above — is dropped for the same reason
+               TradeSkillFrame.xml's own row `OnLeave` dropped it: nothing ever recolors the row on
+               hover in this engine, so there is nothing to restore).
+             - `EditBox:SetNumber`/`SecondsToTime` are NOT needed here at all: Craft has no repeat-count
+               input (deviation 8) and no per-recipe cooldown concept (no `CraftSkillCooldown` region
+               exists in the ref) — TradeSkillFrame.xml's own engine-gap shims for those simply don't
+               apply to this window.
+          8. NO CREATE ALL (a REAL ref difference, not an engine gap — verified: `CraftCreateButton`'s
+             OnClick is bare `DoCraft(GetCraftSelectionIndex())`, ref l.667, no count argument
+             anywhere). This window ships ONE action button; no repeat-count EditBox, no -/+ buttons, no
+             `CraftCreateAllButton`, no `GetCraftskillRepeatCount`/`UPDATE_CRAFTRECAST` — `craft.rs`'s
+             own module doc.
+          9. Dead ref code dropped, not transcribed (TradeSkillFrame.xml's own `reagentToAnchorTo`
+             precedent for exactly this move): `CraftSubTypeColor` + its `subColor` local (ref l.15-22,
+             189) are computed but never read anywhere in the reference — grepped, confirmed zero other
+             uses — a real vestige. The row-width scrollbar toggle (ref l.174-187, `293` vs `323`) is
+             dropped the same way TradeSkill's was: the ScrollFrame itself is always visible in both
+             engines (only its *scrollbar* toggles on overflow), so rows are fixed at 293
+             (TradeSkillFrame.xml's own row width).
+          10. SELECTION SURVIVES `CRAFT_SHOW` (a deliberate deviation from Craft's OWN ref, flagged):
+              the real `CraftFrame_Show` (ref l.26-49) unconditionally re-selects index 1 on every open,
+              discarding whatever was selected before. Our engine's `set_craft` already PRESERVES the
+              selection across a re-push by spell id (`craft.rs`'s own doc, TradeSkill's identical
+              `set_trade_skill` law) specifically so re-opening the same skill line doesn't visibly jump
+              the detail pane — forcing index 1 on every Show would fight that mechanism for no benefit.
+              `BenillaCraftFrame_Show` therefore mirrors `BenillaTradeSkillFrame_Show`'s own pattern
+              (keep a nonzero selection, else pick 1) instead of Craft's own ref line-for-line.
+          11. THE ITEM-TARGET PICK UX NOTE (0437 §"What scoping verified", `craft.rs`'s own
+              `needs_item_target` doc): `DoCraft` on an `ENCHANT_ITEM`-family recipe arms an APP-SIDE
+              item-target pick (the `TARGET_FLAG_ITEM` cast-target flow) — this XML plays NO part in
+              that flow; `CraftCreateButton_OnClick` below is the same bare `DoCraft(...)` call
+              regardless of which recipe is selected, exactly like the ref's own button.
+          12. GlobalStrings the ref reads (`REQUIRES_LABEL`, `SPELL_REAGENTS`, `PARENS_TEMPLATE`,
+              `CREATE`, `EXIT`) are declared LOCALLY below as the byte-exact 1.12 enUS values (session
+              scratchpad extraction, decision 0246's discipline, line-cited per constant),
+              TradeSkillFrame.xml's own idiom — with ONE exception: `CREATE` is declared as a REAL Lua
+              GLOBAL (`CREATE = CREATE or "Create"`, guarded so a second file loading it stays
+              idempotent), not `local`, because `getglobal(GetCraftButtonToken())` (ref l.106, faithfully
+              transcribed in `BenillaCraftFrame_Update` below) needs an actual `_G["CREATE"]` entry to
+              resolve — a genuine structural requirement of that ref call, not a style choice.
+              `GRAY_FONT_COLOR`/`HIGHLIGHT_FONT_COLOR` are Fonts.xml globals (CharacterFrame.xml's own
+              precedent for reading them unqualified).
+
+        Registers at the left UIPanel slot (`UiPanels.xml`). The ref's OWN registration
+        (`Blizzard_CraftUI.lua:24`, `UIPanelWindows["CraftFrame"] = { area = "left", pushable = 4 }`) is
+        `pushable = 4` — VERIFIED at that line (NOT `3`; `3` is `TradeSkillFrame`'s own line 13 value, a
+        different window/depth — grepped both files directly to confirm before using either number).
+        ESC-closable through the standard UIPanel chain. `CloseCraft()` fires on hide for ANY reason
+        (ESC, close X, Exit, `CRAFT_CLOSE`, or another left-slot window displacing it) —
+        TradeSkillFrame.xml's own `CloseTradeSkill`-on-hide precedent, adapted (no server round trip per
+        0437, purely client-side session teardown).
+    -->
+    <Script><![CDATA[
+        -- ── Constants (ref Blizzard_CraftUI.lua:2-4) ────────────────────────────────────────────────
+        local CRAFTS_DISPLAYED = 8       -- CRAFTS_DISPLAYED (ref l.2)
+        local MAX_CRAFT_REAGENTS = 8     -- MAX_CRAFT_REAGENTS (ref l.3)
+        local CRAFT_SKILL_HEIGHT = 16    -- CRAFT_SKILL_HEIGHT (ref l.4)
+
+        -- The recipe-row color table (ref l.6-13), transcribed verbatim including "header"/"used"/
+        -- "none" — all UNREACHABLE in v1 (this file's header comment, deviation 1). CraftSubTypeColor
+        -- (ref l.15-22) is DROPPED outright — dead ref code, deviation 9.
+        CraftTypeColor = {}
+        CraftTypeColor["optimal"] = { r = 1.00, g = 0.50, b = 0.25 }
+        CraftTypeColor["medium"]  = { r = 1.00, g = 1.00, b = 0.00 }
+        CraftTypeColor["easy"]    = { r = 0.25, g = 0.75, b = 0.25 }
+        CraftTypeColor["trivial"] = { r = 0.50, g = 0.50, b = 0.50 }
+        CraftTypeColor["used"]    = { r = 0.50, g = 0.50, b = 0.50 }
+        CraftTypeColor["header"]  = { r = 1.00, g = 0.82, b = 0 }
+        CraftTypeColor["none"]    = { r = 0.25, g = 0.75, b = 0.25 }
+
+        -- ── GlobalStrings the ref reads (byte-exact 1.12 enUS, this file's header comment cites the
+        -- extraction + the CREATE-must-be-global exception) — chunk-local except CREATE. ─────────────
+        local REQUIRES_LABEL   = "Requires:"   -- REQUIRES_LABEL (GlobalStrings.lua:3339)
+        local PARENS_TEMPLATE  = "(%s)"        -- PARENS_TEMPLATE (2984)
+        local EXIT_LABEL       = "Exit"        -- EXIT (1933)
+        CREATE = CREATE or "Create"            -- CREATE (871) -- REAL global, see header comment
+
+        -- BuildColoredListString is REUSED from TradeSkillFrame.xml (already a true global by the time
+        -- this file loads — this file's header comment, deviation 2). No redefinition here.
+
+        -- ── Detail pane ─────────────────────────────────────────────────────────────────────────────
+        -- No crafts known at all (ref l.131-150): blank the whole detail pane. Regions on this window's
+        -- own Layers "hide" via SetText("") — TradeSkillFrame.xml's own convention, which predates
+        -- region Show/Hide (region.rs has the real pair now); equivalent either way.
+        function BenillaCraftFrame_HideDetails()
+            getglobal("BenillaCraftFrameTitleText"):SetText(GetCraftName())
+            getglobal("BenillaCraftName"):SetText("")
+            getglobal("BenillaCraftRequirements"):SetText("")
+            getglobal("BenillaCraftDescription"):SetText("")
+            getglobal("BenillaCraftIcon"):Hide()
+            for i = 1, MAX_CRAFT_REAGENTS do
+                getglobal("BenillaCraftReagent" .. i):Hide()
+            end
+            getglobal("BenillaCraftCreateButton"):Disable()
+        end
+
+        -- Fill the detail pane for the selected recipe `id` (ref CraftFrame_SetSelection, l.285-408;
+        -- the header branch is dropped — deviation 1, never reached). Also the SOURCE of the selection
+        -- highlight's color (set once here, ref l.305-306).
+        function BenillaCraftFrame_SetSelection(id)
+            if not id or id == 0 then
+                BenillaCraftFrame_HideDetails()
+                return
+            end
+            SelectCraft(id)
+            if GetCraftSelectionIndex() > GetNumCrafts() then
+                return
+            end
+            local craftName, craftSubSpellName, craftType = GetCraftInfo(id)
+            local color = CraftTypeColor[craftType]
+            if color then
+                getglobal("BenillaCraftHighlight"):SetVertexColor(color.r, color.g, color.b)
+            end
+
+            -- General info (ref l.308-320).
+            getglobal("BenillaCraftFrameTitleText"):SetText(GetCraftName())
+            getglobal("BenillaCraftName"):SetText(craftName)
+            local icon = getglobal("BenillaCraftIcon")
+            icon:Show()
+            icon:SetNormalTexture(GetCraftIcon(id) or BENILLA_FALLBACK_ICON)
+
+            -- The description + the Reagents label's DYNAMIC reposition (ref l.312-318, transcribed
+            -- verbatim): when there's a description, the label sits 10px below its bottom edge; when
+            -- there isn't, it sits directly where the (blank) description would have been.
+            if GetCraftDescription(id) then
+                getglobal("BenillaCraftDescription"):SetText(GetCraftDescription(id))
+                getglobal("BenillaCraftReagentLabel"):SetPoint("TOPLEFT", "BenillaCraftDescription", "BOTTOMLEFT", 0, -10)
+            else
+                getglobal("BenillaCraftDescription"):SetText(" ")
+                getglobal("BenillaCraftReagentLabel"):SetPoint("TOPLEFT", "BenillaCraftDescription", "TOPLEFT", 0, 0)
+            end
+
+            -- Reagents (ref l.321-359): up to MAX_CRAFT_REAGENTS, gray-out + creatable gate.
+            local creatable = true
+            local numReagents = GetCraftNumReagents(id)
+            for i = 1, MAX_CRAFT_REAGENTS do
+                local reagent = getglobal("BenillaCraftReagent" .. i)
+                if i <= numReagents then
+                    local reagentName, reagentTexture, need, have = GetCraftReagentInfo(id, i)
+                    if not reagentName or not reagentTexture then
+                        -- Item template not landed yet for this reagent — hide it, like the ref does
+                        -- for any nil reagent (engine API note, decision 0437).
+                        reagent:Hide()
+                    else
+                        reagent:Show()
+                        reagent.icon:SetTexture(reagentTexture)
+                        reagent.name:SetText(reagentName)
+                        have = have or 0
+                        if have < need then
+                            reagent.icon:SetVertexColor(0.5, 0.5, 0.5)
+                            reagent.name:SetTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+                            creatable = false
+                        else
+                            reagent.icon:SetVertexColor(1.0, 1.0, 1.0)
+                            reagent.name:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                        end
+                        local haveText = have
+                        if have >= 100 then haveText = "*" end
+                        reagent.count:SetText(haveText .. " /" .. need)
+                    end
+                else
+                    reagent:Hide()
+                end
+            end
+
+            -- Requires: line (ref l.361-372) — ONE concatenated FontString, unlike TradeSkill's split
+            -- Label+Text pair (Craft's own ref genuinely differs here — this file's header comment
+            -- points at TradeSkillFrame.xml's split for comparison). The pet-level fallback branch
+            -- (ref l.364-369) is unreachable in v1 (deviation 6) and dropped.
+            local requiredTotems = BuildColoredListString(GetCraftSpellFocus(id))
+            if requiredTotems then
+                getglobal("BenillaCraftRequirements"):SetText(REQUIRES_LABEL .. " " .. requiredTotems)
+            else
+                getglobal("BenillaCraftRequirements"):SetText("")
+            end
+
+            if creatable then
+                getglobal("BenillaCraftCreateButton"):Enable()
+            else
+                getglobal("BenillaCraftCreateButton"):Disable()
+            end
+        end
+
+        -- ── The list page (ref CraftFrame_Update, l.99-283 — the header/expand-icon/training-points
+        -- tail is dropped: deviations 1/6, never reached in v1) ────────────────────────────────────────
+        function BenillaCraftFrame_Update()
+            getglobal("BenillaCraftFrameTitleText"):SetText(GetCraftName())
+            getglobal("BenillaCraftCreateButton"):SetText(getglobal(GetCraftButtonToken()))
+
+            local numCrafts = GetNumCrafts()
+            if numCrafts == 0 then
+                BenillaCraftFrame_HideDetails()
+            else
+                getglobal("BenillaCraftCollapseAllButton"):Enable() -- ref l.158 (no matching Disable()
+                -- anywhere in Craft's own ref — a real asymmetry vs. TradeSkill's own l.86/94 pair,
+                -- transcribed as-is, not "fixed").
+            end
+
+            local scrollFrame = getglobal("BenillaCraftListScrollFrame")
+            BenillaFauxScrollFrame_Update(scrollFrame, numCrafts, CRAFTS_DISPLAYED, CRAFT_SKILL_HEIGHT)
+            local craftOffset = BenillaFauxScrollFrame_GetOffset(scrollFrame)
+
+            -- The skill-rank StatusBar (ref l.107-123): Show/Hide are real here (real widgets, not
+            -- flattened Layer regions).
+            local name, rank, maxRank = GetCraftDisplaySkillLine()
+            local rankFrame = getglobal("BenillaCraftRankFrame")
+            if name then
+                getglobal("BenillaCraftRankFrameSkillName"):SetText(name)
+                rankFrame:SetStatusBarColor(0.0, 0.0, 1.0, 0.5)
+                getglobal("BenillaCraftRankFrameBackground"):SetVertexColor(0.0, 0.0, 0.75, 0.5)
+                rankFrame:SetMinMaxValues(0, maxRank)
+                rankFrame:SetValue(rank)
+                getglobal("BenillaCraftRankFrameSkillRank"):SetText(rank .. "/" .. maxRank)
+                rankFrame:Show()
+                getglobal("BenillaCraftSkillBorderLeft"):Show()
+                getglobal("BenillaCraftSkillBorderRight"):Show()
+            else
+                rankFrame:Hide()
+                getglobal("BenillaCraftSkillBorderLeft"):Hide()
+                getglobal("BenillaCraftSkillBorderRight"):Hide()
+            end
+
+            local highlight = getglobal("BenillaCraftHighlightFrame")
+            highlight:Hide()
+
+            local selection = GetCraftSelectionIndex()
+            for i = 1, CRAFTS_DISPLAYED do
+                local craftIndex = i + craftOffset
+                local button = getglobal("BenillaCraft" .. i)
+                if craftIndex <= numCrafts then
+                    local craftName, craftSubSpellName, craftType, numAvailable = GetCraftInfo(craftIndex)
+                    button.craftIndex = craftIndex
+                    local color = CraftTypeColor[craftType]
+                    if color then
+                        button.name:SetTextColor(color.r, color.g, color.b)
+                    end
+                    if (numAvailable or 0) == 0 then
+                        button.name:SetText(" " .. craftName)
+                    else
+                        button.name:SetText(" " .. craftName .. " [" .. numAvailable .. "]")
+                    end
+                    if craftSubSpellName and craftSubSpellName ~= "" then
+                        button.subtext:SetText(format(PARENS_TEMPLATE, craftSubSpellName))
+                    else
+                        button.subtext:SetText("")
+                    end
+                    button:Show()
+                    if selection == craftIndex then
+                        highlight:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+                        highlight:Show()
+                    end
+                else
+                    button.craftIndex = nil
+                    button:Hide()
+                end
+            end
+
+            -- Count headers + how many stay folded (ref l.249-259), to drive the CollapseAll tab's own
+            -- texture below — restored, deviation 1 (still functionally inert: GetCraftInfo never
+            -- returns "header" in v1, so numHeaders is always 0 here).
+            local numHeaders, notExpanded = 0, 0
+            for i = 1, numCrafts do
+                local craftName, craftSubSpellName, craftType, numAvailable, isExpanded = GetCraftInfo(i)
+                if craftName and craftType == "header" then
+                    numHeaders = numHeaders + 1
+                    if not isExpanded then
+                        notExpanded = notExpanded + 1
+                    end
+                end
+            end
+            -- If all headers are not expanded then show the collapse texture, otherwise the expand one
+            -- (ref l.261-267).
+            local collapseAll = getglobal("BenillaCraftCollapseAllButton")
+            if notExpanded ~= numHeaders then
+                collapseAll.collapsed = nil
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+            else
+                collapseAll.collapsed = true
+                collapseAll:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
+            end
+            -- Show the tab only when there are headers to fold (ref l.269-282; the row-text-reposition
+            -- loops there stay dropped, deviation 1) — always Hidden in v1 since numHeaders is always 0.
+            if numHeaders > 0 then
+                getglobal("BenillaCraftExpandButtonFrame"):Show()
+            else
+                getglobal("BenillaCraftExpandButtonFrame"):Hide()
+            end
+        end
+
+        -- A row click selects it (ref CraftButton_OnClick + SetSelection's non-header path; the
+        -- header-fold branch is dropped, deviation 1). Left-button only. NO OnEnter/OnLeave here —
+        -- Craft's OWN ref never adds a row-hover tooltip (verified, header comment deviation 7).
+        function BenillaCraftSkillButton_OnClick(button, mouseButton)
+            if mouseButton ~= "LeftButton" then return end
+            local index = button.craftIndex
+            if not index then return end
+            BenillaCraftFrame_SetSelection(index)
+            BenillaCraftFrame_Update()
+        end
+
+        -- The window's wheel handler (bubbled up the parent chain from a row) → one row via the faux
+        -- kit (TradeSkillFrame.xml's own note: the engine bubbles a spin up the parent chain, so the
+        -- handler lives on the window, not a child).
+        function BenillaCraftFrame_OnMouseWheel(delta)
+            BenillaFauxScrollFrame_OnMouseWheel(getglobal("BenillaCraftListScrollFrame"), delta)
+        end
+
+        -- ── The CollapseAll tab (ref CraftCollapseAllButton_OnClick, l.417-425) — TradeSkillFrame.xml's
+        -- own identical shape: toggles Expand/CollapseCraftSkillLine(0) off the button's own `.collapsed`
+        -- flag (re-derived every Update() above), no direct BenillaCraftFrame_Update() call (the ref
+        -- doesn't call one either). UNLIKE TradeSkill's own pair, `Expand`/`CollapseCraftSkillLine` are
+        -- true engine no-ops here (header comment, deviation 1) — no touched flag, no CRAFT_UPDATE, so a
+        -- click changes nothing observably beyond this button's own local state until the next Update()
+        -- runs some other way. ──────────────────────────────────────────────────────────────────────
+        function BenillaCraftCollapseAllButton_OnClick(self)
+            if self.collapsed then
+                self.collapsed = nil
+                ExpandCraftSkillLine(0)
+            else
+                self.collapsed = true
+                BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+                CollapseCraftSkillLine(0)
+            end
+        end
+
+        -- ── The detail icon (ref CraftIcon OnEnter, l.564-568 — the Ctrl/Shift dressing-room branches
+        -- dropped, deviation 3): SetCraftSpell, NOT SetCraftItem — Craft has no product-item concept
+        -- (craft.rs's own module doc). ───────────────────────────────────────────────────────────────
+        function BenillaCraftIcon_OnEnter(button)
+            if GetCraftSelectionIndex() ~= 0 then
+                GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+                GameTooltip:SetCraftSpell(GetCraftSelectionIndex())
+                GameTooltip:Show()
+            end
+        end
+
+        -- ── The reagent slots (ref CraftItemTemplate OnEnter, l.31-35 — the dressing-room/chat-link
+        -- OnClick branches dropped, deviation 3) ────────────────────────────────────────────────────
+        function BenillaCraftReagent_OnLoad(button, index)
+            button.reagentIndex = index
+            local n = button:GetName()
+            button.icon = getglobal(n .. "Icon")
+            button.name = getglobal(n .. "Name")
+            button.count = getglobal(n .. "Count")
+        end
+
+        function BenillaCraftReagent_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_TOPLEFT")
+            GameTooltip:SetCraftItem(GetCraftSelectionIndex(), button.reagentIndex)
+            GameTooltip:Show()
+        end
+
+        -- ── Create / Exit (ref l.654-670 — no Create All, no repeat-count input: deviation 8) ───────
+        function BenillaCraftCreateButton_OnClick()
+            -- Bare index → spell id, exactly the ref's own OnClick (ref l.667). An ENCHANT_ITEM recipe
+            -- arms an app-side item-target pick from here — this XML plays no part in that (header
+            -- comment, deviation 11).
+            DoCraft(GetCraftSelectionIndex())
+        end
+
+        function BenillaCraftCancelButton_OnClick()
+            HideUIPanel(getglobal("BenillaCraftFrame"))
+        end
+
+        -- ── The window lifecycle (MerchantFrame.xml/TradeSkillFrame.xml's own shape) ────────────────
+        function BenillaCraftFrame_OnLoad(frame)
+            frame:RegisterEvent("CRAFT_SHOW")
+            frame:RegisterEvent("CRAFT_UPDATE")
+            frame:RegisterEvent("CRAFT_CLOSE")
+            -- SPELLS_CHANGED (ref l.58/92-93): a real, non-Beast-Training event (a newly learned enchant
+            -- rank should refresh the list) — registered for fidelity; forward-compatible if this
+            -- engine doesn't fire it yet (TradeSkillFrame.xml's own UNIT_PORTRAIT_UPDATE posture).
+            -- UNIT_PET_TRAINING_POINTS (ref l.59) is NOT registered — nothing left to drive it
+            -- (deviation 6, Craft_UpdateTrainingPoints doesn't exist in v1).
+            frame:RegisterEvent("SPELLS_CHANGED")
+            frame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
+
+            local scrollFrame = getglobal("BenillaCraftListScrollFrame")
+            scrollFrame.updateFunc = BenillaCraftFrame_Update
+        end
+
+        -- Fresh session paint (ref CraftFrame_Show, l.26-49 — the header index-select branch is
+        -- dropped, deviation 1; the selection-reset itself is ALSO overridden, deviation 10: this
+        -- keeps a persisted selection instead of always forcing index 1).
+        function BenillaCraftFrame_Show(frame)
+            getglobal("BenillaCraftCreateButton"):Disable()
+            if GetCraftSelectionIndex() == 0 then
+                if GetNumCrafts() > 0 then
+                    BenillaCraftFrame_SetSelection(1)
+                end
+            else
+                BenillaCraftFrame_SetSelection(GetCraftSelectionIndex())
+            end
+            BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+            SetPortraitTexture(getglobal("BenillaCraftFramePortrait"), "player")
+            BenillaCraftFrame_Update()
+            ShowUIPanel(frame)
+        end
+
+        function BenillaCraftFrame_OnEvent(frame)
+            if event == "CRAFT_SHOW" then
+                BenillaCraftFrame_Show(frame)
+            elseif event == "CRAFT_UPDATE" then
+                -- ref l.68-87: re-anchor the selection if it's fallen off a (possibly shorter) list.
+                local selection = GetCraftSelectionIndex()
+                if selection > 1 and selection <= GetNumCrafts() then
+                    BenillaCraftFrame_SetSelection(selection)
+                elseif GetNumCrafts() > 0 then
+                    BenillaCraftFrame_SetSelection(1)
+                    BenillaFauxScrollFrame_SetOffset(getglobal("BenillaCraftListScrollFrame"), 0)
+                end
+                BenillaCraftFrame_Update()
+            elseif event == "CRAFT_CLOSE" then
+                HideUIPanel(frame)
+            elseif event == "SPELLS_CHANGED" then
+                BenillaCraftFrame_Update()
+            elseif event == "UNIT_PORTRAIT_UPDATE" then
+                if arg1 == "player" then
+                    SetPortraitTexture(getglobal("BenillaCraftFramePortrait"), "player")
+                end
+            end
+        end
+
+        function BenillaCraftFrameCloseButton_OnClick()
+            HideUIPanel(getglobal("BenillaCraftFrame"))
+        end
+    ]]></Script>
+
+    <!--
+        One list row (ref CraftButtonTemplate inherits ClassTrainerSkillButtonTemplate, l.4-28 for the
+        template, l.344-415 for the instances): a 293×16 text row, name + a parenthesized rank subtext
+        column (unlike TradeSkill's own row template, which carries no subname — this file's header
+        comment) — TradeSkillFrame.xml's own BenillaTradeSkillSkillButtonTemplate shape, plus the fixed
+        subtext column (TrainerFrame.xml's own Name/SubText fixed-column precedent, since this engine
+        has no FontString-width-based dynamic anchor). NO OnEnter/OnLeave — Craft's own ref adds no row
+        hover tooltip (header comment, deviation 7).
+    -->
+    <Button name="BenillaCraftSkillButtonTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="293" y="16"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="180" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentSubText" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="99" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="190" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                self.name = getglobal(self:GetName() .. "Name")
+                self.subtext = getglobal(self:GetName() .. "SubText")
+            </OnLoad>
+            <OnClick>BenillaCraftSkillButton_OnClick(self, arg1)</OnClick>
+        </Scripts>
+    </Button>
+
+    <!--
+        One reagent slot (ref CraftItemTemplate inherits QuestItemTemplate, l.29-53 — TradeSkillFrame's
+        own BenillaTradeSkillReagentTemplate shape, byte-identical layout): a 28×28 icon, the reagent
+        name to its right, "have /need" below the name.
+    -->
+    <Button name="BenillaCraftReagentTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="140" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon">
+                    <Size><AbsDimension x="28" y="28"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="$parentName" inherits="GameFontHighlightSmall" justifyH="LEFT" justifyV="TOP">
+                    <Size><AbsDimension x="104" y="14"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentIcon" relativePoint="TOPRIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentCount" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="$parentName" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnEnter>BenillaCraftReagent_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- A panel action button (Create/Exit): the UIPanelButtonTemplate face locally reconstructed
+         (this house dialect ships no such template — TalentFrame.xml's own ENGINE API note),
+         TradeSkillFrame.xml's identical-shaped BenillaTradeSkillPanelButtonTemplate — its OWN local
+         copy per this house's per-window convention (StackSplit.xml's own "not a cross-file inherits"
+         note), not a cross-file reuse of that other window's virtual template. -->
+    <Button name="BenillaCraftPanelButtonTemplate" virtual="true">
+        <Size><AbsDimension x="80" y="22"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaCraftFrame" hidden="true">
+        <!-- The real 384×512 window. No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints it to the left
+             slot (MerchantFrame.xml/TradeSkillFrame.xml's own convention). -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <!-- Transcribed for fidelity (ref l.65-67); no loader wiring exists yet for the hit-rect
+             shrink — TalentFrame.xml's own "transcribe the hook even if nothing drives it yet"
+             posture. -->
+        <HitRectInsets><AbsInset left="0" right="34" top="0" bottom="75"/></HitRectInsets>
+        <Layers>
+            <!-- "player" portrait 60×60 TOPLEFT (7,-6) (ref l.70-81), BACKGROUND so the window art's
+                 ring frames it. Bound via SetPortraitTexture(region, "player") in Show/OnEvent — not an
+                 NPC session (header comment). -->
+            <Layer level="BACKGROUND">
+                <Texture name="BenillaCraftFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <!-- The four quadrant slabs that ARE the window art (ref l.83-125): ALL FOUR from
+                 ClassTrainerFrame's shared art — unlike TradeSkill's own mixed set (its BotLeft comes
+                 from TradeSkillFrame's own art instead), Craft's ref uses one uniform art family
+                 throughout, transcribed exactly as given. -->
+            <Layer level="BORDER">
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-TopRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotLeft"><Size><AbsDimension x="256" y="256"/></Size><Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors></Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-BotRight"><Size><AbsDimension x="128" y="256"/></Size><Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/></Anchors></Texture>
+                <!-- Title: GetCraftName() directly — unlike TradeSkill's "%s"-formatted TRADE_SKILL_TITLE,
+                     Craft's ref sets this raw (ref l.101: CraftFrameTitleText:SetText(GetCraftName())).
+                     "Enchanting" is a harmless static placeholder until the first paint. -->
+                <FontString name="BenillaCraftFrameTitleText" inherits="GameFontNormal" justifyH="CENTER" text="Enchanting">
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+            <!-- The skill-border + horizontal-divider decorative bars (ref l.126-174), sampled from the
+                 same two shared ClassTrainer/TradeSkill textures by TexCoord — byte-identical to
+                 TradeSkillFrame.xml's own equivalents. -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaCraftSkillBorderLeft" file="Interface\TradeSkillFrame\UI-TradeSkill-SkillBorder">
+                    <Size><AbsDimension x="256" y="8"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="63" y="-50"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture name="BenillaCraftSkillBorderRight" file="Interface\TradeSkillFrame\UI-TradeSkill-SkillBorder">
+                    <Size><AbsDimension x="28" y="8"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftSkillBorderLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.109375" top="0.25" bottom="0.5"/>
+                </Texture>
+                <Texture name="BenillaCraftHorizontalBarLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="256" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-221"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="1.0" top="0" bottom="0.25"/>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-HorizontalBar">
+                    <Size><AbsDimension x="75" y="16"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftHorizontalBarLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.29296875" top="0.25" bottom="0.5"/>
+                </Texture>
+            </Layer>
+            <!-- The FIXED detail-pane FontStrings + header art (ref CraftDetailScrollChildFrame,
+                 l.456-537), flattened onto this window's OWN Layers at OVERLAY (the flat-layout gap,
+                 this file's header comment) — computed from the ref's ScrollFrame anchor (TOPLEFT
+                 20,-234, byte-identical to TradeSkillFrame's own) + each region's own ScrollChild-
+                 relative offset. Declaration order matters (same parent+level ⇒ z-tiebreak,
+                 TradeSkillFrame.xml's own note): the header art is declared BEFORE ReagentLabel so the
+                 "Reagents: " banner text paints over its lower edge, exactly as the reference does.
+                 CraftCost (ref l.483-491, the per-recipe training-point cost line) is DROPPED — deviation 6,
+                 always blank in v1. -->
+            <Layer level="OVERLAY">
+                <FontString name="BenillaCraftName" inherits="GameFontNormal" justifyH="LEFT">
+                    <Size><AbsDimension x="244" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="70" y="-239"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- ONE concatenated FontString (Craft's own ref, unlike TradeSkill's split
+                     Label+Text pair — header comment). -->
+                <FontString name="BenillaCraftRequirements" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftName" relativePoint="BOTTOMLEFT"/></Anchors>
+                </FontString>
+                <Texture name="BenillaCraftDetailHeaderLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-DetailHeaderLeft">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="20" y="-231"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\ClassTrainerFrame\UI-ClassTrainer-DetailHeaderRight">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftDetailHeaderLeft" relativePoint="TOPRIGHT"/></Anchors>
+                </Texture>
+                <!-- The recipe's own description (ref l.516-527) — TradeSkill's detail pane has no
+                     analogue for this region (header comment). Its BOTTOMLEFT is the ReagentLabel's
+                     DYNAMIC anchor target, re-pointed every SetSelection (SetSelection's own Lua). -->
+                <FontString name="BenillaCraftDescription" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="290" y="0"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="25" y="-284"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- STATIC always-shown label (TradeSkillFrame.xml's own precedent: the ref's
+                     Show/Hide-on-reagent-count dance is dropped, every recipe here has ≥1 reagent in
+                     practice) — its POSITION is dynamic (SetSelection), its text/visibility is not. -->
+                <FontString name="BenillaCraftReagentLabel" inherits="GameFontNormalSmall" text="Reagents: ">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftDescription" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The scroll-wheel catcher (TradeSkillFrame.xml's own note) — MUST be first so every real
+                 row below out-ranks it in hit-testing. -->
+            <Button name="BenillaCraftWheelCatcher">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"/>
+                </Anchors>
+                <Scripts><OnMouseWheel>BenillaCraftFrame_OnMouseWheel(arg1)</OnMouseWheel></Scripts>
+            </Button>
+
+            <!-- The top-right close X (ref a UIPanelCloseButton at TOPRIGHT -29,-8, l.688-696; the
+                 minimize-button art stands in — this house dialect ships no such template,
+                 TradeSkillFrame.xml's own precedent). -->
+            <Button name="BenillaCraftFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaCraftFrameCloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- The skill-rank StatusBar (ref CraftRankFrame, l.196-264): blue fill, "name rank/max"
+                 text, the UI-Character-Skills-Bar[Border] art — byte-identical to TradeSkillFrame's own.
+                 SKILL_LINES_CHANGED self-listen dropped (deviation 4). -->
+            <StatusBar name="BenillaCraftRankFrame" drawLayer="BACKGROUND" minValue="0" maxValue="1" defaultValue="0">
+                <Size><AbsDimension x="268" y="15"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="73" y="-37"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <FontString name="BenillaCraftRankFrameSkillName" inherits="GameFontNormalSmall">
+                            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="6" y="1"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BenillaCraftRankFrameSkillRank" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                            <Size><AbsDimension x="128" y="0"/></Size>
+                            <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftRankFrameSkillName" relativePoint="RIGHT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BenillaCraftRankFrameBackground"><Color r="1.0" g="1.0" b="1.0" a="0.2"/></Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="BenillaCraftRankFrameBorder">
+                        <Size><AbsDimension x="281" y="32"/></Size>
+                        <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\PaperDollInfoFrame\UI-Character-Skills-BarBorder"/>
+                    </Button>
+                </Frames>
+                <BarTexture name="BenillaCraftRankFrameBar" file="Interface\PaperDollInfoFrame\UI-Character-Skills-Bar"/>
+                <BarColor r="0.25" g="0.25" b="0.75"/>
+            </StatusBar>
+
+            <!-- The expand/collapse-all tab (ref CraftExpandButtonFrame, l.265-325): verbatim
+                 geometry/art — TradeSkillFrame.xml's own identical tab frame, EXCEPT the button itself
+                 is 22×22 here (Craft's own ref value, not TradeSkill's 40×22 — each window's own ref,
+                 not copy-pasted). TrainerFrame.xml's own BenillaTrainerCollapseAllButton is the
+                 reconstruction precedent this mirrors (standalone Button, not this file's row template —
+                 header comment, deviation 1). Always ends up Hidden in v1 (Update()'s own tail, header
+                 comment) — ships for fidelity, not yet reachable. -->
+            <Frame name="BenillaCraftExpandButtonFrame">
+                <Size><AbsDimension x="54" y="32"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="15" y="-71"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="BACKGROUND">
+                    <Texture name="BenillaCraftExpandTabLeft" file="Interface\ClassTrainerFrame\UI-ClassTrainer-ExpandTab-Left"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors></Texture>
+                    <Texture name="BenillaCraftExpandTabMiddle" file="Interface\QuestFrame\UI-QuestLogSortTab-Middle"><Size><AbsDimension x="38" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaCraftExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors></Texture>
+                    <Texture file="Interface\QuestFrame\UI-QuestLogSortTab-Right"><Size><AbsDimension x="8" y="32"/></Size><Anchors><Anchor point="LEFT" relativeTo="BenillaCraftExpandTabMiddle" relativePoint="RIGHT"/></Anchors></Texture>
+                </Layer></Layers>
+                <Frames>
+                    <Button name="BenillaCraftCollapseAllButton" text="All">
+                        <Size><AbsDimension x="22" y="22"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftExpandTabLeft" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                        <NormalTexture file="Interface\Buttons\UI-MinusButton-Up"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></NormalTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-PlusButton-Hilight" alphaMode="ADD"><Size><AbsDimension x="16" y="16"/></Size><Anchors><Anchor point="LEFT" relativePoint="LEFT"/></Anchors></HighlightTexture>
+                        <ButtonText><Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="18" y="0"/></Offset></Anchor></Anchors></ButtonText>
+                        <NormalFont inherits="GameFontNormalSmall" justifyH="LEFT"/>
+                        <Scripts>
+                            <OnClick>BenillaCraftCollapseAllButton_OnClick(self)</OnClick>
+                        </Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The persistent selection highlight (ref CraftHighlightFrame, l.331-343): 293×16,
+                 ARTWORK-layer UI-Listbox-Highlight2. Declared BEFORE the rows so the row text paints
+                 OVER the glow (TradeSkillFrame.xml's own z-tiebreak note). Vertex-colored by the
+                 selected recipe's CraftTypeColor (SetSelection), positioned onto the selected visible
+                 row (Update). -->
+            <Frame name="BenillaCraftHighlightFrame" hidden="true">
+                <Size><AbsDimension x="293" y="16"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers><Layer level="ARTWORK">
+                    <Texture name="BenillaCraftHighlight" file="Interface\Buttons\UI-Listbox-Highlight2">
+                        <Anchors><Anchor point="TOPLEFT"/><Anchor point="BOTTOMRIGHT"/></Anchors>
+                    </Texture>
+                </Layer></Layers>
+            </Frame>
+
+            <!-- 8 list rows (ref Craft1..8, l.344-415): 293×16, row1 TOPLEFT (22,-96); rows 2-8 chain
+                 TOPLEFT→prior BOTTOMLEFT with no gap — byte-identical to TradeSkillFrame's own. -->
+            <Button name="BenillaCraft1" inherits="BenillaCraftSkillButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="BenillaCraft2" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft1" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft3" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft2" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft4" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft3" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft5" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft4" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft6" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft5" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft7" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft6" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+            <Button name="BenillaCraft8" inherits="BenillaCraftSkillButtonTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraft7" relativePoint="BOTTOMLEFT"/></Anchors></Button>
+
+            <!-- The faux-scroll frame (BenillaFauxScrollFrameTemplate, ScrollTemplates.xml): invisible
+                 container over the 8 rows; only its right-hand Slider scroll bar renders. Sized to the
+                 8-row span (CRAFTS_DISPLAYED × CRAFT_SKILL_HEIGHT), TradeSkillFrame.xml's own
+                 same-TOPLEFT-as-row1 convention. updateFunc set in BenillaCraftFrame_OnLoad. -->
+            <Frame name="BenillaCraftListScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                <Size><AbsDimension x="293" y="128"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="22" y="-96"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The detail icon (ref CraftIcon, l.540-577): a 37×37 button over a 64×64 UI-EmptySlot
+                 ring (TrainerFrame.xml's own BenillaTrainerSkillIcon shape, TradeSkillFrame.xml's own
+                 identical reuse) at the flattened header art's top-left. No made-count overlay — Craft
+                 has no min/max-made concept (craft.rs's own module doc), unlike TradeSkill's own icon. -->
+            <Button name="BenillaCraftIcon" hidden="true">
+                <Size><AbsDimension x="37" y="37"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="28" y="-237"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\Buttons\UI-EmptySlot"><Size><AbsDimension x="64" y="64"/></Size><Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor></Anchors></Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnter>BenillaCraftIcon_OnEnter(self)</OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </Button>
+
+            <!-- Up to 8 reagents, the ref's own 2-column grid + anchor chain (l.578-649): odd slots
+                 chain down the left column (TOPLEFT→prior BOTTOMLEFT, -2 gap), even slots sit LEFT of
+                 the odd slot in the same row. Reagent7 chains off Reagent6 (not Reagent5) — a literal
+                 ref quirk shared with TradeSkillFrame's own reagent grid (this file's header comment,
+                 deviation 9's sibling note): harmless, since 6's row-mate LEFT anchor to 5 already puts
+                 it at 5's own row height. Reagent1's own offset is (0,-3) here — Craft's ref literal
+                 value, NOT TradeSkill's own (-5,-3) (transcribed from each window's own ref, not
+                 copy-pasted). -->
+            <Button name="BenillaCraftReagent1" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftReagentLabel" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent2" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftReagent1" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent3" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftReagent1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent4" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftReagent3" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent5" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftReagent3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent6" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftReagent5" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent7" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCraftReagent6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaCraftReagent8" inherits="BenillaCraftReagentTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaCraftReagent7" relativePoint="RIGHT"/></Anchors>
+                <Scripts><OnLoad>BenillaCraftReagent_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+
+            <!-- The action row (ref l.654-696): Create / Exit only — NO Create All, NO -/+, NO
+                 repeat-count EditBox (deviation 8). Positions byte-identical to TradeSkillFrame's own
+                 Create/Cancel buttons (ref l.658-663/676-681 vs Craft's own l.658-663/675-680 — the
+                 SAME two constants in both refs). -->
+            <Button name="BenillaCraftCreateButton" inherits="BenillaCraftPanelButtonTemplate" text="Create">
+                <Anchors><Anchor point="CENTER" relativeTo="BenillaCraftFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="224" y="-422"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaCraftCreateButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaCraftCancelButton" inherits="BenillaCraftPanelButtonTemplate" text="Exit">
+                <Anchors><Anchor point="CENTER" relativeTo="BenillaCraftFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="305" y="-422"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaCraftCancelButton_OnClick()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <!-- The window lifecycle (MerchantFrame.xml/TradeSkillFrame.xml's own shape): OnHide calls
+             CloseCraft() for ANY hide reason. The list wheel lives on the WINDOW (the engine bubbles a
+             spin up the parent chain). -->
+        <Scripts>
+            <OnLoad>BenillaCraftFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaCraftFrame_OnEvent(self)</OnEvent>
+            <OnMouseWheel>BenillaCraftFrame_OnMouseWheel(arg1)</OnMouseWheel>
+            <OnShow>PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnHide>CloseCraft(); PlaySound("igCharacterInfoClose")</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

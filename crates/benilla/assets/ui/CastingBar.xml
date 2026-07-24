@@ -1,0 +1,239 @@
+<Ui>
+    <!--
+        The cast bar - the 1.12 CastingBarFrame, transcribed from the extracted reference
+        (Interface\FrameXML\CastingBarFrame.xml/.lua, mpqx; decision 0137 phase 1). Geometry,
+        textures, colors, and every timing constant are the reference's own. Driven by the
+        SPELLCAST_* events crate::ui_cast fires off the wire (START name,ms / STOP / FAILED /
+        INTERRUPTED / DELAYED / CHANNEL_START ms,name / CHANNEL_UPDATE ms / CHANNEL_STOP).
+
+        The reference's globals (CastingBarText/Spark/Flash) are named regions, so they publish as
+        globals here exactly as they do there; `this` is the firing frame (RF-0025). Departures
+        from the reference .lua: its dead code (`CastingBarFrameStatusBar = CastingBarFrame`, a
+        self-alias — we just use the frame; the `if not this:IsVisible() then this:Hide() end`
+        no-op guard at the top of the STOP branch; the two write-only `this.mode` stores nothing
+        reads), and the flash/fade steps normalized to the reference tick rate (the
+        CASTING_BAR_REF_TICK comment below — decision 0454).
+
+        SPELLCAST_DELAYED is live: SMSG_SPELL_DELAYED (pushback on taking a hit) is decoded and fed,
+        so a hit slides the bar's window out instead of letting it finish early (decision 0256).
+
+        POSITION: the XML anchor y=55 below is only the pre-manage default, exactly as in the
+        reference — UIParent.lua overrides it on every bottom-stack layout pass
+        (UIPARENT_MANAGED_FRAME_POSITIONS["CastingBarFrame"]: baseY 60, +40 per either bottom
+        multibar, +40 per pet/stance bar, +9 per rep bar). Our transcription of that mechanism
+        lives in UIParent.xml (decision 0272); with the always-on multibars the bar sits at
+        y=100, and y=140 while the stance bar shows.
+    -->
+    <Script><![CDATA[
+        CASTING_BAR_ALPHA_STEP = 0.05
+        CASTING_BAR_FLASH_STEP = 0.2
+        CASTING_BAR_HOLD_TIME = 1
+
+        -- The ref applies the two steps PER OnUpdate TICK (no arg1 scaling) — the flash/fade
+        -- tail is frame-rate dependent by the reference's own design: ~25 ticks from hold-expiry
+        -- to hidden, i.e. 0.83 s at the reference bottle's configured cap (WoW/WTF/Config.wtf
+        -- `SET maxfps "30"`), 0.42 s at an era-typical 60 fps, a blink at 120. We render fast,
+        -- so the step lines below are normalized to the reference tick rate — the bar's
+        -- hold+fade then matches the reference window at any render rate (decision 0454).
+        CASTING_BAR_REF_TICK = 30
+
+        -- The 1.12 GlobalStrings values (no GlobalStrings.lua is loaded yet).
+        FAILED = FAILED or "Failed"
+        INTERRUPTED = INTERRUPTED or "Interrupted"
+
+        function CastingBarFrame_OnLoad()
+            this:RegisterEvent("SPELLCAST_START")
+            this:RegisterEvent("SPELLCAST_STOP")
+            this:RegisterEvent("SPELLCAST_FAILED")
+            this:RegisterEvent("SPELLCAST_INTERRUPTED")
+            this:RegisterEvent("SPELLCAST_DELAYED")
+            this:RegisterEvent("SPELLCAST_CHANNEL_START")
+            this:RegisterEvent("SPELLCAST_CHANNEL_UPDATE")
+            this:RegisterEvent("SPELLCAST_CHANNEL_STOP")
+            this.casting = nil
+            this.holdTime = 0
+            this:Hide()
+        end
+
+        function CastingBarFrame_OnEvent()
+            if event == "SPELLCAST_START" then
+                this:SetStatusBarColor(1.0, 0.7, 0.0)
+                CastingBarSpark:Show()
+                this.startTime = GetTime()
+                this.maxValue = this.startTime + (arg2 / 1000)
+                this:SetMinMaxValues(this.startTime, this.maxValue)
+                this:SetValue(this.startTime)
+                CastingBarText:SetText(arg1)
+                this:SetAlpha(1.0)
+                this.holdTime = 0
+                this.casting = 1
+                this.fadeOut = nil
+                this:Show()
+            elseif event == "SPELLCAST_STOP" or event == "SPELLCAST_CHANNEL_STOP" then
+                if this:IsShown() then
+                    this:SetValue(this.maxValue)
+                    this:SetStatusBarColor(0.0, 1.0, 0.0)
+                    CastingBarSpark:Hide()
+                    CastingBarFlash:SetAlpha(0.0)
+                    CastingBarFlash:Show()
+                    if event == "SPELLCAST_STOP" then
+                        this.casting = nil
+                    else
+                        this.channeling = nil
+                    end
+                    this.flash = 1
+                    this.fadeOut = 1
+                end
+            elseif event == "SPELLCAST_FAILED" or event == "SPELLCAST_INTERRUPTED" then
+                if this:IsShown() and not this.channeling then
+                    this:SetValue(this.maxValue)
+                    this:SetStatusBarColor(1.0, 0.0, 0.0)
+                    CastingBarSpark:Hide()
+                    if event == "SPELLCAST_FAILED" then
+                        CastingBarText:SetText(FAILED)
+                    else
+                        CastingBarText:SetText(INTERRUPTED)
+                    end
+                    this.casting = nil
+                    this.fadeOut = 1
+                    this.holdTime = GetTime() + CASTING_BAR_HOLD_TIME
+                end
+            elseif event == "SPELLCAST_DELAYED" then
+                if this:IsShown() then
+                    this.startTime = this.startTime + (arg1 / 1000)
+                    this.maxValue = this.maxValue + (arg1 / 1000)
+                    this:SetMinMaxValues(this.startTime, this.maxValue)
+                end
+            elseif event == "SPELLCAST_CHANNEL_START" then
+                this:SetStatusBarColor(1.0, 0.7, 0.0)
+                CastingBarSpark:Show()
+                this.maxValue = 1
+                this.startTime = GetTime()
+                this.endTime = this.startTime + (arg1 / 1000)
+                this.duration = arg1 / 1000
+                this:SetMinMaxValues(this.startTime, this.endTime)
+                this:SetValue(this.endTime)
+                CastingBarText:SetText(arg2)
+                this:SetAlpha(1.0)
+                this.holdTime = 0
+                this.casting = nil
+                this.channeling = 1
+                this.fadeOut = nil
+                this:Show()
+            elseif event == "SPELLCAST_CHANNEL_UPDATE" then
+                if this:IsShown() then
+                    local origDuration = this.endTime - this.startTime
+                    this.endTime = GetTime() + (arg1 / 1000)
+                    this.startTime = this.endTime - origDuration
+                    this:SetMinMaxValues(this.startTime, this.endTime)
+                end
+            end
+        end
+
+        function CastingBarFrame_OnUpdate()
+            if this.casting then
+                local status = GetTime()
+                if status > this.maxValue then
+                    status = this.maxValue
+                end
+                this:SetValue(status)
+                CastingBarFlash:Hide()
+                local sparkPosition = ((status - this.startTime) / (this.maxValue - this.startTime)) * 195
+                if sparkPosition < 0 then
+                    sparkPosition = 0
+                end
+                CastingBarSpark:SetPoint("CENTER", CastingBarFrame, "LEFT", sparkPosition, 2)
+            elseif this.channeling then
+                local time = GetTime()
+                if time > this.endTime then
+                    time = this.endTime
+                end
+                if time == this.endTime then
+                    this.channeling = nil
+                    this.fadeOut = 1
+                    return
+                end
+                local barValue = this.startTime + (this.endTime - time)
+                this:SetValue(barValue)
+                CastingBarFlash:Hide()
+                local sparkPosition = ((barValue - this.startTime) / (this.endTime - this.startTime)) * 195
+                CastingBarSpark:SetPoint("CENTER", CastingBarFrame, "LEFT", sparkPosition, 2)
+            elseif GetTime() < this.holdTime then
+                return
+            elseif this.flash then
+                local alpha = CastingBarFlash:GetAlpha() + CASTING_BAR_FLASH_STEP * (arg1 * CASTING_BAR_REF_TICK)
+                if alpha < 1 then
+                    CastingBarFlash:SetAlpha(alpha)
+                else
+                    CastingBarFlash:SetAlpha(1.0)
+                    this.flash = nil
+                end
+            elseif this.fadeOut then
+                local alpha = this:GetAlpha() - CASTING_BAR_ALPHA_STEP * (arg1 * CASTING_BAR_REF_TICK)
+                if alpha > 0 then
+                    this:SetAlpha(alpha)
+                else
+                    this.fadeOut = nil
+                    this:Hide()
+                end
+            end
+        end
+    ]]></Script>
+
+    <StatusBar name="CastingBarFrame" drawLayer="BORDER" toplevel="true" parent="UIParent" hidden="true">
+        <Size><AbsDimension x="195" y="13"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOM">
+                <Offset><AbsDimension x="0" y="55"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture setAllPoints="true">
+                    <Color r="0" g="0" b="0" a="0.5"/>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="CastingBarText" inherits="GameFontHighlight">
+                    <Size><AbsDimension x="185" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="5"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+                <Texture name="CastingBarBorder" file="Interface\CastingBar\UI-CastingBar-Border">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="28"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="CastingBarSpark" file="Interface\CastingBar\UI-CastingBar-Spark" alphaMode="ADD">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors>
+                        <Anchor point="CENTER"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="CastingBarFlash" file="Interface\CastingBar\UI-CastingBar-Flash" alphaMode="ADD">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="28"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>CastingBarFrame_OnLoad()</OnLoad>
+            <OnEvent>CastingBarFrame_OnEvent()</OnEvent>
+            <OnUpdate>CastingBarFrame_OnUpdate()</OnUpdate>
+        </Scripts>
+        <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+        <BarColor r="1.0" g="0.7" b="0.0"/>
+    </StatusBar>
+</Ui>

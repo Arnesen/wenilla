@@ -1,0 +1,630 @@
+<!--
+    The fullscreen world map — transcribed from the 1.12 FrameXML WorldMapFrame.xml/.lua
+    (decision 0203 phase 2), restored verbatim by decision 0221 (the windowed / 1.14-header
+    direction of 0214/0217/0219 is parked; this faithful fullscreen sheet is the baseline we
+    return to). The map is pure FrameXML over the worldmap host API (benilla-ui
+    script/worldmap.rs): detail tiles are plain textures whose art the Lua swaps per selection
+    (GetMapInfo → Interface\WorldMap\<name>\<name>1..12), the player blip is positioned from
+    GetPlayerMapPosition exactly like the reference, navigation is SetMapZoom/-ToCurrentZone/
+    ProcessMapClick.
+
+    IN (this file): the FULLSCREEN frame + blackout, the 12-piece parchment chrome, the title,
+    the 1002×668 detail frame with its 12 tiles + ADD highlight, the discovery-overlay pool
+    (0222 — the explored sub-areas paint their detail over the base parchment), the click/hover
+    button layer, the continent/zone dropdowns (over UIDropDownMenu.xml's kit), the zoom-out
+    button (panel-button shape — our engine ships no UIPanelButtonTemplate), the close X (the
+    QuestLog/BagFrame hand-drawn shape), the area label pair, and the player arrow (MinimapArrow
+    art spun by SetRotation(GetPlayerFacing()) — the reference renders an engine arrow model;
+    0203 flags the stand-in).
+
+    OUT (later slices, per 0203): POI landmarks;
+    party/raid/battlefield/corpse/ping children (no group wire); the magnifying-glass zoom-out
+    shortcut (redundant with the button); SetupFullscreenScale (the map renders at its native
+    1024×768 centered; a scale pass is a taste knob); WorldMapTooltip (only unit blips used it).
+
+    Deviations from the reference, deliberate: BlackoutWorld fills via anchors instead of the
+    GetScreenWidth resize dance (same pixels); OnShow calls WorldMapFrame_Update() directly after
+    SetMapToCurrentZone (the reference repaints off the synchronous WORLD_MAP_UPDATE; ours fires
+    next tick — the direct call keeps the open paint flicker-free); ESC/M close via the app key
+    arm, not OnKeyDown+RunBinding (no binding system).
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        NUM_WORLDMAP_DETAIL_TILES = 12;
+        NUM_WORLDMAP_OVERLAYS = 0;
+
+        function ToggleWorldMap()
+            if ( WorldMapFrame:IsVisible() ) then
+                WorldMapFrame:Hide();
+            else
+                WorldMapFrame:Show();
+            end
+        end
+
+        -- Fill the screen: scale the native 1024×768 sheet up until it touches the constraining
+        -- screen edge — full height on any screen wider than 4:3 (the common case), full width on
+        -- a narrower one (ref SetupFullscreenScale, deferred at 0203, wired at 0224). The blackout
+        -- is a SEPARATE unscaled frame behind the sheet, so only the sheet grows.
+        function SetupFullscreenScale()
+            local xScale = GetScreenWidth() / 1024;
+            local yScale = GetScreenHeight() / 768;
+            local scale = xScale;
+            if ( yScale < xScale ) then
+                scale = yScale;
+            end
+            WorldMapFrame:SetScale(scale);
+        end
+
+        -- ref-WorldMapFrame.lua WorldMapFrame_Update(): the tile swap, the discovery-overlay
+        -- pool, and the zoom-out arming (POI landmarks are still deferred). The "World" fallback
+        -- is the reference's own hack for the nil GetMapInfo at the world level — kept verbatim.
+        function WorldMapFrame_Update()
+            local mapFileName = GetMapInfo();
+            if ( not mapFileName ) then
+                mapFileName = "World";
+            end
+            for i=1, NUM_WORLDMAP_DETAIL_TILES, 1 do
+                getglobal("WorldMapDetailTile"..i):SetTexture("Interface\\WorldMap\\"..mapFileName.."\\"..mapFileName..i);
+            end
+
+            -- The discovery overlays (ref WorldMapFrame.lua:94-153): the base tiles are the
+            -- unexplored parchment; each REVEALED sub-area (GetNumMapOverlays / GetMapOverlayInfo,
+            -- filtered host-side by the explored bitset) paints its detailed art on top. Pool
+            -- ARTWORK textures on WorldMapDetailFrame on demand, slice each overlay into 256-px
+            -- tiles whose file sizes round up to the next power of two, park the leftovers hidden.
+            -- Native offsets — the map renders at its native 1024×768 (no WORLDMAP_SX/SY scale,
+            -- unlike the parked windowed layout); the overlays share the detail tiles' coord space.
+            local numOverlays = GetNumMapOverlays();
+            local textureName, textureWidth, textureHeight, offsetX, offsetY;
+            local textureCount = 0;
+            local texture;
+            local texturePixelWidth, textureFileWidth, texturePixelHeight, textureFileHeight;
+            local numTexturesWide, numTexturesTall, neededTextures;
+            for i=1, numOverlays do
+                textureName, textureWidth, textureHeight, offsetX, offsetY = GetMapOverlayInfo(i);
+                numTexturesWide = ceil(textureWidth/256);
+                numTexturesTall = ceil(textureHeight/256);
+                neededTextures = textureCount + (numTexturesWide * numTexturesTall);
+                if ( neededTextures > NUM_WORLDMAP_OVERLAYS ) then
+                    for j=NUM_WORLDMAP_OVERLAYS+1, neededTextures do
+                        WorldMapDetailFrame:CreateTexture("WorldMapOverlay"..j, "ARTWORK");
+                    end
+                    NUM_WORLDMAP_OVERLAYS = neededTextures;
+                end
+                for j=1, numTexturesTall do
+                    if ( j < numTexturesTall ) then
+                        texturePixelHeight = 256;
+                        textureFileHeight = 256;
+                    else
+                        texturePixelHeight = mod(textureHeight, 256);
+                        if ( texturePixelHeight == 0 ) then
+                            texturePixelHeight = 256;
+                        end
+                        textureFileHeight = 16;
+                        while(textureFileHeight < texturePixelHeight) do
+                            textureFileHeight = textureFileHeight * 2;
+                        end
+                    end
+                    for k=1, numTexturesWide do
+                        textureCount = textureCount + 1;
+                        texture = getglobal("WorldMapOverlay"..textureCount);
+                        if ( k < numTexturesWide ) then
+                            texturePixelWidth = 256;
+                            textureFileWidth = 256;
+                        else
+                            texturePixelWidth = mod(textureWidth, 256);
+                            if ( texturePixelWidth == 0 ) then
+                                texturePixelWidth = 256;
+                            end
+                            textureFileWidth = 16;
+                            while(textureFileWidth < texturePixelWidth) do
+                                textureFileWidth = textureFileWidth * 2;
+                            end
+                        end
+                        texture:SetWidth(texturePixelWidth);
+                        texture:SetHeight(texturePixelHeight);
+                        texture:SetTexCoord(0, texturePixelWidth/textureFileWidth, 0, texturePixelHeight/textureFileHeight);
+                        texture:ClearAllPoints();
+                        texture:SetPoint("TOPLEFT", offsetX + (256 * (k-1)), -(offsetY + (256 * (j - 1))));
+                        texture:SetTexture(textureName..(((j - 1) * numTexturesWide) + k));
+                        texture:Show();
+                    end
+                end
+            end
+            for i=textureCount+1, NUM_WORLDMAP_OVERLAYS do
+                getglobal("WorldMapOverlay"..i):Hide();
+            end
+
+            if ( GetCurrentMapContinent() == 0 ) then
+                WorldMapZoomOutButton:Disable();
+            else
+                WorldMapZoomOutButton:Enable();
+            end
+        end
+
+        -- ref verbatim: zone view → its continent; continent view → the world.
+        function WorldMapZoomOutButton_OnClick()
+            if ( GetCurrentMapZone() ~= 0 ) then
+                SetMapZoom(GetCurrentMapContinent());
+            else
+                SetMapZoom(0);
+            end
+        end
+
+        -- ── The continent/zone dropdowns (ref verbatim, except the vararg walk: the reference's
+        -- `arg.n` needs LUA_COMPAT_VARARG, which stock 5.1 — and ours — doesn't ship; select()
+        -- is the 5.1-native spelling). ─────────────────────────────────────────────────────────
+        function WorldMapContinentsDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, WorldMapContinentsDropDown_Initialize);
+            UIDropDownMenu_SetWidth(130);
+        end
+
+        function WorldMapContinentsDropDown_Initialize()
+            WorldMapFrame_LoadContinents(GetMapContinents());
+        end
+
+        function WorldMapFrame_LoadContinents(...)
+            local info;
+            for i=1, select("#", ...), 1 do
+                info = {};
+                info.text = select(i, ...);
+                info.func = WorldMapContinentButton_OnClick;
+                UIDropDownMenu_AddButton(info);
+            end
+        end
+
+        function WorldMapZoneDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, WorldMapZoneDropDown_Initialize);
+            UIDropDownMenu_SetWidth(130);
+        end
+
+        function WorldMapZoneDropDown_Initialize()
+            WorldMapFrame_LoadZones(GetMapZones(GetCurrentMapContinent()));
+        end
+
+        function WorldMapFrame_LoadZones(...)
+            local info;
+            for i=1, select("#", ...), 1 do
+                info = {};
+                info.text = select(i, ...);
+                info.func = WorldMapZoneButton_OnClick;
+                UIDropDownMenu_AddButton(info);
+            end
+        end
+
+        function WorldMapContinentButton_OnClick()
+            UIDropDownMenu_SetSelectedID(WorldMapContinentDropDown, this:GetID());
+            SetMapZoom(this:GetID());
+        end
+
+        function WorldMapZoneButton_OnClick()
+            UIDropDownMenu_SetSelectedID(WorldMapZoneDropDown, this:GetID());
+            SetMapZoom(GetCurrentMapContinent(), this:GetID());
+        end
+
+        function WorldMap_UpdateZoneDropDownText()
+            if ( GetCurrentMapZone() == 0 ) then
+                UIDropDownMenu_ClearAll(WorldMapZoneDropDown);
+            else
+                UIDropDownMenu_SetSelectedID(WorldMapZoneDropDown, GetCurrentMapZone());
+            end
+        end
+
+        function WorldMap_UpdateContinentDropDownText()
+            if ( GetCurrentMapContinent() == 0 ) then
+                UIDropDownMenu_ClearAll(WorldMapContinentDropDown);
+            else
+                UIDropDownMenu_SetSelectedID(WorldMapContinentDropDown, GetCurrentMapContinent());
+            end
+        end
+
+        -- ref verbatim: left click drills in via ProcessMapClick on normalized button coords;
+        -- anything else zooms out.
+        function WorldMapButton_OnClick(mouseButton)
+            CloseDropDownMenus();
+            if ( mouseButton == "LeftButton" ) then
+                local x, y = GetCursorPosition();
+                x = x / WorldMapButton:GetEffectiveScale();
+                y = y / WorldMapButton:GetEffectiveScale();
+                local centerX, centerY = WorldMapButton:GetCenter();
+                local width = WorldMapButton:GetWidth();
+                local height = WorldMapButton:GetHeight();
+                local adjustedY = (centerY + (height/2) - y) / height;
+                local adjustedX = (x - (centerX - (width/2))) / width;
+                ProcessMapClick( adjustedX, adjustedY);
+            else
+                WorldMapZoomOutButton_OnClick();
+            end
+        end
+
+        -- ref WorldMapButton_OnUpdate, reduced to hover + the player blip (party/raid/flags/
+        -- corpse/ping are deferred with their wire). UpdateMapHighlight is a stub until the
+        -- area-bitmap source lands (wow-re dispatch) — nil name/fileName take the hide paths.
+        function WorldMapButton_OnUpdate(elapsed)
+            local x, y = GetCursorPosition();
+            x = x / this:GetEffectiveScale();
+            y = y / this:GetEffectiveScale();
+            local centerX, centerY = this:GetCenter();
+            local width = this:GetWidth();
+            local height = this:GetHeight();
+            local adjustedY = (centerY + (height/2) - y ) / height;
+            local adjustedX = (x - (centerX - (width/2))) / width;
+            local name, fileName, texPercentageX, texPercentageY, textureX, textureY, scrollChildX, scrollChildY = UpdateMapHighlight( adjustedX, adjustedY );
+            WorldMapFrameAreaLabel:SetText(name or "");
+            if ( fileName ) then
+                WorldMapHighlight:SetTexCoord(0, texPercentageX, 0, texPercentageY);
+                WorldMapHighlight:SetTexture("Interface\\WorldMap\\"..fileName.."\\"..fileName.."Highlight");
+                textureX = textureX * width;
+                textureY = textureY * height;
+                scrollChildX = scrollChildX * width;
+                scrollChildY = -scrollChildY * height;
+                if ( (textureX > 0) and (textureY > 0) ) then
+                    WorldMapHighlight:SetWidth(textureX);
+                    WorldMapHighlight:SetHeight(textureY);
+                    WorldMapHighlight:SetPoint("TOPLEFT", "WorldMapDetailFrame", "TOPLEFT", scrollChildX, scrollChildY);
+                    WorldMapHighlight:Show();
+                end
+            else
+                WorldMapHighlight:Hide();
+            end
+            -- The player blip: the reference's engine arrow, as our rotating texture stand-in.
+            WorldMapPlayerIcon:SetRotation(GetPlayerFacing());
+            local playerX, playerY = GetPlayerMapPosition("player");
+            if ( playerX == 0 and playerY == 0 ) then
+                WorldMapPlayer:Hide();
+            else
+                playerX = playerX * WorldMapDetailFrame:GetWidth();
+                playerY = -playerY * WorldMapDetailFrame:GetHeight();
+                WorldMapPlayer:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", playerX, playerY);
+                WorldMapPlayer:Show();
+            end
+            -- Position corpse (ref WorldMapFrame.lua:443-452, verbatim law: (0,0) = hide).
+            local corpseX, corpseY = GetCorpseMapPosition();
+            if ( corpseX == 0 and corpseY == 0 ) then
+                WorldMapCorpse:Hide();
+            else
+                corpseX = corpseX * WorldMapDetailFrame:GetWidth();
+                corpseY = -corpseY * WorldMapDetailFrame:GetHeight();
+                WorldMapCorpse:SetPoint("CENTER", "WorldMapDetailFrame", "TOPLEFT", corpseX, corpseY);
+                WorldMapCorpse:Show();
+            end
+        end
+    ]]></Script>
+    <!-- The fullscreen blackout — a separate, UNSCALED frame behind the map sheet (0224). The map
+         itself (WorldMapFrame) is now the native 1024×768 sheet that SetupFullscreenScale grows to
+         fill the screen; the blackout stays screen-sized so the world never shows through the
+         margins, and eats clicks so nothing leaks to the world behind it. -->
+    <Frame name="WorldMapBlackout" frameStrata="FULLSCREEN" hidden="true" enableMouse="true" parent="UIParent">
+        <Anchors>
+            <Anchor point="TOPLEFT"/>
+            <Anchor point="BOTTOMRIGHT"/>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture setAllPoints="true"><Color r="0.0" g="0.0" b="0.0"/></Texture>
+            </Layer>
+        </Layers>
+    </Frame>
+    <Frame name="WorldMapFrame" frameStrata="FULLSCREEN_DIALOG" hidden="true" enableMouse="true" parent="UIParent">
+        <Size><AbsDimension x="1024" y="768"/></Size>
+        <Anchors>
+            <Anchor point="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture file="Interface\WorldMap\UI-WorldMap-Top1">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-512" y="384"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Top2">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-256" y="384"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Top3">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="0" y="384"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Top4">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="256" y="384"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Middle1">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-512" y="128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Middle2">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-256" y="128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Middle3">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="0" y="128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Middle4">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="256" y="128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Bottom1">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-512" y="-128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Bottom2">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="-256" y="-128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Bottom3">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\WorldMap\UI-WorldMap-Bottom4">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="CENTER"><Offset><AbsDimension x="256" y="-128"/></Offset></Anchor></Anchors>
+                </Texture>
+                <FontString inherits="GameFontNormal" text="World Map">
+                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="0" y="372"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="WorldMapPositioningGuide">
+                <Size><AbsDimension x="1024" y="768"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+            </Frame>
+            <!-- ref: the continent picker (id 1) at the top row's left, the zone picker (id 2)
+                 chained to its right, the zoom-out button closing the row. OnLoad instead of the
+                 ref's OnShow (our engine fires OnShow only on the frame itself, not children of
+                 a shown parent; OnLoad + the WORLD_MAP_UPDATE re-init below cover every open). -->
+            <Frame name="WorldMapContinentDropDown" inherits="UIDropDownMenuTemplate" id="1">
+                <Anchors>
+                    <Anchor point="TOP" relativePoint="TOP" relativeTo="WorldMapPositioningGuide">
+                        <Offset><AbsDimension x="-80" y="-35"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString inherits="GameFontNormalSmall" text="Continent">
+                            <Anchors>
+                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="10"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>
+                        WorldMapContinentsDropDown_OnLoad();
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+            <Frame name="WorldMapZoneDropDown" inherits="UIDropDownMenuTemplate" id="2">
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="WorldMapContinentDropDown" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="-33" y="0"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString inherits="GameFontNormalSmall" text="Zone">
+                            <Anchors>
+                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="20" y="10"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>
+                        WorldMapZoneDropDown_OnLoad();
+                        this:RegisterEvent("WORLD_MAP_UPDATE");
+                    </OnLoad>
+                    <OnEvent>
+                        if ( this:IsVisible() ) then
+                            WorldMapContinentsDropDown_OnLoad();
+                            WorldMap_UpdateContinentDropDownText();
+                            WorldMapZoneDropDown_OnLoad();
+                            WorldMap_UpdateZoneDropDownText();
+                        end
+                    </OnEvent>
+                </Scripts>
+            </Frame>
+            <Button name="WorldMapZoomOutButton" text="Zoom Out">
+                <Size><AbsDimension x="110" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="WorldMapZoneDropDown" relativePoint="RIGHT">
+                        <Offset><AbsDimension x="-10" y="3"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <NormalFont inherits="GameFontNormal"/>
+                <HighlightFont inherits="GameFontHighlight"/>
+                <DisabledFont inherits="GameFontDisable"/>
+                <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+                <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+                <Scripts>
+                    <OnClick>WorldMapZoomOutButton_OnClick();</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="WorldMapFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="TOPRIGHT" relativePoint="TOP" relativeTo="WorldMapPositioningGuide">
+                        <Offset><AbsDimension x="516" y="4"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts>
+                    <OnClick>WorldMapFrame:Hide();</OnClick>
+                </Scripts>
+            </Button>
+            <Frame name="WorldMapDetailFrame">
+                <Size><AbsDimension x="1002" y="668"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="TOP" relativeTo="WorldMapPositioningGuide">
+                        <Offset><AbsDimension x="-502" y="-69"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="WorldMapDetailTile1">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile2">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile1" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile3">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile2" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile4">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile3" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile5">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile1" relativePoint="BOTTOMLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile6">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile5" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile7">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile6" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile8">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile7" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile9">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile5" relativePoint="BOTTOMLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile10">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile9" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile11">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile10" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="WorldMapDetailTile12">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailTile11" relativePoint="TOPRIGHT"/></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <Texture name="WorldMapHighlight" alphaMode="ADD" hidden="true">
+                            <Size><AbsDimension x="128" y="128"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <Button name="WorldMapButton" enableMouse="true">
+                <Size><AbsDimension x="1002" y="668"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="WorldMapDetailFrame"/></Anchors>
+                <Frames>
+                    <Frame name="WorldMapPlayer">
+                        <Size><AbsDimension x="32" y="32"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="OVERLAY">
+                                <Texture name="WorldMapPlayerIcon" file="Interface\Minimap\MinimapArrow" setAllPoints="true"/>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+                    <!-- The corpse marker (decision 0308 §5) — ref WorldMapCorpseTemplate
+                         (WorldMapFrameTemplates.xml l.55-88) inlined: 16x16, the POIIcons skull
+                         cell (0.875-1.0 / 0-0.125), hover names it CORPSE_RED. The ref anchors its
+                         tooltip to a WorldMapTooltip; ours rides the shared GameTooltip (this
+                         map ships no separate tooltip — header note), same side-pick law. -->
+                    <Frame name="WorldMapCorpse" hidden="true" enableMouse="true">
+                        <Size><AbsDimension x="16" y="16"/></Size>
+                        <Anchors><Anchor point="CENTER"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture file="Interface\Minimap\POIIcons" setAllPoints="true">
+                                    <TexCoords left="0.875" right="1.0" top="0" bottom="0.125"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEnter>
+                                local x = this:GetCenter()
+                                local parentX = this:GetParent():GetCenter()
+                                if x > parentX then
+                                    GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+                                else
+                                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                                end
+                                GameTooltip:SetText("|cffff2020Corpse|r")
+                                GameTooltip:Show()
+                            </OnEnter>
+                            <OnLeave>
+                                GameTooltip:Hide()
+                            </OnLeave>
+                        </Scripts>
+                    </Frame>
+                    <Frame name="WorldMapFrameAreaFrame">
+                        <Size><AbsDimension x="400" y="128"/></Size>
+                        <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="OVERLAY">
+                                <FontString name="WorldMapFrameAreaLabel" inherits="WorldMapTextFont">
+                                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="20" y="-20"/></Offset></Anchor></Anchors>
+                                </FontString>
+                                <FontString name="WorldMapFrameAreaDescription" inherits="SubZoneTextFont">
+                                    <Anchors><Anchor point="TOP" relativeTo="WorldMapFrameAreaLabel" relativePoint="BOTTOM"/></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                    </Frame>
+                </Frames>
+                <Scripts>
+                    <OnLoad>
+                        this:RegisterForClicks("LeftButtonUp", "RightButtonUp");
+                    </OnLoad>
+                    <OnClick>
+                        WorldMapButton_OnClick(arg1);
+                    </OnClick>
+                    <OnUpdate>
+                        WorldMapButton_OnUpdate(arg1);
+                    </OnUpdate>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("WORLD_MAP_UPDATE");
+                -- The hover area label inherits WorldMapTextFont (nominal 102). 33 was the
+                -- director's taste call (0235) — which the one-to-one raster cap (the fold-back
+                -- record; wow-re fontstring-overflow.md) now clamps to the byte law's 32, one
+                -- unit under that call and closer to it than the 36 the atlas snap used to
+                -- deliver. The real client draws this SetFont(33) at 32 too. Still a taste dial:
+                -- any value ≤ 32 is honored exactly.
+                WorldMapFrameAreaLabel:SetFont("Fonts\\FRIZQT__.TTF", 33);
+                WorldMapFrame_Update();
+            </OnLoad>
+            <OnShow>
+                WorldMapBlackout:Show();
+                SetupFullscreenScale();
+                SetMapToCurrentZone();
+                WorldMapFrame_Update();
+                PlaySound("igQuestLogOpen");
+                CloseDropDownMenus();
+            </OnShow>
+            <OnHide>
+                WorldMapBlackout:Hide();
+                PlaySound("igQuestLogClose");
+            </OnHide>
+            <OnEvent>
+                if ( WorldMapFrame:IsVisible() ) then
+                    WorldMapFrame_Update();
+                end
+            </OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

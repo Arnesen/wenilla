@@ -1,0 +1,570 @@
+//! `benilla-formats` — adapters and CLI tooling over WoW 1.12.1 (build 5875) asset formats.
+//!
+//! Every asset format is **in-repo** (decision 0021): MPQ archives (`benilla-mpq`), BLP2 textures
+//! (`benilla-blp`), DBC tables (`benilla-dbc`), WDT tile tables (`benilla-wdt`), ADT terrain
+//! (`benilla-adt`), WMO buildings (`benilla-wmo`), and M2 models (`benilla-m2`). This crate adds our
+//! schema layer, the patch-chain helper ([`Chain`]), and the `benilla-extract` CLI, and keeps data in
+//! **raw WoW coordinates** (the Bevy transform lives in `benilla`).
+//!
+//! Phase 1: MPQ list/extract, BLP -> PNG, DBC -> CSV.
+
+use std::io::Cursor;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use benilla_dbc::{DbcParser, FieldType, Schema, SchemaField};
+
+mod chain;
+pub use chain::{Chain, ChainEntry};
+mod characters;
+pub use characters::{
+    CharCreateCatalog, CharSections, CharacterGeosets, DialRanges, EquipGeosets, StartOutfitItem,
+};
+mod creatures;
+mod dbc;
+mod unit_blood;
+pub use creatures::{load_creature_catalog, CreatureCatalog, CreatureModel, NpcAppearance};
+pub use unit_blood::{load_blood_catalog, BloodCatalog};
+mod itemsets;
+pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod itemsubclass;
+pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
+mod factions;
+pub use factions::{
+    load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo, FactionTemplate, Reaction,
+};
+mod creature_types;
+pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
+mod gameobjects;
+pub use gameobjects::{
+    go_sound_slot, load_gameobject_catalog, load_gameobject_sounds, GameObjectCatalog,
+    GameObjectSounds,
+};
+mod durability;
+pub use durability::{load_durability_tables, DurabilityTables};
+mod bank_bag_slot_prices;
+pub use bank_bag_slot_prices::{load_bank_bag_slot_prices, BankBagSlotPrices};
+mod stationery;
+pub use stationery::{load_stationery_catalog, StationeryCatalog, STATIONERY_DEFAULT};
+mod lock;
+pub use lock::{
+    load_lock_catalog, LockCatalog, LockSlot, LOCK_KEY_ITEM, LOCK_KEY_NONE, LOCK_KEY_SKILL,
+    MAX_LOCK_SLOTS,
+};
+mod lock_type;
+pub use lock_type::{load_lock_type_catalog, LockTypeCatalog};
+mod items;
+pub use items::{load_item_display_catalog, ItemDisplay, ItemDisplayCatalog};
+mod item_sounds;
+pub use item_sounds::{load_item_group_sounds, ItemGesture, ItemGroupSoundsCatalog};
+mod ground_effects;
+pub use ground_effects::{
+    load_ground_effect_catalog, scatter_ground_doodads, GroundDoodadPlacement, GroundEffect,
+    GroundEffectCatalog,
+};
+mod light;
+pub use light::{Atmosphere, LightCatalog};
+mod loading_screen;
+pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
+mod liquid;
+pub use liquid::{LiquidKind, LiquidMesh};
+mod maps;
+pub use maps::{load_map_catalog, MapCatalog};
+mod anim_data;
+pub use anim_data::{load_anim_data_catalog, AnimDataCatalog, AnimEntry};
+mod quest_headers;
+pub use quest_headers::{load_quest_header_names, QuestHeaderNames};
+mod area_sound;
+pub use area_sound::{
+    load_area_sound_catalog, AreaAudio, AreaEntry, AreaSoundCatalog, SoundAmbienceEntry,
+    ZoneIntroEntry, ZoneMusicEntry,
+};
+mod creature_sound;
+pub use creature_sound::{load_creature_voice_catalog, CreatureVoice, CreatureVoiceCatalog};
+
+mod npc_greeting;
+pub use npc_greeting::{load_npc_greeting_catalog, NpcGreeting, NpcGreetingCatalog};
+mod emotes;
+pub use emotes::{load_emote_sound_catalog, EmoteSoundCatalog};
+mod environmental_damage;
+pub use environmental_damage::{load_environmental_damage, EnvironmentalDamageTable};
+mod footsteps;
+pub use footsteps::{load_footstep_catalog, FootstepCatalog};
+mod sound_entries;
+pub use sound_entries::{load_sound_kit_catalog, sound_kit_flags, SoundKit, SoundKitCatalog};
+mod sound_provider;
+pub use sound_provider::{load_sound_provider_catalog, SoundProvider, SoundProviderCatalog};
+mod sound_water;
+pub use sound_water::{load_water_sound_catalog, WaterSoundCatalog};
+mod weapon_impact;
+pub use weapon_impact::{
+    impact_slot, load_weapon_impact_catalog, WeaponImpactCatalog, WeaponImpactRow,
+};
+mod sheathe;
+pub use sheathe::{load_sheathe_sound_catalog, SheatheSoundCatalog, SheatheSounds};
+mod wmo_area;
+pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
+mod spells;
+pub use spells::{
+    load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_durations,
+    load_spell_radii, load_spell_ranges, substitute, ShapeshiftForm, SpellCastTime,
+    SpellCastTimeCatalog, SpellCatalog, SpellDisplay, SpellDuration, SpellDurationCatalog,
+    SpellRadius, SpellRadiusCatalog, SpellRange, SpellRangeCatalog, TokenContext,
+    ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED, SPELL_EFFECT_CREATE_ITEM,
+    SPELL_EFFECT_ENCHANT_ITEM, SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_SKINNING,
+    SPELL_EFFECT_TRADE_SKILL,
+};
+mod skill_lines;
+pub use skill_lines::{
+    load_skill_line_catalog, SkillLineCatalog, SkillLineInfo, SlaInfo, SKILL_CATEGORY_NOT_DISPLAYED,
+};
+mod spell_focus;
+pub use spell_focus::{load_spell_focus_catalog, SpellFocusCatalog};
+mod talents;
+pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
+mod spell_visual;
+pub use spell_visual::{
+    load_spell_visual_catalog, SpellVisualCatalog, VisualKit, VisualStages, KIT_SLOT_TAGS,
+    MISSILE_ATTACH_TABLE,
+};
+mod particles;
+pub use particles::{
+    parse_m2_particle_emitters, OverLife, ParticleBlend, ParticleEmitterDef, ParticleShape,
+    SplineData,
+};
+mod ribbons;
+pub use ribbons::{parse_m2_ribbon_emitters, RibbonEmitterDef};
+mod value_track;
+pub use value_track::{OnOffTrack, TrackValue, ValueTrack};
+mod models;
+pub use models::{
+    accumulate_wmo_group_camera_collision, accumulate_wmo_group_collision, hand_grip_finger_poses,
+    load_m2_animation_summary, load_m2_bounds, load_m2_collision_hull, load_m2_mesh,
+    load_m2_mesh_skinned, load_object_model, load_wmo, load_wmo_collision_tris,
+    m2_ribbon_emitter_count, m2_texture_transform_count, parse_m2_animation_summary,
+    parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
+    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
+    parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
+    parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
+    parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
+    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
+    wmo_group_submeshes, wmo_root_id, AlphaAnim, AnimEvent, Billboard, BillboardKind, BoneKeys,
+    BoneScaleAnim, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy,
+    FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment,
+    M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, PlayableAnim, RenderSubmesh,
+    RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
+    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
+    WmoPortals, WmoRoot,
+};
+mod terrain;
+pub use terrain::{
+    adt_to_tile_mesh, area_id_at, find_tile_near, ground_effect_at, load_tile_mesh,
+    load_tiles_around, mcsh_shadowed_at, terrain_height_at, triangle_z_at, ChunkMesh, Doodad,
+    MapTiles, TileMesh, WmoInstance, ALPHA_MAP_SIZE, SHADOW_MAP_SIZE, STORMWIND_XY, TILE_SIZE,
+};
+mod wdl;
+/// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles
+/// (and the minimap uses to place its tile art, decision 0203: minimap `map<X>_<Y>.blp` names
+/// share the ADT index order, chain-verified — `AhnQiraj_27_46.adt` exists, the swap doesn't).
+pub use benilla_wdt::{tile_to_world, world_to_tile, WdtFile, WdtReader, WowVersion};
+pub use wdl::{WdlFile, WdlTileMesh};
+
+// The map arc (decision 0203), phase 0: the minimap tile hash catalog + the world-map DBCs.
+mod minimap_translate;
+pub use minimap_translate::{load_minimap_translate, MinimapTranslate};
+mod world_map_area;
+pub use world_map_area::{load_world_map_area_catalog, WorldMapArea, WorldMapAreaCatalog};
+mod world_map_overlay;
+pub use world_map_overlay::{
+    load_world_map_overlay_catalog, WorldMapOverlay, WorldMapOverlayCatalog,
+};
+mod world_map_continent;
+pub use world_map_continent::{
+    load_world_map_continent_catalog, WorldMapContinent, WorldMapContinentCatalog,
+};
+mod area_poi;
+pub use area_poi::{load_area_poi_catalog, AreaPoi, AreaPoiCatalog};
+mod area_table;
+pub use area_table::{load_area_table_catalog, AreaTableCatalog, AreaTableRow};
+mod zone_map;
+pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
+
+// The transport arc (decision 0438), phase 0: the taxi/transport path DBC adapter + timetable.
+mod taxi;
+pub use taxi::{load_taxi_path_nodes, TaxiPathNode, TaxiPathNodes};
+mod transport_period;
+mod transports;
+pub use transports::{TransportSample, TransportTimetable};
+// The transport arc phase 3's second consumer: type-11 elevator/lift keyframe paths.
+mod elevators;
+pub use elevators::{
+    elevator_period_ms, elevator_sample, load_elevator_paths, ElevatorKeyframe, ElevatorPaths,
+};
+
+// The taxi arc (decision 0484), phase 1: the flight-master catalogs — node identity/position/
+// per-team mount (`TaxiNodes.dbc`) and the direct-hop fare table (`TaxiPath.dbc`). Distinct from
+// `taxi`/`TaxiPathNode.dbc` above, which carries a path's waypoints, not its node list or price.
+mod taxi_nodes;
+pub use taxi_nodes::{load_taxi_nodes, TaxiNode, TaxiNodes};
+mod taxi_path;
+pub use taxi_path::{load_taxi_paths, TaxiPath, TaxiPaths};
+
+/// Vanilla 1.12.1 MPQ load order, **lowest priority first**.
+///
+/// Later archives override earlier ones for files sharing an internal path. The base
+/// content archives hold the bulk of the data but carry **no `(listfile)`**; the master
+/// `(listfile)` (and most overrides) live in `patch.MPQ` / `patch-2.MPQ`, which is why the
+/// chain — not a single archive — is the correct unit to read from. Verified against the
+/// build-5875 client (`patch.MPQ` listfile = 26,350 entries).
+pub const VANILLA_LOAD_ORDER: &[&str] = &[
+    "base.MPQ",
+    "dbc.MPQ",
+    "fonts.MPQ",
+    "interface.MPQ",
+    "misc.MPQ",
+    "model.MPQ",
+    "sound.MPQ",
+    "speech.MPQ",
+    "terrain.MPQ",
+    "texture.MPQ",
+    "wmo.MPQ",
+    "patch.MPQ",
+    "patch-2.MPQ",
+];
+
+/// Open a [`Chain`] from either a single `.MPQ` file or a vanilla `Data` directory. Thin wrapper over
+/// [`Chain::open`], kept as the established entry point used across the crate and the CLI.
+pub fn open_chain(path: &Path) -> Result<Chain> {
+    Chain::open(path)
+}
+
+/// Decode a BLP texture from raw archive bytes and write it as a PNG at `out`.
+///
+/// Returns the source `(width, height)`. Used by the `benilla-extract` CLI. **1.12 textures are BLP2**
+/// (DXT-compressed or paletted Raw1 — NOT BLP1; verified). Decoded in-repo by [`benilla_blp`]
+/// (decision 0021); mip level 0 (full resolution) is written.
+pub fn blp_to_png(blp_bytes: &[u8], out: &Path) -> Result<(u32, u32)> {
+    let (w, h, rgba) = blp_to_rgba(blp_bytes)?;
+    image::RgbaImage::from_raw(w, h, rgba)
+        .ok_or_else(|| anyhow::anyhow!("BLP RGBA buffer size mismatch"))?
+        .save(out)
+        .with_context(|| format!("writing PNG {}", out.display()))?;
+    Ok((w, h))
+}
+
+/// Decode a BLP texture (raw bytes) to RGBA8: `(width, height, pixels)`.
+///
+/// For feeding GPU textures (the renderer) without a disk round-trip; mip level 0.
+pub fn blp_to_rgba(blp_bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    let decoded =
+        benilla_blp::decode(blp_bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    let level0 = decoded
+        .mips
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("BLP has no level 0"))?;
+    Ok((level0.width, level0.height, level0.rgba))
+}
+
+/// Read a texture from the chain by internal path (accepts `/` or `\`) and decode to RGBA8.
+pub fn read_texture_rgba(chain: &mut Chain, path: &str) -> Result<(u32, u32, Vec<u8>)> {
+    let name = path.replace('/', "\\");
+    let bytes = chain
+        .read_file(&name)
+        .with_context(|| format!("reading texture '{name}'"))?;
+    blp_to_rgba(&bytes)
+}
+
+/// A decoded BLP, mip-major: each entry is one authored mip level's RGBA8 bytes, level 0 first.
+/// **Never empty**: the chain length is `BlpHeader::mipmaps_count().max(1)` — a no-mipmaps BLP (the
+/// count formula reports 0) still yields a 1-level chain (level 0), matching `benilla_blp::decode`'s
+/// own guarantee that `mips` is never empty (see [`blp_bytes_to_mip_chain`]).
+#[derive(Debug, Clone)]
+pub struct BlpMipChain {
+    /// Mip-0 dimensions; level i's dims are `(width >> i).max(1) × (height >> i).max(1)`.
+    pub width: u32,
+    pub height: u32,
+    /// One RGBA8 buffer per authored mip level, level 0 first. **Authored, not regenerated** —
+    /// the BLP's pre-baked mip levels are what the real 1.12 client uploads ("the BLP's own stored mip
+    /// chain is used verbatim — no client-side mip regeneration"). Using these instead of
+    /// CPU-resampling mip 0 in gamma byte space is the
+    /// C2 fix: gamma-byte averaging of texels darkens mid-tones (the historical "dim/cool"
+    /// terrain tone gap).
+    pub mips: Vec<Vec<u8>>,
+}
+
+impl BlpMipChain {
+    /// Width × height of the mip level `i`, clamped to 1×1 minimum (wgpu / GL convention).
+    pub fn mip_size(&self, i: u32) -> (u32, u32) {
+        ((self.width >> i).max(1), (self.height >> i).max(1))
+    }
+}
+
+/// Decode every authored mip level of a BLP texture from the chain into `Rgba8Unorm` buffers.
+///
+/// One RGBA8 allocation per mip level (8 for a 256² with 8 mips). Caller is responsible for any
+/// further processing (concatenation, upload, BCn re-encode). The mip pyramid is the BLP's own,
+/// not regenerated — the C2-faithful behaviour.
+pub fn read_texture_mip_chain(chain: &mut Chain, path: &str) -> Result<BlpMipChain> {
+    let name = path.replace('/', "\\");
+    let bytes = chain
+        .read_file(&name)
+        .with_context(|| format!("reading texture '{name}'"))?;
+    blp_bytes_to_mip_chain(&bytes).with_context(|| format!("decoding texture '{name}'"))
+}
+
+/// Decode every authored mip level of an **in-memory** BLP into `Rgba8Unorm` buffers — the BLP's own
+/// stored pyramid, used verbatim (no client-side regeneration; the C2-faithful behaviour). This is the
+/// bytes-in entry point used by the Bevy `AssetLoader`; [`read_texture_mip_chain`] is the
+/// chain-reading wrapper.
+pub fn blp_bytes_to_mip_chain(bytes: &[u8]) -> Result<BlpMipChain> {
+    let decoded = benilla_blp::decode(bytes).map_err(|e| anyhow::anyhow!("decoding BLP: {e}"))?;
+    // `decode` guarantees `mips` is never empty: it always decodes level 0 regardless of the
+    // authored mip-chain count (`benilla_blp::decode`, `n = chain.clamp(1, 16)`, so the loop that
+    // fills `mips` runs at least once) — a no-mipmaps BLP reports `mip_chain_count() == 0` but still
+    // carries `mips[0]`. Take at least that one level: the chain we return is never empty, so a
+    // mipmap-less BLP yields a 1-level chain here, not zero.
+    let (width, height, count) = (
+        decoded.width,
+        decoded.height,
+        decoded.mip_chain_count().max(1),
+    );
+    let mips: Vec<Vec<u8>> = decoded
+        .mips
+        .into_iter()
+        .take(count)
+        .map(|m| m.rgba)
+        .collect();
+    Ok(BlpMipChain {
+        width,
+        height,
+        mips,
+    })
+}
+
+/// A hand-defined schema for a known 1.12 DBC, keyed by base filename, or `None`.
+///
+/// DBC files carry no column types, so the schema is ours to supply (from wowdev.wiki +
+/// the verified file header). Vanilla localized strings occupy **9 dwords** (8 locale
+/// offsets + 1 flags); only the enUS slot is populated in an enUS client. As we need more
+/// DBCs (Map, AreaTable, ...) add them here.
+fn schema_for(dbc_name: &str) -> Option<Schema> {
+    let base = dbc_name.rsplit(['/', '\\']).next().unwrap_or(dbc_name);
+
+    if base.eq_ignore_ascii_case("TaxiNodes.dbc") {
+        // 16 fields (record_size 64), verified against build 5875.
+        let mut s = Schema::new("TaxiNodes");
+        s.add_field(SchemaField::new("ID", FieldType::UInt32));
+        s.add_field(SchemaField::new("MapID", FieldType::UInt32));
+        s.add_field(SchemaField::new("X", FieldType::Float32));
+        s.add_field(SchemaField::new("Y", FieldType::Float32));
+        s.add_field(SchemaField::new("Z", FieldType::Float32));
+        s.add_field(SchemaField::new("Name", FieldType::String)); // enUS (locale 0)
+        s.add_field(SchemaField::new_array(
+            "NameOtherLocales",
+            FieldType::String,
+            7,
+        ));
+        s.add_field(SchemaField::new("NameFlags", FieldType::UInt32));
+        s.add_field(SchemaField::new("MountIdHorde", FieldType::UInt32));
+        s.add_field(SchemaField::new("MountIdAlliance", FieldType::UInt32));
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    if base.eq_ignore_ascii_case("AreaTable.dbc") {
+        // 25 fields (record_size 100), verified against build 5875 (the layout
+        // `area_table.rs` / `area_sound.rs` load from).
+        let mut s = Schema::new("AreaTable");
+        s.add_field(SchemaField::new("ID", FieldType::UInt32));
+        s.add_field(SchemaField::new("ContinentID", FieldType::UInt32));
+        s.add_field(SchemaField::new("ParentAreaID", FieldType::UInt32));
+        s.add_field(SchemaField::new("AreaBit", FieldType::UInt32));
+        s.add_field(SchemaField::new("Flags", FieldType::UInt32));
+        s.add_field(SchemaField::new("SoundProviderPref", FieldType::UInt32));
+        s.add_field(SchemaField::new(
+            "SoundProviderPrefUnderwater",
+            FieldType::UInt32,
+        ));
+        s.add_field(SchemaField::new("AmbienceID", FieldType::UInt32));
+        s.add_field(SchemaField::new("ZoneMusic", FieldType::UInt32));
+        s.add_field(SchemaField::new("IntroSound", FieldType::UInt32));
+        s.add_field(SchemaField::new("ExplorationLevel", FieldType::UInt32));
+        s.add_field(SchemaField::new("AreaName", FieldType::String)); // enUS (locale 0)
+        s.add_field(SchemaField::new_array(
+            "AreaNameOtherLocales",
+            FieldType::String,
+            7,
+        ));
+        s.add_field(SchemaField::new("AreaNameFlags", FieldType::UInt32));
+        s.add_field(SchemaField::new("FactionGroupMask", FieldType::UInt32));
+        s.add_field(SchemaField::new_array("LiquidTypeID", FieldType::UInt32, 4));
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    if base.eq_ignore_ascii_case("GameObjectDisplayInfo.dbc") {
+        // 12 fields (ID, ModelName, Sound[10]) — the layout `gameobjects.rs`'s own typed adapter
+        // loads from (verified build 5875).
+        let mut s = Schema::new("GameObjectDisplayInfo");
+        s.add_field(SchemaField::new("ID", FieldType::UInt32));
+        s.add_field(SchemaField::new("ModelName", FieldType::String));
+        for i in 0..10 {
+            s.add_field(SchemaField::new(format!("Sound{i}"), FieldType::UInt32));
+        }
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    if base.eq_ignore_ascii_case("TaxiPath.dbc") {
+        // 4 fields: ID, FromTaxiNode, ToTaxiNode, Cost — verified build 5875.
+        let mut s = Schema::new("TaxiPath");
+        for name in ["ID", "FromTaxiNode", "ToTaxiNode", "Cost"] {
+            s.add_field(SchemaField::new(name, FieldType::UInt32));
+        }
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    if base.eq_ignore_ascii_case("TaxiPathNode.dbc") {
+        // 9 fields (ID, PathID, NodeIndex, MapID, LocX/Y/Z, Flags, Delay) — the layout
+        // `taxi.rs`'s own typed adapter loads from (decision 0438 phase 0, verified build 5875).
+        let mut s = Schema::new("TaxiPathNode");
+        for name in ["ID", "PathID", "NodeIndex", "MapID"] {
+            s.add_field(SchemaField::new(name, FieldType::UInt32));
+        }
+        for name in ["LocX", "LocY", "LocZ"] {
+            s.add_field(SchemaField::new(name, FieldType::Float32));
+        }
+        for name in ["Flags", "Delay"] {
+            s.add_field(SchemaField::new(name, FieldType::UInt32));
+        }
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    if base.eq_ignore_ascii_case("TransportAnimation.dbc") {
+        // 7 fields: ID, TransportID, TimeIndex, PosX, PosY, PosZ, SequenceID — matches vmangos's
+        // `TransportAnimationEntry` (`DBCStructure.h:709-718`), which only reads the middle five
+        // (TransportEntry/TimeSeg/X/Y/Z) but the row itself carries all 7 (its own `Id` and
+        // `MovementId` columns are commented out there, not absent from the file).
+        let mut s = Schema::new("TransportAnimation");
+        s.add_field(SchemaField::new("ID", FieldType::UInt32));
+        s.add_field(SchemaField::new("TransportID", FieldType::UInt32));
+        s.add_field(SchemaField::new("TimeIndex", FieldType::UInt32));
+        for name in ["PosX", "PosY", "PosZ"] {
+            s.add_field(SchemaField::new(name, FieldType::Float32));
+        }
+        s.add_field(SchemaField::new("SequenceID", FieldType::UInt32));
+        s.set_key_field("ID");
+        return Some(s);
+    }
+
+    None
+}
+
+/// Parse a DBC (raw archive bytes) using our schema for it and write it as CSV with
+/// column headers. Returns `(record_count, field_count)`. Errors if we have no schema for
+/// the named DBC (with a hint), so a wrong/missing schema fails loudly rather than silently
+/// misaligning columns.
+pub fn dbc_to_csv(dbc_bytes: &[u8], dbc_name: &str, out: &Path) -> Result<(u32, u32)> {
+    let mut cursor = Cursor::new(dbc_bytes);
+    let parser =
+        DbcParser::parse(&mut cursor).map_err(|e| anyhow::anyhow!("parsing DBC header: {e}"))?;
+    let (records, fields) = (parser.header().record_count, parser.header().field_count);
+
+    let schema = schema_for(dbc_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no schema defined for '{dbc_name}' ({fields} fields); known: TaxiNodes.dbc, \
+             AreaTable.dbc, GameObjectDisplayInfo.dbc, TaxiPath.dbc, TaxiPathNode.dbc, \
+             TransportAnimation.dbc"
+        )
+    })?;
+
+    let parser = parser
+        .with_schema(schema)
+        .map_err(|e| anyhow::anyhow!("applying schema (field count mismatch?): {e}"))?;
+    let record_set = parser
+        .parse_records()
+        .map_err(|e| anyhow::anyhow!("parsing DBC records: {e}"))?;
+
+    let file = std::fs::File::create(out).with_context(|| format!("creating {}", out.display()))?;
+    benilla_dbc::export_to_csv(&record_set, std::io::BufWriter::new(file))
+        .with_context(|| format!("writing CSV {}", out.display()))?;
+
+    Ok((records, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal, complete BLP2 header (magic..=mip_sizes[16], 148 bytes) — mirrors the private
+    /// builder in `benilla_blp`'s own tests (that crate's helper isn't exported).
+    #[allow(clippy::too_many_arguments)]
+    fn blp2_header(
+        compression: u8,
+        alpha_bits: u8,
+        alpha_type: u8,
+        has_mipmaps: u8,
+        width: u32,
+        height: u32,
+        offsets: [u32; 16],
+        sizes: [u32; 16],
+    ) -> Vec<u8> {
+        const HEADER_SIZE: usize = 148;
+        let mut b = vec![0u8; HEADER_SIZE];
+        b[0..4].copy_from_slice(b"BLP2");
+        b[4..8].copy_from_slice(&1u32.to_le_bytes()); // content: 1 = Direct
+        b[8] = compression;
+        b[9] = alpha_bits;
+        b[10] = alpha_type;
+        b[11] = has_mipmaps;
+        b[12..16].copy_from_slice(&width.to_le_bytes());
+        b[16..20].copy_from_slice(&height.to_le_bytes());
+        for (i, o) in offsets.iter().enumerate() {
+            b[20 + i * 4..24 + i * 4].copy_from_slice(&o.to_le_bytes());
+        }
+        for (i, s) in sizes.iter().enumerate() {
+            b[84 + i * 4..88 + i * 4].copy_from_slice(&s.to_le_bytes());
+        }
+        b
+    }
+
+    /// THE VERIFIED LATENT PANIC, regression-pinned: a no-mipmaps BLP2 (`has_mipmaps = 0`) makes
+    /// `benilla_blp::decode` report `mip_chain_count() == 0`, which `blp_bytes_to_mip_chain` used to
+    /// take literally (`.take(0)`), returning an **empty** `mips` — `benilla-assets`' `world_art_image`
+    /// then panics on `chain.mips[0]`. `decode` itself always keeps level 0 regardless of the count
+    /// (see the comment on `blp_bytes_to_mip_chain`), so the fix is to floor the take at 1: this must
+    /// yield a 1-level chain, never an empty one.
+    #[test]
+    fn no_mipmap_blp_yields_a_one_level_chain_not_empty() {
+        const HEADER_SIZE: usize = 148;
+        const PALETTE_SIZE: usize = 256 * 4;
+        let pixel_offset = (HEADER_SIZE + PALETTE_SIZE) as u32;
+        let pixel_size = 2 * 2 * 4;
+        let mut offsets = [0u32; 16];
+        let mut sizes = [0u32; 16];
+        offsets[0] = pixel_offset;
+        sizes[0] = pixel_size;
+        // compression 3 = Raw3 (uncompressed BGRA8); has_mipmaps 0.
+        let mut b = blp2_header(3, 8, 0, 0, 2, 2, offsets, sizes);
+        b.resize(HEADER_SIZE + PALETTE_SIZE, 0); // palette bytes: unused by Raw3, present anyway
+        b.extend_from_slice(&[
+            10, 20, 30, 40, // B G R A
+            50, 60, 70, 80, //
+            90, 100, 110, 120, //
+            130, 140, 150, 160,
+        ]);
+
+        let chain = blp_bytes_to_mip_chain(&b).expect("valid no-mipmap BLP decodes");
+        assert_eq!(chain.width, 2);
+        assert_eq!(chain.height, 2);
+        assert_eq!(
+            chain.mips.len(),
+            1,
+            "no-mipmaps BLP must yield 1 level, not 0"
+        );
+        assert_eq!(chain.mips[0].len(), 2 * 2 * 4);
+    }
+}

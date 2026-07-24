@@ -1,0 +1,140 @@
+//! The character-select roster family: the `SMSG_CHAR_ENUM` [`Character`] entry (vmangos
+//! `Player::BuildEnumData` field order, byte-goldened in `tests/char_enum.rs`) + the
+//! create/delete result codes and the race/class/gender ids the create path sends.
+
+use std::io::{self, Read};
+
+use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8, Vector3d};
+
+/// `WorldResult::CharCreateSuccess` / `CharCreateNameInUse` (`SMSG_CHAR_CREATE`).
+pub const CHAR_CREATE_SUCCESS: u8 = 0x2E;
+pub const CHAR_CREATE_NAME_IN_USE: u8 = 0x31;
+/// `WorldResult::CharDeleteSuccess` (`SMSG_CHAR_DELETE`; vmangos `SharedDefines.h` ResponseCodes,
+/// counted from the verified `CHAR_CREATE_SUCCESS = 0x2E` anchor).
+pub const CHAR_DELETE_SUCCESS: u8 = 0x39;
+/// Race/Class/Gender values benilla's char-create sends.
+pub const RACE_HUMAN: u8 = 0x1;
+pub const CLASS_WARRIOR: u8 = 0x1;
+pub const GENDER_MALE: u8 = 0x0;
+
+/// A character-creation request: the identity + the five appearance dials the create screen picked.
+/// Consumed by the [`super::char_create`] body builder (`CMSG_CHAR_CREATE`) and carried to the
+/// parked IO thread over the pick channel (decision 0423). `outfit_id` isn't here — it's always 0 on
+/// the wire (the server reads and ignores it, then recomputes start gear; verified vmangos
+/// `CharacterHandler.cpp:310`). The five appearance bytes are `ChrRaces`/`CharSections`-valid indices
+/// the create UI derives from the DBCs, so every request the UI can build passes the server's
+/// `Player::ValidateAppearance`.
+#[derive(Debug, Clone)]
+pub struct CharCreateReq {
+    pub name: String,
+    /// `ChrRaces.dbc` id (1 Human … 8 Troll).
+    pub race: u8,
+    /// `ChrClasses.dbc` id (1 Warrior … 11 Druid).
+    pub class: u8,
+    /// 0 male, 1 female.
+    pub gender: u8,
+    pub skin: u8,
+    pub face: u8,
+    pub hair_style: u8,
+    pub hair_color: u8,
+    pub facial_hair: u8,
+}
+
+/// The enum entry's `flags` bits the select screen renders (vmangos `CHARACTER_FLAG_*`,
+/// `Player::BuildEnumData`): the at-login helm/cloak hide toggles, the dead-as-ghost marker, and
+/// the server-ordered rename.
+pub const CHARACTER_FLAG_HIDE_HELM: u32 = 0x0400;
+pub const CHARACTER_FLAG_HIDE_CLOAK: u32 = 0x0800;
+pub const CHARACTER_FLAG_GHOST: u32 = 0x2000;
+pub const CHARACTER_FLAG_RENAME: u32 = 0x4000;
+
+/// One visible-equipment entry of the enum record: the `ItemDisplayInfo.dbc` id (NOT an item id —
+/// the server already resolved the template hop) and the item's `InventoryType`. `display_id == 0`
+/// is an empty slot. 19 slots in the vanilla equipment order (head 0 … tabard 18).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CharEnumItem {
+    pub display_id: u32,
+    pub inventory_type: u8,
+}
+
+/// A character from `SMSG_CHAR_ENUM` — the full roster entry the character-select screen renders
+/// (decision 0465): identity, the five appearance bytes, zone/map/position, the display flags, and
+/// the visible equipment display ids. Only the guild id, first-login byte, pet triple, and first-bag
+/// pair are parsed for alignment and discarded (nothing at select renders them).
+#[derive(Debug, Clone)]
+pub struct Character {
+    pub guid: u64,
+    pub name: String,
+    /// `ChrRaces.dbc` id (1 Human … 8 Troll).
+    pub race: u8,
+    /// `ChrClasses.dbc` id (1 Warrior … 11 Druid).
+    pub class: u8,
+    /// 0 male, 1 female.
+    pub gender: u8,
+    /// The five appearance dials, `CharSections` indices (the create screen's tuple, echoed back).
+    pub skin: u8,
+    pub face: u8,
+    pub hair_style: u8,
+    pub hair_color: u8,
+    pub facial_hair: u8,
+    pub level: u8,
+    /// `AreaTable.dbc` id of the character's zone (the roster row's location line).
+    pub zone: u32,
+    pub map: u32,
+    pub position: Vector3d,
+    /// `CHARACTER_FLAG_*` bits (hide-helm/hide-cloak/ghost/rename are the rendered ones).
+    pub flags: u32,
+    /// The 19 visible equipment slots (vanilla order: head, neck, shoulders, shirt, chest, waist,
+    /// legs, feet, wrists, hands, finger×2, trinket×2, back, main hand, off hand, ranged, tabard).
+    pub equipment: [CharEnumItem; 19],
+}
+
+impl Character {
+    pub(super) fn read(r: &mut impl Read) -> io::Result<Self> {
+        let guid = read_u64_le(r)?;
+        let name = read_cstring(r)?;
+        let race = read_u8(r)?;
+        let class = read_u8(r)?;
+        let gender = read_u8(r)?;
+        let skin = read_u8(r)?;
+        let face = read_u8(r)?;
+        let hair_style = read_u8(r)?;
+        let hair_color = read_u8(r)?;
+        let facial_hair = read_u8(r)?;
+        let level = read_u8(r)?;
+        let zone = read_u32_le(r)?;
+        let map = read_u32_le(r)?;
+        let position = Vector3d::read(r)?;
+        let _guild_id = read_u32_le(r)?;
+        let flags = read_u32_le(r)?;
+        let _first_login = read_u8(r)?;
+        let _pet_display_id = read_u32_le(r)?;
+        let _pet_level = read_u32_le(r)?;
+        let _pet_family = read_u32_le(r)?;
+        let mut equipment = [CharEnumItem::default(); 19];
+        for slot in &mut equipment {
+            slot.display_id = read_u32_le(r)?;
+            slot.inventory_type = read_u8(r)?;
+        }
+        let _first_bag_display_id = read_u32_le(r)?;
+        let _first_bag_inventory_id = read_u8(r)?;
+        Ok(Self {
+            guid,
+            name,
+            race,
+            class,
+            gender,
+            skin,
+            face,
+            hair_style,
+            hair_color,
+            facial_hair,
+            level,
+            zone,
+            map,
+            position,
+            flags,
+            equipment,
+        })
+    }
+}

@@ -1,0 +1,118 @@
+<Ui>
+    <!--
+        The real client's UIErrorsFrame (ref UIErrorsFrame.xml/.lua; ErrorFont =
+        GameFontNormalLarge, ref Fonts.xml:258): a 512×60 MessageFrame at TOP (0,-122),
+        displayDuration 5, insertMode TOP — the newest message takes the top line and older ones
+        shift down, up to the ~3 lines the 60px box holds. UI_INFO_MESSAGE shows YELLOW (1,1,0) —
+        the quest objective-progress toasts land here — and UI_ERROR_MESSAGE red (1,0.1,0.1), the
+        ref handler verbatim (UIErrorsFrame.lua:8-16; its SYSMSG arm is unwired — no engine
+        producer yet). This engine has no MessageFrame widget, so the message list is this file's
+        Lua over three stacked FontStrings: hold 5 s (the ref displayDuration), then fade out
+        (INTERIM 1 s — the ref MessageFrame's post-hold fade curve is unpinned), oldest dropped
+        past the visible three. `BenillaErrorsFrame_AddMessage(text, r, g, b)` is the Lua-callable
+        seam (the ref's `UIErrorsFrame:AddMessage`) for FrameXML-side producers — the quest log's
+        watch guards use it.
+    -->
+    <Script><![CDATA[
+        BENILLA_ERRORS_LINES = 3
+        BENILLA_ERRORS_HOLD = 5.0   -- ref displayDuration="5"
+        BENILLA_ERRORS_FADE = 1.0   -- INTERIM (comment above)
+
+        function BenillaErrorsFrame_AddMessage(text, r, g, b)
+            local frame = getglobal("BenillaErrorsFrame")
+            -- insertMode="TOP": newest first, older lines shift down and off the list.
+            table.insert(frame.messages, 1, { text = text, r = r, g = g, b = b, age = 0 })
+            while table.getn(frame.messages) > BENILLA_ERRORS_LINES do
+                table.remove(frame.messages)
+            end
+            BenillaErrorsFrame_Paint(frame)
+            frame:Show()
+        end
+
+        function BenillaErrorsFrame_Paint(frame)
+            for i = 1, BENILLA_ERRORS_LINES do
+                local line = getglobal("BenillaErrorsFrameLine" .. i)
+                local msg = frame.messages[i]
+                if msg then
+                    line:SetText(msg.text)
+                    line:SetTextColor(msg.r, msg.g, msg.b)
+                    local over = msg.age - BENILLA_ERRORS_HOLD
+                    if over > 0 then
+                        line:SetAlpha(1.0 - over / BENILLA_ERRORS_FADE)
+                    else
+                        line:SetAlpha(1.0)
+                    end
+                    line:Show()
+                else
+                    line:Hide()
+                end
+            end
+        end
+
+        function BenillaErrorsFrame_OnLoad(frame)
+            frame.messages = {}
+            frame:RegisterEvent("UI_INFO_MESSAGE")
+            frame:RegisterEvent("UI_ERROR_MESSAGE")
+            frame:Hide()
+        end
+
+        function BenillaErrorsFrame_OnEvent(frame)
+            if not arg1 then return end
+            if event == "UI_INFO_MESSAGE" then
+                BenillaErrorsFrame_AddMessage(arg1, 1.0, 1.0, 0.0) -- ref UIErrorsFrame.lua:12
+            elseif event == "UI_ERROR_MESSAGE" then
+                BenillaErrorsFrame_AddMessage(arg1, 1.0, 0.1, 0.1) -- ref UIErrorsFrame.lua:14
+            end
+        end
+
+        function BenillaErrorsFrame_OnUpdate(frame, elapsed)
+            for i = table.getn(frame.messages), 1, -1 do
+                local msg = frame.messages[i]
+                msg.age = msg.age + elapsed
+                if msg.age > BENILLA_ERRORS_HOLD + BENILLA_ERRORS_FADE then
+                    table.remove(frame.messages, i)
+                end
+            end
+            BenillaErrorsFrame_Paint(frame)
+            if table.getn(frame.messages) == 0 then
+                frame:Hide()
+            end
+        end
+    ]]></Script>
+
+    <!-- frameStrata HIGH is the ref's own (`UIErrorsFrame.xml` l.4). It matters here: this frame is
+         512x60 anchored TOP (0,-122), which overlaps the right edge of every left-slot panel window
+         (character, quest log, loot, merchant, mail, trainer, taxi — all at TOPLEFT (0,-104)). Its
+         own content is flat FontString REGIONS at level 0 while those panels carry dozens of nested
+         child frames at level 1+, so left in the default MEDIUM its toasts draw UNDER whichever
+         panel is open — invisible in exactly the state you most want to read them. Decision 0597. -->
+    <Frame name="BenillaErrorsFrame" frameStrata="HIGH">
+        <Size><AbsDimension x="512" y="60"/></Size>
+        <Anchors>
+            <Anchor point="TOP" relativePoint="TOP">
+                <Offset><AbsDimension x="0" y="-122"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="OVERLAY">
+                <FontString name="BenillaErrorsFrameLine1" inherits="GameFontNormalLarge" justifyH="CENTER">
+                    <Size><AbsDimension x="512" y="0"/></Size>
+                    <Anchors><Anchor point="TOP" relativePoint="TOP"/></Anchors>
+                </FontString>
+                <FontString name="BenillaErrorsFrameLine2" inherits="GameFontNormalLarge" justifyH="CENTER">
+                    <Size><AbsDimension x="512" y="0"/></Size>
+                    <Anchors><Anchor point="TOP" relativeTo="BenillaErrorsFrameLine1" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaErrorsFrameLine3" inherits="GameFontNormalLarge" justifyH="CENTER">
+                    <Size><AbsDimension x="512" y="0"/></Size>
+                    <Anchors><Anchor point="TOP" relativeTo="BenillaErrorsFrameLine2" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>BenillaErrorsFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaErrorsFrame_OnEvent(self)</OnEvent>
+            <OnUpdate>BenillaErrorsFrame_OnUpdate(self, arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

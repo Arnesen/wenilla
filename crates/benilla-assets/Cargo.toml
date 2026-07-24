@@ -1,0 +1,15 @@
+[package]
+name = "benilla-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bevy AssetSource + AssetLoaders over the WoW 1.12.1 MPQ patch chain"
+
+[dependencies]
+anyhow.workspace = true
+bevy.workspace = true
+benilla-formats = { path = "../benilla-formats" }
+# Nearest-neighbour resize for off-Elwynn layer BLPs authored below LAYER_TEX_SIZE (texel
+# replication in gamma byte space — no averaging, so the C2 mid-tone darkening can't creep in).
+image = { version = "0.25", default-features = false }
+serde = { version = "1", features = ["derive"] }

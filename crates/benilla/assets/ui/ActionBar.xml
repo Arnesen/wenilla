@@ -1,0 +1,732 @@
+<Ui>
+    <!--
+        benilla's main action bar, RE-SKINNED to the real 1.12 MainMenuBar (decision 0068 slice-1;
+        dressing arc, decision 0084). The geometry + art below are QUOTED from the real FrameXML
+        (scratchpad refs, line citations inline): ref-MainMenuBar.xml (the bar art, end caps, XP bar),
+        ref-ActionBarFrame.xml (the 12-button anchor chain + page buttons), ref-ActionButtonTemplate.xml
+        (the button template). The Lua data flow is UNCHANGED — the vanilla page formula, the
+        ACTIONBAR_SLOT_CHANGED repaint, HasAction/GetActionTexture in, UseAction out.
+
+        Structure mirrors the real hierarchy so the draw order falls out of the frame tree:
+          BenillaActionBar (1024x53, BOTTOM of screen)
+            ├─ BenillaExpBar        (StatusBar, TOP)      — drawn first ⇒ lowest
+            └─ BenillaActionBarArtFrame (fills the bar)   — dwarf strips + end caps over the XP bar
+                 └─ 12 buttons + page up/down             — child frames ⇒ over the art
+        (The real client gets the same order via RaiseFrameLevel(MainMenuBarArtFrame); our loader's
+        later-sibling-is-higher + child-over-parent rules reproduce it without the explicit raise.)
+
+        SCOPE / real-client divergences (noted, not bugs):
+        - No frame scale: the real bar is UIParent-scaled; we render 1:1. Geometry is otherwise exact.
+        - Page up/down + the page number are ART ONLY (we have no bar paging — only the bonus-bar
+          offset; ref-ActionBarFrame.xml l.159-217). The page number renders a static "1".
+        - HotKey renders the static binding labels — always non-empty, so the ref's RANGE_INDICATOR
+          dot path (shown only when a button has NO binding text, ActionButton_UpdateHotkeys) never
+          applies; the out-of-range read is the hotkey's red tint (the OnUpdate range timer below).
+        - The state/feedback layer (decision 0137 phase 4) is the ref ActionButton.lua transcribed:
+          UpdateState (checked on IsCurrentAction/IsAutoRepeatAction), UpdateUsable (the 1/1/1 ·
+          0.5/0.5/1 · 0.4/0.4/0.4 vertex-color trio), UpdateCooldown (CooldownFrame_SetTimer),
+          the Border's equipped green, and the 0.4 s Flash blink — with ONE structural deviation:
+          the event set registers on the BAR frame and fans to all 12 buttons, instead of the
+          ref's per-button Register/Unregister churn on HasAction (12 fixed buttons make the
+          skip-empties optimization noise; the handlers themselves are the ref's).
+        - Count (decision 0216 §7, slice 4): the ref gates it on IsConsumableAction; we simplify to
+          "an ITEM-kind action with a positive bag count" (GetActionCount always answers 0 for a
+          non-item kind, so the gate is really just `count > 0`) — not every consumable is
+          detectable as such without the full consumable-flag column, which nothing else needs yet.
+        - Empty-slot grid (ref ActionButton.lua:241-259's ShowGrid/HideGrid, a per-button COUNTER):
+          simplified to one bar-level BOOLEAN — the cursor is a single global payload, so no two
+          "shows" can ever nest, and a counter would just be a boolean with extra steps. Unlike the
+          ref (which HIDES an empty, non-grid slot entirely), our bar always shows all 12 wells; the
+          grid only swaps an EMPTY slot's ring art between the occupied and empty Quickslot textures
+          — the default (nothing held) look is unchanged from before this slice, no capture regression.
+        - Exhaustion tick + rest fill, XP text (hover/cvar-gated), MaxLevelBar, the performance bar,
+          the four bag slots / keyring / micro buttons: OUT. The bag/keyring/micro cluster on the
+          bar's right is the visible remaining gap (only the backpack toggle is relocated there).
+    -->
+    <Script><![CDATA[
+        BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+
+        -- Ref ActionButton.lua:4 / UIParent.lua: the flash blink period and the range-check cadence.
+        ATTACK_BUTTON_FLASH_TIME = 0.4
+        TOOLTIP_UPDATE_TIME = 0.2
+
+        -- CooldownFrame_SetTimer moved to Cooldown.xml (the ref's own file split) — the bag
+        -- slots share it, so it loads before both consumers.
+
+        -- The static key-binding label each button i shows in its HotKey corner (our bar binds
+        -- 1..9,0,-,= to slots 1..12). The real client derives these from GetBindingKey; we render
+        -- them statically since the bindings are fixed.
+        BENILLA_ACTIONBAR_HOTKEYS = { "1","2","3","4","5","6","7","8","9","0","-","=" }
+
+        -- Whether a placeable cursor payload is held (decision 0216 §7's ACTIONBAR_SHOWGRID/
+        -- _HIDEGRID pair, simplified to a boolean — see the SCOPE note above).
+        BENILLA_ACTIONBAR_GRID_SHOWN = false
+
+        -- Every live action button — the main bar's 12 plus the multibars' (MultiBars.xml joins
+        -- at OnLoad). The fan-out roster for the bar-level events below: the ref registers the
+        -- feedback events per-button; our bar-level fan needs the full set in one place.
+        BENILLA_ACTION_BUTTONS = {}
+
+        -- The wire/API action id the MAIN bar's button i displays (the vanilla page formula).
+        -- INTERNAL to BenillaActionButton_Action below — the ONLY caller. A button path that
+        -- reaches past it computes a MAIN-bar id for a multibar button (base ignored), which
+        -- reads as "the slot below": the tooltip hover did exactly that until 2026-07-21.
+        function BenillaActionBar_ActionFor(index)
+            local offset = GetBonusBarOffset()
+            local base = 0
+            if offset > 0 then
+                base = (6 + offset - 1) * 12
+            end
+            return base + index
+        end
+
+        -- The action id a specific BUTTON displays: the ref forks on the parent frame's NAME
+        -- (ActionButton_GetPagedID:446-467 — MultiBarBottomLeft ⇒ page 6, MultiBarBottomRight ⇒
+        -- page 5, else the paged/bonus formula); we carry the fork as data — a fixed per-button
+        -- page base set at OnLoad (MultiBars.xml), nil for the bonus-paged main bar.
+        function BenillaActionButton_Action(button)
+            if button.base then
+                return button.base + button.index
+            end
+            return BenillaActionBar_ActionFor(button.index)
+        end
+
+        -- Hover: SetAction's pure delegation (decision 0276 — a SPELL slot renders the spell
+        -- tooltip with its rank column, an ITEM slot the shared item renderer; ref
+        -- ActionButton_SetTooltip). The re-enter keeps it live across page flips.
+        -- Anchor: ref ActionButton_SetTooltip (ActionButton.lua l.366-372) branches on the
+        -- UberTooltips CVar — "1" → the default corner, else RIGHT/LEFT by bar. UberTooltips
+        -- registers with default "1" (byte-read: WoW.exe 0x48fdd9, default string 0x82e748;
+        -- sibling rows BlockTrades→"0", UnitNameRenderMode→"2" confirm the layout), and benilla
+        -- ships no CVar state, so the branch collapses to the stock-client one: action-bar
+        -- tooltips live at the screen's bottom-right, above the bags.
+        function BenillaActionButton_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            GameTooltip:SetAction(BenillaActionButton_Action(button))
+        end
+
+        function BenillaActionButton_OnLoad(button, index, base)
+            button.index = index
+            button.base = base
+            button.icon = getglobal(button:GetName() .. "Icon")
+            button.hotkey = getglobal(button:GetName() .. "HotKey")
+            button.count = getglobal(button:GetName() .. "Count")
+            button.flash = getglobal(button:GetName() .. "Flash")
+            button.border = getglobal(button:GetName() .. "Border")
+            button.cooldown = getglobal(button:GetName() .. "Cooldown")
+            -- Ref ActionButton_OnLoad:104-106: the flash/range state the OnUpdate loop drives.
+            button.flashing = 0
+            button.flashtime = 0
+            button.rangeTimer = nil
+            if base then
+                -- Multibar buttons are unbound (ref Bindings.xml ships no default MULTIACTIONBAR*
+                -- keys): no static label. Their hotkey corner instead carries the ref's
+                -- RANGE_INDICATOR dot (ActionButton_UpdateHotkeys' no-binding leg, net effect:
+                -- a red dot only while out of range), painted by the OnUpdate range timer.
+                button.hotkey:SetText("")
+            else
+                button.hotkey:SetText(BENILLA_ACTIONBAR_HOTKEYS[index])
+            end
+            table.insert(BENILLA_ACTION_BUTTONS, button)
+            -- The drag trio (decision 0216 §3/§7): click-carry and drag share one downstream path
+            -- by construction (OnClick/OnDragStart both call PickupAction; OnReceiveDrag calls
+            -- PlaceAction — ref ActionBarFrame.xml:12-38). LOCK_ACTIONBAR stays the vanilla
+            -- default (unlocked), so unlike the ref's cvar guard, drag is always live here.
+            button:RegisterForDrag("LeftButton")
+            BenillaActionButton_Update(button)
+        end
+
+        -- Ref ActionBarFrame.xml:12-22's fork verbatim: shift picks up, else uses (checkCursor=1 —
+        -- the engine routes a click-with-payload to PlaceAction instead, decision 0216 §7).
+        function BenillaActionButton_OnClick(button)
+            local action = BenillaActionButton_Action(button)
+            if IsShiftKeyDown() then
+                PickupAction(action)
+            else
+                UseAction(action, 1)
+            end
+            BenillaActionButton_Update(button)
+        end
+
+        function BenillaActionButton_OnDragStart(button)
+            PickupAction(BenillaActionButton_Action(button))
+            BenillaActionButton_Update(button)
+        end
+
+        function BenillaActionButton_OnReceiveDrag(button)
+            PlaceAction(BenillaActionButton_Action(button))
+            BenillaActionButton_Update(button)
+        end
+
+        -- The default ACTIONBUTTON1..12 key bindings (ref Bindings.xml:121-127: keys 1..9,0,-,=
+        -- run ActionButtonDown on keystate "down" and ActionButtonUp on "up" via runOnUp), both
+        -- transcribed from ActionButton.lua:15-28/30-45 and routed here from the app's key feed.
+        -- DOWN pushes the button only from NORMAL; UP fires the action only from PUSHED — the
+        -- state pair is both the pushed visual and the debounce (a key-repeat DOWN or a stray UP
+        -- is a no-op). Calls UseAction DIRECTLY with NO checkCursor argument — unlike the
+        -- mouse-click fork above, a keybind never places (decision 0216 §7: the ref itself never
+        -- routes ActionButtonUp through OnClick, so this no longer goes through Click() either —
+        -- the two entry points share the id formula, not the click path). The ref's
+        -- BonusActionBar fork and the SELFACTIONBUTTON onSelf argument are not modeled (no bonus
+        -- bar frame, no self-cast modifier binding).
+        function BenillaActionButtonDown(index)
+            local button = getglobal("BenillaActionButton" .. index)
+            if ( button:GetButtonState() == "NORMAL" ) then
+                button:SetButtonState("PUSHED")
+            end
+        end
+
+        function BenillaActionButtonUp(index)
+            local button = getglobal("BenillaActionButton" .. index)
+            if ( button:GetButtonState() == "PUSHED" ) then
+                button:SetButtonState("NORMAL")
+                UseAction(BenillaActionButton_Action(button))
+                -- Ref ActionButtonUp:55-59: the checked ring reflects the use immediately.
+                BenillaActionButton_UpdateState(button)
+            end
+        end
+
+        -- Ref ActionButton_UpdateState:261-267 — the checked ring: the current action (Attack
+        -- while auto-attacking, the in-flight cast) or the live auto-repeat spell.
+        function BenillaActionButton_UpdateState(button)
+            local action = BenillaActionButton_Action(button)
+            if ( IsCurrentAction(action) or IsAutoRepeatAction(action) ) then
+                button:SetChecked(1)
+            else
+                button:SetChecked(0)
+            end
+        end
+
+        -- Ref ActionButton_UpdateUsable:269-283, verbatim colors: usable white; out of power the
+        -- blue-grey 0.5/0.5/1.0 on icon AND ring; otherwise-unusable the 0.4 grey icon only.
+        function BenillaActionButton_UpdateUsable(button)
+            local action = BenillaActionButton_Action(button)
+            local normalTexture = getglobal(button:GetName() .. "NormalTexture")
+            local isUsable, notEnoughMana = IsUsableAction(action)
+            if ( isUsable ) then
+                button.icon:SetVertexColor(1.0, 1.0, 1.0)
+                normalTexture:SetVertexColor(1.0, 1.0, 1.0)
+            elseif ( notEnoughMana ) then
+                button.icon:SetVertexColor(0.5, 0.5, 1.0)
+                normalTexture:SetVertexColor(0.5, 0.5, 1.0)
+            else
+                button.icon:SetVertexColor(0.4, 0.4, 0.4)
+                normalTexture:SetVertexColor(1.0, 1.0, 1.0)
+            end
+        end
+
+        -- Ref ActionButton_UpdateCooldown:294-298.
+        function BenillaActionButton_UpdateCooldown(button)
+            local start, duration, enable = GetActionCooldown(BenillaActionButton_Action(button))
+            CooldownFrame_SetTimer(button.cooldown, start, duration, enable)
+        end
+
+        -- Ref ActionButton_UpdateFlash/StartFlash/StopFlash/IsFlashing:469-496: the red blink on
+        -- an engaged Attack button / a live auto-repeat, toggled by the OnUpdate loop below.
+        function BenillaActionButton_UpdateFlash(button)
+            local action = BenillaActionButton_Action(button)
+            if ( (IsAttackAction(action) and IsCurrentAction(action)) or IsAutoRepeatAction(action) ) then
+                BenillaActionButton_StartFlash(button)
+            else
+                BenillaActionButton_StopFlash(button)
+            end
+        end
+
+        function BenillaActionButton_StartFlash(button)
+            button.flashing = 1
+            button.flashtime = 0
+            BenillaActionButton_UpdateState(button)
+        end
+
+        function BenillaActionButton_StopFlash(button)
+            button.flashing = 0
+            button.flash:Hide()
+            BenillaActionButton_UpdateState(button)
+        end
+
+        -- Ref ActionButton_OnUpdate:384-428, minus the RANGE_INDICATOR dot (our hotkeys always
+        -- carry binding text — SCOPE note) and the tooltip refresh (no per-button tooltip yet):
+        -- the 0.4 s flash toggle, and the 0.2 s range recheck tinting the hotkey red/grey.
+        function BenillaActionButton_OnUpdate(button, elapsed)
+            if ( button.flashing == 1 ) then
+                button.flashtime = button.flashtime - elapsed
+                if ( button.flashtime <= 0 ) then
+                    local overtime = -button.flashtime
+                    if ( overtime >= ATTACK_BUTTON_FLASH_TIME ) then
+                        overtime = 0
+                    end
+                    button.flashtime = ATTACK_BUTTON_FLASH_TIME - overtime
+                    if ( button.flash:IsVisible() ) then
+                        button.flash:Hide()
+                    else
+                        button.flash:Show()
+                    end
+                end
+            end
+            if ( button.rangeTimer ) then
+                button.rangeTimer = button.rangeTimer - elapsed
+                if ( button.rangeTimer <= 0 ) then
+                    if ( IsActionInRange(BenillaActionButton_Action(button)) == 0 ) then
+                        -- An unbound (multibar) button has no label to tint: paint the ref's
+                        -- RANGE_INDICATOR dot instead (net ref behavior — red dot iff out of range).
+                        if button.base then
+                            button.hotkey:SetText("●")
+                        end
+                        button.hotkey:SetVertexColor(1.0, 0.1, 0.1)
+                    else
+                        if button.base then
+                            button.hotkey:SetText("")
+                        end
+                        button.hotkey:SetVertexColor(0.6, 0.6, 0.6)
+                    end
+                    button.rangeTimer = TOOLTIP_UPDATE_TIME
+                end
+            end
+        end
+
+        function BenillaActionButton_Update(button)
+            local action = BenillaActionButton_Action(button)
+            if HasAction(action) then
+                button.icon:SetTexture(GetActionTexture(action) or BENILLA_FALLBACK_ICON)
+                button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
+                button:Show()
+                button.rangeTimer = -1
+                local count = GetActionCount(action)
+                if count > 0 then
+                    button.count:SetText(count)
+                else
+                    button.count:SetText("")
+                end
+                BenillaActionButton_UpdateState(button)
+                BenillaActionButton_UpdateUsable(button)
+                BenillaActionButton_UpdateCooldown(button)
+                BenillaActionButton_UpdateFlash(button)
+            else
+                button.icon:SetTexture(nil)
+                button.count:SetText("")
+                button.cooldown:Hide()
+                button.rangeTimer = nil
+                button.hotkey:SetVertexColor(0.6, 0.6, 0.6)
+                button:SetChecked(0)
+                BenillaActionButton_StopFlash(button)
+                if button.base then
+                    -- An EMPTY multibar well is the ref's own default: hidden entirely, appearing
+                    -- as a drop-target ring only while a payload is held (ActionButton_Update's
+                    -- showgrid==0 Hide; MultiActionBar_ShowAllGrids). Only the MAIN bar keeps our
+                    -- always-visible wells divergence (the SCOPE note) — its art has sockets;
+                    -- floating rings over bare world would not read as a bar.
+                    button.hotkey:SetText("")
+                    if BENILLA_ACTIONBAR_GRID_SHOWN then
+                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
+                        button:Show()
+                    else
+                        button:Hide()
+                    end
+                else
+                    -- While a payload is held, an empty slot shows the ref's own "no action" ring
+                    -- (Interface\Buttons\UI-Quickslot) so it reads as a drop target; otherwise the
+                    -- plain occupied-style ring, unchanged from before this slice (SCOPE note).
+                    if BENILLA_ACTIONBAR_GRID_SHOWN then
+                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
+                    else
+                        button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
+                    end
+                end
+            end
+            -- Ref ActionButton_Update:221-228: the equipped-item green border.
+            if ( IsEquippedAction(action) ) then
+                button.border:SetVertexColor(0, 1.0, 0, 0.35)
+                button.border:Show()
+            else
+                button.border:Hide()
+            end
+        end
+
+        function BenillaActionBar_OnLoad(frame)
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+            frame:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+            frame:RegisterEvent("ACTIONBAR_SHOWGRID")
+            frame:RegisterEvent("ACTIONBAR_HIDEGRID")
+            -- The state/feedback events (ref ActionButton_OnLoad's per-button set, registered
+            -- bar-level here — the SCOPE note): the app fires each on the byte-mapped client
+            -- edge (wow-re action-button-state-api.md).
+            frame:RegisterEvent("ACTIONBAR_UPDATE_STATE")
+            frame:RegisterEvent("ACTIONBAR_UPDATE_USABLE")
+            frame:RegisterEvent("ACTIONBAR_UPDATE_COOLDOWN")
+            frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+            frame:RegisterEvent("PLAYER_AURAS_CHANGED")
+            frame:RegisterEvent("PLAYER_ENTER_COMBAT")
+            frame:RegisterEvent("PLAYER_LEAVE_COMBAT")
+            frame:RegisterEvent("START_AUTOREPEAT_SPELL")
+            frame:RegisterEvent("STOP_AUTOREPEAT_SPELL")
+        end
+
+        -- Run one ref per-button handler over the OCCUPIED buttons (the bar-level fan — SCOPE
+        -- note). The HasAction gate is the ref's own semantics, load-bearing, not an optimization:
+        -- ActionButton.lua registers these handlers only while the button has an action ("All
+        -- event handlers below this line are only set when the button has an action"), so an
+        -- empty button never runs them — UpdateUsable on an empty would land its 0.4 grey
+        -- SetVertexColor on the texture-less icon region, which draws as a solid grey plate
+        -- (the director's empty-wells report, 2026-07-10).
+        function BenillaActionBar_ForEach(fn)
+            for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                local button = BENILLA_ACTION_BUTTONS[i]
+                if HasAction(BenillaActionButton_Action(button)) then
+                    fn(button)
+                end
+            end
+        end
+
+        function BenillaActionBar_OnEvent(frame)
+            -- ACTIONBAR_SLOT_CHANGED names its action in arg1; repaint just the button showing it.
+            if event == "ACTIONBAR_SLOT_CHANGED" and arg1 then
+                for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                    local button = BENILLA_ACTION_BUTTONS[i]
+                    if BenillaActionButton_Action(button) == arg1 then
+                        BenillaActionButton_Update(button)
+                    end
+                end
+                return
+            end
+            -- The ref ActionButton_OnEvent dispatch (l.332-362), fanned bar-level:
+            if event == "ACTIONBAR_UPDATE_STATE" then
+                BenillaActionBar_ForEach(BenillaActionButton_UpdateState)
+                return
+            end
+            if event == "ACTIONBAR_UPDATE_USABLE" or event == "ACTIONBAR_UPDATE_COOLDOWN" then
+                BenillaActionBar_ForEach(BenillaActionButton_UpdateUsable)
+                BenillaActionBar_ForEach(BenillaActionButton_UpdateCooldown)
+                return
+            end
+            if event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_AURAS_CHANGED" then
+                BenillaActionBar_ForEach(BenillaActionButton_UpdateUsable)
+                return
+            end
+            if event == "PLAYER_ENTER_COMBAT" then
+                BenillaActionBar_ForEach(function(b)
+                    if IsAttackAction(BenillaActionButton_Action(b)) then
+                        BenillaActionButton_StartFlash(b)
+                    end
+                end)
+                return
+            end
+            if event == "PLAYER_LEAVE_COMBAT" then
+                BenillaActionBar_ForEach(function(b)
+                    if IsAttackAction(BenillaActionButton_Action(b)) then
+                        BenillaActionButton_StopFlash(b)
+                    end
+                end)
+                return
+            end
+            if event == "START_AUTOREPEAT_SPELL" then
+                BenillaActionBar_ForEach(function(b)
+                    if IsAutoRepeatAction(BenillaActionButton_Action(b)) then
+                        BenillaActionButton_StartFlash(b)
+                    end
+                end)
+                return
+            end
+            if event == "STOP_AUTOREPEAT_SPELL" then
+                BenillaActionBar_ForEach(function(b)
+                    if b.flashing == 1 and not IsAttackAction(BenillaActionButton_Action(b)) then
+                        BenillaActionButton_StopFlash(b)
+                    end
+                end)
+                return
+            end
+            if event == "ACTIONBAR_SHOWGRID" or event == "ACTIONBAR_HIDEGRID" then
+                BENILLA_ACTIONBAR_GRID_SHOWN = (event == "ACTIONBAR_SHOWGRID")
+            end
+            for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                BenillaActionButton_Update(BENILLA_ACTION_BUTTONS[i])
+            end
+        end
+
+        -- The XP bar (ref-MainMenuBar.lua MainMenuExpBar_Update): value = current XP within the
+        -- level, max = XP-to-level. Both from the player-global UnitXP feed (PLAYER_XP /
+        -- PLAYER_NEXT_LEVEL_XP). currXP >= 0 so min(0,currXP) is just 0.
+        function BenillaExpBar_Update(bar)
+            local currXP = UnitXP("player")
+            local nextXP = UnitXPMax("player")
+            bar:SetMinMaxValues(0, nextXP)
+            bar:SetValue(currXP)
+        end
+
+        function BenillaExpBar_OnLoad(bar)
+            bar:RegisterEvent("PLAYER_ENTERING_WORLD")
+            bar:RegisterEvent("PLAYER_XP_UPDATE")
+            BenillaExpBar_Update(bar)
+        end
+
+        function BenillaExpBar_OnEvent(bar)
+            BenillaExpBar_Update(bar)
+        end
+    ]]></Script>
+
+    <!--
+        One action button (ref-ActionButtonTemplate.xml, now the FULL template — decision 0137
+        phase 4): a CheckButton, 36x36 (l.3-6); icon fills the button (BACKGROUND, owner-sized,
+        l.8-10); Flash (UI-QuickslotRed, hidden — the auto-attack/auto-repeat blink) + HotKey
+        (l.11-24) + Count (l.25-33) on ARTWORK; Border (UI-ActionButton-Border 62x62 CENTER, ADD,
+        hidden — the equipped-item green ring, l.48-59) on OVERLAY; the Cooldown child (the ref's
+        CooldownFrameTemplate Model at 36x36 CENTER (0,-1), l.62-73 — ours is the native Cooldown
+        widget playing the same machine); NormalTexture = the 66x66 UI-Quickslot2 ring centered at
+        (0,-1) (l.74-85); PushedTexture UI-Quickslot-Depress (l.86); HighlightTexture
+        ButtonHilight-Square ADD (l.87); CheckedTexture CheckButtonHilight ADD (l.88 — the
+        IsCurrentAction/IsAutoRepeatAction ring). Only Name (macros) stays OUT.
+    -->
+    <CheckButton name="BenillaActionButtonTemplate" virtual="true">
+        <Size><AbsDimension x="36" y="36"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+            </Layer>
+            <Layer level="ARTWORK">
+                <Texture name="$parentFlash" file="Interface\Buttons\UI-QuickslotRed" hidden="true"/>
+                <FontString name="$parentHotKey" inherits="NumberFontNormalSmallGray" justifyH="RIGHT">
+                    <Size><AbsDimension x="36" y="10"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="-2" y="-2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                    <Anchors>
+                        <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="$parentBorder" file="Interface\Buttons\UI-ActionButton-Border" hidden="true" alphaMode="ADD">
+                    <Size><AbsDimension x="62" y="62"/></Size>
+                    <Anchors>
+                        <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Cooldown name="$parentCooldown" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+            </Cooldown>
+        </Frames>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="66" y="66"/></Size>
+            <Anchors>
+                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaActionButton_OnClick(self)</OnClick>
+            <OnDragStart>BenillaActionButton_OnDragStart(self)</OnDragStart>
+            <OnReceiveDrag>BenillaActionButton_OnReceiveDrag(self)</OnReceiveDrag>
+            <OnUpdate>BenillaActionButton_OnUpdate(self, arg1)</OnUpdate>
+            <OnEnter>BenillaActionButton_OnEnter(self)</OnEnter>
+            <OnLeave>if GameTooltip then GameTooltip:Hide() end</OnLeave>
+        </Scripts>
+    </CheckButton>
+
+    <!-- The bar: 1024x53 anchored BOTTOM of the screen (ref-MainMenuBar.xml l.4-10). -->
+    <Frame name="BenillaActionBar">
+        <Size><AbsDimension x="1024" y="53"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <!--
+                The XP StatusBar: 1024x13 anchored TOP of the bar (ref-MainMenuBar.xml l.12-18).
+                BarTexture UI-StatusBar, BarColor purple (0.58,0,0.55) (l.158-159); a solid black
+                a=0.5 BACKGROUND (l.89-93); and the 4 dwarf-notch OVERLAY strips (256x10, BOTTOM
+                x=-384/-128/128/384 y=3, the tick TexCoord bands l.36-87) that frame the fill.
+                Drawn first among the bar's children ⇒ lowest, so the dwarf art overlaps it (the
+                real RaiseFrameLevel(art) order).
+            -->
+            <StatusBar name="BenillaExpBar">
+                <Size><AbsDimension x="1024" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture>
+                            <Color r="0.0" g="0.0" b="0.0" a="0.5"/>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <Texture name="BenillaXPBarTexture0" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-384" y="3"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.79296875" bottom="0.83203125"/>
+                        </Texture>
+                        <Texture name="BenillaXPBarTexture1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-128" y="3"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.54296875" bottom="0.58203125"/>
+                        </Texture>
+                        <Texture name="BenillaXPBarTexture2" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="128" y="3"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.29296875" bottom="0.33203125"/>
+                        </Texture>
+                        <Texture name="BenillaXPBarTexture3" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="10"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="384" y="3"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.04296875" bottom="0.08203125"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+                <BarColor r="0.58" g="0.0" b="0.55"/>
+                <Scripts>
+                    <OnLoad>BenillaExpBar_OnLoad(self)</OnLoad>
+                    <OnEvent>BenillaExpBar_OnEvent(self)</OnEvent>
+                </Scripts>
+            </StatusBar>
+
+            <!--
+                The art frame: fills the bar (ref-MainMenuBar.xml l.225-229). Carries the 4 dwarf
+                strips (ARTWORK) + the 2 end caps and page number (OVERLAY); the buttons are its
+                children so they draw over the art.
+            -->
+            <Frame name="BenillaActionBarArtFrame">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="BenillaActionBar" relativePoint="TOPLEFT"/>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="BenillaActionBar" relativePoint="BOTTOMRIGHT"/>
+                </Anchors>
+                <Layers>
+                    <!-- 4 dwarf strips: 256x43, BOTTOM x=-384/-128/128/384 y=0, TexCoord bands
+                         (ref-MainMenuBar.xml l.232-283). Adjacent atlas rows ⇒ the joins are seamless. -->
+                    <Layer level="ARTWORK">
+                        <Texture name="BenillaActionBarTexture0" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="43"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-384" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.83203125" bottom="1.0"/>
+                        </Texture>
+                        <Texture name="BenillaActionBarTexture1" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="43"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-128" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.58203125" bottom="0.75"/>
+                        </Texture>
+                        <Texture name="BenillaActionBarTexture2" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="43"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="128" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.33203125" bottom="0.5"/>
+                        </Texture>
+                        <Texture name="BenillaActionBarTexture3" file="Interface\MainMenuBar\UI-MainMenuBar-Dwarf">
+                            <Size><AbsDimension x="256" y="43"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="384" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="1.0" top="0.08203125" bottom="0.25"/>
+                        </Texture>
+                    </Layer>
+                    <!-- End caps: UI-MainMenuBar-EndCap-Dwarf 128x128, BOTTOM x=-544 / +544; the RIGHT
+                         cap mirrors its art with TexCoords (1.0, 0.0, 0.0, 1.0) so the lion faces
+                         outward on both sides (ref-MainMenuBar.xml l.286-310; the mirrored-UV engine
+                         fix landed in 87c97d7). Page number: GameFontNormalSmall CENTER (30,-5),
+                         static "1" (l.311-319). -->
+                    <Layer level="OVERLAY">
+                        <Texture name="BenillaActionBarLeftEndCap" file="Interface\MainMenuBar\UI-MainMenuBar-EndCap-Dwarf">
+                            <Size><AbsDimension x="128" y="128"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="-544" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="BenillaActionBarRightEndCap" file="Interface\MainMenuBar\UI-MainMenuBar-EndCap-Dwarf">
+                            <Size><AbsDimension x="128" y="128"/></Size>
+                            <Anchors><Anchor point="BOTTOM" relativePoint="BOTTOM"><Offset><AbsDimension x="544" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="1.0" right="0.0" top="0.0" bottom="1.0"/>
+                        </Texture>
+                        <FontString name="BenillaActionBarPageNumber" inherits="GameFontNormalSmall" text="1">
+                            <Anchors>
+                                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="30" y="-5"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The 12 buttons: Button1 at the art frame BOTTOMLEFT (8,4); 2..12 chain LEFT of
+                         the previous's RIGHT +6,0 (ref-ActionBarFrame.xml l.51-158). Replaces our old
+                         fixed 38px stride with the real 42px chain (36 wide + 6 gap). -->
+                    <CheckButton name="BenillaActionButton1" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="8" y="4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 1)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton2" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 2)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton3" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 3)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton4" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 4)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton5" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 5)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton6" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 6)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton7" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 7)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton8" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 8)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton9" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 9)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton10" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 10)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton11" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton10" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 11)</OnLoad></Scripts>
+                    </CheckButton>
+                    <CheckButton name="BenillaActionButton12" inherits="BenillaActionButtonTemplate">
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaActionButton11" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaActionButton_OnLoad(self, 12)</OnLoad></Scripts>
+                    </CheckButton>
+
+                    <!-- Page up/down: 32x32 at CENTER of the art frame's TOPLEFT +(522,-22)/(522,-42)
+                         (ref-ActionBarFrame.xml l.159-217). ART ONLY — we have no bar paging, so the
+                         clicks are no-ops (no OnClick handler). -->
+                    <Button name="BenillaActionBarUpButton">
+                        <Size><AbsDimension x="32" y="32"/></Size>
+                        <Anchors>
+                            <Anchor point="CENTER" relativeTo="BenillaActionBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-22"/></Offset></Anchor>
+                        </Anchors>
+                        <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Up"/>
+                        <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Down"/>
+                        <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollUpButton-Highlight" alphaMode="ADD"/>
+                    </Button>
+                    <Button name="BenillaActionBarDownButton">
+                        <Size><AbsDimension x="32" y="32"/></Size>
+                        <Anchors>
+                            <Anchor point="CENTER" relativeTo="BenillaActionBarArtFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="522" y="-42"/></Offset></Anchor>
+                        </Anchors>
+                        <NormalTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Up"/>
+                        <PushedTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Down"/>
+                        <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Highlight" alphaMode="ADD"/>
+                    </Button>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaActionBar_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaActionBar_OnEvent(self)</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

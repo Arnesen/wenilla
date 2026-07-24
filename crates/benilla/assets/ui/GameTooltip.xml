@@ -1,0 +1,398 @@
+<Ui>
+    <!--
+        The GameTooltip (decision 0274): a real <GameTooltip> engine widget — the line stack,
+        SetOwner anchor law, auto-size + right-flush, IsOwned, FadeOut, and the OnTooltipCleared/
+        OnTooltipAddMoney script protocol all live engine-side (benilla-ui script/tooltip.rs); the
+        line pairs are engine-created named regions (GameTooltipTextLeftN/RightN — real globals,
+        like the template pairs reference Lua addresses by name). This file declares the INSTANCE:
+        the plate (backdrop art + colors QUOTED from ref-GameTooltip.xml/.lua, line cites inline),
+        the money coin trio, and the Lua that is genuinely FrameXML's in the real client
+        (GameTooltip_SetDefaultAnchor, SetTooltipMoney) — plus the P0 item-stat renderer, which
+        moves engine-side in 0274 P1 with the full template feed.
+
+        The frame's global name is the real one — GameTooltip — so transcribed reference code
+        (MinimapCluster's zone hover, UnitFrame's TextLeft1 recolor) works verbatim.
+    -->
+    <Script><![CDATA[
+        -- Tooltip default colours (VERIFIED, ref-GameTooltip.lua l.3-4). The border is white, the
+        -- background the dark blue tint; applied to the Backdrop in OnLoad exactly as the real
+        -- GameTooltip_OnLoad does (ref-GameTooltip.lua l.79-82).
+        TOOLTIP_DEFAULT_COLOR = { r = 1, g = 1, b = 1 }
+        TOOLTIP_DEFAULT_BACKGROUND_COLOR = { r = 0.09, g = 0.09, b = 0.19 }
+        -- GameTooltip_SetDefaultAnchor's position math (ref-GameTooltip.lua l.6,73-77): the
+        -- bottom-right screen corner, -CONTAINER_OFFSET_X - 13 in x, CONTAINER_OFFSET_Y in y.
+        DEFAULT_TOOLTIP_POSITION = -13
+        CONTAINER_OFFSET_X = CONTAINER_OFFSET_X or 0
+        CONTAINER_OFFSET_Y = CONTAINER_OFFSET_Y or 70
+        -- The shopping-compare pair count (ref GameTooltip.lua l.7; PaperDollFrame's listener
+        -- bounds arg2 by it).
+        NUM_SHOPPING_TOOLTIPS = 2
+
+        -- The bracketed name out of an item hyperlink "|cff…|Hitem:117|h[Tough Jerky]|h|r"; if the
+        -- string has no bracket it is already a plain name (the merchant/loot rows hand plain names).
+        function BenillaTooltip_ItemName(link)
+            if not link then return nil end
+            local _, _, name = strfind(link, "%[(.-)%]")
+            return name or link
+        end
+
+        -- Reuse the quality→colour source the loot window already ships (BENILLA_LOOT_QUALITY_COLORS,
+        -- LootFrame.xml — itself matching ui_items.rs quality_color / the client's GetItemQualityColor).
+        -- Unknown/nil quality falls back to common white. All FrameXML files load before any hover
+        -- fires, so the table is defined by the time this runs regardless of file order.
+        function BenillaTooltip_QualityColor(quality)
+            local t = BENILLA_LOOT_QUALITY_COLORS
+            local c = (t and (t[quality] or t[1])) or { r = 1, g = 1, b = 1 }
+            return c.r, c.g, c.b
+        end
+
+        -- Copper → "Ng Ms Kc" text for a price/value line (only the non-zero high coins, always the
+        -- copper). math.floor if present, else a truncation fallback.
+        function BenillaTooltip_MoneyString(copper)
+            copper = copper or 0
+            local mfloor = (math and math.floor) or function(x) return x - (x % 1) end
+            local g = mfloor(copper / 10000)
+            local s = mfloor((copper - g * 10000) / 100)
+            local c = copper - g * 10000 - s * 100
+            local out = ""
+            if g > 0 then out = g .. "g " end
+            if s > 0 or g > 0 then out = out .. s .. "s " end
+            return out .. c .. "c"
+        end
+
+        -- The default anchor (ref-GameTooltip.lua l.73-77, quoted): owner with no auto-anchor,
+        -- then the bottom-right screen corner, above the bag row - CONTAINER_OFFSET_X/Y are the
+        -- manage pass's live values (UIParent.xml). The engine's ANCHOR_NONE drops the previous
+        -- owner anchor (tooltip.rs SetOwner), so no ClearAllPoints - the ref has none either.
+        function GameTooltip_SetDefaultAnchor(tooltip, parent)
+            tooltip:SetOwner(parent, "ANCHOR_NONE")
+            tooltip:SetPoint("BOTTOMRIGHT", "UIParent", "BOTTOMRIGHT",
+                -CONTAINER_OFFSET_X + DEFAULT_TOOLTIP_POSITION, CONTAINER_OFFSET_Y)
+            tooltip.default = 1
+        end
+
+        -- ref GameTooltip_OnHide (ref-GameTooltip.lua l.100-104, quoted): the plate colours
+        -- reset for the next owner and the default-corner flag drops. The ref's OnHide also
+        -- hides ShoppingTooltip1/2 - that pair lands with the compare-tooltip slice (0274 P4).
+        function GameTooltip_OnHide(self)
+            self:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
+            self:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
+            self.default = nil
+        end
+
+        -- The embedded money row — the ref's SetTooltipMoney (ref-GameTooltip.lua l.84-92) over our
+        -- shared coin kit (BenillaMoney_Set, MerchantFrame.xml): a blank line, the coin trio seated
+        -- at the money line's LEFT +4, and the money's width as the tooltip's minimum width. The
+        -- engine fires OnTooltipAddMoney with the computed price (wow-re ui/scratch/tooltip-money.md
+        -- 0x52b650@0x52e376: the engine computes, FrameXML renders) and this is its handler; Lua
+        -- call sites (repair cost) call it directly, exactly like the ref's ContainerFrame does.
+        function SetTooltipMoney(frame, money)
+            frame:AddLine(" ", 1.0, 1.0, 1.0)
+            local numLines = frame:NumLines()
+            local line = getglobal(frame:GetName() .. "TextLeft" .. numLines)
+            local coin1 = getglobal(frame:GetName() .. "MoneyCoin1")
+            coin1:ClearAllPoints()
+            coin1:SetPoint("LEFT", line, "LEFT", 4, 0)
+            BenillaMoney_Set(frame:GetName() .. "Money", money, true)
+            local width = 4
+            for i = 1, 3 do
+                local c = getglobal(frame:GetName() .. "MoneyCoin" .. i)
+                if c:IsShown() then width = width + c:GetWidth() + 4 end
+            end
+            frame:SetMinimumWidth(width)
+        end
+
+        -- The money row clears whenever the content does (the ref wires GameTooltip_ClearMoney to
+        -- OnTooltipCleared; the engine fires it on ClearLines/SetOwner/Hide). BenillaMoney_Clear
+        -- ships in MerchantFrame.xml (the money kit's home) — guard for engine tests that load
+        -- this file alone; in the app every file is loaded.
+        function GameTooltip_ClearMoney(frame)
+            if BenillaMoney_Clear then
+                BenillaMoney_Clear(frame:GetName() .. "Money")
+            end
+        end
+
+        -- The item content channels (SetItemById/SetBagItem/SetMerchantItem/SetBuybackItem) are
+        -- ENGINE methods on the GameTooltip widget (benilla-ui script/tooltip_item.rs, decision
+        -- 0274 P1): one shared renderer — the real client's own shape (0x52b650 behind 8 of the
+        -- 9 Set*Item bindings, wow-re ui/scratch/tooltip-money.md; decision 0126's one-renderer
+        -- law) — over the full item-template store, with the red failed-requirement law and the
+        -- engine-fired sell-price money row (merchant open + real instance + repair off).
+
+        -- The reaction color table (ref ReputationFrame.lua l.3-12, quoted) — the unit-name
+        -- recolor's palette; guarded so a later reputation window's own definition wins.
+        FACTION_BAR_COLORS = FACTION_BAR_COLORS or {
+            [1] = { r = 0.8, g = 0.3, b = 0.22 },
+            [2] = { r = 0.8, g = 0.3, b = 0.22 },
+            [3] = { r = 0.75, g = 0.27, b = 0 },
+            [4] = { r = 0.9, g = 0.7, b = 0 },
+            [5] = { r = 0, g = 0.6, b = 0.1 },
+            [6] = { r = 0, g = 0.6, b = 0.1 },
+            [7] = { r = 0, g = 0.6, b = 0.1 },
+            [8] = { r = 0, g = 0.6, b = 0.1 },
+        }
+
+        -- GameTooltip_UnitColor (ref-GameTooltip.lua l.8-71): creatures color by reaction;
+        -- players read white (the ref's own shipping state — its hostile/PvP player branches
+        -- are the FACTION_BAR_COLORS reds/greens, kept for when PvP states stream). The engine
+        -- prints the name gold and fires UPDATE_MOUSEOVER_UNIT; this recolors line 1 (the
+        -- byte-verified split — the name COLOR is FrameXML's, decision 0276).
+        function GameTooltip_UnitColor(unit)
+            local reaction = UnitReaction(unit, "player")
+            if reaction and FACTION_BAR_COLORS[reaction] then
+                local c = FACTION_BAR_COLORS[reaction]
+                return c.r, c.g, c.b
+            end
+            return 1.0, 1.0, 1.0
+        end
+
+        -- HealthBar_OnValueChanged (ref-HealthBar.lua, quoted; the tooltip bar passes no
+        -- `smooth`, so the fill reads the ref's plain green).
+        function HealthBar_OnValueChanged(value, smooth)
+            if not value then return end
+            local r, g, b
+            local min, max = this:GetMinMaxValues()
+            if value < min or value > max then return end
+            if (max - min) > 0 then
+                value = (value - min) / (max - min)
+            else
+                value = 0
+            end
+            if smooth then
+                if value > 0.5 then
+                    r = (1.0 - value) * 2
+                    g = 1.0
+                else
+                    r = 1.0
+                    g = value * 2
+                end
+            else
+                r = 0.0
+                g = 1.0
+            end
+            b = 0.0
+            this:SetStatusBarColor(r, g, b)
+        end
+
+        function GameTooltip_OnLoad(self)
+            -- The plate colours (ref GameTooltip_OnLoad, ref-GameTooltip.lua l.79-82).
+            self:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
+            self:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
+            self:Hide()
+        end
+    ]]></Script>
+
+    <GameTooltip name="GameTooltip" frameStrata="TOOLTIP" hidden="true">
+        <!-- A default size so the plate resolves the first frame it is shown; the engine's
+             auto-size pass takes over once the lines are measured (one frame's latency). NO
+             load-time anchor (the ref instance carries none): every show path seats the plate
+             first - SetOwner's anchor law for owned hovers, OnTooltipSetDefaultAnchor for world
+             hovers - and a leftover static anchor is exactly what parked the world tooltip at
+             screen center when the default-anchor script wasn't wired. -->
+        <Size><AbsDimension x="120" y="32"/></Size>
+        <!-- The tooltip plate (ref-GameTooltip.xml l.33-43 / ref-GameTooltipTemplate.xml l.4-14):
+             UI-Tooltip-Background tiled, UI-Tooltip-Border edge, EdgeSize 16, TileSize 16, insets
+             5/5/5/5. Colours are set in OnLoad (SetBackdropColor/BorderColor) — no <Color> here, so
+             the plate starts ctor-white and OnLoad tints it. -->
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- DELIBERATE deviation (director's call): the real plate is UI-Tooltip-Background's
+                     baked 187/255 alpha (~73% opaque — measured from the BLP; the tint can only
+                     lower it) and read too see-through here. This solid fill in the same navy,
+                     inset to the backdrop's 5px background insets, thickens the plate to ~84%
+                     against the world. The `a` is the knob; delete the region for the raw quote. -->
+                <Texture name="$parentThicken">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The money row's coin trio (the real $parentMoneyFrame — GameTooltipTemplate.xml,
+                 patch.MPQ — as our shared coin-slot shape; MerchantFrame.xml's BenillaMoney_Set
+                 fills them, left-to-right gold-first). Coin1 is re-anchored by SetTooltipMoney to
+                 the money line's LEFT +4 (ref SetTooltipMoney's seat). -->
+            <Frame name="$parentMoneyCoin1" hidden="true">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0.5" right="0.75" top="0" bottom="1"/>
+                        </Texture>
+                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
+                            <Size><AbsDimension x="20" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <Frame name="$parentMoneyCoin2" hidden="true">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="$parentMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0.25" right="0.5" top="0" bottom="1"/>
+                        </Texture>
+                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
+                            <Size><AbsDimension x="20" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <Frame name="$parentMoneyCoin3" hidden="true">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativeTo="$parentMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons">
+                            <Size><AbsDimension x="13" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
+                            <TexCoords left="0" right="0.25" top="0" bottom="1"/>
+                        </Texture>
+                        <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT">
+                            <Size><AbsDimension x="20" y="13"/></Size>
+                            <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+            <!-- The mouseover health bar (ref-GameTooltipTemplate.xml l.575-597, quoted): 8px
+                 tall, hanging below the plate, UI-TargetingFrame-BarFill, colored by
+                 HealthBar_OnValueChanged. The ENGINE drives min/max/value from the live unit
+                 snapshot (the byte law's HEALTH watcher — SetUnit + every set_unit push). -->
+            <StatusBar name="$parentStatusBar" hidden="true">
+                <Size><AbsDimension x="0" y="8"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnValueChanged>HealthBar_OnValueChanged(arg1)</OnValueChanged>
+                </Scripts>
+                <BarTexture name="$parentTexture" file="Interface\TargetingFrame\UI-TargetingFrame-BarFill"/>
+            </StatusBar>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                GameTooltip_OnLoad(self)
+                self:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+            </OnLoad>
+            <!-- The engine renders the mouseover unit's lines gold and fires this; the recolor by
+                 reaction is FrameXML's half (ref-GameTooltip.xml l.12-16, quoted). -->
+            <OnEvent>
+                if event == "UPDATE_MOUSEOVER_UNIT" then
+                    getglobal(this:GetName() .. "TextLeft1"):SetTextColor(GameTooltip_UnitColor("mouseover"))
+                end
+            </OnEvent>
+            <!-- The default corner for world hovers (ref-GameTooltipTemplate.xml l.617-619,
+                 quoted): the engine fires this before rendering a mouseover unit/object, and
+                 the handler seats the plate at the screen's bottom-right. THE wiring whose
+                 absence parked the world tooltip on the character. -->
+            <OnTooltipSetDefaultAnchor>GameTooltip_SetDefaultAnchor(this, UIParent)</OnTooltipSetDefaultAnchor>
+            <!-- ref GameTooltip.xml OnHide (l.18-22, quoted): the color reset + the compare pair
+                 drops with its anchor host. -->
+            <OnHide>
+                GameTooltip_OnHide(this)
+                ShoppingTooltip1:Hide()
+                ShoppingTooltip2:Hide()
+            </OnHide>
+            <!-- The engine-fired money protocol (ref-GameTooltipTemplate.xml l.620-625): the engine
+                 computes a price and fires OnTooltipAddMoney(arg1 = copper); OnTooltipCleared fires
+                 whenever the content clears (ClearLines/SetOwner/Hide) and drops the coin row. -->
+            <OnTooltipAddMoney>SetTooltipMoney(this, arg1)</OnTooltipAddMoney>
+            <OnTooltipCleared>GameTooltip_ClearMoney(this)</OnTooltipCleared>
+        </Scripts>
+    </GameTooltip>
+
+    <!-- The shopping-compare pair (ref GameTooltip.xml l.25-26 / ShoppingTooltipTemplate,
+         GameTooltipTemplate.xml l.628+): two more GameTooltip widgets the engine seats on the
+         paperdoll slot when SHOW_COMPARE_TOOLTIP fires (CharacterFrame.xml's listener). The
+         declared TextLeft/Right1-4 pairs are the template's own small-font ladder, faces quoted
+         verbatim (including its odd GameFontNormal cells) — the engine ADOPTS declared pairs and
+         clones the last pair's faces for lines it grows past them (tooltip.rs ensure_lines).
+         Same plate as the main tooltip, including the Thicken deviation (its rationale is on the
+         GameTooltip instance above); no coin trio — the compare cut ends before money. -->
+    <GameTooltip name="ShoppingTooltip1" frameStrata="TOOLTIP" hidden="true">
+        <Size><AbsDimension x="120" y="32"/></Size>
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentThicken">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="$parentTextLeft1" inherits="GameFontNormalSmall" hidden="true"/>
+                <FontString name="$parentTextRight1" inherits="GameFontNormal" hidden="true"/>
+                <FontString name="$parentTextLeft2" inherits="GameFontNormal" hidden="true"/>
+                <FontString name="$parentTextRight2" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextLeft3" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextRight3" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextLeft4" inherits="GameTooltipTextSmall" hidden="true"/>
+                <FontString name="$parentTextRight4" inherits="GameFontHighlightSmall" hidden="true"/>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>GameTooltip_OnLoad(self)</OnLoad>
+        </Scripts>
+    </GameTooltip>
+    <GameTooltip name="ShoppingTooltip2" frameStrata="TOOLTIP" hidden="true">
+        <Size><AbsDimension x="120" y="32"/></Size>
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <EdgeSize><AbsValue val="16"/></EdgeSize>
+            <TileSize><AbsValue val="16"/></TileSize>
+            <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentThicken">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="5" y="-5"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="5"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0.09" g="0.09" b="0.19" a="0.4"/>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <FontString name="$parentTextLeft1" inherits="GameFontNormalSmall" hidden="true"/>
+                <FontString name="$parentTextRight1" inherits="GameFontNormal" hidden="true"/>
+                <FontString name="$parentTextLeft2" inherits="GameFontNormal" hidden="true"/>
+                <FontString name="$parentTextRight2" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextLeft3" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextRight3" inherits="GameFontHighlightSmall" hidden="true"/>
+                <FontString name="$parentTextLeft4" inherits="GameTooltipTextSmall" hidden="true"/>
+                <FontString name="$parentTextRight4" inherits="GameFontHighlightSmall" hidden="true"/>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>GameTooltip_OnLoad(self)</OnLoad>
+        </Scripts>
+    </GameTooltip>
+</Ui>

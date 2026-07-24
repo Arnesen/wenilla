@@ -1,0 +1,462 @@
+//! Character appearance → per-look skin materials — the *who wears what* half of [`super`].
+//!
+//! [`super`] (attach) spawns a streamed entity's visual; this module resolves the character-specific
+//! inputs it swaps in: the entity's [`CharLook`] (race/sex/customization — wire fields for a player,
+//! CreatureDisplayInfoExtra for a character-model NPC, decision 0041), its worn-equipment display ids
+//! ([`WornEquip`], decision 0074), and the per-appearance material quints over the composited body
+//! atlas / hair / cape textures ([`build_char_skin_materials`], decisions 0044 / 0045).
+
+use std::collections::HashMap;
+
+use benilla_formats::{CharSkinSlot, ModelBlend};
+use benilla_protocol::EntityKind;
+use bevy::prelude::*;
+use bevy::render::render_resource::Buffer;
+
+use crate::assets::{repeat_texture_authored, LockRecover, WorldAssets};
+use crate::lighting::SharedLightBuffer;
+use crate::model_render::{model_material, MaterialCache, ShadeSel};
+use crate::net::{NetEntity, ObjectStore};
+use crate::terrain::WowModelMaterial;
+
+use super::super::{DisplayModel, EntityPart, SkinKey, SkinSections};
+
+/// The resolved character appearance for one entity that renders as a character-model body — either a
+/// **player** (appearance decoded from the wire) or a **character-model NPC** (from its display's
+/// CreatureDisplayInfoExtra, decision 0041). It drives both the geoset selection and the per-appearance
+/// skin/hair materials, so the two cases share one code path. `None` for a beast NPC / GameObject / a
+/// unit with no appearance data — those render whole, with their built textures, as before.
+pub(super) struct CharLook {
+    pub(super) race: u8,
+    pub(super) sex: u8,
+    /// skinColor — keys the composited base skin AND the standalone extra-skin BLP (the tauren fur,
+    /// M2 type 8), which even a pre-baked NPC atlas doesn't cover, so it lives here, not in `body`.
+    pub(super) skin: u8,
+    pub(super) hair_style: u8,
+    pub(super) hair_color: u8,
+    pub(super) facial_hair: u8,
+    /// Where the body-skin atlas comes from.
+    pub(super) body: BodySkin,
+}
+
+/// The body-skin atlas source for a [`CharLook`].
+pub(super) enum BodySkin {
+    /// A player (or a character-model NPC row that carries no bake name): composite the atlas live from
+    /// CharSections — needs the face (skinColor is on [`CharLook`]) — cached per appearance in
+    /// [`SkinComposites`].
+    Composite { face: u8 },
+    /// A character-model NPC: the pre-baked body atlas the client ships under `Textures\BakedNpcTextures\`
+    /// (CreatureDisplayInfoExtra field 18). Loaded directly through the async `mpq://` pipeline — no
+    /// compositing (the faithful path: the file ships and the client loads it, it does not re-bake).
+    Baked(String),
+}
+
+/// Resolve the character look for a net entity, or `None` if it isn't a character-model body. A player
+/// takes race/sex + customization from the wire (its [`ObjectStore`] descriptor fields); a
+/// character-model NPC takes them from its display's [`NpcAppearance`](benilla_formats::NpcAppearance)
+/// — a baked body when the row names one, else a live composite. A beast NPC / GameObject has no look.
+pub(super) fn resolve_char_look(
+    net: &NetEntity,
+    dm: Option<&DisplayModel>,
+    entity: Entity,
+    stores: &Query<&ObjectStore>,
+) -> Option<CharLook> {
+    match net.kind {
+        EntityKind::Player => {
+            // A player entity is always a character body. Race/sex come from `UNIT_FIELD_BYTES_0`; the
+            // `PLAYER_BYTES` / `PLAYER_BYTES_2` customization is *optional on the wire* — vmangos omits an
+            // all-zero field from the create mask, so a fully-default character (like our own "One") sends
+            // no `PLAYER_BYTES` at all. Per UpdateFields semantics an absent field means its default (0),
+            // not "no data": default each byte to 0 rather than gate the whole look on its presence (an
+            // over-strict `?` here left a default-customized avatar unskinned — the pre-0061 component
+            // path defaulted these implicitly).
+            let s = &stores.get(entity).ok()?.0;
+            Some(CharLook {
+                race: s.unit_race()?,
+                sex: s.unit_gender()?,
+                skin: s.player_skin().unwrap_or(0),
+                hair_style: s.player_hair_style().unwrap_or(0),
+                hair_color: s.player_hair_color().unwrap_or(0),
+                facial_hair: s.player_facial_hair().unwrap_or(0),
+                body: BodySkin::Composite {
+                    face: s.player_face().unwrap_or(0),
+                },
+            })
+        }
+        EntityKind::Unit => {
+            let npc = dm?.npc_appearance.as_ref()?;
+            Some(CharLook {
+                race: npc.race,
+                sex: npc.sex,
+                skin: npc.skin,
+                hair_style: npc.hair_style,
+                hair_color: npc.hair_color,
+                facial_hair: npc.facial_hair,
+                body: match &npc.bake_name {
+                    Some(name) => BodySkin::Baked(name.clone()),
+                    None => BodySkin::Composite { face: npc.face },
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The `mpq://` URL for a pre-baked NPC body atlas (a CreatureDisplayInfoExtra bake name) under
+/// `Textures\BakedNpcTextures\`. Lowercased forward-slash, like the other `mpq://` loads.
+fn baked_npc_url(bake_name: &str) -> String {
+    format!(
+        "mpq://textures/bakednpctextures/{}",
+        bake_name.replace('\\', "/").to_ascii_lowercase()
+    )
+}
+
+/// The worn-equipment display ids that drive a character body's geoset selection (the equipment
+/// branches in [`benilla_formats::CharacterGeosets::visible_geosets`]) and — for a player — the
+/// region-texture composite: the 8 armor bodyslots (shirt..tabard, the [`EquipGeosets`] index order),
+/// the cloak, and the helm.
+///
+/// A **player** takes them from its resolved [`super::Equipment`] (the wire's visible-item entries →
+/// item template → display id, decision 0074). A **character-model NPC** takes them from its display's
+/// [`NpcAppearance`](benilla_formats::NpcAppearance) equipment columns (CreatureDisplayInfoExtra —
+/// decision 0060 named the gap; this is the fill): its bodyslots 2..9 (shirt..tabard) map straight onto
+/// the 8 slots, field 0 (head) is the helm, and there is no NPC cloak column (the row stops at bodyslot
+/// 9). A beast NPC / GameObject / a unit with no appearance row yields the all-zero naked default.
+#[derive(Default)]
+pub(super) struct WornEquip {
+    /// shirt · chest · belt · pants · boots · wrist · gloves · tabard (bodyslot 2–9).
+    pub(super) bodyslots: [u32; 8],
+    pub(super) cloak: u32,
+    pub(super) helm: u32,
+}
+
+pub(super) fn resolve_worn_equip(
+    net: &NetEntity,
+    equipment: Option<&super::super::Equipment>,
+    dm: Option<&DisplayModel>,
+) -> WornEquip {
+    match net.kind {
+        EntityKind::Player => equipment
+            .map(|e| WornEquip {
+                bodyslots: e.bodyslots,
+                cloak: e.cloak,
+                helm: e.helm,
+            })
+            .unwrap_or_default(),
+        // A character-model NPC's worn gear ships in its display's CreatureDisplayInfoExtra columns
+        // (bodyslot-indexed) — the same ItemDisplayInfo ids a player's items resolve to. bodyslots
+        // 2..9 map directly onto the 8 armor slots; field 0 is the helm; there is no cloak column.
+        EntityKind::Unit => dm
+            .and_then(|d| d.npc_appearance.as_ref())
+            .map(|npc| WornEquip {
+                bodyslots: std::array::from_fn(|i| npc.equipment[i + 2]),
+                cloak: 0,
+                helm: npc.equipment[0],
+            })
+            .unwrap_or_default(),
+        _ => WornEquip::default(),
+    }
+}
+
+/// The worn geoset selectors for a set of equipment display ids (decision 0074's B1–B8 branches +
+/// the cloak group + the helm's RF-0083 hide-mask row pair): each non-zero display resolves its
+/// ItemDisplayInfo row's geoset columns. One helper for the world attach path and the glue-preview
+/// builder — the selection law can't fork (decision 0465).
+pub(in crate::entities) fn equip_geosets(
+    displays: Option<&super::super::ItemDisplays>,
+    bodyslots: &[u32; 8],
+    cloak: u32,
+    helm: u32,
+) -> benilla_formats::EquipGeosets {
+    let mut eg = benilla_formats::EquipGeosets::default();
+    if let Some(d) = displays {
+        for (i, id) in bodyslots.iter().enumerate() {
+            if *id != 0 {
+                eg.bodyslots[i] = d.catalog.get(*id).map(|row| row.geoset_groups);
+            }
+        }
+        if cloak != 0 {
+            eg.cloak = d.catalog.get(cloak).map(|row| row.geoset_groups[0]);
+        }
+        if helm != 0 {
+            eg.helm_vis = d.catalog.get(helm).map(|row| row.helmet_vis);
+        }
+    }
+    eg
+}
+
+/// One per-appearance material set for a character runtime texture slot: (steady, interior-matte,
+/// appear-fade-blend, interior-bake, interior-bake-blend). `model_material` dedups by
+/// texture+blend, so all players of one look share them.
+pub(super) type MatQuint = (
+    Handle<WowModelMaterial>,
+    Handle<WowModelMaterial>,
+    Handle<WowModelMaterial>,
+    Handle<WowModelMaterial>,
+    Handle<WowModelMaterial>,
+);
+
+/// The full character material set [`build_char_skin_materials`] returns: `(body, hair, object,
+/// skin_extra)`, the body + skin-extra each a (single-sided, two-sided) pair. Each per-slot
+/// [`MatQuint`] is `None` for an absent row (a bald style, a non-fur race) or missing tables. Named
+/// so the create-preview builder ([`super::create_preview`]) can select the steady variant per part.
+pub(super) type CharSkinMaterials = (
+    Option<(MatQuint, MatQuint)>,
+    Option<MatQuint>,
+    Option<MatQuint>,
+    (Option<MatQuint>, Option<MatQuint>),
+);
+
+/// Build the (steady, interior-matte, fade-blend, interior-bake, interior-bake-blend) variants for
+/// one character texture at one blend + sidedness. The body is opaque, hair is alpha-cut (its own
+/// blend) — so the caller passes the blend; the fade variants are always `Blend` (the feathers ramp
+/// alpha; the bake-blend keeps the probe light through a feather — 0355). All sky-lit;
+/// `model_material` dedups them by (texture, blend, sidedness, …).
+fn build_char_materials(
+    tex: Handle<Image>,
+    blend: ModelBlend,
+    two_sided: bool,
+    light: &Buffer,
+    materials: &mut Assets<WowModelMaterial>,
+    cache: &mut MaterialCache,
+) -> MatQuint {
+    let mut mk = |blend, shade: ShadeSel, fade, probe| {
+        model_material(
+            cache,
+            materials,
+            Some(tex.clone()),
+            blend,
+            two_sided,
+            false,
+            probe, // interior-PROP mode: the shader reads the MeshTag as an SH-probe slot
+            false,
+            false,
+            fade,
+            false,
+            false,
+            // A character body/hair texture is a synthetic composite, not one M2 batch — it carries
+            // no blend-mode fog policy of its own (body/hair are always opaque/alpha-cut, which the
+            // byte table fogs toward the scene colour anyway).
+            benilla_formats::FogPolicy::Scene,
+            // Steady/fade: LIT like every entity M2 — the owner's dynamic MCSH shade reaches these
+            // parts per instance through the MeshTag shade byte (`entity_shade`), not the shared
+            // material. Interior-matte: the plain pair at sun ×1.0 — the null-node fallback.
+            // Interior-bake: the footprint-MOCV probe, the steady indoor law for every entity M2
+            // (wow-re `unit-m2-shader-light.md` — units take the same entity-node bake as
+            // GameObjects; shade is unread on the probe lane).
+            shade,
+            0,
+            None,  // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
+            None,  // character skin/hair swaps never carry an animated M2Color tint
+            None,  // worn/held part: light selection anchors at the instance origin
+            None,  // M2 carries no MOMT SIDN colour
+            false, // …nor the WINDOW flag
+            light,
+        )
+    };
+    (
+        mk(blend, ShadeSel::Lit, false, false),
+        mk(blend, ShadeSel::Matte, false, false),
+        mk(ModelBlend::Blend, ShadeSel::Lit, true, false),
+        mk(blend, ShadeSel::Matte, false, true),
+        mk(ModelBlend::Blend, ShadeSel::Matte, true, true),
+    )
+}
+
+/// Build a character body's per-appearance materials — the **body** atlas (as a (single-sided,
+/// two-sided) pair — a body batch keeps its own M2 0x04, e.g. the robe skirt) and the **hair**-mesh
+/// texture (a single CharSections BLP, decision 0045) — each as a (steady, interior-matte, fade,
+/// interior-bake) quad. Works for a
+/// player (atlas composited live from CharSections + overlays, decisions 0041 / 0044) *and* a
+/// character-model NPC (atlas = the shipped pre-baked BLP), selected by [`CharLook::body`]. Returns
+/// `(body, hair, object, skin_extra)`; each is `None` for an absent row (e.g. a bald style has no hair
+/// texture, only tauren author an extra skin) or when the tables / world chain / lighting aren't
+/// available (those parts then keep their built, untextured material). A composited atlas is uploaded once per look ([`super::super::SkinComposites`] cache); a baked or hair
+/// BLP loads through the async `mpq://` pipeline (which dedups by path). `parts` supplies the hair
+/// batches' blend (hair is alpha-cut, so it can't be forced opaque like the body).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn build_char_skin_materials(
+    look: &CharLook,
+    // The worn armor display ids (bodyslot 2–9) + the cloak's, and the ItemDisplayInfo catalog to
+    // resolve their region textures (decision 0074). Consumed **only** on the live-composite path
+    // (a player, or the rare bake-less NPC row); a baked NPC atlas already owns the skin, so its
+    // equip ids don't paint here — they drive the geosets only. `[0; 8]`/`0`/`None` = the naked body.
+    equip: [u32; 8],
+    cloak: u32,
+    displays: Option<&super::super::ItemDisplays>,
+    sections: Option<&SkinSections>,
+    world_assets: Option<&WorldAssets>,
+    light: Option<&SharedLightBuffer>,
+    parts: &[EntityPart],
+    images: &mut Assets<Image>,
+    skin_cache: &mut HashMap<SkinKey, Handle<Image>>,
+    asset_server: &AssetServer,
+    materials: &mut Assets<WowModelMaterial>,
+    cache: &mut MaterialCache,
+) -> CharSkinMaterials {
+    let (Some(sections), Some(light)) = (sections, light) else {
+        return (None, None, None, (None, None));
+    };
+    let light = &light.0;
+
+    // Body-skin atlas. A character-model NPC loads its shipped, pre-baked atlas directly; a player (or an
+    // NPC row without a bake name) composites it live from CharSections + overlays, uploaded + cached
+    // once per appearance ([`SkinComposites`]). The composite reads its half-dozen BLPs synchronously off
+    // the shared chain (like the WDL/clutter main-thread loads) — fine behind the cache (once per look).
+    let body_tex: Option<Handle<Image>> = match &look.body {
+        BodySkin::Baked(name) => Some(asset_server.load::<Image>(baked_npc_url(name))),
+        BodySkin::Composite { face } => world_assets.and_then(|world| {
+            let key = SkinKey {
+                race: look.race,
+                sex: look.sex,
+                skin: look.skin,
+                face: *face,
+                facial_hair: look.facial_hair,
+                hair_style: look.hair_style,
+                hair_color: look.hair_color,
+                equip,
+            };
+            match skin_cache.get(&key) {
+                Some(handle) => Some(handle.clone()),
+                None => {
+                    // The worn ItemDisplayInfo rows whose region textures dress the atlas
+                    // (decision 0074); an unknown/zero display id contributes nothing.
+                    let catalog = displays.map(|d| &d.catalog);
+                    let mut worn: [Option<&benilla_formats::ItemDisplay>; 8] = [None; 8];
+                    if let Some(catalog) = catalog {
+                        for (i, id) in equip.iter().enumerate() {
+                            if *id != 0 {
+                                worn[i] = catalog.get(*id);
+                            }
+                        }
+                    }
+                    let chain = &mut world.chain.lock_recover();
+                    let composed = sections
+                        .0
+                        .composite_body(
+                            chain,
+                            key.race,
+                            key.sex,
+                            key.skin,
+                            key.face,
+                            key.facial_hair,
+                            key.hair_style,
+                            key.hair_color,
+                            worn,
+                        )
+                        .ok()??;
+                    let handle = images.add(repeat_texture_authored(composed));
+                    skin_cache.insert(key, handle.clone());
+                    Some(handle)
+                }
+            }
+        }),
+    };
+    // Body atlas: a (single-sided, two-sided) quint pair, chosen per body batch at the swap. The
+    // naked body is a closed single-sided mesh (the approved decision-0044 look), but body-slot
+    // batches carry their own M2 0x04: every race's robe skirt (geoset 1302) — and the undead
+    // ragged-trouser batch — is authored two-sided, and flattening it to the closed-body default
+    // culled the robe's inner faces (see-through from below). `model_material` dedups by key, so
+    // the second quint is a handful of cache entries per look, shared like the first.
+    let body = body_tex.map(|tex| {
+        (
+            build_char_materials(
+                tex.clone(),
+                ModelBlend::Opaque,
+                false,
+                light,
+                materials,
+                cache,
+            ),
+            build_char_materials(tex, ModelBlend::Opaque, true, light, materials, cache),
+        )
+    });
+
+    // Hair-mesh texture — a single CharSections BLP loaded through the async pipeline (dedups by path).
+    // Alpha-cut, so it takes the hair batches' own blend. `None` for a model with no hair part. Same
+    // for a player + an NPC: the baked/composited body atlas covers the head *skin*, but the 3D hair
+    // geometry is a separate geoset with its own texture, keyed here — and that same type-6 unit also
+    // dresses the *facial* hair on the races whose beards are geometry, so this resolves through
+    // `hair_mesh_texture`'s bald fallback rather than the raw row (a bald orc/gnome still has a beard
+    // to texture; taking the blank row left it flat white).
+    let hair = sections
+        .0
+        .hair_mesh_texture(look.race, look.sex, look.hair_style, look.hair_color)
+        .and_then(|path| {
+            // Hair cards are alpha-cut + two-sided (M2 `0x04`); carry both onto the swapped material.
+            let hair_part = parts
+                .iter()
+                .find(|p| p.char_slot == Some(CharSkinSlot::Hair))?;
+            let tex = asset_server.load::<Image>(format!(
+                "mpq://{}",
+                path.replace('\\', "/").to_ascii_lowercase()
+            ));
+            Some(build_char_materials(
+                tex,
+                hair_part.blend,
+                hair_part.two_sided,
+                light,
+                materials,
+                cache,
+            ))
+        });
+
+    // Cape texture (decision 0074's empirical pin): the worn cloak's ItemDisplayInfo
+    // `model_texture[0]` is the Cape BLP basename under `Item\ObjectComponents\Cape\`, bound to the
+    // body's runtime type-2 batches ([`CharSkinSlot::Object`]) — the cloak-geoset skin. `None`
+    // (cloak-less, unknown display, no Object part) keeps those parts' built material — moot when
+    // the cloak geoset branch has them hidden anyway.
+    let object = (cloak != 0)
+        .then_some(())
+        .and_then(|()| displays?.catalog.get(cloak)?.model_texture[0].as_deref())
+        .and_then(|tex_name| {
+            let part = parts
+                .iter()
+                .find(|p| p.char_slot == Some(CharSkinSlot::Object))?;
+            let tex = asset_server.load::<Image>(format!(
+                "mpq://item/objectcomponents/cape/{}.blp",
+                tex_name.to_ascii_lowercase()
+            ));
+            Some(build_char_materials(
+                tex,
+                part.blend,
+                part.two_sided,
+                light,
+                materials,
+                cache,
+            ))
+        });
+
+    // Extra-skin texture (the tauren fur, M2 type 8) — CharSections `sectionType 0` `TextureName[1]`
+    // keyed by skinColor, loaded plain through the async pipeline (the client's extra loader is a bare
+    // TextureCreate — no compositing; a pre-baked NPC atlas doesn't cover it either, so this applies to
+    // players and NPCs alike). The batches come in exactly two authored flavors — the opaque
+    // single-sided fur core and the alpha-cut two-sided fringe cards — so build one quint per flavor
+    // from a representative part (a flavor no part carries is never selected). Empty column (every
+    // non-fur race) ⇒ `(None, None)`; those models carry no type-8 batch anyway.
+    let skin_extra = sections
+        .0
+        .skin_extra_texture(look.race, look.sex, look.skin)
+        .map_or((None, None), |path| {
+            let tex = asset_server.load::<Image>(format!(
+                "mpq://{}",
+                path.replace('\\', "/").to_ascii_lowercase()
+            ));
+            let mut quint_for = |two_sided: bool| {
+                let part = parts.iter().find(|p| {
+                    p.char_slot == Some(CharSkinSlot::SkinExtra) && p.two_sided == two_sided
+                })?;
+                Some(build_char_materials(
+                    tex.clone(),
+                    part.blend,
+                    part.two_sided,
+                    light,
+                    materials,
+                    cache,
+                ))
+            };
+            (quint_for(false), quint_for(true))
+        });
+
+    (body, hair, object, skin_extra)
+}

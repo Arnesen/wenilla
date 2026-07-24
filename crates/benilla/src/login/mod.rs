@@ -1,0 +1,756 @@
+//! The login screen (decision 0539) — the faithful `AccountLogin` glue, functional core only:
+//! the `UI_MainMenu` scene with its authored fog/fires, the account/password boxes, Remember
+//! Account Name, Login/Quit, the version block, and the connecting/error dialogs. The Credits/
+//! Cinematics/TOS side of the reference screen is deliberately cut (the director's call).
+//!
+//! This module owns the **credential policy** — the 0193 §3 mirror for the IO thread's pre-logon
+//! park: the env fast path (any of `WOW_USER`/`WOW_PASS`/`WOW_CHAR` explicitly set auto-submits
+//! with the old `one`/`pone` defaults, so every probe/smoke invocation keeps working), the
+//! pending-credentials resubmit that preserves 0065's seamless reconnect (paced at the flat 3 s,
+//! app-side — the IO thread never sleeps), and the director's typed submit. A *refused* code
+//! (bad password) clears the intent and shows the authored `AUTH_*` dialog — never an auto-retry
+//! against a refusal.
+//!
+//! Module split: this file (state, policy, input, dialogs, the saved-account persistence),
+//! [`screen`] (the authored layout, transcribed from `AccountLogin.xml`).
+
+mod screen;
+
+use std::sync::atomic::Ordering;
+
+use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::ButtonState;
+use bevy::prelude::*;
+
+use benilla_protocol::LoginStage;
+
+use crate::char_select::ClientState;
+use crate::glue_strings::GlueStrings;
+use crate::net::{
+    CharListMessage, DisconnectedMessage, LoginAbandon, LoginFailedMessage, LoginRequest,
+    LoginStageMessage, LoginSubmit,
+};
+use crate::portrait::{GluePreview, GlueScene};
+use crate::sound::GlueSound;
+
+pub(crate) use screen::LoginAction;
+
+/// The flat resubmit pacing after a transport failure with pending credentials (decision 0065's
+/// reconnect cadence, moved app-side by 0539 — the IO thread never sleeps).
+const RETRY_DELAY_SECS: f32 = 3.0;
+/// The quit grace: `gsTitleQuit` gets this long to be audible before `AppExit` drops the mixer.
+const QUIT_GRACE_SECS: f32 = 0.4;
+/// The ref's `letters="16"` on both edit boxes.
+const MAX_LETTERS: usize = 16;
+
+pub(crate) struct LoginPlugin;
+
+impl Plugin for LoginPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LoginIntent>()
+            .init_resource::<LoginForm>()
+            .init_resource::<LoginDialog>()
+            .add_systems(OnEnter(ClientState::Login), enter_login)
+            .add_systems(OnExit(ClientState::Login), screen::exit_login)
+            .add_systems(
+                Update,
+                (
+                    // Policy + transitions run in EVERY state: the reconnect resubmit fires while
+                    // `InWorld`, and the roster edge lands wherever it lands.
+                    (drive_policy, to_select_on_roster, drive_quit).chain(),
+                    (
+                        screen::materialize_screen,
+                        login_input,
+                        screen::refresh_boxes,
+                        screen::refresh_checkbox,
+                        drive_dialog,
+                        crate::glue::art_swaps,
+                        crate::glue::glue_button_visuals,
+                        crate::glue::sync_outlines,
+                    )
+                        .chain()
+                        .run_if(in_state(ClientState::Login)),
+                    (debug_login_smoke, screen::debug_login_shot),
+                )
+                    .chain()
+                    .after(crate::schedule::WorldStage::Net),
+            );
+    }
+}
+
+// ── The credential policy ────────────────────────────────────────────────────────────────────────
+
+/// Where the IO thread's read loop currently is, as far as the app can tell — the policy submits
+/// credentials only while it's parked pre-logon.
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum IoPark {
+    /// Parked at the pre-logon park (boot, a failure, a disconnect, a Back).
+    #[default]
+    AtLogin,
+    /// Past logon — parked at select or streaming the world.
+    Active,
+}
+
+/// The credential policy's memory (the 0193 §3 mirror): the last credentials this session
+/// authenticated (or asked) with, the in-flight/park bookkeeping, and the resubmit timer.
+#[derive(Resource, Default)]
+pub(crate) struct LoginIntent {
+    /// The session's credentials — kept while in-world so a reconnect re-authenticates silently
+    /// (0065); cleared by select's Back, a refusal code, or a Cancel.
+    creds: Option<(String, String)>,
+    /// A submit is in flight (between our send and its LoginFailed/CharacterList answer).
+    in_flight: bool,
+    /// Whether the in-flight submit came from the screen (it announced a connecting dialog and
+    /// wants its failure surfaced) or from the silent auto path.
+    announced: bool,
+    park: IoPark,
+    /// `Time::elapsed_secs` deadline for the next silent resubmit (`None` = no retry scheduled).
+    retry_at: Option<f32>,
+    /// Env fast path read latch (checked once, on the first policy run).
+    env_read: bool,
+}
+
+impl LoginIntent {
+    /// Forget the session's credentials and any scheduled retry (select's Back, a refusal).
+    pub(crate) fn clear(&mut self) {
+        self.creds = None;
+        self.retry_at = None;
+    }
+}
+
+/// Send one login attempt to the parked IO thread, stamped with the current abandon generation.
+fn send_login(
+    intent: &mut LoginIntent,
+    submit: &LoginSubmit,
+    abandon: &LoginAbandon,
+    user: &str,
+    pass: &str,
+    announced: bool,
+) {
+    intent.creds = Some((user.to_string(), pass.to_string()));
+    intent.in_flight = true;
+    intent.announced = announced;
+    intent.retry_at = None;
+    let _ = submit.0.send(LoginRequest {
+        user: user.to_string(),
+        pass: pass.to_string(),
+        generation: abandon.0.load(Ordering::SeqCst),
+    });
+}
+
+/// The `LOGIN_STATE_*` glue string for a stage (the connecting dialog's text).
+fn stage_text(strings: &GlueStrings, stage: LoginStage) -> &str {
+    match stage {
+        LoginStage::Connecting => strings.text("LOGIN_STATE_CONNECTING", "Connecting"),
+        LoginStage::Authenticating => strings.text("LOGIN_STATE_AUTHENTICATING", "Authenticating"),
+        LoginStage::Handshaking => strings.text("LOGIN_STATE_HANDSHAKING", "Handshaking"),
+    }
+}
+
+/// The authored failure string for an auth result byte (the vmangos-verified map, decision 0539
+/// §6): each row is the client's own `GlueStrings` text; a transport failure (`None`) reads
+/// `LOGIN_FAILED` ("Unable to connect").
+fn fail_text(strings: &GlueStrings, code: Option<u8>) -> &str {
+    let (key, fallback): (&str, &str) = match code {
+        None => ("LOGIN_FAILED", "Unable to connect"),
+        Some(0x03) => ("AUTH_BANNED", "This account has been banned"),
+        // vmangos sends 0x04 for unknown account AND wrong password (its AuthCodes.h comment:
+        // the client locks out after an 0x05).
+        Some(0x04) => ("AUTH_UNKNOWN_ACCOUNT", "Unknown account"),
+        Some(0x05) => ("AUTH_INCORRECT_PASSWORD", "Incorrect Password"),
+        Some(0x06) => ("AUTH_ALREADY_ONLINE", "This account is already logged in"),
+        Some(0x07) => ("AUTH_NO_TIME", "Your subscription has expired"),
+        Some(0x08) => ("AUTH_DB_BUSY", "This session has timed out"),
+        Some(0x09) => ("AUTH_VERSION_MISMATCH", "Wrong client version"),
+        Some(0x0B) => ("LOGIN_FAILED", "Unable to connect"),
+        Some(0x0C) => (
+            "AUTH_SUSPENDED",
+            "This account has been temporarily suspended",
+        ),
+        Some(0x0D) => ("AUTH_REJECT", "Login unavailable"),
+        Some(0x0F) => ("AUTH_PARENTAL_CONTROL", "Blocked by parental controls"),
+        Some(_) => ("AUTH_FAILED", "Authentication failed"),
+    };
+    strings.text(key, fallback)
+}
+
+/// The policy tick + the net-message reactions. Runs in every state (the reconnect path fires
+/// while `InWorld`); the screen's own submit comes through [`login_input`], which calls
+/// [`send_login`] with `announced = true`.
+#[allow(clippy::too_many_arguments)]
+fn drive_policy(
+    mut intent: ResMut<LoginIntent>,
+    mut dialog: ResMut<LoginDialog>,
+    submit: Res<LoginSubmit>,
+    abandon: Res<LoginAbandon>,
+    strings: Option<Res<GlueStrings>>,
+    time: Res<Time>,
+    mut stages: MessageReader<LoginStageMessage>,
+    mut failures: MessageReader<LoginFailedMessage>,
+    mut disconnects: MessageReader<DisconnectedMessage>,
+) {
+    let now = time.elapsed_secs();
+    let empty = GlueStrings::default();
+    let strings = strings.as_deref().unwrap_or(&empty);
+
+    // The env fast path, once (decision 0539 §3): any of WOW_USER/WOW_PASS/WOW_CHAR explicitly
+    // set → auto-submit env-with-defaults, so every probe/smoke/harness invocation keeps working.
+    // The login smoke drives its own credentials instead.
+    if !intent.env_read {
+        intent.env_read = true;
+        let any_set = ["WOW_USER", "WOW_PASS", "WOW_CHAR"]
+            .iter()
+            .any(|k| std::env::var_os(k).is_some());
+        if any_set && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
+            let user = std::env::var("WOW_USER").unwrap_or_else(|_| "one".into());
+            let pass = std::env::var("WOW_PASS").unwrap_or_else(|_| "pone".into());
+            info!("login: env fast path — auto-submitting as {user}");
+            intent.creds = Some((user, pass));
+            intent.retry_at = Some(now);
+        }
+    }
+
+    for msg in stages.read() {
+        if matches!(dialog.kind, Some(DialogKind::Status)) {
+            dialog.set_text(stage_text(strings, msg.stage));
+        }
+    }
+    for msg in failures.read() {
+        intent.in_flight = false;
+        intent.park = IoPark::AtLogin;
+        // A terminal failure names something no resubmit can change (the server requires Warden,
+        // say) — show the server's own words and drop the credentials so nothing retries.
+        if msg.terminal {
+            warn!("login: {}", msg.reason);
+            intent.clear();
+            dialog.open_error(&msg.reason);
+            continue;
+        }
+        match msg.code {
+            Some(code) => {
+                // A refusal: surface it (even on the silent path — the credentials went stale)
+                // and never auto-retry against it.
+                warn!("login: refused (code {code:#04x}) — {}", msg.reason);
+                intent.clear();
+                dialog.open_error(fail_text(strings, Some(code)));
+            }
+            None if intent.announced => {
+                warn!("login: {}", msg.reason);
+                dialog.open_error(fail_text(strings, None));
+            }
+            None => {
+                // Silent transport failure with pending intent: schedule the paced resubmit.
+                debug!("login: transport failure ({}) — retrying", msg.reason);
+                if intent.creds.is_some() {
+                    intent.retry_at = Some(now + RETRY_DELAY_SECS);
+                }
+            }
+        }
+    }
+    for msg in disconnects.read() {
+        // The IO thread is heading back to its pre-logon park. With session credentials the
+        // re-auth is silent: immediate after a clean logout (the roster IS the select screen the
+        // app now shows), paced after a stream death (the old reconnect delay, app-side).
+        intent.park = IoPark::AtLogin;
+        intent.in_flight = false;
+        if intent.creds.is_some() {
+            let delay = if msg.reason == "logged out" {
+                0.0
+            } else {
+                RETRY_DELAY_SECS
+            };
+            intent.retry_at = Some(now + delay);
+        }
+    }
+
+    // The silent (re)submit tick.
+    if intent.park == IoPark::AtLogin
+        && !intent.in_flight
+        && intent.retry_at.is_some_and(|t| now >= t)
+    {
+        if let Some((user, pass)) = intent.creds.clone() {
+            send_login(&mut intent, &submit, &abandon, &user, &pass, false);
+        } else {
+            intent.retry_at = None;
+        }
+    }
+}
+
+/// The roster's arrival is the login flow's success edge: the attempt settled, the IO thread is
+/// parked at select — leave the login screen for CharSelect (only from `Login`; a reconnect's
+/// roster lands while `InWorld` and must not flip the screen).
+fn to_select_on_roster(
+    mut msgs: MessageReader<CharListMessage>,
+    mut intent: ResMut<LoginIntent>,
+    mut dialog: ResMut<LoginDialog>,
+    state: Res<State<ClientState>>,
+    mut next: ResMut<NextState<ClientState>>,
+) {
+    if msgs.read().next().is_none() {
+        return;
+    }
+    intent.in_flight = false;
+    intent.park = IoPark::Active;
+    intent.retry_at = None;
+    dialog.close();
+    if *state.get() == ClientState::Login {
+        next.set(ClientState::CharSelect);
+    }
+}
+
+// ── The screen's form state + input ──────────────────────────────────────────────────────────────
+
+/// Which edit box has the focus.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Field {
+    #[default]
+    Account,
+    Password,
+}
+
+/// The typed form: both boxes' contents, the focus, the Remember checkbox, and the caret clock.
+#[derive(Resource, Default)]
+pub(crate) struct LoginForm {
+    pub(super) account: String,
+    pub(super) password: String,
+    pub(super) focus: Field,
+    pub(super) save: bool,
+    pub(super) caret_t: f32,
+}
+
+/// The armed quit (`gsTitleQuit` needs [`QUIT_GRACE_SECS`] to be audible before `AppExit`).
+#[derive(Resource, Default)]
+struct QuitArm(Option<f32>);
+
+/// Entering the login screen: the ref's `AccountLogin_OnShow` — prefill the saved account name,
+/// clear the password, focus account when empty / password otherwise, checkbox = saved-name
+/// exists — and stand the `UI_MainMenu` scene up.
+fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
+    let saved = load_saved_account();
+    form.save = !saved.is_empty();
+    form.focus = if saved.is_empty() {
+        Field::Account
+    } else {
+        Field::Password
+    };
+    form.account = saved;
+    form.password.clear();
+    form.caret_t = 0.0;
+    preview.scene = Some(GlueScene::MainMenu);
+    preview.look = None;
+    preview.yaw = 0.0;
+}
+
+/// The screen's input: typing into the focused box (the ref's 16-letter cap), Tab cycling, Enter
+/// submits, Esc quits (dialog-first — an open dialog's Esc is its Cancel/Okay), clicks focus the
+/// boxes / press the buttons / toggle the checkbox.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn login_input(
+    presses: Query<(&LoginAction, &Interaction), Changed<Interaction>>,
+    mut keyboard: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut form: ResMut<LoginForm>,
+    mut intent: ResMut<LoginIntent>,
+    mut dialog: ResMut<LoginDialog>,
+    submit: Res<LoginSubmit>,
+    abandon: Res<LoginAbandon>,
+    strings: Option<Res<GlueStrings>>,
+    mut sounds: MessageWriter<GlueSound>,
+    mut quit: Local<bool>,
+    mut commands: Commands,
+    time: Res<Time>,
+) {
+    let empty = GlueStrings::default();
+    let strings = strings.as_deref().unwrap_or(&empty);
+    form.caret_t += time.delta_secs();
+
+    let mut do_login = false;
+    let mut do_quit = false;
+
+    // While a dialog is up it owns the input; the box/button surface underneath is inert.
+    let dialog_open = dialog.kind.is_some();
+
+    for (action, interaction) in &presses {
+        if *interaction != Interaction::Pressed || dialog_open {
+            continue;
+        }
+        match action {
+            LoginAction::FocusAccount => form.focus = Field::Account,
+            LoginAction::FocusPassword => form.focus = Field::Password,
+            LoginAction::Login => do_login = true,
+            LoginAction::Quit => do_quit = true,
+            LoginAction::ToggleSave => {
+                form.save = !form.save;
+                // Verbatim ref quirk (`AccountLoginSaveAccountName` OnClick): checked plays the
+                // "Off" kit, unchecked the "On" kit.
+                sounds.write(GlueSound(if form.save {
+                    "igMainMenuOptionCheckBoxOff"
+                } else {
+                    "igMainMenuOptionCheckBoxOn"
+                }));
+                if !form.save {
+                    save_account("");
+                }
+            }
+            LoginAction::Dialog => {} // the dialog driver's
+        }
+    }
+
+    for ev in keyboard.read() {
+        if ev.state != ButtonState::Pressed || dialog_open {
+            continue;
+        }
+        match &ev.logical_key {
+            Key::Character(chs) => {
+                for ch in chs.chars() {
+                    if ch.is_ascii_graphic() {
+                        let field = match form.focus {
+                            Field::Account => &mut form.account,
+                            Field::Password => &mut form.password,
+                        };
+                        if field.len() < MAX_LETTERS {
+                            field.push(ch);
+                        }
+                        if form.focus == Field::Account {
+                            on_account_edited(&mut form);
+                        }
+                    }
+                }
+                form.caret_t = 0.0;
+            }
+            Key::Backspace => {
+                match form.focus {
+                    Field::Account => {
+                        form.account.pop();
+                        on_account_edited(&mut form);
+                    }
+                    Field::Password => {
+                        form.password.pop();
+                    }
+                }
+                form.caret_t = 0.0;
+            }
+            Key::Tab => {
+                form.focus = match form.focus {
+                    Field::Account => Field::Password,
+                    Field::Password => Field::Account,
+                };
+                form.caret_t = 0.0;
+            }
+            _ => {}
+        }
+    }
+    if !dialog_open
+        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
+    {
+        do_login = true;
+    }
+    if !dialog_open && keys.just_pressed(KeyCode::Escape) {
+        do_quit = true;
+    }
+
+    if do_login && !intent.in_flight {
+        // The ref's own guards: empty account / empty password get their dialog, no wire.
+        if form.account.is_empty() {
+            dialog.open_error(strings.text("LOGIN_ENTER_NAME", "Please enter your account name."));
+        } else if form.password.is_empty() {
+            dialog.open_error(strings.text("LOGIN_ENTER_PASSWORD", "Please enter your password."));
+        } else {
+            sounds.write(GlueSound("gsLogin"));
+            // `AccountLogin_Login`: save or clear the account name per the checkbox, clear the
+            // password box after grabbing it.
+            if form.save {
+                save_account(&form.account);
+            } else {
+                save_account("");
+            }
+            let (user, pass) = (form.account.clone(), form.password.clone());
+            form.password.clear();
+            dialog.open_status(strings.text("LOGIN_STATE_CONNECTING", "Connecting"));
+            send_login(&mut intent, &submit, &abandon, &user, &pass, true);
+        }
+    }
+    if do_quit && !*quit {
+        *quit = true;
+        sounds.write(GlueSound("gsTitleQuit"));
+        commands.insert_resource(QuitArm(Some(time.elapsed_secs() + QUIT_GRACE_SECS)));
+    }
+}
+
+/// Editing the account box away from the saved name clears the save + unchecks (the ref's
+/// `OnTextChanged`).
+fn on_account_edited(form: &mut LoginForm) {
+    if form.save {
+        let saved = load_saved_account();
+        if !saved.is_empty() && saved != form.account {
+            save_account("");
+            form.save = false;
+        }
+    }
+}
+
+/// Fire the armed quit once its grace elapsed (so `gsTitleQuit` is heard).
+fn drive_quit(arm: Option<Res<QuitArm>>, time: Res<Time>, mut exit: MessageWriter<AppExit>) {
+    if let Some(arm) = arm {
+        if arm.0.is_some_and(|t| time.elapsed_secs() >= t) {
+            exit.write(AppExit::Success);
+        }
+    }
+}
+
+// ── The GlueDialog (connecting / error) ──────────────────────────────────────────────────────────
+
+/// Which dialog is up: the connecting status (Cancel button, text driven by the stages) or an
+/// error (Okay button).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DialogKind {
+    Status,
+    Error,
+}
+
+/// The login screen's one dialog (the ref's shared `GlueDialog`): kind + text; the driver spawns/
+/// despawns the tree (respawning on a kind change — the button caption differs) and updates the
+/// text in place.
+#[derive(Resource, Default)]
+pub(crate) struct LoginDialog {
+    pub(super) kind: Option<DialogKind>,
+    pub(super) text: String,
+    pub(super) dirty: bool,
+    pub(super) root: Option<Entity>,
+    /// The kind the spawned tree was built for.
+    spawned: Option<DialogKind>,
+    /// The glue scale the spawned tree was built at — a resize rebuilds it.
+    spawned_s: f32,
+}
+
+impl LoginDialog {
+    fn open_status(&mut self, text: &str) {
+        self.kind = Some(DialogKind::Status);
+        self.set_text(text);
+    }
+    fn open_error(&mut self, text: &str) {
+        self.kind = Some(DialogKind::Error);
+        self.set_text(text);
+    }
+    fn set_text(&mut self, text: &str) {
+        if self.text != text {
+            self.text = text.to_string();
+            self.dirty = true;
+        }
+    }
+    fn close(&mut self) {
+        self.kind = None;
+        self.text.clear();
+        self.dirty = false;
+    }
+}
+
+/// Spawn/despawn the dialog tree with the resource, update its text, and run its one button:
+/// Status's Cancel bumps the abandon generation (the in-flight attempt discards at its next
+/// stage boundary) and forgets the intent; Error's Okay just closes. Esc = the button; Enter
+/// confirms an error.
+#[allow(clippy::too_many_arguments)]
+fn drive_dialog(
+    mut commands: Commands,
+    mut dialog: ResMut<LoginDialog>,
+    mut intent: ResMut<LoginIntent>,
+    abandon: Res<LoginAbandon>,
+    art: Res<crate::glue::art::GlueArt>,
+    assets: Res<AssetServer>,
+    strings: Option<Res<GlueStrings>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    presses: Query<(&LoginAction, &Interaction), Changed<Interaction>>,
+    mut texts: Query<&mut Text, With<screen::DialogText>>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let empty = GlueStrings::default();
+    let strings = strings.as_deref().unwrap_or(&empty);
+
+    let Some(kind) = dialog.kind else {
+        if let Some(root) = dialog.root.take() {
+            commands.entity(root).despawn();
+        }
+        dialog.spawned = None;
+        return;
+    };
+
+    // (Re)spawn on the open edge, a kind change (the button caption differs), or a window resize
+    // (the tree bakes the glue scale); a text-only change updates the message line in place.
+    let s = crate::glue::screen_scale(window.single().ok());
+    if dialog.root.is_none() || dialog.spawned != Some(kind) || dialog.spawned_s != s {
+        if let Some(root) = dialog.root.take() {
+            commands.entity(root).despawn();
+        }
+        dialog.root = Some(screen::spawn_dialog(
+            &mut commands,
+            &art,
+            &assets,
+            strings,
+            kind,
+            &dialog.text,
+            s,
+        ));
+        dialog.spawned = Some(kind);
+        dialog.spawned_s = s;
+        dialog.dirty = false;
+    } else if dialog.dirty {
+        for mut t in &mut texts {
+            if t.0 != dialog.text {
+                t.0 = dialog.text.clone();
+            }
+        }
+        dialog.dirty = false;
+    }
+
+    // The one button (or its keys).
+    let mut pressed = presses
+        .iter()
+        .any(|(a, i)| matches!(a, LoginAction::Dialog) && *i == Interaction::Pressed);
+    if keys.just_pressed(KeyCode::Escape) {
+        pressed = true;
+    }
+    if kind == DialogKind::Error
+        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
+    {
+        pressed = true;
+    }
+    if pressed {
+        if kind == DialogKind::Status {
+            // Cancel: the next stage boundary discards the attempt; a canceled manual attempt
+            // must not silently resubmit later.
+            abandon.0.fetch_add(1, Ordering::SeqCst);
+            intent.in_flight = false;
+            intent.clear();
+        }
+        dialog.close();
+        if let Some(root) = dialog.root.take() {
+            commands.entity(root).despawn();
+        }
+    }
+}
+
+// ── The saved account name (decision 0539 §4) ────────────────────────────────────────────────────
+
+/// The benilla-owned config base: `$BENILLA_HOME`, else `~/.benilla`. The runtime data dir is the
+/// reference install and is never written. (Also `/shot`'s home for `shots.txt` — decision 0600.)
+pub(crate) fn config_base() -> Option<std::path::PathBuf> {
+    if let Some(base) = std::env::var_os("BENILLA_HOME") {
+        return Some(std::path::PathBuf::from(base));
+    }
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".benilla"))
+}
+
+/// Read the saved account name from `base` (missing file/dir = empty).
+fn load_saved_account_from(base: &std::path::Path) -> String {
+    std::fs::read_to_string(base.join("account"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Write (or, for an empty name, remove) the saved account name under `base`.
+fn save_account_to(base: &std::path::Path, name: &str) {
+    let path = base.join("account");
+    if name.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    if std::fs::create_dir_all(base).is_ok() {
+        if let Err(e) = std::fs::write(&path, name) {
+            warn!("login: saving account name failed: {e}");
+        }
+    }
+}
+
+/// The ref's `GetSavedAccountName`.
+fn load_saved_account() -> String {
+    config_base()
+        .map(|b| load_saved_account_from(&b))
+        .unwrap_or_default()
+}
+
+/// The ref's `SetSavedAccountName` (empty clears).
+fn save_account(name: &str) {
+    if let Some(base) = config_base() {
+        save_account_to(&base, name);
+    }
+}
+
+// ── Instruments ──────────────────────────────────────────────────────────────────────────────────
+
+/// The login smoke (`WOW_LOGIN_SMOKE=user:pass`, decision 0539 §7): once the screen is up, submit
+/// those credentials through the real screen path; exit success on reaching CharSelect, log + exit
+/// failure on a refusal — the wrong-password path is provable headlessly.
+#[allow(clippy::too_many_arguments)]
+fn debug_login_smoke(
+    state: Res<State<ClientState>>,
+    mut intent: ResMut<LoginIntent>,
+    submit: Res<LoginSubmit>,
+    abandon: Res<LoginAbandon>,
+    mut failures: MessageReader<LoginFailedMessage>,
+    time: Res<Time>,
+    mut exit: MessageWriter<AppExit>,
+    mut phase: Local<u8>,
+) {
+    let Ok(spec) = std::env::var("WOW_LOGIN_SMOKE") else {
+        return;
+    };
+    match *phase {
+        0 if *state.get() == ClientState::Login && time.elapsed_secs() > 2.0 => {
+            let (user, pass) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            info!("login-smoke: submitting as {user}");
+            let (user, pass) = (user.to_string(), pass.to_string());
+            send_login(&mut intent, &submit, &abandon, &user, &pass, true);
+            *phase = 1;
+        }
+        1 => {
+            if let Some(f) = failures.read().last() {
+                error!("login-smoke: FAILED code={:?} reason={}", f.code, f.reason);
+                // `WOW_LOGIN_SMOKE_HOLD=1`: keep running on a refusal instead of exiting — the
+                // error dialog stays up, so a shot instrument can photograph it (the dialog is
+                // otherwise unreachable headlessly; pair with `WOW_PROBE_EXIT_AT`).
+                if std::env::var_os("WOW_LOGIN_SMOKE_HOLD").is_none() {
+                    exit.write(AppExit::error());
+                }
+                *phase = 2;
+            } else if *state.get() == ClientState::CharSelect {
+                info!("login-smoke: reached character select — done");
+                exit.write(AppExit::Success);
+                *phase = 2;
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The code→string map quotes the client's own strings for the vmangos-verified rows.
+    #[test]
+    fn fail_text_maps_the_verified_codes() {
+        let strings = GlueStrings::default(); // empty table → the fallback literals
+        assert_eq!(fail_text(&strings, Some(0x04)), "Unknown account");
+        assert_eq!(fail_text(&strings, Some(0x05)), "Incorrect Password");
+        assert_eq!(fail_text(&strings, None), "Unable to connect");
+        assert_eq!(fail_text(&strings, Some(0x09)), "Wrong client version");
+        assert_eq!(fail_text(&strings, Some(0xEE)), "Authentication failed");
+    }
+
+    /// Save → load → clear round-trips through the dot-file (the ref's Get/SetSavedAccountName).
+    #[test]
+    fn saved_account_round_trips() {
+        let base = std::env::temp_dir().join(format!(
+            "benilla-login-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(load_saved_account_from(&base), "");
+        save_account_to(&base, "ONE");
+        assert_eq!(load_saved_account_from(&base), "ONE");
+        save_account_to(&base, "");
+        assert_eq!(load_saved_account_from(&base), "");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

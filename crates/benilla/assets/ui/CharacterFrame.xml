@@ -1,0 +1,1771 @@
+<Ui>
+    <!--
+        benilla's character window (decision 0208, phase 1a display + phase 1b equip interactions
+        — the C-key window, paper doll first):
+        the round player portrait + name + level line + close button + the five-tab row, dressed
+        from the real 1.12 `CharacterFrame.xml`/`.lua` + `PaperDollFrame.xml`/`.lua` +
+        `CharacterFrameTemplates.xml` + the `Model_*` rotate helpers (`UIParent.lua:1421-1462`) —
+        extracted from the MPQ chain to session scratch this session (director-local reference
+        artifacts, never committed — the 0068/0138 pattern; line cites below are into that
+        extraction's own `ref-CharacterFrame.xml`/`.lua`, `ref-PaperDollFrame.xml`/`.lua`,
+        `ref-UIParent.lua`, `ref-GlobalStrings.lua`). `CharacterFrameTabButtonTemplate` is ALREADY
+        transcribed in `UiPanels.xml:507-563` (battle-tested by Merchant/QuestLog, 0138) — reused
+        here, not redefined.
+
+        Docks the left UIPanel slot exactly like Gossip/Merchant/Quest/QuestLog (`UiPanels.xml`
+        `UIPanelWindows["BenillaCharacterFrame"] = { area = "left", pushable = 0 }`, mirroring the
+        ref's own `CharacterFrame` row, `UIParent.lua` pin cited in `UiPanels.xml`'s header) — so it
+        competes for/replaces those windows, never stacks with them. `ToggleCharacter(tab)` (ref
+        `CharacterFrame.lua:3-23`, kept BARE — not Benilla-prefixed — matching this codebase's own
+        `ToggleQuestLog()` precedent: the addon-facing entry point keeps the real global name even
+        though the frames it drives are Benilla-prefixed) is the show/hide/tab-switch entry point;
+        the app's 'C' binding calls it (`ui_script/mod.rs`).
+
+        ONE deliberate naming deviation from the ref, applied consistently: every frame this file
+        defines is Benilla-prefixed (`BenillaCharacterFrame`, `BenillaPaperDollFrame`, …) — including
+        the string `ToggleCharacter`/`CharacterFrame_ShowSubFrame` pass around internally
+        (`BENILLA_CHARACTERFRAME_SUBFRAMES` lists `"BenillaPaperDollFrame"`, not the ref's bare
+        `"PaperDollFrame"`) — matching the same-prefix convention every other window in this codebase
+        already follows (Merchant/Bag/QuestLog never leave a sub-piece unprefixed).
+
+        Phase 1a shipped the window, display-only. Phase 1b (THIS pass) adds the equip
+        interactions over the SAME display — `PickupInventoryItem`/`UseInventoryItem`/
+        `AutoEquipCursorItem`/`CursorCanGoInSlot`/`IsInventoryItemLocked`, joining the paper doll
+        onto the ONE cursor-payload space via its sentinel `EQUIPMENT_BAG` bag id (decision 0216
+        §1, extended by decision 0208's own phasing, §"Phasing"/"1a"/"1b", and 0216/0218's
+        cursor-arc design). Tabs 2-5 (Pet/Reputation/Skills/Honor) are still OMITTED, the 0138
+        merchant-tab precedent ("tabs arrive with their pages") — `BENILLA_CHARACTERFRAME_SUBFRAMES`
+        only lists the one page that exists.
+
+        Named deferrals/OMITs (each re-cited at its own site below):
+          - Guild line (`CharacterGuildText`) and the PVP rank name (`UnitPVPName` — plain `UnitName`
+            ships instead): both decision 0208's own named deferrals (guild needs `CMSG_GUILD_QUERY`;
+            rank needs the honor arc). `CharacterTitleText` (also PVP-rank-driven) is dropped with it.
+          - Shift-click chat-link insert and ctrl-click `DressUpItemLink` (the dressing room): both
+            named deferrals this phase too — the left-click fork recognizes the modifiers and does
+            nothing, rather than silently falling through to a pickup a real shift/ctrl-click
+            would never have triggered.
+          - The ammo slot (id 0) LOADS ammo by entry (`CMSG_SET_AMMO`) — it does NOT swap into an
+            equip slot (decision 0526; wow-re `cursor-dragdrop-slots.md`: the client's auto-equip
+            sender forks ammo-class → SET_AMMO). So it can't share the 19 named slots'
+            `PickupInventoryItem` path — its click/drop route to `BenillaCharacterAmmoSlot_OnClick`
+            → `AutoEquipCursorItem` (the app's autoequip drain resolves the held entry and forks to
+            SET_AMMO), gated by `CursorCanGoInSlot(0)` so only an ammo payload fits. It carries no
+            ring, so the `CURSOR_UPDATE` highlight / `ITEM_LOCK` dim legs no-op, and there is no
+            drag-OUT of loaded ammo; it keeps sharing `BenillaPaperDollSlot_OnLoad`/`_Update`/
+            `_OnEvent` for its DISPLAY. (The four equipped-bag icons, ids 20-23, joined the
+            `EQUIPMENT_BAG` payload space in decision 0216/0218 — no longer out of the drag space.)
+          - Cooldowns (`GetInventoryItemCooldown`/`CooldownFrameTemplate`), the broken-red tint
+            (`GetInventoryItemBroken`), and the shift-compare tooltip (`SHOW_COMPARE_TOOLTIP`):
+            none of their backing feeds/engine affordances exist yet — the item stats feed has no
+            durability/cooldown channel (the same named gap as 0138's damaged-sell-price).
+          - The `CURSOR_UPDATE` slot highlight is an EMULATION, not the reference's true
+            `LockHighlight`/`UnlockHighlight` (grepped `benilla-ui/src/script/button.rs` this
+            session — no such Button methods exist; a Button's highlight texture only ever shows
+            on REAL mouse hover, `ButtonState::region_visible`'s hardwired `enabled && hovered`, no
+            forced-show path). A real forced-highlight affordance is a `benilla-ui` follow-up, not
+            blocking this slice — `BenillaPaperDollSlot_LockHighlight`/`_UnlockHighlight` below
+            tint the slot's Quickslot2 ring instead, flagged at their own definition.
+          - The relic slot: `UnitHasRelicSlot` is vanilla-always-false (there is no relic slot in
+            1.12), so the ref's `CharacterAmmoSlot:Hide()`/relic-texture branches are DEAD CODE even
+            in the real client — omitted outright rather than transcribing unreachable branches; the
+            ammo slot always shows.
+          - Class-specific stat-tooltip flavor text (`WARRIOR_STRENGTH_TOOLTIP` and its ~20 siblings):
+            only the 5 `DEFAULT_*_TOOLTIP` fallbacks ship. `BenillaPaperDollStatTooltip` still looks
+            the class-specific global up FIRST exactly like the ref, so dropping in the per-class
+            table later is pure string data, no logic change — the numeric stat lines (the
+            load-bearing content) are complete either way.
+          - The model pane ships as a booth-texture stand-in, not a live `<Model>`/`<PlayerModel>`
+            widget (decision 0208 §5): our engine's `FrameKind::Model` parses but has no
+            `SetUnit`/`RefreshUnit` surface (verified this session — grepped `benilla-ui/src/script`),
+            so `CharacterModelFrame` materializes here as a plain `<Frame>` sampling the paper-doll
+            booth bake via `BenillaSetBoothTexture(region, "paperdoll")` (the `SetPortraitTexture`
+            plumbing's sibling, per this session's parallel-build contract) — `DISPLAY_SIZE_CHANGED`/
+            `RefreshUnit` don't apply and are dropped. `OnMouseUp`-to-equip DOES apply, though (1b):
+            it needs no live 3D — just `EnableMouse(true)` + the two script hooks, added below. The
+            held-button continuous spin (`Model_OnUpdate`, ref `UIParent.lua:1444-1462`) needs
+            `GetButtonState()=="PUSHED"` — grepped, no such method exists on our `Button` — so this
+            ships CLICK-ONLY (±0.03 rad/click); the held-spin is a follow-up once/if `GetButtonState`
+            lands.
+          - The ammo slot's data path (verified this session, not the speculative framing in decision
+            0208 §4): the ref's `CharacterAmmoSlot` is NOT driven by a separate `PLAYER_AMMO_ID`
+            Lua global — it shares the exact same `PaperDollItemSlotButton_OnLoad`/`_Update` functions
+            the 19 named slots use (ref `ref-PaperDollFrame.xml:999-1028`, byte-identical to the
+            shared template's own Scripts block at l.8-37), just keyed off `GetInventorySlotInfo(
+            "AmmoSlot")` instead of e.g. `"HeadSlot"`. Whatever `PLAYER_AMMO_ID`/bag-summing happens
+            for that particular slot id is the parallel binding's own implementation detail, invisible
+            to this Lua — transcribed here exactly as the ref wires it.
+          - `$parentStock` (the ammo slot's yellow "in bags" count, ref `ref-PaperDollFrame.xml:
+            970-978`): no Lua in this session's extraction ever populates it (likely an ammo-picker-
+            addon-only overlay outside this pull) — dropped rather than guessed at.
+
+        Engine-gap notes (transcribed anyway per this file's own instructions, or worked around):
+          - `HitRectInsets` (both `BenillaCharacterFrame` and `BenillaPaperDollFrame`, ref's identical
+            0/30/0/45 on both) has no loader wiring yet (grepped `benilla-ui/src/loader` — no
+            `HitRectInsets` handling exists) — included anyway (harmless no-op, documents the ref's
+            intent for whenever hit-rect insets land).
+          - `enableMouse`/`setAllPoints` (frame-level) are also no-ops on `<Frame>` (only the
+            region-level `setAllPoints` shorthand is wired, `loader/regions.rs:130`) — `
+            BenillaPaperDollFrame` therefore gets an explicit `Size`+`TOPLEFT` anchor instead of the
+            ref's `setAllPoints="true"` (the same effect, since it's sized to exactly fill its
+            parent).
+          - A plain `<Frame>` isn't mouse-enabled by construction in this engine (only Button/
+            CheckButton/EditBox/ScrollingMessageFrame are — `widget/mod.rs`'s ctor comment, already
+            the reason `UnitFrames.xml` calls `EnableMouse(true)` on its own root frame) — every
+            hover-tooltip `<Frame>` below (the 5 attribute rows, armor/attack/damage/ranged rows, the
+            5 resistance frames — none of them Buttons) gets its own `self:EnableMouse(true)` in
+            `OnLoad` for this reason; the 19 item slots are Buttons and need no such call.
+          - `TEXT(x)` (the ref's localization-tooling identity macro) has no engine equivalent and
+            needs none — it's a build-time no-op wrapper in the real client, so every `TEXT(FOO)` call
+            below is transcribed as the bare `FOO` global.
+          - The font color codes (`HIGHLIGHT_FONT_COLOR_CODE`/`GREEN_FONT_COLOR_CODE`/
+            `RED_FONT_COLOR_CODE`/`FONT_COLOR_CODE_CLOSE`, `NORMAL_FONT_COLOR`/`HIGHLIGHT_FONT_COLOR`)
+            are defined by the real `Fonts.xml`'s own <Script> block (ref l.8-19 — extracted and
+            verified this session), so ours live in our `Fonts.xml` (loaded first), not here.
+
+        Sounds (decision 0090): `igCharacterInfoOpen`/`Close` on Show/Hide (ref `CharacterFrame.lua:
+        83/96`), `igCharacterInfoTab` on the tab click (ref `CharacterFrameTab_OnClick`, l.47),
+        `igInventoryRotateCharacter` on each rotate click (ref `UIParent.lua:1432/1441`).
+    -->
+    <Script><![CDATA[
+        -- ── GlobalStrings values this window uses (ref-GlobalStrings.lua, cited per line — the
+        -- `X = X or "..."` idiom matches CastingBar.xml's own convention: a real GlobalStrings.lua,
+        -- if one ever loads, wins over this fallback) ──────────────────────────────────────────────
+        CHARACTER = CHARACTER or "Character"                          -- :481
+        SKILLS = SKILLS or "Skills"                                    -- :3477 (decision 0437 phase 4, the Skills tab label)
+        PLAYER_LEVEL = PLAYER_LEVEL or "Level %d %s %s"                -- :3075
+        ARMOR = ARMOR or "Armor"                                       -- :62
+        ARMOR_COLON = ARMOR_COLON or "Armor:"                          -- :63
+        ARMOR_TOOLTIP = ARMOR_TOOLTIP or
+            "Decreases the amount of damage taken from physical attacks.  The amount of reduction is influenced by the level of the attacker.\nDamage reduction against a level %d attacker: %.1f%%" -- :65
+        ATTACK_POWER_COLON = ATTACK_POWER_COLON or "Power:"            -- :71
+        ATTACK_SPEED_COLON = ATTACK_SPEED_COLON or "Attack Speed (seconds):" -- :73
+        ATTACK_TOOLTIP = ATTACK_TOOLTIP or "Attack Rating"             -- :75
+        ATTACK_TOOLTIP_SUBTEXT = ATTACK_TOOLTIP_SUBTEXT or
+            "Your attack rating affects your chance to hit a target, and is based on the weapon skill of the weapon you are currently wielding." -- :76
+        DAMAGE_COLON = DAMAGE_COLON or "Damage:"                       -- :888
+        DAMAGE_PER_SECOND = DAMAGE_PER_SECOND or "Damage per Second:"  -- :889
+        DPS_TEMPLATE = DPS_TEMPLATE or "(%.1f damage per second)"      -- :942
+        MELEE_ATTACK = MELEE_ATTACK or "Melee Attack"                  -- :2680
+        MELEE_ATTACK_POWER = MELEE_ATTACK_POWER or "Melee Attack Power" -- :2681
+        MELEE_ATTACK_POWER_TOOLTIP = MELEE_ATTACK_POWER_TOOLTIP or
+            "Increases damage with melee weapons by %.1f damage per second." -- :2682
+        NOT_APPLICABLE = NOT_APPLICABLE or "N/A"                       -- :2802
+        RANGED_ATTACK = RANGED_ATTACK or "Ranged Attack"               -- :3292
+        RANGED_ATTACK_POWER = RANGED_ATTACK_POWER or "Ranged Attack Power" -- :3293
+        RANGED_ATTACK_POWER_TOOLTIP = RANGED_ATTACK_POWER_TOOLTIP or
+            "Increases damage with ranged weapons by %.1f damage per second." -- :3294
+        RANGED_ATTACK_TOOLTIP = RANGED_ATTACK_TOOLTIP or "Ranged Attack Rating" -- :3295
+        INVTYPE_WEAPONMAINHAND = INVTYPE_WEAPONMAINHAND or "Main Hand" -- :2375
+        INVTYPE_WEAPONOFFHAND = INVTYPE_WEAPONOFFHAND or "Off Hand"    -- :2376
+        INVTYPE_RANGED = INVTYPE_RANGED or "Ranged"                    -- :2366
+
+        SPELL_STAT0_NAME = SPELL_STAT0_NAME or "Strength"              -- :4118
+        SPELL_STAT1_NAME = SPELL_STAT1_NAME or "Agility"               -- :4119
+        SPELL_STAT2_NAME = SPELL_STAT2_NAME or "Stamina"               -- :4120
+        SPELL_STAT3_NAME = SPELL_STAT3_NAME or "Intellect"             -- :4121
+        SPELL_STAT4_NAME = SPELL_STAT4_NAME or "Spirit"                -- :4122
+
+        RESISTANCE1_NAME = RESISTANCE1_NAME or "Holy Resistance"       -- :3347 (unused: Holy never rides the paper doll)
+        RESISTANCE2_NAME = RESISTANCE2_NAME or "Fire Resistance"       -- :3348
+        RESISTANCE3_NAME = RESISTANCE3_NAME or "Nature Resistance"     -- :3349
+        RESISTANCE4_NAME = RESISTANCE4_NAME or "Frost Resistance"      -- :3350
+        RESISTANCE5_NAME = RESISTANCE5_NAME or "Shadow Resistance"     -- :3351
+        RESISTANCE6_NAME = RESISTANCE6_NAME or "Arcane Resistance"     -- :3352
+        RESISTANCE_TYPE1 = RESISTANCE_TYPE1 or "holy"                  -- :3362
+        RESISTANCE_TYPE2 = RESISTANCE_TYPE2 or "fire"                  -- :3363
+        RESISTANCE_TYPE3 = RESISTANCE_TYPE3 or "nature"                -- :3364
+        RESISTANCE_TYPE4 = RESISTANCE_TYPE4 or "frost"                 -- :3365
+        RESISTANCE_TYPE5 = RESISTANCE_TYPE5 or "shadow"                -- :3366
+        RESISTANCE_TYPE6 = RESISTANCE_TYPE6 or "arcane"                -- :3367
+        RESISTANCE_EXCELLENT = RESISTANCE_EXCELLENT or "Excellent"     -- :3353
+        RESISTANCE_VERYGOOD = RESISTANCE_VERYGOOD or "Very Good"       -- :3368
+        RESISTANCE_GOOD = RESISTANCE_GOOD or "Good"                    -- :3355
+        RESISTANCE_FAIR = RESISTANCE_FAIR or "Fair"                    -- :3354
+        RESISTANCE_POOR = RESISTANCE_POOR or "Poor"                    -- :3358
+        RESISTANCE_NONE = RESISTANCE_NONE or "None"                    -- :3357
+        RESISTANCE_TOOLTIP_SUBTEXT = RESISTANCE_TOOLTIP_SUBTEXT or
+            "Increases the ability to resist %s-based attacks, spells and abilities.\nResistance against level %d: |cffffffff%s|r" -- :3360
+
+        -- Default (class-agnostic) stat tooltips only — see this file's header comment on the
+        -- class-specific (WARRIOR_STRENGTH_TOOLTIP, …) omission.
+        DEFAULT_STRENGTH_TOOLTIP = DEFAULT_STRENGTH_TOOLTIP or "Increases attack power with melee weapons." -- :916
+        DEFAULT_AGILITY_TOOLTIP = DEFAULT_AGILITY_TOOLTIP or
+            "Increases attack power with ranged weapons.\nImproves chance to score a critical hit with all weapons.\nIncreases armor and chance to dodge attacks." -- :911
+        DEFAULT_STAMINA_TOOLTIP = DEFAULT_STAMINA_TOOLTIP or "Increases health points." -- :915
+        DEFAULT_INTELLECT_TOOLTIP = DEFAULT_INTELLECT_TOOLTIP or "Increases the rate at which weapon skills improve." -- :913
+        DEFAULT_SPIRIT_TOOLTIP = DEFAULT_SPIRIT_TOOLTIP or "Increases health and mana regeneration rates." -- :914
+
+        HEADSLOT = HEADSLOT or "Head"                                  -- :2123
+        NECKSLOT = NECKSLOT or "Neck"                                  -- :2713
+        SHOULDERSLOT = SHOULDERSLOT or "Shoulders"                     -- :3428
+        BACKSLOT = BACKSLOT or "Back"                                  -- :133
+        CHESTSLOT = CHESTSLOT or "Chest"                               -- :746
+        SHIRTSLOT = SHIRTSLOT or "Shirt"                               -- :3427
+        TABARDSLOT = TABARDSLOT or "Tabard"                            -- :4217
+        WRISTSLOT = WRISTSLOT or "Wrist"                                -- :5458
+        HANDSSLOT = HANDSSLOT or "Hands"                               -- :2115
+        WAISTSLOT = WAISTSLOT or "Waist"                                -- :5428
+        LEGSSLOT = LEGSSLOT or "Legs"                                  -- :2565
+        FEETSLOT = FEETSLOT or "Feet"                                  -- :1967
+        FINGER0SLOT = FINGER0SLOT or "Finger"                          -- :1971
+        FINGER1SLOT = FINGER1SLOT or "Finger"                          -- :1972
+        TRINKET0SLOT = TRINKET0SLOT or "Trinket"                       -- :4313
+        TRINKET1SLOT = TRINKET1SLOT or "Trinket"                       -- :4314
+        MAINHANDSLOT = MAINHANDSLOT or "Main Hand"                     -- :2658
+        SECONDARYHANDSLOT = SECONDARYHANDSLOT or "Off Hand"            -- :3400
+        RANGEDSLOT = RANGEDSLOT or "Ranged"                            -- :3291
+        AMMOSLOT = AMMOSLOT or "Ammo"                                  -- :53
+
+        -- The font color codes/tables live in our Fonts.xml (the ref's own home for them, l.8-19 —
+        -- verified this session), loaded before every window.
+
+        -- ── This window's own constants (ref-PaperDollFrame.lua:1-4, Benilla-prefixed) ────────────
+        BENILLA_NUM_STATS = 5              -- NUM_STATS
+        BENILLA_NUM_RESISTANCE_TYPES = 5   -- NUM_RESISTANCE_TYPES
+        BENILLA_ATTACK_POWER_MAGIC_NUMBER = 14 -- ATTACK_POWER_MAGIC_NUMBER
+        -- MagicResFrame1..5's ref `id=` attrs (ref-PaperDollFrame.xml:654-759) — arcane/fire/nature/
+        -- frost/shadow; Holy(1) never rides the paper doll (only 5 of the 6 schools show here).
+        BENILLA_MAGICRES_IDS = { 6, 2, 3, 4, 5 }
+        -- The pages that exist so far (this file's header comment; the 0138 merchant-tab
+        -- precedent — tabs arrive with their pages). Benilla-prefixed, unlike the ref's bare
+        -- "PaperDollFrame"/"SkillFrame". 1:1 with the tab row below (index N is tab N's page) —
+        -- decision 0437 phase 4 adds "BenillaSkillFrame" as tab 2; Pet/Reputation/Honor (the
+        -- real client's tabs 2/3/5) are still OMITTED.
+        BENILLA_CHARACTERFRAME_SUBFRAMES = { "BenillaPaperDollFrame", "BenillaSkillFrame" }
+
+        -- ── The window: toggle / tab dispatch (ref CharacterFrame.lua:1-48) ─────────────────────
+        -- Kept BARE (not Benilla-prefixed) — the addon-facing entry point, matching this codebase's
+        -- own ToggleQuestLog() precedent (QuestLogFrame.xml).
+        function CharacterFrame_ShowSubFrame(frameName)
+            for _, value in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
+                -- Nil-guarded: a page's file may not be loaded (a test subset, a later
+                -- load-on-demand page) — a missing sibling must never break the switch.
+                local page = getglobal(value)
+                if page then
+                    if value == frameName then page:Show() else page:Hide() end
+                end
+            end
+        end
+
+        function ToggleCharacter(tab)
+            local subFrame = getglobal(tab)
+            if not subFrame then return end
+            local frame = getglobal("BenillaCharacterFrame")
+            if frame:IsVisible() then
+                if subFrame:IsVisible() then
+                    HideUIPanel(frame)
+                else
+                    PlaySound("igCharacterInfoTab")
+                    CharacterFrame_ShowSubFrame(tab)
+                end
+            else
+                ShowUIPanel(frame)
+                CharacterFrame_ShowSubFrame(tab)
+            end
+        end
+
+        -- The tab row's own OnClick (ref CharacterFrameTab_OnClick, l.35-48), now id-based (decision
+        -- 0437 phase 4 grows the row to 2) — the MerchantFrame.xml Merchant/Buyback pair's own shape
+        -- for a >1-tab window: `id` indexes BOTH the tab button and BENILLA_CHARACTERFRAME_SUBFRAMES
+        -- 1:1. PanelTemplates_SetTab visually selects the clicked tab (the ref's own
+        -- PanelTemplates_SetTab(this, subFrame:GetID()) call, dropped by the original phase-1a
+        -- single-tab comment above — restored now that a second tab exists to disagree with the
+        -- first). l.47's trailing PlaySound is the ref's OWN redundant second igCharacterInfoTab —
+        -- ToggleCharacter already plays it on the "switch to this tab" path, so this second call only
+        -- matters when the window is ALREADY open on this same tab, i.e. the HideUIPanel branch —
+        -- transcribed verbatim rather than "fixed" since it's the ref's own behavior, not a bug of ours.
+        function BenillaCharacterFrameTab_OnClick(id)
+            PanelTemplates_SetTab(getglobal("BenillaCharacterFrame"), id)
+            ToggleCharacter(BENILLA_CHARACTERFRAME_SUBFRAMES[id])
+            PlaySound("igCharacterInfoTab")
+        end
+
+        function BenillaCharacterFrame_OnLoad(frame)
+            -- GetID()/SetID() DO exist (landed with slice 2's BagFrame, which relies on them for
+            -- its own per-window bag id) — the STALE claim this comment used to make is corrected
+            -- here (0208 phase 1b touched this function anyway). 2 tabs ship as of decision 0437
+            -- phase 4 (Character + Skills); the window opens on tab 1 by default, matching the
+            -- real client.
+            PanelTemplates_SetNumTabs(frame, 2)
+            PanelTemplates_SetTab(frame, 1)
+        end
+
+        -- ref CharacterFrame_OnShow (l.82-93): UpdateMicroButtons/Show*TextStatusBarText/
+        -- ShowWatchedReputationBarText all OMITTED — no micro-button bar, unit-frame bar-text-mode
+        -- toggle, or reputation-bar-text mechanism exists in this engine. UnitPVPName -> plain
+        -- UnitName (this file's header comment: PVP rank is a named deferral).
+        function BenillaCharacterFrame_OnShow()
+            PlaySound("igCharacterInfoOpen")
+            SetPortraitTexture(getglobal("BenillaCharacterFramePortrait"), "player")
+            getglobal("BenillaCharacterNameText"):SetText(UnitName("player"))
+        end
+
+        -- ref CharacterFrame_OnHide (l.95-104): everything past the PlaySound is the OnShow list's
+        -- Hide-twin, OMITTED for the same reason. The subframe hide-loop is OUR OWN addition
+        -- (decision 0437 phase 4): BenillaPaperDollFrame is a true engine child of this frame (its
+        -- own header comment) so it hides for free on the parent's Hide-cascade, but
+        -- BenillaSkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
+        -- attachment (grepped `benilla-ui/src/loader`: the XML `parent=` attribute is read nowhere,
+        -- unlike `relativeTo`, which resolves by name regardless of tree position — see
+        -- SkillFrame.xml's own header comment) — so nothing else would hide it when the WHOLE
+        -- character window closes (ESC, the close X, or another left-slot window bumping it via
+        -- UIPanel exclusivity). Looping every BENILLA_CHARACTERFRAME_SUBFRAMES entry here, once,
+        -- keeps this correct as more non-nested tabs (Pet/Reputation/Honor) land the same way.
+        function BenillaCharacterFrame_OnHide()
+            PlaySound("igCharacterInfoClose")
+            for _, name in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
+                local subFrame = getglobal(name)
+                if subFrame then subFrame:Hide() end
+            end
+        end
+
+        -- ── The paper-doll page (ref PaperDollFrame.lua) ────────────────────────────────────────
+        -- ref PaperDollFrame_OnLoad (l.6-29), the label lines (l.7-13) transcribed verbatim: the
+        -- labels live ONLY in the row template's $parentLabel (gold GameFontNormalSmall, LEFT) and
+        -- Lua fills them — never a re-declared region in an instance (the ref's instances carry no
+        -- <Layers> at all, and this engine's template expansion appends children, so a re-declared
+        -- $parentLabel creates a SECOND anchorless default-font FontString instead of merging — the
+        -- white/overlapping-label bug this line-set replaces). CHARACTER_POINTS_CHANGED/
+        -- UNIT_MODEL_CHANGED/PLAYER_DAMAGE_DONE_MODS/UNIT_RANGEDDAMAGE/PLAYER_GUILD_UPDATE/
+        -- SKILL_LINES_CHANGED are OMITTED (talents/guild/skills are out of this phase's event
+        -- contract; UNIT_RANGEDDAMAGE isn't in it either — UNIT_DAMAGE/UNIT_ATTACK_SPEED alone
+        -- trigger the ranged refresh below, same as the ref's own first branch already does).
+        function BenillaPaperDollFrame_OnLoad(frame)
+            getglobal("BenillaCharacterAttackFrameLabel"):SetText(MELEE_ATTACK)
+            getglobal("BenillaCharacterDamageFrameLabel"):SetText(DAMAGE_COLON)
+            getglobal("BenillaCharacterAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
+            getglobal("BenillaCharacterRangedAttackFrameLabel"):SetText(RANGED_ATTACK)
+            getglobal("BenillaCharacterRangedDamageFrameLabel"):SetText(DAMAGE_COLON)
+            getglobal("BenillaCharacterRangedAttackPowerFrameLabel"):SetText(ATTACK_POWER_COLON)
+            getglobal("BenillaCharacterArmorFrameLabel"):SetText(ARMOR_COLON)
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("UNIT_LEVEL")
+            frame:RegisterEvent("UNIT_RESISTANCES")
+            frame:RegisterEvent("UNIT_STATS")
+            frame:RegisterEvent("UNIT_DAMAGE")
+            frame:RegisterEvent("UNIT_ATTACK_SPEED")
+            frame:RegisterEvent("UNIT_ATTACK_POWER")
+            frame:RegisterEvent("UNIT_RANGED_ATTACK_POWER")
+            frame:RegisterEvent("UNIT_ATTACK")
+        end
+
+        -- ref PaperDollFrame_OnEvent (l.37-76), the unit-token branch only (unit == "player" always
+        -- true here — no pet/other-unit reuse in phase 1a) and this file's registered subset only.
+        function BenillaPaperDollFrame_OnEvent(frame)
+            if event == "PLAYER_ENTERING_WORLD" then
+                return
+            end
+            if not frame:IsVisible() then return end
+            if arg1 ~= "player" then return end
+            if event == "UNIT_LEVEL" then
+                BenillaPaperDollFrame_SetLevel()
+            elseif event == "UNIT_DAMAGE" or event == "UNIT_ATTACK_SPEED" then
+                BenillaPaperDollFrame_SetDamage()
+                BenillaPaperDollFrame_SetRangedAttack()
+                BenillaPaperDollFrame_SetRangedDamage()
+                BenillaPaperDollFrame_SetAttackBothHands()
+            elseif event == "UNIT_ATTACK" then
+                BenillaPaperDollFrame_SetAttackBothHands()
+            elseif event == "UNIT_RESISTANCES" then
+                BenillaPaperDollFrame_SetResistances()
+                BenillaPaperDollFrame_SetArmor()
+            elseif event == "UNIT_STATS" then
+                BenillaPaperDollFrame_SetStats()
+            elseif event == "UNIT_ATTACK_POWER" then
+                BenillaPaperDollFrame_SetAttackPower()
+            elseif event == "UNIT_RANGED_ATTACK_POWER" then
+                BenillaPaperDollFrame_SetRangedAttack()
+                BenillaPaperDollFrame_SetRangedAttackPower()
+            end
+        end
+
+        -- ref PaperDollFrame_OnShow (l.568-585): SetGuild OMITTED (named deferral, this file's
+        -- header). The relic Hide/Show branch is DROPPED outright — UnitHasRelicSlot is
+        -- vanilla-always-false, so CharacterAmmoSlot simply never has a reason to hide; it ships
+        -- with no hidden="true" at all (see its own Button below).
+        function BenillaPaperDollFrame_OnShow()
+            BenillaPaperDollFrame_SetLevel()
+            BenillaPaperDollFrame_SetStats()
+            BenillaPaperDollFrame_SetResistances()
+            BenillaPaperDollFrame_SetArmor()
+            BenillaPaperDollFrame_SetDamage()
+            BenillaPaperDollFrame_SetAttackPower()
+            BenillaPaperDollFrame_SetAttackBothHands()
+            BenillaPaperDollFrame_SetRangedAttack()
+            BenillaPaperDollFrame_SetRangedDamage()
+            BenillaPaperDollFrame_SetRangedAttackPower()
+        end
+        -- ref PaperDollFrame_OnHide (l.587-592) is entirely commented-out in the ref itself (the
+        -- ShoppingTooltip/compare-tooltip lines, OMIT) — nothing to transcribe, no OnHide wired.
+
+        -- UnitRace/UnitClass return nil,nil until the app's first player snapshot lands (unlike the
+        -- real client, whose race/class are synchronous local data, never network-raced) — "?" is a
+        -- harmless placeholder for that one-tick window, not a fidelity change (verified live: an
+        -- unguarded format() errors "string expected, got nil" the instant this fires before the
+        -- first snapshot).
+        function BenillaPaperDollFrame_SetLevel()
+            getglobal("BenillaCharacterLevelText"):SetText(
+                format(PLAYER_LEVEL, UnitLevel("player"), UnitRace("player") or "?", UnitClass("player") or "?"))
+        end
+
+        -- ref PaperDollFrame_SetStats (l.131-174), including its per-refresh label SetText (l.140)
+        -- — the labels' one source of text (see BenillaPaperDollFrame_OnLoad's header comment).
+        function BenillaPaperDollFrame_SetStats()
+            for i = 1, BENILLA_NUM_STATS do
+                local label = getglobal("BenillaCharacterStatFrame" .. i .. "Label")
+                local text = getglobal("BenillaCharacterStatFrame" .. i .. "StatText")
+                local frame = getglobal("BenillaCharacterStatFrame" .. i)
+                local statName = getglobal("SPELL_STAT" .. (i - 1) .. "_NAME")
+                label:SetText(statName .. ":")
+                local stat, effectiveStat, posBuff, negBuff = UnitStat("player", i)
+                local tooltipText = HIGHLIGHT_FONT_COLOR_CODE .. statName .. " "
+                if posBuff == 0 and negBuff == 0 then
+                    text:SetText(effectiveStat)
+                    frame.tooltip = tooltipText .. effectiveStat .. FONT_COLOR_CODE_CLOSE
+                else
+                    tooltipText = tooltipText .. effectiveStat
+                    if posBuff > 0 or negBuff < 0 then
+                        tooltipText = tooltipText .. " (" .. (stat - posBuff - negBuff) .. FONT_COLOR_CODE_CLOSE
+                    end
+                    if posBuff > 0 then
+                        tooltipText = tooltipText .. FONT_COLOR_CODE_CLOSE .. GREEN_FONT_COLOR_CODE .. "+" .. posBuff .. FONT_COLOR_CODE_CLOSE
+                    end
+                    if negBuff < 0 then
+                        tooltipText = tooltipText .. RED_FONT_COLOR_CODE .. " " .. negBuff .. FONT_COLOR_CODE_CLOSE
+                    end
+                    if posBuff > 0 or negBuff < 0 then
+                        tooltipText = tooltipText .. HIGHLIGHT_FONT_COLOR_CODE .. ")" .. FONT_COLOR_CODE_CLOSE
+                    end
+                    frame.tooltip = tooltipText
+                    if negBuff < 0 then
+                        text:SetText(RED_FONT_COLOR_CODE .. effectiveStat .. FONT_COLOR_CODE_CLOSE)
+                    else
+                        text:SetText(GREEN_FONT_COLOR_CODE .. effectiveStat .. FONT_COLOR_CODE_CLOSE)
+                    end
+                end
+            end
+        end
+
+        -- ref PaperDollFrame_SetResistances (l.176-228). `resistanceLevel` is a proper `local` here
+        -- (the ref leaks it as an implicit global, harmless there — Lua 5.0's default — but our
+        -- sandboxed globals table is worth not littering).
+        function BenillaPaperDollFrame_SetResistances()
+            for i = 1, BENILLA_NUM_RESISTANCE_TYPES do
+                local resistId = BENILLA_MAGICRES_IDS[i]
+                local text = getglobal("BenillaMagicResText" .. i)
+                local frame = getglobal("BenillaMagicResFrame" .. i)
+                local base, resistance, positive, negative = UnitResistance("player", resistId)
+                local resistanceName = getglobal("RESISTANCE" .. resistId .. "_NAME")
+                frame.tooltip = resistanceName .. " " .. resistance
+                if math.abs(negative) > positive then
+                    text:SetText(RED_FONT_COLOR_CODE .. resistance .. FONT_COLOR_CODE_CLOSE)
+                elseif math.abs(negative) == positive then
+                    text:SetText(resistance)
+                else
+                    text:SetText(GREEN_FONT_COLOR_CODE .. resistance .. FONT_COLOR_CODE_CLOSE)
+                end
+                if positive ~= 0 or negative ~= 0 then
+                    frame.tooltip = frame.tooltip .. " ( " .. HIGHLIGHT_FONT_COLOR_CODE .. base
+                    if positive > 0 then
+                        frame.tooltip = frame.tooltip .. GREEN_FONT_COLOR_CODE .. " +" .. positive
+                    end
+                    if negative < 0 then
+                        frame.tooltip = frame.tooltip .. " " .. RED_FONT_COLOR_CODE .. negative
+                    end
+                    frame.tooltip = frame.tooltip .. FONT_COLOR_CODE_CLOSE .. " )"
+                end
+                local unitLevel = math.max(UnitLevel("player") or 1, 20)
+                local magicResistanceNumber = resistance / unitLevel
+                local resistanceLevel
+                if magicResistanceNumber > 5 then
+                    resistanceLevel = RESISTANCE_EXCELLENT
+                elseif magicResistanceNumber > 3.75 then
+                    resistanceLevel = RESISTANCE_VERYGOOD
+                elseif magicResistanceNumber > 2.5 then
+                    resistanceLevel = RESISTANCE_GOOD
+                elseif magicResistanceNumber > 1.25 then
+                    resistanceLevel = RESISTANCE_FAIR
+                elseif magicResistanceNumber > 0 then
+                    resistanceLevel = RESISTANCE_POOR
+                else
+                    resistanceLevel = RESISTANCE_NONE
+                end
+                frame.tooltipSubtext = format(RESISTANCE_TOOLTIP_SUBTEXT,
+                    getglobal("RESISTANCE_TYPE" .. resistId), unitLevel, resistanceLevel)
+            end
+        end
+
+        -- ref PaperDollFrame_SetArmor (l.230-250). NOTE the ref's own third UnitArmor return
+        -- (`armor`) is unused here too — PaperDollFormatStat gets `base`, not `armor`; transcribed
+        -- verbatim, not "fixed".
+        function BenillaPaperDollFrame_SetArmor(unit, prefix)
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local base, effectiveArmor, armor, posBuff, negBuff = UnitArmor(unit)
+            local frame = getglobal(prefix .. "ArmorFrame")
+            local text = getglobal(prefix .. "ArmorFrameStatText")
+            BenillaPaperDollFormatStat(ARMOR, base, posBuff, negBuff, frame, text)
+            local playerLevel = UnitLevel(unit)
+            local armorReduction = effectiveArmor / ((85 * playerLevel) + 400)
+            armorReduction = 100 * (armorReduction / (armorReduction + 1))
+            frame.tooltipSubtext = format(ARMOR_TOOLTIP, playerLevel, armorReduction)
+        end
+
+        -- ref PaperDollFrame_SetDamage (l.274-372).
+        function BenillaPaperDollFrame_SetDamage(unit, prefix)
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local damageText = getglobal(prefix .. "DamageFrameStatText")
+            local damageFrame = getglobal(prefix .. "DamageFrame")
+            local speed, offhandSpeed = UnitAttackSpeed(unit)
+            local minDamage, maxDamage, minOffHandDamage, maxOffHandDamage, physicalBonusPos, physicalBonusNeg, percent =
+                UnitDamage(unit)
+            local displayMin = math.max(math.floor(minDamage), 1)
+            local displayMax = math.max(math.ceil(maxDamage), 1)
+            minDamage = (minDamage / percent) - physicalBonusPos - physicalBonusNeg
+            maxDamage = (maxDamage / percent) - physicalBonusPos - physicalBonusNeg
+            local baseDamage = (minDamage + maxDamage) * 0.5
+            local fullDamage = (baseDamage + physicalBonusPos + physicalBonusNeg) * percent
+            local totalBonus = fullDamage - baseDamage
+            local damagePerSecond = math.max(fullDamage, 1) / speed
+            local damageTooltip = math.max(math.floor(minDamage), 1) .. " - " .. math.max(math.ceil(maxDamage), 1)
+            local colorPos = "|cff20ff20"
+            local colorNeg = "|cffff2020"
+            if totalBonus == 0 then
+                if displayMin < 100 and displayMax < 100 then
+                    damageText:SetText(displayMin .. " - " .. displayMax)
+                else
+                    damageText:SetText(displayMin .. "-" .. displayMax)
+                end
+            else
+                local color
+                if totalBonus > 0 then color = colorPos else color = colorNeg end
+                if displayMin < 100 and displayMax < 100 then
+                    damageText:SetText(color .. displayMin .. " - " .. displayMax .. "|r")
+                else
+                    damageText:SetText(color .. displayMin .. "-" .. displayMax .. "|r")
+                end
+                if physicalBonusPos > 0 then
+                    damageTooltip = damageTooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
+                end
+                if physicalBonusNeg < 0 then
+                    damageTooltip = damageTooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
+                end
+                if percent > 1 then
+                    damageTooltip = damageTooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                elseif percent < 1 then
+                    damageTooltip = damageTooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                end
+            end
+            damageFrame.damage = damageTooltip
+            damageFrame.attackSpeed = speed
+            damageFrame.dps = damagePerSecond
+            if offhandSpeed then
+                minOffHandDamage = (minOffHandDamage / percent) - physicalBonusPos - physicalBonusNeg
+                maxOffHandDamage = (maxOffHandDamage / percent) - physicalBonusPos - physicalBonusNeg
+                local offhandBaseDamage = (minOffHandDamage + maxOffHandDamage) * 0.5
+                local offhandFullDamage = (offhandBaseDamage + physicalBonusPos + physicalBonusNeg) * percent
+                local offhandDamagePerSecond = math.max(offhandFullDamage, 1) / offhandSpeed
+                local offhandDamageTooltip =
+                    math.max(math.floor(minOffHandDamage), 1) .. " - " .. math.max(math.ceil(maxOffHandDamage), 1)
+                if physicalBonusPos > 0 then
+                    offhandDamageTooltip = offhandDamageTooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
+                end
+                if physicalBonusNeg < 0 then
+                    offhandDamageTooltip = offhandDamageTooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
+                end
+                if percent > 1 then
+                    offhandDamageTooltip = offhandDamageTooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                elseif percent < 1 then
+                    offhandDamageTooltip = offhandDamageTooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                end
+                damageFrame.offhandDamage = offhandDamageTooltip
+                damageFrame.offhandAttackSpeed = offhandSpeed
+                damageFrame.offhandDps = offhandDamagePerSecond
+            else
+                damageFrame.offhandAttackSpeed = nil
+            end
+        end
+
+        -- ref PaperDollFrame_SetAttackPower (l.374-389).
+        function BenillaPaperDollFrame_SetAttackPower(unit, prefix)
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local base, posBuff, negBuff = UnitAttackPower(unit)
+            local frame = getglobal(prefix .. "AttackPowerFrame")
+            local text = getglobal(prefix .. "AttackPowerFrameStatText")
+            BenillaPaperDollFormatStat(MELEE_ATTACK_POWER, base, posBuff, negBuff, frame, text)
+            frame.tooltipSubtext = format(MELEE_ATTACK_POWER_TOOLTIP,
+                math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
+        end
+
+        -- ref PaperDollFrame_SetAttackBothHands (l.391-417) — the weapon-skill line (decision 0208's
+        -- own "to confirm": the equipped-weapon subclass -> skill-id table is UnitAttackBothHands's
+        -- own concern, not this file's).
+        function BenillaPaperDollFrame_SetAttackBothHands(unit, prefix)
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local mainHandAttackBase, mainHandAttackMod = UnitAttackBothHands(unit)
+            local frame = getglobal(prefix .. "AttackFrame")
+            local text = getglobal(prefix .. "AttackFrameStatText")
+            if mainHandAttackMod == 0 then
+                text:SetText(mainHandAttackBase)
+                frame.tooltip = nil
+            else
+                local color = RED_FONT_COLOR_CODE
+                if mainHandAttackMod > 0 then
+                    color = GREEN_FONT_COLOR_CODE
+                    frame.tooltip = mainHandAttackBase .. color .. " +" .. mainHandAttackMod .. FONT_COLOR_CODE_CLOSE
+                else
+                    frame.tooltip = mainHandAttackBase .. color .. " " .. mainHandAttackMod .. FONT_COLOR_CODE_CLOSE
+                end
+                text:SetText(color .. (mainHandAttackBase + mainHandAttackMod) .. FONT_COLOR_CODE_CLOSE)
+            end
+        end
+
+        -- ref PaperDollFrame_SetRangedAttack (l.419-466). `hasRelic`/UnitHasRelicSlot DROPPED
+        -- outright (this file's header comment: vanilla-always-false, dead code in the ref itself).
+        -- The literal slot id 18 is the ref's OWN hardcoded value (l.435) — quoted verbatim; what
+        -- GetInventoryItemTexture resolves id 18 to is the parallel binding's call, not re-derived
+        -- here.
+        function BenillaPaperDollFrame_SetRangedAttack(unit, prefix)
+            if unit == "pet" then return end
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local frame = getglobal(prefix .. "RangedAttackFrame")
+            local text = getglobal(prefix .. "RangedAttackFrameStatText")
+            local paperDoll = getglobal("BenillaPaperDollFrame")
+            local rangedAttackBase, rangedAttackMod = UnitRangedAttack(unit)
+            local rangedTexture = GetInventoryItemTexture("player", 18)
+            local oldValue = paperDoll.noRanged
+            if rangedTexture then
+                paperDoll.noRanged = nil
+            else
+                text:SetText(NOT_APPLICABLE)
+                paperDoll.noRanged = true
+                frame.tooltip = nil
+            end
+            if oldValue ~= paperDoll.noRanged then
+                BenillaPaperDollFrame_SetRangedAttackPower()
+                BenillaPaperDollFrame_SetRangedDamage()
+            end
+            if not rangedTexture then return end
+            if rangedAttackMod == 0 then
+                text:SetText(rangedAttackBase)
+                frame.tooltip = nil
+            else
+                local color = RED_FONT_COLOR_CODE
+                if rangedAttackMod > 0 then
+                    color = GREEN_FONT_COLOR_CODE
+                    frame.tooltip = rangedAttackBase .. color .. " +" .. rangedAttackMod .. FONT_COLOR_CODE_CLOSE
+                else
+                    frame.tooltip = rangedAttackBase .. color .. " " .. rangedAttackMod .. FONT_COLOR_CODE_CLOSE
+                end
+                text:SetText(color .. (rangedAttackBase + rangedAttackMod) .. FONT_COLOR_CODE_CLOSE)
+            end
+        end
+
+        -- ref PaperDollFrame_SetRangedDamage (l.468-537).
+        function BenillaPaperDollFrame_SetRangedDamage(unit, prefix)
+            if unit == "pet" then return end
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local damageText = getglobal(prefix .. "RangedDamageFrameStatText")
+            local damageFrame = getglobal(prefix .. "RangedDamageFrame")
+            local paperDoll = getglobal("BenillaPaperDollFrame")
+            if paperDoll.noRanged then
+                damageText:SetText(NOT_APPLICABLE)
+                damageFrame.damage = nil
+                return
+            end
+            local rangedAttackSpeed, minDamage, maxDamage, physicalBonusPos, physicalBonusNeg, percent =
+                UnitRangedDamage(unit)
+            local displayMin = math.max(math.floor(minDamage), 1)
+            local displayMax = math.max(math.ceil(maxDamage), 1)
+            minDamage = (minDamage / percent) - physicalBonusPos - physicalBonusNeg
+            maxDamage = (maxDamage / percent) - physicalBonusPos - physicalBonusNeg
+            local baseDamage = (minDamage + maxDamage) * 0.5
+            local fullDamage = (baseDamage + physicalBonusPos + physicalBonusNeg) * percent
+            local totalBonus = fullDamage - baseDamage
+            local damagePerSecond = math.max(fullDamage, 1) / rangedAttackSpeed
+            local tooltip = math.max(math.floor(minDamage), 1) .. " - " .. math.max(math.ceil(maxDamage), 1)
+            if totalBonus == 0 then
+                if displayMin < 100 and displayMax < 100 then
+                    damageText:SetText(displayMin .. " - " .. displayMax)
+                else
+                    damageText:SetText(displayMin .. "-" .. displayMax)
+                end
+            else
+                local colorPos = "|cff20ff20"
+                local colorNeg = "|cffff2020"
+                local color
+                if totalBonus > 0 then color = colorPos else color = colorNeg end
+                if displayMin < 100 and displayMax < 100 then
+                    damageText:SetText(color .. displayMin .. " - " .. displayMax .. "|r")
+                else
+                    damageText:SetText(color .. displayMin .. "-" .. displayMax .. "|r")
+                end
+                if physicalBonusPos > 0 then
+                    tooltip = tooltip .. colorPos .. " +" .. physicalBonusPos .. "|r"
+                end
+                if physicalBonusNeg < 0 then
+                    tooltip = tooltip .. colorNeg .. " " .. physicalBonusNeg .. "|r"
+                end
+                if percent > 1 then
+                    tooltip = tooltip .. colorPos .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                elseif percent < 1 then
+                    tooltip = tooltip .. colorNeg .. " x" .. math.floor(percent * 100 + 0.5) .. "%|r"
+                end
+                damageFrame.tooltip = tooltip .. " " .. format(DPS_TEMPLATE, damagePerSecond)
+            end
+            damageFrame.attackSpeed = rangedAttackSpeed
+            damageFrame.damage = tooltip
+            damageFrame.dps = damagePerSecond
+        end
+
+        -- ref PaperDollFrame_SetRangedAttackPower (l.539-566).
+        function BenillaPaperDollFrame_SetRangedAttackPower(unit, prefix)
+            if unit == "pet" then return end
+            unit = unit or "player"
+            prefix = prefix or "BenillaCharacter"
+            local frame = getglobal(prefix .. "RangedAttackPowerFrame")
+            local text = getglobal(prefix .. "RangedAttackPowerFrameStatText")
+            local paperDoll = getglobal("BenillaPaperDollFrame")
+            if paperDoll.noRanged then
+                text:SetText(NOT_APPLICABLE)
+                frame.tooltip = nil
+                return
+            end
+            if HasWandEquipped() then
+                text:SetText("--")
+                frame.tooltip = nil
+                return
+            end
+            local base, posBuff, negBuff = UnitRangedAttackPower(unit)
+            BenillaPaperDollFormatStat(RANGED_ATTACK_POWER, base, posBuff, negBuff, frame, text)
+            frame.tooltipSubtext = format(RANGED_ATTACK_POWER_TOOLTIP,
+                math.max(base + posBuff + negBuff, 0) / BENILLA_ATTACK_POWER_MAGIC_NUMBER)
+        end
+
+        -- ref PaperDollFormatStat (l.804-833).
+        function BenillaPaperDollFormatStat(name, base, posBuff, negBuff, frame, textString)
+            local effective = math.max(0, base + posBuff + negBuff)
+            local text = HIGHLIGHT_FONT_COLOR_CODE .. name .. " " .. effective
+            if posBuff == 0 and negBuff == 0 then
+                text = text .. FONT_COLOR_CODE_CLOSE
+                textString:SetText(effective)
+            else
+                if posBuff > 0 or negBuff < 0 then
+                    text = text .. " (" .. base .. FONT_COLOR_CODE_CLOSE
+                end
+                if posBuff > 0 then
+                    text = text .. FONT_COLOR_CODE_CLOSE .. GREEN_FONT_COLOR_CODE .. "+" .. posBuff .. FONT_COLOR_CODE_CLOSE
+                end
+                if negBuff < 0 then
+                    text = text .. RED_FONT_COLOR_CODE .. " " .. negBuff .. FONT_COLOR_CODE_CLOSE
+                end
+                if posBuff > 0 or negBuff < 0 then
+                    text = text .. HIGHLIGHT_FONT_COLOR_CODE .. ")" .. FONT_COLOR_CODE_CLOSE
+                end
+                if negBuff < 0 then
+                    textString:SetText(RED_FONT_COLOR_CODE .. effective .. FONT_COLOR_CODE_CLOSE)
+                else
+                    textString:SetText(GREEN_FONT_COLOR_CODE .. effective .. FONT_COLOR_CODE_CLOSE)
+                end
+            end
+            frame.tooltip = text
+        end
+
+        -- ref PaperDollStatTooltip (l.786-802) — `this` (the ref's ambient global) becomes an
+        -- explicit `button` param here, matching this codebase's own house convention (Merchant/
+        -- Bag/QuestLog all thread `self` explicitly rather than lean on the engine's `this`
+        -- global, which DOES exist — `benilla-ui/src/script/event.rs` — but isn't this codebase's
+        -- idiom).
+        function BenillaPaperDollStatTooltip(button, stat)
+            -- classFileName nil until the first player snapshot lands (this file's SetLevel comment
+            -- on the same engine timing gap) — "" just misses every class lookup, falling through to
+            -- DEFAULT_*_TOOLTIP below exactly like an unrecognized class would.
+            local _, classFileName = UnitClass("player")
+            classFileName = classFileName or ""
+            local classStatText = getglobal(strupper(classFileName) .. "_" .. stat .. "_TOOLTIP")
+            if not classStatText then
+                classStatText = getglobal("DEFAULT_" .. stat .. "_TOOLTIP")
+            end
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetText(button.tooltip)
+            GameTooltip:AddLine(classStatText, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+            GameTooltip:Show()
+        end
+
+        -- ref CharacterDamageFrame_OnEnter (l.835-851).
+        function BenillaCharacterDamageFrame_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetText(INVTYPE_WEAPONMAINHAND, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(ATTACK_SPEED_COLON, string.format("%.2f", button.attackSpeed),
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(DAMAGE_COLON, button.damage,
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(DAMAGE_PER_SECOND, string.format("%.1f", button.dps),
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            if button.offhandAttackSpeed then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(INVTYPE_WEAPONOFFHAND, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                GameTooltip:AddDoubleLine(ATTACK_SPEED_COLON, string.format("%.2f", button.offhandAttackSpeed),
+                    NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                GameTooltip:AddDoubleLine(DAMAGE_COLON, button.offhandDamage,
+                    NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+                GameTooltip:AddDoubleLine(DAMAGE_PER_SECOND, string.format("%.1f", button.offhandDps),
+                    NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            end
+            GameTooltip:Show()
+        end
+
+        -- ref CharacterRangedDamageFrame_OnEnter (l.853-863).
+        function BenillaCharacterRangedDamageFrame_OnEnter(button)
+            if not button.damage then return end
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetText(INVTYPE_RANGED, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(ATTACK_SPEED_COLON, string.format("%.2f", button.attackSpeed),
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(DAMAGE_COLON, button.damage,
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:AddDoubleLine(DAMAGE_PER_SECOND, string.format("%.1f", button.dps),
+                NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            GameTooltip:Show()
+        end
+
+        -- ── The 19 equipment slots + ammo (ref PaperDollItemSlotButton_*, l.78-98/594-784) ──────
+        -- Cooldowns, the broken-red tint, and SHOW_COMPARE_TOOLTIP are still OMITTED this phase —
+        -- this file's header comment. What ships now (1b): the icon/count fill, the empty-slot
+        -- art, the hover tooltip, click-to-equip/-use (l.647-662, ctrl/shift named deferrals),
+        -- the drag trio, lock dimming, and the CURSOR_UPDATE ring highlight (emulated — header
+        -- comment).
+        function BenillaPaperDollSlot_OnLoad(button, slotName)
+            button:RegisterEvent("UNIT_INVENTORY_CHANGED")
+            local id, texture, checkRelic = GetInventorySlotInfo(slotName)
+            button.invSlotId = id
+            button.slotName = slotName
+            button.emptyTexture = texture
+            button.checkRelic = checkRelic -- UnitHasRelicSlot is vanilla-always-false (header OMIT): never read
+            button.icon = getglobal(button:GetName() .. "IconTexture")
+            button.count = getglobal(button:GetName() .. "Count")
+            -- Equip interactions on the 19 named slots use the equip-swap wire (PickupInventoryItem
+            -- pick/place/swap). The ammo slot (id 0) is different: it LOADS ammo by entry via
+            -- CMSG_SET_AMMO (decision 0526; wow-re cursor-dragdrop-slots.md — the client's auto-equip
+            -- sender forks ammo-class → SET_AMMO), so it only wants click-to-place + drag-drop, both
+            -- routed to BenillaCharacterAmmoSlot_OnClick (its own Scripts block below). It carries no
+            -- ring, so the CURSOR_UPDATE highlight / ITEM_LOCK dim legs would no-op anyway, and there
+            -- is no drag-OUT (you can't pick the loaded ammo off the slot).
+            if slotName ~= "AmmoSlot" then
+                button:RegisterEvent("ITEM_LOCK_CHANGED")
+                button:RegisterEvent("CURSOR_UPDATE")
+                -- The shift-compare listener (ref PaperDollFrame.lua l.83): the ENGINE fires
+                -- SHOW_COMPARE_TOOLTIP(slot, n) for an equippable item hover while shift is held;
+                -- only the matching visible doll slot answers (the OnEvent branch below).
+                button:RegisterEvent("SHOW_COMPARE_TOOLTIP")
+                button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+                -- The drag trio (decision 0216 §3): click-carry and drag are ONE code path in the
+                -- reference (PaperDollFrame.xml:20-25 routes OnDragStart/OnReceiveDrag to the same
+                -- OnClick("LeftButton", ignoreModifiers=1) the plain click uses) — see
+                -- BenillaPaperDollSlot_OnClick below for the identical routing, the bag slots' own
+                -- precedent (BagFrame.xml's BenillaBagSlot_OnClick).
+                button:RegisterForDrag("LeftButton")
+            else
+                button:RegisterForClicks("LeftButtonUp")
+            end
+            BenillaPaperDollSlot_Update(button)
+        end
+
+        -- Left: shift/ctrl are named deferrals (chat-link insert / DressUpItemLink, header
+        -- comment) — recognized and done, not fallen through to a pickup a real modified click
+        -- would never trigger. Plain click: PickupInventoryItem (pick up / place / swap / cancel,
+        -- ref l.656). Right: UseInventoryItem (ref l.659). `ignoreModifiers` is the drag-route
+        -- calls' own suppression, the bag slots' precedent.
+        function BenillaPaperDollSlot_OnClick(button, mouseButton, ignoreModifiers)
+            if mouseButton == "LeftButton" then
+                if IsControlKeyDown() and not ignoreModifiers then
+                    return -- DressUpItemLink: named deferral, no dressing room yet
+                elseif IsShiftKeyDown() and not ignoreModifiers then
+                    return -- chat-link insert: named deferral
+                end
+                PickupInventoryItem(button.invSlotId)
+                GameTooltip:Hide() -- the item just left the slot for the cursor
+                BenillaPaperDollSlot_Update(button)
+            elseif mouseButton == "RightButton" then
+                UseInventoryItem(button.invSlotId)
+            end
+        end
+
+        -- The ammo slot's own click/drop (decision 0526): ammo LOADS by entry (CMSG_SET_AMMO), it
+        -- doesn't swap into an equip slot, so it can't share BenillaPaperDollSlot_OnClick's
+        -- PickupInventoryItem path. Only an ammo payload fits (CursorCanGoInSlot(0) — ammo's
+        -- find_equip_slot is [0]); the drop funnels through AutoEquipCursorItem, whose app-side drain
+        -- resolves the held item's entry and forks to SET_AMMO — the reference's own shared auto-equip
+        -- sender (wow-re cursor-dragdrop-slots.md). An empty cursor or a non-ammo payload is inert
+        -- (nothing fits), and there is no unload-via-slot in 1.12.
+        function BenillaCharacterAmmoSlot_OnClick(button)
+            if CursorCanGoInSlot(button.invSlotId) then
+                AutoEquipCursorItem()
+                GameTooltip:Hide()
+                BenillaPaperDollSlot_Update(button)
+            end
+        end
+
+        function BenillaPaperDollSlot_Update(button)
+            local textureName = GetInventoryItemTexture("player", button.invSlotId)
+            if textureName then
+                button.icon:SetTexture(textureName)
+                local count = GetInventoryItemCount("player", button.invSlotId)
+                if (count or 0) > 1 then
+                    button.count:SetText(count)
+                else
+                    button.count:SetText("")
+                end
+            else
+                button.icon:SetTexture(button.emptyTexture)
+                button.count:SetText("")
+            end
+            -- A BROKEN item (durability 0) tints icon + slot ring red — ref
+            -- PaperDollItemSlotButton_Update (l.670-676: SetItemButtonTextureVertexColor +
+            -- SetItemButtonNormalTextureVertexColor, both 0.9, 0, 0). The bags carry no broken
+            -- tint in 1.12 (ContainerFrame.lua has none) — equipped only. Kept as a flag for
+            -- the cursor highlight's restore (Unlock below shares the ring).
+            button.broken = textureName and GetInventoryItemBroken("player", button.invSlotId)
+            -- A locked slot (its item is up on the cursor, or a send is still pending
+            -- server-side, decision 0216 §4/0218 §3) dims — the bag slots' own vertex-dim
+            -- convention (BagFrame.xml's BenillaBagSlot_Update), applied here instead of the
+            -- ref's separate SetItemButtonDesaturated call (no engine equivalent — header
+            -- comment). The transient drag-dim outranks the broken red on the icon.
+            if IsInventoryItemLocked(button.invSlotId) then
+                button.icon:SetVertexColor(0.4, 0.4, 0.4)
+            elseif button.broken then
+                button.icon:SetVertexColor(0.9, 0, 0)
+            else
+                button.icon:SetVertexColor(1, 1, 1)
+            end
+            BenillaPaperDollSlot_UnlockHighlight(button)
+            if GameTooltip:IsOwned(button) then
+                BenillaPaperDollSlot_OnEnter(button)
+            end
+        end
+
+        -- ref PaperDollItemSlotButton_OnEnter (l.739-748): the equipped hover is the INSTANCE
+        -- render — SetInventoryItem, never an id/template render. That carries the live
+        -- durability pair (an earlier SetItemById here read the template's full max/max), and
+        -- an instance hover never arms a shift-compare — the engine's SetInventoryItem doesn't
+        -- arm (a worn item compared with itself is no comparison; director-caught: shift over
+        -- the doll popped a "Currently Equipped" 0/XX beside a template-full main tooltip).
+        -- The ref's repair-mode branch (l.757-762) is INTERIM-omitted with the binding's
+        -- repairCost. checkRelic (l.744-746) is TBC-flagged dead weight in 1.12 — omitted.
+        function BenillaPaperDollSlot_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            local hasItem = GameTooltip:SetInventoryItem("player", button.invSlotId)
+            if not hasItem then
+                -- Empty slot: the slot-name tooltip (ref strupper(strsub(name,10)) -> the matching
+                -- GlobalStrings key, e.g. "HeadSlot" -> HEADSLOT -> "Head").
+                GameTooltip:SetText(getglobal(strupper(button.slotName)) or button.slotName)
+            end
+            GameTooltip:Show()
+        end
+
+        -- CURSOR_UPDATE's LockHighlight/UnlockHighlight emulation (this file's header comment: no
+        -- true forced-highlight affordance exists — no benilla-ui Button method shows a state
+        -- texture off real hover). A vertex tint on the slot's own Quickslot2 ring
+        -- (`NormalTexture`, the template below) stands in: green while `CursorCanGoInSlot` says
+        -- the held payload fits here, white otherwise.
+        -- Both legs no-op on a ringless slot (the ammo slot carries no NormalTexture).
+        function BenillaPaperDollSlot_LockHighlight(button)
+            local ring = button:GetNormalTexture()
+            if ring then
+                ring:SetVertexColor(0, 1, 0)
+            end
+        end
+
+        -- The restore leg: back to the ring's resting color — broken red (ref l.672) or white.
+        function BenillaPaperDollSlot_UnlockHighlight(button)
+            local ring = button:GetNormalTexture()
+            if not ring then
+                return
+            end
+            if button.broken then
+                ring:SetVertexColor(0.9, 0, 0)
+            else
+                ring:SetVertexColor(1, 1, 1)
+            end
+        end
+
+        function BenillaPaperDollSlot_OnEvent(button)
+            if event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
+                BenillaPaperDollSlot_Update(button)
+            elseif event == "ITEM_LOCK_CHANGED" then
+                -- Ref PaperDollItemSlotButton_OnEvent (l.601-604): no arg filtering — every doll
+                -- slot just repaints on any lock transition (cheap, idempotent; it's this SLOT's
+                -- own dim that's actually changing, if anything is).
+                BenillaPaperDollSlot_Update(button)
+            elseif event == "CURSOR_UPDATE" then
+                if CursorCanGoInSlot(button.invSlotId) then
+                    BenillaPaperDollSlot_LockHighlight(button)
+                else
+                    BenillaPaperDollSlot_UnlockHighlight(button)
+                end
+            elseif event == "SHOW_COMPARE_TOOLTIP" then
+                -- ref PaperDollItemSlotButton_OnEvent (l.621-640, quoted; button.invSlotId for the
+                -- ref's this:GetID()): arg1 = the doll slot the hovered item would equip into,
+                -- arg2 = which shopping tooltip. Both anchor to THIS doll slot (1 to its right,
+                -- 2 hanging below-right) — so compares appear only with the character window
+                -- open, the 1.12 behavior.
+                if arg1 ~= button.invSlotId or not button:IsVisible() or arg2 > NUM_SHOPPING_TOOLTIPS then
+                    return
+                end
+                local tooltip = getglobal("ShoppingTooltip" .. arg2)
+                local anchor = "ANCHOR_RIGHT"
+                if arg2 > 1 then
+                    anchor = "ANCHOR_BOTTOMRIGHT"
+                end
+                tooltip:SetOwner(button, anchor)
+                local hasItem = tooltip:SetInventoryItem("player", button.invSlotId)
+                if not hasItem then
+                    tooltip:Hide()
+                end
+            end
+        end
+
+        -- ref PaperDollItemSlotButton_OnUpdate (l.766-784), the un-throttled BagFrame-style
+        -- re-enter loop (BagFrame.xml's own comment on why this ships unthrottled).
+        function BenillaPaperDollSlot_OnUpdate(button)
+            if GameTooltip:IsOwned(button) then
+                BenillaPaperDollSlot_OnEnter(button)
+            end
+        end
+
+        -- ── The model pane (ref UIParent.lua:1420-1462) ─────────────────────────────────────────
+        -- This file's header comment: a booth-texture stand-in, not a live widget. `frame` here is
+        -- BenillaCharacterModelFrame; `frame.facing` stands in for the ref's `model.rotation`.
+        function BenillaPaperDollModel_OnLoad(frame)
+            frame.facing = 0.61 -- ref UIParent.lua:1422, the literal default facing
+            BenillaPaperDollModel_SetFacing(frame.facing)
+        end
+
+        -- ref Model_RotateLeft/Right (UIParent.lua:1426-1442) — the ref's OWN left/right sign
+        -- convention is preserved verbatim (rotate-left SUBTRACTS, rotate-right ADDS); not
+        -- re-derived, just quoted.
+        function BenillaPaperDollModel_RotateLeft(frame)
+            frame.facing = frame.facing - 0.03
+            BenillaPaperDollModel_SetFacing(frame.facing)
+            PlaySound("igInventoryRotateCharacter")
+        end
+
+        function BenillaPaperDollModel_RotateRight(frame)
+            frame.facing = frame.facing + 0.03
+            BenillaPaperDollModel_SetFacing(frame.facing)
+            PlaySound("igInventoryRotateCharacter")
+        end
+        -- The held-button continuous spin (ref Model_OnUpdate, UIParent.lua:1444-1462,
+        -- ROTATIONS_PER_SECOND=0.5) needs GetButtonState()=="PUSHED" — no such method exists on our
+        -- Button (grepped) — so this ships CLICK-ONLY; no OnUpdate wired on the model frame.
+
+        -- ref CharacterModelFrame_OnMouseUp (l.31-35): a plain left-click-up on the model pane
+        -- also auto-equips a held container item — the model pane doubles as a drop target even
+        -- without a drag, not just via OnReceiveDrag. AutoEquipCursorItem is already a no-op for
+        -- every non-fitting/non-container payload (cursor.rs's own contract), so no CursorHasItem
+        -- guard is needed here.
+        function BenillaPaperDollModel_OnMouseUp(frame, button)
+            if button == "LeftButton" then
+                AutoEquipCursorItem()
+            end
+        end
+    ]]></Script>
+
+    <!--
+        The shared equipment-slot button (ref PaperDollItemSlotButtonTemplate inherits
+        ItemButtonTemplate, ref-PaperDollFrame.xml:4-38 — ItemButtonTemplate's own XML isn't part of
+        this session's extraction, so its shape is taken from this codebase's own prior
+        reconstruction of it, BagFrame.xml's BenillaBagSlotTemplate: 37x37, a BACKGROUND icon fill,
+        an OVERLAY count, the 64x64 UI-Quickslot2 ring centered (0,-1), UI-Quickslot-Depress pushed,
+        ButtonHilight-Square ADD highlight — duplicated here rather than cross-file inherited so this
+        window's slot behavior (UNIT_INVENTORY_CHANGED refresh, tooltip) stays self-contained in one
+        file, the same posture Merchant's own item-row template takes vs. reusing Bag's).
+        Cooldown ($parentCooldown, CooldownFrameTemplate) OMITTED — no cooldown feed/engine
+        affordance exists yet. OnClick + the drag trio land THIS phase (1b) — the NormalTexture
+        ring below doubles as the CURSOR_UPDATE highlight's vertex-tint target (this file's header
+        comment: an emulation, no true LockHighlight/UnlockHighlight exists).
+    -->
+    <Button name="BenillaPaperDollItemSlotTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIconTexture"/>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                    <Anchors>
+                        <Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="2"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors>
+                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaPaperDollSlot_OnClick(self, arg1)</OnClick>
+            <OnEnter>BenillaPaperDollSlot_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+            <OnEvent>BenillaPaperDollSlot_OnEvent(self)</OnEvent>
+            <OnUpdate>BenillaPaperDollSlot_OnUpdate(self)</OnUpdate>
+            <!-- The reference routes both drag entries to the plain click path with modifiers
+                 suppressed (PaperDollFrame.xml:20-25 — PickupInventoryItem, ignoring
+                 shift/ctrl) — the bag slots' own precedent (BagFrame.xml). -->
+            <OnDragStart>BenillaPaperDollSlot_OnClick(self, "LeftButton", true)</OnDragStart>
+            <OnReceiveDrag>BenillaPaperDollSlot_OnClick(self, "LeftButton", true)</OnReceiveDrag>
+        </Scripts>
+    </Button>
+
+    <!--
+        The ref defines TWO byte-identical templates for the attribute/stat rows — StatFrameTemplate
+        (ref-PaperDollFrame.xml:39-71) and AttributeFrameTemplate (l.72-105): same 104x13 size, same
+        Label(GameFontNormalSmall,LEFT) + $parentStat(30x13,RIGHT)/$parentText(GameFontHighlightSmall,
+        RIGHT) shape — a semantic-only distinction in the real client (armor/attack rows "are stats",
+        the 5 primaries "are attributes"). Collapsed to ONE template here (a legitimate reuse — no
+        behavior differs). `self:EnableMouse(true)` in OnLoad: a plain Frame isn't mouse-enabled by
+        construction in this engine (this file's header comment) — every instance below needs it to
+        receive its own OnEnter/OnLeave hover.
+    -->
+    <Frame name="BenillaStatRowTemplate" virtual="true">
+        <Size><AbsDimension x="104" y="13"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentLabel" inherits="GameFontNormalSmall">
+                    <Anchors><Anchor point="LEFT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="$parentStat">
+                <Size><AbsDimension x="30" y="13"/></Size>
+                <Anchors><Anchor point="RIGHT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString name="$parentText" inherits="GameFontHighlightSmall" justifyH="RIGHT">
+                            <Anchors><Anchor point="RIGHT"/></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+    </Frame>
+
+    <!--
+        The magic-resistance icon frame (ref MagicResistanceFrameTemplate, ref-PaperDollFrame.xml:
+        106-123): 32x29, a generic tooltip OnEnter reading self.tooltip/self.tooltipSubtext (both
+        filled by BenillaPaperDollFrame_SetResistances) — no per-instance OnEnter override needed
+        (the ref's own MagicResFrame1-5 instances carry none either).
+    -->
+    <Frame name="BenillaMagicResistanceFrameTemplate" virtual="true">
+        <Size><AbsDimension x="32" y="29"/></Size>
+        <Scripts>
+            <OnLoad>self:EnableMouse(true)</OnLoad>
+            <OnEnter>
+                if self.tooltip then
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(self.tooltip)
+                    GameTooltip:AddLine(self.tooltipSubtext, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                    GameTooltip:Show()
+                end
+            </OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+        </Scripts>
+    </Frame>
+
+    <Frame name="BenillaCharacterFrame" hidden="true">
+        <!-- The real 384x512 window (ref-CharacterFrame.xml:5-7). No <Anchors> — ShowUIPanel/
+             SetLeftFrame SetPoints this to the left slot on open (UiPanels.xml's own convention). -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <!-- HitRectInsets: transcribed for fidelity; no loader wiring exists yet (this file's header
+             comment) — a harmless no-op today. -->
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
+        <Layers>
+            <!-- Portrait 60x60 TOPLEFT (7,-6) (ref l.19-31). Set in OnShow via SetPortraitTexture
+                 (the live model-bake binding, UnitFrames.xml's own precedent) — "player" is a fixed
+                 token here (unlike a unit frame, this window only ever shows the local player). -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaCharacterFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Name: CENTER (6,232) wrapper, GameFontNormal 300x12 centered inside it, white (ref
+                 l.35-64). UnitPVPName -> plain UnitName (this file's header comment: PVP rank is a
+                 named deferral) — CharacterTitleText/CharacterGuildText (both PVP-rank/guild-driven)
+                 are dropped with it. -->
+            <Frame name="BenillaCharacterNameFrame">
+                <Size><AbsDimension x="109" y="12"/></Size>
+                <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="232"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer>
+                        <FontString name="BenillaCharacterNameText" inherits="GameFontNormal" text="NAME">
+                            <Size><AbsDimension x="300" y="12"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                            <Color r="1.0" g="1.0" b="1.0"/>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
+                </Scripts>
+            </Frame>
+            <!-- Close: the ref's own UIPanelCloseButton position (CENTER of TOPRIGHT, -44,-25 — ref
+                 l.65-78), on the minimize-button art this codebase's close buttons all use (no
+                 UIPanelCloseButton template ships — Gossip/Bag/Merchant's own header comments).
+                 OnLoad raises the frame level +1 (the same idiom BenillaCharacterNameFrame above uses,
+                 transcribed from the ref): the window's own art is BenillaPaperDollFrame's BACKGROUND
+                 layer — a full-window sibling created AFTER this button — so at the shared default
+                 level 0 the page's art paints over the button by creation order (order.rs). The ref's
+                 close button rides the client's show-time bucket-tail re-insertion instead; benilla
+                 proxies that with creation order, so the explicit raise is the faithful compensation. -->
+            <Button name="BenillaCharacterFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-44" y="-25"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts>
+                    <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
+                    <OnClick>HideUIPanel(getglobal("BenillaCharacterFrame"))</OnClick>
+                </Scripts>
+            </Button>
+            <!-- The tab row (ref l.79-96 — CENTER of BOTTOMLEFT +60,+62 — tab 2 chained off tab 1,
+                 MerchantFrame.xml's own Merchant/Buyback LEFT-of-RIGHT -16 offset). DEVIATION
+                 flagged (decision 0437 phase 4): the real client's Skills tab is 4th of five
+                 (Character/Pet/Reputation/Skills/Honor, ref l.79-168); ours renders 2nd until
+                 Pet/Reputation/Honor land (the "tabs arrive with their pages" precedent, 0138/0208).
+                 No hover tooltip (MicroButtonTooltipText/TOGGLECHARACTER0 have no engine surface,
+                 and each tab's own visible label already says what it does — Merchant's own tab
+                 pair carries no hover tooltip either). -->
+            <Button name="BenillaCharacterFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="Character">
+                <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="60" y="62"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(1)</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaCharacterFrameTab2" inherits="CharacterFrameTabButtonTemplate" text="Skills">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaCharacterFrameTab1" relativePoint="RIGHT"><Offset><AbsDimension x="-16" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(2)</OnClick></Scripts>
+            </Button>
+
+            <!-- The paper-doll page (ref PaperDollFrame, ref-PaperDollFrame.xml:124-1059). No
+                 setAllPoints="true" (frame-level setAllPoints is a no-op in this engine, this file's
+                 header comment) — sized to exactly fill the parent instead, the same effect. -->
+            <Frame name="BenillaPaperDollFrame">
+                <Size><AbsDimension x="384" y="512"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <!-- The four quadrant slabs that ARE this page's art (ref l.129-173): 256-wide
+                             left halves, 128-wide right halves, each 256 tall, pinned per corner. -->
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-L1">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-R1">
+                            <Size><AbsDimension x="128" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-BottomLeft">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-256"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-BottomRight">
+                            <Size><AbsDimension x="128" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <!-- "Level %d %s %s" under the name (ref l.174-182). -->
+                        <FontString name="BenillaCharacterLevelText" inherits="GameFontNormalSmall">
+                            <Anchors>
+                                <Anchor point="TOP" relativeTo="BenillaCharacterNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The model pane (ref PlayerModel CharacterModelFrame, l.204-273): 233x224 at
+                         TOPLEFT (65,-78). This file's header comment: a plain Frame sampling the
+                         paper-doll booth bake, not a live <Model>/<PlayerModel> widget. -->
+                    <Frame name="BenillaCharacterModelFrame">
+                        <Size><AbsDimension x="233" y="224"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-78"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="$parentTexture">
+                                    <Size><AbsDimension x="233" y="224"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- Rotate buttons (ref l.234-271): 35x35, left then right chained off its
+                                 TOPRIGHT, both at the model pane's own TOPLEFT. Held-spin OMITTED
+                                 (this file's header comment: no GetButtonState) — click-only, so no
+                                 RegisterForClicks("LeftButtonDown",...) either (default LeftButtonUp
+                                 suffices). -->
+                            <Button name="BenillaCharacterModelFrameRotateLeftButton">
+                                <Size><AbsDimension x="35" y="35"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
+                                <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
+                                <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                                <Scripts>
+                                    <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("BenillaCharacterModelFrame"))</OnClick>
+                                </Scripts>
+                            </Button>
+                            <Button name="BenillaCharacterModelFrameRotateRightButton">
+                                <Size><AbsDimension x="35" y="35"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
+                                <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
+                                <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                                <Scripts>
+                                    <OnClick>BenillaPaperDollModel_RotateRight(getglobal("BenillaCharacterModelFrame"))</OnClick>
+                                </Scripts>
+                            </Button>
+                        </Frames>
+                        <Scripts>
+                            <OnLoad>
+                                -- A plain Frame isn't mouse-enabled by construction (this file's
+                                -- header comment) — needed THIS phase (1b) so the pane hit-tests
+                                -- as an OnMouseUp/OnReceiveDrag drop target (ref l.226-231).
+                                self:EnableMouse(true)
+                                BenillaPaperDollModel_OnLoad(self)
+                                BenillaSetBoothTexture(getglobal(self:GetName() .. "Texture"), "paperdoll")
+                            </OnLoad>
+                            <OnMouseUp>BenillaPaperDollModel_OnMouseUp(self, arg1)</OnMouseUp>
+                            <OnReceiveDrag>AutoEquipCursorItem()</OnReceiveDrag>
+                        </Scripts>
+                    </Frame>
+
+                    <!-- The attributes block (ref CharacterAttributesFrame, l.274-405): 230x78 at
+                         TOPLEFT (67,-291), the 9-piece UI-Character-StatBackground plate (3 stacked
+                         3-piece columns: player-stat / melee / ranged) behind the rows. -->
+                    <Frame name="BenillaCharacterAttributesFrame">
+                        <Size><AbsDimension x="230" y="78"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="67" y="-291"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="BenillaPlayerStatBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
+                                </Texture>
+                                <Texture name="BenillaPlayerStatBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="53"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPlayerStatBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
+                                </Texture>
+                                <Texture name="BenillaPlayerStatBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaPlayerStatBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
+                                </Texture>
+                                <Texture name="BenillaMeleeAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="115" y="0"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
+                                </Texture>
+                                <Texture name="BenillaMeleeAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="12"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
+                                </Texture>
+                                <Texture name="BenillaMeleeAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
+                                </Texture>
+                                <Texture name="BenillaRangedAttackBackgroundTop" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaMeleeAttackBackgroundBottom" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="2"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0" bottom="0.125"/>
+                                </Texture>
+                                <Texture name="BenillaRangedAttackBackgroundMiddle" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="11"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaRangedAttackBackgroundTop" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.125" bottom="0.1953125"/>
+                                </Texture>
+                                <Texture name="BenillaRangedAttackBackgroundBottom" file="Interface\PaperDollInfoFrame\UI-Character-StatBackground">
+                                    <Size><AbsDimension x="115" y="16"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaRangedAttackBackgroundMiddle" relativePoint="BOTTOMLEFT"/></Anchors>
+                                    <TexCoords left="0" right="0.8984375" top="0.484375" bottom="0.609375"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- The 5 primary attributes (ref l.407-491): TOPLEFT (6,-3), chained
+                                 BOTTOMLEFT-to-BOTTOMLEFT. Labels are the TEMPLATE's $parentLabel,
+                                 filled from Lua exactly like the ref (BenillaPaperDollFrame_OnLoad /
+                                 _SetStats — see the former's header comment); instances declare no
+                                 regions of their own, same as the ref's. -->
+                            <Frame name="BenillaCharacterStatFrame1" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="6" y="-3"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>BenillaPaperDollStatTooltip(self, "STRENGTH")</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <Frame name="BenillaCharacterStatFrame2" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame1" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>BenillaPaperDollStatTooltip(self, "AGILITY")</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <Frame name="BenillaCharacterStatFrame3" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame2" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>BenillaPaperDollStatTooltip(self, "STAMINA")</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <Frame name="BenillaCharacterStatFrame4" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame3" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>BenillaPaperDollStatTooltip(self, "INTELLECT")</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <Frame name="BenillaCharacterStatFrame5" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame4" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>BenillaPaperDollStatTooltip(self, "SPIRIT")</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Armor (ref l.492-511), chained off Stat5's BOTTOMLEFT. -->
+                            <Frame name="BenillaCharacterArmorFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterStatFrame5" relativePoint="BOTTOMLEFT"/></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>
+                                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                                        GameTooltip:SetText(self.tooltip)
+                                        GameTooltip:AddLine(self.tooltipSubtext, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                                        GameTooltip:Show()
+                                    </OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Melee attack rating (ref l.512-531), TOPLEFT of the attributes frame
+                                 itself (122,-2) — the second column's own chain root. -->
+                            <Frame name="BenillaCharacterAttackFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttributesFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="122" y="-2"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>
+                                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                                        GameTooltip:SetText(ATTACK_TOOLTIP)
+                                        GameTooltip:AddLine(ATTACK_TOOLTIP_SUBTEXT, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                                        GameTooltip:Show()
+                                    </OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Melee attack power (ref l.532-554), 99px-wide override (OnLoad). -->
+                            <Frame name="BenillaCharacterAttackPowerFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
+                                    <OnEnter>
+                                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                                        GameTooltip:SetText(self.tooltip)
+                                        GameTooltip:AddLine(self.tooltipSubtext, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                                        GameTooltip:Show()
+                                    </OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Melee damage (ref l.555-574), 99px-wide override, dedicated OnEnter. -->
+                            <Frame name="BenillaCharacterDamageFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
+                                    <OnEnter>BenillaCharacterDamageFrame_OnEnter(self)</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Ranged attack rating (ref l.575-594). -->
+                            <Frame name="BenillaCharacterRangedAttackFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterDamageFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-6"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true)</OnLoad>
+                                    <OnEnter>
+                                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                                        GameTooltip:SetText(RANGED_ATTACK_TOOLTIP)
+                                        GameTooltip:AddLine(ATTACK_TOOLTIP_SUBTEXT, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                                        GameTooltip:Show()
+                                    </OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Ranged attack power (ref l.595-619), 99px-wide, conditional tooltip
+                                 (the N/A / wand-equipped states leave self.tooltip nil). -->
+                            <Frame name="BenillaCharacterRangedAttackPowerFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterRangedAttackFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="5" y="1"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
+                                    <OnEnter>
+                                        if self.tooltip then
+                                            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                                            GameTooltip:SetText(self.tooltip)
+                                            GameTooltip:AddLine(self.tooltipSubtext, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                                            GameTooltip:Show()
+                                        end
+                                    </OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                            <!-- Ranged damage (ref l.620-639), 99px-wide, dedicated OnEnter (no-ops
+                                 while self.damage is nil, e.g. no ranged weapon equipped). -->
+                            <Frame name="BenillaCharacterRangedDamageFrame" inherits="BenillaStatRowTemplate">
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterRangedAttackPowerFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor></Anchors>
+                                <Scripts>
+                                    <OnLoad>self:EnableMouse(true); self:SetWidth(99)</OnLoad>
+                                    <OnEnter>BenillaCharacterRangedDamageFrame_OnEnter(self)</OnEnter>
+                                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                                </Scripts>
+                            </Frame>
+                        </Frames>
+                    </Frame>
+
+                    <!-- The 5 magic-resistance frames (ref CharacterResistanceFrame, l.642-760):
+                         32x160 wrapper, TOPRIGHT of PaperDollFrame's own TOPLEFT (297,-77); each
+                         32x29 icon TOP-chained off the previous, ids 6/2/3/4/5 (arcane/fire/nature/
+                         frost/shadow — Holy(1) never rides the paper doll). -->
+                    <Frame name="BenillaCharacterResistanceFrame">
+                        <Size><AbsDimension x="32" y="160"/></Size>
+                        <Anchors>
+                            <Anchor point="TOPRIGHT" relativeTo="BenillaPaperDollFrame" relativePoint="TOPLEFT"><Offset><AbsDimension x="297" y="-77"/></Offset></Anchor>
+                        </Anchors>
+                        <Frames>
+                            <Frame name="BenillaMagicResFrame1" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="BenillaCharacterResistanceFrame" relativePoint="TOP"/></Anchors>
+                                <Layers>
+                                    <Layer level="BACKGROUND">
+                                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
+                                            <TexCoords left="0" right="1.0" top="0.2265625" bottom="0.33984375"/>
+                                        </Texture>
+                                        <FontString name="BenillaMagicResText1" inherits="GameFontHighlightSmall" text="X">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+                            <Frame name="BenillaMagicResFrame2" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame1" relativePoint="BOTTOM"/></Anchors>
+                                <Layers>
+                                    <Layer level="BACKGROUND">
+                                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
+                                            <TexCoords left="0" right="1.0" top="0" bottom="0.11328125"/>
+                                        </Texture>
+                                        <FontString name="BenillaMagicResText2" inherits="GameFontHighlightSmall" text="X">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+                            <Frame name="BenillaMagicResFrame3" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame2" relativePoint="BOTTOM"/></Anchors>
+                                <Layers>
+                                    <Layer level="BACKGROUND">
+                                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
+                                            <TexCoords left="0" right="1.0" top="0.11328125" bottom="0.2265625"/>
+                                        </Texture>
+                                        <FontString name="BenillaMagicResText3" inherits="GameFontHighlightSmall" text="X">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+                            <Frame name="BenillaMagicResFrame4" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame3" relativePoint="BOTTOM"/></Anchors>
+                                <Layers>
+                                    <Layer level="BACKGROUND">
+                                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
+                                            <TexCoords left="0" right="1.0" top="0.33984375" bottom="0.453125"/>
+                                        </Texture>
+                                        <FontString name="BenillaMagicResText4" inherits="GameFontHighlightSmall" text="X">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+                            <Frame name="BenillaMagicResFrame5" inherits="BenillaMagicResistanceFrameTemplate">
+                                <Anchors><Anchor point="TOP" relativeTo="BenillaMagicResFrame4" relativePoint="BOTTOM"/></Anchors>
+                                <Layers>
+                                    <Layer level="BACKGROUND">
+                                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-ResistanceIcons">
+                                            <TexCoords left="0" right="1.0" top="0.453125" bottom="0.56640625"/>
+                                        </Texture>
+                                        <FontString name="BenillaMagicResText5" inherits="GameFontHighlightSmall" text="X">
+                                            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="3"/></Offset></Anchor></Anchors>
+                                        </FontString>
+                                    </Layer>
+                                </Layers>
+                            </Frame>
+                        </Frames>
+                    </Frame>
+
+                    <!-- The 19 equipment slots (ref l.761-931): left column TOPLEFT (21,-74) chained
+                         BOTTOMLEFT -4, right column TOPLEFT (305,-74) chained the same way, the
+                         weapon row off the page's own BOTTOMLEFT (122,127) then chained TOPRIGHT +5. -->
+                    <Button name="BenillaCharacterHeadSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-74"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "HeadSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterNeckSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterHeadSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "NeckSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterShoulderSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterNeckSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ShoulderSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterBackSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterShoulderSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "BackSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterChestSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterBackSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ChestSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterShirtSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterChestSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "ShirtSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterTabardSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterShirtSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "TabardSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterWristSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterTabardSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "WristSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterHandsSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="305" y="-74"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "HandsSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterWaistSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterHandsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "WaistSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterLegsSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterWaistSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "LegsSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterFeetSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterLegsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "FeetSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterFinger0Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFeetSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Finger0Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterFinger1Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFinger0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Finger1Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterTrinket0Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterFinger1Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Trinket0Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterTrinket1Slot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterTrinket0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "Trinket1Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterMainHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="122" y="127"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "MainHandSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterSecondaryHandSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterMainHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "SecondaryHandSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaCharacterRangedSlot" inherits="BenillaPaperDollItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaCharacterSecondaryHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaPaperDollSlot_OnLoad(self, "RangedSlot")</OnLoad></Scripts>
+                    </Button>
+
+                    <!-- The ammo slot (ref CharacterAmmoSlot, l.932-1043): 27x27, LEFT of the ranged
+                         slot's RIGHT (+15,0). NOT built from the shared slot template — its own
+                         hand-authored art (a pouch background + a corner-accent overlay cut from the
+                         same sheet, no Quickslot2 ring) — but reuses the SAME Lua as the 19 named
+                         slots (this file's header comment: the ref shares PaperDollItemSlotButton_*
+                         verbatim here too, keyed off "AmmoSlot"). $parentCount's hidden="true" (ref
+                         default) is DROPPED — every other count fontstring in this codebase (Bag/
+                         Merchant/this file's own template) uses the same "blank text = invisible"
+                         idiom with no Show/Hide dance, applied here too for consistency.
+                         $parentStock OMITTED (this file's header comment: no ref Lua populates it). -->
+                    <Button name="BenillaCharacterAmmoSlot">
+                        <Size><AbsDimension x="27" y="27"/></Size>
+                        <Anchors>
+                            <Anchor point="LEFT" relativeTo="BenillaCharacterRangedSlot" relativePoint="RIGHT"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture file="Interface\PaperdollInfoFrame\UI-Character-AmmoSlot">
+                                    <Size><AbsDimension x="41" y="41"/></Size>
+                                    <Anchors><Anchor point="CENTER"/></Anchors>
+                                    <TexCoords left="0" right="0.640625" top="0" bottom="0.640625"/>
+                                </Texture>
+                            </Layer>
+                            <Layer level="BORDER">
+                                <Texture name="$parentIconTexture"/>
+                                <FontString name="$parentCount" inherits="NumberFontNormal" justifyH="RIGHT">
+                                    <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-1" y="2"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                            <Layer level="OVERLAY">
+                                <Texture file="Interface\PaperdollInfoFrame\UI-Character-AmmoSlot">
+                                    <Size><AbsDimension x="23" y="41"/></Size>
+                                    <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="-22" y="0"/></Offset></Anchor></Anchors>
+                                    <TexCoords left="0.640625" right="1.0" top="0" bottom="0.640625"/>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnLoad>BenillaPaperDollSlot_OnLoad(self, "AmmoSlot")</OnLoad>
+                            <OnEnter>BenillaPaperDollSlot_OnEnter(self)</OnEnter>
+                            <OnLeave>GameTooltip:Hide()</OnLeave>
+                            <OnEvent>BenillaPaperDollSlot_OnEvent(self)</OnEvent>
+                            <OnUpdate>BenillaPaperDollSlot_OnUpdate(self)</OnUpdate>
+                            <!-- Ammo loads by SET_AMMO, not the equip-swap wire (decision 0526):
+                                 click-to-place and drag-drop both route to the ammo handler. -->
+                            <OnClick>BenillaCharacterAmmoSlot_OnClick(self)</OnClick>
+                            <OnReceiveDrag>BenillaCharacterAmmoSlot_OnClick(self)</OnReceiveDrag>
+                        </Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>BenillaPaperDollFrame_OnLoad(self)</OnLoad>
+                    <OnEvent>BenillaPaperDollFrame_OnEvent(self)</OnEvent>
+                    <OnShow>BenillaPaperDollFrame_OnShow()</OnShow>
+                </Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaCharacterFrame_OnLoad(self)</OnLoad>
+            <OnShow>BenillaCharacterFrame_OnShow()</OnShow>
+            <OnHide>BenillaCharacterFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

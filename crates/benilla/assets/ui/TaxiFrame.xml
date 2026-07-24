@@ -1,0 +1,502 @@
+<Ui>
+    <!--
+        benilla's taxi-map window (decision 0484 phase 2): a faithful port of the real 1.12
+        `TaxiFrame.{xml,lua}` (patch chain; scratchpad `ref-TaxiFrame.xml/.lua`, line citations
+        inline) onto the taxi engine seam (`crates/benilla-ui/src/script/taxi.rs`) fed by
+        `crates/benilla/src/ui_taxi.rs`. The window art/geometry are quoted from the reference
+        verbatim (384×512, the four TaxiFrame quadrant slabs at 256/128 split, the 316×352 map
+        rect at TOP -13,-75) — the deviations below are all where THIS ENGINE, not taste, draws
+        the line, each flagged and reasoned like every other transcribed window (Gossip/Merchant/
+        Trainer's own header notes).
+
+        Modeled on MerchantFrame.xml/TrainerFrame.xml for the framing: the NPC-session lifecycle
+        (RegisterEvent pair, OPENED/CLOSED dispatch, OnShow/OnHide PlaySound with a client-side
+        close on hide), the "npc" model-portrait binding, the minimize-button close X (this engine
+        ships no UIPanelCloseButton), and the UIPanel slot system (NO hardcoded `<Anchors>` on the
+        root — ShowUIPanel/SetLeftFrame SetPoints it to the left slot on open, exactly like every
+        other NPC window).
+
+        DEVIATIONS from the literal reference, each forced by this engine (never taste):
+
+        1. NODE BUTTONS ARE A STATIC POOL, not `CreateFrame(..., "TaxiButtonTemplate")` grown on
+           demand (ref l.36-42/TaxiFrame.lua:36-42). This engine's runtime `CreateFrame`'s 4th
+           `inherits` argument is explicitly a no-op — template expansion is the XML LOADER's job
+           only (`benilla-ui/src/script/object.rs`'s `create_frame`: "inherits/template expansion
+           is the XML loader's job — ignored"). Every other list window in this codebase hits the
+           identical wall and solves it identically: Gossip's 8-row pool, Trainer's service-row
+           pool, QuestLog's row pool — a fixed set of concrete `inherits=` instances (which DOES
+           expand at LOAD time), shown/hidden/repositioned per repaint instead of created on
+           demand. `BENILLA_TAXI_MAX_NODES = 50` below comfortably covers the real 5875
+           `TaxiNodes.dbc`'s per-continent max (43 nodes on Eastern Kingdoms, 39 on Kalimdor —
+           counted this session, `crate::ui_taxi`'s module doc). The route-line textures stay
+           genuinely dynamic (`BenillaTaxiRouteMap:CreateTexture(...)`, ref l.101/142) — plain
+           region creation carries no template/inherits, so THAT half of the reference runs
+           completely unmodified.
+        2. THE TITLE READS AN EVENT ARG, not `UnitName("npc")` (ref TaxiFrame.lua:27). This
+           engine's `"npc"` unit token (decision 0421) only feeds the PORTRAIT bake — there is no
+           backing `UnitState` for `UnitName` to read from it. Gossip/Merchant/Trainer hit the
+           identical gap and all solve it the same way: the app resolves the flight master's name
+           through the `NameCache` and rides it in as the open event's arg1 — done here too
+           (`BenillaTaxiFrame_SetTitle`, fed by `TAXIMAP_OPENED`'s arg1).
+        3. THE "NO SINGLE-HOP DESTINATION" REFUSAL (`DrawOneHopLines`, ref l.161-164) calls
+           `BenillaErrorsFrame_AddMessage` (`ErrorsFrame.xml`'s real Lua-callable seam, byte-exact
+           `ERR_TAXINOPATHS` text below) rather than the reference's `UIErrorsFrame:AddMessage` —
+           this engine's error toast is `BenillaErrorsFrame`, not an intrinsic `MessageFrame`
+           object, so the ref's OO call becomes the plain function call. `ErrorsFrame.xml` loads
+           well before this file in the shipped list (`ui_script/mod.rs`), so the global already
+           exists by the time this ever runs.
+
+        `<TaxiRouteFrame>` (an intrinsic type this engine doesn't have) becomes a plain `<Frame>`
+        (`BenillaTaxiRouteMap`) per the house rule for every non-shipped intrinsic (decision 0246's
+        patch-chain rule; the `Cooldown`/`GameTooltip`/etc. precedents) — it carries no behavior of
+        its own beyond being a Frame that owns child regions/buttons, so the plain type loses
+        nothing.
+
+        Money (the fare) renders as plain text via `SetTooltipMoney` on the shared `GameTooltip`
+        (`GameTooltip.xml`'s own seam) exactly like the reference — no `BenillaMoney_*` coin rig
+        needed here (that lives on the merchant/trainer purse displays, a different job).
+    -->
+    <Script><![CDATA[
+        -- ref TaxiFrame.lua:2-3, verbatim.
+        TAXI_MAP_WIDTH = 316
+        TAXI_MAP_HEIGHT = 352
+
+        -- The static node-button pool's size — see deviation 1 above.
+        BENILLA_TAXI_MAX_NODES = 50
+
+        -- ref TaxiFrame.lua:7-16, verbatim (the three icon states — CURRENT green / REACHABLE
+        -- white / DISTANT yellow — all three files verified present in the MPQ this session).
+        TaxiButtonTypes = { }
+        TaxiButtonTypes["CURRENT"] = {
+            file = "Interface\\TaxiFrame\\UI-Taxi-Icon-Green"
+        }
+        TaxiButtonTypes["REACHABLE"] = {
+            file = "Interface\\TaxiFrame\\UI-Taxi-Icon-White"
+        }
+        TaxiButtonTypes["DISTANT"] = {
+            file = "Interface\\TaxiFrame\\UI-Taxi-Icon-Yellow"
+        }
+
+        -- Byte-exact 1.12 enUS GlobalStrings (interface.MPQ `GlobalStrings.lua`, line-cited).
+        -- `TEXT(x)` (ref l.121) is the real client's build-time no-op localization macro — every
+        -- `TEXT(FOO)` call is transcribed as the bare `FOO` global (CharacterFrame.xml's own
+        -- convention); with no engine `TEXT` global at all, these are plain locals instead.
+        local TAXINODEYOUAREHERE = "You are here" -- GlobalStrings.lua:4232
+        -- GlobalStrings.lua:1864 — the reference's own byte, including its curly apostrophe
+        -- (U+2019, "don\226\128\153t"), not a straight one.
+        local ERR_TAXINOPATHS = "You don\226\128\153t know any flight locations connected to this one."
+
+        function BenillaTaxiFrame_OnLoad(frame)
+            -- The "npc" portrait token (decision 0421): the open taxi session's flight master
+            -- bakes into the ring, resolved exactly like Gossip/Merchant/Trainer's own OnLoad.
+            SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
+            frame:RegisterEvent("TAXIMAP_OPENED")
+            frame:RegisterEvent("TAXIMAP_CLOSED")
+        end
+
+        -- Deviation 2 above: the flight master's name rides TAXIMAP_OPENED's arg1 (the app
+        -- resolves it through the NameCache) rather than a live UnitName("npc") read.
+        function BenillaTaxiFrame_SetTitle(name)
+            getglobal("BenillaTaxiNameText"):SetText(name or "")
+        end
+
+        -- ref TaxiFrame.lua:24-80, restructured only at the node-button loop (deviation 1 — a
+        -- fixed pool walked 1..BENILLA_TAXI_MAX_NODES instead of grown via CreateFrame).
+        function BenillaTaxiFrame_OnEvent(frame)
+            if event == "TAXIMAP_OPENED" then
+                BenillaTaxiFrame_SetTitle(arg1)
+
+                -- Set the texture coords on the map, then hand the region to the app's art pick.
+                BenillaTaxiMap:SetTexCoord(0, 1, 0, 1)
+                SetTaxiMap(BenillaTaxiMap)
+
+                -- Draw nodes: every pool slot up to the pushed count shows its type's icon at its
+                -- pushed position; the rest hide (ref l.44-63, the static-pool shape).
+                local num_nodes = NumTaxiNodes()
+                for index = 1, BENILLA_TAXI_MAX_NODES do
+                    local button = getglobal("BenillaTaxiButton" .. index)
+                    local ntype = TaxiNodeGetType(index)
+                    if index <= num_nodes and ntype ~= "NONE" then
+                        local x, y = TaxiNodePosition(button:GetID())
+                        button:ClearAllPoints()
+                        button:SetPoint("CENTER", "BenillaTaxiMap", "BOTTOMLEFT", x * TAXI_MAP_WIDTH, y * TAXI_MAP_HEIGHT)
+                        button:SetNormalTexture(TaxiButtonTypes[ntype].file)
+                        button:Show()
+                    else
+                        button:Hide()
+                    end
+                end
+
+                -- All set...
+                ShowUIPanel(frame)
+                if not frame:IsVisible() then
+                    CloseTaxiMap()
+                end
+                return
+            end
+            if event == "TAXIMAP_CLOSED" then
+                HideUIPanel(frame)
+                return
+            end
+        end
+
+        -- ref TaxiFrame.lua:82-126, verbatim. `this:GetID()` (l.96) reads the SAME button as the
+        -- `button` parameter — the engine sets the shared `this` global to the invoking frame
+        -- before OnEnter runs (decision 0068's event-dispatch convention), exactly like the real
+        -- client, so the two reads agree.
+        function TaxiNodeOnButtonEnter(button)
+            local index = button:GetID()
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(TaxiNodeName(index), "", 1.0, 1.0, 1.0)
+
+            -- Setup variables
+            local numRoutes = GetNumRoutes(index)
+            local line
+            local sX, sY, dX, dY
+            local w = BenillaTaxiRouteMap:GetWidth()
+            local h = BenillaTaxiRouteMap:GetHeight()
+
+            local ntype = TaxiNodeGetType(index)
+            if ntype == "REACHABLE" then
+                SetTooltipMoney(GameTooltip, TaxiNodeCost(this:GetID()))
+                TaxiNodeSetCurrent(index)
+
+                if numRoutes > NUM_TAXI_ROUTES then
+                    for i = NUM_TAXI_ROUTES + 1, numRoutes do
+                        line = BenillaTaxiRouteMap:CreateTexture("TaxiRoute" .. i, "BACKGROUND")
+                        line:SetTexture("Interface\\TaxiFrame\\UI-Taxi-Line")
+                    end
+                    NUM_TAXI_ROUTES = numRoutes
+                end
+
+                for i = 1, NUM_TAXI_ROUTES do
+                    line = getglobal("TaxiRoute" .. i)
+                    if i <= numRoutes then
+                        sX = TaxiGetSrcX(index, i) * w
+                        sY = TaxiGetSrcY(index, i) * h
+                        dX = TaxiGetDestX(index, i) * w
+                        dY = TaxiGetDestY(index, i) * h
+                        DrawRouteLine(line, "BenillaTaxiRouteMap", sX, sY, dX, dY, 32)
+                        line:Show()
+                    else
+                        line:Hide()
+                    end
+                end
+            elseif ntype == "CURRENT" then
+                GameTooltip:AddLine(TAXINODEYOUAREHERE, "", 0.5, 1.0, 0.5)
+                DrawOneHopLines()
+            end
+
+            GameTooltip:Show()
+        end
+
+        NUM_TAXI_ROUTES = 0
+
+        -- Draw all flightpaths within one hop of current location — ref TaxiFrame.lua:129-165,
+        -- verbatim except the canvas name ("TaxiRouteMap" -> "BenillaTaxiRouteMap") and the
+        -- no-single-hop refusal (deviation 3 above: BenillaErrorsFrame_AddMessage, not
+        -- UIErrorsFrame:AddMessage).
+        function DrawOneHopLines()
+            local line
+            local sX, sY, dX, dY
+            local w = BenillaTaxiRouteMap:GetWidth()
+            local h = BenillaTaxiRouteMap:GetHeight()
+            local numNodes = NumTaxiNodes()
+            local numLines = 0
+            local numSingleHops = 0
+            for i = 1, numNodes do
+                if GetNumRoutes(i) == 1 then
+                    numSingleHops = numSingleHops + 1
+                    numLines = numLines + 1
+                    if numLines > NUM_TAXI_ROUTES then
+                        line = BenillaTaxiRouteMap:CreateTexture("TaxiRoute" .. numLines, "BACKGROUND")
+                        line:SetTexture("Interface\\TaxiFrame\\UI-Taxi-Line")
+                        NUM_TAXI_ROUTES = numLines
+                    else
+                        line = getglobal("TaxiRoute" .. numLines)
+                    end
+                    if line then
+                        sX = TaxiGetSrcX(i, 1) * w
+                        sY = TaxiGetSrcY(i, 1) * h
+                        dX = TaxiGetDestX(i, 1) * w
+                        dY = TaxiGetDestY(i, 1) * h
+                        DrawRouteLine(line, "BenillaTaxiRouteMap", sX, sY, dX, dY, 32)
+                        line:Show()
+                    end
+                end
+            end
+            for i = numLines + 1, NUM_TAXI_ROUTES do
+                getglobal("TaxiRoute" .. i):Hide()
+            end
+            if numSingleHops == 0 then
+                BenillaErrorsFrame_AddMessage(ERR_TAXINOPATHS, 1.0, 0.1, 0.1)
+                HideUIPanel(BenillaTaxiFrame)
+            end
+        end
+
+
+        -- The following function is used with permission from Daniel Stephens
+        -- <iriel@vigilance-committee.org> — ref TaxiFrame.lua:168-226, byte-for-byte verbatim (pure
+        -- Lua line-quad math over the engine's 8-arg affine SetTexCoord; no engine dependency beyond
+        -- what the phase-1 seam test already proved: CreateTexture, SetTexCoord's 8-arg form,
+        -- SetPoint with a string canvas name).
+        TAXIROUTE_LINEFACTOR = 32/30 -- Multiplying factor for texture coordinates
+        TAXIROUTE_LINEFACTOR_2 = TAXIROUTE_LINEFACTOR / 2 -- Half o that
+
+        -- T        - Texture
+        -- C        - Canvas Frame (for anchoring)
+        -- sx,sy    - Coordinate of start of line
+        -- ex,ey    - Coordinate of end of line
+        -- w        - Width of line
+        -- relPoint - Relative point on canvas to interpret coords (Default BOTTOMLEFT)
+        function DrawRouteLine(T, C, sx, sy, ex, ey, w, relPoint)
+           if (not relPoint) then relPoint = "BOTTOMLEFT"; end
+
+           -- Determine dimensions and center point of line
+           local dx,dy = ex - sx, ey - sy;
+           local cx,cy = (sx + ex) / 2, (sy + ey) / 2;
+
+           -- Normalize direction if necessary
+           if (dx < 0) then
+              dx,dy = -dx,-dy;
+           end
+
+           -- Calculate actual length of line
+           local l = sqrt((dx * dx) + (dy * dy));
+
+           -- Quick escape if it's zero length
+           if (l == 0) then
+              T:SetTexCoord(0,0,0,0,0,0,0,0);
+              T:SetPoint("BOTTOMLEFT", C, relPoint, cx,cy);
+              T:SetPoint("TOPRIGHT",   C, relPoint, cx,cy);
+              return;
+           end
+
+           -- Sin and Cosine of rotation, and combination (for later)
+           local s,c = -dy / l, dx / l;
+           local sc = s * c;
+
+           -- Calculate bounding box size and texture coordinates
+           local Bwid, Bhgt, BLx, BLy, TLx, TLy, TRx, TRy, BRx, BRy;
+           if (dy >= 0) then
+              Bwid = ((l * c) - (w * s)) * TAXIROUTE_LINEFACTOR_2;
+              Bhgt = ((w * c) - (l * s)) * TAXIROUTE_LINEFACTOR_2;
+              BLx, BLy, BRy = (w / l) * sc, s * s, (l / w) * sc;
+              BRx, TLx, TLy, TRx = 1 - BLy, BLy, 1 - BRy, 1 - BLx;
+              TRy = BRx;
+           else
+              Bwid = ((l * c) + (w * s)) * TAXIROUTE_LINEFACTOR_2;
+              Bhgt = ((w * c) + (l * s)) * TAXIROUTE_LINEFACTOR_2;
+              BLx, BLy, BRx = s * s, -(l / w) * sc, 1 + (w / l) * sc;
+              BRy, TLx, TLy, TRy = BLx, 1 - BRx, 1 - BLx, 1 - BLy;
+              TRx = TLy;
+           end
+
+           -- Set texture coordinates and anchors
+           T:ClearAllPoints();
+           T:SetTexCoord(TLx, TLy, BLx, BLy, TRx, TRy, BRx, BRy);
+           T:SetPoint("BOTTOMLEFT", C, relPoint, cx - Bwid, cy - Bhgt);
+           T:SetPoint("TOPRIGHT",   C, relPoint, cx + Bwid, cy + Bhgt);
+        end
+
+        function BenillaTaxiCloseButton_OnClick()
+            -- vanilla's client-side close sends no packet; the app clears TaxiState on this
+            -- intent (which fires TAXIMAP_CLOSED), and we hide immediately so there's no lag.
+            CloseTaxiMap()
+            HideUIPanel(BenillaTaxiFrame)
+        end
+    ]]></Script>
+
+    <!--
+        The node-button pool's virtual template (ref TaxiButtonTemplate, l.4-32): a 16×16 button,
+        the type icon assigned per repaint via SetNormalTexture (deviation 1's static pool — see
+        the header note), the 32×32 CENTER highlight glow. OnEnter/OnLeave/OnClick are the ref's,
+        byte for byte (l.12-20) — including the click firing UNCONDITIONALLY regardless of node
+        type, exactly like the reference (a DISTANT/CURRENT click still queues TakeTaxiNode; the
+        app-side drain treats a routeless click as a no-op — there is no RE'd finding for what the
+        real client's native TakeTaxiNode does with an unreachable index, so this is the safe,
+        undocumented-but-reasonable inference, not an asserted fact).
+    -->
+    <Button name="BenillaTaxiButtonTemplate" hidden="true" virtual="true">
+        <Size>
+            <AbsDimension x="16" y="16"/>
+        </Size>
+        <Anchors>
+            <Anchor point="BOTTOMRIGHT"/>
+        </Anchors>
+        <Scripts>
+            <OnEnter>
+                TaxiNodeOnButtonEnter(this);
+            </OnEnter>
+            <OnLeave>
+                GameTooltip:Hide();
+            </OnLeave>
+            <OnClick>
+                TakeTaxiNode(this:GetID());
+            </OnClick>
+        </Scripts>
+        <HighlightTexture file="Interface\TaxiFrame\UI-Taxi-Icon-Highlight">
+            <Size x="32" y="32"/>
+            <Anchors>
+                <Anchor point="CENTER">
+                    <Offset>
+                        <AbsDimension x="0" y="0"/>
+                    </Offset>
+                </Anchor>
+            </Anchors>
+        </HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaTaxiFrame" hidden="true">
+        <!-- The real 384×512 window (ref l.34-36). No <Anchors> — ShowUIPanel/SetLeftFrame
+             SetPoints this to the left slot on open, exactly like Gossip/Merchant/Trainer. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Layers>
+            <!-- NPC portrait 58×58 TOPLEFT (8,-9) (ref TaxiPortrait, l.46-57), BACKGROUND —
+                 drawn under the ARTWORK quadrant slabs below so their frame art rings it. -->
+            <Layer level="BACKGROUND">
+                <Texture name="$parentPortrait">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="8" y="-9"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <!-- The four TaxiFrame quadrant slabs that ARE the window art (ref l.59-103): 256-wide
+                 left halves, 128-wide right halves, each 256 tall, pinned to their corner. No
+                 <TexCoords> — each samples its whole texture. -->
+            <Layer level="ARTWORK">
+                <Texture file="Interface\TaxiFrame\UI-TaxiFrame-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\TaxiFrame\UI-TaxiFrame-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\TaxiFrame\UI-TaxiFrame-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-256"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture file="Interface\TaxiFrame\UI-TaxiFrame-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
+                </Texture>
+                <!-- The flight master's name banner (ref TaxiMerchant, l.104-115): GameFontNormal,
+                     CENTER, TOP -17, 192 wide — deviation 2 above (arg1, not UnitName("npc")). -->
+                <FontString name="BenillaTaxiNameText" inherits="GameFontNormal" justifyH="CENTER">
+                    <Size><AbsDimension x="192" y="0"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP"><Offset><AbsDimension x="0" y="-17"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+            <!-- The continent map art (ref TaxiMap, l.117-129): 316×352, TOP -13,-75. No file —
+                 SetTaxiMap assigns the app's TAXIMAP<continentId> pick (byte-verified — decision 0496). -->
+            <Layer level="OVERLAY">
+                <Texture name="BenillaTaxiMap">
+                    <Size><AbsDimension x="316" y="352"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP"><Offset><AbsDimension x="-13" y="-75"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Close: the real UIPanelCloseButton position (TOPRIGHT -29,-8; ref l.133-141), on
+                 the minimize-button art (this engine ships no UIPanelCloseButton — the Gossip/
+                 Trainer/Merchant precedent). -->
+            <Button name="BenillaTaxiCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors>
+                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-29" y="-8"/></Offset></Anchor>
+                </Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaTaxiCloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- `<TaxiRouteFrame>` (ref l.142-153) — an intrinsic type this engine doesn't have —
+                 becomes a plain <Frame> (see the header note): 316×352, TOP -13,-75, exactly
+                 overlaid on BenillaTaxiMap. Houses the node-button pool + the dynamically-created
+                 route-line textures, both parented here exactly like the reference (ref l.39,101). -->
+            <Frame name="BenillaTaxiRouteMap">
+                <Size><AbsDimension x="316" y="352"/></Size>
+                <Anchors>
+                    <Anchor point="TOP"><Offset><AbsDimension x="-13" y="-75"/></Offset></Anchor>
+                </Anchors>
+                <Frames>
+                <Button name="BenillaTaxiButton1" inherits="BenillaTaxiButtonTemplate" id="1"/>
+                <Button name="BenillaTaxiButton2" inherits="BenillaTaxiButtonTemplate" id="2"/>
+                <Button name="BenillaTaxiButton3" inherits="BenillaTaxiButtonTemplate" id="3"/>
+                <Button name="BenillaTaxiButton4" inherits="BenillaTaxiButtonTemplate" id="4"/>
+                <Button name="BenillaTaxiButton5" inherits="BenillaTaxiButtonTemplate" id="5"/>
+                <Button name="BenillaTaxiButton6" inherits="BenillaTaxiButtonTemplate" id="6"/>
+                <Button name="BenillaTaxiButton7" inherits="BenillaTaxiButtonTemplate" id="7"/>
+                <Button name="BenillaTaxiButton8" inherits="BenillaTaxiButtonTemplate" id="8"/>
+                <Button name="BenillaTaxiButton9" inherits="BenillaTaxiButtonTemplate" id="9"/>
+                <Button name="BenillaTaxiButton10" inherits="BenillaTaxiButtonTemplate" id="10"/>
+                <Button name="BenillaTaxiButton11" inherits="BenillaTaxiButtonTemplate" id="11"/>
+                <Button name="BenillaTaxiButton12" inherits="BenillaTaxiButtonTemplate" id="12"/>
+                <Button name="BenillaTaxiButton13" inherits="BenillaTaxiButtonTemplate" id="13"/>
+                <Button name="BenillaTaxiButton14" inherits="BenillaTaxiButtonTemplate" id="14"/>
+                <Button name="BenillaTaxiButton15" inherits="BenillaTaxiButtonTemplate" id="15"/>
+                <Button name="BenillaTaxiButton16" inherits="BenillaTaxiButtonTemplate" id="16"/>
+                <Button name="BenillaTaxiButton17" inherits="BenillaTaxiButtonTemplate" id="17"/>
+                <Button name="BenillaTaxiButton18" inherits="BenillaTaxiButtonTemplate" id="18"/>
+                <Button name="BenillaTaxiButton19" inherits="BenillaTaxiButtonTemplate" id="19"/>
+                <Button name="BenillaTaxiButton20" inherits="BenillaTaxiButtonTemplate" id="20"/>
+                <Button name="BenillaTaxiButton21" inherits="BenillaTaxiButtonTemplate" id="21"/>
+                <Button name="BenillaTaxiButton22" inherits="BenillaTaxiButtonTemplate" id="22"/>
+                <Button name="BenillaTaxiButton23" inherits="BenillaTaxiButtonTemplate" id="23"/>
+                <Button name="BenillaTaxiButton24" inherits="BenillaTaxiButtonTemplate" id="24"/>
+                <Button name="BenillaTaxiButton25" inherits="BenillaTaxiButtonTemplate" id="25"/>
+                <Button name="BenillaTaxiButton26" inherits="BenillaTaxiButtonTemplate" id="26"/>
+                <Button name="BenillaTaxiButton27" inherits="BenillaTaxiButtonTemplate" id="27"/>
+                <Button name="BenillaTaxiButton28" inherits="BenillaTaxiButtonTemplate" id="28"/>
+                <Button name="BenillaTaxiButton29" inherits="BenillaTaxiButtonTemplate" id="29"/>
+                <Button name="BenillaTaxiButton30" inherits="BenillaTaxiButtonTemplate" id="30"/>
+                <Button name="BenillaTaxiButton31" inherits="BenillaTaxiButtonTemplate" id="31"/>
+                <Button name="BenillaTaxiButton32" inherits="BenillaTaxiButtonTemplate" id="32"/>
+                <Button name="BenillaTaxiButton33" inherits="BenillaTaxiButtonTemplate" id="33"/>
+                <Button name="BenillaTaxiButton34" inherits="BenillaTaxiButtonTemplate" id="34"/>
+                <Button name="BenillaTaxiButton35" inherits="BenillaTaxiButtonTemplate" id="35"/>
+                <Button name="BenillaTaxiButton36" inherits="BenillaTaxiButtonTemplate" id="36"/>
+                <Button name="BenillaTaxiButton37" inherits="BenillaTaxiButtonTemplate" id="37"/>
+                <Button name="BenillaTaxiButton38" inherits="BenillaTaxiButtonTemplate" id="38"/>
+                <Button name="BenillaTaxiButton39" inherits="BenillaTaxiButtonTemplate" id="39"/>
+                <Button name="BenillaTaxiButton40" inherits="BenillaTaxiButtonTemplate" id="40"/>
+                <Button name="BenillaTaxiButton41" inherits="BenillaTaxiButtonTemplate" id="41"/>
+                <Button name="BenillaTaxiButton42" inherits="BenillaTaxiButtonTemplate" id="42"/>
+                <Button name="BenillaTaxiButton43" inherits="BenillaTaxiButtonTemplate" id="43"/>
+                <Button name="BenillaTaxiButton44" inherits="BenillaTaxiButtonTemplate" id="44"/>
+                <Button name="BenillaTaxiButton45" inherits="BenillaTaxiButtonTemplate" id="45"/>
+                <Button name="BenillaTaxiButton46" inherits="BenillaTaxiButtonTemplate" id="46"/>
+                <Button name="BenillaTaxiButton47" inherits="BenillaTaxiButtonTemplate" id="47"/>
+                <Button name="BenillaTaxiButton48" inherits="BenillaTaxiButtonTemplate" id="48"/>
+                <Button name="BenillaTaxiButton49" inherits="BenillaTaxiButtonTemplate" id="49"/>
+                <Button name="BenillaTaxiButton50" inherits="BenillaTaxiButtonTemplate" id="50"/>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                BenillaTaxiFrame_OnLoad(self)
+            </OnLoad>
+            <OnEvent>
+                BenillaTaxiFrame_OnEvent(self)
+            </OnEvent>
+            <!-- ref l.162-169, verbatim: the MainMenu sound kit (not Merchant/Trainer's
+                 CharacterInfo kit — the reference genuinely uses a different pair here). -->
+            <OnShow>
+                PlaySound("igMainMenuOpen");
+                DrawOneHopLines();
+            </OnShow>
+            <OnHide>
+                CloseTaxiMap();
+                PlaySound("igMainMenuClose")
+            </OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

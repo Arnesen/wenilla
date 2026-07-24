@@ -1,0 +1,557 @@
+<Ui>
+    <!--
+        benilla's player-to-player trade window (decision 0592 P1). The geometry/art/texcoords are
+        transcribed from the reference `TradeFrame.xml` (WoW/_extracted_framexml/TradeFrame.xml) —
+        sizes, offsets, anchors, art files, texcoords — adapted only in (a) naming (every `Foo` →
+        `BenillaFoo`) and (b) feed/intent wiring onto the trade script API
+        (`benilla-ui/src/script/trade.rs`) + `crate::ui_trade`'s feed/drain. The house dressing
+        convention (decisions 0084/0112/0120/0544).
+
+        Where the reference inherits a shared template benilla does NOT ship (ItemButtonTemplate,
+        UIPanelButtonTemplate, UIPanelCloseButton, MoneyInputFrameTemplate, SmallMoneyFrameTemplate),
+        the body is inlined with the reference's own geometry/art (the MailFrame.xml precedent). The
+        two money displays reuse `MerchantFrame.xml`'s global `BenillaMoney_*` coin trio (read-only in
+        P1); the reference's editable `MoneyInputFrame` on the player's side is decision 0592 P2.
+
+        SCOPE (decision 0592 P1): the window opens on an incoming/initiated trade and mirrors both
+        sides' items + gold live, the partner's portrait (the shared "npc" booth) + name, and the
+        accept glow; the Trade/Cancel buttons drive the accept/cancel verbs. DEFERRED to P2: setting
+        items/gold onto the window (the drag-drop slots + the editable money widget), so the item
+        slots carry NO OnClick/OnEnter here, and the slot tooltips (GameTooltip:SetTradePlayerItem)
+        are P2. The enchant-slot spell name (slot 7's "enchantment") is decision 0592 P3.
+    -->
+    <Script><![CDATA[
+        BENILLA_MAX_TRADE_ITEMS = 7    -- MAX_TRADE_ITEMS (ref TradeFrame.lua l.1)
+
+        -- ── Load / event dispatch (ref TradeFrame_OnLoad l.4 / TradeFrame_OnEvent l.18) ───────────
+        function BenillaTradeFrame_OnLoad(frame)
+            frame:RegisterEvent("TRADE_SHOW")
+            frame:RegisterEvent("TRADE_UPDATE")
+            frame:RegisterEvent("TRADE_CLOSED")
+            frame:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+            frame:RegisterEvent("TRADE_TARGET_ITEM_CHANGED")
+            frame:RegisterEvent("TRADE_ACCEPT_UPDATE")
+            -- Our accepted gold, echoed back so the input reflects the server's clamp (ref
+            -- TradePlayerInputMoneyFrame's own PLAYER_TRADE_MONEY registration, l.565). Kept off the
+            -- general TRADE_UPDATE repaint so it never overwrites what the player is mid-typing.
+            frame:RegisterEvent("PLAYER_TRADE_MONEY")
+        end
+
+        function BenillaTradeFrame_OnEvent(frame)
+            if event == "TRADE_SHOW" or event == "TRADE_UPDATE" then
+                ShowUIPanel(frame)
+                if not frame:IsVisible() then
+                    CloseTrade()
+                    return
+                end
+                BenillaTradeFrameTradeButton:Enable()
+                BenillaTradeFrame_Update()
+            elseif event == "PLAYER_TRADE_MONEY" then
+                BenillaMoneyInput_SetCopper("BenillaTradePlayerInputMoney", GetPlayerTradeMoney())
+            elseif event == "TRADE_CLOSED" then
+                HideUIPanel(frame)
+            elseif event == "TRADE_PLAYER_ITEM_CHANGED" then
+                BenillaTradeFrame_UpdatePlayerItem(arg1)
+            elseif event == "TRADE_TARGET_ITEM_CHANGED" then
+                BenillaTradeFrame_UpdateTargetItem(arg1)
+            elseif event == "TRADE_ACCEPT_UPDATE" then
+                BenillaTradeFrame_SetAcceptState(arg1, arg2)
+            end
+        end
+
+        function BenillaTradeFrame_OnShow()
+            BenillaTradeFrame.acceptState = 0
+        end
+
+        function BenillaTradeFrame_OnHide()
+            -- The client-side close verb (ref TradeFrame_OnHide l.144) → CMSG_CANCEL_TRADE + a local
+            -- clear (the app's drain); clear our money entry so a later trade opens fresh (ref l.146).
+            BenillaMoneyInput_ResetMoney("BenillaTradePlayerInputMoney")
+            CloseTrade()
+        end
+
+        -- A keystroke in our money input (ref TradeFrame_UpdateMoney l.162): read the copper total,
+        -- clamp to what we actually carry, and offer it → SetTradeMoney → CMSG_SET_TRADE_GOLD.
+        function BenillaTradeFrame_UpdateMoney()
+            local copper = BenillaMoneyInput_GetCopper("BenillaTradePlayerInputMoney")
+            if GetMoney and copper > GetMoney() then
+                copper = GetPlayerTradeMoney()
+                BenillaMoneyInput_SetCopper("BenillaTradePlayerInputMoney", copper)
+            end
+            SetTradeMoney(copper)
+        end
+
+        -- ── Full repaint (ref TradeFrame_Update l.39): portraits, names, all 7 slots each side, the
+        --    two money displays, the accept highlights hidden. ────────────────────────────────────
+        function BenillaTradeFrame_Update()
+            SetPortraitTexture(BenillaTradeFramePlayerPortrait, "player")
+            -- The partner rides the shared "npc" portrait booth (the app points it at the partner
+            -- entity, decision 0592); the name comes from GetTradePartnerName() in place of the
+            -- reference's UnitName("NPC").
+            SetPortraitTexture(BenillaTradeFrameRecipientPortrait, "npc")
+            BenillaTradeFramePlayerNameText:SetText(UnitName("player") or "")
+            BenillaTradeFrameRecipientNameText:SetText(GetTradePartnerName() or "")
+            for i = 1, BENILLA_MAX_TRADE_ITEMS do
+                BenillaTradeFrame_UpdatePlayerItem(i)
+                BenillaTradeFrame_UpdateTargetItem(i)
+            end
+            -- Our gold is the editable input, reflected via PLAYER_TRADE_MONEY (not repainted here, so
+            -- the repaint never clobbers mid-typing); only the partner's read-only gold repaints.
+            BenillaMoney_Set("BenillaTradeRecipientMoneyFrame", GetTargetTradeMoney())
+            BenillaTradeHighlightPlayer:Hide()
+            BenillaTradeHighlightRecipient:Hide()
+            BenillaTradeHighlightPlayerEnchant:Hide()
+            BenillaTradeHighlightRecipientEnchant:Hide()
+        end
+
+        -- One slot's paint, shared by both columns (ref TradeFrame_UpdatePlayerItem l.54 /
+        -- UpdateTargetItem l.83). `isTarget` gates the recipient-only not-usable red tint.
+        function BenillaTradeSlot_SetItem(prefix, id, name, texture, numItems, isUsable, enchantment, isTarget)
+            local nameText = getglobal(prefix.."Name")
+            local icon = getglobal(prefix.."ItemButtonIcon")
+            local count = getglobal(prefix.."ItemButtonCount")
+            -- The enchant slot (id 7): the enchant name (P3) or the "will not be traded" note.
+            if id == BENILLA_MAX_TRADE_ITEMS then
+                if name then
+                    if enchantment then
+                        nameText:SetText("|cff20ff20"..enchantment.."|r")
+                    else
+                        nameText:SetText("|cffffffffWill Not Be Traded|r")
+                    end
+                else
+                    nameText:SetText("")
+                end
+            else
+                nameText:SetText(name or "")
+            end
+            if texture then
+                icon:SetTexture(texture)
+                icon:Show()
+            else
+                icon:Hide()
+            end
+            if numItems and numItems > 1 then
+                count:SetText(numItems)
+                count:Show()
+            else
+                count:SetText("")
+                count:Hide()
+            end
+            -- The recipient not-usable red tint (ref l.105-113): red when the partner offers an item
+            -- our class/level/skill can't use; white otherwise (and always white on our own column).
+            local slotTex = getglobal(prefix.."SlotTexture")
+            local nameFrame = getglobal(prefix.."NameFrame")
+            if isTarget and name and not isUsable then
+                icon:SetVertexColor(0.9, 0, 0)
+                nameFrame:SetVertexColor(0.9, 0, 0)
+                slotTex:SetVertexColor(1.0, 0, 0)
+            else
+                icon:SetVertexColor(1, 1, 1)
+                nameFrame:SetVertexColor(1, 1, 1)
+                slotTex:SetVertexColor(1, 1, 1)
+            end
+        end
+
+        function BenillaTradeFrame_UpdatePlayerItem(id)
+            local name, texture, numItems, isUsable, enchantment = GetTradePlayerItemInfo(id)
+            BenillaTradeSlot_SetItem("BenillaTradePlayerItem"..id, id, name, texture, numItems, isUsable, enchantment, nil)
+        end
+
+        function BenillaTradeFrame_UpdateTargetItem(id)
+            local name, texture, numItems, quality, isUsable, enchantment = GetTradeTargetItemInfo(id)
+            BenillaTradeSlot_SetItem("BenillaTradeRecipientItem"..id, id, name, texture, numItems, isUsable, enchantment, 1)
+        end
+
+        -- A trade slot's item button as a cursor drop target (decision 0592 P2, ref ClickTradeButton /
+        -- ClickTargetTradeButton, TradeFrame.xml l.135/101). Both columns share the slot template, so
+        -- player-vs-recipient is read off the slot frame's name; the slot number is its frame id. Our
+        -- slot drops/clears a bag item (SET/CLEAR_TRADE_ITEM); the partner's column is read-only.
+        function BenillaTradeSlot_OnClick(button)
+            local slot = button:GetParent()
+            local id = slot:GetID()
+            if string.find(slot:GetName(), "Player", 1, true) then
+                ClickTradeButton(id)
+            else
+                ClickTargetTradeButton(id)
+            end
+        end
+
+        -- The accept glow (ref TradeFrame_SetAcceptState l.116): each side's column + enchant-slot
+        -- highlight tracks who has pressed Trade; our own accept disables the Trade button.
+        function BenillaTradeFrame_SetAcceptState(playerState, targetState)
+            BenillaTradeFrame.acceptState = playerState
+            if playerState == 1 then
+                BenillaTradeHighlightPlayer:Show()
+                BenillaTradeHighlightPlayerEnchant:Show()
+                BenillaTradeFrameTradeButton:Disable()
+            else
+                BenillaTradeHighlightPlayer:Hide()
+                BenillaTradeHighlightPlayerEnchant:Hide()
+                BenillaTradeFrameTradeButton:Enable()
+            end
+            if targetState == 1 then
+                BenillaTradeHighlightRecipient:Show()
+                BenillaTradeHighlightRecipientEnchant:Show()
+            else
+                BenillaTradeHighlightRecipient:Hide()
+                BenillaTradeHighlightRecipientEnchant:Hide()
+            end
+        end
+
+        -- Cancel (ref TradeFrameCancelButton_OnClick l.136): with our accept up, drop it (stay in the
+        -- trade); otherwise close the window (→ OnHide → CloseTrade).
+        function BenillaTradeFrameCancelButton_OnClick()
+            if BenillaTradeFrame.acceptState == 1 then
+                CancelTradeAccept()
+            else
+                HideUIPanel(BenillaTradeFrame)
+            end
+        end
+    ]]></Script>
+
+    <!-- The accept-glow highlight (ref TradeHighlightTemplate l.4): a 3-slice UI-TradeFrame-Highlight
+         (top/bottom caps + a stretched middle), sized per-instance. -->
+    <Frame name="BenillaTradeHighlightTemplate" hidden="false" virtual="true">
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentTop" file="Interface\TradeFrame\UI-TradeFrame-Highlight">
+                    <Size><AbsDimension x="161" y="16"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.62890625" top="0" bottom="0.0625"/>
+                </Texture>
+                <Texture name="$parentBottom" file="Interface\TradeFrame\UI-TradeFrame-Highlight">
+                    <Size><AbsDimension x="161" y="16"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.62890625" top="0.9375" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\TradeFrame\UI-TradeFrame-Highlight">
+                    <Size><AbsDimension x="161" y="10"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="$parentTop" relativePoint="BOTTOM"/>
+                        <Anchor point="BOTTOM" relativeTo="$parentBottom" relativePoint="TOP"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.62890625" top="0.0625" bottom="0.9375"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <!-- One trade slot (ref TradeItemTemplate l.38 + PlayerTradeItemTemplate's inlined ItemButton
+         l.120): the empty-slot art, the name plate, the item name, and a 37px item button (icon +
+         stack count). Display-only in P1 — no OnClick/OnEnter (decision 0592 P2). -->
+    <Frame name="BenillaTradeItemTemplate" virtual="true">
+        <Size><AbsDimension x="153" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentSlotTexture" file="Interface\Buttons\UI-EmptySlot">
+                    <Size><AbsDimension x="64" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-13" y="13"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture name="$parentNameFrame" file="Interface\QuestFrame\UI-QuestItemNameFrame">
+                    <Size><AbsDimension x="124" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentSlotTexture" relativePoint="RIGHT"><Offset><AbsDimension x="-20" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+                <FontString name="$parentName" inherits="GameFontNormalSmall" text="" justifyH="LEFT">
+                    <Size><AbsDimension x="90" y="30"/></Size>
+                    <Anchors>
+                        <Anchor point="LEFT" relativeTo="$parentNameFrame"><Offset><AbsDimension x="15" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentItemButton">
+                <Size><AbsDimension x="37" y="37"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parent"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentIcon" hidden="true" setAllPoints="true"/>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <FontString name="$parentCount" inherits="NumberFontNormal" hidden="true" justifyH="RIGHT">
+                            <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-2" y="2"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+                <!-- A cursor drop target (decision 0592 P2): a click or a drag-release routes through
+                     the shared slot handler, which places/clears on our side and is inert on the
+                     partner's. Both gestures share one path, the reference's drag/click contract. -->
+                <Scripts>
+                    <OnClick>BenillaTradeSlot_OnClick(self)</OnClick>
+                    <OnReceiveDrag>BenillaTradeSlot_OnClick(self)</OnReceiveDrag>
+                </Scripts>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <!-- The enchant / non-traded slot art (ref TradeRecipientItem7/TradePlayerItem7 l.393): the
+         EnchantIcon overlay sits over slot 7's item button. A virtual twin of the base slot with the
+         extra icon, instantiated only for id 7. -->
+    <Frame name="BenillaTradeEnchantItemTemplate" inherits="BenillaTradeItemTemplate" virtual="true">
+        <Frames>
+            <Frame name="$parentEnchant" setAllPoints="false">
+                <Size><AbsDimension x="62" y="62"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture file="Interface\TradeFrame\UI-TradeFrame-EnchantIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+    </Frame>
+
+    <Frame name="BenillaTradeFrame" toplevel="true" movable="true" enableMouse="true" hidden="true">
+        <!-- ref TradeFrame l.164: 384×512; ShowUIPanel slots it left. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <HitRectInsets><AbsInset left="0" right="35" top="0" bottom="72"/></HitRectInsets>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- ref l.180: the two 60×60 unit portraits (recipient right, player left). -->
+                <Texture name="BenillaTradeFrameRecipientPortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="183" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+                <Texture name="BenillaTradeFramePlayerPortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- ref l.205: the four corner slabs. -->
+                <Texture file="Interface\TradeFrame\UI-TradeFrame-TopLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\TradeFrame\UI-TradeFrame-TopRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\TradeFrame\UI-TradeFrame-BotLeft">
+                    <Size><AbsDimension x="256" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture file="Interface\TradeFrame\UI-TradeFrame-BotRight">
+                    <Size><AbsDimension x="128" y="256"/></Size>
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+                <FontString name="BenillaTradeFrameRecipientNameText" inherits="GameFontNormal" text="">
+                    <Size><AbsDimension x="80" y="12"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeFrame"><Offset><AbsDimension x="245" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTradeFramePlayerNameText" inherits="GameFontNormal" text="">
+                    <Size><AbsDimension x="100" y="12"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeFrame"><Offset><AbsDimension x="75" y="-17"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- ref l.262: the "Will Be Enchanted" column labels above the enchant slots. -->
+                <FontString name="BenillaTradeFramePlayerEnchantText" inherits="GameFontHighlightSmall" text="Will Be Enchanted">
+                    <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeFrame"><Offset><AbsDimension x="26" y="-374"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="BenillaTradeFrameRecipientEnchantText" inherits="GameFontHighlightSmall" text="Will Be Enchanted">
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaTradeFramePlayerEnchantText"><Offset><AbsDimension x="170" y="0"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The accept-glow highlights, one per column + its enchant slot (ref l.283). -->
+            <Frame name="BenillaTradeHighlightPlayer" inherits="BenillaTradeHighlightTemplate" hidden="true">
+                <Size><AbsDimension x="161" y="266"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeFrame"><Offset><AbsDimension x="19" y="-100"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeHighlightRecipient" inherits="BenillaTradeHighlightTemplate" hidden="true">
+                <Size><AbsDimension x="161" y="266"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="189" y="-100"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeHighlightPlayerEnchant" inherits="BenillaTradeHighlightTemplate" hidden="true">
+                <Size><AbsDimension x="161" y="61"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeHighlightPlayer" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeHighlightRecipientEnchant" inherits="BenillaTradeHighlightTemplate" hidden="true">
+                <Size><AbsDimension x="161" y="61"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeHighlightRecipient" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The partner's 6 trade slots + the 7th enchant slot (ref TradeRecipientItem1..7 l.331). -->
+            <Frame name="BenillaTradeRecipientItem1" inherits="BenillaTradeItemTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="195" y="-104"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem2" inherits="BenillaTradeItemTemplate" id="2">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem3" inherits="BenillaTradeItemTemplate" id="3">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem4" inherits="BenillaTradeItemTemplate" id="4">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem5" inherits="BenillaTradeItemTemplate" id="5">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem6" inherits="BenillaTradeItemTemplate" id="6">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradeRecipientItem7" inherits="BenillaTradeEnchantItemTemplate" id="7">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeRecipientItem6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-28"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- Our 6 trade slots + the 7th enchant slot (ref TradePlayerItem1..7 l.410). -->
+            <Frame name="BenillaTradePlayerItem1" inherits="BenillaTradeItemTemplate" id="1">
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="26" y="-104"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem2" inherits="BenillaTradeItemTemplate" id="2">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem3" inherits="BenillaTradeItemTemplate" id="3">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem4" inherits="BenillaTradeItemTemplate" id="4">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem5" inherits="BenillaTradeItemTemplate" id="5">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem6" inherits="BenillaTradeItemTemplate" id="6">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="BenillaTradePlayerItem7" inherits="BenillaTradeEnchantItemTemplate" id="7">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradePlayerItem6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-28"/></Offset></Anchor></Anchors>
+            </Frame>
+
+            <!-- The Trade button (ref l.502, UIPanelButtonTemplate inlined): OnClick → AcceptTrade. -->
+            <Button name="BenillaTradeFrameTradeButton" text="Trade">
+                <Size><AbsDimension x="85" y="22"/></Size>
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="BenillaTradeFrame" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-113" y="55"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+                <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+                <ButtonText name="$parentText"/>
+                <NormalFont inherits="GameFontNormal"/><HighlightFont inherits="GameFontHighlight"/><DisabledFont inherits="GameFontDisable"/>
+                <Scripts><OnClick>AcceptTrade()</OnClick></Scripts>
+            </Button>
+            <Button name="BenillaTradeFrameCancelButton" text="Cancel">
+                <Size><AbsDimension x="77" y="22"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaTradeFrameTradeButton" relativePoint="TOPRIGHT"><Offset><AbsDimension x="3" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+                <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+                <ButtonText name="$parentText"/>
+                <NormalFont inherits="GameFontNormal"/><HighlightFont inherits="GameFontHighlight"/><DisabledFont inherits="GameFontDisable"/>
+                <Scripts><OnClick>BenillaTradeFrameCancelButton_OnClick()</OnClick></Scripts>
+            </Button>
+            <!-- The window close X (ref l.544, UIPanelCloseButton inlined). -->
+            <Button name="BenillaTradeFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativeTo="BenillaTradeFrame" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-25" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>HideUIPanel(BenillaTradeFrame)</OnClick></Scripts>
+            </Button>
+
+            <!-- Our gold — EDITABLE (decision 0592 P2, ref TradePlayerInputMoneyFrame l.553): the shared
+                 BenillaMoneyInput trio (three numeric edit boxes Gold/Silver/Copper). A keystroke drives
+                 BenillaTradeFrame_UpdateMoney → SetTradeMoney → CMSG_SET_TRADE_GOLD; the server's echo is
+                 reflected back through PLAYER_TRADE_MONEY (below). Box layout copied from the proven
+                 send-mail widget (MailFrame.xml). -->
+            <Frame name="BenillaTradePlayerInputMoney">
+                <Size><AbsDimension x="176" y="18"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="26" y="-73"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <EditBox name="$parentGold" historyLines="0" numeric="true" autoFocus="false">
+                        <Size><AbsDimension x="58" y="20"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
+                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnTabPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnTabPressed>
+                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Silver"):SetFocus()</OnEnterPressed>
+                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                            <OnTextChanged>if ( BenillaMoneyInput_Consume("BenillaTradePlayerInputMoney") ) then BenillaTradeFrame_UpdateMoney() end</OnTextChanged>
+                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                    <EditBox name="$parentSilver" letters="2" historyLines="0" numeric="true" autoFocus="false">
+                        <Size><AbsDimension x="30" y="20"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="$parentGold" relativePoint="RIGHT"><Offset><AbsDimension x="26" y="0"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
+                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnTabPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnTabPressed>
+                            <OnEnterPressed>getglobal(this:GetParent():GetName().."Copper"):SetFocus()</OnEnterPressed>
+                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                            <OnTextChanged>if ( BenillaMoneyInput_Consume("BenillaTradePlayerInputMoney") ) then BenillaTradeFrame_UpdateMoney() end</OnTextChanged>
+                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                    <EditBox name="$parentCopper" letters="2" historyLines="0" numeric="true" autoFocus="false">
+                        <Size><AbsDimension x="30" y="20"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="$parentSilver" relativePoint="RIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="BACKGROUND">
+                                <Texture name="$parentLeft" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors><TexCoords left="0" right="0.0625" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentRight" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="8" y="20"/></Size><Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.9375" right="1.0" top="0" bottom="0.625"/></Texture>
+                                <Texture name="$parentMiddle" file="Interface\Common\Common-Input-Border"><Size><AbsDimension x="10" y="20"/></Size><Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/><Anchor point="RIGHT" relativeTo="$parentRight" relativePoint="LEFT"/></Anchors><TexCoords left="0.0625" right="0.9375" top="0" bottom="0.625"/></Texture>
+                                <Texture file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="-8" y="0"/></Offset></Anchor></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                            <OnTextChanged>if ( BenillaMoneyInput_Consume("BenillaTradePlayerInputMoney") ) then BenillaTradeFrame_UpdateMoney() end</OnTextChanged>
+                            <OnEditFocusLost>this:HighlightText(0, 0)</OnEditFocusLost>
+                            <OnEditFocusGained>this:HighlightText()</OnEditFocusGained>
+                        </Scripts>
+                        <FontString inherits="ChatFontNormal"/>
+                    </EditBox>
+                </Frames>
+            </Frame>
+            <!-- The partner's gold (read-only — GetTargetTradeMoney; ref TradeRecipientMoneyFrame l.574). -->
+            <Frame name="BenillaTradeRecipientMoneyFrame">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-40" y="-80"/></Offset></Anchor></Anchors>
+                <Frames>
+                    <Frame name="$parentCoin1">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors>
+                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
+                    </Frame>
+                    <Frame name="$parentCoin2">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
+                    </Frame>
+                    <Frame name="$parentCoin3">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="$parentCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                        <Layers><Layer level="OVERLAY"><Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture><FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString></Layer></Layers>
+                    </Frame>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaTradeFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaTradeFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaTradeFrame_OnShow(); PlaySound("igCharacterInfoOpen")</OnShow>
+            <OnHide>BenillaTradeFrame_OnHide(); PlaySound("igCharacterInfoClose")</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

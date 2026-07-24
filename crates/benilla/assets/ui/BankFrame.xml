@@ -1,0 +1,1147 @@
+<Ui>
+    <!--
+        benilla's bank window (decision 0604 phase 4): the vault is already streamed (the 24 bank
+        slots + 6 bank bags ride the descriptor at login, exactly like the backpack — see the
+        decision's "pinned mechanism"), so this file is purely the window over the existing
+        C_Container/cursor plumbing. Geometry/art below are QUOTED from the real `BankFrame.xml`
+        (`WoW/_extracted_framexml/BankFrame.xml`/`.lua`, read this session — line-cited inline),
+        turned onto OUR house idioms per decision 0068/0084: no `ItemButtonTemplate`/
+        `SmallMoneyFrameTemplate`/`UIPanelButtonTemplate` ship, so every one of those is either a
+        cross-file `inherits` of a benilla template that already reconstructs the real art
+        (`BenillaBagSlotTemplate`/`BenillaBagWindowTemplate`, both `BagFrame.xml`) or a local
+        redraw (the Purchase button, `UI-Panel-Button-*`, the house convention every NPC window
+        already uses — TrainerFrame.xml/QuestFrame.xml &c.).
+
+        MAXIMAL REUSE, per the phase-4 brief: the 24 generic slots (container `-1`) are 24
+        `BenillaBagSlotTemplate` buttons — the SAME click/drag/tooltip/stack-split/lock/cooldown
+        chain the bag windows use, just parented under a frame carrying `id="-1"` (this window
+        itself) so `button:GetParent():GetID()` resolves to `BANK_CONTAINER`. The six bank-bag
+        POPOUT windows (`BenillaBankBagFrame1..6`, container ids 5..10 — decision 0604: "the
+        reference reuses ContainerFrames for bank bags identically") `inherits="BenillaBagWindowTemplate"`
+        and reuse `BenillaBagFrame_OnLoad/_OnEvent/_OnShow/_OnHide` from `BagFrame.xml` VERBATIM —
+        the exact "container-window plumbing" the phase brief named, since this engine has no
+        `ToggleBag`/`CloseBag` globals (grepped; none exist) and `BagFrame.xml`'s own window
+        family only spans ids 0..4.
+
+        DEVIATIONS from the raw reference quote (each load-bearing, none silent):
+        - The 24 generic slots reuse `BenillaBagSlot_Update`'s `physIndex` chain-resolution
+          (`slot = size - physIndex + 1`) rather than a bespoke direct mapping, so slot i's
+          button is loaded with `BenillaBagSlot_OnLoad(self, 25 - i)` — container `-1` is a FIXED
+          24 slots (never resized, decision 0604), so this reversal is a stable constant, not a
+          live recompute; it buys the exact same click/drag/split/lock/cooldown chain the bag
+          windows get for free, at the cost of the physIndex arithmetic reading backwards from
+          the reference's direct `id=i` (the reference's `BankFrameItem<i>` has no chain at all
+          since a real ContainerFrame's `id~=0` slot count is genuinely fixed at generation time —
+          our shared function always resolves dynamically, so the reversal is what makes button i
+          show slot i).
+        - The Purchase confirm popup (`CONFIRM_BUY_BANK_SLOT`) shows TEXT ONLY, no embedded cost —
+          the house's `StaticPopup` engine (`UiPanels.xml`) has no money-frame variant (the
+          `hasMoneyFrame` field the reference dialog carries is inert), the same accepted gap
+          `MailFrame.xml`'s `SEND_MONEY`/`DELETE_MONEY` popups already live with (that file's own
+          header note). The row's own Cost: coins (visible before you ever open the popup) carry
+          the affordability information instead.
+        - The close button is the house's `UI-Panel-MinimizeButton` at TOPRIGHT(-30,-8) — the
+          Merchant/Trainer/Mail convention — rather than the reference's CENTER-relative offset
+          against ITS OWN `UI-BankFrame` art's button recess (which our re-skin doesn't reproduce
+          pixel-for-pixel).
+        - ESC / `CloseAllWindows` closes the MAIN bank window (registered in `UiPanels.xml`'s
+          `UIPanelWindows`, which drives the whole chain generically) and its `OnHide` explicitly
+          closes every open bank-bag popout with it — but a popout is NOT independently in
+          `CloseAllWindows`'s hardcoded bag list (`UiPanels.xml`), so it would survive an ESC
+          press that DIDN'T close the bank frame itself (impossible today: nothing else occupies
+          the left slot while the bank is open without closing it first, so this is a latent gap,
+          not a reachable bug).
+
+        Money: reuses `BenillaMoney_Set`/`_SetColor` (`MerchantFrame.xml`, loaded first — the
+        established cross-window reuse `TrainerFrame.xml`/`BagFrame.xml` already lean on).
+    -->
+    <Script><![CDATA[
+        BENILLA_BANK_ITEM_SLOTS = 24  -- NUM_BANKGENERIC_SLOTS (ref BankFrame.lua:3)
+        BENILLA_BANK_BAG_SLOTS = 6    -- NUM_BANKBAGSLOTS (ref BankFrame.lua:4)
+
+        function BenillaBankFrame_OnLoad(frame)
+            SetPortraitTexture(getglobal(frame:GetName() .. "Portrait"), "npc")
+            frame:RegisterEvent("BANKFRAME_OPENED")
+            frame:RegisterEvent("BANKFRAME_CLOSED")
+            frame:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
+            frame:RegisterEvent("PLAYERBANKBAGSLOTS_CHANGED")
+            frame:RegisterEvent("PLAYER_MONEY")
+            -- Container -1 is a container like any other: the same lock/cooldown maintenance
+            -- events the bag windows register (BagFrame.xml's BenillaBagFrame_OnLoad), handled
+            -- below by BenillaBankFrame_OnEvent directly (not delegated — the shared window-level
+            -- repaint helper caps at BENILLA_BAG_WINDOW_MAX_SLOTS=20, short of the bank's 24).
+            frame:RegisterEvent("ITEM_LOCK_CHANGED")
+            frame:RegisterEvent("BAG_UPDATE_COOLDOWN")
+        end
+
+        -- The banker's name arrives as arg1 of BANKFRAME_OPENED (the app resolves the banker guid
+        -- through the NameCache — the merchant/trainer feed's own ask-once pattern); nil/empty
+        -- until it lands, or if this ever fires with no name, falls back to "Banker".
+        function BenillaBankFrame_SetTitle(name)
+            if name == nil or name == "" then
+                name = "Banker"
+            end
+            getglobal("BenillaBankFrameTitleText"):SetText(name)
+        end
+
+        -- Repaint every one of the 24 generic slots (PLAYERBANKSLOTS_CHANGED names ONE slot; the
+        -- spec allows repainting all 24 — cheap, and spares tracking a slot->button map).
+        function BenillaBankFrame_RepaintItems()
+            for i = 1, BENILLA_BANK_ITEM_SLOTS do
+                local button = getglobal("BenillaBankItem" .. i)
+                if button then BenillaBagSlot_Update(button) end
+            end
+        end
+
+        -- The bag row (ref UpdateBagSlotStatus, BankFrame.lua:81-117): each button's icon from the
+        -- app-resolved BenillaGetBankBagTexture feed (falling back to the empty paper-doll bag
+        -- slot art), tinted white when purchased / red when not; the purchase row's cost coins +
+        -- afford color; the whole row hidden once GetNumBankSlots() reports `full`.
+        function BenillaBankFrame_UpdateBagRow()
+            local numSlots, full = GetNumBankSlots()
+            for i = 1, BENILLA_BANK_BAG_SLOTS do
+                local button = getglobal("BenillaBankBagButton" .. i)
+                if button then
+                    local texture = BenillaGetBankBagTexture(i)
+                    button.icon:SetTexture(texture or "Interface\\PaperDoll\\UI-PaperDoll-Slot-Bag")
+                    if i <= numSlots then
+                        button.icon:SetVertexColor(1.0, 1.0, 1.0)
+                        button.tooltipText = "Bag Slot" -- BANK_BAG
+                    else
+                        button.icon:SetVertexColor(1.0, 0.1, 0.1)
+                        button.tooltipText = "Purchasable Bag Slot" -- BANK_BAG_PURCHASE
+                    end
+                end
+            end
+
+            local cost = GetBankSlotCost(numSlots)
+            BenillaBankFrame.nextSlotCost = cost
+            BenillaMoney_Set("BenillaBankFrameCostMoney", cost, true)
+            if GetMoney() >= cost then
+                BenillaMoney_SetColor("BenillaBankFrameCostMoney", 1.0, 1.0, 1.0)
+            else
+                BenillaMoney_SetColor("BenillaBankFrameCostMoney", 1.0, 0.1, 0.1)
+            end
+
+            local purchaseFrame = getglobal("BenillaBankFramePurchaseInfo")
+            if full then
+                purchaseFrame:Hide()
+            else
+                purchaseFrame:Show()
+            end
+        end
+
+        function BenillaBankFrame_OnEvent(frame)
+            if event == "BANKFRAME_OPENED" then
+                BenillaBankFrame_SetTitle(arg1)
+                BenillaBankFrame_RepaintItems()
+                BenillaBankFrame_UpdateBagRow()
+                ShowUIPanel(frame)
+            elseif event == "BANKFRAME_CLOSED" then
+                HideUIPanel(frame)
+            elseif event == "PLAYERBANKSLOTS_CHANGED" then
+                BenillaBankFrame_RepaintItems()
+            elseif event == "PLAYERBANKBAGSLOTS_CHANGED" then
+                BenillaBankFrame_UpdateBagRow()
+            elseif event == "PLAYER_MONEY" then
+                BenillaMoney_Set("BenillaBankFrameMoney", GetMoney())
+                BenillaBankFrame_UpdateBagRow() -- the cost coins' afford color can flip too
+            elseif event == "ITEM_LOCK_CHANGED" then
+                if arg1 == -1 then
+                    BenillaBankFrame_RepaintItems()
+                end
+            elseif event == "BAG_UPDATE_COOLDOWN" then
+                -- No bag argument (ref l.243-253's own shape) — BenillaBagSlot_Update's occupied
+                -- leg re-runs the cooldown sweep as part of the full 24-slot repaint.
+                BenillaBankFrame_RepaintItems()
+            end
+        end
+
+        function BenillaBankFrame_CloseButton_OnClick()
+            CloseBankFrame()
+            HideUIPanel(getglobal("BenillaBankFrame"))
+        end
+
+        -- CloseBankBagFrames (ref BankFrame.lua:119-123), over our popout naming.
+        function BenillaCloseBankBagFrames()
+            for j = 1, BENILLA_BANK_BAG_SLOTS do
+                local frame = getglobal("BenillaBankBagFrame" .. j)
+                if frame and frame:IsShown() then frame:Hide() end
+                local button = getglobal("BenillaBankBagButton" .. j)
+                if button then button:SetChecked(nil) end
+            end
+        end
+
+        -- ── The 6 bag buttons (ref BankFrameItemButtonBag_OnClick/_OnShiftClick, BankFrame.lua:
+        --    171-204): NOT container slots (they hold a whole BAG item, not a stack) — the doll
+        --    pickup idiom BagFrame.xml's BenillaBagBarSlot_* already established for the equipped
+        --    bag slots, reused verbatim here over BankButtonIDToInvSlotID's bag arm (id 1..6 ->
+        --    live 64..69). A held cursor item always PLACES; an empty cursor toggles the button's
+        --    popout window instead (ref: PutItemInBag first, ToggleBag only if that failed). ──
+        function BenillaBankBagButton_OnLoad(button, id)
+            button:SetID(id)
+            button.icon = getglobal(button:GetName() .. "Icon")
+            button:RegisterForDrag("LeftButton")
+        end
+
+        function BenillaBankBagButton_Place(button)
+            PickupInventoryItem(BankButtonIDToInvSlotID(button:GetID(), 1))
+            PlaySound("BAGMENUBUTTONPRESS")
+        end
+
+        function BenillaBankBagButton_OnClick(button)
+            if CursorHasItem() then
+                BenillaBankBagButton_Place(button)
+                return
+            end
+            local id = button:GetID()
+            PlaySound("BAGMENUBUTTONPRESS")
+            -- Only a slot actually holding a bag opens its popout — the reference's ToggleBag on
+            -- a bagless (or unpurchased) slot is a no-op beyond the click sound; the container
+            -- feed reports 0 slots exactly when no bag object sits in the slot.
+            if C_Container.GetContainerNumSlots(4 + id) == 0 then
+                button:SetChecked(nil)
+                return
+            end
+            local frame = getglobal("BenillaBankBagFrame" .. id)
+            if frame then
+                if frame:IsShown() then
+                    frame:Hide()
+                else
+                    BenillaBagWindow_Update(frame) -- paint before Show (BenillaBagBarSlot_OnClick's own idiom)
+                    frame:Show()
+                end
+                button:SetChecked(frame:IsShown())
+            end
+        end
+
+        function BenillaBankBagButton_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            GameTooltip:SetText(button.tooltipText or "Bag Slot")
+            GameTooltip:Show()
+        end
+
+        -- The Purchase button (ref BankFramePurchaseButton OnClick, BankFrame.xml:478-482) + its
+        -- confirm popup (ref StaticPopup.lua CONFIRM_BUY_BANK_SLOT, l.47-58 — text-only here, see
+        -- the header's money-frame note). Accept queues PurchaseSlot(); the descriptor's byte-2
+        -- delta is the only success signal (decision 0604) — PLAYERBANKBAGSLOTS_CHANGED repaints.
+        function BenillaBankFramePurchaseButton_OnClick()
+            PlaySound("igMainMenuOption")
+            StaticPopup_Show("CONFIRM_BUY_BANK_SLOT")
+        end
+
+        StaticPopupDialogs["CONFIRM_BUY_BANK_SLOT"] = {
+            text = "Do you want to purchase a bank slot for:", -- CONFIRM_BUY_BANK_SLOT
+            button1 = "Yes",
+            button2 = "No",
+            OnAccept = function() PurchaseSlot() end,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+    ]]></Script>
+
+    <!--
+        One bank-bag BUTTON (ref BankItemButtonBagTemplate, BankFrame.xml:46-74): the 37×37
+        UI-Quickslot2 ring, a CheckButton so it lights (CheckedTexture) while its popout is open —
+        the same lit-ring convention BagFrame.xml's BenillaBagBarSlot uses for the equipped bags.
+    -->
+    <CheckButton name="BenillaBankBagButtonTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+        </NormalTexture>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaBankBagButton_OnClick(self)</OnClick>
+            <OnEnter>BenillaBankBagButton_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+            <OnDragStart>BenillaBankBagButton_Place(self)</OnDragStart>
+            <OnReceiveDrag>BenillaBankBagButton_Place(self)</OnReceiveDrag>
+        </Scripts>
+    </CheckButton>
+
+    <Frame name="BenillaBankFrame" id="-1" hidden="true">
+        <!-- The real 384×512 window (ref l.77-90). No <Anchors> — ShowUIPanel/SetLeftFrame SetPoints
+             this to the left slot on open, the same NPC-session convention as Merchant/Trainer/Mail.
+             id="-1" = BANK_CONTAINER: the 24 item buttons below read it via GetParent():GetID(), the
+             SAME resolution BagFrame.xml's slot family uses for every other container. -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- NPC portrait 60×60 TOPLEFT (7,-6) (ref l.93-104), bound in OnLoad via
+                     SetPortraitTexture(region, "npc") — the Merchant/Trainer/Gossip convention. -->
+                <Texture name="BenillaBankFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The whole window art, one 512×512 texture (ref l.107-114 — unlike Merchant/
+                     Trainer's 4-quadrant re-skin, the reference Bank window is a single slab). -->
+                <Texture file="Interface\BankFrame\UI-BankFrame">
+                    <Size><AbsDimension x="512" y="512"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                </Texture>
+                <!-- Title: the banker's name (ref BankFrameTitleText l.115-123, GameFontHighlight,
+                     CENTER (6,233)); "Banker" until BANKFRAME_OPENED's arg1 lands. -->
+                <FontString name="BenillaBankFrameTitleText" inherits="GameFontHighlight" justifyH="CENTER" text="Banker">
+                    <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="6" y="233"/></Offset></Anchor></Anchors>
+                </FontString>
+                <!-- Section labels (ref l.124-141: ITEMSLOTTEXT/BAGSLOTTEXT, GameFontNormal, CENTER
+                     (-11,195) / (-11,-5)). -->
+                <FontString inherits="GameFontNormal" text="Item Slots" justifyH="CENTER">
+                    <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-11" y="195"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString inherits="GameFontNormal" text="Bag Slots" justifyH="CENTER">
+                    <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-11" y="-5"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Close X: the house minimize-button convention (Merchant/Trainer/Mail), TOPRIGHT
+                 (-30,-8) — see the header's deviation note on the reference's own offset. -->
+            <Button name="BenillaBankFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-30" y="-8"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>BenillaBankFrame_CloseButton_OnClick()</OnClick></Scripts>
+            </Button>
+
+            <!-- The 24 generic item slots (ref BankFrameItem1..24, l.154-369): 6 cols × 4 rows,
+                 TOPLEFT(40,-73), 12px column gap, -7px row gap — QUOTED verbatim. Each is a
+                 BenillaBagSlotTemplate button (BagFrame.xml) read against container -1; physIndex
+                 is `25 - i` so button i resolves to slot i (see the header's deviation note). -->
+            <Button name="BenillaBankItem1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="40" y="-73"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 24)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 23)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 22)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 21)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem7" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem8" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem10" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem11" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem14" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem15" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem16" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem17" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem19" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem21" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem20" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem22" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem21" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem23" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem22" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="BenillaBankItem24" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem23" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+
+            <!-- The 6 bag buttons (ref BankFrameBag1..6 id=5..10, l.372-425): under item19, 12px
+                 column gap. Button id = the bag-button number (1..6, what BankButtonIDToInvSlotID
+                 and BenillaGetBankBagTexture expect) — NOT the container id (5..10), which the
+                 popout windows below carry instead via their own `id=`. -->
+            <CheckButton name="BenillaBankBagButton1" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankItem19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-32"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 1)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaBankBagButton2" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 2)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaBankBagButton3" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton2" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 3)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaBankBagButton4" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton3" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 4)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaBankBagButton5" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton4" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 5)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaBankBagButton6" inherits="BenillaBankBagButtonTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaBankBagButton5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="12" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBankBagButton_OnLoad(self, 6)</OnLoad></Scripts>
+            </CheckButton>
+
+            <!-- The purchase row (ref BankFramePurchaseInfo, l.426-500): 300×72, CENTER of the
+                 window (-15,-105). House coin rig (BenillaMoney_Set) in place of the reference's
+                 SmallMoneyFrameTemplate; the Purchase button is a local UI-Panel-Button redraw (no
+                 UIPanelButtonTemplate ships — the house convention every NPC window uses). -->
+            <Frame name="BenillaBankFramePurchaseInfo">
+                <Size><AbsDimension x="300" y="72"/></Size>
+                <Anchors><Anchor point="CENTER" relativeTo="BenillaBankFrame" relativePoint="CENTER"><Offset><AbsDimension x="-15" y="-105"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <FontString inherits="GameFontHighlight" text="Do you wish to purchase space for an additional bag?" justifyH="LEFT">
+                            <Size><AbsDimension x="280" y="0"/></Size>
+                            <Anchors><Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="10" y="20"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <FontString name="BenillaBankFrameCostLabel" inherits="GameFontNormal" text="Cost:" justifyH="LEFT">
+                            <Anchors><Anchor point="LEFT" relativePoint="LEFT"><Offset><AbsDimension x="30" y="-10"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Frame name="BenillaBankFrameCostMoneyCoin1">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostLabel" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Layers><Layer level="OVERLAY">
+                            <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
+                            <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                        </Layer></Layers>
+                    </Frame>
+                    <Frame name="BenillaBankFrameCostMoneyCoin2">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostMoneyCoin1" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Layers><Layer level="OVERLAY">
+                            <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
+                            <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                        </Layer></Layers>
+                    </Frame>
+                    <Frame name="BenillaBankFrameCostMoneyCoin3">
+                        <Size><AbsDimension x="13" y="13"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="BenillaBankFrameCostMoneyCoin2" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <Layers><Layer level="OVERLAY">
+                            <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture>
+                            <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                        </Layer></Layers>
+                    </Frame>
+                    <Button name="BenillaBankFramePurchaseButton" text="Purchase">
+                        <Size><AbsDimension x="124" y="21"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
+                        <NormalFont inherits="GameFontNormal"/>
+                        <HighlightFont inherits="GameFontHighlight"/>
+                        <DisabledFont inherits="GameFontDisable"/>
+                        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+                        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+                        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+                        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+                        <Scripts><OnClick>BenillaBankFramePurchaseButton_OnClick()</OnClick></Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- The player's own money (ref BankFrameMoneyFrame, l.501-509: BOTTOMRIGHT(-38,102)).
+                 Same right-to-left coin chain as MerchantFrame's purse — copper-first, right-flush
+                 off Coin1 (BenillaMoney_Set's own module doc, MerchantFrame.xml). -->
+            <Frame name="BenillaBankFrameMoneyCoin1">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-51" y="102"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.5" right="0.75" top="0" bottom="1"/></Texture>
+                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                </Layer></Layers>
+            </Frame>
+            <Frame name="BenillaBankFrameMoneyCoin2">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaBankFrameMoneyCoin1" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0.25" right="0.5" top="0" bottom="1"/></Texture>
+                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                </Layer></Layers>
+            </Frame>
+            <Frame name="BenillaBankFrameMoneyCoin3">
+                <Size><AbsDimension x="13" y="13"/></Size>
+                <Anchors><Anchor point="RIGHT" relativeTo="BenillaBankFrameMoneyCoin2" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                <Layers><Layer level="OVERLAY">
+                    <Texture name="$parentIcon" file="Interface\MoneyFrame\UI-MoneyIcons"><Size><AbsDimension x="13" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"/></Anchors><TexCoords left="0" right="0.25" top="0" bottom="1"/></Texture>
+                    <FontString name="$parentNum" inherits="NumberFontNormal" justifyH="RIGHT"><Size><AbsDimension x="20" y="13"/></Size><Anchors><Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-13" y="0"/></Offset></Anchor></Anchors></FontString>
+                </Layer></Layers>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBankFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBankFrame_OnEvent(self)</OnEvent>
+            <!-- OnShow/OnHide (ref l.518-526): OpenBackpack/CloseBackpack per the 0561 contract
+                 (MerchantFrame.xml's own placement is the model); the reference OnHide order
+                 (CloseBankBagFrames(); CloseBankFrame(); PlaySound(...)) kept exactly, with
+                 CloseBackpack folded in at the Merchant convention's spot. -->
+            <OnShow>OpenBackpack(); PlaySound("igMainMenuOpen")</OnShow>
+            <OnHide>BenillaCloseBankBagFrames(); CloseBankFrame(); CloseBackpack(); PlaySound("igMainMenuClose")</OnHide>
+        </Scripts>
+    </Frame>
+
+    <!--
+        The six bank-bag POPOUT windows (ref: bank bags are ordinary ContainerFrames, ids 5..10 —
+        decision 0604). `inherits="BenillaBagWindowTemplate"` (BagFrame.xml) for the SAME snug-fit
+        background + slot grid + portrait the equipped-bag windows (BenillaBagFrame1..4) use, and
+        the SAME `BenillaBagFrame_OnLoad/_OnEvent/_OnShow/_OnHide` globals — full container-window
+        plumbing reuse, per the header's design note. Slot buttons are the identical 20-slot
+        bottom-right-growing chain BagFrame.xml's own equipped-bag windows author (BENILLA_BAG_
+        WINDOW_MAX_SLOTS=20, vanilla's largest bag) — copied verbatim per window since virtual
+        templates in this engine are not proven safe to chain two levels deep with their own
+        $parent-named children (BagFrame.xml's own instances repeat the block 4 times rather than
+        share it a second way; this file follows the same proven shape).
+    -->
+    <Frame name="BenillaBankBagFrame1" id="5" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+    <Frame name="BenillaBankBagFrame2" id="6" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+    <Frame name="BenillaBankBagFrame3" id="7" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+    <Frame name="BenillaBankBagFrame4" id="8" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+    <Frame name="BenillaBankBagFrame5" id="9" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+    <Frame name="BenillaBankBagFrame6" id="10" inherits="BenillaBagWindowTemplate">
+        <Frames>
+            <Button name="$parentSlot1" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-12" y="9"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 1)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot2" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 2)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot3" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 3)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot4" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 4)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot5" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot1" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 5)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot6" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 6)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot7" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 7)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot8" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 8)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot9" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot5" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 9)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot10" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 10)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot11" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 11)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot12" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 12)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot13" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot9" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 13)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot14" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 14)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot15" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot14" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 15)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot16" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot15" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 16)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot17" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot13" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 17)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot18" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot17" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 18)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot19" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot18" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 19)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentSlot20" inherits="BenillaBagSlotTemplate">
+                <Anchors><Anchor point="BOTTOMRIGHT" relativeTo="$parentSlot19" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaBagSlot_OnLoad(self, 20)</OnLoad></Scripts>
+            </Button>
+            <Button name="$parentCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts><OnClick>this:GetParent():Hide()</OnClick></Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

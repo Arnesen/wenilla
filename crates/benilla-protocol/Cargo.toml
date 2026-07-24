@@ -1,0 +1,12 @@
+[package]
+name = "benilla-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WoW 1.12.1 auth (SRP6) + world wire protocol and the benilla-auth CLI"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+benilla-srp = { path = "../benilla-srp" }
+flate2 = "1.0"

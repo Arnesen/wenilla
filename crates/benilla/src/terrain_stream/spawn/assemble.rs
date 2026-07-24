@@ -1,0 +1,313 @@
+//! The placed-model assembler: [`spawn_model_entities`] builds a model's submesh entities with the
+//! full doodad/WMO component set (production materials, fade, mesh tags, the doodad anim host and
+//! its skinned twins). Two consumers — the terrain streamer's world-static placements
+//! ([`super::spawn_loaded_placements`]) and the WMO-display gameobject's doodad props
+//! (`crate::entities`' `wmo_props`).
+
+use benilla_assets::{M2Model, ModelSubmesh};
+use benilla_formats::ModelBlend;
+use bevy::mesh::skinning::SkinnedMesh;
+use bevy::mesh::MeshTag;
+use bevy::prelude::*;
+use bevy::render::render_resource::Buffer;
+
+use crate::billboard::BillboardCard;
+use crate::debug_panel::{ModelKind, ModelPart};
+use crate::doodad_anim::DoodadAnimHost;
+use crate::mesh_tag::alpha_bits;
+use crate::model_fade::DoodadFade;
+use crate::model_render::{model_material, MaterialCache, ShadeSel};
+use crate::terrain::WowModelMaterial;
+
+/// Spawn a model's submeshes at `transform` with the full doodad/WMO component set. Returns the spawned
+/// entities (for refcounted despawn).
+///
+/// `pub(crate)`: two consumers — the terrain streamer's world-static placements here, and the
+/// WMO-display GameObject's doodad props ([`crate::entities`]'s `wmo_props`, the ship's sails), which
+/// pass a doodad-LOCAL `transform` + `card_owner` and parent the returned entities under the moving
+/// gameobject (every downstream system reads propagated `GlobalTransform`s, so the composition holds).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_model_entities(
+    commands: &mut Commands,
+    mat_cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    light: &Buffer,
+    submeshes: &[ModelSubmesh],
+    transform: Transform,
+    is_wmo: bool,
+    // The static terrain-shade selector for every batch (the MCSH sample at this placement's base →
+    // `ShadeSel::Lit`/`Matte`/`Shaded`; see `model_render::ShadeSel`). Ignored by WMO group geometry
+    // and interior props (their lighting lanes don't read it).
+    shade: ShadeSel,
+    // `Some(slot)` for an INTERIOR M2 prop: its folded SH probe's table slot, carried per-instance
+    // in `MeshTag` (read by `wow_model.wgsl`'s interior-prop lane); such props never distance-fade.
+    // `None` everywhere else (exterior props fade; WMO groups use their own per-submesh interior
+    // flag + batch class).
+    interior_slot: Option<u16>,
+    radius: f32,
+    local_center: Vec3,
+    // `Some((model, now))` for an M2 placement: the doodad-animation gate (decision 0130) — an
+    // animated model spawns joints + the skinned twins; `now` is the clock origin. `None` for WMO
+    // group geometry.
+    m2: Option<(&M2Model, f32)>,
+    // UV-animated material registry (decision 0130 phase 3): a batch with a `uv_anim` loop registers
+    // its material here so `tick_uv_anim_materials` scrolls the shared offset each frame.
+    uv_reg: &mut crate::doodad_anim::UvAnimMaterials,
+    // Animated-tint material registry (the M2Color RGB twin of `uv_reg`): a batch with an
+    // `rgb_anim` loop registers its material here so `tick_tint_anim_materials` re-samples the
+    // shared tint each frame.
+    tint_reg: &mut crate::doodad_anim::TintAnimMaterials,
+    // `Some(anchor)` for a prop spawned ON a streamed entity (the WMO-gameobject path): a boneless
+    // model's billboard cards FOLLOW this anchor (`BillboardCard::following` — the entity-path law,
+    // decision 0153) instead of baking a world pivot, so they track the moving owner and
+    // self-despawn with it; such cards are also excluded from the returned entity list (the caller
+    // parents that list, and a card is a world root the billboard pass writes absolutely).
+    // `None` for world-static placements (terrain), whose pivots never move.
+    card_owner: Option<Entity>,
+    // Returns the spawned entities + the anim host's joint set (bone-indexed) when the model
+    // animates — the emitter spawn rides its host bone's joint off it (0130 phase 4).
+) -> (Vec<Entity>, Option<Vec<Entity>>) {
+    let kind = if is_wmo {
+        ModelKind::Wmo
+    } else {
+        ModelKind::Doodad
+    };
+    let mut out = Vec::with_capacity(submeshes.len());
+    // The doodad-animation host (decision 0130 phase 1): an animated model — most placed instances
+    // aren't, and stay on the static path below untouched — gets an anim-root + joint hierarchy +
+    // player/drive from [`crate::doodad_anim::spawn_anim_host`]; its ordinary submeshes then draw
+    // the skinned twin bound to those joints. Billboard batches keep today's camera-facing path
+    // (their transform is the billboard system's, and their glow-pulse already rides
+    // `BoneScaleAnim`). The host exists for every JOINT CONSUMER, not just skinned submeshes:
+    // emitters and ribbons ride their bone's joint too (0130 phase 4), so a particles-only model
+    // (0 render batches — the InstancePortal swirl, whose two emitters sit on the spinning rotor
+    // bones) still needs its joints driven. Only a model with nothing but billboard cards and no
+    // emitters/ribbons spawns no host.
+    let host = m2
+        .filter(|(m, _)| {
+            submeshes.iter().any(|s| s.billboard.is_none())
+                || !m.emitters.is_empty()
+                || !m.ribbons.is_empty()
+        })
+        .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, m, transform));
+    // Captures freeze material-alpha clocks at 0 (deterministic frames) — read the env once.
+    let mat_frozen = crate::capture::scenario_active();
+    let skin = host
+        .as_ref()
+        .map(|h| (h.joints.clone(), h.inverse_bindposes.clone()));
+    if let Some(h) = &host {
+        out.push(h.root);
+    }
+    let mut skinned_meshes: Vec<Entity> = Vec::new();
+    for (wmo_batch_idx, sub) in submeshes.iter().enumerate() {
+        // WMO batches carry their authored order (index + 1; 0 = non-WMO) into the material so the
+        // pipeline can bias coplanar layers to resolve in MOBA file order — the byte-verified client
+        // behaviour (wow-5875-re models/scratch/wmo-batch-blend-depth-state.md). Every WMO batch gets
+        // it (the filmed farmhouse layers are OPAQUE batches, not blends). Doodads/M2 pass 0.
+        let wmo_batch_order = if is_wmo {
+            u16::try_from(wmo_batch_idx + 1).unwrap_or(u16::MAX)
+        } else {
+            0
+        };
+        let interior = sub.interior || interior_slot.is_some();
+        // Billboard cards (glow halos) are forced two-sided: they always face the camera, and a glow
+        // reads the same from either face, so we don't risk the card's plane normal pointing away from
+        // the viewer (which would backface-cull it to nothing).
+        let two_sided = sub.two_sided || sub.billboard.is_some();
+        // A lit interior M2 prop submesh (not a WMO group, not an emissive billboard glow card): it carries
+        // its SH-probe slot in `MeshTag` and is steady (no distance fade), so the fade twin/`DoodadFade`
+        // are skipped — otherwise the fade system would overwrite the slot the shader reads from the tag.
+        let lit_interior_prop = !is_wmo && sub.billboard.is_none() && interior_slot.is_some();
+        let cutout = model_material(
+            mat_cache,
+            materials,
+            sub.texture.clone(),
+            sub.blend,
+            two_sided,
+            is_wmo,
+            interior,
+            sub.emissive,
+            sub.additive,
+            false,
+            sub.no_depth_write,
+            sub.no_depth_test,
+            sub.fog_policy,
+            shade,
+            wmo_batch_order,
+            sub.uv_anim.as_ref(),
+            sub.rgb_anim.as_ref(),
+            sub.wmo_batch,
+            sub.sidn,
+            sub.window,
+            light,
+        );
+        // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
+        // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
+        // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so it
+        // cannot feather — the reference's instanceAlpha fade leaves it at full strength (0528).
+        let blend = if lit_interior_prop
+            || matches!(
+                sub.blend,
+                ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x
+            ) {
+            cutout.clone()
+        } else {
+            model_material(
+                mat_cache,
+                materials,
+                sub.texture.clone(),
+                ModelBlend::Blend,
+                two_sided,
+                is_wmo,
+                interior,
+                sub.emissive,
+                sub.additive,
+                true,
+                sub.no_depth_write,
+                sub.no_depth_test,
+                sub.fog_policy,
+                shade,
+                wmo_batch_order,
+                sub.uv_anim.as_ref(),
+                sub.rgb_anim.as_ref(),
+                sub.wmo_batch,
+                sub.sidn,
+                sub.window,
+                light,
+            )
+        };
+        // Register both variants' materials for the per-frame UV scroll (idempotent per material —
+        // every instance of the batch lands on the same deduped handle).
+        if let Some(anim) = &sub.uv_anim {
+            uv_reg.0.entry(cutout.id()).or_insert_with(|| anim.clone());
+            uv_reg.0.entry(blend.id()).or_insert_with(|| anim.clone());
+        }
+        // …and for the per-frame tint re-sample (the animated M2Color RGB, same shared clock —
+        // the same invisible seq-band phase divergence as the UV scroll, recorded there).
+        if let Some(anim) = &sub.rgb_anim {
+            tint_reg
+                .0
+                .entry(cutout.id())
+                .or_insert_with(|| anim.clone());
+            tint_reg.0.entry(blend.id()).or_insert_with(|| anim.clone());
+        }
+        // `MeshTag` is the per-instance lighting/fade scalar: an interior prop carries its SH-probe
+        // slot index here (the shader evaluates the folded probe instead of the sky base);
+        // everything else carries the distance-fade alpha (`1.0` = opaque, the no-fade default the
+        // fade system overwrites). The slot goes through the ONE typed constructor
+        // (`mesh_tag::probe_bits` — bits 16-29 since the 0355 re-lane): this site kept the old
+        // bits-0..=15 write through that re-lane, so every static interior prop read probe slot 0,
+        // taking whichever probe won the streaming race — the director's inn-doodad regression.
+        let mesh_tag = match interior_slot {
+            Some(slot) if lit_interior_prop => MeshTag(crate::mesh_tag::probe_bits(slot)),
+            _ => MeshTag(alpha_bits(1.0)),
+        };
+        // A billboard batch (glow card / chain) faces the camera each frame, so its transform is owned
+        // by the billboard system. It still distance-fades with its doodad (same `radius` band) — the
+        // fade only touches the material/`MeshTag`, not the transform — so the bright halo culls when the
+        // lamp does instead of hanging in the air far past it. The mesh is centred at the pivot, so the
+        // fade centre is `ZERO` (→ the entity's world translation = the pivot).
+        let (entity, fade_center) = if let Some(info) = &sub.billboard {
+            // An animated doodad's card rides its billboard bone's live joint (the swinging
+            // lamp's glow follows the swing — 0153 follow-up; the joint frame bakes the pivot,
+            // 0130 rig identity). A static doodad keeps the fixed placement-baked pivot.
+            let card = match skin
+                .as_ref()
+                .and_then(|(joints, _)| joints.get(info.bone as usize))
+            {
+                Some(&joint) => BillboardCard::following_joint(info, joint),
+                None => match card_owner {
+                    Some(anchor) => BillboardCard::following(info, anchor),
+                    None => BillboardCard::new(info, transform),
+                },
+            };
+            (
+                commands
+                    .spawn((
+                        Mesh3d(sub.mesh.clone()),
+                        MeshMaterial3d(cutout.clone()),
+                        Transform::from_translation(transform.transform_point(info.pivot)),
+                        ModelPart {
+                            kind,
+                            blend: sub.blend,
+                        },
+                        mesh_tag,
+                        card,
+                    ))
+                    .id(),
+                Vec3::ZERO,
+            )
+        } else {
+            // An animated doodad's ordinary submesh draws the skinned twin bound to the placement's
+            // joint set (the entity keeps the placement transform — culling/fade read it; the
+            // skinned draw itself is joint-driven). Everything else draws the static mesh.
+            let mesh = match &skin {
+                Some(_) => sub.skinned_mesh.clone(),
+                None => sub.mesh.clone(),
+            };
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(cutout.clone()),
+                    transform,
+                    ModelPart {
+                        kind,
+                        blend: sub.blend,
+                    },
+                    mesh_tag,
+                ))
+                .id();
+            if let Some((joints, ibp)) = &skin {
+                commands.entity(entity).insert(SkinnedMesh {
+                    inverse_bindposes: ibp.clone(),
+                    joints: joints.clone(),
+                });
+                skinned_meshes.push(entity);
+            }
+            (entity, local_center)
+        };
+        // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
+        // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the
+        // visibility authority composes the value into the render-alpha tag + the A ≤ 0 cull.
+        // Captures freeze the clock at 0 (deterministic frames). NB a lit interior prop's tag
+        // carries its room colour, so its partial alpha can't show yet — only the 0-cull applies
+        // there (flagged in decision 0130; the population is a handful of instances per town).
+        if let Some(anim) = &sub.alpha_anim {
+            commands
+                .entity(entity)
+                .insert(crate::doodad_anim::MatAnim::new(
+                    anim.clone(),
+                    m2.map(|(_, now)| now).unwrap_or_default(),
+                    mat_frozen,
+                ));
+        }
+        // Distance fade for everything except a lit interior prop (whose `MeshTag` carries colour, and
+        // which is steady indoors). Adding `DoodadFade` is what makes the fade system drive the tag.
+        if !lit_interior_prop {
+            commands.entity(entity).insert(DoodadFade {
+                radius,
+                local_center: fade_center,
+                cutout,
+                blend,
+            });
+        }
+        // An entity-following card manages its own lifecycle (`face_billboards` despawns it with
+        // its owner) and must stay a world root — keep it out of the caller's parent/despawn list.
+        if sub.billboard.is_none() || card_owner.is_none() {
+            out.push(entity);
+        }
+    }
+    // Arm the draw gate: animation runs iff any of these submeshes is drawn (`doodad_anim`) —
+    // or, for a meshless (particles-only) host, iff the placement's fade sphere is in the draw
+    // set (the same 0171 law its emitters gate on).
+    if let Some(h) = host {
+        commands.entity(h.root).insert(DoodadAnimHost {
+            meshes: skinned_meshes,
+            fade: (radius, transform.transform_point(local_center)),
+            clip: h.clip,
+            spawned_at: m2.map(|(_, now)| now).unwrap_or_default(),
+            active: true,
+        });
+    }
+    (out, skin.map(|(joints, _)| joints))
+}

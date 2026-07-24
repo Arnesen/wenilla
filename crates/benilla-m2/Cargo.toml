@@ -1,0 +1,9 @@
+[package]
+name = "benilla-m2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "M2 (MD20) model reader for WoW 1.12.1 (build 5875) — in-repo, decision 0021"
+
+[dependencies]
+benilla-bytes = { path = "../benilla-bytes" }

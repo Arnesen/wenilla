@@ -1,0 +1,206 @@
+<Ui>
+    <!--
+        The stance/shapeshift bar (vanilla ShapeshiftBarFrame, ref-BonusActionBarFrame.xml/.lua —
+        extracted from patch.MPQ). Warrior stances, druid forms, rogue Stealth: one CheckButton per
+        known form, checked = the ACTIVE form (the descriptor's UNIT_FIELD_BYTES_1 byte-2 form,
+        wow-re bonusbar-shapeshift.md), grey icon when not castable, cooldown swipe, click casts
+        the form (`crate::ui_shapeshift` drains CastShapeshiftForm onto the wire).
+
+        Geometry QUOTED from the ref, permanently in its RAISED mode (ShapeshiftBar_UpdatePosition's
+        MultiBarBottomLeft.isShowing branch — our bottom multibars are ALWAYS ON, MultiBars.xml):
+        frame BOTTOMLEFT at MainMenuBar TOPLEFT +(30,45); the ShapeshiftBarEnds/Middle shelf art
+        HIDDEN (raised mode hides it, so it is not modeled at all); buttons 30x30, button1 at frame
+        BOTTOMLEFT +(11,3), chained +7; NormalTexture UI-Quickslot2 at the raised mode's 50x50
+        (ref l.236-237), CENTER (0,-1) like the action template. Max 10 slots (NUM_SHAPESHIFT_SLOTS).
+
+        Ref divergences (deliberate):
+        - ONE refresh event: the app diffs the whole pushed form list (identity, active, castable,
+          cooldown) and fires UPDATE_SHAPESHIFT_FORMS on any change — so the ref's separate
+          Update/UpdateState split over six events (SPELL_UPDATE_COOLDOWN/_USABLE,
+          PLAYER_AURAS_CHANGED, UPDATE_INVENTORY_ALERTS "Wha??", ACTIONBAR_PAGE_CHANGED) collapses
+          into Update on UPDATE_SHAPESHIFT_FORMS + PLAYER_ENTERING_WORLD.
+        - No lastSelected bookkeeping (ref ShapeshiftBar_ChangeForm) — checked state is always
+          re-derived from the pushed `isActive`, never locally latched: the server's form byte is
+          the truth and the app re-pushes on its every change. (Verified dead in the ref itself:
+          `lastSelected` is written twice and read nowhere in the shipped FrameXML.)
+    -->
+    <Script><![CDATA[
+        NUM_SHAPESHIFT_SLOTS = 10
+
+        function BenillaShapeshiftButton_OnLoad(button, index)
+            button.index = index
+            button.icon = getglobal(button:GetName() .. "Icon")
+            button.cooldown = getglobal(button:GetName() .. "Cooldown")
+        end
+
+        -- The CheckButton widget toggles itself BEFORE OnClick fires (the widget contract); the
+        -- ref immediately reverts that toggle (ShapeshiftButtonTemplate OnClick, ref-
+        -- BonusActionBarFrame.xml l.31-38), so the checked ring never follows the click — only
+        -- the isActive repaint. That is what keeps a warrior's ACTIVE stance lit through the
+        -- click's silent wire no-op (stances never cancel — the 0x4b4963 guard), and a druid
+        -- form/Stealth lit until the server actually confirms the shift-out.
+        function BenillaShapeshiftButton_OnClick(button)
+            if button:GetChecked() then
+                button:SetChecked(nil)
+            else
+                button:SetChecked(1)
+            end
+            CastShapeshiftForm(button.index)
+        end
+
+        -- Hover: the form's spell tooltip through the engine channel (ref ShapeshiftBar's
+        -- GameTooltip:SetShapeshift; decision 0274 P2). Anchor: the ref's ShapeshiftButton
+        -- OnEnter (BonusActionBarFrame.xml l.40-45) takes the default corner when UberTooltips
+        -- is "1" — its byte-verified stock default (ActionBar.xml has the read) — so the branch
+        -- collapses to the default corner here too.
+        function BenillaShapeshiftButton_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            GameTooltip:SetShapeshift(button.index)
+        end
+
+        function BenillaShapeshiftButton_OnLeave(button)
+            GameTooltip:Hide()
+        end
+
+        -- Ref ShapeshiftBar_Update + ShapeshiftBar_UpdateState fused (SCOPE note above): size the
+        -- bar to the form count (hide the whole frame at 0 — a formless class never shows it),
+        -- then paint each button — icon, checked (active), the 1.0/0.4 castable tint (ref l.210-214),
+        -- cooldown swipe (CooldownFrame_SetTimer, Cooldown.xml's shared transcription).
+        function BenillaShapeshiftBar_Update()
+            local numForms = GetNumShapeshiftForms()
+            if numForms > 0 then
+                BenillaShapeshiftBarFrame:Show()
+            else
+                BenillaShapeshiftBarFrame:Hide()
+            end
+            for i = 1, NUM_SHAPESHIFT_SLOTS do
+                local button = getglobal("BenillaShapeshiftButton" .. i)
+                if i <= numForms then
+                    local texture, name, isActive, isCastable = GetShapeshiftFormInfo(i)
+                    button.icon:SetTexture(texture or BENILLA_FALLBACK_ICON)
+                    local start, duration, enable = GetShapeshiftFormCooldown(i)
+                    CooldownFrame_SetTimer(button.cooldown, start, duration, enable)
+                    if isActive then
+                        button:SetChecked(1)
+                    else
+                        button:SetChecked(0)
+                    end
+                    if isCastable then
+                        button.icon:SetVertexColor(1.0, 1.0, 1.0)
+                    else
+                        button.icon:SetVertexColor(0.4, 0.4, 0.4)
+                    end
+                    button:Show()
+                else
+                    button:Hide()
+                end
+            end
+        end
+
+        function BenillaShapeshiftBar_OnLoad(frame)
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("UPDATE_SHAPESHIFT_FORMS")
+            BenillaShapeshiftBar_Update()
+        end
+
+        function BenillaShapeshiftBar_OnEvent(frame)
+            BenillaShapeshiftBar_Update()
+        end
+    ]]></Script>
+
+    <!--
+        One stance button (ref ShapeshiftButtonTemplate: 30x30, inherits ActionButtonTemplate's
+        art set): icon fills (BACKGROUND); Cooldown child (the ref SetScale(.83)s the 36px
+        template's — ours is sized 30x30 directly); the raised-mode 50x50 UI-Quickslot2 ring
+        CENTER (0,-1); the action template's pushed/highlight/checked trio.
+    -->
+    <CheckButton name="BenillaShapeshiftButtonTemplate" virtual="true">
+        <Size><AbsDimension x="30" y="30"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Cooldown name="$parentCooldown" hidden="true">
+                <Size><AbsDimension x="30" y="30"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+            </Cooldown>
+        </Frames>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="50" y="50"/></Size>
+            <Anchors>
+                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaShapeshiftButton_OnClick(self)</OnClick>
+            <OnEnter>BenillaShapeshiftButton_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaShapeshiftButton_OnLeave(self)</OnLeave>
+        </Scripts>
+    </CheckButton>
+
+    <Frame name="BenillaShapeshiftBarFrame" hidden="true">
+        <Size><AbsDimension x="29" y="32"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="BenillaActionBar" relativePoint="TOPLEFT"><Offset><AbsDimension x="30" y="45"/></Offset></Anchor>
+        </Anchors>
+        <Frames>
+            <CheckButton name="BenillaShapeshiftButton1" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="11" y="3"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 1)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton2" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton1" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 2)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton3" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton2" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 3)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton4" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton3" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 4)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton5" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton4" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 5)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton6" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton5" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 6)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton7" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 7)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton8" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton7" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 8)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton9" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton8" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 9)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaShapeshiftButton10" inherits="BenillaShapeshiftButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaShapeshiftButton9" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaShapeshiftButton_OnLoad(self, 10)</OnLoad></Scripts>
+            </CheckButton>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaShapeshiftBar_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaShapeshiftBar_OnEvent(self)</OnEvent>
+            <!-- The stance bar is the pet/stance term of the managed bottom-stack positions
+                 (UIParent.xml, decision 0272): its show/hide re-fires the pass, exactly the
+                 ref's BonusActionBarFrame.xml:350-355. -->
+            <OnShow>UIParent_ManageFramePositions()</OnShow>
+            <OnHide>UIParent_ManageFramePositions()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed (this workspace produces binaries).
+
+# --- Blizzard-owned content: NEVER commit ---
+# A legally-installed 1.12.1 client, read at runtime; not redistributed.
+/WoW
+# Cached / extracted assets derived from an install.
+/extracted/
+/out/
+# Real client files used as test fixtures (document expected paths, do not commit).
+**/tests/fixtures/
+
+# Profiling output (`--features bevy/trace_chrome`).
+trace-*.json
+
+# OS / editor cruft
+.DS_Store
+*.swp
+/.idea/

@@ -1,0 +1,271 @@
+//! [`UiScript::extract`] — the render-list builder (decision 0068): the visible-tree
+//! [`crate::order::traversal`] zipped with the resolved rects and per-kind region visuals, in the
+//! client's painter order. An `impl UiScript` block beside its concern (the `layout.rs` pattern);
+//! the shared ScrollFrame clip it walks lives in [`super::clip`].
+
+use crate::layout::Rect;
+use crate::order::{self, ZTarget};
+
+use super::clip::{effective_clip, scroll_clip_sources};
+use super::{slider, ExtractedQuad, FontObject, QuadContent, TexCoords, UiScript};
+
+impl UiScript {
+    /// The render list in the client's painter order (decision 0068): the visible-tree
+    /// [`crate::order::traversal`] zipped with the resolved rects and region visuals. Already sorted
+    /// ascending by `ZKey`. Call [`UiScript::resolve`] first for populated rects.
+    pub fn extract(&self) -> Vec<ExtractedQuad> {
+        let now = self.now();
+        let model = self.model_ref();
+        let list = order::traversal(&model.arena);
+        let mut out = Vec::with_capacity(list.len());
+        // The ScrollFrame clip sources (decision 0112): every live ScrollFrame with a resolved rect
+        // and a live child, `child handle → the scrollframe's resolved rect`. Built once per extract;
+        // [`effective_clip`] walks a quad's owner up through this to find every ancestor ScrollFrame
+        // it is clipped by (nested ScrollFrames intersect).
+        let scroll_sources = scroll_clip_sources(&model);
+        for (target, zkey) in list {
+            let (rect, alpha, content, clip) = match target {
+                ZTarget::Frame(fh) => {
+                    let frame = model.arena.frame(fh);
+                    let alpha = frame.map(|f| f.effective_alpha).unwrap_or(1.0);
+                    let clip = effective_clip(&model, &scroll_sources, fh);
+                    // A Minimap widget's own slot carries its zoom out to the app renderer (the
+                    // tile/mask/arrow draw — decision 0203); every other frame slot is bare.
+                    let content = match frame.map(|f| &f.kind_state) {
+                        Some(crate::widget::KindState::Minimap(m)) => QuadContent::Minimap {
+                            zoom: m.zoom,
+                            inside_zoom: m.inside_zoom,
+                        },
+                        // A shown Cooldown's phase (the reference machine's derived state): the
+                        // sweep scrub while `now < start+duration`, else the 1 s flash's own
+                        // progress. `tick` hides the widget at flash end, so a stale slot never
+                        // draws (decision 0137 phase 4).
+                        Some(crate::widget::KindState::Cooldown(cd)) if cd.duration > 0.0 => {
+                            let fraction = ((now - cd.start) / cd.duration) as f32;
+                            let flash = (fraction >= 1.0).then(|| {
+                                ((now - cd.sweep_end()) / crate::widget::COOLDOWN_FLASH_SECS)
+                                    .clamp(0.0, 1.0) as f32
+                            });
+                            QuadContent::Cooldown { fraction, flash }
+                        }
+                        _ => QuadContent::Frame,
+                    };
+                    (model.resolved.get(&fh).copied(), alpha, content, clip)
+                }
+                ZTarget::Region(rh) => {
+                    let region = model.arena.region(rh);
+                    let owner = region.map(|r| r.owner);
+                    let owner_frame = owner.and_then(|o| model.arena.frame(o));
+                    // Regions clip with their owner frame (decision 0112 §4).
+                    let clip = owner.and_then(|o| effective_clip(&model, &scroll_sources, o));
+                    let mut rect = owner.and_then(|o| model.resolved.get(&o).copied());
+                    // A StatusBar's bar-fill region draws at the value fraction of the frame's rect,
+                    // along the orientation axis (horizontal grows rightward, vertical bottom-up). The
+                    // bar owns its geometry — it never carries anchors, so it skips the region-rect
+                    // precedence below. It also CROPS: see `bar_fill_uv`.
+                    let mut bar_fill: Option<&crate::widget::StatusBarState> = None;
+                    if let Some(crate::widget::KindState::StatusBar(sb)) =
+                        owner_frame.map(|f| &f.kind_state)
+                    {
+                        if sb.bar == Some(rh) {
+                            rect = rect.map(|r| bar_fill_rect(r, sb));
+                            bar_fill = Some(sb);
+                        }
+                    }
+                    // A Slider's thumb draws at the value fraction along the track (decision 0250 §4),
+                    // centered on the cross-axis — like the bar-fill, it owns its geometry and skips
+                    // the region-rect precedence below.
+                    let mut thumb_fill = false;
+                    if let Some(crate::widget::KindState::Slider(sl)) =
+                        owner_frame.map(|f| &f.kind_state)
+                    {
+                        if sl.thumb == Some(rh) {
+                            let tsize = model.region_data.get(&rh).and_then(|d| d.size);
+                            rect = rect
+                                .map(|r| slider::thumb_rect(r, tsize, sl.vertical, sl.fraction()));
+                            thumb_fill = true;
+                        }
+                    }
+                    // A Button's state textures show by interaction state (the texture-array
+                    // "current" pointer): a non-current state texture emits no quad this frame.
+                    // The ButtonText additionally re-points to the current STATE's font object
+                    // (disabled > hovered > normal; hover falls back to normal) — the client's
+                    // per-state label font swap (UIPanelButtonTemplate's gold/white/gray trio).
+                    let mut state_font: Option<&FontObject> = None;
+                    let mut state_color: Option<[f32; 4]> = None;
+                    if let Some(crate::widget::KindState::Button(bs)) =
+                        owner_frame.map(|f| &f.kind_state)
+                    {
+                        let hovered = owner.is_some() && model.mouseover == owner;
+                        let held = owner.is_some()
+                            && model.mouse_down_on.get("LeftButton").copied() == owner;
+                        if !bs.region_visible(rh, hovered, held) {
+                            continue;
+                        }
+                        if bs.text == Some(rh) {
+                            let name = if !bs.enabled {
+                                bs.disabled_font.as_ref()
+                            } else if hovered {
+                                bs.highlight_font.as_ref().or(bs.normal_font.as_ref())
+                            } else {
+                                bs.normal_font.as_ref()
+                            };
+                            state_font = name.and_then(|n| model.font_objects.get(n));
+                            // The per-state color override (Button:Set*TextColor) — hover falls
+                            // back to the normal color, mirroring the font fallback above.
+                            state_color = if !bs.enabled {
+                                bs.disabled_color
+                            } else if hovered {
+                                bs.highlight_color.or(bs.normal_color)
+                            } else {
+                                bs.normal_color
+                            };
+                        }
+                    }
+                    let mut data = model.region_data.get(&rh).cloned().unwrap_or_default();
+                    // Region-level Hide (the VisibleRegion bit): no quad at all.
+                    if data.hidden {
+                        continue;
+                    }
+                    // The single-hop draw multiply (`propagation.md`): the region's own alpha times
+                    // its immediate owner's — never a product up the tree, because the owner's own
+                    // `effective_alpha` was already overwritten by any ancestor's SetAlpha.
+                    let alpha = owner_frame.map(|f| f.effective_alpha).unwrap_or(1.0)
+                        * data.alpha.unwrap_or(1.0);
+                    if let Some(fo) = state_font {
+                        // The font object's paint wholesale, except a color the Lua explicitly
+                        // SetTextColor'd (the client's explicitly-set mask keeps it — ui ledger
+                        // FONTINSTANCE+0x38, color bit 0x404).
+                        data.font_path = fo.font.clone().or(data.font_path);
+                        data.font_height = fo.height.or(data.font_height);
+                        data.font_shadow = fo.shadow.or(data.font_shadow);
+                        data.outline = fo.outline;
+                        if data.color.is_none() {
+                            data.color = fo.color;
+                        }
+                        // The object's own justify (`<NormalFont inherits=… justifyH="LEFT"/>` —
+                        // how the ref left-aligns a ButtonText).
+                        if let Some(j) = fo.justify_h {
+                            data.justify_h = j;
+                        }
+                        if let Some(j) = fo.justify_v {
+                            data.justify_v = j;
+                        }
+                    }
+                    // The button-level state color wins over the font object AND the region's own
+                    // explicit color — the client's Button color slots repaint the label outright.
+                    if let Some(c) = state_color {
+                        data.color = Some(c);
+                    }
+                    // Region-rect precedence (decision 0068 v1): anchored regions resolved in
+                    // [`resolve`] → their owner-relative rect; else an explicitly-sized region draws
+                    // *centered* on its owner (the state-texture overhang); else it fills the owner
+                    // (`rect` already = owner). The bar-fill region keeps its fraction geometry.
+                    // The fill CROPS its texture (wow-re `nameplate-vkey.md`, VERIFIED): every
+                    // `SetValue` rewrites the region's 4-corner UV block with `u1 = fraction` and
+                    // recomputes the quad as `right = left + frac·width`. So the art is sliced, never
+                    // squeezed — a bar texture with a horizontal ramp (`UI-StatusBar` brightens 124→166
+                    // left-to-right) keeps its true gradient at every fill level.
+                    if let Some(sb) = bar_fill {
+                        data.tex_coords = Some(bar_fill_uv(data.tex_coords, sb));
+                    }
+                    if bar_fill.is_none() && !thumb_fill {
+                        if let Some(rr) = model.region_resolved.get(&rh) {
+                            rect = Some(*rr);
+                        } else if let (Some((w, h)), Some(r)) = (data.size, rect) {
+                            let (cx, cy) = ((r.left + r.right) * 0.5, (r.bottom + r.top) * 0.5);
+                            rect = Some(Rect::new(
+                                cy - h * 0.5,
+                                cx - w * 0.5,
+                                cy + h * 0.5,
+                                cx + w * 0.5,
+                            ));
+                        }
+                    }
+                    let is_text = matches!(
+                        region.map(|r| r.kind),
+                        Some(crate::widget::RegionKind::FontString)
+                    );
+                    let content = if is_text {
+                        QuadContent::Text {
+                            text: data.text,
+                            color: data.color,
+                            justify_h: data.justify_h,
+                            justify_v: data.justify_v,
+                            font: data.font_path,
+                            font_height: data.font_height,
+                            text_height: data.text_height,
+                            shadow: data.font_shadow,
+                            outline: data.outline,
+                            alpha_gradient: data.alpha_gradient,
+                        }
+                    } else {
+                        QuadContent::Texture {
+                            path: data.texture,
+                            color: data.color,
+                            additive: data.additive,
+                            tex_coords: data.tex_coords,
+                            circular: data.circular,
+                            portrait_unit: data.portrait_unit,
+                            rotation: data.rotation,
+                        }
+                    };
+                    (rect, alpha, content, clip)
+                }
+            };
+            out.push(ExtractedQuad {
+                target,
+                z: zkey.raw(),
+                rect,
+                alpha,
+                content,
+                clip,
+            });
+            // A ScrollingMessageFrame emits, on top of its own (empty) frame slot, one Text quad per
+            // visible ring line — stacked bottom-up (newest at the frame's bottom edge), each carrying
+            // its live fade alpha in the text color. The generic region path can't do this (the lines
+            // aren't declared FontStrings); the ring lives in the frame's kind state.
+            if let (ZTarget::Frame(fh), Some(fr)) = (target, rect) {
+                // The frame's own draw slot also carries its Backdrop (behind its regions, which sort
+                // after the frame slot) and, for a ScrollingMessageFrame, its ring lines — both clip
+                // like the frame's own slot (the frame IS the clipped owner when it's a scroll child).
+                Self::emit_backdrop(&model, fh, fr, zkey.raw(), alpha, clip, &mut out);
+                Self::emit_message_lines(&model, fh, fr, zkey.raw(), alpha, clip, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// A StatusBar's bar-fill rect: the frame rect scaled by the value fraction — rightward from the
+/// left edge (horizontal) or upward from the bottom (vertical), the documented fill directions
+/// (reverse-fill is an Era extension, not modeled yet).
+fn bar_fill_rect(r: Rect, sb: &crate::widget::StatusBarState) -> Rect {
+    let f = sb.fraction();
+    if sb.vertical {
+        Rect::new(r.bottom, r.left, r.bottom + r.height() * f, r.right)
+    } else {
+        Rect::new(r.bottom, r.left, r.top, r.left + r.width() * f)
+    }
+}
+
+/// A StatusBar's bar-fill UV sub-rect: `base` (its `<TexCoords>`/`SetTexCoord`, or the full texture)
+/// sliced to the value fraction along the fill axis — `[left, right, top, bottom]`, 0..1, top-left
+/// origin.
+///
+/// The client CROPS rather than scales (wow-re `nameplate-vkey.md`, VERIFIED): `SetValue`
+/// (`0x7cc450`→`0x7833c0`) drives `0x770410`, which writes the 4-corner UV block (`+0x104..+0x120`)
+/// with `u1 = GetValue()` and recomputes `right = left + frac·width`. Horizontal is the verified
+/// case; VERTICAL mirrors it up the `v` axis (bottom-up fill ⇒ the *bottom* edge of the art is
+/// pinned) — inferred from the same block, not separately pinned.
+fn bar_fill_uv(base: Option<TexCoords>, sb: &crate::widget::StatusBarState) -> TexCoords {
+    // The fill crop is inherently the 4-edge form; an affine base (no live StatusBar uses one)
+    // contributes its bounding edges.
+    let [l, r, t, b] = base.map(|tc| tc.edges()).unwrap_or([0.0, 1.0, 0.0, 1.0]);
+    let f = sb.fraction();
+    TexCoords::Rect(if sb.vertical {
+        [l, r, b - (b - t) * f, b]
+    } else {
+        [l, l + (r - l) * f, t, b]
+    })
+}

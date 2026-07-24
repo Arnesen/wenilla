@@ -1,0 +1,353 @@
+<Ui>
+    <!--
+        The party member frames + the group-invite popup (decision 0434 phase 3). Geometry, art
+        paths, behavior laws, and the popup entry are QUOTED from the reference client's own
+        FrameXML, extracted through the full MPQ patch chain (decision 0246; survey 2026-07-17):
+        PartyFrame.xml, PartyFrameTemplates.xml, PartyMemberFrame.lua, StaticPopup.lua ("PARTY_INVITE"),
+        UIParent.lua (the PARTY_INVITE_REQUEST wiring). Data flow is ours: the app feeds
+        party1..party4 unit snapshots + the PartyState roster (crates/benilla/src/ui_party.rs) and
+        fires the PARTY_* events; the popup's Accept/Decline queue PartyRequests the app drains.
+
+        THE CASCADE. The ref anchors frames 2-4 to the PREVIOUS frame's PetFrame bottom-left at
+        (-23,-10) — spacing rides the pet frame, which sits at (23,-27) when hidden (26 tall), so
+        the no-pet stride is TOPLEFT->BOTTOMLEFT (0,-10). Pet frames land in phase 4; until then
+        the cascade uses that no-pet stride directly, which is byte-identical to the ref's layout
+        for petless parties (the only kind phase 3 renders).
+
+        DEVIATIONS / DEFERRED (phase 4+, decision 0434):
+        - Pet frames, the 4 debuff buttons (48,-32 +2px chain), the 16/8 buff hover panel, and the
+          dispellable-debuff Status ring: they need the party aura/pet feed (phase 4).
+        - The PVP icon (UI-Group-PVP-<faction>, 32x32 at -9,-15): needs UnitFactionGroup, absent
+          from the engine today (a party member always shares our faction in 1.12 — low loss).
+        - HIDE_PARTY_INTERFACE (hide-in-raid uvar): waits for the raid UI slice.
+        - Portrait: our high-res model bake (decision 0105), same as every unit frame.
+        - The ref's low-health portrait pulse flips alpha 127/255<->255/255 on 0.5 s half-cycles
+          (PartyMemberFrame.lua's sign-flip counter); transcribed as the same triangle wave.
+
+        DOUBLE-DECLINE, KEPT: the ref's popup calls DeclineGroup() in OnCancel AND again in OnHide
+        (only OnAccept sets the inviteAccepted guard), so a clicked Decline sends two
+        CMSG_GROUP_DECLINE. vmangos silently ignores the second (no pending invite -> early
+        return). Transcribed verbatim rather than "fixed" - the wire tolerates it and the guard's
+        real job is the timeout/override/escape paths.
+    -->
+    <Script><![CDATA[
+        -- StaticPopup entry, quoted from the ref's StaticPopup.lua (INVITATION =
+        -- "%s invites you to a group.", GlobalStrings:2586-area; sound + 60 s silent timeout +
+        -- whileDead + hideOnEscape are the ref's own fields).
+        StaticPopupDialogs["PARTY_INVITE"] = {
+            text = INVITATION,
+            button1 = ACCEPT,
+            button2 = DECLINE,
+            sound = "igPlayerInvite",
+            OnShow = function()
+                StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = nil
+            end,
+            OnAccept = function()
+                AcceptGroup()
+                StaticPopupDialogs["PARTY_INVITE"].inviteAccepted = 1
+            end,
+            OnCancel = function()
+                DeclineGroup()
+            end,
+            OnHide = function()
+                if not StaticPopupDialogs["PARTY_INVITE"].inviteAccepted then
+                    DeclineGroup()
+                end
+            end,
+            timeout = 60,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ref PartyMemberFrame.lua's OnLoad: cache children, register, first paint.
+        function BenillaPartyFrame_OnLoad(frame)
+            local id = frame:GetID()
+            local name = frame:GetName()
+            local tf = name .. "TextureFrame"
+            frame.unit = "party" .. id
+            frame.portrait   = getglobal(name .. "Portrait")
+            frame.healthBar  = getglobal(name .. "HealthBar")
+            frame.manaBar    = getglobal(name .. "ManaBar")
+            frame.nameText   = getglobal(tf .. "Name")
+            frame.leaderIcon = getglobal(tf .. "LeaderIcon")
+            frame.masterIcon = getglobal(tf .. "MasterIcon")
+            frame.disconnect = getglobal(tf .. "Disconnect")
+            frame.flashTimer = 0
+            SetPortraitTexture(frame.portrait, frame.unit)
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+            frame:RegisterEvent("PARTY_LEADER_CHANGED")
+            frame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
+            frame:RegisterEvent("UNIT_HEALTH")
+            frame:RegisterEvent("UNIT_MAXHEALTH")
+            frame:RegisterEvent("UNIT_POWER_UPDATE")
+            frame:RegisterEvent("UNIT_MAXPOWER")
+            frame:RegisterEvent("UNIT_DISPLAYPOWER")
+            frame:RegisterEvent("UNIT_NAME_UPDATE")
+            frame:EnableMouse(true)
+            BenillaPartyFrame_Update(frame)
+        end
+
+        function BenillaPartyFrame_OnEvent(frame)
+            -- UNIT_* events name their unit in arg1; other units' updates are not ours.
+            if string.sub(event, 1, 5) == "UNIT_" and arg1 ~= frame.unit then
+                return
+            end
+            BenillaPartyFrame_Update(frame)
+        end
+
+        -- ref PartyMemberHealthCheck: the portrait recolor law + the disconnect override.
+        function BenillaPartyFrame_HealthCheck(frame)
+            local unit = frame.unit
+            if not UnitIsConnected(unit) then
+                -- Disconnected: bar forced full and grey, portrait desaturated, icon on.
+                frame.healthBar:SetMinMaxValues(0, 1)
+                frame.healthBar:SetValue(1)
+                frame.healthBar:SetStatusBarColor(0.5, 0.5, 0.5)
+                SetDesaturation(frame.portrait, 1)
+                frame.disconnect:Show()
+                return
+            end
+            SetDesaturation(frame.portrait, nil)
+            frame.disconnect:Hide()
+            frame.healthBar:SetStatusBarColor(0.0, 1.0, 0.0)
+            local hp, hpMax = UnitHealth(unit), UnitHealthMax(unit)
+            if UnitIsDead(unit) then
+                frame.portrait:SetVertexColor(0.35, 0.35, 0.35, 1.0)
+            elseif UnitIsGhost(unit) then
+                frame.portrait:SetVertexColor(0.2, 0.2, 0.75, 1.0)
+            elseif hpMax > 0 and hp / hpMax <= 0.2 then
+                frame.portrait:SetVertexColor(1.0, 0.0, 0.0, 1.0)
+            else
+                frame.portrait:SetVertexColor(1.0, 1.0, 1.0, 1.0)
+            end
+        end
+
+        function BenillaPartyFrame_Update(frame)
+            local unit = frame.unit
+            if not UnitExists(unit) then
+                frame:Hide()
+                return
+            end
+            frame:Show()
+
+            frame.nameText:SetText(UnitName(unit) or "Unknown")
+
+            frame.healthBar:SetMinMaxValues(0, UnitHealthMax(unit))
+            frame.healthBar:SetValue(UnitHealth(unit))
+
+            local maxPower = UnitPowerMax(unit)
+            if maxPower > 0 then
+                frame.manaBar:Show()
+                local _, token = UnitPowerType(unit)
+                local c = BENILLA_POWER_COLORS[token] or BENILLA_POWER_COLORS.MANA
+                frame.manaBar:SetStatusBarColor(c.r, c.g, c.b)
+                frame.manaBar:SetMinMaxValues(0, maxPower)
+                frame.manaBar:SetValue(UnitPower(unit))
+            else
+                frame.manaBar:Hide()
+            end
+
+            -- Leader + master-looter icons (ref: GetPartyLeaderIndex / GetLootMethod vs own id).
+            local id = frame:GetID()
+            if GetPartyLeaderIndex() == id then
+                frame.leaderIcon:Show()
+            else
+                frame.leaderIcon:Hide()
+            end
+            local lootMethod, masterId = GetLootMethod()
+            if lootMethod == "master" and masterId == id then
+                frame.masterIcon:Show()
+            else
+                frame.masterIcon:Hide()
+            end
+
+            BenillaPartyFrame_HealthCheck(frame)
+        end
+
+        -- The ref's <=20% portrait alpha pulse: a 0.5 s-per-leg triangle between 127/255 and 1.
+        function BenillaPartyFrame_OnUpdate(frame, elapsed)
+            local unit = frame.unit
+            if not UnitExists(unit) or not UnitIsConnected(unit) then
+                return
+            end
+            local hp, hpMax = UnitHealth(unit), UnitHealthMax(unit)
+            if hpMax > 0 and hp > 0 and hp / hpMax <= 0.2 then
+                local t = math.fmod(frame.flashTimer + elapsed, 1.0)
+                frame.flashTimer = t
+                local a
+                if t < 0.5 then
+                    a = 1.0 - t * (1.0 - 127 / 255) * 2
+                else
+                    a = 127 / 255 + (t - 0.5) * (1.0 - 127 / 255) * 2
+                end
+                frame.portrait:SetAlpha(a)
+            elseif frame.flashTimer ~= 0 then
+                frame.flashTimer = 0
+                frame.portrait:SetAlpha(1.0)
+            end
+        end
+
+        -- The hover tooltip: same law as the unit frames (default corner anchor + SetUnit).
+        function BenillaPartyFrame_OnEnter(frame)
+            if not UnitExists(frame.unit) then return end
+            GameTooltip_SetDefaultAnchor(GameTooltip, frame)
+            if GameTooltip:SetUnit(frame.unit) then
+                getglobal("GameTooltipTextLeft1"):SetTextColor(GameTooltip_UnitColor(frame.unit))
+            end
+        end
+
+        -- The invite driver (ref UIParent.lua): PARTY_INVITE_REQUEST shows the popup with the
+        -- inviter's name; PARTY_INVITE_CANCEL hides it.
+        function BenillaPartyInviteDriver_OnEvent()
+            if event == "PARTY_INVITE_REQUEST" then
+                StaticPopup_Show("PARTY_INVITE", arg1)
+            elseif event == "PARTY_INVITE_CANCEL" then
+                StaticPopup_Hide("PARTY_INVITE")
+            end
+        end
+
+        -- The right-click dropdown (decision 0434 phase 5; ref PartyMemberFrame.lua l.369-381)
+        -- + the ref's click law (l.226-237): left targets the member, right opens the PARTY
+        -- menu seated at the frame's (47, 15).
+        function PartyFrameDropDown_OnLoad()
+            UIDropDownMenu_Initialize(this, PartyFrameDropDown_Initialize, "MENU")
+        end
+
+        function PartyFrameDropDown_Initialize()
+            local dropdown
+            if UIDROPDOWNMENU_OPEN_MENU then
+                dropdown = getglobal(UIDROPDOWNMENU_OPEN_MENU)
+            else
+                dropdown = this
+            end
+            UnitPopup_ShowMenu(dropdown, "PARTY", "party" .. dropdown:GetParent():GetID())
+        end
+
+        function BenillaPartyFrame_OnClick(frame, button)
+            if button == "LeftButton" then
+                TargetUnit(frame.unit)
+            elseif button == "RightButton" then
+                ToggleDropDownMenu(1, nil, getglobal(frame:GetName() .. "DropDown"), frame:GetName(), 47, 15)
+            end
+        end
+    ]]></Script>
+
+    <!-- The shared member-frame template — ref PartyFrameTemplates.xml, 128x53 over the 128x64
+         UI-PartyFrame art at (0,-2) (the art hangs 13 px below the frame rect, as authored).
+
+         LAYERING (the ref's law, in our z-model's idiom): the ref nests the frame art two anonymous
+         child frames deep so it draws OVER the status bars — the bars show through the art's
+         semi-transparent tube windows, inset, their ends clipped by the rails. Ours is the
+         UnitFrames.xml idiom: a $parentTextureFrame child declared AFTER the bars. The name and the
+         leader/master/disconnect icons ride in it too (the ref keeps them in that nested frame;
+         left below the art, the ring would swallow the leader crown). -->
+    <!-- frameStrata LOW is the ref's own (`PartyFrameTemplates.xml` l.194) and it is load-bearing,
+         not decoration. The panel windows (loot, character, merchant, quest log, …) are MEDIUM, and
+         the party frames share the top-left corner with the left-slot panel. Left in the default
+         MEDIUM, a party frame's nested HealthBar/ManaBar/TextureFrame children land one frame LEVEL
+         above a panel's background region — and level outranks insertion order in the draw key, so
+         the party frame draws straight *through* the loot window no matter which was shown last.
+         Nothing about raising could have saved it: a raise only reorders within one stratum (wow-re
+         `system/ui/scratch/toplevel-raise.md`, dispatched for exactly this). Decision 0597. -->
+    <Frame name="BenillaPartyMemberTemplate" virtual="true" hidden="true" frameStrata="LOW">
+        <Size><AbsDimension x="128" y="53"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- Portrait at the bottom of the stack; the art's round window shows it through. -->
+                <Texture name="$parentPortrait">
+                    <Size><AbsDimension x="37" y="37"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <StatusBar name="$parentHealthBar">
+                <Size><AbsDimension x="70" y="8"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-12"/></Offset></Anchor></Anchors>
+                <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+                <BarColor r="0" g="1.0" b="0"/>
+            </StatusBar>
+            <StatusBar name="$parentManaBar">
+                <Size><AbsDimension x="70" y="8"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="47" y="-21"/></Offset></Anchor></Anchors>
+                <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+                <BarColor r="0" g="0" b="1.0"/>
+            </StatusBar>
+            <!-- The PARTY-menu dropdown host (ref $parentDropDown): hidden state-holder only —
+                 the list anchors to the member frame by name. -->
+            <Frame name="$parentDropDown" inherits="UIDropDownMenuTemplate" hidden="true">
+                <Size><AbsDimension x="10" y="10"/></Size>
+                <Anchors><Anchor point="TOP"><Offset><AbsDimension x="-20" y="-10"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>PartyFrameDropDown_OnLoad()</OnLoad>
+                </Scripts>
+            </Frame>
+            <Frame name="$parentTextureFrame">
+                <Size><AbsDimension x="128" y="53"/></Size>
+                <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentTexture" file="Interface\TargetingFrame\UI-PartyFrame">
+                            <Size><AbsDimension x="128" y="64"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <FontString name="$parentName" inherits="GameFontNormalSmall" justifyH="LEFT">
+                            <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="50" y="43"/></Offset></Anchor></Anchors>
+                        </FontString>
+                        <Texture name="$parentLeaderIcon" file="Interface\GroupFrame\UI-Group-LeaderIcon" hidden="true">
+                            <Size><AbsDimension x="16" y="16"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="$parentMasterIcon" file="Interface\GroupFrame\UI-Group-MasterLooter" hidden="true">
+                            <Size><AbsDimension x="16" y="16"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="32" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="$parentDisconnect" file="Interface\CharacterFrame\Disconnect-Icon" hidden="true">
+                            <Size><AbsDimension x="64" y="64"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-7" y="-1"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaPartyFrame_OnLoad(this)</OnLoad>
+            <OnEvent>BenillaPartyFrame_OnEvent(this)</OnEvent>
+            <OnUpdate>BenillaPartyFrame_OnUpdate(this, arg1)</OnUpdate>
+            <OnEnter>BenillaPartyFrame_OnEnter(this)</OnEnter>
+            <OnLeave>GameTooltip:FadeOut()</OnLeave>
+            <OnClick>BenillaPartyFrame_OnClick(this, arg1)</OnClick>
+        </Scripts>
+    </Frame>
+
+    <!-- The four instances — frame 1 at the ref's (10,-128); 2-4 cascade at the no-pet stride
+         (see the header note; the pet-frame anchor law returns with phase 4). -->
+    <Frame name="PartyMemberFrame1" inherits="BenillaPartyMemberTemplate" parent="UIParent" id="1">
+        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-128"/></Offset></Anchor></Anchors>
+    </Frame>
+    <Frame name="PartyMemberFrame2" inherits="BenillaPartyMemberTemplate" parent="UIParent" id="2">
+        <Anchors><Anchor point="TOPLEFT" relativeTo="PartyMemberFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+    </Frame>
+    <Frame name="PartyMemberFrame3" inherits="BenillaPartyMemberTemplate" parent="UIParent" id="3">
+        <Anchors><Anchor point="TOPLEFT" relativeTo="PartyMemberFrame2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+    </Frame>
+    <Frame name="PartyMemberFrame4" inherits="BenillaPartyMemberTemplate" parent="UIParent" id="4">
+        <Anchors><Anchor point="TOPLEFT" relativeTo="PartyMemberFrame3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-10"/></Offset></Anchor></Anchors>
+    </Frame>
+
+    <!-- The invite event driver (hidden; the DeathFrame driver pattern). -->
+    <Frame name="BenillaPartyInviteDriver" parent="UIParent" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("PARTY_INVITE_REQUEST")
+                this:RegisterEvent("PARTY_INVITE_CANCEL")
+            </OnLoad>
+            <OnEvent>BenillaPartyInviteDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

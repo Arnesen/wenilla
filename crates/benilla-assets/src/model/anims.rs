@@ -1,0 +1,437 @@
+//! The playable-animation surface: the types + resolution logic the game queries at runtime
+//! ([`AnimClip`], [`ModelAnimations`], [`ResolvedAnim`], and `ModelAnimations`'s `find`/
+//! `pick_variation`/`resolve`) — kept separate from the bake-side builders in [`super`] (meshes,
+//! skeleton, attachments, masks/subtree helpers, grip poses, billboard info).
+
+use benilla_formats::AnimDataCatalog;
+pub use benilla_formats::PlayableAnim;
+use bevy::animation::graph::{AnimationGraph, AnimationNodeIndex};
+use bevy::prelude::*;
+
+/// One animation in a model's [`ModelAnimations`] graph (decision 0019): its `AnimationData.dbc` id,
+/// the graph node an `AnimationPlayer` plays to run it, and whether it loops.
+#[derive(Clone)]
+pub struct AnimClip {
+    pub anim_id: u16,
+    pub node: AnimationNodeIndex,
+    pub looping: bool,
+    /// Clip length in seconds — used to seek a one-shot clip (Death) to its end pose, e.g. for a unit
+    /// that streamed in already dead so it shows the settled corpse instead of replaying the collapse.
+    pub duration: f32,
+    /// The sequence's authored design movement speed (`ModelAnimation::move_speed`, yd/s) — the
+    /// denominator the locomotion playback-rate scaler divides the unit's live speed by, so a fast
+    /// mover cycles its legs proportionally faster. `0.0` for a non-locomotion clip (left at rate 1×).
+    pub move_speed: f32,
+    /// The sequence's blend-in time (`ModelAnimation::blend_time`, seconds) — the cross-fade duration the
+    /// spawn site uses when transitioning *into* this clip, so a gait change eases instead of snapping.
+    pub blend_time: f32,
+    /// The sequence's bounds-sphere centre, **Bevy model space** (the raw `M2Sequence` CAaBox centre
+    /// mapped like the mesh vertices, so it shares the rendered parts' frame). With
+    /// [`Self::bounds_radius`], the mouse-pick **broad phase**: the real client tests the cursor ray
+    /// against the *current* animation's sphere — world-placed + scaled, no pad — before the posed
+    /// per-triangle narrow test (wow-re pick-volume RE, `0x7089c0`).
+    pub bounds_center: Vec3,
+    /// The sequence's bounds-sphere radius (model-local yards). `0.0` ⇒ unauthored (callers fall back).
+    pub bounds_radius: f32,
+    /// The sequence's CAaBox, **Bevy model space** (componentwise min/max of the WoW-space corners
+    /// mapped like the mesh vertices). The unit **blob shadow**'s projection box: the real client
+    /// sizes the shadow from the *current* animation's box — clamped into ±5 per axis, scaled by
+    /// the world matrix, yaw-rotated then axis-aligned (VERIFIED wow-5875-re `unit-blob-shadow.md`,
+    /// `0x711a20` + the `0x6d7920` corner build). `(Vec3::ZERO, Vec3::ZERO)` ⇒ unauthored.
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+    /// The sequence's event keyframes (`$SND`/footsteps/`$CSS`… — decision 0070 slice 3), sorted by
+    /// time, seconds on the clip clock. Shared (`Arc`) so cloning a clip stays cheap; empty for the
+    /// overwhelming majority of sequences.
+    pub events: std::sync::Arc<[benilla_formats::AnimEvent]>,
+    /// Per-arm masked variants `(right, left)` of this clip — graph nodes that animate **only** the
+    /// right/left arm subtree (shoulder keybone down), for the client's per-slot one-shots played
+    /// *over* the gait (the draw/stow: mainhand ceremony on the right arm, offhand on the left,
+    /// legs untouched). Built only for the sheath family (ids 89/90) on models whose hand
+    /// attachments + shoulder keybones resolve; `None` otherwise.
+    pub arm_nodes: Option<(AnimationNodeIndex, AnimationNodeIndex)>,
+    /// The **upper-body masked variant** of this clip: a graph node that animates only the
+    /// SpineLow-subtree ([`upper_subtree_root`] — keyBoneLookup[4]/[6], the legs excluded), for the
+    /// one-shot route's masked destination (decision 0087 — a swing/emote played *over* a live base:
+    /// legs keep running/sitting/jumping while the torso swings or emotes). The general form of the
+    /// per-arm [`Self::arm_nodes`] ceremony machinery, one subtree wider. `None` for a model with no
+    /// split key-bone (the −1 sentinel) — the route falls back to full-body on the base node.
+    pub upper_node: Option<AnimationNodeIndex>,
+    /// This variation's weight in the per-play roll (`M2Sequence.frequency` @+0x14): sequences
+    /// sharing an `anim_id` are **variations** (the alternating 1H swing arcs, the wound recoils),
+    /// and the real client picks one per one-shot play by a `_rand()`-weighted walk of the chain
+    /// (wow-re `anim-id-resolution.md`, op4 `0x71248a..`) — [`ModelAnimations::pick_variation`].
+    pub frequency: u16,
+    /// The sequence's `(minReplay, maxReplay)` range (`M2Sequence` +0x18/+0x1c): the client rolls a
+    /// play count `R` at every arm and multiplies it into the play window, so a clamp-flag one-shot
+    /// runs `R` times before freezing (wow-re `loop-replay-fidget.md`; a loop-flag sequence ignores
+    /// it). Benilla expresses the same window as a `RepeatAnimation::Count(R)` on the one-shot play.
+    /// `(0, 0)` — the overwhelming majority — rolls to `R = 1`.
+    pub replay: (u32, u32),
+}
+
+/// A model's animations as a playable bundle (decision 0019): one shared `AnimationGraph` holding every
+/// sequence's clip, plus the per-sequence node/id/loop info. Built once per M2 asset and shared across
+/// instances; each creature instance drives this graph with its own `AnimationPlayer`. Also attached to
+/// the creature **as a component**, so the model bench can scrub `clips` and gameplay (Milestone C) can
+/// select by `AnimationData.dbc` id (Stand now, walk/run later) — both query it on the entity.
+#[derive(Clone, Component)]
+pub struct ModelAnimations {
+    pub graph: Handle<AnimationGraph>,
+    pub clips: Vec<AnimClip>,
+    /// The **`HandsClosed` finger-grip masked nodes** `(right, left)` — graph nodes that animate only one
+    /// hand's finger key-bone subtrees ([`finger_subtree_roots`]) with the model's `HandsClosed`
+    /// (AnimationData 15) pose, played as a persistent weighted overlay over the gait while a weapon is
+    /// held in that hand (wow-re `hand-grip-mechanism.md`: the fingers curl for a held weapon; a
+    /// forearm-mounted shield or an empty hand stays open). `None` per hand for a model with no finger
+    /// key-bones or no `HandsClosed` clip (beasts, props — they never grip).
+    pub hand_close: [Option<AnimationNodeIndex>; 2],
+    /// The model's baked **PlayableAnimationLookup** (decision 0082, M2 header `+0x2c/+0x30`, see
+    /// [`PlayableAnim`]): row `i` is the model's own precomputed substitute for requested
+    /// `AnimationData.dbc` id `i`. Empty for a model whose header carries no table (a boneless
+    /// doodad-shaped cube fallback, a malformed M2) — [`Self::resolve`] then degrades to identity.
+    pub playable_animation_lookup: Vec<PlayableAnim>,
+    /// The model's **global-sequence bone channels** baked to Bevy space (the eye-blink eyelid scale and
+    /// kin): free-clock loops the runtime samples independently of the playing animation and composes
+    /// over the sequence pose (see [`super::GlobalBone`]). Empty for a model with no global-sequence
+    /// tracks.
+    pub global_bones: Vec<super::GlobalBone>,
+    /// Index into [`Self::clips`] of the **file-order-first sequence**, when that sequence actually
+    /// moves a bone (some track with >1 key). This is the doodad-animation content gate (decision
+    /// 0130): the client arms every M2 instance once at load with `animations[0].id` and loops it
+    /// forever (wow-re `doodad-anim-host.md`), so a placed doodad plays exactly this clip. `None` for
+    /// a model whose first sequence is a motionless pose (constant 1-key tracks build a clip too, but
+    /// looping it renders identically to the static mesh — the ~90% of placed doodads `doodadscan`
+    /// measured stay on the static path).
+    pub first_seq: Option<usize>,
+}
+
+/// A requested `AnimationData.dbc` id resolved to what a specific model actually plays (decision
+/// 0082, wow-re `anim-id-resolution.md`, byte-verified `0x711bf0`) — see [`ModelAnimations::resolve`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedAnim {
+    /// The `AnimationData.dbc` id to look up via [`ModelAnimations::find`].
+    pub id: u16,
+    /// PATH 1's high16 direction/variant playback code (`0` from PATH 2 / the no-table degrade, which
+    /// have no such code of their own). **Plumbed through, not applied**: decision 0082 flags the
+    /// exact playback consumption (wow-re `~0x7126d2`) as untraced — no consumer reads this yet.
+    pub dir_flags: u16,
+}
+
+impl ModelAnimations {
+    /// The clip for an `AnimationData.dbc` id (0 Stand, 4 Walk, 5 Run, …), or `None` if this model has
+    /// no sequence with that id (e.g. a static-Stand creature has no animated id-0 clip — the caller
+    /// then falls back to Stand or to bind pose rather than to an arbitrary clip). Returns the id's
+    /// **head variation** — the stable identity callers compare/loop on; a one-shot play that should
+    /// alternate variations goes through [`Self::pick_variation`] instead.
+    pub fn find(&self, anim_id: u16) -> Option<&AnimClip> {
+        self.clips.iter().find(|c| c.anim_id == anim_id)
+    }
+
+    /// The clip a free/effect model instance runs: the caller's `preferred` id when the model has
+    /// it (the thrown-weapon missile asks for InFlight), else the file-order-first clip — the
+    /// existing default. One selector so the rig ([`crate::…`]'s `arm_effect_rig`) and its ribbon
+    /// gate agree on which sequence is playing.
+    pub fn preferred_clip(&self, preferred: Option<u16>) -> Option<&AnimClip> {
+        preferred
+            .and_then(|id| self.find(id))
+            .or_else(|| self.clips.first())
+    }
+
+    /// Pick a **variation** of `anim_id` for one play, given a fresh `roll` (the client's `_rand()`,
+    /// `0..0x7fff`): the byte-verified weighted walk (wow-re `anim-id-resolution.md`, op4 with
+    /// variationIdx −1) — `roll < frequency` picks the current node, else `roll -= frequency` and
+    /// advance; chain exhaustion falls back to the **head** (the client leaves the resolved seqIndex
+    /// untouched on the exhaust path — `edi` set at `0x71247a`, only the win path overwrites it at
+    /// `0x7124e9`; wow-re `loop-replay-fidget.md`, correcting decision 0114's clamp-to-last).
+    /// Variations are the sequences sharing `anim_id`, taken in file order (retail exporters bake
+    /// the `variationNext` chain contiguously and in order — the same assumption [`Self::find`]'s
+    /// head = variation 0 already rests on). `None` iff the model has no sequence for `anim_id`.
+    pub fn pick_variation(&self, anim_id: u16, roll: u16) -> Option<&AnimClip> {
+        let mut roll = i32::from(roll);
+        let mut head = None;
+        for c in self.clips.iter().filter(|c| c.anim_id == anim_id) {
+            head.get_or_insert(c);
+            if roll < i32::from(c.frequency) {
+                return Some(c);
+            }
+            roll -= i32::from(c.frequency);
+        }
+        head
+    }
+
+    /// Resolve a *requested* `AnimationData.dbc` id to the id this model actually plays (decision
+    /// 0082, wow-re `anim-id-resolution.md` — the byte-verified two-path `0x711bf0` resolver the real
+    /// client runs before every sequence lookup, ahead of [`Self::find`]):
+    /// - **PATH 1** (`requested < playable_animation_lookup.len()`): the model's own baked table —
+    ///   one dword read, already the precomputed `AnimationData.dbc` Fallback-column walk's result for
+    ///   THIS model's actual sequence set (a chicken lacking Attack2H bakes `[18] = 16`).
+    /// - **PATH 2** (`requested` ≥ the table length, table non-empty): the guarded `AnimationData.dbc`
+    ///   Fallback-column walk over `catalog` — reachable only for the 5 ids ≥ 203 on a normal retail
+    ///   asset set (`nPlayableAnimationLookup` is a fixed 203; `AnimationData.dbc` has 208 rows).
+    /// - **No table at all** (`playable_animation_lookup` empty — a cube fallback / malformed M2):
+    ///   degrades to identity; [`Self::find`] then does its own direct lookup (today's behavior).
+    pub fn resolve(&self, requested: u16, catalog: &AnimDataCatalog) -> ResolvedAnim {
+        if let Some(row) = self.playable_animation_lookup.get(requested as usize) {
+            return ResolvedAnim {
+                id: row.resolved_id,
+                dir_flags: row.dir_flags,
+            };
+        }
+        if self.playable_animation_lookup.is_empty() {
+            return ResolvedAnim {
+                id: requested,
+                dir_flags: 0,
+            };
+        }
+        self.resolve_path2(requested, catalog)
+    }
+
+    /// PATH 2 — the `AnimationData.dbc` Fallback-column walk (wow-re `anim-id-resolution.md`): follow
+    /// `catalog.fallback` from `requested` until this model actually has a sequence for the current id
+    /// (mirrors the real walk's `animationLookup[eax] != 0xffff` success test via [`Self::find`]),
+    /// guarded by a 208-entry visited set (`AnimationData.dbc`'s row count — the byte-verified cycle
+    /// guard). `catalog.fallback` already collapses the walk's NULL-row guard, self-fallback
+    /// termination, and "Fallback is 0 (Stand)" into a single `None` — each of those is a dead end that
+    /// leads to the same exhaustion default, so folding them costs nothing here. Exhaustion → Stand(0),
+    /// matching decision 0082's stated simplification (the real client's fuller default — the
+    /// GameObject-rest pose 147, or the model's first sequence id — is a further-out RE gap no benilla
+    /// id exercises: every id benilla requests resolves through PATH 1).
+    fn resolve_path2(&self, requested: u16, catalog: &AnimDataCatalog) -> ResolvedAnim {
+        const STAND: ResolvedAnim = ResolvedAnim {
+            id: 0,
+            dir_flags: 0,
+        };
+        let mut visited = [false; 208];
+        let mut id = requested;
+        loop {
+            if self.find(id).is_some() {
+                return ResolvedAnim { id, dir_flags: 0 };
+            }
+            match visited.get_mut(id as usize) {
+                Some(seen) if !*seen => *seen = true,
+                _ => return STAND, // revisited (cycle) or id ≥ 208 (NULL/max-id guard)
+            }
+            match catalog.fallback(id) {
+                Some(next) => id = next,
+                None => return STAND, // unknown row / self-fallback / already-Stand → exhaustion
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ModelAnimations::resolve (decision 0082) ──────────────────────────────────────────────
+
+    use bevy::animation::graph::AnimationNodeIndex;
+
+    fn test_clip(anim_id: u16) -> AnimClip {
+        AnimClip {
+            anim_id,
+            node: AnimationNodeIndex::new(0),
+            looping: true,
+            duration: 1.0,
+            move_speed: 0.0,
+            blend_time: 0.0,
+            bounds_center: Vec3::ZERO,
+            bounds_radius: 0.0,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ZERO,
+            events: Vec::new().into(),
+            arm_nodes: None,
+            upper_node: None,
+            frequency: 0,
+            replay: (0, 0),
+        }
+    }
+
+    fn test_anims(has_clips: &[u16], table: Vec<PlayableAnim>) -> ModelAnimations {
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: has_clips.iter().map(|&id| test_clip(id)).collect(),
+            playable_animation_lookup: table,
+            hand_close: [None, None],
+            global_bones: Vec::new(),
+            first_seq: None,
+        }
+    }
+
+    fn playable(resolved_id: u16, dir_flags: u16) -> PlayableAnim {
+        PlayableAnim {
+            resolved_id,
+            dir_flags,
+        }
+    }
+
+    fn empty_catalog() -> AnimDataCatalog {
+        AnimDataCatalog::from_rows([])
+    }
+
+    /// PATH 1: a table entry within range is read verbatim, low16 as the id and high16 as the dir
+    /// code — the chicken-lacking-Attack2H shape (`[18] = {16, 0}`), model has clip 16 not 18.
+    #[test]
+    fn path1_reads_the_baked_table_entry() {
+        let mut table = vec![playable(0, 0); 19];
+        table[18] = playable(16, 0);
+        let anims = test_anims(&[0, 16], table);
+        let resolved = anims.resolve(18, &empty_catalog());
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 16,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// PATH 1 also carries the dir-flags code — the real byte-verified HumanMale example
+    /// (`playableAnimationLookup[6] = 0x00030001`, wow-re `anim-id-resolution.md` §4): resolved id 1,
+    /// dir code 3. PATH 1 never consults the catalog at all (an empty one is fine here).
+    #[test]
+    fn path1_carries_dir_flags_through_unapplied() {
+        let mut table = vec![playable(0, 0); 7];
+        table[6] = playable(1, 3);
+        let anims = test_anims(&[0, 1], table);
+        let resolved = anims.resolve(6, &empty_catalog());
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 1,
+                dir_flags: 3
+            }
+        );
+    }
+
+    /// PATH 2: id ≥ the table length walks the DBC Fallback chain (via `catalog`) until the model
+    /// actually has a sequence for the current id.
+    #[test]
+    fn path2_walks_the_dbc_fallback_past_the_table() {
+        let cat = AnimDataCatalog::from_rows([
+            (
+                5,
+                benilla_formats::AnimEntry {
+                    weapon_flags: 0,
+                    fallback: 4,
+                },
+            ),
+            (
+                4,
+                benilla_formats::AnimEntry {
+                    weapon_flags: 0,
+                    fallback: 3,
+                },
+            ),
+        ]);
+        let anims = test_anims(&[0, 3], vec![playable(0, 0); 3]); // table covers only ids 0..2
+        let resolved = anims.resolve(5, &cat);
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 3,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// PATH 2's cycle guard: a Fallback loop (5→6→5→…) terminates at Stand(0) rather than spinning.
+    #[test]
+    fn path2_cycle_guard_terminates_at_stand() {
+        let cat = AnimDataCatalog::from_rows([
+            (
+                5,
+                benilla_formats::AnimEntry {
+                    weapon_flags: 0,
+                    fallback: 6,
+                },
+            ),
+            (
+                6,
+                benilla_formats::AnimEntry {
+                    weapon_flags: 0,
+                    fallback: 5,
+                },
+            ),
+        ]);
+        let anims = test_anims(&[], vec![playable(0, 0); 3]); // model has neither 5 nor 6
+        let resolved = anims.resolve(5, &cat);
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 0,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// PATH 2's self-fallback / NULL-row termination: an id with no usable Fallback (an unknown row,
+    /// or one whose Fallback is itself/0 — `AnimDataCatalog::fallback` already collapses all three to
+    /// `None`) exhausts to Stand(0) on the first hop.
+    #[test]
+    fn path2_self_or_null_fallback_exhausts_to_stand() {
+        let anims = test_anims(&[], vec![playable(0, 0); 3]);
+        let resolved = anims.resolve(99, &empty_catalog()); // id 99 has no row at all
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 0,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// PATH 2's NULL/max-id guard: an id at or past the 208-row `AnimationData.dbc` bound can't even
+    /// be marked visited — it exhausts to Stand(0) immediately, not just when it recurs.
+    #[test]
+    fn path2_out_of_dbc_range_id_exhausts_to_stand() {
+        let anims = test_anims(&[], vec![playable(0, 0); 3]);
+        let resolved = anims.resolve(250, &empty_catalog());
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 0,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// A model with no baked table at all (a cube fallback / malformed M2) degrades to identity —
+    /// `resolve` hands the id straight back so the caller's own `find` does today's direct lookup.
+    #[test]
+    fn no_table_degrades_to_identity() {
+        let anims = test_anims(&[0], Vec::new());
+        let resolved = anims.resolve(42, &empty_catalog());
+        assert_eq!(
+            resolved,
+            ResolvedAnim {
+                id: 42,
+                dir_flags: 0
+            }
+        );
+    }
+
+    /// The variation pick is the client's weighted walk (wow-re `anim-id-resolution.md`, op4 with
+    /// variationIdx −1): `roll < frequency` picks, else `roll -= frequency` and advance; chain
+    /// exhaustion clamps to the last variation; a lone variation always wins.
+    #[test]
+    fn pick_variation_walks_the_weighted_chain() {
+        let mut anims = test_anims(&[16, 16, 5], Vec::new());
+        anims.clips[0].frequency = 0x6000; // Attack1H variation 0 — the common arc
+        anims.clips[1].frequency = 0x1fff; // variation 1 — the off-side swing
+        let pick = |anims: &ModelAnimations, id, roll| {
+            let c = anims.pick_variation(id, roll).unwrap();
+            anims.clips.iter().position(|x| std::ptr::eq(x, c)).unwrap()
+        };
+        assert_eq!(pick(&anims, 16, 0x0000), 0);
+        assert_eq!(pick(&anims, 16, 0x5fff), 0); // last roll inside variation 0's weight
+        assert_eq!(pick(&anims, 16, 0x6000), 1); // first roll past it
+        assert_eq!(pick(&anims, 16, 0x7ffe), 1);
+        // Weights under-cover the roll → the HEAD, not the last (the client's exhaust path leaves
+        // the resolved seqIndex untouched — wow-re loop-replay-fidget.md, corrects decision 0114).
+        assert_eq!(pick(&anims, 16, 0x7fff), 0);
+        assert_eq!(pick(&anims, 5, 0x7fff), 2); // lone variation wins by exhaustion→head (weight 0)
+        assert!(anims.pick_variation(99, 0).is_none());
+    }
+}

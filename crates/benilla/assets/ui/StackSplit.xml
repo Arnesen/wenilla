@@ -1,0 +1,226 @@
+<Ui>
+    <!--
+        The stack-split spinner (decision 0216 §6/§D, scratchpad `ref-framexml/StackSplitFrame.xml`/
+        `.lua`, transcribed near-verbatim onto our own cursor seam — `SplitContainerItem`/
+        `OpenStackSplitFrame` already exist in benilla-ui's `cursor.rs`; this file is purely the
+        window + the Left/Right/Okay/Cancel plumbing around it). One shared instance, like the real
+        client's `StackSplitFrame` — any owner (a bag slot today; the paper doll / bank / mail slices
+        reuse it unmodified later) sets `owner.SplitStack = function(owner, n) ... end` before calling
+        `OpenStackSplitFrame`, and Okay calls it generically (`StackSplitFrameOkay_Click`).
+
+        Textures: `Interface\MoneyFrame\UI-MoneyFrame` (the little parchment plate) and
+        `Interface\MoneyFrame\Arrow-Left/Right-Up/Down/Disabled` are the ref's own — both already
+        resolve through the shared sprite loader the money-purse coin icons use
+        (`Interface\MoneyFrame\UI-MoneyIcons`, BagFrame.xml/MerchantFrame.xml), so they're quoted
+        verbatim rather than substituted. The Okay/Cancel button face (`UI-Panel-Button-*`) is our
+        own local virtual template, NOT a cross-file `inherits` of `BenillaQuestPanelButtonTemplate`
+        (QuestFrame.xml) — this file loads BEFORE QuestFrame.xml (see ui_script/mod.rs's load order),
+        so that template isn't registered yet; the house convention already answered this exact case
+        for GossipFrame/QuestFrame/QuestLogFrame ("our engine ships no UIPanelButtonTemplate, so we
+        draw it") — this is one more independent draw of the same real art.
+
+        NAMED DEFERRALS (both cited on the functions below, not just here):
+        - Typed-digit entry (`StackSplitFrame_OnChar`/`_OnKeyDown` in the ref): this engine has no
+          plain-frame OnChar/OnKeyDown keyboard capture, only EditBox focus (grepped; no such hook
+          exists anywhere in benilla-ui). The Left/Right spinner buttons are the only way to change
+          the split count.
+        - The ref's shift-click "insert the item link into the chat editbox" (StackSplitFrame isn't
+          even opened in that branch — ContainerFrame.lua:568-569 diverts to
+          `ChatFrameEditBox:Insert` instead of `OpenStackSplitFrame`) never triggers here: the
+          shift-click gesture itself has no plumbing in this engine (BagFrame.xml's own comment on
+          `BenillaBagSlot_OnClick` — no modifier-key global exists at all), so there is no path that
+          reaches this branch to defer. `EditBox:Insert` DOES exist on our engine (editbox.rs) for
+          when that gap closes.
+    -->
+    <Script><![CDATA[
+        -- OpenStackSplitFrame(maxStack, owner, anchor, anchorTo) — ref StackSplitFrame.lua:2-24,
+        -- verbatim shape. `owner` must already carry `owner.SplitStack = function(owner, n) ... end`
+        -- (BagFrame.xml's `BenillaBagSlot_OnClick` sets it right before calling this, mirroring
+        -- ContainerFrameItemButton_OnClick's own closure). maxStack < 2 hides instead of showing (a
+        -- 1-stack has nothing to split) — the ref's own guard.
+        function OpenStackSplitFrame(maxStack, owner, anchor, anchorTo)
+            local frame = BenillaStackSplitFrame
+            if frame.owner then
+                frame.owner.hasStackSplit = nil
+            end
+            frame.maxStack = maxStack
+            if frame.maxStack < 2 then
+                frame:Hide()
+                return
+            end
+            frame.owner = owner
+            owner.hasStackSplit = true
+            frame.split = 1
+            BenillaStackSplitText:SetText(frame.split)
+            BenillaStackSplitLeftButton:Disable()
+            BenillaStackSplitRightButton:Enable()
+            -- ref l.21-22: ClearAllPoints first — SetPoint only replaces an anchor of the SAME
+            -- point, and the anchor callers choose (BagFrame.xml passes "BOTTOMRIGHT") differs from
+            -- this frame's authored placeholder ("CENTER"), so skipping this would leave both live.
+            frame:ClearAllPoints()
+            frame:SetPoint(anchor, owner, anchorTo, 0, 0)
+            frame:Show()
+        end
+
+        -- UpdateStackSplitFrame(maxStack) — ref l.26-52: the owner's stack shrank/grew out from
+        -- under an OPEN spinner (e.g. a server correction). Not called by anything in benilla yet
+        -- (no caller has a live reason to resize an open spinner today) — kept so a later caller
+        -- (the paper doll / bank slice) drops in without a new function.
+        function UpdateStackSplitFrame(maxStack)
+            local frame = BenillaStackSplitFrame
+            frame.maxStack = maxStack
+            if frame.maxStack < 2 then
+                if frame.owner then
+                    frame.owner.hasStackSplit = nil
+                end
+                frame:Hide()
+                return
+            end
+            if frame.split > frame.maxStack then
+                frame.split = frame.maxStack
+                BenillaStackSplitText:SetText(frame.split)
+            end
+            if frame.split == frame.maxStack then
+                BenillaStackSplitRightButton:Disable()
+            else
+                BenillaStackSplitRightButton:Enable()
+            end
+            if frame.split == 1 then
+                BenillaStackSplitLeftButton:Disable()
+            else
+                BenillaStackSplitLeftButton:Enable()
+            end
+        end
+
+        function BenillaStackSplitLeft_Click()
+            local frame = BenillaStackSplitFrame
+            if frame.split == 1 then return end
+            frame.split = frame.split - 1
+            BenillaStackSplitText:SetText(frame.split)
+            if frame.split == 1 then
+                BenillaStackSplitLeftButton:Disable()
+            end
+            BenillaStackSplitRightButton:Enable()
+        end
+
+        function BenillaStackSplitRight_Click()
+            local frame = BenillaStackSplitFrame
+            if frame.split == frame.maxStack then return end
+            frame.split = frame.split + 1
+            BenillaStackSplitText:SetText(frame.split)
+            if frame.split == frame.maxStack then
+                BenillaStackSplitRightButton:Disable()
+            end
+            BenillaStackSplitLeftButton:Enable()
+        end
+
+        function BenillaStackSplitOkay_Click()
+            local frame = BenillaStackSplitFrame
+            if frame.owner then
+                frame.owner.SplitStack(frame.owner, frame.split)
+            end
+            frame:Hide()
+        end
+
+        function BenillaStackSplitCancel_Click()
+            BenillaStackSplitFrame:Hide()
+        end
+
+        -- OnHide (ref l.158-162): ANY hide — Okay, Cancel, or BenillaOnEscape's chain hook below —
+        -- clears the owner's `hasStackSplit` flag (ref ItemButtonTemplate's OnHide, ContainerFrame.xml
+        -- l.35-39, checks `this.hasStackSplit` to auto-close the spinner if the SLOT itself goes away
+        -- mid-split — no consumer needs that half here, but the flag's own clear is this function's
+        -- job regardless of which button caused the hide).
+        function BenillaStackSplitFrame_OnHide()
+            local frame = BenillaStackSplitFrame
+            if frame.owner then
+                frame.owner.hasStackSplit = nil
+            end
+        end
+    ]]></Script>
+
+    <!-- The Okay/Cancel face — our own local draw (see the file header) of the real
+         `UIPanelButtonTemplate` art (`Interface\Buttons\UI-Panel-Button-*`). -->
+    <Button name="BenillaStackSplitButtonTemplate" virtual="true">
+        <Size><AbsDimension x="64" y="24"/></Size>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+    </Button>
+
+    <Frame name="BenillaStackSplitFrame" frameStrata="HIGH" hidden="true">
+        <!-- ref StackSplitFrame.xml l.4-7: 172×96. The CENTER anchor here is only the pre-first-open
+             placeholder — OpenStackSplitFrame always repositions before the first Show. -->
+        <Size><AbsDimension x="172" y="96"/></Size>
+        <Anchors>
+            <Anchor point="CENTER" relativePoint="CENTER"/>
+        </Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- ref l.9-15: the parchment plate, 256×32, TexCoords 0-0.671875 / 0-0.75. -->
+                <Texture file="Interface\MoneyFrame\UI-MoneyFrame">
+                    <Size><AbsDimension x="256" y="32"/></Size>
+                    <TexCoords left="0" right="0.671875" top="0" bottom="0.75"/>
+                </Texture>
+                <!-- ref l.16-24: the count, GameFontHighlight, right-justified, RIGHT -50/+18. -->
+                <FontString name="BenillaStackSplitText" inherits="GameFontHighlight" justifyH="RIGHT">
+                    <Anchors>
+                        <Anchor point="RIGHT" relativePoint="RIGHT"><Offset><AbsDimension x="-50" y="18"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- ref l.28-47: the left/right arrows, 16×16, RIGHT/LEFT-of-CENTER ±59/64, +18. -->
+            <Button name="BenillaStackSplitLeftButton">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors>
+                    <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-59" y="18"/></Offset></Anchor>
+                </Anchors>
+                <NormalTexture file="Interface\MoneyFrame\Arrow-Left-Up"/>
+                <PushedTexture file="Interface\MoneyFrame\Arrow-Left-Down"/>
+                <DisabledTexture file="Interface\MoneyFrame\Arrow-Left-Disabled"/>
+                <Scripts>
+                    <OnClick>BenillaStackSplitLeft_Click()</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="BenillaStackSplitRightButton">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors>
+                    <Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="64" y="18"/></Offset></Anchor>
+                </Anchors>
+                <NormalTexture file="Interface\MoneyFrame\Arrow-Right-Up"/>
+                <PushedTexture file="Interface\MoneyFrame\Arrow-Right-Down"/>
+                <DisabledTexture file="Interface\MoneyFrame\Arrow-Right-Disabled"/>
+                <Scripts>
+                    <OnClick>BenillaStackSplitRight_Click()</OnClick>
+                </Scripts>
+            </Button>
+            <!-- ref l.68-84: Okay, RIGHT-of-BOTTOM -3/+32. -->
+            <Button name="BenillaStackSplitButton1" inherits="BenillaStackSplitButtonTemplate" text="OKAY">
+                <Anchors>
+                    <Anchor point="RIGHT" relativePoint="BOTTOM"><Offset><AbsDimension x="-3" y="32"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>BenillaStackSplitOkay_Click()</OnClick>
+                </Scripts>
+            </Button>
+            <!-- ref l.85-101: Cancel, LEFT-of-BOTTOM +5/+32. -->
+            <Button name="BenillaStackSplitButton2" inherits="BenillaStackSplitButtonTemplate" text="CANCEL">
+                <Anchors>
+                    <Anchor point="LEFT" relativePoint="BOTTOM"><Offset><AbsDimension x="5" y="32"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>BenillaStackSplitCancel_Click()</OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnHide>BenillaStackSplitFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>
