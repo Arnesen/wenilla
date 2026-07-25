@@ -23,7 +23,7 @@ use clap::Parser;
 
 use probes::{
     Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, Loot, Probe, QueryNames, Quest,
-    QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot, Vendor,
+    QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot, Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -166,6 +166,15 @@ struct Cli {
     /// `.quest remove 7` (unaccepted quest 7 should read AVAILABLE=5). Needs a GM account.
     #[arg(long)]
     giverstatus: bool,
+
+    /// Live-verify the world-state table's two wires (`SMSG_INIT_WORLD_STATES` /
+    /// `SMSG_UPDATE_WORLD_STATE` — what the NPC-text `$<n>w`/`$<n>e` tokens read): teleport to
+    /// Elwynn, hop to Stormwind to force a zone-change init, and `.debug send worldstate` one
+    /// synthetic pair to require back. Prints every state received. Needs a **SEC_DEVELOPER**
+    /// account: `.debug send worldstate` is gmlevel 5, one above the 3 the slot-keyed probe
+    /// accounts carry (decision 0450), so the update leg needs a temporary grant.
+    #[arg(long)]
+    worldstate: bool,
 
     /// Live-verify the Charge wire (warrior Charge rank 1, spell 100): GM `.learn 100`, teleport to
     /// open ground near the Northshire kobold camp ([`CHARGE_TP`]), pick a creature at charge range
@@ -347,6 +356,9 @@ fn main() -> Result<()> {
     }
     if cli.spirit {
         probes.push(Box::new(Spirit::default()));
+    }
+    if cli.worldstate {
+        probes.push(Box::new(WorldState::default()));
     }
 
     // Pre-stream staging: the DeathArc first (its `.revive` + teleport lead --spirit's `.repairitems`),

@@ -32,8 +32,13 @@ pub(crate) struct NameCache {
     /// the `CreatureType.dbc` id the TAB-target critter filter reads; rank/civilian feed the
     /// unit tooltip's level-line word + CIVILIAN line (decision 0276).
     creatures: HashMap<u32, Option<CreatureRecord>>,
+    /// Pet names by **pet number** — the third naming path (see [`Self::resolve`]'s pet branch).
+    /// No negative entry exists: the server answers for a live pet or says nothing at all, so an
+    /// unanswered ask stays unanswered, exactly as it does for the real client.
+    pets: HashMap<u32, String>,
     pending_players: HashSet<u64>,
     pending_creatures: HashSet<u32>,
+    pending_pets: HashSet<u32>,
 }
 
 /// One cached creature template head (see [`NameCache::creatures`]).
@@ -67,12 +72,35 @@ impl NameCache {
                 return None;
             }
             self.players.get(&guid_val).and_then(|n| n.as_deref())
+        } else if let Some(pet_number) = guid::pet_number(guid_val) {
+            // A pet is a `TYPEID_UNIT` like any creature, but it carries a pet number where a
+            // creature carries its template entry, so it has its own query. Asking the creature
+            // query for that number is what left every summoned pet nameless.
+            self.resolve_pet(pet_number, guid_val, commands)
         } else if guid::is_creature_or_pet(guid_val) {
             let entry = guid::entry(guid_val)?;
             self.resolve_creature(entry, guid_val, commands)
         } else {
             None
         }
+    }
+
+    /// The name for a live pet by its `pet_number` — the pet twin of [`Self::resolve_creature`],
+    /// same ask-once discipline. Unlike the creature/player queries this one has **no negative
+    /// answer**: vmangos returns early without a packet when the guid is not a live pet bearing that
+    /// number (`PetHandler.cpp:190-192`), so an unanswered ask simply stays unresolved rather than
+    /// caching a "server doesn't know" — and is re-asked after a reconnect like the others.
+    fn resolve_pet(&mut self, pet_number: u32, guid: u64, commands: &NetCommands) -> Option<&str> {
+        if !self.pets.contains_key(&pet_number) {
+            if self.pending_pets.insert(pet_number) {
+                debug!("names: asking pet name (pet {pet_number})");
+                let _ = commands
+                    .0
+                    .send(ClientCommand::PetNameQuery { pet_number, guid });
+            }
+            return None;
+        }
+        self.pets.get(&pet_number).map(String::as_str)
     }
 
     /// The name for a creature template `entry`, if known — the entry-keyed twin of
@@ -107,6 +135,8 @@ impl NameCache {
     pub(crate) fn peek(&self, guid_val: u64) -> Option<&str> {
         if guid::is_player(guid_val) {
             self.players.get(&guid_val).and_then(|n| n.as_deref())
+        } else if let Some(pet_number) = guid::pet_number(guid_val) {
+            self.pets.get(&pet_number).map(String::as_str)
         } else if guid::is_creature_or_pet(guid_val) {
             self.creatures
                 .get(&guid::entry(guid_val)?)
@@ -122,6 +152,12 @@ impl NameCache {
         self.pending_players.remove(&guid);
         self.players
             .insert(guid, (!name.is_empty()).then_some(name));
+    }
+
+    /// Record a pet-name answer (`SMSG_PET_NAME_QUERY_RESPONSE`), keyed by pet number.
+    pub(crate) fn insert_pet(&mut self, pet_number: u32, name: String) {
+        self.pending_pets.remove(&pet_number);
+        self.pets.insert(pet_number, name);
     }
 
     /// Record a creature-name answer (`SMSG_CREATURE_QUERY_RESPONSE`); `None` = unknown entry.
@@ -156,11 +192,15 @@ impl NameCache {
             .map(|r| r.creature_type)
     }
 
-    /// Forget the in-flight asks (a disconnect may have dropped them on the writer floor); the
-    /// resolved names stay — they are stable across sessions.
+    /// Forget the in-flight asks (a disconnect may have dropped them on the writer floor). Resolved
+    /// player/creature names stay — those are identities, stable across sessions. Resolved **pet**
+    /// names do not: a pet number names one live spawn rather than a template, and nothing that
+    /// answered before the disconnect is still on the map after it.
     pub(crate) fn clear_pending(&mut self) {
         self.pending_players.clear();
         self.pending_creatures.clear();
+        self.pending_pets.clear();
+        self.pets.clear();
     }
 }
 
@@ -177,6 +217,35 @@ mod tests {
     fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         (NetCommands(tx), rx)
+    }
+
+    /// A summoned pet resolves through `CMSG_PET_NAME_QUERY`, keyed by the pet number in its guid —
+    /// NOT through the creature query, which would ask for a template entry that does not exist and
+    /// leave the pet nameless (the reported bug: an NPC-summoned voidwalker with no name).
+    #[test]
+    fn a_pet_asks_the_pet_query_not_the_creature_query() {
+        let (cmds, rx) = commands();
+        let mut cache = NameCache::default();
+        let voidwalker = compose(guid::HIGH_PET, 137, 9);
+
+        assert_eq!(cache.resolve(voidwalker, &cmds), None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::PetNameQuery {
+                pet_number: 137,
+                ..
+            })
+        ));
+        // Ask-once, like every other name.
+        assert_eq!(cache.resolve(voidwalker, &cmds), None);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        cache.insert_pet(137, "Voidwalker".into());
+        assert_eq!(cache.resolve(voidwalker, &cmds), Some("Voidwalker"));
+        assert_eq!(cache.peek(voidwalker), Some("Voidwalker"));
+        // Pet names are per-spawn, so a disconnect drops them.
+        cache.clear_pending();
+        assert_eq!(cache.peek(voidwalker), None);
     }
 
     #[test]

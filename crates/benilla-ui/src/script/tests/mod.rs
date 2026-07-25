@@ -13,6 +13,7 @@ mod end_to_end;
 mod events;
 mod frame_api;
 mod input;
+mod layout_gate;
 mod measure;
 mod minimap;
 mod object_model;

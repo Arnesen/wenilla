@@ -345,6 +345,7 @@ fn feed_actions(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
     commands: Res<NetCommands>,
     mut memory: Local<FeedMemory>,
 ) {
@@ -370,6 +371,29 @@ fn feed_actions(
         .filter_map(|(spell_id, reason)| {
             let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
             let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            // 0x19/0x1a/0x1b EQUIPPED_ITEM_CLASS* — the other argument-formatted family whose
+            // `%s` benilla models (`0x6e1db7`, the arm that resolves an item class/subclass name
+            // through `0x6e2380`): "Must have a **Wand** equipped", the SINGULAR DisplayName,
+            // where the spell tooltip's own requirement line takes the verbose plural. Purely a
+            // DBC read, so no query/redisplay round trip. A multi-bit mask resolves too — through
+            // ItemSubClassMask.dbc's group name, else the FIRST matching subclass (law
+            // §3-EQUIPITEM; the tooltip's twin joins instead).
+            if let (0x19..=0x1b, Some(d), Some(subs)) = (reason, d, sub_classes.as_deref()) {
+                if let Some(name) = (d.equipped_item_class >= 0)
+                    .then(|| {
+                        subs.0.requirement_display_name(
+                            d.equipped_item_class as u32,
+                            d.equipped_item_subclass_mask,
+                        )
+                    })
+                    .flatten()
+                {
+                    let key = cast_fail::CAST_FAIL_KEYS[reason as usize];
+                    return get(key)
+                        .filter(|s| !s.is_empty())
+                        .map(|t| t.replace("%s", &name));
+                }
+            }
             if reason == 0x78 || reason == 0x5c {
                 let d = d?;
                 let failing = if reason == 0x78 {

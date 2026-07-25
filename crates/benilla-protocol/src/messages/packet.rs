@@ -7,9 +7,9 @@ use crate::wire::Vector3d;
 use super::{
     ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
     CorpseLocation, DamageShield, EnvironmentalDamageLog, GameObjectQueryInfo, GossipOption,
-    GroupLootInfo, GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
-    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, Object,
-    PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
+    GroupLootInfo, GroupMemberEntry, InitWorldStates, ItemInfo, ItemPushResult, JumpInfo,
+    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    Object, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
     QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody,
     SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
     SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
@@ -74,6 +74,19 @@ pub enum ServerPacket {
     },
     UpdateObject {
         objects: Vec<Object>,
+    },
+    /// `SMSG_COMPRESSED_MOVES` — a **batch** of whole movement packets in one zlib envelope, each
+    /// already parsed into its own [`ServerPacket`] (decision 0624).
+    ///
+    /// vmangos flips a session onto this container once it has been sent
+    /// `Compression.Movement.Count` (300) movement packets inside a ten-second window
+    /// (`WorldSession::SendMovementPacket`), and flips back when the rate drops — so it is not an
+    /// exotic case but the **normal** carrier for any nearby player moving at frame cadence, which
+    /// since decision 0617 is what our own sender produces. Body: `u32` uncompressed size, then a
+    /// deflate stream of `[u8 size][u16 opcode][body]` records where `size` counts the opcode's two
+    /// bytes (`MovementData::AddPacket`).
+    CompressedMoves {
+        packets: Vec<ServerPacket>,
     },
     /// `SMSG_DESTROY_OBJECT` — one object ceased to exist server-side (a corpse decaying ahead of
     /// respawn, a despawn), body a plain `u64` guid (vmangos `DestroyObject::AppendBodyTo`). Distinct
@@ -221,6 +234,15 @@ pub enum ServerPacket {
         entry: u32,
         /// `Some` on a hit; `None` when the server flagged the entry unknown.
         info: Option<CreatureQueryInfo>,
+    },
+    /// `SMSG_PET_NAME_QUERY_RESPONSE` — a pet's display name, answering `CMSG_PET_NAME_QUERY`.
+    /// Keyed by **pet number**, not a template entry (a pet guid carries none — see
+    /// [`crate::guid::pet_number`]); that is also how the real client's own pet-name cache is keyed.
+    /// The `nameTimestamp` tail is parsed for alignment and dropped: it exists to age out that
+    /// on-disk cache, which we have no equivalent of.
+    PetNameQueryResponse {
+        pet_number: u32,
+        name: String,
     },
     /// `SMSG_GAMEOBJECT_QUERY_RESPONSE` — a GameObject template's type/display/name/`data[24]` head,
     /// answering `CMSG_GAMEOBJECT_QUERY` (decision 0236's ask-once template lookup, the GO twin of
@@ -566,12 +588,13 @@ pub enum ServerPacket {
     },
     /// `SMSG_GOSSIP_COMPLETE` — the gossip window closes (vmangos `Npc.cpp:90`); an empty body.
     GossipComplete,
-    /// `SMSG_NPC_TEXT_UPDATE` — answers `CMSG_NPC_TEXT_QUERY`: always 8 probability-weighted text
-    /// blocks (vmangos `GossipDef.cpp:298-369`); `greeting` is the highest-probability block's male
-    /// text with a female-text fallback (see [`super::gossip::read_npc_text_update`]).
+    /// `SMSG_NPC_TEXT_UPDATE` — answers `CMSG_NPC_TEXT_QUERY`: always 8 weighted text blocks
+    /// (vmangos `GossipDef.cpp:298-369`), carried here **undecided**. Which line greets you needs
+    /// the NPC's gender and a die roll, so it is drawn when the frame opens, not when the packet
+    /// lands — [`super::gossip::select_greeting`].
     NpcText {
         text_id: u32,
-        greeting: String,
+        blocks: Vec<super::gossip::NpcTextBlock>,
     },
     /// `SMSG_LIST_INVENTORY` — a vendor's stock, answering `CMSG_LIST_INVENTORY` (vmangos
     /// `ItemHandler.cpp:741-810`). Empty stock sends `count = 0` plus a trailing error byte the
@@ -919,6 +942,14 @@ pub enum ServerPacket {
     TradeStatusExtended {
         state: Box<TradeStatusExtended>,
     },
+    /// `SMSG_INIT_WORLD_STATES` — the whole world-state table for a zone, pushed on login and on
+    /// every zone change (layout in [`super::world_state::read_init_world_states`]).
+    InitWorldStates(InitWorldStates),
+    /// `SMSG_UPDATE_WORLD_STATE` — one `(id, value)` write into that table.
+    UpdateWorldState {
+        id: u32,
+        value: u32,
+    },
     Other {
         opcode: u16,
     },
@@ -934,6 +965,7 @@ impl ServerPacket {
             ServerPacket::CharCreate { .. } => "SMSG_CHAR_CREATE".into(),
             ServerPacket::CharDelete { .. } => "SMSG_CHAR_DELETE".into(),
             ServerPacket::UpdateObject { .. } => "SMSG_UPDATE_OBJECT".into(),
+            ServerPacket::CompressedMoves { .. } => "SMSG_COMPRESSED_MOVES".into(),
             ServerPacket::DestroyObject { .. } => "SMSG_DESTROY_OBJECT".into(),
             ServerPacket::TriggerCinematic { .. } => "SMSG_TRIGGER_CINEMATIC".into(),
             ServerPacket::MonsterMove { .. } => "SMSG_MONSTER_MOVE".into(),
@@ -950,6 +982,7 @@ impl ServerPacket {
             ServerPacket::SetFactionStanding { .. } => "SMSG_SET_FACTION_STANDING".into(),
             ServerPacket::NameQueryResponse { .. } => "SMSG_NAME_QUERY_RESPONSE".into(),
             ServerPacket::CreatureQueryResponse { .. } => "SMSG_CREATURE_QUERY_RESPONSE".into(),
+            ServerPacket::PetNameQueryResponse { .. } => "SMSG_PET_NAME_QUERY_RESPONSE".into(),
             ServerPacket::GameObjectQueryResponse { .. } => "SMSG_GAMEOBJECT_QUERY_RESPONSE".into(),
             ServerPacket::PlaySound { .. } => "SMSG_PLAY_SOUND".into(),
             ServerPacket::PlayMusic { .. } => "SMSG_PLAY_MUSIC".into(),
@@ -1088,6 +1121,8 @@ impl ServerPacket {
             ServerPacket::NextMailTime { .. } => "MSG_QUERY_NEXT_MAIL_TIME".into(),
             ServerPacket::TradeStatus { .. } => "SMSG_TRADE_STATUS".into(),
             ServerPacket::TradeStatusExtended { .. } => "SMSG_TRADE_STATUS_EXTENDED".into(),
+            ServerPacket::InitWorldStates(_) => "SMSG_INIT_WORLD_STATES".into(),
+            ServerPacket::UpdateWorldState { .. } => "SMSG_UPDATE_WORLD_STATE".into(),
             ServerPacket::Other { opcode } => format!("opcode {opcode:#06x}"),
         }
     }

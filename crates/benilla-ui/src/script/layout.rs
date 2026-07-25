@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::layout::{self, Anchor, LayoutGraph, LayoutInput, Point, Rect};
+use crate::layout::{self, Anchor, LayoutInput, Point, Rect};
 use crate::order::ZTarget;
 use crate::widget::{FrameHandle, FrameKind, KindState, RegionHandle};
 
@@ -9,6 +9,104 @@ use super::{
     ExtractedQuad, FontShadow, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Model,
     Outline, QuadContent, UiScript, SCREEN,
 };
+
+/// A 128-bit rolling fingerprint of everything [`UiScript::resolve_layout`] *reads*, so a resolve
+/// whose inputs are byte-identical to the last one can be skipped outright.
+///
+/// ## Why a fingerprint and not a dirty flag
+///
+/// A dirty flag has to be *set* at every mutation site, and the resolve's read set is spread over
+/// `layout_inputs`, the arena (scale, clamp, ScrollFrame child + offset, frame/region liveness),
+/// `region_data` (anchors, size, measured), and `screen`. Missing one site is a silently stale
+/// layout — the worst failure mode this module has, and one no test reliably catches because the
+/// staleness only shows on the frame the missed setter fires. A fingerprint has no sites to miss:
+/// it is computed FROM the read set, so any change to any of it changes the value by construction.
+/// It also absorbs *idempotent* writes for free — the GameTooltip pre-pass rewrites tooltip sizes
+/// and anchor offsets every single call, which would pin a mutation-tracked flag permanently dirty.
+///
+/// ## Why 128 bits
+///
+/// A collision here is not self-healing: the skip keeps the stored value, so a colliding change
+/// would stay unresolved until something *else* moved. Two independent lanes put that beyond
+/// physical concern (~2^-128 per frame) at the cost of one extra multiply per item.
+///
+/// ## Order sensitivity is safe
+///
+/// The accumulator is order-dependent, and it is fed by walking `HashMap`s whose iteration order
+/// is arbitrary. That order is nevertheless *stable for an unmutated map*, so an unchanged model
+/// reproduces the value; a mutated map may reorder and merely re-resolves. The failure mode is a
+/// false DIRTY (a wasted resolve), never a false CLEAN (a stale rect).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputFingerprint(u64, u64);
+
+impl Default for InputFingerprint {
+    fn default() -> Self {
+        // Distinct non-zero bases (FNV-1a's, and a 64-bit mix constant) so leading zero-valued
+        // items still move both lanes.
+        InputFingerprint(0xcbf2_9ce4_8422_2325, 0x9e37_79b9_7f4a_7c15)
+    }
+}
+
+impl InputFingerprint {
+    #[inline]
+    fn feed(&mut self, v: u64) {
+        self.0 = (self.0 ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        self.1 = (self.1 ^ v.rotate_left(29)).wrapping_mul(0xff51_afd7_ed55_8ccd);
+    }
+
+    #[inline]
+    fn f32(&mut self, v: f32) {
+        // Bit pattern, not value: `resolve` is bit-exact float math, so -0.0 and NaN payloads are
+        // distinctions that matter here even where `==` would call them equal (or unequal).
+        self.feed(u64::from(v.to_bits()));
+    }
+
+    #[inline]
+    fn anchors(&mut self, anchors: &[Anchor]) {
+        self.feed(anchors.len() as u64);
+        for a in anchors {
+            self.feed(u64::from(a.point.id()));
+            self.feed(u64::from(a.relative_to));
+            self.feed(u64::from(a.relative_point.id()));
+            self.f32(a.x_off);
+            self.f32(a.y_off);
+        }
+    }
+
+    #[inline]
+    fn input(&mut self, i: &LayoutInput) {
+        self.anchors(&i.anchors);
+        self.f32(i.width);
+        self.f32(i.height);
+        self.f32(i.scale);
+        self.feed(u64::from(i.clamp));
+        self.f32(i.extent_x);
+        self.f32(i.extent_y);
+    }
+
+    #[inline]
+    fn rect(&mut self, r: Rect) {
+        self.f32(r.bottom);
+        self.f32(r.left);
+        self.f32(r.top);
+        self.f32(r.right);
+    }
+}
+
+/// `WOW_LAYOUT_VERIFY=1` — the change gate's self-check (decision 0022's instruments-first
+/// posture). When set, a resolve the gate wants to SKIP runs in full anyway and asserts it
+/// reproduced the previous rects exactly; a divergence means the fingerprint's read set is
+/// incomplete, and it fails loudly at the resolve that proves it rather than silently rendering a
+/// stale frame days later.
+///
+/// This is what makes the gate's central claim — "the fingerprint covers everything the rounds
+/// read" — machine-checked instead of argued: run the workspace suite under it and every UI test
+/// (the shipped windows, driven through real FrameXML + Lua) becomes a probe for a missed input.
+/// Read once; when off it costs a relaxed atomic load per resolve.
+fn layout_verify_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
+}
 
 impl UiScript {
     /// [`UiScript::resolve`]'s body, taking `&mut Model` directly rather than `&mut self` — so a
@@ -34,21 +132,26 @@ impl UiScript {
             region_data,
             region_resolved,
             frame_to_id,
-            id_to_frame,
             id_to_region,
+            region_to_id,
             screen,
             warnings,
+            solver,
+            layout_fingerprint,
+            layout_solves,
             ..
         } = model;
 
-        // One id per live frame, and its layout input with scale synced from the arena.
-        let mut ids: HashMap<FrameHandle, u32> = HashMap::new();
+        // One id per live frame, and its layout input with scale synced from the arena. A flat
+        // `Vec`, not a map: this list is walked (never probed) by every round below, and it is
+        // rebuilt on each call anyway — a `HashMap` bought nothing and cost 1881 hashes per call.
+        let mut ids: Vec<(FrameHandle, u32)> = Vec::with_capacity(frame_to_id.len());
         for (&h, &id) in frame_to_id.iter() {
             if arena.frame(h).is_some() {
-                ids.insert(h, id);
+                ids.push((h, id));
             }
         }
-        for &h in ids.keys() {
+        for &(h, _) in &ids {
             let (scale, clamp) = arena
                 .frame(h)
                 .map(|f| (f.effective_scale, f.clamped_to_screen))
@@ -76,7 +179,7 @@ impl UiScript {
         // computed. The child's own width/height (from its own `LayoutInput`) stay whatever they are;
         // only its anchors are replaced.
         let mut scroll_child_anchor: HashMap<FrameHandle, Anchor> = HashMap::new();
-        for (&h, &id) in ids.iter() {
+        for &(h, id) in &ids {
             let Some(frame) = arena.frame(h) else {
                 continue;
             };
@@ -122,38 +225,140 @@ impl UiScript {
             arena.region(*rh).is_some()
                 && region_data.get(rh).is_some_and(|d| !d.anchors.is_empty())
         });
-        let round_cap = ids.len() + region_data.len() + 2;
+        // The per-frame solve plan, resolved ONCE per call rather than per round: each live
+        // frame's id, a borrow of its (already scale/clamp-synced) layout input, and its
+        // ScrollFrame anchor override if it is a scroll child. The round loop below then walks a
+        // flat slice — no map probes, no input clones.
+        let plan: Vec<(FrameHandle, u32, &LayoutInput, Option<Anchor>)> = ids
+            .iter()
+            .filter_map(|&(h, id)| {
+                layout_inputs
+                    .get(&h)
+                    .map(|input| (h, id, input, scroll_child_anchor.get(&h).copied()))
+            })
+            .collect();
+
+        // ── The change gate ───────────────────────────────────────────────────────────────────
+        // Fingerprint exactly what the rounds below read, and skip them outright when nothing has
+        // moved since the last converged resolve. Measured on the shipped default UI: the layout
+        // inputs are byte-identical on 34 of 35 idle frames and 39 of 41 with three windows open,
+        // because almost all per-frame UI traffic (StatusBar values, cooldown sweeps, chat fades,
+        // colour changes) is read by EXTRACT, not by the anchor solve.
+        //
+        // The read set, in the order the rounds consume it:
+        //   * `screen`                      — the root external, and the clamp extents;
+        //   * `plan`                        — every live frame's id, its (already scale/clamp-
+        //                                     synced) `LayoutInput`, and its ScrollFrame override,
+        //                                     which together distil `frame_to_id`, frame liveness,
+        //                                     `effective_scale`, `clamped_to_screen`, and the
+        //                                     ScrollFrame child + vertical offset;
+        //   * `id_to_region` × `region_resolved` — the region rects seeded as externals;
+        //   * `region_data`                 — each region's anchors, explicit size, and measured
+        //                                     text extent;
+        //   * `arena.region(rh)`            — liveness and owner (a dead region drops out of the
+        //                                     sweep; the owner supplies the fallback edges).
+        // `resolved` / `region_resolved` are the previous pass's OUTPUT carried forward as the
+        // 0294 seed; at convergence seed and output are equal, so re-running against an unchanged
+        // input set is guaranteed to reproduce them — which is precisely what makes the skip safe.
+        let mut fp = InputFingerprint::default();
+        fp.rect(*screen);
+        fp.feed(plan.len() as u64);
+        for &(_, id, input, over) in &plan {
+            fp.feed(u64::from(id));
+            fp.input(input);
+            match over {
+                Some(a) => fp.anchors(std::slice::from_ref(&a)),
+                None => fp.feed(u64::MAX),
+            }
+        }
+        fp.feed(region_data.len() as u64);
+        for (&rh, data) in region_data.iter() {
+            fp.feed(rh.fingerprint_bits());
+            fp.anchors(&data.anchors);
+            match data.size {
+                Some((w, h)) => {
+                    fp.f32(w);
+                    fp.f32(h);
+                }
+                None => fp.feed(u64::MAX),
+            }
+            match data.measured {
+                Some(m) => {
+                    fp.f32(m.w);
+                    fp.f32(m.h);
+                }
+                None => fp.feed(u64::MAX),
+            }
+            // Liveness only. The sweep also reads the region's `owner` and `kind`, but both are
+            // fixed at creation and can never change under a live handle; the owner's contribution
+            // to the result — its resolved rect and its `effective_scale` — rides the frame half
+            // (the scale is synced into `layout_inputs` by the preamble above, and the rect is the
+            // frame pass's own output). A DESTROYED region does still matter: `WidgetArena::destroy`
+            // drops the arena entry but leaves `region_data` behind, so membership alone would miss
+            // it and the sweep's `continue` would go unnoticed.
+            fp.feed(u64::from(arena.region(rh).is_some()));
+        }
+        for (&id, rh) in id_to_region.iter() {
+            if let Some(r) = region_resolved.get(rh) {
+                fp.feed(u64::from(id));
+                fp.rect(*r);
+            }
+        }
+        let gate_skips = *layout_fingerprint == Some(fp);
+        if gate_skips && !layout_verify_enabled() {
+            return;
+        }
+        // Under `WOW_LAYOUT_VERIFY=1` a skippable resolve runs anyway, against a copy of the rects
+        // it is supposed to reproduce — see [`layout_verify_enabled`].
+        let verify_against = gate_skips.then(|| (resolved.clone(), region_resolved.clone()));
+        // Cleared, not stored, until the fixpoint actually CONVERGES: a run that exhausts the
+        // round cap (a genuine anchor cycle) leaves its rects mid-flight, and the 0294 cross-frame
+        // seed is what lets the next frame carry them further. Storing here would freeze a
+        // pathological graph at whatever partial state it reached.
+        *layout_fingerprint = None;
+        // Counted on the gate's DECISION, not on the fixpoint running: under
+        // `WOW_LAYOUT_VERIFY=1` a skipped resolve still runs below, and a counter that moved for
+        // it would mean something different in the two modes — exactly the ambiguity the tests
+        // asserting on it exist to remove.
+        if !gate_skips {
+            *layout_solves += 1;
+        }
+
+        let round_cap = plan.len() + region_data.len() + 2;
         for round in 0..round_cap {
             let mut changed = false;
 
-            let mut graph = LayoutGraph::new();
-            graph.set_external(SCREEN, *screen);
+            // Seed the solver: the screen root, then every region rect settled so far (regions are
+            // externals to the frame solve — the fixpoint is what closes the loop between them).
+            // Frame ids and region ids come from one monotonic counter, so both live in the
+            // solver's single dense rect array and every anchor-target lookup is an array index.
+            solver.begin();
+            solver.set_external(SCREEN, *screen);
             for (&id, rh) in id_to_region.iter() {
                 if let Some(r) = region_resolved.get(rh) {
-                    graph.set_external(id, *r);
+                    solver.set_external(id, *r);
                 }
             }
-            for (&h, &id) in ids.iter() {
-                if let Some(input) = layout_inputs.get(&h) {
-                    match scroll_child_anchor.get(&h) {
-                        Some(&over) => {
-                            let mut overridden = input.clone();
-                            overridden.anchors = vec![over];
-                            graph.set_frame(id, overridden);
+            for &(_, id, input, over) in &plan {
+                match over {
+                    Some(a) => solver.set_frame_anchored(id, input, a),
+                    None => solver.set_frame(id, input),
+                }
+            }
+            solver.solve();
+            for &(h, id, _, _) in &plan {
+                match solver.rect(id) {
+                    Some(r) => {
+                        if resolved.get(&h) != Some(&r) {
+                            resolved.insert(h, r);
+                            changed = true;
                         }
-                        None => graph.set_frame(id, input.clone()),
                     }
-                }
-            }
-            let res = graph.resolve();
-            for (&h, &id) in ids.iter() {
-                if let Some(&r) = res.rects.get(&id) {
-                    if resolved.get(&h) != Some(&r) {
-                        resolved.insert(h, r);
-                        changed = true;
+                    None => {
+                        if resolved.remove(&h).is_some() {
+                            changed = true;
+                        }
                     }
-                } else if resolved.remove(&h).is_some() {
-                    changed = true;
                 }
             }
 
@@ -165,6 +370,10 @@ impl UiScript {
             // owner-fallback that stood in for this was the jutting-plates bug). One region sweep per
             // outer round: a not-yet-resolved chain target leaves this region on its owner-edge
             // fallback for now, the fixpoint re-sweeps until every link has settled.
+            //
+            // `scratch` is hoisted out of the loop so the per-region `LayoutInput` refills its
+            // anchors `Vec` in place instead of allocating one per region per round.
+            let mut scratch = LayoutInput::default();
             for (&rh, data) in region_data.iter() {
                 if data.anchors.is_empty() {
                     continue;
@@ -193,19 +402,20 @@ impl UiScript {
                         width = m.w;
                     }
                 }
-                let input = LayoutInput {
-                    anchors: data.anchors.clone(),
-                    width,
-                    height,
-                    scale,
-                    ..LayoutInput::default()
-                };
-                let edges = layout::resolve_rect_edges(&input, |id| {
-                    id_to_frame
-                        .get(&id)
-                        .and_then(|h| resolved.get(h))
-                        .or_else(|| id_to_region.get(&id).and_then(|h| region_resolved.get(h)))
-                        .copied()
+                scratch.anchors.clear();
+                scratch.anchors.extend_from_slice(&data.anchors);
+                scratch.width = width;
+                scratch.height = height;
+                scratch.scale = scale;
+                let edges = layout::resolve_rect_edges(&scratch, |id| {
+                    // SCREEN is a FRAME-pass external only. The map-pair lookup this replaces
+                    // consulted `id_to_frame` and `id_to_region`, and neither can hold the
+                    // reserved id 0 (`next_id` starts at 1) — so a region anchor to the screen
+                    // root has always fallen through to the owner-edge fallback below. Preserved
+                    // deliberately: the solver's dense array DOES carry the screen rect at 0, and
+                    // quietly starting to resolve it here would be a behaviour change riding in
+                    // on a performance fix.
+                    (id != SCREEN).then(|| solver.rect(id)).flatten()
                 });
                 // Unpinned edges: textures inherit the owner's edge (the v1 region model,
                 // decision 0068). A FONTSTRING's implicit extent is its measured TEXT, and
@@ -225,6 +435,12 @@ impl UiScript {
                 let (bottom, top) = axis(edges[0], edges[2], owner_rect.bottom, owner_rect.top);
                 let (left, right) = axis(edges[1], edges[3], owner_rect.left, owner_rect.right);
                 let rect = Rect::new(bottom, left, top, right);
+                // Publish into the solver as well as the model: a later region in THIS same sweep
+                // that anchors to this one must see the fresh rect (the sweep has always worked
+                // that way — it read the same `region_resolved` map it was writing).
+                if let Some(&id) = region_to_id.get(&rh) {
+                    solver.set_external(id, rect);
+                }
                 if region_resolved.get(&rh) != Some(&rect) {
                     region_resolved.insert(rh, rect);
                     changed = true;
@@ -232,6 +448,19 @@ impl UiScript {
             }
 
             if !changed {
+                if let Some((frames_before, regions_before)) = &verify_against {
+                    assert!(
+                        frames_before == resolved && regions_before == region_resolved,
+                        "WOW_LAYOUT_VERIFY: the change gate skipped a resolve that would have \
+                         MOVED something — the fingerprint's read set is incomplete. \
+                         frames {} -> {} changed, regions {} -> {} changed",
+                        frames_before.len(),
+                        resolved.len(),
+                        regions_before.len(),
+                        region_resolved.len(),
+                    );
+                }
+                *layout_fingerprint = Some(fp);
                 return;
             }
             if round + 1 == round_cap {

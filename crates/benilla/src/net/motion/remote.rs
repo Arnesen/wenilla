@@ -2,14 +2,17 @@
 //! [`super`]'s motion model (decision 0053): flag-driven ground locomotion between the ~2 Hz
 //! heartbeats, and the jump as a locally-played ballistic event.
 
-use benilla_assets::coords::wow_to_bevy;
+use avian3d::character_controller::move_and_slide::MoveAndSlide;
+use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{JumpInfo, MoveSpeeds};
 use bevy::prelude::*;
+use bevy::time::Real;
 
 use crate::creature_anim::move_flags;
 use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
 use super::super::{SelfPlayer, UnitSpeeds};
+use super::relay::{PendingMove, RelayChain, RelayMove};
 use super::{yaw_of, Spline};
 
 /// The server-authoritative movement state of a *remote* mover (another player), set from each relayed
@@ -62,78 +65,150 @@ pub(crate) struct RemoteMotion {
     /// clock reaches its [`PendingMove::fire_ms`]; until then the dead-reckon covers the mover's
     /// own timeline, so the residual at apply time is structurally small.
     pub(crate) pending: std::collections::VecDeque<PendingMove>,
+    /// This mover's replay chain — the per-unit timing cells that pick each packet's fire-time
+    /// (decision 0615; [`super::relay`]). Per unit, exactly as the reference holds them on the
+    /// unit's own CMovement.
+    pub(crate) relay: RelayChain,
+    /// Real-time ms when a packet last applied to this mover (`0.0` until the first one), and the
+    /// position it applied at. The dead-reckon's anchor — everything since is *our extrapolation*,
+    /// not anything the server said. Read by the runaway watch in [`extrapolate_remote_units`].
+    pub(crate) last_apply_ms: f64,
+    pub(crate) last_apply_pos: [f32; 3],
 }
 
-/// One scheduled relayed move — the payload of [`benilla_protocol::SessionEvent::UnitMove`] plus
-/// the client fire-time [`RelayClock`] mapped from its server timestamp. The reference's queued
-/// move-event node (`0x617570`: fire-time at `node[+8]`, pose at `node[+0x10]`).
-#[derive(Clone)]
-pub(crate) struct PendingMove {
-    /// When to apply, on [`Time::elapsed`]'s ms clock (the reference's `ev[+8]`).
-    pub(crate) fire_ms: f64,
-    pub(crate) position: [f32; 3],
-    pub(crate) orientation: f32,
-    pub(crate) flags: u32,
-    pub(crate) pitch: f32,
-    pub(crate) fall_time: u32,
-    pub(crate) jump: Option<JumpInfo>,
-    pub(crate) transport: Option<benilla_protocol::TransportPose>,
-    /// `MSG_MOVE_HEARTBEAT` — excluded from the pre-fire reconcile lerp (the reference's
-    /// `0x619090` skips tag `0x26`); it applies as an outright snap.
-    pub(crate) heartbeat: bool,
+/// What [`crate::net::apply`]'s `unit_move` did with an inbound relayed move — the `out=` field of
+/// the `rly` trace. Every arrival gets a line, **including the ones we discard**: "the packet never
+/// showed up" and "the packet showed up and lost" are different bugs with the same symptom, and the
+/// trace has to tell them apart (decision 0619).
+#[derive(Clone, Copy)]
+pub(in crate::net) enum RelayOutcome {
+    /// Applied at arrival — it was due and the unit's queue was empty.
+    Now,
+    /// Scheduled: waiting in the unit's queue for its fire-time.
+    Queued,
+    /// The unit's first packet: seeds the chain and places it immediately.
+    Seed,
+    /// Ours. The controller owns our avatar; the server never echoes our own moves anyway.
+    SelfMover,
+    /// **No entity for this guid.** The mover isn't in our object index — so this packet, Stop or
+    /// not, changes nothing. A stale mover that keeps running while these accumulate is a streaming
+    /// bug, not a replay bug.
+    Unknown,
 }
 
-/// The relayed-move clock map (decision 0601): estimates the offset between the server's
-/// `MovementInfo` ms clock (vmangos stamps `stime` at receipt — one coherent clock for all movers)
-/// and our render clock, so each relayed move gets a client **fire-time** — the reference's
-/// scheduled replay (`ev[+8] = mapped time + clamped skew`, wow-re `remote-apply-timing.md`).
-/// The mapping is an EWMA of per-packet `(now − stime)` plus a jitter margin, so a typical packet
-/// arrives just *before* its fire-time and waits in the unit's queue; the exact reference cursor
-/// arithmetic (`mgr+0x128/+0x140`) is the un-traced residual on wow-re's board, so this estimator
-/// is ours — bounded by the reference's verified `[−500, +1000] ms` skew clamp.
-#[derive(Resource, Default)]
-pub(crate) struct RelayClock {
-    /// EWMA of `(now_ms − stime)` over recent relays; `None` until the first.
-    mean: Option<f64>,
-    /// EWMA of `|sample − mean|` — the jitter estimate feeding the scheduling margin.
-    mad: f64,
-}
-
-/// EWMA weight for the clock mean/jitter — ~16-packet memory (a few seconds of one mover's
-/// heartbeats), quick to settle at login, slow enough to ride out one outlier.
-const CLOCK_ALPHA: f64 = 1.0 / 16.0;
-/// A sample this far off the mean is a re-anchor (server restart, session change), not jitter.
-const CLOCK_REANCHOR_MS: f64 = 2000.0;
-/// Cap on the jitter-derived scheduling margin: never buffer more than this beyond the mean.
-const CLOCK_MARGIN_MAX_MS: f64 = 200.0;
-/// The reference's skew clamp ceiling: a fire-time never lands more than this past arrival
-/// (`0x618c30 @0x618d0d/49`: skew held in `[−500, +1000]` ms; the floor needs no mirror — an
-/// already-due fire-time applies at arrival either way).
-const FIRE_DEFER_MAX_MS: f64 = 1000.0;
-
-impl RelayClock {
-    /// Map a relayed move's server timestamp to a client fire-time (ms on [`Time::elapsed`]),
-    /// updating the offset estimate with this packet's sample.
-    pub(crate) fn fire_time(&mut self, stime: u32, now_ms: f64) -> f64 {
-        let sample = now_ms - f64::from(stime);
-        let mean = match self.mean {
-            Some(m) if (sample - m).abs() < CLOCK_REANCHOR_MS => {
-                let m = m + (sample - m) * CLOCK_ALPHA;
-                self.mad += ((sample - m).abs() - self.mad) * CLOCK_ALPHA;
-                m
-            }
-            _ => {
-                self.mad = 0.0;
-                sample
-            }
-        };
-        self.mean = Some(mean);
-        // Schedule at the mean-latency timeline plus a jitter margin, so most packets arrive
-        // early and wait — the buffering that absorbs relay jitter — capped by the reference's
-        // +1000 ms skew ceiling relative to arrival.
-        let margin = (3.0 * self.mad).min(CLOCK_MARGIN_MAX_MS);
-        (f64::from(stime) + mean + margin).min(now_ms + FIRE_DEFER_MAX_MS)
+impl RelayOutcome {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::Queued => "queued",
+            Self::Seed => "seed",
+            Self::SelfMover => "self",
+            Self::Unknown => "UNKNOWN-GUID",
+        }
     }
+}
+
+/// One line of the `WOW_MOVE_TRACE` sink per inbound relayed move (tag `rly`), so replay is
+/// **measured** rather than eyeballed (method §4): the mover, its wire stamp, the move-flags the
+/// packet carries, what we did with it, the lead the schedule gave it (`fire − arrival`, ms), and how
+/// deep the unit's queue is. Together with the sender's `snd` lines on the other client, a run's
+/// `rly` lines answer the only question that matters when a mover misbehaves: *did the packet arrive,
+/// and did it win?* Costs one `OnceLock` read per packet when the trace is off.
+pub(in crate::net) fn trace_relay(
+    guid: u64,
+    mv: &RelayMove,
+    chain: &RelayChain,
+    now_ms: f64,
+    queued: usize,
+    out: RelayOutcome,
+) {
+    if !crate::dbg_trace::enabled() {
+        return;
+    }
+    let lead = chain.lead_ms(now_ms);
+    let kind = if mv.heartbeat { "hb" } else { "tr" };
+    crate::dbg_trace::line(
+        "rly",
+        &format!(
+            "guid={guid:#x} {kind} wire={} flags={:#x} out={} lead={lead:7.1} q={queued}",
+            mv.wire_ms,
+            mv.flags,
+            out.tag()
+        ),
+    );
+}
+
+/// How long a mover may dead-reckon with **nothing queued** before the runaway watch starts
+/// reporting it (ms). A moving unit is normally fed every frame while it turns and at worst every
+/// 500 ms by the heartbeat (decision 0617), so two seconds of silence with a direction flag still
+/// live means we are inventing motion the server never described.
+const RUNAWAY_SILENCE_MS: f64 = 2000.0;
+
+/// The **runaway watch** (tag `run`): one line per silent second per mover that is still moving under
+/// our own extrapolation with an empty queue — its flags, how long since anything applied, and how
+/// far we have carried it from the last position the server actually gave us.
+///
+/// This is the instrument the "he keeps running off into the distance" report needed: it timestamps
+/// the moment precisely, so the mover client's `snd` lines at that instant say whether the Stop was
+/// ever sent, and the observer's `rly` lines say whether it arrived. Nothing in the client — or in
+/// the reference — otherwise notices a mover that has travelled a hundred yards on dead reckoning
+/// alone. Reporting only; it never corrects the pose.
+fn trace_runaway(guid_hint: Entity, rm: &RemoteMotion, now_ms: f64, silent_s: u32) {
+    let d = [
+        rm.wow_pos[0] - rm.last_apply_pos[0],
+        rm.wow_pos[1] - rm.last_apply_pos[1],
+    ];
+    // The inbound census rides every line, because it is the discriminator: a starving mover with
+    // packets still landing means the **server** stopped relaying that unit; a starving mover with
+    // the whole census frozen means the **socket** died with nobody noticing (decision 0621).
+    let (pkts, age) = crate::net::io::inbound_census();
+    let age = age.map_or_else(|| "never".to_string(), |ms| format!("{ms}ms"));
+    crate::dbg_trace::line(
+        "run",
+        &format!(
+            "{guid_hint} RUNAWAY flags={:#x} silent={silent_s}s drift={:.1}yd since={:.0}ms pos=[{:.1},{:.1}] netpkts={pkts} lastpkt={age}",
+            rm.flags,
+            d[0].hypot(d[1]),
+            now_ms - rm.last_apply_ms,
+            rm.wow_pos[0],
+            rm.wow_pos[1],
+        ),
+    );
+}
+
+/// How often the remote-pose watch samples a mover (ms) — see [`trace_remote`].
+const REMOTE_TRACE_MS: f64 = 500.0;
+
+/// The **remote-pose watch** (tag `rem`): one line per mover per [`REMOTE_TRACE_MS`], reporting what
+/// the dead-reckon asked for and what the world gave back. Until decision 0626 nothing measured the
+/// *pose* of a watched player at all — `rly` measures the packets that arrive and `run` only fires
+/// when a mover starves — so "he sinks into the ground / into the wall and pops back out" had no
+/// instrument behind it and could only be argued from reading code. Two numbers close that:
+///
+/// - **`dz`** — the height the mover gained or lost **this frame**, *excluding* the packet applied
+///   this frame (the drain runs first, so the anchor already carries it). A grounded mover riding the
+///   surface moves in Z on every sloped frame; before 0626 the only thing that could move it was the
+///   pre-fire reconcile lerp, which skips heartbeats — so a mover running *straight* read `+0.000`
+///   sample after sample and took its height as a 2 Hz snap, which is the "delayed terrain snap"
+///   report. Read it against `age`: a nonzero `dz` at a large `age` is the ground, not the server.
+/// - **`held`** — how much of this frame's intended horizontal travel the world took away. Sustained
+///   nonzero is a mover being *held* against a wall by our colliders (right); a flat zero for a mover
+///   whose own client is stopped dead is the dead-reckon marching into the geometry (wrong), and it
+///   is the "sinks in and pops out again and again" report.
+///
+/// `age` (ms since a packet last applied) rides along so a sample is never read as server truth.
+fn trace_remote(e: Entity, rm: &RemoteMotion, held: f32, dz: f32, now_ms: f64) {
+    crate::dbg_trace::line(
+        "rem",
+        &format!(
+            "{e} flags={:#x} pos=[{:.2},{:.2},{:.2}] dz={dz:+.3} held={held:.3} age={:.0}ms",
+            rm.flags,
+            rm.wow_pos[0],
+            rm.wow_pos[1],
+            rm.wow_pos[2],
+            now_ms - rm.last_apply_ms,
+        ),
+    );
 }
 
 /// `WOW_REMOTE_SNAP=1` — the A/B escape: apply every relayed move at arrival as a raw snap
@@ -141,6 +216,18 @@ impl RelayClock {
 pub(in crate::net) fn arrival_snap() -> bool {
     static SNAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SNAP.get_or_init(|| std::env::var_os("WOW_REMOTE_SNAP").is_some())
+}
+
+/// `WOW_REMOTE_FLAT=1` — the other A/B escape (decision 0626): dead-reckon a remote mover **without
+/// the world**, the pre-0626 behaviour — height frozen at the last packet's Z, the step unswept.
+/// Restores both defects on demand (a watched player sinking into rising ground and floating over
+/// falling ground; a mover marching into the wall its own client is stopped at), which is what makes
+/// the fix measurable side by side rather than asserted — and what re-answers "is the ground resolve
+/// still doing anything?" for one env var instead of a bisect. Its twin above earns its keep the
+/// same way.
+fn flat_extrapolation() -> bool {
+    static FLAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAT.get_or_init(|| std::env::var_os("WOW_REMOTE_FLAT").is_some())
 }
 
 /// The reconcile-arm tolerance (squared yards): predicted-vs-event disagreement below this needs
@@ -210,8 +297,9 @@ pub(super) fn facing_lerp(orientation: f32, target: f32, dt: f32, remaining_s: f
 /// arrival path ([`crate::net::apply`]'s `unit_move`) and the queue drain ([`drain_pending_moves`]).
 pub(in crate::net) fn apply_move(
     e: Entity,
-    ev: &PendingMove,
+    ev: &RelayMove,
     rm: &mut RemoteMotion,
+    now_ms: f64,
     commands: &mut Commands,
     landings: &mut MessageWriter<crate::creature_anim::HardLanding>,
 ) {
@@ -250,14 +338,26 @@ pub(in crate::net) fn apply_move(
     rm.pitch = ev.pitch;
     rm.vertical_velocity = vertical_velocity;
     rm.jump_xy_vel = jump_xy_vel;
+    // The dead-reckon's anchor: when this mover was last *told* anything, and from where. Read only
+    // by the runaway watch ([`trace_runaway`]) — a mover extrapolating far past its last packet is
+    // the shape of every "he ran off into the distance" report.
+    rm.last_apply_ms = now_ms;
+    rm.last_apply_pos = ev.position;
 }
 
 /// Fire every due queued move (the reference's drain `0x615c30`: bail while `now < ev[+8]`,
 /// dequeue + dispatch once due). Runs before [`extrapolate_remote_units`], which then advances
 /// the freshly-applied state and runs the pre-fire reconcile lerp against the next queued head.
+///
+/// **REAL time, deliberately** (decision 0615): this is a replay clock paced against the server's
+/// stamps, and the reference's is the OS wall clock (`0x42c010`, a QPC-derived ms counter). Bevy's
+/// virtual clock clamps every frame delta to `max_delta` (250 ms), so under macOS occlusion
+/// throttling (~1 fps for a backgrounded client — i.e. exactly the side-by-side A/B against the
+/// reference) it falls minutes behind real time and drags the whole replay schedule with it. Same
+/// lesson, same fix as the UI script clock (`ui_script/extract`).
 #[allow(clippy::type_complexity)]
 pub(in crate::net) fn drain_pending_moves(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut commands: Commands,
     mut landings: MessageWriter<crate::creature_anim::HardLanding>,
     mut q: Query<(Entity, &mut RemoteMotion), (Without<Spline>, Without<SelfPlayer>)>,
@@ -266,7 +366,7 @@ pub(in crate::net) fn drain_pending_moves(
     for (e, mut rm) in &mut q {
         while rm.pending.front().is_some_and(|ev| ev.fire_ms <= now_ms) {
             let ev = rm.pending.pop_front().expect("front checked");
-            apply_move(e, &ev, &mut rm, &mut commands, &mut landings);
+            apply_move(e, &ev.mv, &mut rm, now_ms, &mut commands, &mut landings);
         }
     }
 }
@@ -274,17 +374,49 @@ pub(in crate::net) fn drain_pending_moves(
 /// Integrate every remote mover's pose from its [`RemoteMotion`] each frame, so another player walks
 /// *smoothly* between the sparse relay packets instead of snapping at the ~2 Hz heartbeat rate. The
 /// horizontal velocity is derived from the live `moveFlags` in the mover's facing frame at its run /
-/// run-back / swim speed; the `TURN_*` flags rotate the facing at `turn_rate`. Z is left to the next
-/// packet's correction (the relay carries the authoritative height). A creature [`Spline`] (server-
-/// authored path) and our own avatar ([`SelfPlayer`]) are excluded — they have their own motion source.
+/// run-back / swim speed; the `TURN_*` flags rotate the facing at `turn_rate`. A creature [`Spline`]
+/// (server-authored path) and our own avatar ([`SelfPlayer`]) are excluded — they have their own
+/// motion source.
+///
+/// **The step is then resolved against the world** ([`crate::player::mover::grounded_step`], decision
+/// 0626) — the same swept capsule, colliders and step-vs-fall election our own avatar walks on,
+/// because the reference drives every mover through one controller (decision 0059). Height therefore
+/// comes from the ground under the mover **every frame**, and the dead-reckon cannot walk a watched
+/// player into geometry.
+///
+/// Without it the extrapolation ran in a vacuum, and the two symptoms that follow are the ones the
+/// director reported. **Height:** [`RemoteMotion::advance`] never moves a grounded mover's Z, so Z
+/// changed only where a *packet* put it — at the apply, or dragged there by the pre-fire reconcile
+/// lerp. The lerp skips heartbeats, and a mover running **straight** sends nothing else that carries
+/// position (0617's frame-cadence stream is `SET_FACING`, sent only while turning) — so a straight run
+/// gave a 2 Hz height staircase under a continuous XY, which sinks a watched player into ground that
+/// rises under them and floats them over ground that falls away, at the same rate. **Geometry:** a
+/// mover held against a wall by its own client keeps reporting `FORWARD` with an unchanged position —
+/// there is no "I am blocked" bit on the wire, and there needn't be, because the watching client is
+/// meant to be stopped by the same wall. Ours wasn't: it advanced into the geometry for the whole
+/// packet interval, and the next packet popped it back out.
 ///
 /// This is the client's own dead-reckoning, in miniature: extrapolate from the last reported state,
 /// snap to the truth when the next packet lands. The pose lives canonically in WoW space on the
 /// component; the [`Transform`] is derived from it (translation + facing only — scale is preserved).
+///
+/// **REAL time, deliberately** — the same clock the replay schedule runs on
+/// ([`drain_pending_moves`]); a dead-reckon that advanced on a different (virtual, clamped) clock
+/// than the fire-times it converges toward would never land on them.
 #[allow(clippy::type_complexity)]
 pub(in crate::net) fn extrapolate_remote_units(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut commands: Commands,
+    // Avian's kinematic move-and-slide + the player-body capsule — the *same* pair the local
+    // controller sweeps (decision 0626): one controller, every mover.
+    move_and_slide: MoveAndSlide,
+    capsule: Res<crate::player::PlayerCapsule>,
+    // The runaway watch's per-mover throttle: the last whole silent second reported, so a stuck
+    // mover writes one line a second rather than one a frame. Trace-only, hence a `Local` and not
+    // state on the component.
+    mut warned: Local<bevy::platform::collections::HashMap<Entity, u32>>,
+    // The remote-pose watch's per-mover throttle: when each mover last wrote a `rem` line.
+    mut sampled: Local<bevy::platform::collections::HashMap<Entity, f64>>,
     mut q: Query<
         (
             Entity,
@@ -293,6 +425,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             Option<&UnitSpeeds>,
             Option<&mut crate::creature_anim::BodyTwist>,
             Has<super::FacingStep>,
+            Has<crate::transport::TransportRider>,
         ),
         (Without<Spline>, Without<SelfPlayer>),
     >,
@@ -300,9 +433,88 @@ pub(in crate::net) fn extrapolate_remote_units(
     use crate::creature_anim::{ease_strafe_yaw, strafe_body_offset, wrap_pi};
     let dt = time.delta_secs();
     let now_ms = time.elapsed_secs_f64() * 1000.0;
-    for (e, mut t, mut rm, speeds, twist, latched) in &mut q {
+    let filter = crate::collision::player_query_filter();
+    for (e, mut t, mut rm, speeds, twist, latched, riding) in &mut q {
+        // The runaway watch (trace-only): a mover still carrying a direction flag, with nothing
+        // queued behind it and nothing applied for seconds, is running on our extrapolation alone.
+        if crate::dbg_trace::enabled() {
+            let silent = now_ms - rm.last_apply_ms;
+            let moving = rm.flags & move_flags::ANY_MOVE != 0;
+            if moving && rm.pending.is_empty() && silent > RUNAWAY_SILENCE_MS {
+                let silent_s = (silent / 1000.0) as u32;
+                if warned.insert(e, silent_s) != Some(silent_s) {
+                    trace_runaway(e, &rm, now_ms, silent_s);
+                }
+            } else {
+                warned.remove(&e);
+            }
+        }
         let s = speeds.map_or_else(MoveSpeeds::default, |u| u.0);
+        let prev = rm.wow_pos;
         let (mut pos, mut orientation, vertical_velocity, speed) = rm.advance(s, dt);
+        // How much of the frame's intended horizontal travel the world took away — measured at the
+        // resolve, before the reconcile lerp, so it is the *collision's* doing and not the
+        // correction's. Stays 0 for a mover the resolve skips (swimming, on a boat).
+        let mut held = 0.0f32;
+        // **The step meets the ground** (decision 0626). What [`RemoteMotion::advance`] produced is
+        // our *invention* — the mover's own client has not told us anything since the last packet —
+        // and an invention that ignores the world is what a watched player sinking into a hillside
+        // and popping back out actually is. Run it through the local controller's own grounded
+        // resolve: swept capsule (so a mover held against a wall by its own collision is held
+        // against ours too, instead of marching into it) and the step-vs-fall election (so height
+        // comes from the surface every frame, instead of standing frozen at the last packet's Z
+        // until the next one snaps it). The reference makes no distinction here — one controller
+        // integrates and commits every mover (decision 0059).
+        //
+        // **An airborne arc resolves too — but only against walls** (decision 0627). A jump owns its
+        // Z (the ballistic arc is the whole point), so it gets no election snap and no step-up; what
+        // it does get is the same swept capsule, because a watched player who jumps into a building
+        // has to be stopped by it. Unswept, our invented arc carried them *inside* the wall for the
+        // length of the jump and the landing packet popped them back out — the airborne half of the
+        // very same defect, closed by the local controller's own airborne slide
+        // ([`crate::player::mover::airborne_step`]).
+        //
+        // Still excluded: a **swimmer** (the wire Z is its depth in the water volume, not a surface
+        // to resolve against) and a **transport rider** (its pose is transport-local; `compose_riders`
+        // re-anchors it through the boat's live matrix each frame, and a world-space resolve would
+        // fight it).
+        let airborne = rm.flags & move_flags::FALLING != 0;
+        let afloat = rm.flags & move_flags::SWIMMING != 0;
+        if !afloat && !riding && !flat_extrapolation() {
+            let half_h = Vec3::Y * (crate::player::CAPSULE_HEIGHT * 0.5);
+            let from = wow_to_bevy(rm.wow_pos) + half_h;
+            // The frame's velocity by construction. Grounded, [`RemoteMotion::advance`] never moves
+            // Z (the surface does, in the snap), so it is purely horizontal; airborne, the arc's
+            // vertical rides along so the sweep sees the real displacement.
+            let vel = if dt > 1.0e-6 {
+                (wow_to_bevy(pos) + half_h - from) / dt
+            } else {
+                Vec3::ZERO
+            };
+            let resolved_center = if airborne {
+                crate::player::mover::airborne_step(
+                    &move_and_slide,
+                    &capsule.0,
+                    &filter,
+                    from,
+                    vel,
+                    time.delta(),
+                )
+            } else {
+                crate::player::mover::grounded_step(
+                    &move_and_slide,
+                    &capsule.0,
+                    &filter,
+                    from,
+                    vel,
+                    time.delta(),
+                )
+                .center
+            };
+            let resolved = bevy_to_wow(resolved_center - half_h);
+            held = (pos[0] - resolved[0]).hypot(pos[1] - resolved[1]);
+            pos = resolved;
+        }
         // The pre-fire reconcile toward the queued head (decisions 0601/0602/0603):
         // - **Facing** interpolates toward a NON-heartbeat event's facing (the reference's
         //   `0x618f80` ω armed by `0x619030`, integrated by `0x7c4f30` — its only smoothed
@@ -320,12 +532,12 @@ pub(in crate::net) fn extrapolate_remote_units(
             // `0x619030` skips tag 0x26 exactly as the position arm `0x619090` does (wow-re
             // `remote-air-facing.md`, decision 0603) — so it applies as an outright snap at
             // fire; the smoothed facings are the transition/SET_FACING family's.
-            if remaining_s > 0.0 && !ev.heartbeat {
-                orientation = facing_lerp(orientation, ev.orientation, dt, remaining_s);
+            if remaining_s > 0.0 && !ev.mv.heartbeat {
+                orientation = facing_lerp(orientation, ev.mv.orientation, dt, remaining_s);
                 // Predict from the pre-frame state to the fire-time (this frame's dt + what's left).
                 let (predicted, ..) = rm.advance(s, dt + remaining_s);
-                let swimming = ev.flags & move_flags::SWIMMING != 0;
-                pos = reconcile_lerp(pos, predicted, ev.position, swimming, dt, remaining_s);
+                let swimming = ev.mv.flags & move_flags::SWIMMING != 0;
+                pos = reconcile_lerp(pos, predicted, ev.mv.position, swimming, dt, remaining_s);
             }
         }
         // The standing mouse-turn shuffle: a mouse-turning mover streams NO turn flag — only its
@@ -346,7 +558,7 @@ pub(in crate::net) fn extrapolate_remote_units(
                     | move_flags::SWIMMING)
                 == 0;
             if grounded_still {
-                wrap_pi(ev.orientation - orientation)
+                wrap_pi(ev.mv.orientation - orientation)
             } else {
                 0.0
             }
@@ -360,6 +572,15 @@ pub(in crate::net) fn extrapolate_remote_units(
         rm.orientation = orientation;
         rm.vertical_velocity = vertical_velocity;
         rm.speed = speed;
+        // The remote-pose watch (trace-only): one sample per mover per half-second.
+        if crate::dbg_trace::enabled()
+            && sampled
+                .get(&e)
+                .is_none_or(|t| now_ms - t >= REMOTE_TRACE_MS)
+        {
+            sampled.insert(e, now_ms);
+            trace_remote(e, &rm, held, pos[2] - prev[2], now_ms);
+        }
         t.translation = wow_to_bevy(pos);
         // The strafe body pose, same as our own avatar's (the client's display-facing blend): a
         // strafing remote player renders its body at `orientation ± 90°/45°`, eased in aim-relative
@@ -440,6 +661,32 @@ pub(in crate::net) fn fall_arc_step(
 }
 
 impl RemoteMotion {
+    /// Does a freshly-scheduled move apply **at arrival**, or go on the unit's queue?
+    ///
+    /// Due (`fire ≤ now`) **and the queue empty** (decision 0618). Fire-times are monotone per unit
+    /// (0615), so a due arrival means every queued packet is due too — and [`drain_pending_moves`]
+    /// runs *after* us in the same frame ([`crate::net`] chains apply → drain). Applying the arrival
+    /// directly therefore writes the newest state and then lets the drain replay the older queued
+    /// packets over the top of it. Last write wins, and the last write is stale: a Stop that races the
+    /// tail of a burst is undone by the FORWARD packet queued in front of it, the mover then goes
+    /// silent (a still player sends nothing at all), and the observer extrapolates a run that ended —
+    /// off into the distance until some unrelated correction lands.
+    ///
+    /// **The reference needs no such test, and tracing why is what makes this faithful rather than
+    /// defensive.** Its due test (`@0x618dd2`: `ecx = [edx+0x128]; sub ecx,fire; jns apply`) compares
+    /// against `mgr+0x128` — the movement manager's clock *cell*, stamped once per movement update
+    /// (`0x616800`), not the live ms counter. Its drain (`0x615c30`) runs in that same update against
+    /// that same stamped value. So by the time packets are processed, every event still queued has
+    /// `fire > mgr+0x128`, and monotonicity puts a new packet's fire at or beyond those: a due arrival
+    /// and a non-empty queue are mutually exclusive *by construction*. We read a live frame clock with
+    /// the drain still ahead of us, which breaks that exclusivity; this term restores it.
+    ///
+    /// Queuing instead costs nothing: the drain applies every due packet later in the same frame,
+    /// this one included, in arrival order.
+    pub(crate) fn fires_at_arrival(&self, fire_ms: f64, now_ms: f64) -> bool {
+        self.pending.is_empty() && fire_ms <= now_ms
+    }
+
     /// Advance one frame of dead-reckoning: the new `(WoW position, facing, vertical speed, horizontal
     /// speed)` given the unit's `speeds` and `dt`. On the **ground**, integrates the velocity the current
     /// `flags` imply in the facing frame (forward/back/strafe summed, normalized, at the run / run-back /

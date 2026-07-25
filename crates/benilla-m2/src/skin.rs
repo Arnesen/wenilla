@@ -20,6 +20,11 @@ pub struct SkinSection {
 
 /// One skin draw batch (section + material + texture-combo references).
 pub struct SkinBatch {
+    /// Batch flags (texUnit `+0x00`) — kept raw, unclassified. Read by the diagnostic dumps while
+    /// we carve which bits the reference's batch path actually reads; the renderer ignores them.
+    pub flags: u16,
+    /// Shader / render-order selector (texUnit `+0x02`), same status as [`Self::flags`].
+    pub shader_id: u16,
     pub skin_section_index: u16,
     pub texture_combo_index: u16,
     pub material_index: u16,
@@ -118,6 +123,8 @@ impl M2Model {
         for i in 0..n_bat {
             let u = bytes.bytes_at(o_bat + i * 24, 24).ok_or(Error::Truncated)?;
             batches.push(SkinBatch {
+                flags: u.u16_at(0).ok_or(Error::Truncated)?,
+                shader_id: u.u16_at(2).ok_or(Error::Truncated)?,
                 skin_section_index: u.u16_at(4).ok_or(Error::Truncated)?,
                 material_index: u.u16_at(0x0a).ok_or(Error::Truncated)?,
                 texture_combo_index: u.u16_at(0x10).ok_or(Error::Truncated)?,

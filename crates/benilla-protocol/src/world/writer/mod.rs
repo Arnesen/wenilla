@@ -460,6 +460,17 @@ impl WorldWriter {
         )
     }
 
+    /// Ask for a pet's name (`CMSG_PET_NAME_QUERY`: pet number + guid). A pet's guid holds a pet
+    /// number where a creature's holds its template entry ([`crate::guid::pet_number`]), so
+    /// [`Self::creature_query`] cannot name one — this is the only query that can. Answered by
+    /// `SMSG_PET_NAME_QUERY_RESPONSE`, or by silence if the pet is gone.
+    pub fn pet_name_query(&mut self, pet_number: u32, guid: u64) -> Result<()> {
+        self.send(
+            opcode::CMSG_PET_NAME_QUERY,
+            &messages::pet_name_query(pet_number, guid),
+        )
+    }
+
     /// Cast a spell (`CMSG_CAST_SPELL`): `target: None` = a self/implicit cast, `Some(guid)` = an
     /// explicit unit target (body in [`messages::cast_spell`]). The server answers
     /// `SMSG_CAST_RESULT` (and `SMSG_SPELL_START`/`GO` on success, unmodelled yet).

@@ -34,9 +34,29 @@ pub fn is_player(guid: u64) -> bool {
     guid != 0 && high(guid) == HIGH_PLAYER
 }
 
-/// A creature or pet guid (`IsCreatureOrPet`) — the family whose template entry rides in the guid.
+/// A creature or pet guid (`IsCreatureOrPet`) — both are `TYPEID_UNIT` to every consumer. They are
+/// **not** interchangeable for naming: only the creature half carries a template entry (see
+/// [`entry`] and [`pet_number`]).
 pub fn is_creature_or_pet(guid: u64) -> bool {
     matches!(high(guid), HIGH_UNIT | HIGH_PET)
+}
+
+/// A pet guid (`IsPet`) — a summoned or charmed unit, whose guid's middle field is a **pet number**
+/// and not a creature template entry. See [`pet_number`].
+pub fn is_pet(guid: u64) -> bool {
+    high(guid) == HIGH_PET
+}
+
+/// A pet guid's **pet number** — the per-pet id `CMSG_PET_NAME_QUERY` is keyed by, and the value the
+/// server matches against `CharmInfo::GetPetNumber()` before it will answer at all.
+///
+/// It occupies the same guid bits 24–47 that a creature's template entry does, because vmangos
+/// composes a pet with `Object::_Create(guidlow, petNumber, HIGHGUID_PET)` (`Objects/Pet.cpp:2250`,
+/// from `Pet::Create(guidlow, pos, cinfo, petNumber)`): the shared `_Create`'s `entry` parameter is
+/// fed the pet number, **not** `cinfo->entry`. That is why [`entry`] answers `None` for this family —
+/// the slot is occupied, just not by a template id, and a `CMSG_CREATURE_QUERY` for it can only miss.
+pub fn pet_number(guid: u64) -> Option<u32> {
+    is_pet(guid).then_some(((guid >> 24) & 0xFF_FFFF) as u32)
 }
 
 /// A (non-zero) item or container guid (`IsItem` — containers included). Items carry **no** entry
@@ -55,9 +75,9 @@ pub fn is_transport(guid: u64) -> bool {
 /// The embedded template entry, for the guid families that carry one. Two different layouts, both
 /// VERIFIED against vmangos:
 ///
-/// - Creatures/pets/GameObjects/**elevators** (`HIGH_UNIT`/`HIGH_PET`/`HIGH_GAMEOBJECT`/
+/// - Creatures/GameObjects/**elevators** (`HIGH_UNIT`/`HIGH_GAMEOBJECT`/
 ///   `HIGH_TRANSPORT`) use the standard `[high:16][entry:24][counter:24]` layout — vmangos's
-///   class-internal `HasEntry` switch returns `true` for all four (`ObjectGuid.h:223-240`), and an
+///   class-internal `HasEntry` switch returns `true` for these (`ObjectGuid.h:223-240`), and an
 ///   elevator composes exactly like an ordinary GameObject: `GameObject::Create` calls
 ///   `Object::_Create(guidlow, goinfo->id, HIGHGUID_TRANSPORT)` for a `GAMEOBJECT_TYPE_TRANSPORT`
 ///   template (`Objects/GameObject.cpp:207`, reached via `ElevatorTransport::Create` →
@@ -77,13 +97,13 @@ pub fn is_transport(guid: u64) -> bool {
 ///   id — none exist today, but the 32-bit mask is what vmangos actually does, so that's what we do.
 ///
 /// `None` for players/items/corpses/dynamic objects (no entry part, and not composed like a transport
-/// either).
+/// either) — and `None` for **pets**, whose entry-shaped slot holds a pet number instead
+/// ([`pet_number`]): `HasEntry` is `true` for the family, but what vmangos stores there is not a
+/// template id, so answering with it would hand every caller a creature entry that cannot resolve.
 pub fn entry(guid: u64) -> Option<u32> {
     match high(guid) {
         HIGH_MO_TRANSPORT => Some((guid & 0xFFFF_FFFF) as u32),
-        HIGH_UNIT | HIGH_PET | HIGH_GAMEOBJECT | HIGH_TRANSPORT => {
-            Some(((guid >> 24) & 0xFF_FFFF) as u32)
-        }
+        HIGH_UNIT | HIGH_GAMEOBJECT | HIGH_TRANSPORT => Some(((guid >> 24) & 0xFF_FFFF) as u32),
         _ => None,
     }
 }
@@ -137,8 +157,22 @@ mod tests {
 
     #[test]
     fn entry_masks_to_24_bits() {
-        let g = compose(HIGH_PET, 0xFF_FFFF, 0xFF_FFFF);
+        let g = compose(HIGH_UNIT, 0xFF_FFFF, 0xFF_FFFF);
         assert_eq!(entry(g), Some(0xFF_FFFF));
+    }
+
+    /// A pet's entry-shaped slot is its PET NUMBER — `Pet::Create` feeds `_Create`'s `entry`
+    /// parameter `petNumber`, not `cinfo->entry` (`Objects/Pet.cpp:2250`). Asking
+    /// `CMSG_CREATURE_QUERY` for it is what left NPC-summoned pets nameless, so `entry` must refuse.
+    #[test]
+    fn a_pet_carries_a_pet_number_not_a_template_entry() {
+        let g = compose(HIGH_PET, 137, 4242);
+        assert!(is_pet(g));
+        assert!(is_creature_or_pet(g));
+        assert_eq!(pet_number(g), Some(137));
+        assert_eq!(entry(g), None, "a pet's slot is not a template entry");
+        // ...and only a pet answers `pet_number`.
+        assert_eq!(pet_number(compose(HIGH_UNIT, 137, 4242)), None);
     }
 
     /// An elevator (`HIGHGUID_TRANSPORT`, 0xF120) composes exactly like an ordinary GameObject —

@@ -53,6 +53,10 @@ cosmic-text = "0.16"
 fontdb = "0.23"
 kira = { version = "0.12", default-features = false, features = ["cpal", "mp3", "wav", "pcm", "adpcm"] }
 mint = "0.5"
+# The gossip greeting is a weighted random DRAW per menu-open, not a fixed pick (wow-re
+# `gossip-npctext-law.md` — the reference re-rolls in its gossip handler), so the app needs a uniform
+# source. Pinned to 0.8: the version `benilla-srp` already depends on, so this adds no crate.
+rand = "0.8"
 
 # macOS: drive a native NSCursor for a crisp hardware cursor. winit drives the cursor via AppKit
 # cursor-rects, which our continuous Metal render loop doesn't honor on mouse-move (custom cursor /

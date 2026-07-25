@@ -11,6 +11,12 @@ pub const CMSG_CHAR_DELETE: u16 = 0x0038;
 pub const SMSG_CHAR_DELETE: u16 = 0x003C;
 pub const SMSG_NAME_QUERY_RESPONSE: u16 = 0x0051; // 81
 pub const SMSG_CREATURE_QUERY_RESPONSE: u16 = 0x0061; // 97
+/// VERIFIED vmangos `Opcodes_1_12_1.h:86`: 83. Answers `CMSG_PET_NAME_QUERY` — the only query that
+/// can name a pet, whose guid carries no template entry ([`crate::guid::pet_number`]). Body: `u32
+/// petNumber`, cstring name, `u32 nameTimestamp` (`Server/Packets/Pet.cpp:79-84`). The server simply
+/// does not reply when the guid is not a live pet bearing that number (`PetHandler.cpp:190-192`), so
+/// there is no "unknown" answer shape to model.
+pub const SMSG_PET_NAME_QUERY_RESPONSE: u16 = 0x0053; // 83
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 95 (decision 0236). Answers `CMSG_GAMEOBJECT_QUERY`; body
 /// (`GameObjectQueryInfo`) in [`super::gameobject`].
 pub const SMSG_GAMEOBJECT_QUERY_RESPONSE: u16 = 0x005F; // 95
@@ -49,6 +55,12 @@ pub const SMSG_AUTH_RESPONSE: u16 = 0x01EE;
 /// a server at the handshake rather than entering a 30-second kick/reconnect cycle.
 pub const SMSG_WARDEN_DATA: u16 = 0x02E6;
 pub const SMSG_COMPRESSED_UPDATE_OBJECT: u16 = 0x01F6;
+/// A zlib envelope holding a **batch of whole movement packets** (763, VERIFIED vmangos
+/// `Opcodes_1_12_1.h`). Not an edge case: vmangos moves a session onto this carrier the moment it
+/// has pushed 300 movement packets to it inside ten seconds (`Compression.Movement.Count`), which
+/// one nearby player moving at frame cadence reaches in about five. See
+/// [`super::ServerPacket::CompressedMoves`].
+pub const SMSG_COMPRESSED_MOVES: u16 = 0x02FB;
 pub const SMSG_LOGIN_VERIFY_WORLD: u16 = 0x0236;
 // The server-pushed sound trio (1.12.1 values VERIFIED vmangos `Opcodes_1_12_1.h`:
 // 631/632/722).
@@ -187,6 +199,9 @@ pub const CMSG_PLAYER_LOGIN: u16 = 0x003D;
 pub const CMSG_LOGOUT_REQUEST: u16 = 0x004B;
 pub const CMSG_NAME_QUERY: u16 = 0x0050; // 80
 pub const CMSG_CREATURE_QUERY: u16 = 0x0060; // 96
+/// VERIFIED vmangos `Opcodes_1_12_1.h:85`: 82. Body in [`super::client::pet_name_query`]. Answered
+/// by [`SMSG_PET_NAME_QUERY_RESPONSE`].
+pub const CMSG_PET_NAME_QUERY: u16 = 0x0052; // 82
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in
 /// [`super::gameobject::gameobject_query`] — the ask-once GO template lookup, identical shape to
 /// `CMSG_CREATURE_QUERY`.
@@ -608,3 +623,11 @@ pub const MSG_QUERY_NEXT_MAIL_TIME: u16 = 0x0284; // 644
 /// One `u32` (always 0) — sent when a mail *arrives* (instant for text-only, on the delivery
 /// timer's expiry otherwise).
 pub const SMSG_RECEIVED_MAIL: u16 = 0x0285; // 645
+
+// The world-state table (VERIFIED both ways: vmangos `Opcodes_1_12_1.h` 706-707, and wow-re's read
+// of the reference's own handler `0x48f690`, whose registration at `0x48f515-0x48f52f` selects these
+// two arms as the ONLY writers of the table setter `0x4c5870`). Bodies in
+// [`super::world_state`]. Backs the NPC-text `$<n>w`/`$<n>e` tokens today; the BG/PvP scoreboard
+// later.
+pub const SMSG_INIT_WORLD_STATES: u16 = 0x02C2; // 706
+pub const SMSG_UPDATE_WORLD_STATE: u16 = 0x02C3; // 707

@@ -265,6 +265,17 @@ pub fn creature_query(entry: u32, guid: u64) -> Vec<u8> {
     body
 }
 
+/// Body of a `CMSG_PET_NAME_QUERY`: the pet's **number** then its full guid (VERIFIED vmangos
+/// `QueryPetName::ReadFromWorldPacket`, `Server/Packets/Pet.cpp:3-7`). Both values come out of the
+/// pet's own guid ([`crate::guid::pet_number`]); the server answers only when the number agrees with
+/// the live pet's `CharmInfo` (`PetHandler.cpp:190-192`), and stays silent otherwise.
+pub fn pet_name_query(pet_number: u32, guid: u64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12);
+    body.extend_from_slice(&pet_number.to_le_bytes());
+    body.extend_from_slice(&guid.to_le_bytes());
+    body
+}
+
 /// Body of a movement message (`MSG_MOVE_*`) — a `MovementInfo`.
 pub fn movement(info: &MovementInfo) -> Vec<u8> {
     let mut body = Vec::with_capacity(28);

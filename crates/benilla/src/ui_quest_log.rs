@@ -322,7 +322,7 @@ fn build_detail(
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
-    player: (&str, u8),
+    macros: &crate::npc_text::MacroContext,
 ) -> QuestLogDetail {
     let (required_money, reward_money) = money_split(template.money);
     let rewards = template
@@ -339,10 +339,10 @@ fn build_detail(
         .collect();
 
     QuestLogDetail {
-        // The wire delivers quest text with its chat macros ($N/$B/$G) un-expanded; the client
-        // substitutes (crate::npc_text — the 0109 look fix's shared mechanism).
-        description: crate::npc_text::substitute(&template.details, player.0, player.1),
-        objectives_text: crate::npc_text::substitute(&template.objectives_text, player.0, player.1),
+        // The wire delivers quest text with its chat macros ($N/$B/$G/$<n>w) un-expanded; the
+        // client substitutes (crate::npc_text — the 0109 look fix's shared mechanism).
+        description: crate::npc_text::substitute(&template.details, macros),
+        objectives_text: crate::npc_text::substitute(&template.objectives_text, macros),
         required_money,
         reward_money,
         choices,
@@ -396,6 +396,7 @@ fn feed_quest_log(
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     header_names: Option<Res<QuestHeaderNamesRes>>,
+    states: Res<crate::world_state::WorldStates>,
     mut last: Local<QuestLogState>,
     mut prior_quest_ids: Local<Option<HashSet<u32>>>,
 ) {
@@ -526,8 +527,11 @@ fn feed_quest_log(
     quest_log.entry_slots = entry_slots;
     quest_log.header_keys = header_keys;
 
-    let (player_name, player_gender) =
-        crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let macros = crate::npc_text::MacroContext {
+        subject: player.as_ref(),
+        states: &states,
+    };
     let sel = script.quest_log_selection() as usize;
     let detail = sel
         .checked_sub(1)
@@ -535,15 +539,9 @@ fn feed_quest_log(
         .filter(|e| !e.is_header)
         .map(|e| e.quest_id)
         .and_then(|quest_id| {
-            quest_log.template(quest_id, &commands).map(|t| {
-                build_detail(
-                    t,
-                    &mut items,
-                    icons.as_deref(),
-                    &commands,
-                    (&player_name, player_gender),
-                )
-            })
+            quest_log
+                .template(quest_id, &commands)
+                .map(|t| build_detail(t, &mut items, icons.as_deref(), &commands, &macros))
         });
 
     let fresh = QuestLogState {

@@ -1,6 +1,6 @@
 # benilla
 
-[![Discord](https://img.shields.io/badge/chat-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/8r5kUgu9ts)
+[![Discord](https://img.shields.io/badge/chat-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/wJSJx467G4)
 [![YouTube](https://img.shields.io/badge/devlog-YouTube-FF0000?logo=youtube)](https://www.youtube.com/playlist?list=PLdCnpZNKxyb8)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
@@ -58,8 +58,12 @@ Credentials go in at the login screen, or set `WOW_USER` / `WOW_PASS` to skip it
 
 benilla is a solo project and isn't taking pull requests for now. Bug reports and questions are
 welcome — open an issue, or bring them to Discord. Comments throughout the code cite numbered
-decision records from a private development log; the citations won't resolve here, but the
-reasoning they carry is kept in the comments themselves.
+decision records and method notes from a private development log; the citations won't resolve
+here, but the reasoning they carry is kept in the comments themselves.
+
+Development happens in that private tree, and this repo is its published export: **each commit here
+is one squashed snapshot** of everything that landed since the last one, titled with what changed —
+not an atomic change, which is why they're large and why there are few of them.
 
 ## Acknowledgements
 

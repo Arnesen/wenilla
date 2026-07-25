@@ -72,6 +72,16 @@ pub struct RegionHandle {
     generation: u32,
 }
 
+impl RegionHandle {
+    /// The handle's identity as one integer — index and generation packed — for the layout change
+    /// gate's fingerprint (`script::layout::InputFingerprint`), which must notice a region being
+    /// swapped for a different one at the same map size.
+    #[inline]
+    pub(crate) fn fingerprint_bits(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // A hand-rolled generational arena (no external deps — a slotmap in miniature)
 // ─────────────────────────────────────────────────────────────────────────────────────────────

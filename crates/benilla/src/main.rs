@@ -121,6 +121,7 @@ mod wdl;
 mod weather;
 mod wmo_portal;
 mod world_map;
+mod world_state;
 
 use assets::AssetPlugin;
 use avian3d::prelude::*;

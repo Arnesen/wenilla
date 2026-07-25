@@ -23,6 +23,10 @@ use crate::dbc::{i32_at, parse, u32_at};
 use crate::Chain;
 
 const ITEM_SUB_CLASS: &str = "DBFilesClient\\ItemSubClass.dbc";
+/// The group-name table read *before* [`ITEM_SUB_CLASS`] whenever a whole subclass **mask** needs a
+/// name — see [`ItemSubClassCatalog::requirement_name`]. 11 fields (verified by loading the shipped
+/// file): `ClassID@0`, `Mask@1`, `Name_Lang@2..9`, `NameFlags@10`.
+const ITEM_SUB_CLASS_MASK: &str = "DBFilesClient\\ItemSubClassMask.dbc";
 
 /// One row's tooltip-relevant fields.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +48,21 @@ pub struct ItemSubClassCatalog {
     /// when non-empty, else **DisplayName** (`+0x28`, column 10). "One-Handed Swords" over
     /// "Sword"; plain "Cloth" where no verbose form exists.
     names: HashMap<(u32, u32), String>,
+    /// **DisplayName** alone (column 10) — the SINGULAR spelling. The two are not
+    /// interchangeable, and the reference picks between them by call site: the cast-fail line
+    /// `SPELL_FAILED_EQUIPPED_ITEM_CLASS` reads "Must have a **Wand** equipped" where the spell
+    /// tooltip's requirement line reads "Requires **Wands**" — both pinned by reference captures
+    /// of the same spell (Shoot 5019: class 2, submask bit 19).
+    display_names: HashMap<(u32, u32), String>,
+    /// Every `(class, subclass)` key in **file order** — the order the reference walks the rows in,
+    /// which decides both the comma-join's order and which row counts as "first"
+    /// ([`Self::requirement_name`] / [`Self::requirement_display_name`]).
+    order: Vec<(u32, u32)>,
+    /// `ItemSubClassMask.dbc`: `(classId, mask, name)` — the group names that stand in for a whole
+    /// mask ("Melee Weapon" for the eleven melee weapon subclasses). Only 3 rows ship. Folded in
+    /// here rather than given its own catalog because it is stage 1 of one lookup, not a second
+    /// vocabulary.
+    mask_groups: Vec<(u32, u32, String)>,
 }
 
 impl ItemSubClassCatalog {
@@ -61,6 +80,73 @@ impl ItemSubClassCatalog {
     /// crafting book's group header text; `None` for an unknown key.
     pub fn name(&self, class: u32, subclass: u32) -> Option<&str> {
         self.names.get(&(class, subclass)).map(String::as_str)
+    }
+
+    /// The SINGULAR subclass name (DisplayName only — [`Self::display_names`]); `None` for an
+    /// unknown key or an empty column.
+    pub fn display_name(&self, class: u32, subclass: u32) -> Option<&str> {
+        self.display_names
+            .get(&(class, subclass))
+            .map(String::as_str)
+    }
+
+    /// What a spell's equipped-item requirement is *called*, for `(class, subclass_mask)` — the
+    /// **plural/verbose** spelling the spell tooltip prints ("Requires Wands", "Requires Melee
+    /// Weapon"). `None` when nothing names it.
+    ///
+    /// The reference's law is two-stage (wow-re `tooltip-content-law.md` §3-EQUIPITEM, carved from
+    /// `0x6e2380` and its two call sites), and both stages matter for a mask with several bits set:
+    ///
+    /// 1. `ItemSubClassMask.dbc` on **exact whole-mask equality** — not "any bit", the entire mask.
+    ///    Three rows ship: `{2, 0x2a5f3, "Melee Weapon"}`, `{4, 0x60, "Shield"}`,
+    ///    `{2, 0x4000c, "Ranged Weapon"}`. This is why Parry (`0x2a5f3` = eleven melee subclasses)
+    ///    prints one group name rather than eleven weapon types.
+    /// 2. Otherwise every subclass the mask names, comma-joined in file order, each preferring
+    ///    VerboseName with a DisplayName fallback ([`Self::name`]).
+    ///
+    /// Only when stage 2 also finds nothing is the line absent. Note `0x6e2380` reads **only**
+    /// ItemSubClass.dbc — there is no ItemClass.dbc fallback on either path.
+    pub fn requirement_name(&self, class: u32, mask: u32) -> Option<String> {
+        self.mask_group(class, mask)
+            .map(str::to_string)
+            .or_else(|| {
+                let joined = self
+                    .masked(class, mask)
+                    .filter_map(|key| self.names.get(&key))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (!joined.is_empty()).then_some(joined)
+            })
+    }
+
+    /// The **singular** spelling of the same requirement — what the `SPELL_FAILED_EQUIPPED_ITEM_CLASS`
+    /// cast-fail line says ("Must have a Wand equipped"). Same stage 1, but stage 2 takes only the
+    /// FIRST matching subclass and its DisplayName: never a join, never VerboseName.
+    pub fn requirement_display_name(&self, class: u32, mask: u32) -> Option<String> {
+        self.mask_group(class, mask)
+            .map(str::to_string)
+            .or_else(|| {
+                self.masked(class, mask)
+                    .find_map(|key| self.display_names.get(&key))
+                    .cloned()
+            })
+    }
+
+    /// Stage 1: the `ItemSubClassMask.dbc` group name for an EXACT `(class, mask)` pair.
+    fn mask_group(&self, class: u32, mask: u32) -> Option<&str> {
+        self.mask_groups
+            .iter()
+            .find(|(c, m, _)| *c == class && *m == mask)
+            .map(|(_, _, name)| name.as_str())
+    }
+
+    /// The catalog's keys for `class` whose subclass bit is set in `mask`, in file order.
+    fn masked(&self, class: u32, mask: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.order
+            .iter()
+            .copied()
+            .filter(move |&(c, sub)| c == class && sub < 32 && mask & (1 << sub) != 0)
     }
 
     /// Whether the type name is suppressed (displayFlags bit 0).
@@ -115,18 +201,52 @@ fn item_sub_class_schema() -> Schema {
     s
 }
 
-/// Load ItemSubClass.dbc from the patch chain.
+fn item_sub_class_mask_schema() -> Schema {
+    let mut s = Schema::new("ItemSubClassMask");
+    s.add_field(SchemaField::new("ClassID", FieldType::UInt32));
+    s.add_field(SchemaField::new("Mask", FieldType::UInt32));
+    for i in 0..8 {
+        s.add_field(SchemaField::new(format!("Name{i}"), FieldType::String));
+    }
+    s.add_field(SchemaField::new("NameFlags", FieldType::UInt32));
+    s
+}
+
+/// Load ItemSubClass.dbc — plus the ItemSubClassMask.dbc group names, which are stage 1 of the same
+/// lookup ([`ItemSubClassCatalog::requirement_name`]) — from the patch chain.
 pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
     let bytes = chain
         .read_file(ITEM_SUB_CLASS)
         .with_context(|| format!("reading {ITEM_SUB_CLASS}"))?;
     let rs = parse(&bytes, item_sub_class_schema(), "ItemSubClass")?;
+    let mask_bytes = chain
+        .read_file(ITEM_SUB_CLASS_MASK)
+        .with_context(|| format!("reading {ITEM_SUB_CLASS_MASK}"))?;
+    let mask_rs = parse(
+        &mask_bytes,
+        item_sub_class_mask_schema(),
+        "ItemSubClassMask",
+    )?;
+    let mut mask_groups = Vec::with_capacity(mask_rs.records().len());
+    for r in mask_rs.records() {
+        let (Some(class), Some(mask), Some(name)) = (
+            u32_at(r, 0),
+            u32_at(r, 1),
+            crate::dbc::str_at(&mask_rs, r, 2).filter(|n| !n.is_empty()),
+        ) else {
+            continue;
+        };
+        mask_groups.push((class, mask, name));
+    }
     let mut rows = HashMap::with_capacity(rs.records().len());
     let mut names = HashMap::with_capacity(rs.records().len());
+    let mut display_names = HashMap::with_capacity(rs.records().len());
+    let mut order = Vec::with_capacity(rs.records().len());
     for r in rs.records() {
         let (Some(class), Some(subclass)) = (u32_at(r, 0), u32_at(r, 1)) else {
             continue;
         };
+        order.push((class, subclass));
         rows.insert(
             (class, subclass),
             ItemSubClassInfo {
@@ -137,14 +257,24 @@ pub fn load_item_sub_classes(chain: &mut Chain) -> Result<ItemSubClassCatalog> {
         );
         // VerboseName enUS (col 19) first, DisplayName enUS (col 10) fallback — the struct doc's
         // byte law. Empty both → no name row (the header renders blank, faithfully unlikely).
+        let display = crate::dbc::str_at(&rs, r, 10).filter(|n| !n.is_empty());
         let name = crate::dbc::str_at(&rs, r, 19)
             .filter(|n| !n.is_empty())
-            .or_else(|| crate::dbc::str_at(&rs, r, 10).filter(|n| !n.is_empty()));
+            .or_else(|| display.clone());
         if let Some(name) = name {
             names.insert((class, subclass), name);
         }
+        if let Some(display) = display {
+            display_names.insert((class, subclass), display);
+        }
     }
-    Ok(ItemSubClassCatalog { rows, names })
+    Ok(ItemSubClassCatalog {
+        rows,
+        names,
+        display_names,
+        order,
+        mask_groups,
+    })
 }
 
 #[cfg(test)]
@@ -171,6 +301,59 @@ mod tests {
         );
         assert_eq!(cat.name(0, 0), Some("Consumable"));
         assert_eq!(cat.name(99, 0), None);
+    }
+
+    /// The two-stage equipped-item requirement law (§3-EQUIPITEM) against the real 5875 DBCs —
+    /// including the multi-bit case we used to give up on. Skips without client data.
+    #[test]
+    fn real_requirement_names_take_the_group_before_the_join() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_item_sub_classes(&mut chain).expect("load the two DBCs");
+
+        // Stage 1 — the whole mask has a name of its own. All three shipped rows.
+        assert_eq!(
+            cat.requirement_name(2, 0x0002_a5f3).as_deref(),
+            Some("Melee Weapon"),
+            "Parry's eleven melee subclasses are ONE group name, not a join"
+        );
+        assert_eq!(cat.requirement_name(4, 0x60).as_deref(), Some("Shield"));
+        assert_eq!(
+            cat.requirement_name(2, 0x0004_000c).as_deref(),
+            Some("Ranged Weapon")
+        );
+        // The group name is the same string in the singular arm — the stages share stage 1.
+        assert_eq!(
+            cat.requirement_display_name(2, 0x0002_a5f3).as_deref(),
+            Some("Melee Weapon")
+        );
+
+        // Stage 2, one bit — the two spellings diverge (Shoot 5019: class 2, bit 19).
+        assert_eq!(cat.requirement_name(2, 1 << 19).as_deref(), Some("Wands"));
+        assert_eq!(
+            cat.requirement_display_name(2, 1 << 19).as_deref(),
+            Some("Wand")
+        );
+
+        // Stage 2, several bits with no group row — joined for the tooltip, first-only for the
+        // cast-fail line. Daggers (15) + fist weapons (13) is not a shipped group.
+        let mask = (1 << 13) | (1 << 15);
+        assert_eq!(
+            cat.requirement_name(2, mask).as_deref(),
+            Some("Fist Weapons, Daggers")
+        );
+        assert_eq!(
+            cat.requirement_display_name(2, mask).as_deref(),
+            Some("Fist Weapon")
+        );
+
+        // Nothing to name.
+        assert_eq!(cat.requirement_name(2, 0), None);
+        assert_eq!(cat.requirement_name(99, 1), None);
     }
 
     /// Data-gated on the real 5875 DBC. Prints the live prereq/postreq and displayFlags rows so

@@ -191,15 +191,15 @@ pub(super) fn object_move(
 
 /// A relayed player movement packet (`MSG_MOVE_*`): the mover's authoritative pose + live move
 /// flags. The reference SCHEDULES a remote's apply (decision 0601, wow-re
-/// `remote-apply-timing.md`): the packet's server timestamp maps to a client fire-time
-/// ([`crate::net::motion::RelayClock`]); an already-due move applies now, a future one queues on
-/// the unit and fires in `drain_pending_moves` — the dead-reckon covering the mover's own
-/// timeline in between, which is what kills the arrival-jitter snap. `WOW_REMOTE_SNAP=1`
-/// restores raw apply-at-arrival for an A/B.
+/// `remote-apply-timing.md`): the mover's own replay chain gives the packet a client fire-time
+/// (decision 0615, [`crate::net::motion::RelayMove`] → `RelayChain::schedule`); an already-due move
+/// applies now, a future one queues on the unit and fires in `drain_pending_moves` — the dead-reckon
+/// covering the mover's own timeline in between, which is what kills the arrival-jitter snap.
+/// `WOW_REMOTE_SNAP=1` restores raw apply-at-arrival for an A/B.
 #[allow(clippy::too_many_arguments)] // the wire fields + the apply context, one per concern
 pub(super) fn unit_move(
     guid: u64,
-    ev: crate::net::motion::PendingMove,
+    mv: crate::net::motion::RelayMove,
     now_ms: f64,
     commands: &mut Commands,
     index: &GuidIndex,
@@ -208,35 +208,69 @@ pub(super) fn unit_move(
     transforms: &mut Query<&mut Transform>,
     landings: &mut MessageWriter<crate::creature_anim::HardLanding>,
 ) {
-    use crate::net::motion::{apply_move, arrival_snap};
+    use crate::net::motion::{apply_move, arrival_snap, trace_relay, PendingMove, RelayOutcome};
     // A relayed move belongs to another player; never let one drive our own avatar (the
     // controller owns it, and the server doesn't echo our moves back anyway).
     if self_guid.0 == Some(guid) {
+        trace_relay(
+            guid,
+            &mv,
+            &Default::default(),
+            now_ms,
+            0,
+            RelayOutcome::SelfMover,
+        );
         return;
     }
-    if let Some(&e) = index.0.get(&guid) {
+    let Some(&e) = index.0.get(&guid) else {
+        // No entity for this guid — the packet changes nothing. Traced rather than dropped in
+        // silence: a mover that keeps running while these pile up is a streaming bug, not a replay
+        // one, and the two look identical from the outside (decision 0619).
+        trace_relay(
+            guid,
+            &mv,
+            &Default::default(),
+            now_ms,
+            0,
+            RelayOutcome::Unknown,
+        );
+        return;
+    };
+    {
         // The server is authoritative now, not any creature path — drop a stale spline.
         commands.entity(e).remove::<Spline>();
         if let Ok(mut rm) = remote_motion.get_mut(e) {
-            if arrival_snap() || ev.fire_ms <= now_ms {
-                apply_move(e, &ev, &mut rm, commands, landings);
+            // The chain reads the mover's state as it stands BEFORE this move applies — the
+            // reference times the packet off the live `[esi+0x40]`/`[esi+0x150]`.
+            let (flags, queue_empty) = (rm.flags, rm.pending.is_empty());
+            let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, flags, queue_empty);
+            let at_arrival = arrival_snap() || rm.fires_at_arrival(fire_ms, now_ms);
+            trace_relay(
+                guid,
+                &mv,
+                &rm.relay,
+                now_ms,
+                rm.pending.len(),
+                if at_arrival {
+                    RelayOutcome::Now
+                } else {
+                    RelayOutcome::Queued
+                },
+            );
+            if at_arrival {
+                apply_move(e, &mv, &mut rm, now_ms, commands, landings);
             } else {
-                // Fire-times stay ascending per unit (the wire is ordered; a clock-estimate
-                // wobble could reorder them — clamp to the tail so the drain never stalls).
-                let fire_ms = rm
-                    .pending
-                    .back()
-                    .map_or(ev.fire_ms, |b| b.fire_ms.max(ev.fire_ms));
-                rm.pending
-                    .push_back(crate::net::motion::PendingMove { fire_ms, ..ev });
+                // Fire-times are monotone per unit by construction (a chained fire never lands
+                // before its predecessor — decision 0615), so the queue stays ordered.
+                rm.pending.push_back(PendingMove { fire_ms, mv });
             }
         } else {
-            // First move for this unit: apply immediately (scheduling starts with the next
-            // packet) and place it this frame — the component insert is deferred, so the
-            // extrapolator won't see it until next frame.
+            // First move for this unit: apply immediately (the chain seeds on it — its own fire
+            // is arrival — and paces from the next packet on) and place it this frame; the
+            // component insert is deferred, so the extrapolator won't see it until next frame.
             let mut rm = RemoteMotion {
-                wow_pos: ev.position,
-                orientation: ev.orientation,
+                wow_pos: mv.position,
+                orientation: mv.orientation,
                 flags: 0,
                 pitch: 0.0,
                 speed: 0.0,
@@ -244,9 +278,15 @@ pub(super) fn unit_move(
                 jump_xy_vel: [0.0; 2],
                 fall_start_z: None,
                 pending: std::collections::VecDeque::new(),
+                relay: Default::default(),
+                last_apply_ms: now_ms,
+                last_apply_pos: mv.position,
             };
-            apply_move(e, &ev, &mut rm, commands, landings);
-            write_pose(transforms, e, ev.position, ev.orientation);
+            let fire_ms = rm.relay.schedule(mv.wire_ms, now_ms, 0, true);
+            debug_assert_eq!(fire_ms, now_ms, "a seeding packet fires at arrival");
+            trace_relay(guid, &mv, &rm.relay, now_ms, 0, RelayOutcome::Seed);
+            apply_move(e, &mv, &mut rm, now_ms, commands, landings);
+            write_pose(transforms, e, mv.position, mv.orientation);
             commands.entity(e).insert(rm);
         }
     }

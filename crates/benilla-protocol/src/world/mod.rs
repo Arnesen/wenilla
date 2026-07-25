@@ -79,8 +79,16 @@ pub(super) fn send_packet(
     if let Some(e) = encrypter {
         e.encrypt(&mut header);
     }
+    // **One write, not two** (decision 0617). Header-then-body was a self-inflicted Nagle stall: the
+    // 6-byte header goes out as its own segment, and the body — small, and now behind unacknowledged
+    // data — is held by the kernel until the server ACKs it. With Nagle now off (see
+    // [`WorldSession::connect`]) that stall is gone either way, but two segments per packet is still
+    // two syscalls and two headers for a ≤40-byte message, and the server cannot parse the packet
+    // until both land. Joined here so one movement report is one segment.
+    let mut packet = Vec::with_capacity(header.len() + body.len());
+    packet.extend_from_slice(&header);
+    packet.extend_from_slice(body);
     stream
-        .write_all(&header)
-        .and_then(|()| stream.write_all(body))
+        .write_all(&packet)
         .map_err(|e| anyhow!("sending opcode {opcode:#x}: {e}"))
 }

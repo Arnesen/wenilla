@@ -34,6 +34,42 @@ use crossbeam_channel::{Receiver, Sender};
 
 use super::{CharRequest, ChatKind, ClientCommand};
 
+/// **The inbound census** — every packet the read thread pulls off the world socket, whatever its
+/// opcode, and the wall-clock of the most recent one (unix ms). Two numbers, one job: telling a
+/// *silent server* apart from a *dead socket* (decision 0621).
+///
+/// When a remote mover freezes into a dead-reckoned runaway, the client cannot otherwise say which
+/// of those it is looking at — and they are opposite bugs. If these keep climbing while the mover
+/// starves, the connection is healthy and the server simply stopped relaying that unit; if they
+/// freeze with it, the whole stream died without anyone noticing. Read by the runaway watch, which
+/// prints them on every line ([`crate::net::motion`]).
+pub(crate) static INBOUND_PACKETS: AtomicU64 = AtomicU64::new(0);
+static LAST_INBOUND_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Count one packet off the wire. Called for every `poll()` return — parsed or skipped, since a
+/// packet we could not decode still proves the socket is alive.
+fn note_inbound() {
+    INBOUND_PACKETS.fetch_add(1, Ordering::Relaxed);
+    LAST_INBOUND_UNIX_MS.store(unix_ms(), Ordering::Relaxed);
+}
+
+/// Wall-clock unix milliseconds — the one clock two processes share (the trace header's `t0` is in
+/// the same units, so a mover's file and an observer's file line up).
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// `(packets seen, ms since the last one)` — `None` for the age until a first packet has landed.
+pub(crate) fn inbound_census() -> (u64, Option<u64>) {
+    let last = LAST_INBOUND_UNIX_MS.load(Ordering::Relaxed);
+    (
+        INBOUND_PACKETS.load(Ordering::Relaxed),
+        (last != 0).then(|| unix_ms().saturating_sub(last)),
+    )
+}
+
 /// One submitted login attempt (decision 0539): the credentials, plus the abandon generation at
 /// submit time — the thread discards the attempt at its next stage boundary if the shared counter
 /// has moved (a Cancel bumps it). A counter, not a flag: a flag cleared by the *next* submit would
@@ -399,10 +435,28 @@ fn run(
     // aligned); a long run of consecutive skips means the stream desynced — guard against a busy spin.
     let (mut skip_run, mut skip_logged) = (0u32, 0u32);
     loop {
-        match reader.poll()? {
-            Poll::Events(evs) => {
+        let polled = reader.poll()?;
+        note_inbound(); // one packet off the wire, parsed or not — the census counts liveness
+        match polled {
+            Poll::Events { opcode, events } => {
                 skip_run = 0;
-                for ev in evs {
+                // The full inbound opcode stream (tag `in`, decision 0624) — the last place a
+                // packet could hide. `skip` covers what failed to parse and `rly` covers what
+                // reached the mover replay; between them sits the packet that parsed into *no*
+                // event, which no instrument could see. With this line every packet off the wire
+                // is accounted for by name, so "the server stopped relaying" and "we dropped it on
+                // the floor" are finally different pictures instead of the same silence.
+                if crate::dbg_trace::enabled() {
+                    crate::dbg_trace::line(
+                        "in",
+                        &format!(
+                            "{opcode:#06x} {} ev={}",
+                            benilla_protocol::messages::opcode_name(opcode).unwrap_or("?"),
+                            events.len()
+                        ),
+                    );
+                }
+                for ev in events {
                     // A confirmed logout ends the cycle *after* the app hears about it.
                     let logged_out = matches!(ev, SessionEvent::LoggedOut);
                     // Receiver dropped → the app exited; end the thread cleanly.
@@ -416,6 +470,14 @@ fn run(
             }
             Poll::Skipped { opcode, reason } => {
                 skip_run += 1;
+                // **Every** skip, uncapped, into the trace (tag `skip`, decision 0623). A packet that
+                // arrives and fails to parse is indistinguishable, from outside, from one that never
+                // arrived: the inbound census counts it either way, and no `rly` line is emitted
+                // either way. That ambiguity is what made a starving remote mover unattributable —
+                // so the skips get their own line, with the opcode that died.
+                if crate::dbg_trace::enabled() {
+                    crate::dbg_trace::line("skip", &format!("opcode={opcode:#06x} {reason}"));
+                }
                 // Log which packet we dropped (opcode + message name), capped so it can't itself
                 // flood — enough to capture a post-teleport burst of unparseable object updates.
                 if skip_logged < 40 {
@@ -492,6 +554,12 @@ fn writer_loop(
             recv(cmd_rx) -> cmd => {
                 let Ok(cmd) = cmd else { return }; // all app senders dropped → app exit
                 let Some(w) = writer.as_mut() else {
+                    // No live writer: the session is gone and this command evaporates. Traced
+                    // unconditionally — this is the state in which a client keeps *deciding* to send
+                    // movement (`snd` lines) that no one will ever receive (decision 0621).
+                    if crate::dbg_trace::enabled() {
+                        crate::dbg_trace::line("wire", "DROPPED — no live session");
+                    }
                     if warned < SEND_WARN_CAP {
                         bevy::log::warn!("net: dropping command — not connected");
                         warned += 1;
@@ -585,6 +653,9 @@ fn writer_loop(
                     ClientCommand::PlayedTime => w.played_time(),
                     ClientCommand::NameQuery { guid } => w.name_query(guid),
                     ClientCommand::CreatureQuery { entry, guid } => w.creature_query(entry, guid),
+                    ClientCommand::PetNameQuery { pet_number, guid } => {
+                        w.pet_name_query(pet_number, guid)
+                    }
                     ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
                     ClientCommand::UseItem { bag_index, slot } => w.use_item(bag_index, slot, 0),
                     ClientCommand::AutoEquipItem { bag_index, slot } => {
@@ -795,7 +866,16 @@ fn writer_loop(
                         nodes,
                     } => w.activate_taxi_express(guid, total_cost, &nodes),
                 };
+                // **What actually reached the socket** (tag `wire`, decision 0621). The controller's
+                // `snd` line is written before the command is even queued, so it records a decision,
+                // not a transmission — a client whose session died goes on producing `snd` lines into
+                // a dead channel forever, which is exactly the ambiguity that cost us a hunt. Only
+                // failures are traced: a silent `wire` log beside a busy `snd` log means every packet
+                // went out.
                 if let Err(e) = result {
+                    if crate::dbg_trace::enabled() {
+                        crate::dbg_trace::line("wire", &format!("SEND FAILED: {e:#}"));
+                    }
                     if warned < SEND_WARN_CAP {
                         bevy::log::warn!("net: send failed: {e:#}");
                         warned += 1;

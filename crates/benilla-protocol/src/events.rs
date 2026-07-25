@@ -194,10 +194,11 @@ pub enum SessionEvent {
         /// is set (`0.0` otherwise): the wire tail exists so observers can integrate a swimmer's
         /// vertical between packets (the client's swim velocity basis adds pitch, `0x7c5880`).
         pitch: f32,
-        /// The `MovementInfo` time word — vmangos's own ms clock stamped at receipt (`stime`), one
-        /// coherent server clock across all movers. The reference schedules a remote's apply from
-        /// this (fire-time = mapped time + clamped skew, wow-re `remote-apply-timing.md`); the app
-        /// mirrors that in `RelayClock` (decision 0601).
+        /// The `MovementInfo` time word — vmangos's own ms clock stamped at receipt (`stime`
+        /// = `WorldTimer::getMSTime()` in `MovementInfo::Read`, relayed verbatim by `Write`), one
+        /// coherent server clock across all movers. The reference schedules a remote's apply off the
+        /// *deltas* between consecutive stamps — replay paced by the sender's own cadence, wow-re
+        /// `remote-apply-timing.md`; the app mirrors that per unit (decisions 0601/0615).
         time: u32,
         /// True for `MSG_MOVE_HEARTBEAT` — the periodic mid-move pulse. The reference's reconcile
         /// lerp is armed only for NON-heartbeat events (`0x619090` excludes tag `0x26`); a
@@ -310,6 +311,13 @@ pub enum SessionEvent {
         gender: u32,
         class: u32,
     },
+    /// A pet's display name (`SMSG_PET_NAME_QUERY_RESPONSE`), keyed by **pet number** — the third
+    /// naming path, alongside [`Self::PlayerName`] and [`Self::CreatureName`], and the only one a
+    /// pet can use: its guid carries a pet number where a creature carries its template entry
+    /// ([`crate::guid::pet_number`]), so a creature query for it can only miss. The name is the
+    /// pet's own — a hunter pet's custom name, or the creature name for anything summoned. There is
+    /// no miss shape: the server stays silent when the pet is gone or the number disagrees.
+    PetName { pet_number: u32, name: String },
     /// A creature template's display name (`SMSG_CREATURE_QUERY_RESPONSE`). Keyed by template
     /// `entry` (shared by every spawn of that template), not by spawn guid. `name` is `None` when
     /// the server flagged the entry unknown; `subname` is the tooltip line ("Stable Master", …).
@@ -606,10 +614,15 @@ pub enum SessionEvent {
     QuestGiverRefused { quest_id: u32, reason: u32 },
     /// The gossip window closes (`SMSG_GOSSIP_COMPLETE`) — no menu is open server-side any more.
     GossipComplete,
-    /// The greeting text for a gossip menu (`SMSG_NPC_TEXT_UPDATE`, answering our
-    /// `CMSG_NPC_TEXT_QUERY`): the highest-probability text block, already resolved male-with-
-    /// female-fallback. `$N` (the player name) is a client-substituted token still in the string.
-    NpcGreeting { text_id: u32, greeting: String },
+    /// The greeting record for a gossip menu (`SMSG_NPC_TEXT_UPDATE`, answering our
+    /// `CMSG_NPC_TEXT_QUERY`) — all 8 blocks, **undrawn**: which line greets you depends on the
+    /// NPC's gender and a die roll, so the app draws it when the frame opens
+    /// (`messages::gossip::select_greeting`). `$N` and friends are client-substituted tokens still
+    /// in the strings.
+    NpcGreeting {
+        text_id: u32,
+        blocks: Vec<crate::messages::NpcTextBlock>,
+    },
     /// A vendor's stock (`SMSG_LIST_INVENTORY`, answering our `CMSG_LIST_INVENTORY`): entry, icon,
     /// price, and remaining stock per row (`current_count == 0xFFFF_FFFF` = unlimited).
     VendorInventory { vendor: u64, items: Vec<VendorItem> },
@@ -887,12 +900,29 @@ pub enum SessionEvent {
     /// partner's, per [`TradeStatusExtended::their_window`]); pushed whenever that side changes.
     /// Boxed (~460 bytes) so it doesn't bloat every `SessionEvent`.
     TradeStatusExtended { state: Box<TradeStatusExtended> },
+    /// The world-state table changed. `SMSG_INIT_WORLD_STATES` carries the whole table for a zone
+    /// (`states` is the wire run verbatim, terminator pair included); `SMSG_UPDATE_WORLD_STATE`
+    /// arrives as a one-entry `states` with `scope: None`, so both wires land on one event and the
+    /// app has a single write path — the reference likewise funnels both into the one setter.
+    /// `scope` is the init packet's `(map, zone)` dwords; nothing consumes them yet.
+    WorldStates {
+        scope: Option<(u32, u32)>,
+        states: Vec<(u32, u32)>,
+    },
 }
 
 /// The result of polling the reader for the next packet's events.
 pub enum Poll {
-    /// A packet decoded into these events (possibly empty for an unmodelled opcode).
-    Events(Vec<SessionEvent>),
+    /// A packet decoded into these events. `events` is **empty** for an opcode we parse but do not
+    /// model — a third outcome, distinct from both "decoded into something" and [`Poll::Skipped`],
+    /// and until decision 0624 it was invisible from outside: no event, no skip, and the inbound
+    /// census counted it like any other packet. A relayed move landing in an unmodelled opcode was
+    /// therefore indistinguishable from one that never arrived. `opcode` rides along so the net
+    /// thread can name what actually came off the wire.
+    Events {
+        opcode: u16,
+        events: Vec<SessionEvent>,
+    },
     /// An unparseable packet was skipped — kept the stream aligned, not an error. Carries the
     /// opcode (for the app's dropped-packet tally) and a short description (opcode + error + a hex
     /// preview) so the net thread can log *which* packet was dropped.

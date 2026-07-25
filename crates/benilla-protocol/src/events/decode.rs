@@ -16,6 +16,10 @@ fn v3(v: Vector3d) -> [f32; 3] {
 pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
     match packet {
         ServerPacket::UpdateObject { objects } => decode_objects(objects),
+        // A batch is only a transport: unwrap it in order and decode each move exactly as if it had
+        // arrived on its own (decision 0624). Order matters — the replay queue in
+        // `net::motion` reconstructs a mover's arc from packet order.
+        ServerPacket::CompressedMoves { packets } => packets.into_iter().flat_map(decode).collect(),
         ServerPacket::CharEnum { characters } => vec![SessionEvent::CharacterList {
             characters,
             realm: None,
@@ -251,8 +255,8 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             vec![SessionEvent::QuestGiverRefused { quest_id, reason }]
         }
         ServerPacket::GossipComplete => vec![SessionEvent::GossipComplete],
-        ServerPacket::NpcText { text_id, greeting } => {
-            vec![SessionEvent::NpcGreeting { text_id, greeting }]
+        ServerPacket::NpcText { text_id, blocks } => {
+            vec![SessionEvent::NpcGreeting { text_id, blocks }]
         }
         ServerPacket::VendorList { vendor, items } => {
             vec![SessionEvent::VendorInventory { vendor, items }]
@@ -536,6 +540,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             gender,
             class,
         }],
+        ServerPacket::PetNameQueryResponse { pet_number, name } => {
+            vec![SessionEvent::PetName { pet_number, name }]
+        }
         ServerPacket::CreatureQueryResponse { entry, info } => {
             let (name, subname, creature_type, rank, type_flags, civilian, racial_leader) =
                 match info {
@@ -687,6 +694,14 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::TradeStatusExtended { state } => {
             vec![SessionEvent::TradeStatusExtended { state }]
         }
+        ServerPacket::InitWorldStates(w) => vec![SessionEvent::WorldStates {
+            scope: Some((w.map, w.zone)),
+            states: w.states,
+        }],
+        ServerPacket::UpdateWorldState { id, value } => vec![SessionEvent::WorldStates {
+            scope: None,
+            states: vec![(id, value)],
+        }],
         // An opcode with NO parse arm at all — surface it so the app can tally the coverage gap
         // (the debug panel's dropped-opcode instrument); the silent fall-through hid whole wire
         // families. Parsed-but-unmodelled packets (the `_` below) stay deliberate no-ops.

@@ -51,6 +51,36 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) now: Instant,
 }
 
+/// Leg 4's own test (`0x6e40e0`), shared with the spell tooltip's requirement line: does some
+/// WORN item match `EquippedItemClass` + `EquippedItemSubClassMask`? `true` when the spell asks
+/// for nothing (`class < 0`). An equipped item whose template hasn't streamed yet counts as a
+/// match — never grey (and never red) on missing data, the catalog-absent convention.
+pub(crate) fn equipped_item_fits(
+    d: &SpellDisplay,
+    store: &ObjectStore,
+    items: &mut Items,
+    commands: &NetCommands,
+) -> bool {
+    if d.equipped_item_class < 0 {
+        return true;
+    }
+    let class = d.equipped_item_class as u32;
+    (0..19).any(|slot| {
+        let Some(guid) = store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
+            return false;
+        };
+        let Some(entry) = items.object(guid).and_then(|o| o.object_entry()) else {
+            return false;
+        };
+        let Some(t) = items.template(entry, guid, commands) else {
+            return true; // unresolved template: benefit of the doubt
+        };
+        t.class == class
+            && (d.equipped_item_subclass_mask == 0
+                || d.equipped_item_subclass_mask & (1 << t.subclass) != 0)
+    })
+}
+
 /// The walk. Returns `(usable, not_enough_mana)` — the `IsUsableAction` pair.
 pub(crate) fn spell_usable(
     spell_id: u32,
@@ -79,28 +109,9 @@ pub(crate) fn spell_usable(
             return (false, false);
         }
     }
-    // Leg 4 (`0x6e40e0`): some worn item must match the class + subclass mask. An equipped
-    // item whose template hasn't streamed yet counts as a match — never grey on missing data
-    // (the catalog-absent convention).
-    if d.equipped_item_class >= 0 {
-        let class = d.equipped_item_class as u32;
-        let fits = (0..19).any(|slot| {
-            let Some(guid) = ctx.store.0.player_inv_slot(slot).filter(|&g| g != 0) else {
-                return false;
-            };
-            let Some(entry) = items.object(guid).and_then(|o| o.object_entry()) else {
-                return false;
-            };
-            let Some(t) = items.template(entry, guid, commands) else {
-                return true; // unresolved template: benefit of the doubt
-            };
-            t.class == class
-                && (d.equipped_item_subclass_mask == 0
-                    || d.equipped_item_subclass_mask & (1 << t.subclass) != 0)
-        });
-        if !fits {
-            return (false, false);
-        }
+    // Leg 4 (`0x6e40e0`): some worn item must match the class + subclass mask.
+    if !equipped_item_fits(d, ctx.store, items, commands) {
+        return (false, false);
     }
     // Leg 6 (`0x612480`): the shapeshift-form gate — the form's stance flag from
     // SpellShapeshiftForm.dbc decides whether it counts as "shapeshifted".

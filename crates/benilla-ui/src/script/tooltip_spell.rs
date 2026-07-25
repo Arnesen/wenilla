@@ -2,10 +2,14 @@
 //! spell builder `0x52e610` and the aura builder `0x52f880` (wow-re
 //! `ui/scratch/tooltip-content-law.md`, the 0276 fold-back):
 //!
-//! - name (white) | rank (gray) — one double line;
+//! - name | rank (gray) — one double line. The name's colour is the BUILDER's: **white** from
+//!   the spell builder (`0x530270`), **gold** from the aura builder (`0x530380`, the gold
+//!   wrapper) — the same split `SetTrackingSpell` shows;
 //! - **Cost | Range** — ONE double line (either side may be absent);
 //! - **CastTime | Cooldown** — ONE double line; a passive spell simply omits it (there is NO
 //!   "Passive" text in the 1.12 builder);
+//! - required tool / form — the equipped-item-class line then the stance line, each white when
+//!   met and red when not;
 //! - reagents — inline red per missing item (the one builder that uses the `|cffff2020` escape;
 //!   joins when a reagent feed exists);
 //! - description — gold, wrapped. An AURA's description is **white** (byte-verified difference),
@@ -34,8 +38,13 @@ const GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpellTooltipView {
     pub name: String,
-    /// "Rank N" — the gray right column of the name line.
+    /// "Rank N" — the gray right column of the name line, on the SPELL variant only.
     pub rank: Option<String>,
+    /// "Magic" / "Curse" / "Disease" / "Poison" — the AURA variant's right column (law §3-BUFF),
+    /// the `SpellDispelType.dbc` name of the spell's dispel class gated by that table's `[+0x28]`
+    /// flag, so an undispellable aura (Stealth) carries `None`. Rendered GOLD, like the aura name
+    /// it shares its line with — not the spell variant's gray.
+    pub dispel_type: Option<String>,
     /// "35 Mana" / "20 Rage" / "Next melee" — the cost cell.
     pub cost: Option<String>,
     /// "30 yd range" — the range cell.
@@ -46,12 +55,28 @@ pub struct SpellTooltipView {
     /// "15 sec cooldown" — the cooldown cell: `max(RecoveryTime, CategoryRecoveryTime)` (the
     /// 0276 line law §3.4 — Charge's 15 s lives in the CATEGORY column).
     pub cooldown: Option<String>,
+    /// "Requires Wands" — the equipped-item-class half of law §3.6, over
+    /// `EquippedItemClass`/`EquippedItemSubClassMask`: white when [`Self::item_met`], red when
+    /// not. Sits ABOVE [`Self::requires_form`] (the law's tool-then-form order).
+    pub requires_item: Option<String>,
+    /// Whether some WORN item satisfies the class + subclass mask (the app re-pushes views when
+    /// the equipped set changes, so the color tracks live swaps).
+    pub item_met: bool,
     /// "Requires Battle Stance" — the required-form line (law §3.6, `SPELL_REQUIRED_FORM` over
     /// the `Stances` mask): white when [`Self::form_met`], red when not.
     pub requires_form: Option<String>,
     /// Whether the player's CURRENT shapeshift form satisfies the mask (the app re-pushes views
     /// on a form change, so the color tracks live stance switches).
     pub form_met: bool,
+    /// "Reagents: Light Feather" — law §3.8, `SPELL_REAGENTS` ("Reagents: ", no format slot) +
+    /// the 8 reagent slots. Rendered WHITE and wrapped; a reagent the player is short of carries
+    /// the builder's own **inline** `|cffff2020` escape (the spell builder is the one builder
+    /// that colors mid-line), so the composed string arrives paint-ready from the app.
+    pub reagents: Option<String>,
+    /// "2.62% chance to dodge" — the law's line 10 (§3-CHANCE), selected by the spell's `Effect[0]`
+    /// and rendered white and unwrapped, BELOW the reagents and ABOVE the description. The
+    /// percentage is the player's own live avoidance/crit field, so the app re-pushes as it moves.
+    pub chance: Option<String>,
     /// The $-substituted description — gold + wrapped for spells.
     pub description: String,
     /// The $-substituted AURA description (`Spell.dbc AuraDescription`) — the buff hover's
@@ -118,18 +143,21 @@ fn render_spell(
     remaining: Option<String>,
     talent: Option<&TalentLines>,
 ) -> mlua::Result<()> {
-    // The rank column shows only when the CALLER asks (byte-verified: SetSpell passes
-    // param6=0 — the spellbook hover never shows "Rank N"; SetAction passes 1).
-    match v.rank.as_ref().filter(|_| show_rank) {
-        Some(rank) => append_line(
-            lua,
-            this,
-            (v.name.clone(), WHITE),
-            Some((rank.clone(), GRAY)),
-            false,
-        )?,
-        None => append_line(lua, this, (v.name.clone(), WHITE), None, false)?,
-    }
+    // The name colour splits by BUILDER, byte-verified: the spell builder `0x52e610` writes its
+    // name line through `0x530270` (white), the aura builder `0x52f880` through `0x530380` — the
+    // GOLD wrapper (wow-re tooltip-content-law §3 line 1 vs §3-BUFF). SetTrackingSpell's gold,
+    // already pinned by the director's own A/B, is the same wrapper.
+    let name_color = if aura { GOLD } else { WHITE };
+    // The name line's RIGHT column splits by builder too. The spell builder's is the gray "Rank N",
+    // and it shows only when the CALLER asks (byte-verified: SetSpell passes param6=0 — the
+    // spellbook hover never shows "Rank N"; SetAction passes 1). The aura builder's is the dispel
+    // class ("Magic" on Ice Armor — §3-BUFF), and it is GOLD, not gray: a buff never shows a rank.
+    let right = if aura {
+        v.dispel_type.clone().map(|t| (t, GOLD))
+    } else {
+        v.rank.clone().filter(|_| show_rank).map(|t| (t, GRAY))
+    };
+    append_line(lua, this, (v.name.clone(), name_color), right, false)?;
     // The talent head: "Rank r/m" (builder line 2, TOOLTIP_TALENT_RANK white) + the red
     // requirement lines while locked (position CONFIRMED, decision 0305 — TalentLines doc).
     if let Some(t) = talent {
@@ -165,10 +193,24 @@ fn render_spell(
                 None => append_line(lua, this, (ct.clone(), WHITE), None, false)?,
             }
         }
-        // Required form (law §3.6, SPELL_REQUIRED_FORM): white when met, red when not.
+        // Required tool / form (law §3.6): the equipped-item-class line first, then the stance
+        // line. Each white when met, red when not.
+        if let Some(req) = &v.requires_item {
+            let color = if v.item_met { WHITE } else { RED };
+            append_line(lua, this, (req.clone(), color), None, false)?;
+        }
         if let Some(req) = &v.requires_form {
             let color = if v.form_met { WHITE } else { RED };
             append_line(lua, this, (req.clone(), color), None, false)?;
+        }
+        // Reagents (law §3.8): white + wrapped, the missing entries inline-red inside the text.
+        if let Some(reagents) = &v.reagents {
+            append_line(lua, this, (reagents.clone(), WHITE), None, true)?;
+        }
+        // Chance to dodge/parry/block/crit (law line 10, §3-CHANCE) — white, NOT wrapped, and it
+        // sits here: below the reagents, above the description.
+        if let Some(chance) = &v.chance {
+            append_line(lua, this, (chance.clone(), WHITE), None, false)?;
         }
     }
     let desc = if aura && !v.aura_description.is_empty() {
@@ -363,12 +405,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             })?,
         )?;
     }
-    // GameTooltip:SetTrackingSpell() — the minimap tracking icon's hover. Its shape differs from
-    // the buff-bar hover: the NAME line is GOLD, the (aura-)description white — pinned by the
-    // director's reference A/B (2026-07-20: "Find Minerals" gold over white "Finding Minerals.",
-    // vs SetPlayerBuff's white name). `0x532c50`'s body isn't carved; carve it in wow-re before
-    // extending this shape. No duration-remaining line (only SetPlayerBuff appends one), and no
-    // tracking active clears + hides, like the SetUnitBuff miss path.
+    // GameTooltip:SetTrackingSpell() — the minimap tracking icon's hover: NAME gold over a white
+    // (aura-)description, pinned by the director's reference A/B (2026-07-20: "Find Minerals"
+    // gold over white "Finding Minerals."). That is just the AURA builder's shape — its name line
+    // rides the gold wrapper `0x530380` too — so this is no longer a one-off; `0x532c50`'s body
+    // still isn't carved, so carve it in wow-re before extending BEYOND that shape. No
+    // duration-remaining line (only SetPlayerBuff appends one), and no tracking active clears +
+    // hides, like the SetUnitBuff miss path.
     m.set(
         "SetTrackingSpell",
         lua.create_function(|lua, this: Table| {

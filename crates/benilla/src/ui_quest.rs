@@ -198,9 +198,9 @@ fn snapshot(
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     quest_log: &QuestLog,
-    player: (&str, u8),
+    macros: &crate::npc_text::MacroContext,
 ) -> Option<QuestState> {
-    let sub = |t: &str| crate::npc_text::substitute(t, player.0, player.1);
+    let sub = |t: &str| crate::npc_text::substitute(t, macros);
     Some(match giver.view.as_ref()? {
         QuestView::Greeting(l) => {
             let mut active_titles = Vec::new();
@@ -274,6 +274,7 @@ fn feed_quest(
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
     quest_log: Res<QuestLog>,
+    states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut last: Local<Option<QuestState>>,
     mut last_name: Local<Option<String>>,
@@ -287,15 +288,17 @@ fn feed_quest(
     if giver.take_completed_fanfare() {
         script.queue_sound_kit("QUESTCOMPLETED");
     }
-    let (player_name, player_gender) =
-        crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
     let fresh = snapshot(
         &giver,
         &mut items,
         icons.as_deref(),
         &commands,
         &quest_log,
-        (&player_name, player_gender),
+        &crate::npc_text::MacroContext {
+            subject: player.as_ref(),
+            states: &states,
+        },
     );
     let npc_name = giver
         .npc
@@ -476,8 +479,24 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let quest_log = QuestLog::default();
-        let snap =
-            snapshot(&giver, &mut items, None, &commands, &quest_log, ("Tri", 0)).expect("open");
+        let player = crate::npc_text::Subject {
+            name: "Tri".into(),
+            race: 1,
+            class: 1,
+            gender: 0,
+        };
+        let snap = snapshot(
+            &giver,
+            &mut items,
+            None,
+            &commands,
+            &quest_log,
+            &crate::npc_text::MacroContext {
+                subject: Some(&player),
+                states: &crate::world_state::WorldStates::default(),
+            },
+        )
+        .expect("open");
         assert_eq!(snap.panel, QuestPanel::Detail);
         assert_eq!(snap.title, "A Threat Within");
         // The wire text's $N substituted through the shared expander (crate::npc_text).
@@ -512,7 +531,18 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
         let quest_log = QuestLog::default();
-        let snap = snapshot(&giver, &mut items, None, &commands, &quest_log, ("", 0)).unwrap();
+        let snap = snapshot(
+            &giver,
+            &mut items,
+            None,
+            &commands,
+            &quest_log,
+            &crate::npc_text::MacroContext {
+                subject: None,
+                states: &crate::world_state::WorldStates::default(),
+            },
+        )
+        .unwrap();
         assert_eq!(snap.panel, QuestPanel::Progress);
         assert_eq!(snap.required.len(), 1);
         assert_eq!(snap.required_money, 500);

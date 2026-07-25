@@ -41,6 +41,7 @@ mod trade;
 mod trainer;
 mod update_object;
 mod vendor;
+mod world_state;
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };
@@ -59,14 +60,18 @@ pub use client::{
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
     creature_query, force_speed_ack, full_guid, join_channel, leave_channel, messagechat,
     messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack, move_spline_done,
-    movement, ping, played_time, random_roll, stand_state_change, teleport_ack, text_emote,
+    movement, pet_name_query, ping, played_time, random_roll, stand_state_change, teleport_ack,
+    text_emote,
 };
 pub use death::{
     reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
     ResurrectRequestBody,
 };
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
-pub use gossip::{gossip_hello, gossip_select_option, npc_text_query, GossipOption, QuestOption};
+pub use gossip::{
+    gossip_hello, gossip_select_option, npc_text_query, select_greeting, GossipOption,
+    NpcTextBlock, QuestOption, NPC_TEXT_BLOCKS,
+};
 pub use group::{
     group_accept, group_assistant_leader, group_change_sub_group, group_decline, group_disband,
     group_invite, group_raid_convert, group_set_leader, group_swap_sub_group, group_uninvite,
@@ -135,6 +140,7 @@ pub use vendor::{
     buy_item, buy_result, buyback_item, list_inventory, repair_item, sell_item, sell_result,
     VendorItem,
 };
+pub use world_state::InitWorldStates;
 
 /// `SMSG_AUTH_RESPONSE` AuthOk result.
 pub const AUTH_OK: u8 = 0x0C;

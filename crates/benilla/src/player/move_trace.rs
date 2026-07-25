@@ -1,8 +1,15 @@
-//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]): one line per
-//! *interesting* frame of the player mover — a step-down snap, a grounded flip, an airborne
-//! frame, or any sizeable vertical delta — so a movement-feel report ("it pops when I step off
-//! the fence") can be read back as per-frame numbers instead of re-guessed from watching the
-//! screen. The anim driver writes its own `anim` lines into the same file, on the same clock.
+//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]), two tags:
+//!
+//! - **`move`** — one line per *interesting* frame of the player mover ([`frame`]): a step-down snap,
+//!   a grounded flip, an airborne frame, or any sizeable vertical delta — so a movement-feel report
+//!   ("it pops when I step off the fence") can be read back as per-frame numbers instead of
+//!   re-guessed from watching the screen.
+//! - **`snd`** — one line per outbound `MSG_MOVE_*` ([`sent`]), the send-side twin of `net::motion`'s
+//!   `rly`: it makes **our own wire cadence measurable** (decision 0617), which is the only way to
+//!   compare it against the reference's — the 1.12.1 sniff's client stream is a list of exactly these
+//!   fields, so `grep snd` on a run of mouse-turning and strafing is directly diffable against it.
+//!
+//! The anim driver writes its own `anim` lines into the same file, on the same clock.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -24,6 +31,22 @@ pub(super) struct Frame {
     /// The atomic step-up's committed height gain this frame (yd), when the maneuver ran
     /// (decision 0209).
     pub climb: Option<f32>,
+}
+
+/// One `snd` line per outbound movement packet: the opcode we chose, the live move-flags it carries,
+/// and the facing. Read against the sniff's client stream (opcode + flags + orientation per line) this
+/// answers "does our wire look like the reference's?" without anyone squinting at a second window.
+pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f32; 3]) {
+    if !dbg_trace::enabled() {
+        return;
+    }
+    dbg_trace::line(
+        "snd",
+        &format!(
+            "{kind:?} flags={flags:#x} o={facing:.4} pos=[{:.2},{:.2},{:.2}]",
+            pos[0], pos[1], pos[2]
+        ),
+    );
 }
 
 static PREV_GROUNDED: AtomicBool = AtomicBool::new(true);

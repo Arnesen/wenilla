@@ -283,6 +283,13 @@ const FIELD_PLAYER_NEXT_LEVEL_XP: u16 = 717;
 // UNIT_END(0xBC = 188) + 0x39B(923) = 1111. Cross-checked against COINAGE: 0x3DC − 0x39B = 65 =
 // the 64 bitset slots + PLAYER_FIELD_WATCHED_FACTION_INDEX between them (1111 + 64 = 1175, then
 // 1176 ✓); the stale hex comment reads 0x451 — the usual 6-low drift.
+// The four avoidance/crit percentages the spell tooltip's chance-to-X line reads (law §3-CHANCE),
+// consecutive and immediately below EXPLORED_ZONES_1: UNIT_END(188) + 0x396..0x399. FLOAT, and the
+// header agrees for once. Anchored on EXPLORED_ZONES_1 = UNIT_END + 0x39B = 1111 just below.
+const FIELD_PLAYER_BLOCK_PERCENTAGE: u16 = 1106;
+const FIELD_PLAYER_DODGE_PERCENTAGE: u16 = 1107;
+const FIELD_PLAYER_PARRY_PERCENTAGE: u16 = 1108;
+const FIELD_PLAYER_CRIT_PERCENTAGE: u16 = 1109;
 const FIELD_PLAYER_EXPLORED_ZONES_1: u16 = 1111;
 /// The bitset's slot count (`Size: 64` in the server enum).
 pub const PLAYER_EXPLORED_ZONES_SLOTS: u16 = 64;

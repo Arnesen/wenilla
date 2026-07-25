@@ -150,6 +150,16 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the geometry a
+    /// **non-character** spawn draws that the reference may not: MULTI-GEOSET models (more than
+    /// one `skinSectionId` — only the character compositor selects among them, so every other
+    /// spawn path draws all of them), UNTEX batches (no embedded texture and no character runtime
+    /// slot) and TINY batches (at most 2 faces). The population instrument behind the stray
+    /// untextured-primitive reports; `m2batch` then explains a single model in full.
+    Geosetscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and census every particle-emitter
     /// FEATURE the corpus authors — shapes, head/tail, blend modes (incl. the folded Mod/Mod2x),
     /// every file-flag bit, spin signs, twinkle gates, atlas tiling, spline emitters, and the
@@ -352,6 +362,7 @@ fn main() -> Result<()> {
         Command::Blendscan { prefix } => scan::blendscan(&mut chain, prefix.as_deref())?,
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
+        Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)

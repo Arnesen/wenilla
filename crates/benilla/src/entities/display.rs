@@ -62,8 +62,16 @@ pub(super) struct EntityPart {
     /// already bakes it for the un-swapped parts.
     pub(super) two_sided: bool,
     /// The part's `skinSectionId` (geoset / mesh-part ID). For a player body the per-entity attach
-    /// filters parts by it (only the selected hair/facial/body geosets spawn); `0` and ignored for
-    /// single-geoset models (creatures, GameObjects, WMO).
+    /// filters parts by it (only the selected hair/facial/body geosets spawn); **unfiltered for
+    /// everything else — which is correct, but NOT because those models have a single geoset.**
+    ///
+    /// Plenty of them do not: 101 creature models author several (`Creature\Banshee` carries `0`
+    /// and `402`). They still draw whole, because the reference's per-model visibility array is
+    /// allocated **filled with `1`** — all visible — and the only writer is the character
+    /// compositor, which a creature never reaches (VERIFIED, wow-re `models.md` §"M2 geoset
+    /// visibility": the `CCharacterComponent` is created on exactly two guarded paths and a
+    /// creature fails both). That array is indexed by **submesh ordinal**, not by this id — the
+    /// client never decomposes a `group*100 + variant` id anywhere in its render band.
     pub(super) geoset_id: u16,
     /// The character runtime texture slot this part carries (M2 type 1 = body, type 6 = hair). For a
     /// player the per-entity attach swaps its material to one carrying that per-appearance texture

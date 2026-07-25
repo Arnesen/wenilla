@@ -3,7 +3,7 @@
 //! 0237), and the taxi-map session (decision 0484 phase 1). Each `pub(super)` fn here is exactly
 //! one arm's body; the match at the call site stays the dispatcher, one call per arm.
 
-use benilla_protocol::messages::{GossipOption, TaxiMask, TrainerSpell, VendorItem};
+use benilla_protocol::messages::{GossipOption, NpcTextBlock, TaxiMask, TrainerSpell, VendorItem};
 use bevy::prelude::*;
 
 use crate::ui_bank::{BankErrors, BankOpen};
@@ -17,10 +17,16 @@ use super::super::{ClientCommand, NetCommands};
 
 /// A gossip menu opened (`SMSG_GOSSIP_MESSAGE`): fill the [`GossipState`] the gossip feed
 /// (`crate::ui_gossip`) reads. On a menu opening, auto-send the ask-once `CMSG_NPC_TEXT_QUERY`
-/// for its greeting (served from the cache on a revisit); the greeting lands via
-/// [`npc_greeting`]; [`gossip_complete`] closes it.
+/// for its text record (served from the cache on a revisit); the record lands via [`npc_greeting`];
+/// [`gossip_complete`] closes it.
+///
+/// The greeting is **drawn here**, not at the packet — this is the reference's own moment for it
+/// (`0x4e2010`), and the draw needs both this NPC's gender and a fresh roll. `npc_gender` is
+/// `UNIT_FIELD_BYTES_0` byte 2 off the NPC's descriptor, defaulting to male when the unit isn't
+/// streamed in (which is also what the reference does for a non-unit gossip target).
 pub(super) fn gossip_menu(
     npc: u64,
+    npc_gender: u8,
     text_id: u32,
     options: Vec<GossipOption>,
     quests: Vec<(u32, u32, String)>,
@@ -36,9 +42,9 @@ pub(super) fn gossip_menu(
     gossip.text_id = text_id;
     gossip.options = options;
     gossip.quests = quests;
-    match gossip.cached_greeting(text_id) {
-        Some(greeting) => gossip.greeting = Some(greeting),
-        None => {
+    match gossip.cached_record(text_id).is_some() {
+        true => gossip.greeting = gossip.draw_greeting(text_id, npc_gender),
+        false => {
             gossip.greeting = None;
             let _ = net_commands
                 .0
@@ -47,12 +53,18 @@ pub(super) fn gossip_menu(
     }
 }
 
-/// The greeting text answer (`SMSG_NPC_TEXT_UPDATE`) — seed the cache, and only fill the OPEN
-/// menu's greeting (a late answer for a menu we already closed just seeds the cache).
-pub(super) fn npc_greeting(text_id: u32, greeting: String, gossip: &mut GossipState) {
-    gossip.remember_greeting(text_id, greeting.clone());
+/// The NPC-text answer (`SMSG_NPC_TEXT_UPDATE`) — seed the cache with the whole record, and draw
+/// the greeting only for the OPEN menu (a late answer for a menu we already closed just seeds the
+/// cache; the next open draws its own line).
+pub(super) fn npc_greeting(
+    text_id: u32,
+    npc_gender: u8,
+    blocks: Vec<NpcTextBlock>,
+    gossip: &mut GossipState,
+) {
+    gossip.remember_record(text_id, blocks);
     if gossip.npc.is_some() && gossip.text_id == text_id {
-        gossip.greeting = Some(greeting);
+        gossip.greeting = gossip.draw_greeting(text_id, npc_gender);
     }
 }
 

@@ -436,3 +436,58 @@ fn observer_speed_legs_parse_golden() {
         other => panic!("expected MountSpecial(player 4), got {other:?}"),
     }
 }
+
+/// `SMSG_COMPRESSED_MOVES` — the batch carrier vmangos switches a session onto once it has been
+/// sent 300 movement packets in ten seconds (decision 0624). The fixture is built exactly as
+/// `MovementData::AddPacket` + `BuildPacket` do: `[u32 uncompressed size][zlib(records)]`, each
+/// record `[u8 size][u16 opcode][body]` with `size` counting the opcode's two bytes. The two
+/// records carry the same relay bodies pinned by `movement_relay_decodes_to_unit_move` above, so
+/// what this adds is the *framing* — that a batched move decodes identically to a loose one.
+#[test]
+fn compressed_moves_unwraps_to_the_same_events_as_loose_relays() {
+    let body = hx("42000000780153d8cac0b88a91818181859989f1ec75ee63a6752c877ff22f77626058600f146650b805540062602a38005600002f2610d9");
+    let events =
+        decode(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &body).unwrap());
+
+    // Both records, in wire order, as ordinary moves — order is load-bearing: the remote-replay
+    // queue reconstructs a mover's arc from it (decision 0618).
+    match events.as_slice() {
+        [SessionEvent::UnitMove {
+            guid: 0xAA,
+            flags: 0x1,
+            ..
+        }, SessionEvent::UnitMove {
+            guid: 0xAA,
+            flags: 0x0,
+            ..
+        }] => {}
+        other => panic!(
+            "expected the moving then the idle relay for mover 0xAA, in that order, got {other:?}"
+        ),
+    }
+
+    // A batched move must be byte-identical to the same move arriving loose.
+    let loose = decode(
+        messages::parse_server(
+            messages::opcode::MSG_MOVE_START_FORWARD,
+            &hx("01aa0100000004030201cdd70bc6357e04c3f90fa7420000a03f00000000"),
+        )
+        .unwrap(),
+    );
+    assert_eq!(format!("{:?}", events[0]), format!("{:?}", loose[0]));
+}
+
+/// A misframed batch must fail **loudly** (one `Poll::Skipped` naming the inner opcode), never
+/// silently drop the moves it carries — the exact silence that made the runaway unattributable for
+/// three rounds of fixes (decision 0624).
+#[test]
+fn a_misframed_batch_errors_rather_than_dropping_moves() {
+    // A HEARTBEAT record claiming a 40-byte body with only 4 bytes left in the stream.
+    let truncated = hx("070000007801d37ac700020006c10119");
+    assert!(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &truncated).is_err());
+
+    // A record whose size (1) cannot even hold the opcode that follows it — misframing, not an
+    // empty-body packet, and it must not underflow into a huge body length.
+    let undersized = hx("030000007801637cc7000001e200f0");
+    assert!(messages::parse_server(messages::opcode::SMSG_COMPRESSED_MOVES, &undersized).is_err());
+}

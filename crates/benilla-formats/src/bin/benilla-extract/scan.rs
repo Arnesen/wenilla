@@ -248,6 +248,110 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Sweep every `.m2` (under `prefix`, if given) and census the **geometry a non-character model
+/// draws that the reference may not** — the population instrument behind the bug channel's
+/// "stray untextured primitive" family. Three independent signals per model, all read through the
+/// renderer's own batch resolution (`m2batch`'s), so the report can't drift from the mechanism:
+///
+/// - **MULTI-GEOSET** — more than one distinct `skinSectionId`. The character compositor selects
+///   among these; every other spawn path draws **all** of them, so this is exactly the population
+///   an unfiltered creature/doodad/effect draw over-renders (`Creature\Banshee\Banshee.m2` is the
+///   pinned case: `0`×17 + `402`×9).
+/// - **UNTEX** — batches with no texture *and* no runtime slot that fills one: neither a character
+///   composite slot ([`benilla_formats::RenderSubmesh::char_slot`]) nor a creature skin variation
+///   ([`benilla_formats::RenderSubmesh::skin_slot`], filled at spawn from `CreatureDisplayInfo`).
+///   Both fills are ordinary, so counting them would drown the signal — 324 of 420 `Creature\`
+///   models carry a skin slot. What is left is geometry nothing can texture.
+/// - **TINY** — batches of at most 2 faces: the literal single-triangle/quad primitives.
+///
+/// A model is listed when it trips any of the three. `m2batch` then explains one model in full.
+pub fn geosetscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut hits) = (0u32, 0u32);
+    let (mut multi_models, mut untex_models, mut tiny_models) = (0u32, 0u32, 0u32);
+    // Top-level directory → multi-geoset model count, so the report says *where* the population
+    // lives (Creature/, Spells/, World/…) rather than only how big it is.
+    let mut by_dir: BTreeMap<String, u32> = BTreeMap::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        let mut geosets: BTreeMap<u16, u32> = BTreeMap::new();
+        let (mut untex, mut tiny) = (0u32, 0u32);
+        for s in &subs {
+            *geosets.entry(s.geoset_id).or_default() += 1;
+            if s.texture.is_none() && s.char_slot.is_none() && s.skin_slot.is_none() {
+                untex += 1;
+            }
+            if !s.indices.is_empty() && s.indices.len() <= 6 {
+                tiny += 1;
+            }
+        }
+        let multi = geosets.len() > 1;
+        if !multi && untex == 0 && tiny == 0 {
+            continue;
+        }
+        hits += 1;
+        if multi {
+            multi_models += 1;
+            let top = name.split_once('\\').map(|(d, _)| d).unwrap_or("<root>");
+            *by_dir.entry(top.to_ascii_lowercase()).or_default() += 1;
+        }
+        if untex > 0 {
+            untex_models += 1;
+        }
+        if tiny > 0 {
+            tiny_models += 1;
+        }
+        let hist = geosets
+            .iter()
+            .map(|(id, n)| format!("{id}×{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut marks = Vec::new();
+        if multi {
+            marks.push(format!("MULTI-GEOSET({})", geosets.len()));
+        }
+        if untex > 0 {
+            marks.push(format!("UNTEX({untex})"));
+        }
+        if tiny > 0 {
+            marks.push(format!("TINY({tiny})"));
+        }
+        println!(
+            "{:>3} batches  [{hist}]  {}  {name}",
+            subs.len(),
+            marks.join(" ")
+        );
+    }
+    let dirs = by_dir
+        .iter()
+        .map(|(d, n)| format!("{d}={n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "{scanned} models scanned, {hits} listed — {multi_models} MULTI-GEOSET, \
+         {untex_models} with UNTEX batches, {tiny_models} with TINY batches; \
+         multi-geoset by top dir: [{dirs}]"
+    );
+    Ok(())
+}
+
 /// Sweep every `.m2` (under `prefix`, if given) and report models that author flat ground-plane
 /// render geometry — the population instrument for the class of spell effects that lie in the
 /// model-space XY plane at z≈0 (WoW axes, Z up) and get buried by sloped terrain (Battle Shout's

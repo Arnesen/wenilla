@@ -209,6 +209,129 @@ fn player_buff_hover_is_the_aura_variant() {
             if t.starts_with("Intellect increased") && *c == [1.0, 1.0, 1.0, 1.0])
     });
     assert!(white, "aura description is white, not gold");
+    // …and the NAME is GOLD: the aura builder `0x52f880` writes it through the gold wrapper
+    // `0x530380`, where the spell builder uses the plain `0x530270`. Pinned against the
+    // reference's own buff hover (2026-07-25 report B53), which the white name did not match.
+    let gold_name = quads.iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == "Arcane Intellect" && (c[1] - 210.0 / 255.0).abs() < 1e-6)
+    });
+    assert!(gold_name, "aura name is gold, not white");
+    assert!(s.take_errors().is_empty());
+}
+
+/// Law §3-BUFF's right column: the buff hover names the DISPEL CLASS where the spell hover would
+/// put a gray "Rank N" — "Magic" on Ice Armor, the half of B53 the gold name didn't cover — and it
+/// is gold, sharing the aura name's wrapper. A `rank` on the same view must NOT displace it.
+#[test]
+fn player_buff_hover_names_the_dispel_class_in_gold() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(
+        168,
+        SpellTooltipView {
+            name: "Ice Armor".into(),
+            rank: Some("Rank 1".into()), // the spell variant's column — never the aura's
+            dispel_type: Some("Magic".into()),
+            aura_description: "Encases the caster in a layer of ice.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_auras(
+        "player",
+        Some(vec![AuraState {
+            spell_id: 168,
+            name: Some("Ice Armor".into()),
+            helpful: true,
+            ..Default::default()
+        }]),
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "BF1"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetPlayerBuff(1)
+        assert(TTTextRight1:GetText() == "Magic",
+            "the dispel class, got " .. tostring(TTTextRight1:GetText()))
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let gold_dispel = s.extract().iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == "Magic" && (c[1] - 210.0 / 255.0).abs() < 1e-6)
+    });
+    assert!(
+        gold_dispel,
+        "the dispel column is gold, not the rank's gray"
+    );
+    assert!(s.take_errors().is_empty());
+}
+
+/// Law §3.6's equipped-item line and §3.8's reagents line — the two lines the 2026-07-25 reports
+/// found missing (B54, B56). Order: cast|cooldown → requires-item → requires-form → reagents →
+/// description, each requirement red while unmet.
+#[test]
+fn requirement_and_reagent_lines_render_in_law_order() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.set_spell_tooltip(
+        5019,
+        SpellTooltipView {
+            name: "Shoot".into(),
+            range: Some("30 yd range".into()),
+            cast_time: Some("Instant".into()),
+            requires_item: Some("Requires Wands".into()),
+            item_met: false,
+            reagents: Some("Reagents: |cffff2020Light Feather|r".into()),
+            description: "Attack with an equipped wand.".into(),
+            ..Default::default()
+        },
+    );
+    s.set_spellbook(SpellBookState {
+        tabs: Vec::new(),
+        slots: vec![SpellSlotView {
+            spell_id: 5019,
+            name: "Shoot".into(),
+            ..Default::default()
+        }],
+    });
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "SB2"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(a, "ANCHOR_RIGHT")
+        tt:SetSpell(1, "spell")
+        assert(tt:NumLines() == 6, "name + range + cast + requires + reagents + desc, got " .. tt:NumLines())
+        assert(TTTextLeft1:GetText() == "Shoot")
+        assert(TTTextLeft2:GetText() == "30 yd range", "cost absent: range moves left")
+        assert(TTTextLeft3:GetText() == "Instant")
+        assert(TTTextLeft4:GetText() == "Requires Wands", "law §3.6 sits above the reagents")
+        assert(TTTextLeft5:GetText():find("Light Feather") ~= nil, "law §3.8")
+        assert(TTTextLeft6:GetText() == "Attack with an equipped wand.", "description last")
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let quads = s.extract();
+    let red = quads.iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == "Requires Wands" && *c == [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0])
+    });
+    assert!(red, "an unmet equipped-item requirement is red");
+    // The reagent's inline `|cffff2020` escape reaches the region VERBATIM: the engine paints
+    // the line's BASE colour white and the app's text layer resolves the escape into colour runs
+    // (`benilla::ui_text::markup`, covered by its own `color_runs_survive_the_wrap`). So what this
+    // layer owns is that the escape is neither stripped nor pre-flattened.
+    let verbatim = quads.iter().any(|q| {
+        matches!(&q.content, QuadContent::Text { text: Some(t), color: Some(c), .. }
+            if t == "Reagents: |cffff2020Light Feather|r" && *c == [1.0, 1.0, 1.0, 1.0])
+    });
+    assert!(
+        verbatim,
+        "the reagents line reaches the region escape-intact, base white"
+    );
     assert!(s.take_errors().is_empty());
 }
 

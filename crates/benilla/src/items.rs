@@ -157,70 +157,75 @@ impl Items {
     }
 }
 
+/// A minimal, VALID item template named `name` — the shared test seam for every module that
+/// needs a landed template (the sentinels that matter are `allowable_*` = −1 and `stackable` = 1).
+#[cfg(test)]
+pub(crate) fn test_template(name: &str) -> ItemInfo {
+    ItemInfo {
+        class: 0,
+        subclass: 0,
+        name: name.into(),
+        display_info_id: 1,
+        quality: 1,
+        flags: 0,
+        buy_price: 0,
+        sell_price: 0,
+        inventory_type: 0,
+        allowable_class: -1,
+        allowable_race: -1,
+        item_level: 0,
+        required_level: 0,
+        required_skill: 0,
+        required_skill_rank: 0,
+        required_spell: 0,
+        required_honor_rank: 0,
+        required_city_rank: 0,
+        required_rep_faction: 0,
+        required_rep_rank: 0,
+        max_count: 0,
+        stackable: 1,
+        container_slots: 0,
+        stats: Vec::new(),
+        damages: Vec::new(),
+        dmg_min: 0.0,
+        dmg_max: 0.0,
+        dmg_type: 0,
+        armor: 0,
+        resistances: [0; 6],
+        delay_ms: 0,
+        ammo_type: 0,
+        ranged_mod_range: 0.0,
+        spells: Vec::new(),
+        use_spell: None,
+        bonding: 0,
+        description: String::new(),
+        page_text: 0,
+        language_id: 0,
+        page_material: 0,
+        start_quest: 0,
+        lock_id: 0,
+        material: 0,
+        sheath: 0,
+        random_property: 0,
+        block: 0,
+        item_set: 0,
+        max_durability: 0,
+        area: 0,
+        map: 0,
+        bag_family: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::test_template as info;
     use crossbeam_channel::TryRecvError;
 
     fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         (NetCommands(tx), rx)
-    }
-
-    fn info(name: &str) -> ItemInfo {
-        ItemInfo {
-            class: 0,
-            subclass: 0,
-            name: name.into(),
-            display_info_id: 1,
-            quality: 1,
-            flags: 0,
-            buy_price: 0,
-            sell_price: 0,
-            inventory_type: 0,
-            allowable_class: -1,
-            allowable_race: -1,
-            item_level: 0,
-            required_level: 0,
-            required_skill: 0,
-            required_skill_rank: 0,
-            required_spell: 0,
-            required_honor_rank: 0,
-            required_city_rank: 0,
-            required_rep_faction: 0,
-            required_rep_rank: 0,
-            max_count: 0,
-            stackable: 1,
-            container_slots: 0,
-            stats: Vec::new(),
-            damages: Vec::new(),
-            dmg_min: 0.0,
-            dmg_max: 0.0,
-            dmg_type: 0,
-            armor: 0,
-            resistances: [0; 6],
-            delay_ms: 0,
-            ammo_type: 0,
-            ranged_mod_range: 0.0,
-            spells: Vec::new(),
-            use_spell: None,
-            bonding: 0,
-            description: String::new(),
-            page_text: 0,
-            language_id: 0,
-            page_material: 0,
-            start_quest: 0,
-            lock_id: 0,
-            material: 0,
-            sheath: 0,
-            random_property: 0,
-            block: 0,
-            item_set: 0,
-            max_durability: 0,
-            area: 0,
-            map: 0,
-            bag_family: 0,
-        }
     }
 
     #[test]

@@ -75,6 +75,7 @@ mod spirit;
 mod swap_pack_slots;
 mod use_pack_slot;
 mod vendor;
+mod worldstate;
 
 pub(crate) use attack::Attack;
 pub(crate) use aura::Aura;
@@ -92,3 +93,4 @@ pub(crate) use spirit::Spirit;
 pub(crate) use swap_pack_slots::SwapPackSlots;
 pub(crate) use use_pack_slot::UsePackSlot;
 pub(crate) use vendor::Vendor;
+pub(crate) use worldstate::WorldState;

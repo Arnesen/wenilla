@@ -176,6 +176,25 @@ impl ObjectFields {
         }
         self.get_u32(FIELD_PLAYER_EXPLORED_ZONES_1 + i).unwrap_or(0)
     }
+    /// `PLAYER_BLOCK_PERCENTAGE` — our chance to block, already a percent (2.62 = "2.62%"). The
+    /// spell tooltip's chance-to-X line (law §3-CHANCE) reads exactly this and its three
+    /// neighbours; the character sheet reads them too. `None` for a non-player unit.
+    pub fn player_block_percentage(&self) -> Option<f32> {
+        self.get_f32(FIELD_PLAYER_BLOCK_PERCENTAGE)
+    }
+    /// `PLAYER_DODGE_PERCENTAGE` — see [`Self::player_block_percentage`].
+    pub fn player_dodge_percentage(&self) -> Option<f32> {
+        self.get_f32(FIELD_PLAYER_DODGE_PERCENTAGE)
+    }
+    /// `PLAYER_PARRY_PERCENTAGE` — see [`Self::player_block_percentage`].
+    pub fn player_parry_percentage(&self) -> Option<f32> {
+        self.get_f32(FIELD_PLAYER_PARRY_PERCENTAGE)
+    }
+    /// `PLAYER_CRIT_PERCENTAGE` — melee crit; see [`Self::player_block_percentage`]. (The ranged
+    /// twin sits one slot above and has no consumer yet.)
+    pub fn player_crit_percentage(&self) -> Option<f32> {
+        self.get_f32(FIELD_PLAYER_CRIT_PERCENTAGE)
+    }
     /// `PLAYER_FIELD_POSSTAT0 + i` — stat `i`'s **positive** buff delta (float despite the header's
     /// "Type: INT" tag; see the field's doc comment). `i >= 5` reads `None`.
     pub fn player_posstat(&self, i: u8) -> Option<f32> {

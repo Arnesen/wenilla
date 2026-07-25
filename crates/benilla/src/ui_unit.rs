@@ -242,8 +242,9 @@ fn fire_unit_combat(
 
 /// The 1.12 race id → (localized display, `raceFile` token) — `UnitRace`'s two returns. The file
 /// token is the client's internal name (undead = `"Scourge"`, the space dropped from `"NightElf"`),
-/// the same vocabulary the 2D portrait stand-in files use (`portrait::temporary_portrait`).
-fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
+/// the same vocabulary the 2D portrait stand-in files use (`portrait::temporary_portrait`). The
+/// display column is also what `$R`/`$r` expand to ([`crate::npc_text`]) — one table, both readers.
+pub(crate) fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
     Some(match race {
         1 => ("Human", "Human"),
         2 => ("Orc", "Orc"),
@@ -260,7 +261,7 @@ fn race_names(race: u8) -> Option<(&'static str, &'static str)> {
 /// The 1.12 class id → (localized display, `classFileName`) — `UnitClass`'s two returns. The file
 /// name is uppercase (the ref's `strupper(classFileName)` tooltip lookups index GlobalStrings keys
 /// like `WARRIOR_STRENGTH_TOOLTIP` directly with it).
-fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
+pub(crate) fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
     Some(match class {
         1 => ("Warrior", "WARRIOR"),
         2 => ("Paladin", "PALADIN"),

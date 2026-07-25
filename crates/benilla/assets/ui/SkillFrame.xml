@@ -62,8 +62,8 @@
              tab, matching `BenillaPaperDollFrame`'s own lack of a per-page close button.
           4. THE RANK TEXT FORMAT IS THE REF'S BYTE-EXACT ONE, not the task brief's own paraphrase:
              `ref-ui/SkillFrame.lua` l.178-186 builds `rank .. " (" .. color .. modifier .. close ..
-             ")/" .. max` (e.g. "57 (|cff20ff20+3|r)/75") — transcribed verbatim (the reference
-             file is the authority on the tuple/format, the brief's prose is a summary).
+             ")/" .. max` (e.g. "57 (|cff20ff20+3|r)/75") — transcribed verbatim (the
+             reference file is the authority on the tuple/format, the brief's prose is a summary).
           5. NO FILLBAR (ref's `$parentFillBar`, driven by `numTempPoints`): [`GetSkillLineInfo`]
              always reports `numTempPoints = 0` (skills.rs's own module doc — 1.12 training points are
              dead data), so the fill bar could never show — dropped outright, `TradeSkillFrame.xml`'s

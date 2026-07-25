@@ -53,7 +53,8 @@ pub struct SpellDisplay {
     pub open_lock_type: Option<u32>,
     /// `Dispel` (column 4, `SpellRec+0x10`) — the `SpellDispelType.dbc` id. The reference client
     /// reads exactly this field for `GetPlayerBuffDispelType` / `UnitDebuff`'s third return
-    /// (byte-verified, decision 0257). Read it through [`Self::debuff_type`].
+    /// (byte-verified, decision 0257). Name it through [`crate::SpellCatalog::dispel_name`] — the
+    /// id alone does not say whether the class is named (`SpellDispelType.dbc`'s `[+0x28]` gate).
     pub dispel: u32,
     /// `Category` (column 2, [`COL_CATEGORY`]) — the shared-cooldown category; `0` = none.
     pub category: u32,
@@ -249,27 +250,12 @@ impl Default for SpellDisplay {
     }
 }
 
-/// The `SpellDispelType.dbc` ids the debuff border tints by (vmangos `DispelType`,
-/// `SpellDefines.h:679-692`). The reference's `DebuffTypeColor` table keys on exactly these four
-/// names and colors everything else — including `0` (none) and the untinted 5–10 (stealth,
-/// invisibility, enrage, …) — with its `"none"` entry.
-const DISPEL_NAMES: [(u32, &str); 4] = [(1, "Magic"), (2, "Curse"), (3, "Disease"), (4, "Poison")];
+// The dispel-class NAME (the aura tooltip's right column, and the `debuffType` the debuff border
+// tints by) is not derivable from [`SpellDisplay::dispel`] alone: `SpellDispelType.dbc` carries
+// both the string and the `[+0x28]` gate that decides whether a class is named at all. It lives on
+// the catalog that loads that file — [`crate::SpellCatalog::dispel_name`].
 
 impl SpellDisplay {
-    /// The dispel-class name a debuff border tints by (`"Magic"`/`"Curse"`/`"Disease"`/`"Poison"`),
-    /// or `None` for an undispellable class — the `debuffType` return of `UnitAura`/`UnitDebuff`,
-    /// whose `nil` the reference maps to `DebuffTypeColor["none"]`.
-    ///
-    /// The real client resolves the name through `SpellDispelType.dbc`; we map the four ids the UI
-    /// actually distinguishes, which are stable and English in that table's enUS column. Nothing
-    /// reads the other ids.
-    pub fn debuff_type(&self) -> Option<&'static str> {
-        DISPEL_NAMES
-            .iter()
-            .find(|(id, _)| *id == self.dispel)
-            .map(|(_, name)| *name)
-    }
-
     /// The client's ranged-stance gate, verbatim: `AttributesEx2 & 0x20` (auto-repeat: Auto Shot,
     /// wand Shoot) **or** `Attributes & 0x2` (uses the ranged slot: every Shoot variant, Throw).
     /// Byte-verified in wow-re (`SpellRec+0x20&0x20 || +0x18&0x2` — the test every ranged trigger
@@ -351,6 +337,32 @@ impl SpellDisplay {
     pub fn is_melee_auto_attack(&self) -> bool {
         self.effect_1 == SPELL_EFFECT_ATTACK
     }
+
+    /// The spell **tooltip's** passive gate (wow-re `tooltip-content-law.md` §3.4): the
+    /// CastTime|Cooldown line is skipped whole for `Attributes & 0x40` **or**
+    /// `Effect[0] ∈ {0x2f, 0x4e}` — `SPELL_EFFECT_TRADE_SKILL` (the profession book entries) and
+    /// `SPELL_EFFECT_ATTACK` (6603 "Attack"). Wider than [`Self::passive`], which is the
+    /// spellbook's own gray-and-refuse gate and must keep reading the attribute alone.
+    ///
+    /// The law's note writes the field as "iconID `[+0xf4]`"; the offset is Effect[0]
+    /// (`0xf4/4 == 61` — the same `[SpellRec+0xf4]` the byte-verified auto-attack resolvers
+    /// compare against `0x4e`). Confirmed on the shipped data: 6603 "Attack" carries
+    /// `Effect[0] = 78` with `Attributes = 0x10`, and the reference's spellbook hover shows it
+    /// with NO cast-time line.
+    pub fn tooltip_omits_cast_line(&self) -> bool {
+        self.passive
+            || matches!(
+                self.effect_1,
+                SPELL_EFFECT_TRADE_SKILL | SPELL_EFFECT_ATTACK
+            )
+    }
+
+    // The equipped-item requirement's NAME used to be decided here, by a
+    // `single_equipped_subclass` that answered only for a one-bit mask — a placeholder standing in
+    // for the uncarved `0x6e2380`. `0x6e2380` is carved now, and it reads only ItemSubClass.dbc,
+    // behind an ItemSubClassMask.dbc group lookup that names a wide mask in one word. The whole
+    // rule (both spellings, both call sites) lives with the vocabulary it reads:
+    // [`crate::ItemSubClassCatalog::requirement_name`].
 
     /// The **ranged** icon-substitution gate — `Attributes & 0x2` AND `AttributesEx2 & 0x20`,
     /// both bits (decision 0231's deferred ranged case; wow-re `attack-icon-substitution.md` §5,

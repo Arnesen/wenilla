@@ -63,6 +63,19 @@ impl WorldSession {
         session_key: [u8; SESSION_KEY_LENGTH],
     ) -> Result<Self> {
         let mut stream = TcpStream::connect(addr).context("connecting to world server")?;
+        // **Nagle off** (decision 0617). VERIFIED in the reference client: `0x5bca60` calls
+        // `setsockopt(s, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &1, 4)` unconditionally on its game
+        // socket (WSOCK32 ordinal 21, IAT slot `0x7ff6f8`; a sibling helper at `0x43dda0` toggles the
+        // same option from a bool). Rust leaves Nagle *on*, which is exactly wrong for this protocol:
+        // every packet we send is a sub-MSS write on a latency-critical stream, so the kernel holds
+        // each one until the server ACKs the last — coalescing our movement stream into delayed-ACK-
+        // sized clumps. The de-jitter chain on the observing client then sizes its buffer to that
+        // self-inflicted lateness (decision 0615). Fatal on failure: the option cannot fail on a
+        // healthy connected socket, so an error here means the next handshake write is doomed anyway —
+        // better one named failure than a session that silently plays at delayed-ACK cadence.
+        stream
+            .set_nodelay(true)
+            .context("disabling Nagle (TCP_NODELAY) on the world socket")?;
         // Handshake reads wait for one specific reply each — silence is failure, so bound them
         // (decision 0065). A server that stays connected but never answers must not wedge the net
         // thread forever. Cleared in `into_split` for the streaming phase (a quiet world is legal).

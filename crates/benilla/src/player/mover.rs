@@ -148,78 +148,30 @@ pub(super) fn step(
         air_nudged = true;
     }
 
-    // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
-    // advance-this-frame's-travel-at-the-raised-height → settle onto a walkable floor, all
-    // committed inside this one frame, or nothing happens and the plain slide runs. There is
-    // no in-between state to be seen wedged or bouncing in (the 0191 ride dwelled mid-face;
-    // every stuck/bounce report of the step-up era was that dwelling). Grazing a face nets
-    // back onto the same floor (reads as sliding); a square push onto a low step lands on its
-    // top; anything taller than [`STEP_UP_HEIGHT`] never commits.
-    let mut stepped = None;
-    if !held && moving && grounded && !jumped {
-        stepped = step_up(&cast, center, dir.normalize_or_zero(), speed * dt);
-    }
-
-    // Held: zero velocity (no move). Grounded: move horizontally only (no gravity-slide).
-    // Jumping/airborne: gravity carries the arc.
-    let velocity = if held {
-        Vec3::ZERO
-    } else if grounded && !jumped {
-        player.horiz_vel
-    } else {
-        player.horiz_vel + Vec3::Y * player.vel_y
-    };
     let pre_move = center;
-    if let Some(landed) = stepped {
-        // The committed maneuver IS this frame's motion — already settled on a walkable floor,
-        // so the slide and the snap below are skipped.
-        center = landed;
-    } else {
-        let out = ms.move_and_slide(
-            capsule,
-            center,
-            Quat::IDENTITY,
-            velocity,
-            time.delta(),
-            &MoveAndSlideConfig::default(),
-            &filter,
-            |hit| {
-                if grounded && !jumped {
-                    if let Some(ride) = walkable_ride_velocity(**hit.normal, *hit.velocity) {
-                        *hit.velocity = ride;
-                        return MoveAndSlideHitResponse::Accept;
-                    }
-                }
-                if let Some(wall) = steep_wall_plane(**hit.normal, *hit.velocity) {
-                    if let Ok(wall) = Dir::new(wall) {
-                        *hit.normal = wall;
-                    }
-                }
-                MoveAndSlideHitResponse::Accept
-            },
-        );
-        center = out.position;
-    }
-    // Snap onto the surface (grounded, not jumping) so we follow downhill slopes + steps down —
-    // the client's step-vs-fall election (`0x6367b0`, wow-re `step-vs-fall-election.md`): the
-    // probe reaches [`STEP_SLOPE_RATIO`]·travel + [`STEP_SNAP_SLACK`] + the unit's collision
-    // height (`0x617430` = `[unit+0xb8]`, our [`CAPSULE_HEIGHT`]; the election's `0x4000000`-
-    // gated extension — decision 0182) and snaps only onto a *walkable* floor (≤50°, the
-    // election's own `cos50°` = [`GROUND_COS`]). A deeper or steeper floor is NOT absorbed: no
-    // snap, the next frame's ground probe misses, and the gap becomes a fall (the client's
-    // `StartFalling(0)` election) — a short ledge drop reads as a quick, continuous, steep
-    // descent, which is what the director's eye confirmed against the reference (decision 0190;
-    // 0189's instant absorbed step read as a teleport and was reverted).
-    let mut snap_probe = None; // (reach, probe outcome) — feeds the WOW_MOVE_TRACE line below
-    if grounded && !jumped && stepped.is_none() {
-        let d = center - pre_move;
-        let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
-        let hit = probe_down(center, reach);
-        snap_probe = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
-        if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
-            center.y -= h.distance;
-            ground_entity = Some(h.entity);
+    // The grounded walk is the SHARED resolve ([`grounded_step`]) — step-up, slide, election
+    // snap — the same code every remote mover's dead-reckon runs. Held and airborne/jumping
+    // frames keep their own slide here: no step-up, no snap, and gravity in the velocity.
+    let (mut climb, mut snap_probe) = (None, None);
+    if !held && grounded && !jumped {
+        let g = grounded_step(ms, capsule, &filter, center, player.horiz_vel, time.delta());
+        center = g.center;
+        climb = g.climb;
+        snap_probe = g.snap;
+        if let Some(e) = g.ground {
+            ground_entity = Some(e);
         }
+    } else {
+        // Held: zero velocity (no move) — `held` already zeroed both terms, but say it outright.
+        // Jumping/airborne: gravity carries the arc.
+        let velocity = if held {
+            Vec3::ZERO
+        } else {
+            player.horiz_vel + Vec3::Y * player.vel_y
+        };
+        // The airborne slide is the OTHER shared resolve ([`airborne_step`]) — the same code a
+        // remote mover's arc runs, so a jump meets our walls whoever is jumping (decision 0627).
+        center = airborne_step(ms, capsule, &filter, center, velocity, time.delta());
     }
     // Wedge-rest detection (decisions 0211/0212): airborne, already falling fast, yet the
     // descent achieved is a sliver of what gravity intended — [`WEDGE_STILL_FRAMES`] in a row
@@ -264,7 +216,7 @@ pub(super) fn step(
         on_walkable,
         vel_y: player.vel_y,
         snap: snap_probe,
-        climb: stepped.map(|landed| landed.y - pre_move.y),
+        climb,
     });
 
     Outcome {
@@ -278,6 +230,166 @@ pub(super) fn step(
             None
         },
     }
+}
+
+/// What one grounded walk step resolved against the world came out as ([`grounded_step`]).
+pub(crate) struct GroundedStep {
+    /// The resolved capsule centre.
+    pub(crate) center: Vec3,
+    /// The collider of the walkable floor the election snap settled onto, when it ran and hit one.
+    /// `None` means "keep whatever the caller already believed" — a step-up commit and a missed
+    /// snap both leave the support unchanged.
+    pub(crate) ground: Option<Entity>,
+    /// The atomic step-up's committed height gain (yd), when the maneuver ran.
+    pub(crate) climb: Option<f32>,
+    /// The election snap's `(probe reach, what it found)` — trace fodder, `None` when the step-up
+    /// took the frame instead. The inner pair is `(hit distance, hit normal.y)`.
+    pub(crate) snap: Option<(f32, Option<(f32, f32)>)>,
+}
+
+/// **One grounded walk step, resolved against the world** — step-up → slide → election snap, from
+/// a capsule centre and this frame's horizontal velocity. The single place a walking body meets the
+/// terrain, and deliberately so: the reference drives **every** mover through one controller (0059's
+/// byte trail — `0x616620` integrates any mover; the local-player GUID compare at `0x6166a9` gates
+/// only a timing budget; the grounded fork zeroes the vertical and commits through the swept world
+/// query `0x633840` + the WALK resolver `0x6367b0`, which reads Z off the surface). So does benilla:
+/// the local controller ([`step`]) calls this for its grounded frames, and every **remote** mover's
+/// dead-reckon calls it for its extrapolated step ([`crate::net::motion::remote`]).
+///
+/// Why a remote needs it at all: dead-reckoning between packets is *our invention*, and an invention
+/// that ignores the world walks a watched player into a hillside (they sink in, then the next packet
+/// pops them out) and leaves their height wherever the last packet put it while the ground under them
+/// rises or falls (they sink or float, and the height arrives as a 2 Hz snap). Both are one defect —
+/// the extrapolator never touched the world — and both are gone the moment the step is resolved
+/// through here.
+///
+/// Airborne and swimming frames are **not** this function's: a jump is a ballistic arc and a
+/// swimmer's Z is its depth, exactly as the reference's grounded fork excludes both.
+pub(crate) fn grounded_step(
+    ms: &MoveAndSlide<'_, '_>,
+    capsule: &Collider,
+    filter: &SpatialQueryFilter,
+    center: Vec3,
+    horiz_vel: Vec3,
+    dt: std::time::Duration,
+) -> GroundedStep {
+    let cast = |from: Vec3, disp: Vec3| {
+        ms.cast_move(capsule, from, Quat::IDENTITY, disp, SKIN_WIDTH, filter)
+    };
+    let speed = horiz_vel.length();
+    // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
+    // advance-this-frame's-travel-at-the-raised-height → settle onto a walkable floor, all
+    // committed inside this one frame, or nothing happens and the plain slide runs. There is
+    // no in-between state to be seen wedged or bouncing in (the 0191 ride dwelled mid-face;
+    // every stuck/bounce report of the step-up era was that dwelling). Grazing a face nets
+    // back onto the same floor (reads as sliding); a square push onto a low step lands on its
+    // top; anything taller than [`STEP_UP_HEIGHT`] never commits.
+    let stepped = if speed > 1.0e-6 {
+        step_up(&cast, center, horiz_vel / speed, speed * dt.as_secs_f32())
+    } else {
+        None
+    };
+    if let Some(landed) = stepped {
+        // The committed maneuver IS this frame's motion — already settled on a walkable floor,
+        // so the slide and the snap below are skipped.
+        return GroundedStep {
+            center: landed,
+            ground: None,
+            climb: Some(landed.y - center.y),
+            snap: None,
+        };
+    }
+    let out = ms.move_and_slide(
+        capsule,
+        center,
+        Quat::IDENTITY,
+        horiz_vel,
+        dt,
+        &MoveAndSlideConfig::default(),
+        filter,
+        |hit| {
+            if let Some(ride) = walkable_ride_velocity(**hit.normal, *hit.velocity) {
+                *hit.velocity = ride;
+                return MoveAndSlideHitResponse::Accept;
+            }
+            if let Some(wall) = steep_wall_plane(**hit.normal, *hit.velocity) {
+                if let Ok(wall) = Dir::new(wall) {
+                    *hit.normal = wall;
+                }
+            }
+            MoveAndSlideHitResponse::Accept
+        },
+    );
+    let mut slid = out.position;
+    // Snap onto the surface so we follow downhill slopes + steps down — the client's step-vs-fall
+    // election (`0x6367b0`, wow-re `step-vs-fall-election.md`): the probe reaches
+    // [`STEP_SLOPE_RATIO`]·travel + [`STEP_SNAP_SLACK`] + the unit's collision height (`0x617430` =
+    // `[unit+0xb8]`, our [`CAPSULE_HEIGHT`]; the election's `0x4000000`-gated extension — decision
+    // 0182) and snaps only onto a *walkable* floor (≤50°, the election's own `cos50°` =
+    // [`GROUND_COS`]). A deeper or steeper floor is NOT absorbed: no snap, the next frame's ground
+    // probe misses, and the gap becomes a fall (the client's `StartFalling(0)` election) — a short
+    // ledge drop reads as a quick, continuous, steep descent, which is what the director's eye
+    // confirmed against the reference (decision 0190; 0189's instant absorbed step read as a
+    // teleport and was reverted).
+    //
+    // Standing still the reach is slack + the collision height, which is what re-grounds an
+    // *idle* body every frame: the small float a raw wire Z leaves a watched player standing on
+    // our terrain is taken out here, the same way [`crate::net::motion::ground_clamp_creatures`]
+    // takes it out of an idle NPC.
+    let d = slid - center;
+    let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
+    let hit = cast(slid, Vec3::NEG_Y * reach);
+    let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
+    let mut ground = None;
+    if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
+        slid.y -= h.distance;
+        ground = Some(h.entity);
+    }
+    GroundedStep {
+        center: slid,
+        ground,
+        climb: None,
+        snap,
+    }
+}
+
+/// **One airborne step, resolved against the world** — the arc's slide and nothing else. No
+/// step-up and no election snap: the arc owns its own height (gravity carries it; the landing is
+/// next frame's ground probe to call), so the only thing the world may do here is *stop* it. Steep
+/// faces get [`steep_wall_plane`]'s treatment, exactly as they do on the ground.
+///
+/// The airborne twin of [`grounded_step`], and shared for the same reason (0059's one controller,
+/// every mover): the local controller ([`step`]) calls it for its held/airborne frames, and a
+/// **remote** mover's ballistic dead-reckon calls it for the arc it invents between packets
+/// ([`crate::net::motion::remote`]). Without that, a watched player who jumps into a building is
+/// drawn *inside* it for the length of the jump and pops back out on the landing packet — the
+/// airborne half of the very defect 0626 fixed on the ground (decision 0627).
+pub(crate) fn airborne_step(
+    ms: &MoveAndSlide<'_, '_>,
+    capsule: &Collider,
+    filter: &SpatialQueryFilter,
+    center: Vec3,
+    velocity: Vec3,
+    dt: std::time::Duration,
+) -> Vec3 {
+    ms.move_and_slide(
+        capsule,
+        center,
+        Quat::IDENTITY,
+        velocity,
+        dt,
+        &MoveAndSlideConfig::default(),
+        filter,
+        |hit| {
+            if let Some(wall) = steep_wall_plane(**hit.normal, *hit.velocity) {
+                if let Ok(wall) = Dir::new(wall) {
+                    *hit.normal = wall;
+                }
+            }
+            MoveAndSlideHitResponse::Accept
+        },
+    )
+    .position
 }
 
 /// The even-speed ramp ride: a walkable slope never slows or deflects the grounded walk. The

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::layout::{LayoutInput, Rect};
+use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
@@ -25,6 +25,22 @@ pub(crate) struct Model {
     pub(crate) layout_inputs: HashMap<FrameHandle, LayoutInput>,
     /// The last [`UiScript::resolve`] result: each resolvable frame's rect. Empty until `resolve`.
     pub(crate) resolved: HashMap<FrameHandle, Rect>,
+    /// The anchor-graph solver, kept alive across resolves so its per-handle arrays and the
+    /// per-frame anchor `Vec`s are reused — a steady round allocates nothing (see
+    /// [`LayoutSolver`]). Scratch only: it holds no state between rounds that `begin` doesn't
+    /// clear, and `resolved`/`region_resolved` remain the model's own answer.
+    pub(crate) solver: LayoutSolver,
+    /// The fingerprint of the input set the last CONVERGED resolve ran against — the change gate
+    /// (see `script::layout::InputFingerprint`). `None` forces the next resolve to run: the
+    /// initial state, and what a non-converging (cyclic) pass leaves behind so its progress can
+    /// carry into the next frame.
+    pub(crate) layout_fingerprint: Option<super::layout::InputFingerprint>,
+    /// How many times the change gate has LET A RESOLVE THROUGH. `UiScript::resolve` is called
+    /// unconditionally every frame, so the gap between call count and this is the gate's whole
+    /// value; it is also what lets a test assert that a no-op resolve really was one, rather than
+    /// merely producing the same rects. Counts the gate's decision, so it reads the same with the
+    /// `WOW_LAYOUT_VERIFY` self-check on (which re-runs skipped resolves) as with it off.
+    pub(crate) layout_solves: u64,
     /// Hyperlink spans per frame — `(rect, link payload, full |H…|h markup)`, rects in the
     /// engine's y-up screen space. Fed by the app each frame after it rasterizes message lines
     /// ([`super::UiScript::set_link_spans`]); consumed by the pointer's release dispatch
@@ -551,6 +567,9 @@ impl Model {
         Model {
             arena: WidgetArena::new(),
             layout_inputs: HashMap::new(),
+            solver: LayoutSolver::new(),
+            layout_fingerprint: None,
+            layout_solves: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),
             chat_tab: false,

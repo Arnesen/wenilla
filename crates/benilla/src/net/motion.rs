@@ -11,7 +11,8 @@
 //!
 //! The parent [`super`] module owns the wire→ECS bridge that seeds + corrects these from the packet
 //! stream; this module owns the integration, split by concern: [`spline`] (the path walk + its
-//! terrain re-ground), [`remote`] (dead-reckoning + jump ballistics), [`facing`] (wire facing
+//! terrain re-ground), [`remote`] (dead-reckoning + jump ballistics), [`relay`] (***when*** a relayed
+//! move replays — the per-unit fire-time chain), [`facing`] (wire facing
 //! resolution + the client-local idle re-face and its [`FacingStep`] shuffle latch). This face keeps
 //! the shared pose glue. Poses live canonically in raw WoW space on the components; the `Transform`
 //! is derived (translation + facing only — scale, baked by the renderer, is preserved).
@@ -20,6 +21,7 @@ use benilla_assets::coords::wow_to_bevy;
 use bevy::prelude::*;
 
 mod facing;
+mod relay;
 mod remote;
 mod spline;
 #[cfg(test)]
@@ -27,9 +29,10 @@ mod tests;
 
 pub(crate) use facing::FacingStep;
 pub(super) use facing::{face_target, resolve_facing};
-pub(in crate::net) use remote::{apply_move, arrival_snap};
+pub(crate) use relay::{PendingMove, RelayMove};
+pub(crate) use remote::RemoteMotion;
+pub(in crate::net) use remote::{apply_move, arrival_snap, trace_relay, RelayOutcome};
 pub(super) use remote::{drain_pending_moves, extrapolate_remote_units};
-pub(crate) use remote::{PendingMove, RelayClock, RemoteMotion};
 pub(super) use spline::{
     ground_clamp_creatures, mark_swimming_creatures, monster_move_spline, sample_splines,
 };

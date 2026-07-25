@@ -24,7 +24,7 @@
 use benilla_formats::SpellDisplay;
 
 /// Wire reason → its `SPELL_FAILED_*` GlobalStrings key (the `0x6e23e0` table, byte-exact).
-const CAST_FAIL_KEYS: [&str; 146] = [
+pub(super) const CAST_FAIL_KEYS: [&str; 146] = [
     "SPELL_FAILED_AFFECTING_COMBAT",             // 0x00
     "SPELL_FAILED_ALREADY_AT_FULL_HEALTH",       // 0x01
     "SPELL_FAILED_ALREADY_AT_FULL_POWER",        // 0x02

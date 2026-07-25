@@ -201,8 +201,7 @@ fn npc_text_update_greeting_extraction() {
         }
     }
 
-    // Block 3 (probability 0.5) is the highest-probability block with a non-empty male text — it
-    // wins over both lower-probability blocks and the higher-index female-only block 6.
+    // The wire carries all 8 blocks through UNDECIDED — the parse layer no longer picks.
     let mut body = 321u32.to_le_bytes().to_vec(); // textID
     block(&mut body, 0.1, "Low probability greeting", "");
     block(&mut body, 0.0, "", "");
@@ -214,34 +213,77 @@ fn npc_text_update_greeting_extraction() {
     block(&mut body, 0.0, "", "");
 
     match messages::parse_server(messages::opcode::SMSG_NPC_TEXT_UPDATE, &body).unwrap() {
-        ServerPacket::NpcText { text_id, greeting } => {
+        ServerPacket::NpcText { text_id, blocks } => {
             assert_eq!(text_id, 321);
-            assert_eq!(greeting, "Welcome, $N!");
+            assert_eq!(blocks.len(), messages::NPC_TEXT_BLOCKS);
+            assert_eq!(blocks[3].probability, 0.5);
+            assert_eq!(blocks[3].male, "Welcome, $N!");
+            assert_eq!(blocks[3].female, "Welcome, traveler!");
+            assert_eq!(blocks[6].female, "Female-only greeting");
         }
         other => panic!("npc text update, got {}", other.name()),
     }
 
     let packet = messages::parse_server(messages::opcode::SMSG_NPC_TEXT_UPDATE, &body).unwrap();
     match decode(packet).pop().unwrap() {
-        SessionEvent::NpcGreeting { text_id, greeting } => {
-            assert_eq!((text_id, greeting.as_str()), (321, "Welcome, $N!"));
+        SessionEvent::NpcGreeting { text_id, blocks } => {
+            assert_eq!(text_id, 321);
+            assert_eq!(blocks.len(), messages::NPC_TEXT_BLOCKS);
         }
         other => panic!("npc greeting event, got {other:?}"),
     }
+}
 
-    // Male-empty fallback: the winning block's text0 is empty, text1 is used instead.
-    let mut fallback_body = 322u32.to_le_bytes().to_vec();
-    for _ in 0..7 {
-        block(&mut fallback_body, 0.0, "", "");
+/// The greeting DRAW (wow-re `gossip-npctext-law.md`, reference `0x4e2010`) — a weighted random
+/// pick over the blocks whose chosen gender column is non-empty. Every branch pinned with an
+/// explicit roll, because all three rules here are the opposite of what this client used to do.
+#[test]
+fn greeting_draw_follows_the_weighted_law() {
+    use benilla_protocol::messages::{select_greeting, NpcTextBlock};
+
+    let b = |probability: f32, male: &str, female: &str| NpcTextBlock {
+        probability,
+        male: male.into(),
+        female: female.into(),
+    };
+    // roll ∈ [1, 2) ⇒ thr = (2 - roll) * sum ∈ (0, sum]. roll = 1.0 is the far end (thr = sum),
+    // roll → 2.0 the near end (thr → 0).
+    const NEAR: f32 = 1.999_999_9;
+    const FAR: f32 = 1.0;
+
+    // 1 · The all-zero record — vmangos's fallback, and much of the 1.12 table. sum = 0 ⇒ thr = 0,
+    //     and the predicate is `<=`, so block 0 wins on EVERY roll rather than nothing winning.
+    let zeros: Vec<_> = (0..8).map(|i| b(0.0, &format!("line {i}"), "")).collect();
+    for roll in [FAR, 1.5, NEAR] {
+        assert_eq!(select_greeting(&zeros, 0, roll), Some("line 0"));
     }
-    block(&mut fallback_body, 1.0, "", "Only the ladies get a hello");
-    match messages::parse_server(messages::opcode::SMSG_NPC_TEXT_UPDATE, &fallback_body).unwrap() {
-        ServerPacket::NpcText { text_id, greeting } => {
-            assert_eq!(text_id, 322);
-            assert_eq!(greeting, "Only the ladies get a hello");
-        }
-        other => panic!("npc text fallback, got {}", other.name()),
-    }
+
+    // 2 · Real weights: the draw walks in order, so a near-zero threshold takes the first non-empty
+    //     block and a threshold of the full sum takes the last. The old rule — highest probability
+    //     wins — would have answered "big" for both.
+    let weighted = vec![b(0.1, "small", ""), b(0.8, "big", ""), b(0.1, "last", "")];
+    assert_eq!(select_greeting(&weighted, 0, NEAR), Some("small"));
+    assert_eq!(select_greeting(&weighted, 0, FAR), Some("last"));
+
+    // 3 · The column is the NPC's gender, chosen once. Genderless (2) reads as male, because the
+    //     reference tests `== 1`, not `!= 0`.
+    let gendered = vec![b(1.0, "sir", "madam")];
+    assert_eq!(select_greeting(&gendered, 0, FAR), Some("sir"));
+    assert_eq!(select_greeting(&gendered, 1, FAR), Some("madam"));
+    assert_eq!(
+        select_greeting(&gendered, 2, FAR),
+        Some("sir"),
+        "genderless"
+    );
+
+    // 4 · No fallback to the other column. A female NPC skips male-only blocks outright — she does
+    //     NOT borrow their text (this client used to) — and if that empties the record she gets no
+    //     greeting at all, which is the reference's "Missing gossip text!" path.
+    let male_only = vec![b(1.0, "men only", ""), b(1.0, "", "ladies")];
+    assert_eq!(select_greeting(&male_only, 1, FAR), Some("ladies"));
+    assert_eq!(select_greeting(&male_only, 1, NEAR), Some("ladies"));
+    assert_eq!(select_greeting(&[b(1.0, "men only", "")], 1, FAR), None);
+    assert_eq!(select_greeting(&[], 0, FAR), None, "empty record");
 }
 
 #[test]

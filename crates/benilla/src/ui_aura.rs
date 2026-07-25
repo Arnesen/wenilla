@@ -290,7 +290,10 @@ fn feed_auras(
                 name: display.map(|d| d.name.clone()),
                 icon: display.and_then(|d| d.icon.clone()),
                 count: c.stacks,
-                debuff_type: display.and_then(|d| d.debuff_type()).map(str::to_string),
+                debuff_type: display
+                    .zip(catalog)
+                    .and_then(|(d, cat)| cat.dispel_name(d))
+                    .map(str::to_string),
                 duration,
                 expiration_time,
                 helpful: c.slot < UNIT_AURA_POSITIVE_SLOTS,
@@ -366,7 +369,10 @@ fn feed_auras(
                             name: display.map(|d| d.name.clone()),
                             icon: display.and_then(|d| d.icon.clone()),
                             count: a.stacks,
-                            debuff_type: display.and_then(|d| d.debuff_type()).map(str::to_string),
+                            debuff_type: display
+                                .zip(catalog)
+                                .and_then(|(d, cat)| cat.dispel_name(d))
+                                .map(str::to_string),
                             // No duration for any unit but yourself — the 1.12 wire carries none
                             // (byte-verified, 0257 B6); the reference's target frame shows no timers.
                             duration: 0.0,

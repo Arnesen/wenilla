@@ -6,13 +6,14 @@
 use std::io::{self, Read};
 
 use crate::wire::{
-    read_cstring, read_f32_le, read_packed_guid, read_u32_le, read_u64_le, read_u8, Vector3d,
+    read_cstring, read_f32_le, read_packed_guid, read_u16_le, read_u32_le, read_u64_le, read_u8,
+    Vector3d,
 };
 
 use super::{
     bank, channel, chat, death, gameobject, gossip, group, items, loot, mail, monster_move,
-    movement, opcode, quest, spells, taxi, trade, trainer, update_object, vendor, Character,
-    CreatureQueryInfo, ServerPacket, SpeedKind,
+    movement, opcode, quest, spells, taxi, trade, trainer, update_object, vendor, world_state,
+    Character, CreatureQueryInfo, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -25,6 +26,65 @@ fn read_force_speed(kind: SpeedKind, r: &mut impl Read) -> io::Result<ServerPack
         counter: read_u32_le(r)?,
         speed: read_f32_le(r)?,
     })
+}
+
+/// Read an `SMSG_COMPRESSED_MOVES` body: `[u32 uncompressed size][deflate stream]`, the stream a
+/// run of `[u8 size][u16 opcode][body]` records where `size` counts the opcode's own two bytes
+/// (VERIFIED vmangos `MovementData::AddPacket`/`BuildPacket`). Each record is a whole movement
+/// packet, so it goes straight back through [`parse_server`] — the batch is a *transport*, not a
+/// message shape, and nothing downstream needs to know a move arrived batched.
+///
+/// A record that fails to parse fails the **whole** batch (surfacing as one `Poll::Skipped` naming
+/// the inner opcode) rather than being dropped quietly. Losing a batch is worse than losing a
+/// packet, but silence here is what cost days: an unhandled inner opcode has to be loud. Only the
+/// `MSG_MOVE_*` relays vmangos routes through `ObjectViewersMovementDeliverer` can appear, and we
+/// model all of them (`the_batch_carries_every_relayed_move_opcode`).
+fn read_compressed_moves(r: &mut impl Read) -> io::Result<Vec<ServerPacket>> {
+    let uncompressed = read_u32_le(r)? as usize;
+    let mut buf = Vec::with_capacity(uncompressed.min(64 * 1024));
+    flate2::read::ZlibDecoder::new(r).read_to_end(&mut buf)?;
+    let mut rest = buf.as_slice();
+    let mut packets = Vec::new();
+    while !rest.is_empty() {
+        let size = read_u8(&mut rest)? as usize;
+        let opcode = read_u16_le(&mut rest)?;
+        // `size` spans opcode + body; anything under two bytes cannot even hold the opcode we
+        // just read, so the stream is misframed and every later record would be garbage.
+        let body_len = size.checked_sub(2).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("compressed-moves record size {size} < 2"),
+            )
+        })?;
+        if rest.len() < body_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "compressed-moves record {opcode:#06x} wants {body_len}B, {}B left",
+                    rest.len()
+                ),
+            ));
+        }
+        let (body, tail) = rest.split_at(body_len);
+        rest = tail;
+        // A batch inside a batch would recurse without bound; vmangos never nests one.
+        if opcode == opcode::SMSG_COMPRESSED_MOVES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compressed-moves nested inside compressed-moves",
+            ));
+        }
+        packets.push(parse_server(opcode, body).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "compressed-moves record {opcode:#06x} ({}): {e}",
+                    super::opcode_name(opcode).unwrap_or("?")
+                ),
+            )
+        })?);
+    }
+    Ok(packets)
 }
 
 /// Read one `SMSG_SPLINE_SET_*_SPEED` body — `[packed guid][f32 speed]` (VERIFIED vmangos
@@ -133,6 +193,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 objects: update_object::read_update_object(&mut dr)?,
             }
         }
+        opcode::SMSG_COMPRESSED_MOVES => ServerPacket::CompressedMoves {
+            packets: read_compressed_moves(&mut r)?,
+        },
         opcode::SMSG_MONSTER_MOVE => monster_move::read_monster_move(&mut r)?,
         opcode::MSG_MOVE_TELEPORT_ACK => {
             let guid = read_packed_guid(&mut r)?;
@@ -478,8 +541,8 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_GOSSIP_COMPLETE => ServerPacket::GossipComplete,
         opcode::SMSG_NPC_TEXT_UPDATE => {
-            let (text_id, greeting) = gossip::read_npc_text_update(&mut r)?;
-            ServerPacket::NpcText { text_id, greeting }
+            let (text_id, blocks) = gossip::read_npc_text_update(&mut r)?;
+            ServerPacket::NpcText { text_id, blocks }
         }
         opcode::SMSG_LIST_INVENTORY => {
             let (vendor, items) = vendor::read_list_inventory(&mut r)?;
@@ -688,6 +751,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 }
             }
         }
+        // `u32 petNumber`, cstring name, `u32 nameTimestamp` (VERIFIED vmangos
+        // `PetNameQueryResponse::AppendBodyTo`, `Server/Packets/Pet.cpp:79-84`). The timestamp ages
+        // out the reference's on-disk pet-name cache; we keep none, so it is alignment-only.
+        opcode::SMSG_PET_NAME_QUERY_RESPONSE => {
+            let pet_number = read_u32_le(&mut r)?;
+            let name = read_cstring(&mut r)?;
+            let _name_timestamp = read_u32_le(&mut r)?;
+            ServerPacket::PetNameQueryResponse { pet_number, name }
+        }
         opcode::SMSG_GAMEOBJECT_QUERY_RESPONSE => {
             let (entry, info) = gameobject::read_gameobject_query_response(&mut r)?;
             ServerPacket::GameObjectQueryResponse { entry, info }
@@ -851,6 +923,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_TRADE_STATUS_EXTENDED => ServerPacket::TradeStatusExtended {
             state: Box::new(trade::read_trade_status_extended(&mut r)?),
         },
+        // The world-state table — the `$<n>w`/`$<n>e` NPC-text tokens' source (and a battleground
+        // scoreboard's, later). Both opcodes write the one table; see [`super::world_state`].
+        opcode::SMSG_INIT_WORLD_STATES => {
+            ServerPacket::InitWorldStates(world_state::read_init_world_states(&mut r)?)
+        }
+        opcode::SMSG_UPDATE_WORLD_STATE => {
+            let (id, value) = world_state::read_update_world_state(&mut r)?;
+            ServerPacket::UpdateWorldState { id, value }
+        }
         // A relayed player movement packet: `[packed mover guid][MovementInfo]`, same opcode the mover
         // sent. This is how other players' walking/turning/strafing reaches us (creatures use
         // SMSG_MONSTER_MOVE instead). Surface the pose + live move-flags; the app extrapolates between.

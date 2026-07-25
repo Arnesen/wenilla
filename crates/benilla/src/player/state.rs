@@ -133,10 +133,18 @@ pub(super) const SETTLE_TIMEOUT: f32 = 6.0;
 /// glimpsed through a building whose collider hasn't streamed in yet.
 pub(super) const SETTLE_REACH: f32 = 1.0;
 
-/// The player's collision capsule, built once at startup and swept by avian's `MoveAndSlide` each
-/// frame. Its origin is the capsule centre; the player's `pos` is its feet (centre − half-height·Y).
+/// The player body's collision capsule, built once at startup and swept by avian's `MoveAndSlide`
+/// each frame. Its origin is the capsule centre; the player's `pos` is its feet (centre −
+/// half-height·Y).
+///
+/// **Every player body, not only ours.** A remote mover's dead-reckon sweeps this same capsule
+/// against the same colliders ([`super::mover::grounded_step`]) — the reference drives non-local
+/// units through the *same* movement controller as the local player (decision 0059's byte trail:
+/// `0x616620` integrates any mover; the local-player GUID compare gates only a timing budget). The
+/// reference reads each unit's own collision height (`[unit+0xb8]`); we use the one player capsule
+/// for every player body, which the 1.12 races are close enough to share.
 #[derive(Resource)]
-pub(super) struct PlayerCapsule(pub(super) Collider);
+pub(crate) struct PlayerCapsule(pub(crate) Collider);
 
 /// The avatar run-speed fallback + dev override. `value` is `$WOW_MOVE_SPEED` when set
 /// (`env_override` — the absolute dev knob, backpedal scaled by [`RUN_BACK_RATIO`] under it), else
@@ -187,9 +195,11 @@ pub(crate) struct Player {
     /// [`crate::net::move_flags`]). Diffed against this frame's flags to emit a `MSG_MOVE_*` per
     /// movement-axis transition — the way the real client announces its movement.
     pub(super) move_flags: u32,
-    /// The facing (WoW orientation) we last sent. While standing and mouse-turning, a change beyond a
-    /// small threshold streams a `MSG_MOVE_SET_FACING` (rate-limited), so others see us turn in place.
-    pub(super) last_sent_facing: f32,
+    /// The facing (WoW orientation) as of **last frame** — the reference's facing-change detector
+    /// (`0x617170`, exact equality against the unit's live facing cell). Any change off the turn axis
+    /// streams a `MSG_MOVE_SET_FACING` that frame, moving or standing, so observers see us aim
+    /// (decision 0617). Updated every frame whether or not a packet went out.
+    pub(super) last_facing: f32,
     /// The stand state we last volunteered (`CMSG_STANDSTATECHANGE`) whose echo into our
     /// `UNIT_FIELD_BYTES_1` hasn't landed yet — the local commit (the client's `SetStandState`
     /// `0x6127b0` applies immediately *and* sends; decision 0080c). `None` = at the echoed value.

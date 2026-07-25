@@ -659,3 +659,33 @@ fn real_crafting_columns_read_created_item_and_focus() {
         );
     }
 }
+
+/// The two tooltip-law reads added for the 2026-07-25 spellbook reports (decision 0620), on pure
+/// data — no client install needed.
+#[test]
+fn the_tooltip_gates_read_effect_and_mask() {
+    // §3.4: the cast|cooldown line goes on the ATTRIBUTE bit or on Effect[0] ∈ {47, 78}.
+    let plain = SpellDisplay::default();
+    assert!(!plain.tooltip_omits_cast_line());
+    let attribute_passive = SpellDisplay {
+        passive: true,
+        ..Default::default()
+    };
+    assert!(attribute_passive.tooltip_omits_cast_line());
+    // 6603 "Attack"'s shape: Effect[0] = 78, attributes 0x10 (NOT the passive bit).
+    let auto_attack = SpellDisplay {
+        effect_1: 78,
+        attributes: 0x10,
+        ..Default::default()
+    };
+    assert!(!auto_attack.passive, "the attribute bit is clear");
+    assert!(auto_attack.tooltip_omits_cast_line(), "the Effect[0] leg");
+    let trade_skill = SpellDisplay {
+        effect_1: 47,
+        ..Default::default()
+    };
+    assert!(trade_skill.tooltip_omits_cast_line());
+
+    // §3-EQUIPITEM's naming rule moved to `ItemSubClassCatalog::requirement_name`, where the
+    // vocabulary it reads lives — see `itemsubclass::tests` for its coverage against the real DBCs.
+}

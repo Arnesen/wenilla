@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use benilla_protocol::messages::GossipOption;
+use benilla_protocol::messages::{select_greeting, GossipOption, NpcTextBlock};
 use bevy::prelude::*;
 
 use benilla_ui::script::{GossipMenu, GossipOptionView, GossipQuestRow, ScriptValue, UiScript};
@@ -26,16 +26,23 @@ use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
 /// The open gossip menu, filled by the net bridge ([`crate::net`]) and read by [`feed_gossip`]. The
-/// ask-once `greetings` cache keyed by `text_id` (mirroring [`crate::items::Items`]'s template cache)
-/// means a revisit to the same NPC never re-queries the greeting. Cleared on `SMSG_GOSSIP_COMPLETE`,
-/// a client-side close, and disconnect; the greeting cache survives (NPC text is static per id).
+/// ask-once `records` cache keyed by `text_id` (mirroring [`crate::items::Items`]'s template cache)
+/// means a revisit to the same NPC never re-queries the text. Cleared on `SMSG_GOSSIP_COMPLETE`,
+/// a client-side close, and disconnect; the record cache survives (NPC text is static per id).
+///
+/// The cache holds the **record**, not a greeting. Which of its 8 blocks greets you is drawn per
+/// menu-open from the NPC's gender and a die roll (`benilla_protocol::messages::select_greeting`),
+/// exactly as the reference re-draws it in its gossip handler — so the same `text_id` can greet you
+/// differently on the next visit, and two NPCs sharing a `text_id` can differ by gender. Caching a
+/// resolved string, as this did, froze the first draw for the whole session.
 #[derive(Resource, Default)]
 pub(crate) struct GossipState {
     /// The NPC whose menu is open; `None` = no menu open.
     pub(crate) npc: Option<u64>,
-    /// The open menu's `NpcText` id (drives the greeting query / cache).
+    /// The open menu's `NpcText` id (drives the text query / cache).
     pub(crate) text_id: u32,
-    /// The resolved greeting (`SMSG_NPC_TEXT_UPDATE`), or `None` while its query is in flight.
+    /// The greeting drawn for THIS menu-open, or `None` while its query is in flight (or when the
+    /// record names no line for this NPC — the reference's "Missing gossip text!" path).
     pub(crate) greeting: Option<String>,
     /// The selectable option rows (wire `GossipOption`: `index` echoed on select, `icon`, `coded`,
     /// `message`).
@@ -44,21 +51,39 @@ pub(crate) struct GossipState {
     /// window lists them above the options; a click sends `CMSG_QUESTGIVER_QUERY_QUEST` /
     /// `_COMPLETE_QUEST` (decision 0088).
     pub(crate) quests: Vec<(u32, u32, String)>,
-    /// Ask-once greeting cache keyed by `text_id`.
-    greetings: HashMap<u32, String>,
+    /// Ask-once NPC-text record cache keyed by `text_id` — the 8 undrawn blocks.
+    records: HashMap<u32, Vec<NpcTextBlock>>,
 }
 
 impl GossipState {
-    /// The cached greeting for `text_id`, if `CMSG_NPC_TEXT_QUERY` was already answered for it.
-    pub(crate) fn cached_greeting(&self, text_id: u32) -> Option<String> {
-        self.greetings.get(&text_id).cloned()
+    /// The cached record for `text_id`, if `CMSG_NPC_TEXT_QUERY` was already answered for it.
+    pub(crate) fn cached_record(&self, text_id: u32) -> Option<&[NpcTextBlock]> {
+        self.records.get(&text_id).map(Vec::as_slice)
     }
 
-    /// Record a greeting answer (`SMSG_NPC_TEXT_UPDATE`) into the ask-once cache.
-    pub(crate) fn remember_greeting(&mut self, text_id: u32, greeting: String) {
-        self.greetings.insert(text_id, greeting);
+    /// Record an NPC-text answer (`SMSG_NPC_TEXT_UPDATE`) into the ask-once cache.
+    pub(crate) fn remember_record(&mut self, text_id: u32, blocks: Vec<NpcTextBlock>) {
+        self.records.insert(text_id, blocks);
     }
 
+    /// Draw this menu-open's greeting out of `text_id`'s cached record for an NPC of `npc_gender`
+    /// — `None` if the record hasn't arrived yet, or names no line for that gender.
+    pub(crate) fn draw_greeting(&self, text_id: u32, npc_gender: u8) -> Option<String> {
+        let blocks = self.cached_record(text_id)?;
+        select_greeting(blocks, npc_gender, greeting_roll()).map(str::to_string)
+    }
+}
+
+/// The reference's uniform float in `[1.0, 2.0)` for the greeting draw: it stuffs PRNG bits straight
+/// into a mantissa (`(rand & 0x7fffff) | 0x3f800000`), which is what makes the range `[1, 2)` rather
+/// than the `[0, 1)` you would expect. We build the same shape from our own source — the *stream*
+/// can't match (it is the client's own PRNG, seeded per run) but the distribution is what the law
+/// needs.
+fn greeting_roll() -> f32 {
+    f32::from_bits((rand::random::<u32>() & 0x7f_ffff) | 0x3f80_0000)
+}
+
+impl GossipState {
     /// Close the open menu (`SMSG_GOSSIP_COMPLETE` / a client-side close). Keeps the greeting cache.
     pub(crate) fn clear(&mut self) {
         self.npc = None;
@@ -163,6 +188,7 @@ fn feed_gossip(
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
     quest_log: Res<QuestLog>,
+    states: Res<crate::world_state::WorldStates>,
     mut last: Local<Option<GossipMenu>>,
     mut last_name: Local<Option<String>>,
     mut last_npc: Local<Option<u64>>,
@@ -171,10 +197,16 @@ fn feed_gossip(
         return;
     };
     let mut fresh = snapshot(&state, &quest_log);
-    // Expand the greeting's chat-text macros ($N/$B/$G) client-side, as the real client does.
+    // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
     if let Some(greeting) = fresh.as_mut().and_then(|m| m.greeting.as_mut()) {
-        let (name, gender) = crate::npc_text::player_identity(&self_q, &mut names, &commands);
-        *greeting = crate::npc_text::substitute(greeting, &name, gender);
+        let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+        *greeting = crate::npc_text::substitute(
+            greeting,
+            &crate::npc_text::MacroContext {
+                subject: player.as_ref(),
+                states: &states,
+            },
+        );
     }
     // The gossip NPC's name resolves through the NameCache (ask-once — the merchant feed's pattern),
     // delivered as arg1 of GOSSIP_SHOW; `None`/empty while the query is in flight, and the diff below
@@ -307,12 +339,50 @@ mod tests {
     }
 
     #[test]
-    fn ask_once_greeting_cache_survives_clear() {
+    fn ask_once_text_cache_survives_clear() {
         let mut state = GossipState::default();
-        state.remember_greeting(50, "Greetings $N".into());
+        state.remember_record(
+            50,
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: "Greetings $N".into(),
+                female: String::new(),
+            }],
+        );
         state.clear();
-        // The open menu is gone but the cached greeting is still servable (a revisit won't re-query).
-        assert_eq!(state.cached_greeting(50).as_deref(), Some("Greetings $N"));
+        // The open menu is gone but the cached RECORD is still servable (a revisit won't re-query
+        // — it re-draws from these blocks).
+        assert!(state.cached_record(50).is_some());
+        assert_eq!(
+            state.draw_greeting(50, 0).as_deref(),
+            Some("Greetings $N"),
+            "the all-zero record draws block 0 on every roll"
+        );
         assert!(state.npc.is_none());
+    }
+
+    /// The record is cached, the GREETING is not: a female NPC and a male NPC sharing one `text_id`
+    /// must read their own columns. Caching a resolved string (as this did) froze whichever one
+    /// asked first for the rest of the session.
+    #[test]
+    fn one_cached_record_greets_each_gender_from_its_own_column() {
+        let mut state = GossipState::default();
+        state.remember_record(
+            77,
+            vec![NpcTextBlock {
+                probability: 0.0,
+                male: "Well met, friend.".into(),
+                female: "Well met, sister.".into(),
+            }],
+        );
+        assert_eq!(
+            state.draw_greeting(77, 0).as_deref(),
+            Some("Well met, friend.")
+        );
+        assert_eq!(
+            state.draw_greeting(77, 1).as_deref(),
+            Some("Well met, sister.")
+        );
+        assert_eq!(state.draw_greeting(78, 0), None, "record not yet arrived");
     }
 }

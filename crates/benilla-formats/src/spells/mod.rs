@@ -112,6 +112,7 @@
 //! simulator (we render and speak the protocol; the server simulates).
 
 mod cast_times;
+mod dispel_types;
 mod display;
 mod duration;
 mod forms;
@@ -120,6 +121,7 @@ mod ranges;
 mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
+pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
 pub use display::SpellDisplay;
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
@@ -430,20 +432,30 @@ pub const SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY: u32 = 54;
 pub struct SpellCatalog {
     spells: HashMap<u32, SpellDisplay>,
     learned_spell: HashMap<u32, u32>,
+    dispel_types: SpellDispelTypes,
 }
 
 impl SpellCatalog {
     /// Build a catalog from an explicit display map — for tests and synthetic fixtures. The live
-    /// path is [`load_spell_catalog`]. Carries no learn-spell map (synthetic ids teach nothing).
+    /// path is [`load_spell_catalog`]. Carries no learn-spell map (synthetic ids teach nothing) and
+    /// no dispel table, so [`Self::dispel_name`] answers `None` for everything.
     pub fn from_displays(spells: HashMap<u32, SpellDisplay>) -> Self {
         Self {
             spells,
             learned_spell: HashMap::new(),
+            dispel_types: SpellDispelTypes::default(),
         }
     }
 
     pub fn get(&self, id: u32) -> Option<&SpellDisplay> {
         self.spells.get(&id)
+    }
+
+    /// The name of a spell's dispel class — the aura tooltip's right column and the `debuffType`
+    /// the debuff border tints by. `None` when the spell has no class or the class is one
+    /// `SpellDispelType.dbc`'s `[+0x28]` gate withholds (see [`dispel_types`]).
+    pub fn dispel_name(&self, display: &SpellDisplay) -> Option<&str> {
+        self.dispel_types.name(display.dispel)
     }
 
     /// Every loaded spell `(id, display)`, unordered — the corpus instruments' walk
@@ -502,6 +514,7 @@ fn spell_schema() -> Schema {
 /// Load the joined spell display catalog off the patch chain.
 pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     let icons = crate::dbc::load_spell_icon_map(chain)?;
+    let dispel_types = load_spell_dispel_types(chain)?;
 
     let spell_bytes = chain.read_file(SPELL).context("reading Spell.dbc")?;
     let spells_set = parse(&spell_bytes, spell_schema(), "Spell.dbc")?;
@@ -634,6 +647,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     Ok(SpellCatalog {
         spells,
         learned_spell,
+        dispel_types,
     })
 }
 

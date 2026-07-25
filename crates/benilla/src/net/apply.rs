@@ -115,8 +115,9 @@ pub(super) fn apply_net_updates(
         ResMut<crate::ui_party::GroupState>,
         // The taxi-map session (decision 0484 phase 1) + the mailbox session + its login-scoped
         // arrival countdown (decision 0544) + the player-trade session (decision 0592) + the bank
-        // session and its purchase-refusal queue (decision 0604), grouped to stay under Bevy's
-        // 16-SystemParam ceiling (this tuple's 16th and last slot).
+        // session and its purchase-refusal queue (decision 0604) + the world-state table the
+        // NPC-text `$<n>w` tokens read, grouped to stay under Bevy's 16-SystemParam ceiling (this
+        // tuple's 16th and last slot).
         (
             ResMut<crate::ui_taxi::TaxiState>,
             ResMut<crate::ui_mail::MailOpen>,
@@ -124,6 +125,7 @@ pub(super) fn apply_net_updates(
             ResMut<crate::ui_trade::TradeSession>,
             ResMut<crate::ui_bank::BankOpen>,
             ResMut<crate::ui_bank::BankErrors>,
+            ResMut<crate::world_state::WorldStates>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -215,9 +217,11 @@ pub(super) fn apply_net_updates(
         // the purge; the TRANSFER_PENDING transport block routes NEW_WORLD's coordinates).
         ResMut<PendingTransfer>,
         Query<&crate::transport::Transport>,
-        // The relayed-move clock map (decision 0601): server MovementInfo time → client
-        // fire-time, for the scheduled remote apply.
-        ResMut<crate::net::motion::RelayClock>,
+        // The REAL-time clock the relayed-move replay runs on (decisions 0601/0615): a remote's
+        // fire-time is stamped against this, and `drain_pending_moves`/`extrapolate_remote_units`
+        // read the same clock. Virtual time's `max_delta` clamp falls behind real time under
+        // occlusion throttling and would displace the whole replay schedule.
+        Res<Time<bevy::time::Real>>,
     ),
 ) {
     let play_seq = &mut aura.4;
@@ -244,6 +248,7 @@ pub(super) fn apply_net_updates(
             mut trade_session,
             mut bank_open,
             mut bank_errors,
+            mut world_states,
         ),
     ) = caches;
     let (
@@ -405,15 +410,14 @@ pub(super) fn apply_net_updates(
                 jump,
                 transport,
             } => {
-                // The scheduled-replay law (decision 0601): map the packet's server timestamp to
-                // a client fire-time; `unit_move` applies it now if due, else queues it on the
-                // unit for `drain_pending_moves`.
-                let now_ms = aura.1.elapsed_secs_f64() * 1000.0;
-                let fire_ms = aura.8.fire_time(time, now_ms);
+                // The scheduled-replay law (decisions 0601/0615): `unit_move` runs the mover's own
+                // replay chain over this packet's wire stamp to get its client fire-time, then
+                // applies it now if due, else queues it on the unit for `drain_pending_moves`.
+                let now_ms = aura.8.elapsed_secs_f64() * 1000.0;
                 objects::unit_move(
                     guid,
-                    crate::net::motion::PendingMove {
-                        fire_ms,
+                    crate::net::motion::RelayMove {
+                        wire_ms: time,
                         position,
                         orientation,
                         flags,
@@ -527,6 +531,9 @@ pub(super) fn apply_net_updates(
             // the player answer but have no consumer yet — the cache stays name-only until one does).
             SessionEvent::PlayerName { guid, name, .. } => {
                 names.insert_player(guid, name);
+            }
+            SessionEvent::PetName { pet_number, name } => {
+                names.insert_pet(pet_number, name);
             }
             SessionEvent::CreatureName {
                 entry,
@@ -663,6 +670,18 @@ pub(super) fn apply_net_updates(
                 // per type, resolves the sender name ask-once, and AddMessages it into ChatFrame1.
                 // System lines (type 0x0A) are GM dot-command feedback — now visible, not silent.
                 debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
+                // …and on the trace clock too (decision 0624). A GM dot-command is the only way to
+                // ask the SERVER what it believes — `.gps` reads back the server-side position of a
+                // mover whose packets may or may not be reaching it — and its answer is only usable
+                // if it lands on the same timeline as the `snd`/`rly`/`run` lines it must be read
+                // against. `debug!` timestamps are wall-clock in a different format; this is one
+                // clock, one file.
+                if crate::dbg_trace::enabled() {
+                    crate::dbg_trace::line(
+                        "sys",
+                        &format!("[{:#04x}] {}", m.chat_type, m.text.replace('\n', " ⏎ ")),
+                    );
+                }
                 chat_log.push_wire(m);
             }
             SessionEvent::ChannelNotify {
@@ -1094,9 +1113,23 @@ pub(super) fn apply_net_updates(
                 text_id,
                 options,
                 quests,
-            } => npc::gossip_menu(npc, text_id, options, quests, &mut gossip, &net_commands),
-            SessionEvent::NpcGreeting { text_id, greeting } => {
-                npc::npc_greeting(text_id, greeting, &mut gossip)
+            } => {
+                let gender = npc_gender(npc, &index, &stores);
+                npc::gossip_menu(
+                    npc,
+                    gender,
+                    text_id,
+                    options,
+                    quests,
+                    &mut gossip,
+                    &net_commands,
+                );
+            }
+            SessionEvent::NpcGreeting { text_id, blocks } => {
+                // The record answers a query we sent for the OPEN menu, so its NPC is the one whose
+                // gender picks the column (decision 0081's ask-once flow).
+                let gender = gossip.npc.map_or(0, |npc| npc_gender(npc, &index, &stores));
+                npc::npc_greeting(text_id, gender, blocks, &mut gossip)
             }
             SessionEvent::GossipComplete => npc::gossip_complete(&mut gossip, &mut quest),
             // Questgiver panels (decision 0088): fill the `QuestGiver` the quest feed
@@ -1276,6 +1309,19 @@ pub(super) fn apply_net_updates(
             SessionEvent::TradeStatusExtended { state } => {
                 trade::trade_status_extended(&state, &mut trade_session)
             }
+            // The world-state table (`SMSG_INIT_WORLD_STATES` / `SMSG_UPDATE_WORLD_STATE`) — both
+            // wires funnel into the one setter, as the reference's own handler does. An init does
+            // NOT clear first: what its `(map, zone)` dwords drive is unrecorded, so we log the
+            // scope rather than act on it (rationale on `crate::world_state`).
+            SessionEvent::WorldStates { scope, states } => {
+                if let Some((map, zone)) = scope {
+                    debug!(
+                        "world states: map {map} zone {zone}, {} entries",
+                        states.len()
+                    );
+                }
+                world_states.write(&states);
+            }
         }
     }
     // Flush the staged descriptor seeds/deltas onto the entities born this drain (now spawned by the
@@ -1285,6 +1331,19 @@ pub(super) fn apply_net_updates(
             commands.entity(e).insert(ObjectStore(fields));
         }
     }
+}
+
+/// A streamed unit's gender (`UNIT_FIELD_BYTES_0` byte 2) by guid — the gossip greeting's column
+/// selector (wow-re `gossip-npctext-law.md`: tested `== 1` for female, so genderless `2` reads as
+/// male). `0` when the guid isn't streamed in or carries no descriptor yet, which is the same
+/// column the reference takes for a gossip target that isn't a unit at all.
+fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) -> u8 {
+    index
+        .0
+        .get(&guid)
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_gender())
+        .unwrap_or(0)
 }
 
 /// Tag our own player's streamed entity with [`SelfPlayer`] once we know our guid — by matching the

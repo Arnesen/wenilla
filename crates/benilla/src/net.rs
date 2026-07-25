@@ -26,7 +26,7 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::schedule::WorldStage;
 
 mod apply;
-mod io;
+pub(crate) mod io;
 mod motion;
 
 use apply::{apply_net_updates, tag_self_player};
@@ -60,7 +60,6 @@ impl Plugin for NetPlugin {
             .insert_resource(PingShared(handles.ping))
             .init_resource::<GuidIndex>()
             .init_resource::<SelfGuid>()
-            .init_resource::<motion::RelayClock>()
             .init_resource::<PendingTransfer>()
             .init_resource::<NetStatus>()
             .init_resource::<DroppedOpcodes>()
@@ -71,6 +70,7 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::names::NameCache>()
             .init_resource::<crate::go_templates::GameObjectTemplates>()
             .init_resource::<crate::items::Items>()
+            .init_resource::<crate::world_state::WorldStates>()
             .add_message::<TeleportMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ServerSoundMessage>()
@@ -481,6 +481,10 @@ pub(crate) enum ClientCommand {
     /// Ask a creature template's name (`CMSG_CREATURE_QUERY`, entry from the guid's bits 24–47);
     /// answered by a `CreatureName` event into the cache.
     CreatureQuery { entry: u32, guid: u64 },
+    /// Ask a pet's name (`CMSG_PET_NAME_QUERY`, pet number from the guid's bits 24–47 — where a
+    /// creature keeps its template entry); answered by a `PetName` event into the cache. A pet
+    /// cannot be named by [`Self::CreatureQuery`]; see [`benilla_protocol::guid::pet_number`].
+    PetNameQuery { pet_number: u32, guid: u64 },
     /// Ask an item template (`CMSG_ITEM_QUERY_SINGLE`; `guid` = the concrete item when the ask is
     /// about one, `0` for template-only); answered by an `ItemTemplate` event into the
     /// [`crate::items::Items`] cache. Sent by the cache's ask-once resolve, never directly.

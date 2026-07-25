@@ -23,10 +23,10 @@
 //! *Interim*: the reference's interactability predicate (`CGUnit::CanInteract 0x606880`) isn't
 //! fully derived; we approximate it as "has service flags and isn't attack-worthy (reaction ≥
 //! neutral)". Attackability approximates the PvP/attack matrix as "reaction rank ≤ neutral" —
-//! the same approximation the ring's player branch documents. The questgiver bit skips the
-//! client's quest-status gate (`0x5df490` — Speak only with an actual quest to show), and the
-//! auto-loot modifier-key split (Pickup vs LootAll, `0x41f8f0`) waits on auto-loot existing at
-//! all — until then the base Pickup is the only mode the loot leg can honestly show.
+//! the same approximation the ring's player branch documents. The auto-loot modifier-key split
+//! (Pickup vs LootAll, `0x41f8f0`) waits on auto-loot existing at all — until then the base Pickup
+//! is the only mode the loot leg can honestly show. (The questgiver bit's own quest-status gate,
+//! `0x5df490`, used to be listed here as unmodelled; it is modelled now — [`questgiver_has_quest`].)
 
 use bevy::prelude::*;
 
@@ -295,16 +295,42 @@ fn go_cursor_kind(type_id: i32, lock_cursor: Option<CursorKind>) -> CursorKind {
     }
 }
 
+/// The QUESTGIVER leg's own gate — the bit alone is not enough. The ladder calls `0x5df490(unit)`,
+/// which is `NPC_FLAGS bit 1` **AND** the cached quest status `[unit+0xcb8] ∉ {0, 1}` (wow-re
+/// `ui/scratch/cursor-system.md` §3, byte-verified row; `object-layer/scratch/questgiver-marker.md`
+/// independently pins `+0xcb8` as the `SMSG_QUESTGIVER_STATUS` cache, written by `0x607440` and with
+/// only three writers repo-wide). So NONE(0) and UNAVAILABLE(1) do **not** make a unit talkable;
+/// every other status does.
+///
+/// This is what keeps a questgiver-flagged NPC with nothing to offer from being clickable at all —
+/// and it is load-bearing far beyond the cursor. Melika Isenstrider (vmangos entry 6778) is flagged
+/// QUESTGIVER, carries no other service bit, and has zero rows in `creature_questrelation`: without
+/// this gate she classifies Speak, we send `CMSG_GOSSIP_HELLO`, and vmangos answers the resulting
+/// `DEFAULT_GOSSIP_MESSAGE` text query with eight literal `"Greetings $N"` blocks
+/// (`QueryHandler.cpp:210-217`) — an empty gossip frame carrying a placeholder greeting, on an NPC
+/// the reference never opens anything for. That was the whole of the reported "the client invents
+/// 'Greetings NAME'" bug: the text was genuine, the *asking* was ours.
+///
+/// `None` (no status ever sent) reads as no quest: the server sends the status unprompted for every
+/// questgiver in range, so its absence means the unit isn't offering us one.
+fn questgiver_has_quest(quest_status: Option<u32>) -> bool {
+    use benilla_protocol::messages::dialog_status::{NONE, UNAVAILABLE};
+    !matches!(quest_status, None | Some(NONE) | Some(UNAVAILABLE))
+}
+
 /// The per-bit service ladder (`0x482336..0x4824e3`, statically unrolled — every row byte-verified
 /// in the RE note's §3 table): lowest set bit wins. `None` = no *consulted* bit set — the unit
 /// falls through to the attack/clear leg (this is where repair-only units land: bit 14 is never
 /// tested in the binary).
-fn service_cursor(service: u32) -> Option<CursorKind> {
+///
+/// `quest_status` is the unit's last `SMSG_QUESTGIVER_STATUS` (`None` = never sent), which gates the
+/// QUESTGIVER leg — see [`questgiver_has_quest`].
+fn service_cursor(service: u32, quest_status: Option<u32>) -> Option<CursorKind> {
     use npc_flags::*;
-    if service & GOSSIP != 0 {
-        Some(CursorKind::Speak)
-    } else if service & QUESTGIVER != 0 {
-        // The client additionally gates this on quest status (`0x5df490`); not yet modeled.
+    // Bits 0 and 1 both land on Speak, and bit 0 is tested first, so the two rows fold into one
+    // condition without changing a single outcome — the same folding the SPIRITHEALER/SPIRITGUIDE
+    // and PETITIONER/TABARDDESIGNER/BATTLEMASTER rows already use. Only bit 1 carries a gate.
+    if service & GOSSIP != 0 || (service & QUESTGIVER != 0 && questgiver_has_quest(quest_status)) {
         Some(CursorKind::Speak)
     } else if service & VENDOR != 0 {
         Some(CursorKind::Pickup)
@@ -347,6 +373,9 @@ pub(super) fn classify_cursor(
     go_templates: Res<crate::go_templates::GameObjectTemplates>,
     locks: Option<Res<crate::go_templates::Locks>>,
     lock_types: Option<Res<crate::go_templates::LockTypes>>,
+    // The QUESTGIVER leg's gate reads the per-guid `SMSG_QUESTGIVER_STATUS` store — see
+    // [`questgiver_has_quest`].
+    quest: Res<crate::ui_quest::QuestGiver>,
 ) {
     // A **highlightable** GameObject shows its **data-driven** cursor (wow-re cursor-system §4): a
     // mailbox's Mail, a plaque's Inspect, a vein's Mine / herb's GatherHerbs / picked lock's PickLock
@@ -414,7 +443,8 @@ pub(super) fn classify_cursor(
         // Interactable NPC (interim CanInteract): a consulted service bit + not attack-worthy.
         // A repair-only unit yields None here and falls through, exactly like the binary.
         if !is_player && rank >= 3 {
-            if let Some(kind) = service_cursor(store.0.unit_npc_flags()) {
+            let status = hovered.guid.and_then(|g| quest.status(g));
+            if let Some(kind) = service_cursor(store.0.unit_npc_flags(), status) {
                 return Some((kind, dist_sq > SERVICE_RANGE_SQ));
             }
         }
@@ -439,6 +469,7 @@ pub(super) fn classify_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benilla_protocol::messages::dialog_status;
 
     #[test]
     fn stems_name_the_shipped_blps() {
@@ -497,27 +528,80 @@ mod tests {
     #[test]
     fn service_ladder_matches_the_unrolled_binary() {
         use npc_flags::*;
+        // A quest to offer, so the QUESTGIVER row behaves like the rest of the ladder here; the
+        // gate itself is `questgiver_flag_alone_is_not_talkable`.
+        let has = Some(dialog_status::AVAILABLE);
         // The rows the RE table pins per byte address.
-        assert_eq!(service_cursor(GOSSIP), Some(CursorKind::Speak));
-        assert_eq!(service_cursor(QUESTGIVER), Some(CursorKind::Speak));
-        assert_eq!(service_cursor(VENDOR), Some(CursorKind::Pickup));
-        assert_eq!(service_cursor(FLIGHTMASTER), Some(CursorKind::Taxi));
-        assert_eq!(service_cursor(TRAINER), Some(CursorKind::Trainer));
-        assert_eq!(service_cursor(SPIRITHEALER), Some(CursorKind::Speak));
-        assert_eq!(service_cursor(INNKEEPER), Some(CursorKind::Interact));
-        assert_eq!(service_cursor(BANKER), Some(CursorKind::Buy));
-        assert_eq!(service_cursor(BATTLEMASTER), Some(CursorKind::Speak));
-        assert_eq!(service_cursor(AUCTIONEER), Some(CursorKind::Buy));
-        assert_eq!(service_cursor(STABLEMASTER), Some(CursorKind::Speak));
+        assert_eq!(service_cursor(GOSSIP, None), Some(CursorKind::Speak));
+        assert_eq!(service_cursor(QUESTGIVER, has), Some(CursorKind::Speak));
+        assert_eq!(service_cursor(VENDOR, None), Some(CursorKind::Pickup));
+        assert_eq!(service_cursor(FLIGHTMASTER, None), Some(CursorKind::Taxi));
+        assert_eq!(service_cursor(TRAINER, None), Some(CursorKind::Trainer));
+        assert_eq!(service_cursor(SPIRITHEALER, None), Some(CursorKind::Speak));
+        assert_eq!(service_cursor(INNKEEPER, None), Some(CursorKind::Interact));
+        assert_eq!(service_cursor(BANKER, None), Some(CursorKind::Buy));
+        assert_eq!(service_cursor(BATTLEMASTER, None), Some(CursorKind::Speak));
+        assert_eq!(service_cursor(AUCTIONEER, None), Some(CursorKind::Buy));
+        assert_eq!(service_cursor(STABLEMASTER, None), Some(CursorKind::Speak));
         // Lowest bit wins: a gossiping vendor speaks; an innkeeper-banker interacts.
-        assert_eq!(service_cursor(GOSSIP | VENDOR), Some(CursorKind::Speak));
         assert_eq!(
-            service_cursor(INNKEEPER | BANKER),
+            service_cursor(GOSSIP | VENDOR, None),
+            Some(CursorKind::Speak)
+        );
+        assert_eq!(
+            service_cursor(INNKEEPER | BANKER, None),
             Some(CursorKind::Interact)
         );
         // REPAIR (0x4000) is never consulted — repair-only falls to the attack/clear leg.
-        assert_eq!(service_cursor(0x4000), None);
-        assert_eq!(service_cursor(0), None);
+        assert_eq!(service_cursor(0x4000, None), None);
+        assert_eq!(service_cursor(0, None), None);
+    }
+
+    /// The QUESTGIVER leg's `0x5df490` gate: the bit alone never makes a unit talkable. This is the
+    /// "client invents 'Greetings NAME'" bug at its root — a questgiver-flagged NPC with nothing to
+    /// offer must fall out of the ladder entirely, so we never send `CMSG_GOSSIP_HELLO` and never
+    /// open the empty gossip frame the server would answer with a placeholder greeting.
+    #[test]
+    fn questgiver_flag_alone_is_not_talkable() {
+        use npc_flags::*;
+        // Melika Isenstrider's exact shape: QUESTGIVER, no other service bit, nothing on offer.
+        for status in [
+            None,
+            Some(dialog_status::NONE),
+            Some(dialog_status::UNAVAILABLE),
+        ] {
+            assert_eq!(
+                service_cursor(QUESTGIVER, status),
+                None,
+                "status {status:?} must not classify Speak"
+            );
+        }
+        // Every other status is a quest worth talking about — `[unit+0xcb8] ∉ {0, 1}`.
+        for status in [
+            dialog_status::CHAT,
+            dialog_status::INCOMPLETE,
+            dialog_status::REWARD_REP,
+            dialog_status::AVAILABLE,
+            dialog_status::REWARD_OLD,
+            dialog_status::REWARD2,
+        ] {
+            assert_eq!(
+                service_cursor(QUESTGIVER, Some(status)),
+                Some(CursorKind::Speak),
+                "status {status} must classify Speak"
+            );
+        }
+        // The gate is the QUESTGIVER leg's alone: a quest-less unit that also gossips still speaks
+        // (bit 0 is tested first and carries no gate), and a quest-less vendor still shows Pickup
+        // rather than falling out of the ladder.
+        assert_eq!(
+            service_cursor(GOSSIP | QUESTGIVER, None),
+            Some(CursorKind::Speak)
+        );
+        assert_eq!(
+            service_cursor(QUESTGIVER | VENDOR, None),
+            Some(CursorKind::Pickup)
+        );
     }
 
     #[test]

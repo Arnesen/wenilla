@@ -39,23 +39,41 @@ impl Plugin for UiTooltipPlugin {
     }
 }
 
+/// Everything a view needs beyond the spell catalogs — the player-dependent halves of the line
+/// law: the worn set (law §3.6's equipped-item test), the bags (§3.8's reagent possession, and
+/// the item-name cache the reagent names come from), the current form, and the bind point `$z`
+/// substitutes against.
+struct ViewCtx<'a> {
+    home_area: Option<&'a str>,
+    form: u8,
+    store: Option<&'a ObjectStore>,
+    items: &'a mut Items,
+    commands: &'a NetCommands,
+    sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+}
+
 /// Build one spell's tooltip view (decision 0274 P2) — the verified spell line law's inputs,
 /// every string resolved here where the catalogs live: the cost cell (power-typed; rage prints
 /// wire-cost ÷ 10; "Next melee" for on-next-swing attributes), the range cell ("N yd range",
 /// "N-M yd range" when the row's min is nonzero — the law's `"%d-%d"` fork; "Melee Range" for
 /// the melee family — INTERIM text, the proper source is SpellRange.dbc's own display-name
-/// column), the cast cell ("Instant"/"Instant cast"/"N sec cast"; None = passive, which omits
-/// the whole line), the cooldown cell (`max(RecoveryTime, CategoryRecoveryTime)` — law §3.4),
-/// the required-form line (law §3.6: the `Stances` mask's form names, met/unmet against `form`),
-/// and the $-substituted description/aura-description (byte-exact formulas,
+/// column), the cast cell ("Instant"/"Instant cast"/"N sec cast"; None = the law's passive gate,
+/// which omits the whole line), the cooldown cell (`max(RecoveryTime, CategoryRecoveryTime)` —
+/// law §3.4), the required-item and required-form lines (law §3.6), the reagents line (law
+/// §3.8), and the $-substituted description/aura-description (byte-exact formulas,
 /// `benilla_formats::substitute`).
+///
+/// Line TEXT is composed in English here, as every cell in this builder is; the reference reads
+/// its own GlobalStrings templates ("Reagents: ", "Requires %s"). That is this builder's standing
+/// INTERIM shape, not a new debt introduced by these lines.
 fn spell_tooltip_view(
     spell_id: u32,
     spells: &Spells,
-    home_area: Option<&str>,
-    form: u8,
+    vctx: &mut ViewCtx,
 ) -> Option<benilla_ui::script::SpellTooltipView> {
     let d = spells.catalog.get(spell_id)?;
+    let home_area = vctx.home_area;
+    let form = vctx.form;
     let ctx = benilla_formats::TokenContext {
         durations: &spells.durations,
         radii: &spells.radii,
@@ -90,7 +108,9 @@ fn spell_tooltip_view(
             None
         }
     });
-    let cast_time = if d.passive {
+    // Law §3.4's own gate — wider than the spellbook's `passive`: a TRADE_SKILL or ATTACK
+    // Effect[0] omits the line too ([`SpellDisplay::tooltip_omits_cast_line`]).
+    let cast_time = if d.tooltip_omits_cast_line() {
         None
     } else {
         let base = spells
@@ -132,15 +152,72 @@ fn spell_tooltip_view(
         })
         .flatten();
     let form_met = form != 0 && d.stances & (1u32 << (u32::from(form) - 1)) != 0;
+    // The equipped-item-class half of law §3.6 — "Requires Wands" on the wand Shoot, and "Requires
+    // Melee Weapon" on Parry. A mask with several bits set is NOT a reason to print nothing (what we
+    // used to do): the reference names the whole mask through ItemSubClassMask.dbc first, and only
+    // falls back to comma-joining the individual subclasses. Law §3-EQUIPITEM, in the catalog.
+    // §3-EQUIPITEM's three entry gates, all of which skip the line: Targets bit 0x10 set, class < 0,
+    // or an empty mask.
+    let requires_item = (d.targets & TARGET_ITEM == 0 && d.equipped_item_class >= 0)
+        .then(|| {
+            vctx.sub_classes?
+                .requirement_name(d.equipped_item_class as u32, d.equipped_item_subclass_mask)
+        })
+        .flatten()
+        .map(|name| format!("Requires {name}"));
+    // The chance-to-X line (law line 10, §3-CHANCE): `Effect[0]` picks which of the player's four
+    // avoidance/crit percentages to print, and — except for ATTACK, which bypasses the gate — the
+    // spell must be passive. The percentages are already percents on the wire.
+    let chance = chance_line(d, vctx.store);
+    let item_met = vctx.store.is_none_or(|s| {
+        crate::ui_action::usable::equipped_item_fits(d, s, vctx.items, vctx.commands)
+    });
+    // Reagents (law §3.8): the named slots, `count > 1` suffixed, a slot the player is short of
+    // wrapped in the builder's inline red. A reagent whose item template hasn't streamed yet is
+    // simply absent from this snapshot — `feed_spell_tooltips` re-pushes when it lands, which is
+    // our shape of the ref's own query-then-redisplay callback.
+    let reagents = {
+        let mut parts: Vec<String> = Vec::new();
+        for (entry, count) in d.reagents.iter().copied().filter(|&(e, _)| e != 0) {
+            let Some(name) = vctx
+                .items
+                .template(entry, 0, vctx.commands)
+                .map(|t| t.name.clone())
+            else {
+                continue;
+            };
+            let text = if count > 1 {
+                format!("{name} ({count})")
+            } else {
+                name
+            };
+            let short = vctx
+                .store
+                .is_some_and(|s| crate::ui_items::count_of(&s.0, vctx.items, entry) < count);
+            parts.push(if short {
+                format!("|cffff2020{text}|r")
+            } else {
+                text
+            });
+        }
+        (!parts.is_empty()).then(|| format!("Reagents: {}", parts.join(", ")))
+    };
     Some(benilla_ui::script::SpellTooltipView {
         name: d.name.clone(),
         rank: d.rank.clone(),
+        // The aura variant's right column (law §3-BUFF) — gated inside the catalog by
+        // SpellDispelType.dbc's own `[+0x28]`, so Stealth-class auras hand back None.
+        dispel_type: spells.catalog.dispel_name(d).map(str::to_string),
         cost,
         range,
         cast_time,
         cooldown,
+        requires_item,
+        item_met,
         requires_form,
         form_met,
+        chance,
+        reagents,
         description: d
             .description
             .as_deref()
@@ -154,6 +231,36 @@ fn spell_tooltip_view(
     })
 }
 
+/// `Targets` bit `0x10` — set ⇒ the equipped-item requirement line is skipped whatever the class
+/// and mask say (§3-EQUIPITEM's first gate; the bit test is verified, the `TARGET_FLAG_ITEM` name
+/// wow-re flags as inferred).
+const TARGET_ITEM: u32 = 0x10;
+
+/// `SPELL_EFFECT_DODGE` / `_PARRY` / `_BLOCK` / `_ATTACK` — the four `Effect[0]` values that select
+/// a chance-to-X line (law §3-CHANCE's jump table).
+const EFFECT_DODGE: u32 = 20;
+const EFFECT_PARRY: u32 = 22;
+const EFFECT_BLOCK: u32 = 23;
+const EFFECT_ATTACK: u32 = 78;
+
+/// The chance-to-X line (law line 10 / §3-CHANCE) — `None` when the spell names none of the four
+/// effects, when the gate rejects it, or before the player's descriptor has streamed.
+///
+/// The predicate is the reference's, and its asymmetry is the point: **ATTACK bypasses the passive
+/// gate** while dodge/parry/block require it. That is why Attack — whose `Attributes` carry `0x10`,
+/// not the passive `0x40` — still shows a crit line, which is exactly the missing line reported.
+fn chance_line(d: &benilla_formats::SpellDisplay, store: Option<&ObjectStore>) -> Option<String> {
+    let (label, percentage) = match d.effect_1 {
+        EFFECT_ATTACK => ("crit", store?.0.player_crit_percentage()?),
+        EFFECT_DODGE if d.passive => ("dodge", store?.0.player_dodge_percentage()?),
+        EFFECT_PARRY if d.passive => ("parry", store?.0.player_parry_percentage()?),
+        EFFECT_BLOCK if d.passive => ("block", store?.0.player_block_percentage()?),
+        _ => return None,
+    };
+    // The reference's `%.2f%%` lives in its GlobalStrings, not the binary — this is the same shape.
+    Some(format!("{percentage:.2}% chance to {label}"))
+}
+
 /// The `%.3g`-style terse seconds (1.5 → "1.5", 2.0 → "2") — the SPELL_CAST_TIME/RECAST shape.
 fn trim_secs(v: f64) -> String {
     if (v - v.round()).abs() < 1e-9 {
@@ -161,6 +268,27 @@ fn trim_secs(v: f64) -> String {
     } else {
         format!("{v:.1}")
     }
+}
+
+/// The push loop's change detectors — everything a view SNAPSHOTS at build time. A change to any
+/// of them means every pushed view is stale, so the loop re-pushes the lot (the reference simply
+/// re-runs its builder on every hover, so a stale snapshot is a benilla-only failure mode).
+#[derive(Default)]
+struct SpellFeedMemory {
+    /// Spell ids whose view has been pushed at least once.
+    pushed: std::collections::HashSet<u32>,
+    /// The bind point `$z` substitutes against.
+    home: Option<String>,
+    /// The current shapeshift form (law §3.6's stance line, white/red).
+    form: Option<u8>,
+    /// The 19 worn-slot guids (law §3.6's item line, white/red).
+    worn: Option<[u64; 19]>,
+    /// The player's block/dodge/parry/crit percentages, as raw bit patterns so the diff needs no
+    /// float comparison (law line 10's printed value — it moves with gear, buffs and talents).
+    avoidance: Option<[u32; 4]>,
+    /// Per reagent entry currently on show: `(owned count, item name resolved)` — law §3.8's
+    /// inline red plus the ask-once template landing.
+    reagents: std::collections::BTreeMap<u32, (u32, bool)>,
 }
 
 /// The spell-tooltip store's push half: every spell the UI can HOVER is owed its view at
@@ -180,9 +308,10 @@ fn feed_spell_tooltips(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     home_bind: Option<Res<crate::net::HomeBind>>,
     area_names: Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
-    mut pushed: Local<std::collections::HashSet<u32>>,
-    mut last_home: Local<Option<String>>,
-    mut last_form: Local<Option<u8>>,
+    mut items: ResMut<Items>,
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
+    commands: Res<NetCommands>,
+    mut memory: Local<SpellFeedMemory>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -197,7 +326,7 @@ fn feed_spell_tooltips(
                 .spells
                 .iter()
                 .copied()
-                .filter(|s| !pushed.contains(s)),
+                .filter(|s| !memory.pushed.contains(s)),
         );
     }
     // The talent window's hoverables: every rank spell of the class's pages (a talent tooltip
@@ -212,14 +341,14 @@ fn feed_spell_tooltips(
                     t.ranks
                         .iter()
                         .copied()
-                        .filter(|s| *s != 0 && !pushed.contains(s)),
+                        .filter(|s| *s != 0 && !memory.pushed.contains(s)),
                 );
             }
         }
     }
     // The buff bar's hoverables: the live aura spells, at arrival.
     if let Some(auras) = auras.as_deref() {
-        wanted.extend(auras.spell_ids().filter(|s| !pushed.contains(s)));
+        wanted.extend(auras.spell_ids().filter(|s| !memory.pushed.contains(s)));
     }
     // The minimap tracking icon's hover (SetTrackingSpell): the tracking aura never enters the
     // display cache above (the rebuild's tracking-effect exclusion, `ui_aura`), so pre-feed from
@@ -231,7 +360,7 @@ fn feed_spell_tooltips(
                 .0
                 .unit_auras()
                 .map(|a| a.spell_id)
-                .filter(|s| !pushed.contains(s)),
+                .filter(|s| !memory.pushed.contains(s)),
         );
     }
     // The target frame's aura rows (SetUnitBuff/SetUnitDebuff): the target's live aura spells,
@@ -242,7 +371,7 @@ fn feed_spell_tooltips(
                 .0
                 .unit_auras()
                 .map(|a| a.spell_id)
-                .filter(|s| !pushed.contains(s)),
+                .filter(|s| !memory.pushed.contains(s)),
         );
     }
     let home_area: Option<String> = home_bind
@@ -251,9 +380,9 @@ fn feed_spell_tooltips(
         .and_then(|id| area_names.as_deref()?.0.resolve(id as i32))
         .map(str::to_string);
     // A bind-point change re-substitutes every pushed view ($z — Astral Recall's shape).
-    if *last_home != home_area {
-        *last_home = home_area.clone();
-        wanted.extend(pushed.drain());
+    if memory.home != home_area {
+        memory.home = home_area.clone();
+        wanted.extend(memory.pushed.drain());
     }
     // A stance/form change re-pushes too: the required-form line's white/red tracks the CURRENT
     // form (law §3.6), and the views are static snapshots until re-pushed.
@@ -261,14 +390,77 @@ fn feed_spell_tooltips(
         .single()
         .map(|s| s.0.unit_shapeshift_form())
         .unwrap_or(0);
-    if *last_form != Some(form) {
-        *last_form = Some(form);
-        wanted.extend(pushed.drain());
+    if memory.form != Some(form) {
+        memory.form = Some(form);
+        wanted.extend(memory.pushed.drain());
     }
+    let self_store = self_q.single().ok();
+    // …and so do the two BAG-dependent halves, which the views likewise snapshot: the worn set
+    // (law §3.6's item line flips white/red on a weapon swap) and the owned counts of the
+    // reagents currently on show (law §3.8's inline red, plus the item names themselves landing
+    // from the ask-once template cache — the ref's query-then-redisplay callback in our shape).
+    // Both signatures are tiny: 19 slot guids, and one count per DISTINCT reagent in play.
+    let worn =
+        self_store.map(|s| std::array::from_fn(|i| s.0.player_inv_slot(i as u8).unwrap_or(0)));
+    if memory.worn != worn {
+        memory.worn = worn;
+        wanted.extend(memory.pushed.drain());
+    }
+    // …and so does the chance-to-X line's percentage (law line 10), which the views snapshot the
+    // same way: a weapon swap, a buff or a talent moves it.
+    let avoidance = self_store.map(|s| {
+        [
+            s.0.player_block_percentage(),
+            s.0.player_dodge_percentage(),
+            s.0.player_parry_percentage(),
+            s.0.player_crit_percentage(),
+        ]
+        .map(|v| v.unwrap_or(0.0).to_bits())
+    });
+    if memory.avoidance != avoidance {
+        memory.avoidance = avoidance;
+        wanted.extend(memory.pushed.drain());
+    }
+    let watched: Vec<u32> = memory.reagents.keys().copied().collect();
+    let reagent_state: std::collections::BTreeMap<u32, (u32, bool)> = watched
+        .into_iter()
+        .map(|entry| {
+            let named = items.template(entry, 0, &commands).is_some();
+            let owned = self_store.map_or(0, |s| crate::ui_items::count_of(&s.0, &items, entry));
+            (entry, (owned, named))
+        })
+        .collect();
+    if memory.reagents != reagent_state {
+        memory.reagents = reagent_state;
+        wanted.extend(memory.pushed.drain());
+    }
+    let mut vctx = ViewCtx {
+        home_area: home_area.as_deref(),
+        form,
+        store: self_store,
+        items: &mut items,
+        commands: &commands,
+        sub_classes: sub_classes.as_deref().map(|c| &c.0),
+    };
     for id in wanted {
-        if let Some(view) = spell_tooltip_view(id, spells, home_area.as_deref(), form) {
+        if let Some(view) = spell_tooltip_view(id, spells, &mut vctx) {
+            // Register this spell's reagents in the watch set, seeded with the state the view was
+            // just built against — so the next recompute re-pushes on a REAL change only.
+            if let Some(d) = spells.catalog.get(id) {
+                for (entry, _) in d.reagents.iter().copied().filter(|&(e, _)| e != 0) {
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        memory.reagents.entry(entry)
+                    {
+                        let named = vctx.items.template(entry, 0, vctx.commands).is_some();
+                        let owned = vctx
+                            .store
+                            .map_or(0, |s| crate::ui_items::count_of(&s.0, vctx.items, entry));
+                        slot.insert((owned, named));
+                    }
+                }
+            }
             script.set_spell_tooltip(id, view);
-            pushed.insert(id);
+            memory.pushed.insert(id);
         }
     }
 }
@@ -440,6 +632,57 @@ mod tests {
     use super::*;
     use crate::ui_action::Spells;
 
+    /// A view context with no player state — the DBC-only half of the builder (the shape the
+    /// pre-0616 test used). `sub_classes` is threaded in by the caller when the case needs it.
+    struct TestCtx {
+        items: Items,
+        commands: NetCommands,
+        _rx: crossbeam_channel::Receiver<crate::net::ClientCommand>,
+    }
+
+    impl TestCtx {
+        fn new() -> Self {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            Self {
+                items: Items::default(),
+                commands: NetCommands(tx),
+                _rx: rx,
+            }
+        }
+
+        fn ctx<'a>(
+            &'a mut self,
+            form: u8,
+            sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+        ) -> ViewCtx<'a> {
+            self.ctx_for(form, sub_classes, None)
+        }
+
+        fn ctx_for<'a>(
+            &'a mut self,
+            form: u8,
+            sub_classes: Option<&'a benilla_formats::ItemSubClassCatalog>,
+            store: Option<&'a ObjectStore>,
+        ) -> ViewCtx<'a> {
+            ViewCtx {
+                home_area: None,
+                form,
+                store,
+                items: &mut self.items,
+                commands: &self.commands,
+                sub_classes,
+            }
+        }
+    }
+
+    /// A player descriptor with nothing worn and nothing in the bags — the "owns none of it"
+    /// pole of both possession tests.
+    fn empty_player() -> ObjectStore {
+        ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(
+            22u16, 100u32,
+        )]))
+    }
+
     /// The full spell-tooltip view off the REAL 5875 data — Fireball rank 1 (133) end to end:
     /// the pinned columns (description 138, cast index 18→1500 ms, duration 30), the token
     /// engine's byte formulas, and the view's verified cell shapes. Skips without client data.
@@ -462,7 +705,8 @@ mod tests {
                 .expect("SpellDuration.dbc"),
             radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
         };
-        let v = spell_tooltip_view(133, &spells, None, 0).expect("Fireball view");
+        let mut t = TestCtx::new();
+        let v = spell_tooltip_view(133, &spells, &mut t.ctx(0, None)).expect("Fireball view");
         assert_eq!(v.name, "Fireball");
         assert_eq!(v.rank.as_deref(), Some("Rank 1"));
         assert_eq!(v.cost.as_deref(), Some("30 Mana"));
@@ -492,7 +736,7 @@ mod tests {
         // Charge rank 1 (100) — the director's reference shot, end to end: the dual-bound range
         // row (SpellRange 95 = {8, 25}), the CATEGORY-column cooldown (recoveryTime 0 /
         // categoryRecoveryTime 15000), and the Stances-mask form line (0x10000 → form 17).
-        let v = spell_tooltip_view(100, &spells, None, 0).expect("Charge view");
+        let v = spell_tooltip_view(100, &spells, &mut t.ctx(0, None)).expect("Charge view");
         assert_eq!(v.name, "Charge");
         assert_eq!(v.rank.as_deref(), Some("Rank 1"));
         assert_eq!(v.cost, None, "Charge costs nothing (it generates rage)");
@@ -505,7 +749,101 @@ mod tests {
             v.description,
             "Charge an enemy, generate 9 rage, and stun it for 1 sec.  Cannot be used in combat."
         );
-        let v = spell_tooltip_view(100, &spells, None, 17).expect("Charge view");
+        let v = spell_tooltip_view(100, &spells, &mut t.ctx(17, None)).expect("Charge view");
         assert!(v.form_met, "form 17 = Battle Stance satisfies the mask");
+    }
+
+    /// The three lines the 2026-07-25 reference captures pinned (decision 0620), each against the
+    /// REAL 5875 data. Skips without client data.
+    #[test]
+    fn the_pinned_c6_lines_on_real_data() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let spells = Spells {
+            catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
+            forms: benilla_formats::load_shapeshift_forms(&mut chain)
+                .expect("SpellShapeshiftForm.dbc"),
+            ranges: benilla_formats::load_spell_ranges(&mut chain).expect("SpellRange.dbc"),
+            cast_times: benilla_formats::load_spell_cast_times(&mut chain)
+                .expect("SpellCastTimes.dbc"),
+            durations: benilla_formats::load_spell_durations(&mut chain)
+                .expect("SpellDuration.dbc"),
+            radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
+        };
+        let subs = benilla_formats::load_item_sub_classes(&mut chain).expect("ItemSubClass.dbc");
+        let mut t = TestCtx::new();
+        let store = empty_player();
+
+        // 1 · The wand Shoot (5019, class 2 / submask bit 19) — "Requires Wands", red with no
+        // wand worn. The same row feeds the cast-fail line's SINGULAR "Wand" (see `cast_fail`).
+        assert_eq!(subs.name(2, 19), Some("Wands"), "the verbose plural");
+        assert_eq!(subs.display_name(2, 19), Some("Wand"), "the singular");
+        let v = spell_tooltip_view(5019, &spells, &mut t.ctx_for(0, Some(&subs), Some(&store)))
+            .expect("Shoot view");
+        assert_eq!(v.requires_item.as_deref(), Some("Requires Wands"));
+        assert!(!v.item_met, "nothing worn satisfies class 2 / bit 19 → red");
+        // A multi-bit mask is named by ItemSubClassMask.dbc, not skipped (law §3-EQUIPITEM — we
+        // printed nothing here until `0x6e2380` was carved): Parry's 0x2a5f3 is exactly the eleven
+        // melee subclasses, which that table names in one word.
+        let parry = spells.catalog.get(3127).expect("Parry 3127");
+        assert!(parry.equipped_item_subclass_mask.count_ones() > 1);
+        let v = spell_tooltip_view(3127, &spells, &mut t.ctx_for(0, Some(&subs), Some(&store)))
+            .expect("Parry view");
+        assert_eq!(v.requires_item.as_deref(), Some("Requires Melee Weapon"));
+
+        // 2 · Attack (6603) — `Effect[0] == 78` omits the cast|cooldown line WHOLE, even though
+        // `Attributes & 0x40` is clear. Before the §3.4 gate widened, this read "Instant".
+        let d = spells.catalog.get(6603).expect("Attack 6603");
+        assert_eq!(d.effect_1, 78, "SPELL_EFFECT_ATTACK");
+        assert!(!d.passive, "6603 carries Attributes 0x10, not 0x40");
+        let v = spell_tooltip_view(6603, &spells, &mut t.ctx(0, None)).expect("Attack view");
+        assert_eq!(v.cast_time, None, "the law's Effect[0] gate");
+        // …and the chance line the same Effect[0] selects (law line 10 / §3-CHANCE). ATTACK
+        // BYPASSES the passive gate, which is the whole reason a non-passive Attack shows a crit
+        // line at all. No descriptor = no line; the percentages are already percents on the wire.
+        assert_eq!(v.chance, None, "no player streamed yet");
+        let rated = ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
+            (22u16, 100u32),
+            (1109u16, 2.62f32.to_bits()), // PLAYER_CRIT_PERCENTAGE
+            (1107u16, 5.5f32.to_bits()),  // PLAYER_DODGE_PERCENTAGE
+        ]));
+        let v = spell_tooltip_view(6603, &spells, &mut t.ctx_for(0, None, Some(&rated)))
+            .expect("Attack view");
+        assert_eq!(v.chance.as_deref(), Some("2.62% chance to crit"));
+        // Dodge (81) is passive and reads its own field.
+        let dodge = spells.catalog.get(81).expect("Dodge 81");
+        assert_eq!(dodge.effect_1, 20, "SPELL_EFFECT_DODGE");
+        assert!(dodge.passive, "81 carries Attributes 0x40");
+        let v = spell_tooltip_view(81, &spells, &mut t.ctx_for(0, None, Some(&rated)))
+            .expect("Dodge view");
+        assert_eq!(v.chance.as_deref(), Some("5.50% chance to dodge"));
+        // A spell naming none of the four effects has no line at all.
+        let v = spell_tooltip_view(133, &spells, &mut t.ctx_for(0, None, Some(&rated)))
+            .expect("Fireball view");
+        assert_eq!(v.chance, None);
+
+        // 3 · Slow Fall (130) — "Reagents: Light Feather", inline-red while unowned (no store =
+        // owns nothing). The name rides the ask-once item cache, seeded here as the server would.
+        let d = spells.catalog.get(130).expect("Slow Fall 130");
+        assert_eq!(d.reagents[0], (17056, 1), "Light Feather ×1");
+        let v = spell_tooltip_view(130, &spells, &mut t.ctx_for(0, None, Some(&store)))
+            .expect("Slow Fall view");
+        assert_eq!(
+            v.reagents, None,
+            "the template hasn't landed: the line waits rather than printing an id"
+        );
+        t.items
+            .insert_template(17056, Some(crate::items::test_template("Light Feather")));
+        let v = spell_tooltip_view(130, &spells, &mut t.ctx_for(0, None, Some(&store)))
+            .expect("Slow Fall view");
+        assert_eq!(
+            v.reagents.as_deref(),
+            Some("Reagents: |cffff2020Light Feather|r"),
+            "count 1 prints no (N); unowned wraps in the builder's inline red"
+        );
     }
 }

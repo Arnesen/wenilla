@@ -570,7 +570,11 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Dump an M2's render batches as the renderer sees them.
+/// Dump an M2's render batches as the renderer sees them, preceded by the model-level material
+/// state the **static visibility cull** reads (wow-re `m2-alpha-combine-cull`: a batch is skipped
+/// when `colorAlpha · transparencyWeight ≤ 0`). Batches this dump *lists* are ones that survived
+/// that cull — when one of them turns out to be a stray primitive in game, these tables are where
+/// the answer has to be, so they print together.
 pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
     let name = normalize(internal_path);
     let data = chain
@@ -579,6 +583,54 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
     let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
     let subs = benilla_formats::parse_m2_render_submeshes(&data, dir, &[])
         .with_context(|| format!("parsing M2 render submeshes '{name}'"))?;
+    if let Ok(format) = benilla_m2::parse_m2(&mut std::io::Cursor::new(data.as_slice())) {
+        let m = format.model();
+        let track = |t: &benilla_m2::M2ScalarTrack| match (t.keys.len(), t.constant()) {
+            (0, _) => "keyless".to_string(),
+            (_, Some(v)) => format!("const {v:.3}"),
+            (n, None) => format!("{n} keys {:.3}..{:.3}", t.keys[0].1, t.keys[n - 1].1),
+        };
+        let join = |v: Vec<String>| {
+            if v.is_empty() {
+                "-".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        println!(
+            "materials: {}",
+            join(
+                m.materials
+                    .iter()
+                    .map(|mt| format!(
+                        "flags 0x{:02x}/blend {}",
+                        mt.flags.bits(),
+                        mt.blend_mode.bits()
+                    ))
+                    .collect()
+            )
+        );
+        println!(
+            "color alpha: {}   transparency: {}   transLookup: {:?}",
+            join(m.color_alpha_tracks.iter().map(track).collect()),
+            join(m.transparency_tracks.iter().map(track).collect()),
+            m.transparency_lookup,
+        );
+        if let Ok(skin) = m.parse_embedded_skin(&data, 0) {
+            println!(
+                "skin batches: {}",
+                join(
+                    skin.batches()
+                        .iter()
+                        .map(|b| format!(
+                            "flags 0x{:02x}/shader 0x{:02x}/texCount {}",
+                            b.flags, b.shader_id, b.texture_count
+                        ))
+                        .collect()
+                )
+            );
+        }
+    }
     println!("{} render batch(es)", subs.len());
     for (i, s) in subs.iter().enumerate() {
         let mut flags = Vec::new();
@@ -613,8 +665,32 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
             (None, Some(slot)) => format!("<char:{slot:?}>"),
             (None, None) => "NONE".into(),
         };
+        // Model-space extent + centre: a batch that renders as a stray primitive is explained by
+        // where and how big it actually is (a degenerate zero-area batch is a different bug from a
+        // real card the reference hides some other way).
+        let ext = |axis: usize| -> (f32, f32) {
+            s.positions
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p[axis]), hi.max(p[axis]))
+                })
+        };
+        let span = if s.positions.is_empty() {
+            "empty".to_string()
+        } else {
+            let (x, y, z) = (ext(0), ext(1), ext(2));
+            format!(
+                "span {:.2}x{:.2}x{:.2} @ ({:.2}, {:.2}, {:.2})",
+                x.1 - x.0,
+                y.1 - y.0,
+                z.1 - z.0,
+                (x.0 + x.1) / 2.0,
+                (y.0 + y.1) / 2.0,
+                (z.0 + z.1) / 2.0,
+            )
+        };
         println!(
-            "  batch {i}: geoset {:>4}  {:?}  {} verts  [{}]  tex {}",
+            "  batch {i}: geoset {:>4}  {:?}  {} verts  {span}  [{}]  tex {}",
             s.geoset_id,
             s.blend,
             s.positions.len(),

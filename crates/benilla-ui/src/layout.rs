@@ -30,7 +30,7 @@
 //! left`, `height = top − bottom`. Coordinates are screen pixels throughout; `scale` (layoutScale =
 //! effective scale, `propagation.md`) scales only the per-anchor offsets and the `width/height` span.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Constants (objdump-VERIFIED in layout.md "Constants")
@@ -48,7 +48,7 @@ pub const SIZE_EPS: f64 = 2.384_185_791_015_625e-7;
 
 /// Recompute change threshold ε — `_DAT_0080c5c8` = `0x3727c5ac` ≈ 9.96e-6 (`layout.md`; applied in
 /// `recompute 0x768d20`): an edge must move at least this far vs the cached rect for a re-store +
-/// `ApplyRect`. Benilla owns its own caching (see [`LayoutCache`]); this const records the client's
+/// `ApplyRect`. Benilla owns its own caching (the caller's dirty gate); this const records the client's
 /// documented threshold for fidelity work that needs it.
 pub const RESOLVE_EPS: f64 = f32::from_bits(0x3727_c5ac) as f64;
 
@@ -729,206 +729,246 @@ pub fn resolve_rect_edges(
 // detecting cycles. This is benilla's orchestration, not client fidelity math: the client resolves
 // lazily-on-read + per-frame-batched via a dependency-ordered deferred queue (layout.md "Resolve /
 // dirty / cache flow"); we express the same dependency ordering as an explicit topological pass.
+//
+// ## Why a dense, reusable solver rather than a fresh map-backed graph
+//
+// The caller re-solves the whole widget set every round of its fixpoint, and the fixpoint runs
+// every frame. A map-backed graph rebuilt per round paid, per round: one `LayoutInput` clone
+// (heap `Vec<Anchor>`) per frame, a `BTreeMap` insert per node, and a `BTreeMap` probe per anchor
+// target during the solve. Measured on the shipped default UI (1881 frames + 5478 regions,
+// release): 1.36 ms per resolve, of which ~0.25 ms was graph construction and ~0.64 ms the solve
+// itself — paid on a completely quiet frame.
+//
+// [`Handle`]s are the caller's own dense id space (benilla's `Model::next_id`, monotonic from 1
+// with frames and regions sharing the counter), so every per-node map collapses to an array index
+// and every buffer can live across calls. `begin` clears only the slots the previous round
+// touched, so a round costs O(nodes), never O(id space). Iteration order is kept **ascending by
+// handle** — identical to the `BTreeMap` it replaces — because cycle members are resolved
+// best-effort in that order and the result depends on it.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// A frame-anchor graph: frames keyed by [`Handle`], plus *external* pre-resolved rects (the screen
-/// root — the client's `CSimpleTop`, whose rect is the physical screen — and any fixed targets).
+/// A reusable dependency solver over a set of anchored frames plus *external* pre-resolved rects
+/// (the screen root — the client's `CSimpleTop`, whose rect is the physical screen — and any fixed
+/// targets, such as already-resolved regions).
+///
+/// One solver is kept alive across frames so its buffers are reused. A round is:
+/// [`begin`](Self::begin) → [`set_external`](Self::set_external) /
+/// [`set_frame`](Self::set_frame) → [`solve`](Self::solve) → [`rect`](Self::rect).
 #[derive(Clone, Debug, Default)]
-pub struct LayoutGraph {
-    frames: BTreeMap<Handle, LayoutInput>,
-    externals: BTreeMap<Handle, Rect>,
+pub struct LayoutSolver {
+    /// Per-handle layout input. Persistent storage: [`set_frame`](Self::set_frame) overwrites in
+    /// place so the anchors `Vec` keeps its allocation across rounds.
+    input: Vec<LayoutInput>,
+    /// Is `input[h]` a frame to solve this round?
+    is_frame: Vec<bool>,
+    /// Per-handle rect: externals as seeded, frames as they resolve. `None` = not (yet) known.
+    rect: Vec<Option<Rect>>,
+    /// Kahn in-degree, and the reverse edges (each inner `Vec` is cleared, never freed).
+    indeg: Vec<u32>,
+    dependents: Vec<Vec<Handle>>,
+    /// Handles whose slots were written this round — `begin` resets exactly these.
+    touched: Vec<Handle>,
+    /// Is `h` already in `touched`?
+    marked: Vec<bool>,
+    /// The frames to solve, ascending (the `BTreeMap` iteration order this replaces).
+    live: Vec<Handle>,
+    /// Kahn scratch + output.
+    queue: VecDeque<Handle>,
+    emitted: Vec<bool>,
+    order: Vec<Handle>,
+    cycle: Vec<Handle>,
+    unresolvable: Vec<Handle>,
 }
 
-/// The result of resolving a [`LayoutGraph`].
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Resolution {
-    /// Every known rect: the externals echoed back, plus each resolvable frame's resolved rect.
-    pub rects: BTreeMap<Handle, Rect>,
-    /// Frames whose `assemble` returned unresolvable (under-constrained, or depending on an
-    /// unresolvable/missing target). May overlap [`Resolution::cycle`].
-    pub unresolvable: BTreeSet<Handle>,
-    /// Frames on (or behind) an anchor dependency cycle — no valid topological position. Resolved
-    /// best-effort against whatever rects were available; a cycle member that could not resolve
-    /// also appears in `unresolvable`.
-    pub cycle: BTreeSet<Handle>,
-}
-
-impl LayoutGraph {
-    /// A new empty graph.
-    pub fn new() -> LayoutGraph {
-        LayoutGraph::default()
+impl LayoutSolver {
+    /// A new, empty solver.
+    pub fn new() -> LayoutSolver {
+        LayoutSolver::default()
     }
 
-    /// Insert/replace a frame at `handle`.
-    pub fn set_frame(&mut self, handle: Handle, frame: LayoutInput) {
-        self.frames.insert(handle, frame);
+    /// Grow the per-handle arrays to cover `h`.
+    fn ensure(&mut self, h: Handle) {
+        let need = h as usize + 1;
+        if self.input.len() < need {
+            self.input.resize_with(need, LayoutInput::default);
+            self.is_frame.resize(need, false);
+            self.rect.resize(need, None);
+            self.indeg.resize(need, 0);
+            self.dependents.resize_with(need, Vec::new);
+            self.marked.resize(need, false);
+            self.emitted.resize(need, false);
+        }
     }
 
-    /// Remove a frame; returns it if present.
-    pub fn remove_frame(&mut self, handle: Handle) -> Option<LayoutInput> {
-        self.frames.remove(&handle)
+    /// Mark `h` as written this round (so [`begin`](Self::begin) will reset its slot).
+    fn touch(&mut self, h: Handle) {
+        let i = h as usize;
+        if !self.marked[i] {
+            self.marked[i] = true;
+            self.touched.push(h);
+        }
     }
 
-    /// Register an external (pre-resolved) rect — typically the screen root that top-level frames
-    /// anchor to.
-    pub fn set_external(&mut self, handle: Handle, rect: Rect) {
-        self.externals.insert(handle, rect);
+    /// Start a round: reset every slot the previous round touched (O(nodes), not O(id space)).
+    pub fn begin(&mut self) {
+        for &h in &self.touched {
+            let i = h as usize;
+            self.is_frame[i] = false;
+            self.rect[i] = None;
+            self.indeg[i] = 0;
+            self.dependents[i].clear();
+            self.marked[i] = false;
+            self.emitted[i] = false;
+        }
+        self.touched.clear();
+        self.live.clear();
+        self.queue.clear();
+        self.order.clear();
+        self.cycle.clear();
+        self.unresolvable.clear();
     }
 
-    /// The frames map.
-    pub fn frames(&self) -> &BTreeMap<Handle, LayoutInput> {
-        &self.frames
+    /// Seed a pre-resolved rect at `h` — an anchor target this solve does not compute (the screen
+    /// root, an already-resolved region). Also used to publish a rect mid-sweep so later nodes in
+    /// the same pass see it.
+    pub fn set_external(&mut self, h: Handle, rect: Rect) {
+        self.ensure(h);
+        self.touch(h);
+        self.rect[h as usize] = Some(rect);
     }
 
-    /// The externals map.
-    pub fn externals(&self) -> &BTreeMap<Handle, Rect> {
-        &self.externals
+    /// Register a frame to solve, copying `src` into the solver's persistent slot (the anchors
+    /// `Vec` is refilled in place, so a steady round allocates nothing).
+    pub fn set_frame(&mut self, h: Handle, src: &LayoutInput) {
+        self.ensure(h);
+        self.touch(h);
+        let dst = &mut self.input[h as usize];
+        dst.anchors.clear();
+        dst.anchors.extend_from_slice(&src.anchors);
+        Self::copy_fields(dst, src);
+        self.is_frame[h as usize] = true;
+        self.live.push(h);
     }
 
-    /// Resolve every frame in dependency order (each anchor target before its dependents),
-    /// detecting cycles. Cycles are reported and everything resolvable is still resolved.
-    pub fn resolve(&self) -> Resolution {
-        // Kahn's algorithm over frame→frame anchor dependencies. A dependency on an external or an
-        // unknown handle does not constrain ordering (its rect is fixed / missing, not produced by
-        // this pass); only frame→frame edges do. A self-anchor counts as an edge, so a
-        // self-referential frame is never emitted ⇒ reported as a cycle.
-        let mut indeg: BTreeMap<Handle, usize> = self.frames.keys().map(|&h| (h, 0)).collect();
-        let mut dependents: BTreeMap<Handle, Vec<Handle>> = BTreeMap::new();
-        for (&h, frame) in &self.frames {
-            let mut seen = BTreeSet::new();
-            for a in &frame.anchors {
-                let d = a.relative_to;
-                if self.frames.contains_key(&d) && seen.insert(d) {
-                    *indeg.get_mut(&h).expect("frame in indeg") += 1;
-                    dependents.entry(d).or_default().push(h);
+    /// [`set_frame`](Self::set_frame) with `src`'s anchors replaced by exactly `anchor` — the
+    /// ScrollFrame child override (decision 0112), which otherwise cost a full input clone plus a
+    /// one-element `Vec` per scroll child per round.
+    pub fn set_frame_anchored(&mut self, h: Handle, src: &LayoutInput, anchor: Anchor) {
+        self.ensure(h);
+        self.touch(h);
+        let dst = &mut self.input[h as usize];
+        dst.anchors.clear();
+        dst.anchors.push(anchor);
+        Self::copy_fields(dst, src);
+        self.is_frame[h as usize] = true;
+        self.live.push(h);
+    }
+
+    /// The non-anchor fields, copied verbatim.
+    fn copy_fields(dst: &mut LayoutInput, src: &LayoutInput) {
+        dst.width = src.width;
+        dst.height = src.height;
+        dst.scale = src.scale;
+        dst.clamp = src.clamp;
+        dst.extent_x = src.extent_x;
+        dst.extent_y = src.extent_y;
+    }
+
+    /// Resolve every registered frame in dependency order (each anchor target before its
+    /// dependents), detecting cycles. Cycle members are still resolved best-effort, ascending by
+    /// handle, against whatever rects were available — matching the map-backed driver this
+    /// replaces.
+    pub fn solve(&mut self) {
+        self.live.sort_unstable();
+
+        // Frame→frame anchor edges. A dependency on an external or an unknown handle does not
+        // constrain ordering (its rect is fixed / missing, not produced by this pass); only
+        // frame→frame edges do. A self-anchor counts as an edge, so a self-referential frame is
+        // never emitted ⇒ reported as a cycle. Duplicate targets count once (an anchor slot set is
+        // at most 9, so the dedupe is a linear scan, not a set).
+        for idx in 0..self.live.len() {
+            let h = self.live[idx];
+            let mut seen: [Handle; 9] = [0; 9];
+            let mut n_seen = 0usize;
+            for a_idx in 0..self.input[h as usize].anchors.len() {
+                let d = self.input[h as usize].anchors[a_idx].relative_to;
+                if !self.is_frame.get(d as usize).copied().unwrap_or(false) {
+                    continue;
+                }
+                if seen[..n_seen].contains(&d) {
+                    continue;
+                }
+                if n_seen < seen.len() {
+                    seen[n_seen] = d;
+                    n_seen += 1;
+                }
+                self.indeg[h as usize] += 1;
+                self.dependents[d as usize].push(h);
+            }
+        }
+
+        for &h in &self.live {
+            if self.indeg[h as usize] == 0 {
+                self.queue.push_back(h);
+            }
+        }
+        while let Some(h) = self.queue.pop_front() {
+            self.order.push(h);
+            self.emitted[h as usize] = true;
+            for i in 0..self.dependents[h as usize].len() {
+                let dep = self.dependents[h as usize][i];
+                let e = &mut self.indeg[dep as usize];
+                *e -= 1;
+                if *e == 0 {
+                    self.queue.push_back(dep);
                 }
             }
         }
 
-        let mut queue: VecDeque<Handle> = indeg
-            .iter()
-            .filter(|&(_, &d)| d == 0)
-            .map(|(&h, _)| h)
-            .collect();
-        let mut order: Vec<Handle> = Vec::with_capacity(self.frames.len());
-        while let Some(h) = queue.pop_front() {
-            order.push(h);
-            if let Some(deps) = dependents.get(&h) {
-                for &dep in deps {
-                    let e = indeg.get_mut(&dep).expect("dependent in indeg");
-                    *e -= 1;
-                    if *e == 0 {
-                        queue.push_back(dep);
-                    }
-                }
-            }
+        for i in 0..self.order.len() {
+            let h = self.order[i];
+            self.resolve_one(h);
         }
 
-        // rects accumulates externals + resolved frames; it is the target-rect lookup.
-        let mut rects: BTreeMap<Handle, Rect> = self.externals.clone();
-        let mut unresolvable: BTreeSet<Handle> = BTreeSet::new();
-
-        let resolve_one = |h: Handle, rects: &mut BTreeMap<Handle, Rect>| -> bool {
-            let frame = &self.frames[&h];
-            match resolve_rect(frame, |t| rects.get(&t).copied()) {
-                ResolveOutcome::Resolved(r) => {
-                    rects.insert(h, r);
-                    true
-                }
-                ResolveOutcome::Unresolvable => false,
+        // Frames never emitted are on (or behind) a cycle; resolve them best-effort, ascending.
+        for idx in 0..self.live.len() {
+            let h = self.live[idx];
+            if !self.emitted[h as usize] {
+                self.cycle.push(h);
+                self.resolve_one(h);
             }
+        }
+    }
+
+    /// Resolve one frame against the rects known so far, recording failure.
+    fn resolve_one(&mut self, h: Handle) {
+        let outcome = {
+            let input = &self.input[h as usize];
+            let rects = &self.rect;
+            resolve_rect(input, |t| rects.get(t as usize).copied().flatten())
         };
-
-        for &h in &order {
-            if !resolve_one(h, &mut rects) {
-                unresolvable.insert(h);
-            }
-        }
-
-        // Frames never emitted are on (or behind) a cycle; resolve them best-effort.
-        let emitted: BTreeSet<Handle> = order.iter().copied().collect();
-        let cycle: BTreeSet<Handle> = self
-            .frames
-            .keys()
-            .copied()
-            .filter(|h| !emitted.contains(h))
-            .collect();
-        for &h in &cycle {
-            if !resolve_one(h, &mut rects) {
-                unresolvable.insert(h);
-            }
-        }
-
-        Resolution {
-            rects,
-            unresolvable,
-            cycle,
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// Dirty-tracking wrapper — a thin recompute-on-demand cache over LayoutGraph. The math above is the
-// fidelity surface; this caching strategy is benilla's own (the client uses a lazy-on-read +
-// per-frame-batched deferred queue — layout.md — which we may later mirror more closely).
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/// A [`LayoutGraph`] with a memoized [`Resolution`]. Any mutation marks the whole cache dirty; the
-/// next [`LayoutCache::resolve`] recomputes. (Per-frame incremental invalidation — dirtying only a
-/// changed frame and its transitive dependents — is a future optimization; correctness lives in the
-/// resolver, not the cache.)
-#[derive(Clone, Debug, Default)]
-pub struct LayoutCache {
-    graph: LayoutGraph,
-    cached: Option<Resolution>,
-}
-
-impl LayoutCache {
-    /// Wrap a graph (starts dirty).
-    pub fn new(graph: LayoutGraph) -> LayoutCache {
-        LayoutCache {
-            graph,
-            cached: None,
+        match outcome {
+            ResolveOutcome::Resolved(r) => self.rect[h as usize] = Some(r),
+            ResolveOutcome::Unresolvable => self.unresolvable.push(h),
         }
     }
 
-    /// Insert/replace a frame and invalidate the cache.
-    pub fn set_frame(&mut self, handle: Handle, frame: LayoutInput) {
-        self.graph.set_frame(handle, frame);
-        self.cached = None;
+    /// The rect known at `h`: an external as seeded, or a frame's resolved rect. `None` if the
+    /// handle is unknown or its frame was under-constrained.
+    #[inline]
+    pub fn rect(&self, h: Handle) -> Option<Rect> {
+        self.rect.get(h as usize).copied().flatten()
     }
 
-    /// Remove a frame and invalidate the cache.
-    pub fn remove_frame(&mut self, handle: Handle) -> Option<LayoutInput> {
-        let removed = self.graph.remove_frame(handle);
-        if removed.is_some() {
-            self.cached = None;
-        }
-        removed
+    /// Frames on (or behind) an anchor dependency cycle — no valid topological position. Ascending.
+    pub fn cycle(&self) -> &[Handle] {
+        &self.cycle
     }
 
-    /// Set an external rect and invalidate the cache.
-    pub fn set_external(&mut self, handle: Handle, rect: Rect) {
-        self.graph.set_external(handle, rect);
-        self.cached = None;
-    }
-
-    /// Whether the next [`LayoutCache::resolve`] will recompute.
-    pub fn is_dirty(&self) -> bool {
-        self.cached.is_none()
-    }
-
-    /// The underlying graph.
-    pub fn graph(&self) -> &LayoutGraph {
-        &self.graph
-    }
-
-    /// The resolved layout, recomputing if dirty.
-    pub fn resolve(&mut self) -> &Resolution {
-        if self.cached.is_none() {
-            self.cached = Some(self.graph.resolve());
-        }
-        self.cached.as_ref().expect("just populated")
+    /// Frames whose `assemble` returned unresolvable (under-constrained, or depending on an
+    /// unresolvable/missing target). May overlap [`cycle`](Self::cycle).
+    pub fn unresolvable(&self) -> &[Handle] {
+        &self.unresolvable
     }
 }
 
@@ -1166,23 +1206,24 @@ mod tests {
     }
 
     #[test]
-    fn chained_frames_via_graph() {
+    fn chained_frames_via_solver() {
         const A: Handle = 1;
         const B: Handle = 2;
-        let mut g = LayoutGraph::new();
-        g.set_external(SCREEN, screen_rect());
-        // Insert B before A to prove topological ordering, not insertion ordering.
-        g.set_frame(
+        let mut s = LayoutSolver::new();
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        // Register B before A to prove topological ordering, not registration ordering.
+        s.set_frame(
             B,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
                 20.0,
                 20.0,
             ),
         );
-        g.set_frame(
+        s.set_frame(
             A,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(
                     Point::TopLeft,
                     SCREEN,
@@ -1194,17 +1235,17 @@ mod tests {
                 50.0,
             ),
         );
-        let res = g.resolve();
-        assert!(res.cycle.is_empty());
-        assert!(res.unresolvable.is_empty());
+        s.solve();
+        assert!(s.cycle().is_empty());
+        assert!(s.unresolvable().is_empty());
         // A: left 100, top 500, right 150, bottom 450
         assert_eq!(
-            bits(res.rects[&A]),
+            bits(s.rect(A).expect("A resolved")),
             bits(Rect::new(450.0, 100.0, 500.0, 150.0))
         );
         // B hangs off A's bottom-right corner (150, 450), size 20
         assert_eq!(
-            bits(res.rects[&B]),
+            bits(s.rect(B).expect("B resolved")),
             bits(Rect::new(430.0, 150.0, 450.0, 170.0))
         );
     }
@@ -1241,67 +1282,70 @@ mod tests {
     fn dependent_of_unresolvable_is_unresolvable() {
         const A: Handle = 1; // no anchors -> unresolvable
         const B: Handle = 2; // anchored to A
-        let mut g = LayoutGraph::new();
-        g.set_external(SCREEN, screen_rect());
-        g.set_frame(A, LayoutInput::sized(vec![], 100.0, 40.0));
-        g.set_frame(
+        let mut s = LayoutSolver::new();
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(A, &LayoutInput::sized(vec![], 100.0, 40.0));
+        s.set_frame(
             B,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(Point::TopLeft, A, Point::TopLeft, 0.0, 0.0)],
                 20.0,
                 20.0,
             ),
         );
-        let res = g.resolve();
-        assert!(res.unresolvable.contains(&A));
-        assert!(res.unresolvable.contains(&B));
-        assert!(!res.rects.contains_key(&A));
-        assert!(!res.rects.contains_key(&B));
+        s.solve();
+        assert!(s.unresolvable().contains(&A));
+        assert!(s.unresolvable().contains(&B));
+        assert!(s.rect(A).is_none());
+        assert!(s.rect(B).is_none());
     }
 
     #[test]
     fn cycle_detected() {
         const A: Handle = 1;
         const B: Handle = 2;
-        let mut g = LayoutGraph::new();
-        g.set_frame(
+        let mut s = LayoutSolver::new();
+        s.begin();
+        s.set_frame(
             A,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(Point::TopLeft, B, Point::TopLeft, 0.0, 0.0)],
                 20.0,
                 20.0,
             ),
         );
-        g.set_frame(
+        s.set_frame(
             B,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(Point::TopLeft, A, Point::TopLeft, 0.0, 0.0)],
                 20.0,
                 20.0,
             ),
         );
-        let res = g.resolve();
-        assert!(res.cycle.contains(&A));
-        assert!(res.cycle.contains(&B));
+        s.solve();
+        assert!(s.cycle().contains(&A));
+        assert!(s.cycle().contains(&B));
         // neither can resolve (each depends on the other's rect, unavailable)
-        assert!(res.unresolvable.contains(&A));
-        assert!(res.unresolvable.contains(&B));
+        assert!(s.unresolvable().contains(&A));
+        assert!(s.unresolvable().contains(&B));
     }
 
     #[test]
     fn self_anchor_is_a_cycle() {
         const A: Handle = 1;
-        let mut g = LayoutGraph::new();
-        g.set_frame(
+        let mut s = LayoutSolver::new();
+        s.begin();
+        s.set_frame(
             A,
-            LayoutInput::sized(
+            &LayoutInput::sized(
                 vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
                 20.0,
                 20.0,
             ),
         );
-        let res = g.resolve();
-        assert!(res.cycle.contains(&A));
+        s.solve();
+        assert!(s.cycle().contains(&A));
     }
 
     #[test]
@@ -1315,13 +1359,22 @@ mod tests {
         assert!(size_changed(r, big));
     }
 
+    /// The solver's buffers live across rounds, so `begin` must leave NO trace of the previous
+    /// one — a stale rect, in-degree, dependent edge, or `is_frame` flag would silently corrupt
+    /// the next solve. Round 2 registers a *disjoint* frame set that anchors to a handle round 1
+    /// used, and must see it as unknown (not round 1's rect).
     #[test]
-    fn cache_recomputes_on_dirty() {
-        let mut g = LayoutGraph::new();
-        g.set_external(SCREEN, screen_rect());
-        g.set_frame(
-            1,
-            LayoutInput::sized(
+    fn begin_leaves_no_state_from_the_previous_round() {
+        const A: Handle = 1;
+        const B: Handle = 2;
+        let mut s = LayoutSolver::new();
+
+        // Round 1: A anchored to the screen, B hanging off A.
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(
+            A,
+            &LayoutInput::sized(
                 vec![Anchor::new(
                     Point::TopLeft,
                     SCREEN,
@@ -1333,27 +1386,115 @@ mod tests {
                 40.0,
             ),
         );
-        let mut cache = LayoutCache::new(g);
-        assert!(cache.is_dirty());
-        let first = cache.resolve().rects[&1];
-        assert!(!cache.is_dirty());
-        // mutate -> dirty -> recompute reflects the change
-        cache.set_frame(
-            1,
-            LayoutInput::sized(
+        s.set_frame(
+            B,
+            &LayoutInput::sized(
+                vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
+                20.0,
+                20.0,
+            ),
+        );
+        s.solve();
+        let a_first = s.rect(A).expect("A resolved in round 1");
+        assert!(s.rect(B).is_some());
+
+        // Round 2: ONLY B, still anchored to A — but A is no longer registered and no external
+        // seeds it, so B must be unresolvable rather than reusing round 1's stale A rect.
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(
+            B,
+            &LayoutInput::sized(
+                vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
+                20.0,
+                20.0,
+            ),
+        );
+        s.solve();
+        assert!(
+            s.rect(A).is_none(),
+            "round 1's A rect must not survive begin"
+        );
+        assert!(
+            s.rect(B).is_none(),
+            "B must not resolve against a stale target"
+        );
+        assert!(s.unresolvable().contains(&B));
+        assert!(s.cycle().is_empty(), "cycle list must be cleared too");
+
+        // Round 3: the original pair again — identical results to round 1 (no accumulated
+        // in-degree or dependent edges from the rounds between).
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(
+            A,
+            &LayoutInput::sized(
                 vec![Anchor::new(
                     Point::TopLeft,
                     SCREEN,
                     Point::TopLeft,
-                    50.0,
+                    0.0,
                     0.0,
                 )],
                 100.0,
                 40.0,
             ),
         );
-        assert!(cache.is_dirty());
-        let second = cache.resolve().rects[&1];
-        assert_eq!(second.left - first.left, 50.0);
+        s.set_frame(
+            B,
+            &LayoutInput::sized(
+                vec![Anchor::new(Point::TopLeft, A, Point::BottomRight, 0.0, 0.0)],
+                20.0,
+                20.0,
+            ),
+        );
+        s.solve();
+        assert_eq!(
+            bits(s.rect(A).expect("A resolved in round 3")),
+            bits(a_first)
+        );
+        assert!(s.unresolvable().is_empty());
+    }
+
+    /// A frame registered with the ScrollFrame override keeps its size/scale but drops its own
+    /// anchors for exactly the override (decision 0112) — and the slot's anchor `Vec` is reused,
+    /// so the previous round's anchors must not leak through.
+    #[test]
+    fn set_frame_anchored_replaces_only_the_anchors() {
+        const A: Handle = 1;
+        let mut s = LayoutSolver::new();
+        let input = LayoutInput::sized(
+            vec![
+                Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 0.0, 0.0),
+                Anchor::new(Point::BottomRight, SCREEN, Point::BottomRight, 0.0, 0.0),
+            ],
+            100.0,
+            40.0,
+        );
+
+        // Plain: both anchors pin all four edges, so the size is ignored.
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame(A, &input);
+        s.solve();
+        assert_eq!(
+            bits(s.rect(A).expect("resolved")),
+            bits(Rect::new(0.0, 0.0, 600.0, 800.0))
+        );
+
+        // Overridden: the two authored anchors are gone, replaced by one TOPLEFT pin at (10, -5),
+        // so the explicit 100x40 size now decides the other two edges.
+        s.begin();
+        s.set_external(SCREEN, screen_rect());
+        s.set_frame_anchored(
+            A,
+            &input,
+            Anchor::new(Point::TopLeft, SCREEN, Point::TopLeft, 10.0, -5.0),
+        );
+        s.solve();
+        assert_eq!(
+            bits(s.rect(A).expect("resolved")),
+            bits(Rect::new(555.0, 10.0, 595.0, 110.0))
+        );
     }
 }

@@ -34,7 +34,12 @@ mod camera;
 mod gait;
 mod move_trace;
 mod movement_net;
-mod mover;
+// The kinematic mover step. `pub(crate)` because the grounded walk resolve is **not** the local
+// player's alone: a remote mover's dead-reckon (`crate::net::motion::remote`) runs its extrapolated
+// step through the very same code, the way the reference runs every mover through one controller
+// (decision 0059's byte trail).
+pub(crate) mod mover;
+mod probe_look;
 mod server_ride;
 mod setup;
 mod state;
@@ -49,13 +54,13 @@ pub(crate) use camera::{head_height, CameraControl, CameraPivot, WorldCamera, CA
 // The shared avatar state + movement constants live in [`state`]; the private re-imports below are
 // what lets this module and the concern modules beside it keep naming them `super::X` unchanged.
 use state::{
-    MoveSpeed, PlayerCapsule, PlayerRide, AIR_NUDGE_SPEED, CAPSULE_RADIUS, FALL_FAR_DROP,
-    FALL_FAR_TIME, GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP,
-    RUN_BACK_RATIO, SETTLE_REACH, SETTLE_TIMEOUT, SKIN_WIDTH, STATIONARY_CHASE_RATE,
-    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
+    MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, CAPSULE_RADIUS, FALL_FAR_DROP, FALL_FAR_TIME,
+    GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
+    SETTLE_REACH, SETTLE_TIMEOUT, SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO,
+    STEP_SNAP_SLACK, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
     WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
-pub(crate) use state::{Player, CAPSULE_HEIGHT, GRAVITY, TERMINAL_VELOCITY};
+pub(crate) use state::{Player, PlayerCapsule, CAPSULE_HEIGHT, GRAVITY, TERMINAL_VELOCITY};
 
 /// The player/camera subsystem: spawns the camera + move/avatar resources at startup, drives the
 /// third-person/free-fly controller each frame. (The cursor is the [`crate::cursor`] subsystem.)
@@ -63,6 +68,9 @@ pub(crate) struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        if let Some(look) = probe_look::from_env() {
+            app.insert_resource(look);
+        }
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,
             // or under the opaque loading screen (whose covered render is what compiles the
@@ -78,6 +86,17 @@ impl Plugin for PlayerPlugin {
                 control
                     .in_set(WorldStage::Input)
                     .run_if(not(resource_exists::<crate::capture::CaptureMode>))
+                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+            )
+            // The scripted mouse-turn (`WOW_PROBE_LOOK`, decision 0621): rotates the aim before
+            // `control` reads it, so the frame that sees the new facing is the frame that streams
+            // it. Registered only when the env var asks for it — inert otherwise.
+            .add_systems(
+                Update,
+                probe_look::drive_probe_look
+                    .in_set(WorldStage::Input)
+                    .before(control)
+                    .run_if(resource_exists::<probe_look::ProbeLook>)
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
             // A server-authored spline (Charge/knockback/taxi) driving our own player is mirrored into
@@ -451,6 +470,21 @@ fn control(
         // the facing tracks the camera; **Q/E always strafe**. Movement basis is the *character* facing,
         // so left-drag (camera-only orbit) doesn't change which way W walks.
         let mouselook = both_buttons || rig.look == Some(LookButton::Right);
+        // The strafe axis, **netted exactly like `fwd_axis`** — Q/E always strafe, A/D only while
+        // mouse-looking. Netting is not a nicety: the two bits are mutually exclusive on the wire.
+        // Holding both keys used to OR `STRAFE_LEFT | STRAFE_RIGHT` into the flags while the avatar
+        // stood still (the `dir` sum below cancels), and vmangos **silently drops** every movement
+        // packet carrying that pair — never relaying it to anyone (decision 0622). Measured: 48 such
+        // packets in one session, 0 received by a watching client, against 0 in the reference
+        // client's entire 1.12.1 capture. That is decision 0056's invariant — the wire mirrors the
+        // avatar's actual motion — violated on this one axis only; the swim branch already nets.
+        let side_axis = i32::from(keys_pressed(KeyCode::KeyE))
+            - i32::from(keys_pressed(KeyCode::KeyQ))
+            + if mouselook {
+                i32::from(keys_pressed(KeyCode::KeyD)) - i32::from(keys_pressed(KeyCode::KeyA))
+            } else {
+                0
+            };
         // A/D turn the facing when not mouse-looking (yaw increases turning left, matching mouse-left).
         let turning = !mouselook && (keys_pressed(KeyCode::KeyA) || keys_pressed(KeyCode::KeyD));
         // This frame's keyboard-turn rotation — `seat_camera` carries the camera by it rigidly
@@ -467,8 +501,7 @@ fn control(
             }
             // 0.75× while also translating — the verified `flags & 0x200f` case, so it reads the
             // *net* axis, not the keys: W+S streams no direction bit and turns at the full rate.
-            let translating =
-                fwd_axis != 0 || keys_pressed(KeyCode::KeyQ) || keys_pressed(KeyCode::KeyE);
+            let translating = fwd_axis != 0 || side_axis != 0;
             let rate = TURN_RATE * if translating { TURN_RATE_MOVING } else { 1.0 };
             turn_delta = turn * rate * dt;
             player.face_yaw += turn_delta;
@@ -485,20 +518,12 @@ fn control(
             -1 => dir -= move_fwd,
             _ => {}
         }
-        // Strafe slides without turning: Q/E always; A/D only while mouse-looking (else they turn, above).
-        if keys_pressed(KeyCode::KeyE) {
-            dir += move_right;
-        }
-        if keys_pressed(KeyCode::KeyQ) {
-            dir -= move_right;
-        }
-        if mouselook {
-            if keys_pressed(KeyCode::KeyD) {
-                dir += move_right;
-            }
-            if keys_pressed(KeyCode::KeyA) {
-                dir -= move_right;
-            }
+        // Strafe slides without turning, one step in the netted sign — never a doubled push, and a
+        // cancelled pair is genuinely no strafe (the same shape as the forward/back axis above).
+        match side_axis.signum() {
+            1 => dir += move_right,
+            -1 => dir -= move_right,
+            _ => {}
         }
         // Rooted (dead-unreleased): translation intent dies here — turning above stays live, the
         // real rooted client's behavior (decision 0308 slice 1).
@@ -935,21 +960,15 @@ fn control(
                 -1 => move_flags_now |= move_flags::BACKWARD,
                 _ => {}
             }
-            // Q/E always strafe; A/D strafe while mouse-looking, else they turn the facing (above).
-            if keys_pressed(KeyCode::KeyQ) {
-                move_flags_now |= move_flags::STRAFE_LEFT;
+            // Straight off the netted strafe axis, so a cancelled press pair streams NO strafe bit —
+            // the two are mutually exclusive on the wire, and both-set is silently dropped by the
+            // server (decision 0622).
+            match side_axis.signum() {
+                -1 => move_flags_now |= move_flags::STRAFE_LEFT,
+                1 => move_flags_now |= move_flags::STRAFE_RIGHT,
+                _ => {}
             }
-            if keys_pressed(KeyCode::KeyE) {
-                move_flags_now |= move_flags::STRAFE_RIGHT;
-            }
-            if mouselook {
-                if keys_pressed(KeyCode::KeyA) {
-                    move_flags_now |= move_flags::STRAFE_LEFT;
-                }
-                if keys_pressed(KeyCode::KeyD) {
-                    move_flags_now |= move_flags::STRAFE_RIGHT;
-                }
-            } else {
+            if !mouselook {
                 if keys_pressed(KeyCode::KeyA) {
                     move_flags_now |= move_flags::TURN_LEFT;
                 }
@@ -1151,10 +1170,13 @@ fn control(
             &mut player,
             move_flags_now,
             swim_pitch,
-            jumped,
-            landed,
-            started_falling,
-            wire_fall_time,
+            movement_net::ArcEdges {
+                jumped,
+                air_nudged,
+                landed,
+                started_falling,
+                fall_time: wire_fall_time,
+            },
             now,
             &speed_acks,
             wire_transport,

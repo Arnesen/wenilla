@@ -10,9 +10,10 @@ use crate::creature_anim::move_flags;
 use crate::player::{GRAVITY, TERMINAL_VELOCITY};
 
 use super::facing::{resolve_facing, turn_toward};
+use super::relay::RelayChain;
 use super::remote::{facing_lerp, fall_arc_step, jump_seed, reconcile_lerp};
 use super::spline::monster_move_spline;
-use super::{RelayClock, RemoteMotion, Spline};
+use super::{RemoteMotion, Spline};
 
 fn speeds() -> MoveSpeeds {
     MoveSpeeds {
@@ -57,6 +58,9 @@ fn motion(flags: u32, orientation: f32) -> RemoteMotion {
         vertical_velocity: 0.0,
         jump_xy_vel: [0.0, 0.0],
         fall_start_z: None,
+        relay: Default::default(),
+        last_apply_ms: 0.0,
+        last_apply_pos: [0.0, 0.0, 0.0],
     }
 }
 
@@ -427,25 +431,151 @@ fn monster_move_without_a_travelable_path_clears_the_spline() {
     );
 }
 
-/// The relay clock maps a packet's server timestamp to a client fire-time on the mover's own
-/// timeline (decision 0601): the first packet anchors the offset (fire = arrival), a steady
-/// stream schedules by the learned mean, an early burst is capped at the reference's +1000 ms
-/// defer ceiling, and a wildly-off sample re-anchors instead of poisoning the mean.
+/// Flags that make the chain treat a mover as mid-motion (`0x20ff`'s FORWARD bit is enough).
+const MOVING: u32 = move_flags::FORWARD;
+
+/// **The headline property** (decision 0615, the reference's `0x618c30`): while a mover is moving,
+/// replay is paced by the *sender's* stamps — `fire = prev fire + wire step` — so however the packets
+/// clumped in flight, they replay at the spacing the stamps carry. Here four 500 ms-apart stamps
+/// arrive at 0 / 520 / 1450 / 1460 ms (one late, then a two-packet burst) and still fire 500 ms apart.
 #[test]
-fn relay_clock_schedules_on_the_server_timeline() {
-    let mut clock = RelayClock::default();
-    // First sample anchors: offset 4000, zero jitter → fire exactly at arrival.
-    assert_eq!(clock.fire_time(1000, 5000.0), 5000.0);
-    // A steady stream (same offset) keeps firing at arrival — no invented delay.
-    assert_eq!(clock.fire_time(1500, 5500.0), 5500.0);
-    // An EARLY packet (offset 1500 ms under the mean, still in-family): the raw schedule
-    // stime + mean lands ~1500 ms past arrival — clamped to the reference's +1000 ceiling.
-    let fire = clock.fire_time(2000, 4500.0);
-    assert_eq!(fire, 5500.0, "defer capped at arrival + 1000 ms");
-    // A sample 6000 ms off the mean is a re-anchor (server restart), not jitter: the clock
-    // resets to it and the next fire follows the NEW timeline at arrival.
-    let fire = clock.fire_time(1000, 11_000.0);
-    assert_eq!(fire, 11_000.0, "re-anchored — fire at arrival again");
+fn relay_chain_replays_on_the_senders_cadence() {
+    let mut chain = RelayChain::default();
+    let script = [(1000, 0.0), (1500, 520.0), (2000, 1450.0), (2500, 1460.0)];
+    let fires: Vec<f64> = script
+        .iter()
+        .map(|&(wire, now)| chain.schedule(wire, now, MOVING, true))
+        .collect();
+    assert_eq!(
+        fires,
+        vec![0.0, 500.0, 1000.0, 1500.0],
+        "the burst is de-clumped onto the sender's cadence"
+    );
+}
+
+/// The chain's two seeds and its guards: the first packet anchors both cells and fires at arrival; a
+/// stale/duplicate stamp contributes no step (`@0x618cb8`'s `jle`); and the server's `u32` ms clock
+/// wrapping mid-session is just another forward step.
+#[test]
+fn relay_chain_seeds_holds_stale_stamps_and_survives_the_clock_wrap() {
+    let mut chain = RelayChain::default();
+    assert_eq!(
+        chain.schedule(7_000, 4_000.0, MOVING, true),
+        4_000.0,
+        "first packet: fire at arrival, whatever the server's clock reads"
+    );
+    // A re-sent / out-of-order stamp: no forward step, so the chain doesn't advance past the
+    // previous fire (and the reference stamp is left alone — the next real step measures from it).
+    assert_eq!(chain.schedule(7_000, 4_100.0, MOVING, true), 4_000.0);
+    assert_eq!(chain.schedule(6_900, 4_200.0, MOVING, true), 4_000.0);
+    assert_eq!(
+        chain.schedule(7_300, 4_300.0, MOVING, true),
+        4_300.0,
+        "the next forward stamp steps 300 ms from the last one that counted"
+    );
+    // The wrap: 150 is 251 ms after u32::MAX − 100 on a wrapping ms clock.
+    let mut chain = RelayChain::default();
+    chain.schedule(u32::MAX - 100, 0.0, MOVING, true);
+    assert_eq!(
+        chain.schedule(150, 10.0, MOVING, true),
+        251.0,
+        "the u32 wrap is a forward step, not a 49-day jump backwards"
+    );
+}
+
+/// The de-jitter buffer is re-sized **only** on a standing mover with an empty queue (`@0x618ce4` /
+/// `@0x618cf3`), and it is sized by the window's worst lateness (`0x618b50`) — then held, not
+/// re-charged: the ring stores lateness *relative to the base*, so a spike already absorbed doesn't
+/// buy a second helping of buffer on the next idle packet.
+#[test]
+fn relay_chain_rebases_the_buffer_only_when_idle_and_unqueued() {
+    // A 200 ms-late packet enters the window while the mover is moving: no re-base, no buffer.
+    let mut chain = RelayChain::default();
+    chain.schedule(0, 0.0, MOVING, true);
+    assert_eq!(chain.schedule(500, 700.0, MOVING, true), 500.0);
+    // Still moving when the next one lands: the chain stays glued to the sender's cadence.
+    let mut moving = chain.clone();
+    assert_eq!(
+        moving.schedule(1000, 1000.0, MOVING, true),
+        1000.0,
+        "mid-motion: the 200 ms spike buys no buffer"
+    );
+    // The same packet on a mover that has come to a stop with nothing queued: NOW the chain
+    // re-bases, and the buffer it takes is exactly the window's worst lateness.
+    let mut idle = chain.clone();
+    assert_eq!(
+        idle.schedule(1000, 1000.0, 0, true),
+        1200.0,
+        "idle + empty: re-based by the window max (200 ms late)"
+    );
+    // ...and the next idle packet holds that buffer rather than charging the spike again.
+    assert_eq!(
+        idle.schedule(1500, 1500.0, 0, true),
+        1700.0,
+        "the absorbed spike is not re-charged: still 200 ms of lead"
+    );
+    // A queued event blocks the re-base even when the mover is idle.
+    let mut queued = chain.clone();
+    assert_eq!(
+        queued.schedule(1000, 1000.0, 0, false),
+        1000.0,
+        "a non-empty queue defers the re-base"
+    );
+}
+
+/// The reference's skew clamp (`@0x618d0d`/`@0x618d49`): a fire never lands more than 1000 ms after
+/// its packet's arrival, nor more than 500 ms before it.
+#[test]
+fn relay_chain_holds_the_offset_inside_the_reference_clamp() {
+    // A 2 s wire step delivered 100 ms after the last fire would schedule 1.9 s out — capped.
+    let mut chain = RelayChain::default();
+    chain.schedule(0, 0.0, MOVING, true);
+    assert_eq!(chain.schedule(2000, 100.0, MOVING, true), 1100.0);
+    // A stalled sender (no forward step) whose packet lands 4 s after the last fire would schedule
+    // 4 s in the past — floored at arrival − 500 ms, which is due-on-arrival either way.
+    let mut chain = RelayChain::default();
+    chain.schedule(0, 1000.0, MOVING, true);
+    assert_eq!(chain.schedule(0, 5000.0, MOVING, true), 4500.0);
+}
+
+/// Under a scripted jitter pattern — a steady stream, a stalled tail, a catch-up burst, an idle
+/// resync, then motion again — the chain stays well-formed: fire-times never go backwards (which is
+/// what lets the queue be a plain FIFO with no re-sort), and the lead over arrival stays inside the
+/// reference's clamp.
+#[test]
+fn relay_chain_stays_monotone_and_bounded_under_scripted_jitter() {
+    // (wire stamp, arrival, moving?) — 500 ms stamps throughout; the arrivals are the abuse.
+    let script: [(u32, f64, bool); 14] = [
+        (500, 100.0, true),    // first packet
+        (1000, 600.0, true),   // steady
+        (1500, 1100.0, true),  // steady
+        (2000, 2400.0, true),  // a 1.3 s stall
+        (2500, 2410.0, true),  // burst catch-up
+        (3000, 2420.0, true),  // burst catch-up
+        (3500, 2430.0, true),  // burst catch-up
+        (4000, 4000.0, false), // stopped, queue drained: resync
+        (4500, 4500.0, false), // idle heartbeats
+        (5000, 5000.0, false),
+        (5500, 5480.0, true), // moving again, slightly early
+        (6000, 6050.0, true), // slightly late
+        (6500, 6500.0, true),
+        (7000, 7100.0, true),
+    ];
+    let mut chain = RelayChain::default();
+    let mut prev_fire = f64::NEG_INFINITY;
+    for (wire, now, moving) in script {
+        let fire = chain.schedule(wire, now, if moving { MOVING } else { 0 }, true);
+        assert!(
+            fire >= prev_fire,
+            "fire-times must never reorder: {fire} after {prev_fire}"
+        );
+        let lead = fire - now;
+        assert!(
+            (-500.0..=1000.0).contains(&lead),
+            "lead {lead} outside the reference clamp at wire={wire}"
+        );
+        prev_fire = fire;
+    }
 }
 
 /// The pre-fire reconcile lerp (decision 0601; the reference's `0x619090`/`0x6191c0`): an armed
@@ -510,4 +640,75 @@ fn facing_lerp_turns_the_short_way_and_lands_at_fire_time() {
     // A sub-dead-zone delta isn't worth turning for.
     let held = facing_lerp(1.0, 1.0 + 1.0e-8, 0.1, 0.4);
     assert_eq!(held, 1.0, "dead-zone: negligible turn skipped");
+}
+
+/// The frame loop as [`crate::net`] chains it: `apply_net_updates` routes each arriving packet
+/// (applied at arrival, or queued), then `drain_pending_moves` empties everything due — apply
+/// **before** drain, both on the same frame clock. Returns the order packets were actually applied
+/// in, tagged by their `fall_time`, plus the flags left on the unit at the end.
+fn replay_frames(script: &[(u32, f64, u32)]) -> (Vec<u32>, u32) {
+    use super::relay::{PendingMove, RelayMove};
+    let mut rm = motion(MOVING, 0.0);
+    let mut applied = Vec::new();
+    let apply = |rm: &mut RemoteMotion, mv: &RelayMove, applied: &mut Vec<u32>| {
+        rm.flags = mv.flags; // the one bit of `apply_move` this ordering question turns on
+        applied.push(mv.fall_time);
+    };
+    for (id, &(wire_ms, arrival_ms, flags)) in script.iter().enumerate() {
+        let now = arrival_ms;
+        let mv = RelayMove {
+            wire_ms,
+            position: [0.0; 3],
+            orientation: 0.0,
+            flags,
+            pitch: 0.0,
+            fall_time: id as u32, // the packet's identity, carried through the queue
+            jump: None,
+            transport: None,
+            heartbeat: false,
+        };
+        let (live, empty) = (rm.flags, rm.pending.is_empty());
+        let fire_ms = rm.relay.schedule(wire_ms, now, live, empty);
+        if rm.fires_at_arrival(fire_ms, now) {
+            apply(&mut rm, &mv, &mut applied);
+        } else {
+            rm.pending.push_back(PendingMove { fire_ms, mv });
+        }
+        while rm.pending.front().is_some_and(|p| p.fire_ms <= now) {
+            let ev = rm.pending.pop_front().expect("front checked");
+            apply(&mut rm, &ev.mv, &mut applied);
+        }
+    }
+    (applied, rm.flags)
+}
+
+#[test]
+fn a_due_arrival_never_jumps_the_queue() {
+    // **The runaway-mover regression** (decision 0618). A mover's packets are applied in the order
+    // they arrived, always — even when the newest one is already due on arrival while older ones sit
+    // in the queue. Fire-times are monotone (0615), so a due arrival means everything queued is due
+    // too: applying the arrival *directly* writes the newest state, and the drain then replays the
+    // older queued packets over it in the same frame. Last write wins, last write is stale.
+    //
+    // The script: a 60 Hz burst that builds a one-deep queue, then a delivery stall (packet 4 lands
+    // 64 ms late) so its fire-time — chained at 48 + 16 = 64 ms — is already past by arrival at 96.
+    // Packet 4 is the STOP; packet 3, still queued in front of it, is FORWARD.
+    let script: [(u32, f64, u32); 5] = [
+        (1000, 0.0, MOVING),  // 0 — seeds the chain, fires at arrival
+        (1016, 0.0, MOVING),  // 1 — same frame; fire 16, queued
+        (1032, 16.0, MOVING), // 2 — fire 32, queued; the drain releases 1
+        (1048, 32.0, MOVING), // 3 — fire 48, queued; the drain releases 2
+        (1064, 96.0, 0),      // 4 — the STOP. Fire 64, already due; 3 is still queued
+    ];
+    let (order, flags) = replay_frames(&script);
+    assert_eq!(
+        order,
+        vec![0, 1, 2, 3, 4],
+        "relayed moves apply in arrival order — a due arrival waits behind the queue it belongs after"
+    );
+    assert_eq!(
+        flags, 0,
+        "the mover ends STOPPED: the Stop is the last write, not the FORWARD packet queued in front \
+         of it — a still player then sends nothing, so a stale FORWARD here runs off forever"
+    );
 }
