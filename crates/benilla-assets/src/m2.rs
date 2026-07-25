@@ -454,6 +454,7 @@ impl AssetLoader for M2ModelLoader {
                         .map(|_| graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root));
                     clips.push(AnimClip {
                         anim_id: anim.anim_id,
+                        seq_index: anim.seq_index,
                         node,
                         looping: anim.looping,
                         duration: anim.duration,

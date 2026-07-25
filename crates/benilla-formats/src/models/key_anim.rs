@@ -1,8 +1,18 @@
 //! The generic keyed-loop bake shared by the material-alpha (`mat_anim`) and texture-transform
 //! (`tex_anim`) channels: ONE kernel-faithful sampler (k0 = last key ≤ t, step holds, linear
-//! lerps, clamp past the last key — no wrap-lerp) and ONE clock resolution (gseq wrap vs seq-0
-//! band rebase), so the byte-verified sampling semantics (wow-re `eval.md`, and the step-boundary
-//! fix) live in exactly one place.
+//! lerps, clamp past the last key — no wrap-lerp) and ONE clock resolution (gseq wrap vs
+//! per-sequence band rebase), so the byte-verified sampling semantics (wow-re `eval.md`, and the
+//! step-boundary fix) live in exactly one place.
+//!
+//! **A track bakes per SEQUENCE, not once.** A sequence-timeline track keys on one absolute
+//! timeline that every sequence carves a band out of, so "the loop this track plays" is a question
+//! about *which sequence is playing* — the reference re-reads it every frame from the playing
+//! sequence's own key window (wow-re `eval.md` FN1 `0x713d50`: window = `ranges[seqSlot]`, and a
+//! collapsed window `lo >= hi` resolves to the single key `keys[lo]`). Baking only the first
+//! sequence's band was correct for a placed doodad — which arms `animations[0]` once and loops it
+//! forever — and wrong for anything that changes sequence, i.e. every creature: a voidwalker's two
+//! upper armour pieces are weight `0` in Stand/Walk/Run and `1` only in Death, and a seq-0-only
+//! bake freezes whichever value Stand happened to hold.
 
 use benilla_m2::M2Track;
 
@@ -30,11 +40,20 @@ impl Lerp for [f32; 3] {
     }
 }
 
+/// The sequence a sequence-timeline track bakes against: the model's **file** sequence slot (which
+/// is what indexes the track's [`M2Track::ranges`] — NOT an index into a filtered animation list)
+/// and that sequence's absolute `(start_ms, end_ms)` band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SeqSlot {
+    pub index: usize,
+    pub band: (u32, u32),
+}
+
 /// One baked keyed loop, seconds: sample at `t mod period` (linear or step per [`Self::step`]),
 /// holding the first/last key outside the keyed span. `period == 0` ⇒ a constant (single key).
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyAnim<V> {
-    /// Loop period (secs): the global sequence's duration, or the first sequence's band length.
+    /// Loop period (secs): the global sequence's duration, or the sequence band's length.
     /// `0.0` for a constant.
     pub period: f32,
     /// Step interpolation (`interp == 0`): hold each key until the next; else linear.
@@ -79,23 +98,70 @@ impl<V: Lerp> KeyAnim<V> {
     }
 }
 
-/// Bake one typed track to a [`KeyAnim`], or `None` when it contributes nothing the static path
-/// doesn't already handle. `proj` maps the on-disk key value into the baked domain (identity for
-/// scalars; vec3 → the UV xy). The two predicates name the channel's semantics:
+/// The reference's own track read at absolute time `t_ms`, for the key window `[lo, hi]` — the
+/// transcription of wow-re `eval.md` FN1 (`0x713d50`) + the scalar sampler's two-way interp
+/// dispatch (`0x71af20`, `cmp word[track],0`):
 ///
-/// - `drop_constant(c)`: an **all-keys-equal** track with value `c` vanishes — because `c` is the
-///   channel identity, or because the caller's *static* path already folded it away (the alpha
-///   combine's constant-0 cull).
-/// - `is_identity(v)`: `v` contributes nothing at runtime — used for the band-empty held key and a
-///   lone in-band key, where the static path has NOT looked (a held non-identity value still bakes,
-///   including a held alpha 0, which must keep hiding the batch every frame).
+/// - a **collapsed window** (`lo >= hi`) resolves to `keys[lo]` outright — the degenerate
+///   `{lo, lo, 0.0}` result, and the reason a band that keys nothing still has an authored value;
+/// - otherwise `k0` = the last key in the window at or before `t_ms` (clamped up to `lo`), `k1 =
+///   k0 + 1`, and the value is `keys[k0]` for a step track or past the last key, else the lerp.
 ///
-/// `gseq_durations` is the model's global-sequence table (ms); `seq0` the file-order-first
-/// sequence's absolute `(start_ms, end_ms)` band — the loop a placed doodad plays.
+/// **One named deviation:** the reference computes the fraction unclamped, so a `t_ms` outside
+/// `[ts[k0], ts[k1]]` extrapolates. That can only arise from a window whose brackets don't contain
+/// the band, and an extrapolated *fix16 factor* lands outside `[0, 1]` — where a negative value
+/// would cull the batch (`A <= 0`) on a data quirk rather than on authoring. We clamp the fraction
+/// to `[0, 1]`, i.e. hold at the bracket instead of running past it.
+fn sample_window<V: Lerp>(
+    keys: &[(u32, V)],
+    step: bool,
+    lo: usize,
+    hi: usize,
+    t_ms: u32,
+) -> Option<V> {
+    let last = keys.len().checked_sub(1)?;
+    let (lo, hi) = (lo.min(last), hi.min(last));
+    if lo >= hi {
+        return keys.get(lo).map(|&(_, v)| v);
+    }
+    let mut k0 = lo;
+    for (k, &(ts, _)) in keys.iter().enumerate().take(hi + 1).skip(lo) {
+        if ts <= t_ms {
+            k0 = k;
+        } else {
+            break;
+        }
+    }
+    let (ta, va) = keys[k0];
+    if step || k0 + 1 > last {
+        return Some(va);
+    }
+    let (tb, vb) = keys[k0 + 1];
+    if tb <= ta {
+        return Some(va);
+    }
+    let f = ((t_ms as f32 - ta as f32) / (tb as f32 - ta as f32)).clamp(0.0, 1.0);
+    Some(V::lerp(va, vb, f))
+}
+
+/// Bake one typed track to a [`KeyAnim`] for one sequence, or `None` when it contributes nothing
+/// the static path doesn't already handle. `proj` maps the on-disk key value into the baked domain
+/// (identity for scalars; vec3 → the UV xy). The two predicates name the channel's semantics:
+///
+/// - `drop_constant(c)`: a **whole-track** constant `c` vanishes — because `c` is the channel
+///   identity, or because the caller's *static* path already folded it away (the alpha combine's
+///   constant-0 cull). Judged on the whole track, which is what that static path looked at.
+/// - `is_identity(v)`: `v` contributes nothing at runtime — applied to a **band** that bakes down
+///   to a constant, where the static path has NOT looked. A held non-identity value still bakes,
+///   including a held alpha 0, which must keep hiding the batch every frame of that sequence.
+///
+/// `gseq_durations` is the model's global-sequence table (ms); `seq` the sequence to bake for
+/// (see [`SeqSlot`]). A `gseq`-tagged track ignores `seq` entirely — it runs on the global
+/// sequence's own free clock, the same loop in every animation.
 pub(super) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     track: &M2Track<T>,
     gseq_durations: &[u32],
-    seq0: Option<(u32, u32)>,
+    seq: Option<SeqSlot>,
     proj: impl Fn(T) -> V,
     drop_constant: impl Fn(V) -> bool,
     is_identity: impl Fn(V) -> bool,
@@ -105,17 +171,19 @@ pub(super) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     }
     let keys: Vec<(u32, V)> = track.keys.iter().map(|&(t, v)| (t, proj(v))).collect();
     let step = track.interp == 0;
-    // An all-equal track is a constant: dropped when the static path owns it, else a period-0 key.
+    let constant = |v: V| KeyAnim {
+        period: 0.0,
+        step,
+        keys: vec![(0.0, v)],
+    };
+    // An all-equal track is a constant in every band: dropped when the static path owns it, else a
+    // period-0 key. Judged before the band split, because that is the shape the static path tested.
     let (_, first) = keys[0];
     if keys.iter().all(|&(_, v)| v == first) {
         if drop_constant(first) {
             return None;
         }
-        return Some(KeyAnim {
-            period: 0.0,
-            step,
-            keys: vec![(0.0, first)],
-        });
+        return Some(constant(first));
     }
     if track.gseq != 0xffff {
         // Global-sequence clock: keys are already loop-relative ms; wrap on the table duration
@@ -131,37 +199,41 @@ pub(super) fn bake_track<T: Copy, V: Lerp + PartialEq>(
             keys: keys.iter().map(|&(t, v)| (t as f32 / 1000.0, v)).collect(),
         });
     }
-    // Sequence-timeline track: keep the keys inside the first sequence's absolute band, rebased —
-    // the loop a placed doodad's one-time arm plays (wow-re `doodad-anim-host.md`). No keys in the
-    // band ⇒ the channel holds the nearest earlier key while that sequence plays; bake it constant
-    // unless that held value is the channel identity (an absent earlier key contributes nothing).
-    let (start, end) = seq0?;
-    let in_band: Vec<(f32, V)> = keys
-        .iter()
-        .filter(|&&(t, _)| t >= start && t <= end)
-        .map(|&(t, v)| ((t - start) as f32 / 1000.0, v))
-        .collect();
-    if in_band.is_empty() {
-        let held = keys
-            .iter()
-            .take_while(|&&(t, _)| t < start)
-            .last()
-            .map(|&(_, v)| v)?;
-        if is_identity(held) {
-            return None;
-        }
-        return Some(KeyAnim {
-            period: 0.0,
-            step,
-            keys: vec![(0.0, held)],
-        });
+    // Sequence-timeline track: rebuild the function the reference samples across THIS sequence's
+    // band. Its key window is the track's own per-sequence `(lo, hi)` pair; an absent ranges array
+    // is the reference's `[track+4] == 0` fallback — search the whole key list.
+    let SeqSlot { index, band } = seq?;
+    let (start, end) = band;
+    let (lo, hi) = match track.ranges.get(index) {
+        Some(&(lo, hi)) => (lo as usize, hi as usize),
+        None => (0, keys.len().saturating_sub(1)),
+    };
+    let at = |t: u32| sample_window(&keys, step, lo, hi, t);
+    let head = at(start)?;
+    if end <= start {
+        // A zero-length band samples one instant — nothing to loop.
+        return (!is_identity(head)).then(|| constant(head));
     }
-    if in_band.len() == 1 && is_identity(in_band[0].1) {
-        return None;
+    // The band's own keys, plus both endpoints: the reference's function on `[start, end]` is
+    // piecewise between consecutive keys, so sampling it AT the keys (and at the band edges, where
+    // it is mid-segment toward an out-of-band bracket) reproduces it exactly.
+    let mut baked: Vec<(f32, V)> = vec![(0.0, head)];
+    for (k, &(t, v)) in keys.iter().enumerate() {
+        if k >= lo && k <= hi && t > start && t < end {
+            baked.push(((t - start) as f32 / 1000.0, v));
+        }
+    }
+    if let Some(tail) = at(end) {
+        baked.push(((end - start) as f32 / 1000.0, tail));
+    }
+    // A band the track never actually moves through is a constant hold — the ordinary case for a
+    // batch authored to appear in one animation and hide in every other.
+    if baked.iter().all(|&(_, v)| v == head) {
+        return (!is_identity(head)).then(|| constant(head));
     }
     Some(KeyAnim {
         period: ((end - start) as f32 / 1000.0).max(0.001),
         step,
-        keys: in_band,
+        keys: baked,
     })
 }

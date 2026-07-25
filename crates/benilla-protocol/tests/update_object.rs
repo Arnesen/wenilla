@@ -446,3 +446,54 @@ fn unit_living_block_surfaces_on_transport_rider_pose() {
         other => panic!("expected one ObjectCreate, got {other:?}"),
     }
 }
+
+/// `PLAYER_VISIBLE_ITEM_<n>_0` across the slot range — the PUBLIC entry the inspect window's whole
+/// paper doll is built from (decision 0631) and the same field equipment rendering resolves other
+/// players' gear through. Untested until now, and an off-by-one in its `258 + 2 + 12i` stride would
+/// put an inspected player's rings on their feet: the stride is exercised at both ends and in the
+/// middle, not just at slot 0 (which any wrong-but-anchored formula would also get right).
+///
+/// Field index = `PLAYER_VISIBLE_ITEM_1_CREATOR` (258, a 2-field guid) + 2 + 12·slot, so
+/// slot 0 → 260 (block 8 bit 4), slot 1 → 272 (block 8 bit 16), slot 14 → 428 (block 13 bit 12),
+/// slot 18 → 476 (block 14 bit 28). 15 mask blocks cover it.
+#[test]
+fn values_update_decodes_player_visible_item_entries() {
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&1u32.to_le_bytes()); // count 1
+    body.push(0); // no transport
+    body.push(0); // UPDATETYPE_VALUES
+    body.extend_from_slice(&hx("01dd")); // packed guid 0xDD
+    body.push(15); // 15 mask blocks
+    let mut masks = [0u32; 15];
+    masks[8] = (1 << 4) | (1 << 16);
+    masks[13] = 1 << 12;
+    masks[14] = 1 << 28;
+    for m in masks {
+        body.extend_from_slice(&m.to_le_bytes());
+    }
+    // Ascending field order: 260, 272, 428, 476.
+    for v in [7365u32, 2196u32, 15406u32, 2504u32] {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    let fields = decode(packet)
+        .into_iter()
+        .find_map(|e| match e {
+            SessionEvent::ObjectValues { guid: 0xDD, fields } => Some(fields),
+            _ => None,
+        })
+        .expect("object values");
+
+    assert_eq!(fields.player_visible_item_entry(0), Some(7365), "HEAD");
+    assert_eq!(fields.player_visible_item_entry(1), Some(2196), "NECK");
+    assert_eq!(fields.player_visible_item_entry(14), Some(15406), "BACK");
+    assert_eq!(fields.player_visible_item_entry(18), Some(2504), "TABARD");
+    // An unsent slot and the sentinel are both None — an empty equipment slot must not read as
+    // "item 0" (the feed keys "is there gear here" on exactly this).
+    assert_eq!(fields.player_visible_item_entry(2), None, "slot 2 unsent");
+    assert_eq!(
+        fields.player_visible_item_entry(19),
+        None,
+        "slot out of range (19 slots, 0..=18)"
+    );
+}

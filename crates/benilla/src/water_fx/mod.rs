@@ -279,9 +279,10 @@ fn foam_image(
     Some(images.add(image))
 }
 
-/// Build a record's static patch: every wet liquid-lattice triangle whose XY bounds overlap the
-/// final box, surface-lifted, in Bevy space; plus the hosting chunk (the one containing the
-/// center). `None` when the center has no hosting water or no wet cell overlaps (off the edge).
+/// Build a record's static patch: every wet liquid cell whose XY bounds overlap the final box, cut
+/// into the same two triangles the liquid surface draws, surface-lifted, in Bevy space; plus the
+/// hosting chunk (the one containing the center). `None` when the center has no hosting water or no
+/// wet cell overlaps (off the edge).
 fn build_patch(
     center: [f32; 2],
     final_size: f32,
@@ -291,34 +292,32 @@ fn build_patch(
     let (lo_y, hi_y) = (center[1] - final_size, center[1] + final_size);
     let mut verts = Vec::new();
     let mut host: Option<Entity> = None;
-    for (entity, info, patch) in chunks {
+    for (entity, info, _foam) in chunks {
         if !info.overlaps(lo_x, hi_x, lo_y, hi_y) {
             continue;
         }
         if host.is_none() && info.contains(center[0], center[1]) {
             host = Some(*entity);
         }
-        for tri in patch.indices.chunks_exact(3) {
-            let p = [
-                patch.positions[tri[0] as usize],
-                patch.positions[tri[1] as usize],
-                patch.positions[tri[2] as usize],
-            ];
-            let (tx0, tx1) = (
-                p[0][0].min(p[1][0]).min(p[2][0]),
-                p[0][0].max(p[1][0]).max(p[2][0]),
+        info.for_each_wet_cell(|[tl, tr, bl, br]| {
+            let x = [tl[0], tr[0], bl[0], br[0]];
+            let y = [tl[1], tr[1], bl[1], br[1]];
+            let (cx0, cx1) = (
+                x.iter().copied().fold(f32::MAX, f32::min),
+                x.iter().copied().fold(f32::MIN, f32::max),
             );
-            let (ty0, ty1) = (
-                p[0][1].min(p[1][1]).min(p[2][1]),
-                p[0][1].max(p[1][1]).max(p[2][1]),
+            let (cy0, cy1) = (
+                y.iter().copied().fold(f32::MAX, f32::min),
+                y.iter().copied().fold(f32::MIN, f32::max),
             );
-            if tx1 < lo_x || tx0 > hi_x || ty1 < lo_y || ty0 > hi_y {
-                continue;
+            if cx1 < lo_x || cx0 > hi_x || cy1 < lo_y || cy0 > hi_y {
+                return;
             }
-            for v in p {
+            // The liquid mesh's own winding: [tl, bl, br] then [tl, br, tr].
+            for v in [tl, bl, br, tl, br, tr] {
                 verts.push(wow_to_bevy([v[0], v[1], v[2] + SURFACE_LIFT]));
             }
-        }
+        });
     }
     let host = host?;
     if verts.is_empty() {
@@ -343,10 +342,12 @@ fn drive_unit(
 ) {
     foam_state.active = true;
     let wow = bevy_to_wow(pos);
+    // The surface height under the unit, from the wet cell it stands on — not the chunk's box and
+    // not the chunk's highest vertex, which on a sloped river put the wade depth ~2 yd out
+    // (decision 0642).
     let Some(surface) = chunks
         .iter()
-        .find(|(_, info, _)| info.contains(wow[0], wow[1]))
-        .map(|(_, info, _)| info.surface_z())
+        .find_map(|(_, info, _)| info.surface_z_at(wow[0], wow[1]))
     else {
         foam_state.wading = false;
         return;
@@ -672,25 +673,30 @@ mod tests {
         assert_eq!(foam.other_cursor, 5);
     }
 
-    /// The patch builder: wet triangles overlapping the final box make it in (surface-lifted),
-    /// ones outside stay out, and a dry position (no hosting chunk) yields no record.
+    /// The patch builder: wet cells overlapping the final box make it in (surface-lifted), ones
+    /// outside stay out, and a dry position (no hosting chunk) yields no record.
     #[test]
     fn patch_clips_to_wet_cells() {
-        let info = WaterChunkInfo::new(0.0, 10.0, 0.0, 10.0, 5.0);
-        let patch = FoamPatch {
-            positions: vec![
-                [1.0, 1.0, 5.0],
-                [3.0, 1.0, 5.0],
-                [1.0, 3.0, 5.0],
-                [8.0, 8.0, 5.0],
-                [9.5, 8.0, 5.0],
-                [8.0, 9.5, 5.0],
-            ],
-            indices: vec![0, 1, 2, 3, 4, 5],
-        };
+        // A 3×3-vertex grid over `[0,10]²` — 4 cells of 5 yd. Only the near (0,0) cell is wet, so
+        // the far half of the box is dry ground the patch must not cover. The grid rides the info
+        // now (the swim query needs the same cells); `FoamPatch` is just the marker.
+        let mut positions = Vec::new();
+        for j in 0..3 {
+            for i in 0..3 {
+                positions.push([i as f32 * 5.0, j as f32 * 5.0, 5.0]);
+            }
+        }
+        let info = WaterChunkInfo::new(
+            crate::liquid::LiquidSource::AdtChunk,
+            benilla_formats::LiquidKind::Still,
+            [3, 3],
+            positions,
+            vec![true, false, false, false],
+        );
+        let patch = FoamPatch;
         let chunks = vec![(Entity::PLACEHOLDER, &info, &patch)];
         let (verts, _) = build_patch([2.0, 2.0], 1.5, &chunks).unwrap();
-        assert_eq!(verts.len(), 3, "only the near triangle overlaps");
+        assert_eq!(verts.len(), 6, "only the one wet cell overlaps");
         let wow = bevy_to_wow(verts[0]);
         assert!(
             (wow[2] - (5.0 + SURFACE_LIFT)).abs() < 1e-4,

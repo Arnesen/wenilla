@@ -498,23 +498,12 @@ fn drain_trade(
     }
 }
 
-/// Resolve a UnitPopup unit token to the player guid to trade with (decision 0592 P1) — `"target"`
-/// through the selection iff it's a player (the target frame's PLAYER menu), a `"partyN"` token
-/// through the roster (the party frame's PARTY menu). `"player"` (yourself) and any unresolved token
-/// answer `None` (the drain sends nothing).
+/// Resolve a UnitPopup unit token to the player guid to trade with (decision 0592 P1). The
+/// resolution is not trade-specific — every UnitPopup verb against another player needs the same
+/// token → player-guid step — so it lives in [`crate::ui_unit::player_token_guid`] and inspect
+/// (decision 0631) shares it. Kept as a named local for this module's own tests.
 fn resolve_trade_target(token: &str, selection: &Selection, group: &GroupState) -> Option<u64> {
-    match token {
-        "target" => selection
-            .guid
-            .filter(|g| benilla_protocol::guid::is_player(*g)),
-        "player" => None,
-        tok => tok
-            .strip_prefix("party")
-            .and_then(|n| n.parse::<usize>().ok())
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|n| group.party_slots().nth(n))
-            .map(|m| m.guid),
-    }
+    crate::ui_unit::player_token_guid(token, selection, group)
 }
 
 #[cfg(test)]

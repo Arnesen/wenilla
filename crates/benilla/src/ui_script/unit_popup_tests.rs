@@ -48,6 +48,11 @@ fn bake_strings(s: &UiScript) {
         WHISPER = "Whisper"
         PARTY_INVITE = "Invite"
         TRADE = "Trade"
+        DUEL = "Duel"
+        -- The inspect row's label (decision 0631). Verified against the real
+        -- `Interface\FrameXML\GlobalStrings.lua:2327` off the 1.12.1 patch chain — which is what the
+        -- app itself runs at boot (`load_global_strings`); this stub only stands in for it here.
+        INSPECT = "Inspect"
         CANCEL = "Cancel"
         RAID_TARGET_ICON = "Raid Target Icon"
     "#,
@@ -171,27 +176,40 @@ fn solo_target_right_click_invites_a_player() {
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "a friendly player target opens the PLAYER menu solo"
     );
-    // title (Ally) + Whisper + Invite + Trade + Cancel — Inspect/Follow/Duel are DEFERRED, the
-    // raid-target submenu needs a party. (Trade un-deferred in decision 0592 P1.)
+    // title (Ally) + Whisper + Inspect + Invite + Trade + Duel + Cancel — only FOLLOW is still
+    // DEFERRED, and the raid-target submenu needs a party. (Trade came out of the deferred set in
+    // decision 0592 P1, Inspect in 0631, Duel in 0633 — Inspect precedes Invite/Trade/Duel in the
+    // reference's own PLAYER menu order, which is why every row below it sits one later than it did
+    // before 0631.)
     assert_eq!(
         s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
-        5,
-        "title + Whisper + Invite + Trade + Cancel"
+        7,
+        "title + Whisper + Inspect + Invite + Trade + Duel + Cancel"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button3:GetText()")
             .unwrap(),
-        "Invite"
+        "Inspect"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button4:GetText()")
             .unwrap(),
+        "Invite"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button5:GetText()")
+            .unwrap(),
         "Trade"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button6:GetText()")
+            .unwrap(),
+        "Duel"
     );
 
     // Click Invite → UnitPopup_OnClick → InviteToParty("target") → InviteUnit.
     let (ix, iy) = s
-        .eval::<(f64, f64)>("return DropDownList1Button3:GetCenter()")
+        .eval::<(f64, f64)>("return DropDownList1Button4:GetCenter()")
         .unwrap();
     s.mouse_button(ix as f32, iy as f32, "LeftButton", true);
     s.mouse_button(ix as f32, iy as f32, "LeftButton", false);
@@ -247,15 +265,16 @@ fn solo_target_trade_click_queues_an_initiate() {
     s.mouse_button(cx as f32, cy as f32, "RightButton", false);
     s.resolve();
     assert_eq!(
-        s.eval::<String>("return DropDownList1Button4:GetText()")
+        s.eval::<String>("return DropDownList1Button5:GetText()")
             .unwrap(),
         "Trade",
-        "Trade is the fourth row (title + Whisper + Invite + Trade)"
+        "Trade is the fifth row (title + Whisper + Inspect + Invite + Trade) — Inspect joined \
+         ahead of it in decision 0631"
     );
 
     // Click Trade through the real hit path → UnitPopup_OnClick's TRADE arm → InitiateTrade("target").
     let (tx, ty) = s
-        .eval::<(f64, f64)>("return DropDownList1Button4:GetCenter()")
+        .eval::<(f64, f64)>("return DropDownList1Button5:GetCenter()")
         .unwrap();
     s.mouse_button(tx as f32, ty as f32, "LeftButton", true);
     s.mouse_button(tx as f32, ty as f32, "LeftButton", false);
@@ -263,6 +282,70 @@ fn solo_target_trade_click_queues_an_initiate() {
         s.take_trade_initiates(),
         vec!["target".to_string()],
         "clicking Trade queues an initiate against the target token"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Clicking the **Inspect** row (un-deferred in decision 0631) through the real hit path reaches
+/// `InspectUnit("target")` — the same "the row is there but the click does nothing" seam 0592 hit on
+/// Trade, which is a dispatch break (`button == "INSPECT"` never matching) that a row-label test
+/// cannot see. `InspectUnit` is stubbed rather than loading the whole window: this file tests the
+/// popup's dispatch, and `inspect_tests.rs` owns what the window then does.
+#[test]
+fn solo_target_inspect_click_reaches_inspect_unit() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_strings(&s);
+    load_popup_frames(&s);
+    s.run("BENILLA_TEST_INSPECTED = nil; function InspectUnit(unit) BENILLA_TEST_INSPECTED = unit end")
+        .unwrap();
+
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Me".into()),
+            is_player: true,
+            ..UnitState::default()
+        }),
+    );
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Ally".into()),
+            health: 40,
+            max_health: 40,
+            is_player: true,
+            reaction: 5,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.resolve();
+
+    let (cx, cy) = s
+        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .unwrap();
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    s.resolve();
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button3:GetText()")
+            .unwrap(),
+        "Inspect",
+        "Inspect is the third row (title + Whisper + Inspect)"
+    );
+
+    let (ix, iy) = s
+        .eval::<(f64, f64)>("return DropDownList1Button3:GetCenter()")
+        .unwrap();
+    s.mouse_button(ix as f32, iy as f32, "LeftButton", true);
+    s.mouse_button(ix as f32, iy as f32, "LeftButton", false);
+    assert_eq!(
+        s.eval::<String>("return BENILLA_TEST_INSPECTED").unwrap(),
+        "target",
+        "clicking Inspect calls InspectUnit against the target token"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

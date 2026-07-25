@@ -12,6 +12,11 @@ const WOLF_POS: [f32; 3] = [-8949.95, -132.49, 83.9];
 const WOLF_DISPLAY: u32 = 604;
 const WOLF_FACTION: u32 = 32;
 
+/// The `name-water` fixture's unit: the same wolf, re-seated 25 yd along the water scenario's own
+/// look bearing (`WATER_EYE` → `WATER_LOOK`) at the river surface, so its overhead name projects
+/// onto the water *beyond* it.
+const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
+
 /// Seed the fixture window's state resources once, right after the scene goes resident — the real
 /// feeds then push it into the VM during the settle window exactly as live wire data would. Item
 /// icons resolve through the offline `ItemDisplayCatalog` (display ids chosen from entries that
@@ -963,6 +968,61 @@ pub(super) fn seed_ui_fixture(
             ) {
                 warn!("capture: ui-chatedit seed failed: {e}");
             }
+        }
+        UiFixture::NameWater => {
+            use benilla_protocol::messages::ObjectFields;
+            // The synthetic self player at the eye (the reaction lookup reads its store, and the
+            // name colour is that verdict).
+            const SELF_GUID: u64 = 0x51;
+            names.insert_player(SELF_GUID, "Benilla".into());
+            commands.spawn((
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                    (34, 2),      // UNIT_FIELD_LEVEL
+                    (35, 1),      // UNIT_FIELD_FACTIONTEMPLATE — human
+                    (36, 0x0101), // UNIT_FIELD_BYTES_0 — race human, class warrior
+                ])),
+                crate::net::SelfPlayer,
+                crate::net::Guid(SELF_GUID),
+                Transform::from_translation(wow_to_bevy(ctx.scenario.eye)),
+            ));
+            // The named unit out in the river (the `vplates` wolf, re-seated): 25 yd along the
+            // scenario's own look bearing, so its overhead name lands on the water surface
+            // BEYOND it — the geometry that catches a plate sorting before the liquid.
+            names.insert_creature(
+                WOLF_ENTRY,
+                Some(crate::names::CreatureRecord {
+                    name: "Timber Wolf".into(),
+                    subname: None,
+                    creature_type: 1,
+                    rank: 0,
+                    type_flags: 0,
+                    civilian: false,
+                    racial_leader: false,
+                }),
+            );
+            commands.spawn((
+                crate::net::Guid(WOLF_GUID),
+                crate::net::NetEntity {
+                    kind: benilla_protocol::EntityKind::Unit,
+                    display_id: Some(WOLF_DISPLAY),
+                    scale: 1.0,
+                },
+                crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                    (22, 100),          // UNIT_FIELD_HEALTH
+                    (28, 100),          // UNIT_FIELD_MAXHEALTH
+                    (34, 2),            // UNIT_FIELD_LEVEL
+                    (35, WOLF_FACTION), // UNIT_FIELD_FACTIONTEMPLATE
+                ])),
+                Transform {
+                    translation: wow_to_bevy(NAME_WATER_POS),
+                    rotation: Quat::from_rotation_y(2.2),
+                    ..default()
+                },
+                Visibility::default(),
+            ));
+            // The floating NAME is the subject, so no V-plate may exist (a plated unit never
+            // draws one — the ShouldShowName exclusivity) even though enemy plates boot ON.
+            vplates.enemies = false;
         }
     }
 }

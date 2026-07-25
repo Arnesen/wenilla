@@ -1,0 +1,438 @@
+//! The shipped **inspect window** driven end-to-end, engine-only (no Bevy): the real
+//! `assets/ui/InspectFrame.xml` loaded behind `Fonts.xml`/`UiPanels.xml`/`GameTooltip.xml` and fed a
+//! synthetic target snapshot + a foreign equipment view (decision 0631). `character_tests.rs`'s
+//! harness, turned onto the other paper doll.
+//!
+//! What these are here to falsify, in order of how quietly it could have shipped broken:
+//!
+//! 1. **The range gate really gates.** `InspectUnit` out of range must not open the window. A
+//!    `CanInspect` that always answered truthy would look perfectly fine in play — you would just
+//!    be able to inspect across the zone — so the boundary is asserted at the verified thresholds,
+//!    including the strict-vs-non-strict asymmetry between the two predicates.
+//! 2. **The slots come from the inspected unit, not from us.** The whole slice is one router change
+//!    (`Model::inv_slot`); if it fell back to the self feed, the window would show *your* gear on
+//!    someone else's doll — plausible-looking and completely wrong. So the two sources are fed
+//!    deliberately different items and the doll is checked against the foreign one.
+//! 3. **The window's own lifecycle.** Open/close sounds, the level line off the target snapshot, the
+//!    `UNIT_INVENTORY_CHANGED` repaint, the rotate buttons moving the booth yaw, and
+//!    `ClearInspectPlayer` firing on hide (without which the app would keep resolving a closed
+//!    window's target forever).
+
+use std::collections::HashMap;
+
+use benilla_ui::script::{
+    InspectView, InvSlotView, InventorySlots, QuadContent, SoundRequest, UiScript, UnitState,
+};
+
+/// Load one shipped `assets/ui/<file>` into `s`, panicking on any loader error.
+fn load_xml(s: &UiScript, file: &str) {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/ui")
+            .join(file),
+    )
+    .unwrap();
+    let doc = benilla_ui::framexml::parse(&text).unwrap();
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(
+        report.errors.is_empty(),
+        "{file}: loader errors: {:?}",
+        report.errors
+    );
+}
+
+/// The inspected player: a Dwarf Paladin, level 34.
+fn target_unit() -> UnitState {
+    UnitState {
+        exists: true,
+        name: Some("Thargrim".into()),
+        health: 900,
+        max_health: 900,
+        level: 34,
+        race: Some("Dwarf".into()),
+        race_file: Some("Dwarf".into()),
+        class: Some("Paladin".into()),
+        class_file: Some("PALADIN".into()),
+        sex: 2,
+        is_player: true,
+        ..Default::default()
+    }
+}
+
+/// A slot view as the inspect feed builds one: entry + icon + name + quality, and nothing an item
+/// *object* would have supplied (no count>1, no durability, no lock) — see `ui_inspect`'s module doc.
+fn foreign_slot(entry: u32, icon: &str, name: &str) -> InvSlotView {
+    InvSlotView {
+        item_id: entry,
+        icon: Some(icon.into()),
+        count: 1,
+        quality: 3,
+        name: Some(name.into()),
+        link: Some(format!("|cff0070dd|Hitem:{entry}:0:0:0|h[{name}]|h|r")),
+        ..Default::default()
+    }
+}
+
+/// The inspected unit's equipment: a helm in the head slot (live-API id 1) and nothing else.
+fn inspect_view(unit: &str) -> InspectView {
+    let mut slots: InventorySlots = Default::default();
+    slots[1] = Some(foreign_slot(
+        7365,
+        "Interface\\Icons\\INV_Helmet_09",
+        "Mighty Helm",
+    ));
+    InspectView {
+        unit: unit.into(),
+        guid: 0x0000_0000_0000_0042,
+        slots,
+    }
+}
+
+/// OUR equipment, deliberately a different item in the same slot — the router's falsifier.
+fn own_slots() -> InventorySlots {
+    let mut slots: InventorySlots = Default::default();
+    slots[1] = Some(foreign_slot(
+        1234,
+        "Interface\\Icons\\INV_Helmet_01",
+        "My Own Helm",
+    ));
+    slots
+}
+
+/// Does a texture whose path contains `needle` actually get DRAWN this frame? Regions carry no Lua
+/// `GetTexture` in this engine, so the icon assertions go through the render pass exactly as
+/// `character_tests.rs`'s do — which also makes them a stronger claim (it renders, not merely
+/// "the state says so").
+fn drawn(s: &mut UiScript, needle: &str) -> bool {
+    s.resolve();
+    s.extract().iter().any(
+        |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle)),
+    )
+}
+
+/// Everything the window needs to open on `"target"`, in range.
+fn armed() -> UiScript {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "InspectFrame.xml");
+    s.set_unit("target", Some(target_unit()));
+    s.set_inspect(Some(inspect_view("target")));
+    // 4 yards away (d² = 16) — comfortably inside the verified 100.0.
+    s.set_inspect_reach(HashMap::from([("target".to_string(), 16.0)]));
+    s
+}
+
+/// The loader itself: the window and its 19 slots + model pane materialize with no errors.
+#[test]
+fn shipped_inspect_frame_loads_clean() {
+    let s = UiScript::new().unwrap();
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "InspectFrame.xml");
+    // All 19 slots exist and carry their GetInventorySlotInfo id (1..=19, no ammo slot).
+    for (name, id) in [
+        ("BenillaInspectHeadSlot", 1),
+        ("BenillaInspectBackSlot", 15),
+        ("BenillaInspectMainHandSlot", 16),
+        ("BenillaInspectRangedSlot", 18),
+        ("BenillaInspectTabardSlot", 19),
+    ] {
+        assert_eq!(
+            s.eval::<i64>(&format!("return {name}.invSlotId")).unwrap(),
+            id,
+            "{name} inventory slot id"
+        );
+    }
+}
+
+/// **The gate really gates.** Out of range, `InspectUnit` sends nothing and opens nothing; the same
+/// call in range does both. A `CanInspect` stuck truthy passes every other test in this file.
+#[test]
+fn inspect_unit_refuses_out_of_range() {
+    let mut s = armed();
+    // 11 yards (d² = 121) — past the verified 100.0 threshold.
+    s.set_inspect_reach(HashMap::from([("target".to_string(), 121.0)]));
+
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+    assert!(
+        !s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
+            .unwrap(),
+        "out of range: the window must not open"
+    );
+    assert!(
+        s.take_inspect_notifies().is_empty(),
+        "out of range: no CMSG_INSPECT request is queued"
+    );
+
+    // Step inside the threshold: the same call now opens and requests.
+    s.set_inspect_reach(HashMap::from([("target".to_string(), 99.9)]));
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    assert!(
+        s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
+            .unwrap(),
+        "in range: the window opens"
+    );
+    assert_eq!(
+        s.take_inspect_notifies(),
+        vec!["target".to_string()],
+        "in range: NotifyInspect queued the token for the app to resolve"
+    );
+}
+
+/// The two verified thresholds and their **different operators** — `CanInspect` refuses only on a
+/// strict `100.0 < d²` (so exactly 100.0 is IN range), while `CheckInteractDistance` admits only on
+/// a strict `d² < table[type-1]` (so exactly 100.0 is OUT). That asymmetry is the binary's own
+/// (wow-re §5: `test ah,0x41; jne` vs `test ah,0x5; jp`), and it is the kind of detail a rewrite
+/// silently normalizes — hence a test on the boundary itself.
+#[test]
+fn range_predicates_transcribe_the_verified_thresholds() {
+    let mut s = armed();
+    for (d2, can_inspect, interact1) in [
+        (99.9_f64, true, true),
+        (100.0, true, false),
+        (100.1, false, false),
+    ] {
+        s.set_inspect_reach(HashMap::from([("target".to_string(), d2)]));
+        assert_eq!(
+            s.eval::<bool>(r#"return CanInspect("target") ~= nil"#)
+                .unwrap(),
+            can_inspect,
+            "CanInspect at d²={d2}"
+        );
+        assert_eq!(
+            s.eval::<bool>(r#"return CheckInteractDistance("target", 1) ~= nil"#)
+                .unwrap(),
+            interact1,
+            "CheckInteractDistance(type 1) at d²={d2}"
+        );
+    }
+    // Type 4 is the 30-yard row (900.0) — the table is indexed, not hardcoded to one distance.
+    s.set_inspect_reach(HashMap::from([("target".to_string(), 899.0)]));
+    assert!(s
+        .eval::<bool>(r#"return CheckInteractDistance("target", 4) ~= nil"#)
+        .unwrap());
+    assert!(
+        !s.eval::<bool>(r#"return CheckInteractDistance("target", 1) ~= nil"#)
+            .unwrap(),
+        "the same distance is out of range for the 10-yard type"
+    );
+    // An unknown token never grays a row (missing data must not gate).
+    assert!(s
+        .eval::<bool>(r#"return CheckInteractDistance("party3", 1) ~= nil"#)
+        .unwrap());
+}
+
+/// **The doll shows THEIR gear, not ours.** Both sources are fed, with different items in the same
+/// slot; the inspected token must read the foreign one and `"player"` must still read ours.
+#[test]
+fn inventory_bindings_route_by_unit_token() {
+    let mut s = armed();
+    s.set_inventory_slots(own_slots());
+
+    assert_eq!(
+        s.eval::<String>(r#"return GetInventoryItemTexture("target", 1)"#)
+            .unwrap(),
+        "Interface\\Icons\\INV_Helmet_09",
+        "the inspected token reads the foreign visible-item view"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return GetInventoryItemTexture("player", 1)"#)
+            .unwrap(),
+        "Interface\\Icons\\INV_Helmet_01",
+        "\"player\" still reads our own equipped feed"
+    );
+    // A token nobody is inspecting has no equipment source at all.
+    assert!(s
+        .eval::<bool>(r#"return GetInventoryItemTexture("party2", 1) == nil"#)
+        .unwrap());
+    // The inspect view is keyed on the token it was built for: if the window rebinds to another
+    // token, the stale view must not answer for it.
+    s.set_inspect(Some(inspect_view("party1")));
+    assert!(
+        s.eval::<bool>(r#"return GetInventoryItemTexture("target", 1) == nil"#)
+            .unwrap(),
+        "a view built for \"party1\" must not answer for \"target\""
+    );
+}
+
+/// The whole window contract in one drive: open through `ShowUIPanel` with the ref's sound, the
+/// name/level lines off the target snapshot, the slot icon painted from the foreign view, an empty
+/// slot falling back to its paper-doll art, the `UNIT_INVENTORY_CHANGED` repaint, the rotate buttons
+/// moving the booth yaw, and closing firing `ClearInspectPlayer`.
+#[test]
+fn shipped_inspect_frame_drives_end_to_end() {
+    let mut s = armed();
+
+    // Hidden at load, and no sound queued (never transitions on startup).
+    assert!(!s
+        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
+        .unwrap());
+    assert!(s.take_sounds().is_empty());
+    // The pane's OnLoad set the ref's own default facing (InspectModelFrame_OnLoad, 0.61).
+    assert!(
+        (s.inspect_yaw() - 0.61).abs() < 0.0001,
+        "default facing 0.61, got {}",
+        s.inspect_yaw()
+    );
+
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    assert!(s.errors().is_empty(), "open errors: {:?}", s.errors());
+    assert!(s
+        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoOpen".into())],
+        "opening plays igCharacterInfoOpen"
+    );
+
+    assert_eq!(
+        s.eval::<String>("return BenillaInspectNameText:GetText()")
+            .unwrap(),
+        "Thargrim",
+        "the name line reads UnitName of the inspected token"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaInspectLevelText:GetText()")
+            .unwrap(),
+        "Level 34 Dwarf Paladin",
+        "the level line reads the inspected unit, not the player"
+    );
+    assert!(
+        drawn(&mut s, "INV_Helmet_09"),
+        "the head slot paints the inspected item's icon"
+    );
+    assert!(
+        drawn(&mut s, "UI-PaperDoll-Slot-Chest"),
+        "an empty slot falls back to its own paper-doll art"
+    );
+
+    // The repaint path: the feed pushes a changed view and fires the event the ref's slot buttons
+    // listen for (filtered on arg1 == the inspected unit).
+    let mut swapped = inspect_view("target");
+    swapped.slots[1] = Some(foreign_slot(
+        7366,
+        "Interface\\Icons\\INV_Helmet_22",
+        "Better Helm",
+    ));
+    s.set_inspect(Some(swapped));
+    s.fire_event(
+        "UNIT_INVENTORY_CHANGED",
+        vec![benilla_ui::script::ScriptValue::Str("target".into())],
+    );
+    assert!(
+        drawn(&mut s, "INV_Helmet_22"),
+        "UNIT_INVENTORY_CHANGED for the inspected unit repaints the slot"
+    );
+
+    // An event for somebody else must NOT repaint (the ref's arg1 filter).
+    let mut other = inspect_view("target");
+    other.slots[1] = Some(foreign_slot(1, "Interface\\Icons\\INV_Helmet_ZZ", "Nope"));
+    s.set_inspect(Some(other));
+    s.fire_event(
+        "UNIT_INVENTORY_CHANGED",
+        vec![benilla_ui::script::ScriptValue::Str("party4".into())],
+    );
+    assert!(
+        drawn(&mut s, "INV_Helmet_22") && !drawn(&mut s, "INV_Helmet_ZZ"),
+        "an event for another unit leaves the doll alone"
+    );
+
+    // Rotate: the ref's sign convention (left subtracts, right adds 0.03) onto the booth yaw, with
+    // the kit each click.
+    s.run("BenillaInspectModelFrameRotateLeftButton:Click()")
+        .unwrap();
+    assert!(
+        (s.inspect_yaw() - 0.58).abs() < 0.0001,
+        "rotate-left subtracts 0.03, got {}",
+        s.inspect_yaw()
+    );
+    s.run("BenillaInspectModelFrameRotateRightButton:Click()")
+        .unwrap();
+    s.run("BenillaInspectModelFrameRotateRightButton:Click()")
+        .unwrap();
+    assert!(
+        (s.inspect_yaw() - 0.64).abs() < 0.0001,
+        "rotate-right adds 0.03, got {}",
+        s.inspect_yaw()
+    );
+    assert_eq!(
+        s.take_sounds(),
+        vec![
+            SoundRequest::KitName("igInventoryRotateCharacter".into()),
+            SoundRequest::KitName("igInventoryRotateCharacter".into()),
+            SoundRequest::KitName("igInventoryRotateCharacter".into()),
+        ],
+        "each rotate click plays the kit"
+    );
+
+    // Closing plays the close sound AND tells the app to stop inspecting — without the latter the
+    // feed would keep resolving a closed window's target forever.
+    assert!(
+        !s.take_inspect_clear(),
+        "ClearInspectPlayer not called while open"
+    );
+    s.run(r#"HideUIPanel(BenillaInspectFrame)"#).unwrap();
+    assert!(!s
+        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
+        .unwrap());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igCharacterInfoClose".into())],
+        "closing plays igCharacterInfoClose"
+    );
+    assert!(
+        s.take_inspect_clear(),
+        "closing called ClearInspectPlayer (the ref's InspectFrame_OnHide)"
+    );
+    assert!(s.errors().is_empty(), "close errors: {:?}", s.errors());
+}
+
+/// The tab chrome, and where the ref's "toggle the showing page shut" branch actually lives.
+///
+/// `PanelTemplates_SelectTab` **disables** the selected tab button (`UiPanels.xml`, the ref's own
+/// UIPanelTemplates), so on a one-tab window the tab is inert from the moment it opens — clicking it
+/// cannot close anything. `ToggleInspect`'s close-when-already-showing branch
+/// (`Blizzard_InspectUI.lua:67-83`) is therefore reachable only by calling `ToggleInspect` directly,
+/// which is how a keybinding would. Both halves asserted, because the first one is what makes the
+/// second one non-obvious.
+#[test]
+fn the_active_tab_is_inert_and_toggle_inspect_closes() {
+    let mut s = armed();
+    s.run(r#"InspectUnit("target")"#).unwrap();
+    let _ = s.take_sounds();
+
+    // NB this engine's `IsEnabled` returns a plain bool, not the live API's 1/nil.
+    assert!(
+        !s.eval::<bool>("return BenillaInspectFrameTab1:IsEnabled()")
+            .unwrap(),
+        "the selected tab is disabled (PanelTemplates_SelectTab), so its click is inert"
+    );
+    s.run("BenillaInspectFrameTab1:Click()").unwrap();
+    assert!(
+        s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
+            .unwrap(),
+        "clicking the disabled active tab changes nothing"
+    );
+
+    // The reachable path: ToggleInspect on the page already showing closes the window.
+    s.run(r#"ToggleInspect("BenillaInspectPaperDollFrame")"#)
+        .unwrap();
+    assert!(
+        !s.eval::<bool>("return BenillaInspectFrame:IsVisible()")
+            .unwrap(),
+        "ToggleInspect on the showing page closes the window (ref ToggleInspect)"
+    );
+    // And again re-opens it, the other branch of the same function.
+    s.run(r#"ToggleInspect("BenillaInspectPaperDollFrame")"#)
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return BenillaInspectFrame:IsVisible()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "tab errors: {:?}", s.errors());
+}

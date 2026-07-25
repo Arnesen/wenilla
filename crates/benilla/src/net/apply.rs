@@ -116,8 +116,8 @@ pub(super) fn apply_net_updates(
         // The taxi-map session (decision 0484 phase 1) + the mailbox session + its login-scoped
         // arrival countdown (decision 0544) + the player-trade session (decision 0592) + the bank
         // session and its purchase-refusal queue (decision 0604) + the world-state table the
-        // NPC-text `$<n>w` tokens read, grouped to stay under Bevy's 16-SystemParam ceiling (this
-        // tuple's 16th and last slot).
+        // NPC-text `$<n>w` tokens read + the duel session (decision 0633), grouped to stay under
+        // Bevy's 16-SystemParam ceiling (this tuple's 16th and last slot).
         (
             ResMut<crate::ui_taxi::TaxiState>,
             ResMut<crate::ui_mail::MailOpen>,
@@ -126,6 +126,7 @@ pub(super) fn apply_net_updates(
             ResMut<crate::ui_bank::BankOpen>,
             ResMut<crate::ui_bank::BankErrors>,
             ResMut<crate::world_state::WorldStates>,
+            ResMut<crate::ui_duel::DuelState>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -249,6 +250,7 @@ pub(super) fn apply_net_updates(
             mut bank_open,
             mut bank_errors,
             mut world_states,
+            mut duel,
         ),
     ) = caches;
     let (
@@ -337,6 +339,7 @@ pub(super) fn apply_net_updates(
                     &mut mail_pending,
                     &mut trade_session,
                     &mut bank_open,
+                    &mut duel,
                     &mut aura.6,
                 );
             }
@@ -766,6 +769,33 @@ pub(super) fn apply_net_updates(
             SessionEvent::MinimapPing { .. }
             | SessionEvent::ReadyCheckRequest
             | SessionEvent::ReadyCheckAnswer { .. } => {}
+            // ── The duel family (decision 0633): the session mirror + the two DisplayError
+            // lines the handlers emit inline; the Era events fire off the mirror's edges in
+            // `ui_duel::feed_duel`, and the countdown ticks in its own system ──
+            SessionEvent::DuelRequested {
+                arbiter,
+                challenger,
+            } => crate::ui_duel::apply::requested(
+                &mut duel,
+                &mut chat_log,
+                &net_commands,
+                arbiter,
+                challenger,
+                self_guid.0,
+            ),
+            SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
+            SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
+            SessionEvent::DuelComplete { started } => {
+                crate::ui_duel::apply::complete(&mut duel, &mut chat_log, started);
+            }
+            SessionEvent::DuelWinner {
+                fled,
+                winner,
+                loser,
+            } => crate::ui_duel::apply::winner(&mut chat_log, fled, &winner, &loser),
+            SessionEvent::DuelCountdown { seconds } => {
+                crate::ui_duel::apply::countdown(&mut duel, seconds);
+            }
             SessionEvent::LootResponse {
                 guid,
                 loot_type,

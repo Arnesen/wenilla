@@ -4,10 +4,10 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    backdrop, bank, char_stats, container, craft, cursor, death, gossip, item_text, loot,
-    loot_roll, mail, merchant, party, quest, quest_log, skills, slider, spellbook, taxi, trade,
-    tradeskill, trainer, ActionSlot, AuraState, FontObject, ItemTemplateView, PlayerReqState,
-    RegionData, ScriptValue, SoundRequest, UnitState,
+    backdrop, bank, char_stats, container, craft, cursor, death, duel, gossip, inspect, item_text,
+    loot, loot_roll, mail, merchant, party, quest, quest_log, skills, slider, spellbook, taxi,
+    trade, tradeskill, trainer, ActionSlot, AuraState, FontObject, ItemTemplateView,
+    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -148,6 +148,10 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
     pub(crate) tell_requests: Vec<String>,
+    /// Duel intents (`AcceptDuel`/`CancelDuel`/`StartDuel*`) queued since the app's last
+    /// [`super::UiScript::take_duel_requests`] drain — the outbound seam ([`duel`]). There is no
+    /// duel *snapshot* beside it: everything the UI reads arrives as event arguments.
+    pub(crate) duel_requests: Vec<duel::DuelRequest>,
 
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
@@ -520,6 +524,23 @@ pub(crate) struct Model {
     /// submodule) — drained by the app into `CMSG_USE_ITEM` against the equipped position.
     pub(crate) inventory_uses: Vec<u32>,
 
+    /// The inspected unit's equipment view, keyed by unit token ([`inspect`], decision 0631) —
+    /// the *second* source behind the unit-keyed `GetInventoryItem*` family. Unlike
+    /// [`Self::inventory_slots`] this is PUBLIC descriptor data (`PLAYER_VISIBLE_ITEM_*`), which
+    /// is the whole reason a foreign player's gear can be read at all. `None` = nothing inspected.
+    pub(crate) inspect: Option<inspect::InspectView>,
+    /// Unit tokens queued by `NotifyInspect` — drained by the app into `CMSG_INSPECT`.
+    pub(crate) inspect_notifies: Vec<String>,
+    /// `ClearInspectPlayer` was called — drained by the app, which drops its inspect target.
+    pub(crate) inspect_clear: bool,
+    /// The inspect model pane's bake yaw, the twin of [`Self::paperdoll_yaw`].
+    pub(crate) inspect_yaw: f32,
+    /// Unit token → squared distance from the player, for every popup token the app resolved to a
+    /// live inspectable player this frame — the input to both verified range predicates
+    /// (`CanInspect`, `CheckInteractDistance`). Absent token = in range (see
+    /// [`UiScript::set_inspect_reach`]).
+    pub(crate) inspect_reach: HashMap<String, f64>,
+
     /// The skills-pane snapshot the app pushes ([`skills::SkillsState`], decision 0437 phase 4) and
     /// the synthesized display tree built from it ([`skills::UiScript::set_skills`]) — the skills
     /// seam ([`skills`]).
@@ -603,6 +624,7 @@ impl Model {
             party: party::PartyState::default(),
             party_requests: Vec::new(),
             tell_requests: Vec::new(),
+            duel_requests: Vec::new(),
             sound_queue: Vec::new(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
@@ -731,6 +753,11 @@ impl Model {
             inventory_alerts: [0; 12],
             paperdoll_yaw: 0.0,
             inventory_uses: Vec::new(),
+            inspect: None,
+            inspect_notifies: Vec::new(),
+            inspect_clear: false,
+            inspect_yaw: 0.0,
+            inspect_reach: HashMap::new(),
             chat_input: Vec::new(),
             skills: skills::SkillsState::default(),
             skills_groups: Vec::new(),

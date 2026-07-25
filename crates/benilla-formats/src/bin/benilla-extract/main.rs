@@ -118,6 +118,16 @@ enum Command {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
+    /// Dump an M2's **per-sequence material alpha**: every colour-alpha/transparency track's raw
+    /// keys, then the combined per-batch factor for EVERY sequence band — the "which batches does
+    /// the reference hide, and in which animation" instrument. A `HIDE` cell is a batch the real
+    /// client skips outright in that sequence (`A <= 0` culls before the blend mode is read,
+    /// wow-re `m2-alpha-combine-cull.md`). Pair with `m2batch` (the batch -> track wiring) and
+    /// `m2seq` (the bands).
+    M2alpha {
+        /// Internal path to the `.m2` (forward or back slashes accepted).
+        internal_path: String,
+    },
     /// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters (header
     /// `0x134`) — the population instrument for the ribbon subsystem (weapon trails, streamers):
     /// which content actually authors one, before we build for it.
@@ -140,6 +150,16 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and classify each BILLBOARD batch by
+    /// which way its geometry FACES. A billboard bone puts the model's +X toward the viewer, so a
+    /// batch's winding normal decides whether it is ever seen: +X faces the camera, −X faces away
+    /// and — single-sided — is backface-culled by the reference from every angle. The population
+    /// instrument for "the card renders but shouldn't": the away+single-sided list is exactly the
+    /// authored placeholder geometry the reference hides and a forced-two-sided renderer reveals.
+    Bbfacescan {
+        /// Internal-path prefix filter (e.g. `world\generic`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and report models that author flat
     /// ground-plane render geometry: batches whose vertices all sit at model-space z≈0 (WoW axes,
     /// Z up), which sloped terrain buries (Battle Shout's crescents are the canonical case — 6
@@ -157,6 +177,14 @@ enum Command {
     /// slot) and TINY batches (at most 2 faces). The population instrument behind the stray
     /// untextured-primitive reports; `m2batch` then explains a single model in full.
     Geosetscan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the models whose batch
+    /// visibility is PER SEQUENCE — geometry the reference draws in one animation and skips in
+    /// another (the verified `A <= 0` alpha cull). The population instrument for "a single-sequence
+    /// material bake draws the wrong set"; `m2alpha` then explains one model in full.
+    Alphascan {
         /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
@@ -358,11 +386,14 @@ fn main() -> Result<()> {
         Command::M2anim { internal_path } => m2dump::m2anim(&mut chain, &internal_path)?,
         Command::M2bones { internal_path } => m2dump::m2bones(&mut chain, &internal_path)?,
         Command::M2batch { internal_path } => m2dump::m2batch(&mut chain, &internal_path)?,
+        Command::M2alpha { internal_path } => m2dump::m2alpha(&mut chain, &internal_path)?,
         Command::Ribbonscan => scan::ribbonscan(&mut chain)?,
         Command::Blendscan { prefix } => scan::blendscan(&mut chain, prefix.as_deref())?,
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
+        Command::Bbfacescan { prefix } => scan::bbfacescan(&mut chain, prefix.as_deref())?,
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
+        Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)

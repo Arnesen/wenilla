@@ -246,16 +246,6 @@ pub fn full_guid(guid: u64) -> Vec<u8> {
     guid.to_le_bytes().to_vec()
 }
 
-/// Body of `CMSG_STANDSTATECHANGE` (vmangos `StandStateChange::ReadFromWorldPacket`:
-/// `recv_data >> animState`): one `u32` stand state. The server accepts only
-/// {0 STAND, 1 SIT, 3 SLEEP, 8 KNEEL} (`HandleStandStateChangeOpcode`,
-/// `MiscHandler.cpp:437`) and applies it via `Unit::SetStandState` → `UNIT_FIELD_BYTES_1`
-/// byte 0, which relays to every observer — the same client-volunteers → server-echoes →
-/// fields-drive-everyone pattern as sheath (decision 0080c).
-pub fn stand_state_change(state: u32) -> Vec<u8> {
-    state.to_le_bytes().to_vec()
-}
-
 /// Body of a `CMSG_CREATURE_QUERY`: the template `entry` + the asking guid (VERIFIED vmangos
 /// `QueryCreature::ReadFromWorldPacket` — `entry` then a full 8-byte guid).
 pub fn creature_query(entry: u32, guid: u64) -> Vec<u8> {

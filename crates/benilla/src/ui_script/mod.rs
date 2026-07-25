@@ -307,6 +307,9 @@ fn load_default_ui(script: &UiScript) {
         // The death arc's dialogs + event driver (decision 0308): registry entries on the shared
         // StaticPopup engine, so after UiPanels.xml.
         "DeathFrame.xml",
+        // The two duel dialogs + their event driver (decision 0633): registry entries on the same
+        // StaticPopup engine, and DUEL_OUTOFBOUNDS leans on its per-tick countdown branch.
+        "DuelFrame.xml",
         // The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
         // consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
         "Cooldown.xml",
@@ -367,6 +370,12 @@ fn load_default_ui(script: &UiScript) {
         // paints ON TOP of it (later file = higher z) and so `BenillaCharacterFrame` already exists
         // for that anchor to resolve against.
         "SkillFrame.xml",
+        // The inspect window (decision 0631): another player's paper doll. Beside the character
+        // window it mirrors — it needs the same three (Fonts/UiPanels/GameTooltip) plus
+        // `CharacterFrameTabButtonTemplate` from UiPanels.xml, and nothing from CharacterFrame.xml
+        // itself (its slot template, handlers, and booth slot are all its own — the two windows
+        // share only the reference's art).
+        "InspectFrame.xml",
         // The spellbook window (decision 0216 §8, slice 5): the P-key window, the spell SOURCE
         // for the cursor-payload arc. Loaded right after CharacterFrame (the same "player-state
         // windows grouped" posture, same Fonts/UiPanels/GameTooltip-only dependency set); the
@@ -709,6 +718,9 @@ mod static_popup_tests;
 mod death_tests;
 
 #[cfg(test)]
+mod duel_tests;
+
+#[cfg(test)]
 mod quest_tests;
 
 #[cfg(test)]
@@ -719,6 +731,9 @@ mod questlog_tests;
 
 #[cfg(test)]
 mod character_tests;
+
+#[cfg(test)]
+mod inspect_tests;
 
 #[cfg(test)]
 mod minimap_tests;

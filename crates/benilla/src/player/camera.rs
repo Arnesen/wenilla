@@ -455,7 +455,7 @@ pub(super) fn seat_camera(
 /// silently skipped every attach model. The self-player entity is singular, so a per-frame tree walk over
 /// its handful of joints + submeshes is nil cost.
 #[allow(clippy::type_complexity)]
-pub(super) fn apply_self_model_fade(
+pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
     self_player: Query<Entity, With<SelfPlayer>>,
     children_of: Query<&Children>,

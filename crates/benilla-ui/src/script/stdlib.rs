@@ -105,6 +105,11 @@ min   = math.min
 sqrt  = math.sqrt
 mod   = math.fmod
 random = math.random
+-- `PI` is an ENGINE global in 1.12, not a FrameXML one: the reference reads it bare (UIParent.lua's
+-- `elapsedTime * 2 * PI * ROTATIONS_PER_SECOND`, TabardFrame.lua l.61-68) and no shipped FrameXML
+-- file ever assigns it (grepped over the whole 1.12 extraction) — so the client supplies it, here,
+-- beside the rest of the bare math family.
+PI = math.pi
 -- The 1.12 bare trig globals are DEGREE-based (the reference CombatText's fountain scroll calls
 -- cos/sin with degree arguments); rad/deg ride along as the same family.
 function sin(d) return math.sin(math.rad(d)) end

@@ -701,6 +701,28 @@ pub(super) fn attach_entity_visuals(
                             InteriorLit::new(entity, lit_kind, mat.clone()),
                         ));
                     }
+                    // The batch's **animated material alpha** (the verified combine's runtime half,
+                    // wow-re `m2-alpha-combine-cull.md`): a creature's colour-alpha/transparency
+                    // tracks are authored PER SEQUENCE, so which of its batches draw is a function
+                    // of what it is playing — a voidwalker's two upper armour pieces are weight 0
+                    // in Stand/Walk/Run and 1 only in Death. Sampling follows this unit's own
+                    // `AnimationPlayer` (the root, `entity`), so the alpha stays in phase with the
+                    // pose. The `A <= 0` cull lands through the `Visibility` authority; the partial
+                    // factor through `entities::apply_unit_mat_alpha`. Nothing is inserted for the
+                    // overwhelming majority of batches, which author no tracks at all.
+                    if let Some(anim) = &part.alpha_anim {
+                        child.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
+                        // The compose needs a tag to write into. An interior-capable part already
+                        // got one above; anything else (a WMO-display part, a model with no
+                        // interior variants) is seeded with the same neutral value.
+                        if mat_interior.is_none() {
+                            child.insert(MeshTag(crate::mesh_tag::alpha_bits(if fading {
+                                0.0
+                            } else {
+                                1.0
+                            })));
+                        }
+                    }
                     // Queue the appear-fade on M2 parts — `arm_appear_fade` starts the ramp once the world
                     // is on-screen (not behind the loading screen), so it plays where the player sees it.
                     // `FadeMaterials` persists the material pair so the despawn fade-out can re-arm later.
@@ -732,7 +754,7 @@ pub(super) fn attach_entity_visuals(
                 } else {
                     BillboardCard::following(&info, owner)
                 };
-                commands.spawn((
+                let mut card = commands.spawn((
                     Mesh3d(part.mesh.clone()),
                     MeshMaterial3d(part.material.clone()),
                     Transform::default(),
@@ -743,6 +765,16 @@ pub(super) fn attach_entity_visuals(
                     object.clone(),
                     card_follow,
                 ));
+                // A card shares its batch's per-sequence alpha loops (the billboard split copies
+                // them onto every group), sampled off the same unit clock as the mesh parts — a
+                // creature's eye glow is authored to vanish in the sequences that hide its eyes.
+                // A world-root card is not interior-classified, so its tag has one writer.
+                if let Some(anim) = &part.alpha_anim {
+                    card.insert((
+                        crate::doodad_anim::MatAnim::following(anim.clone(), entity),
+                        MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+                    ));
+                }
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item
             // / helm / shoulder attaching later reads this to join the same ramp

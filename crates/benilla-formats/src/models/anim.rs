@@ -262,6 +262,20 @@ pub struct AnimEvent {
 pub struct ModelAnimation {
     /// `AnimationData.dbc` id, the selection key (0 Stand, 4 Walk, 5 Run, 13 WalkBackwards, …).
     pub anim_id: u16,
+    /// This sequence's **file slot** — its index in the M2's own sequence array, which is NOT this
+    /// list's index (zero-duration sequences are dropped below). Load-bearing because the slot is
+    /// what indexes every track's per-sequence key ranges: the material-alpha bake keys its
+    /// per-sequence loops by it (`mat_anim::AlphaAnim::seq`), so a consumer that knows which clip
+    /// is playing can ask for that clip's authored batch visibility.
+    pub seq_index: usize,
+    /// The sequence's **absolute time band** on the model's global keyframe timeline
+    /// (`M2Sequence` start @+0x04 / end @+0x08, ms) — the window every non-global-sequence track's
+    /// keys are selected from and rebased against ([`read_bone_track`], `key_anim::bake_track`).
+    /// Exposed because "which keys does this sequence actually see?" is unanswerable without it: a
+    /// track whose keys all sit in *other* sequences' bands holds a clamped value here, and which
+    /// value that is depends on where this band falls among them.
+    pub start_ms: u32,
+    pub end_ms: u32,
     pub duration: f32,
     pub looping: bool,
     /// The sequence's authored **design movement speed** (`M2Sequence.moveSpeed` @+0x0c, yd/s) — the
@@ -537,6 +551,7 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
             break;
         }
         let anim_id = le_u16(b, rec);
+        let seq_index = s;
         let (start, end, flags) = (
             le_u32(b, rec + 0x04),
             le_u32(b, rec + 0x08),
@@ -601,6 +616,9 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
 
         out.push(ModelAnimation {
             anim_id,
+            seq_index,
+            start_ms: start,
+            end_ms: end,
             duration,
             looping,
             move_speed,

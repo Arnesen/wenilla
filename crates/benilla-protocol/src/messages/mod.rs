@@ -15,11 +15,15 @@
 //! domain — client, movement, items, spells, update_object, simple_packets — sharing fixtures via
 //! `tests/common`).
 
+mod action_bar;
+mod attack;
 mod bank;
 mod channel;
 mod chat;
 mod client;
+mod combat_log;
 mod death;
+mod duel;
 mod gameobject;
 mod gossip;
 mod group;
@@ -32,9 +36,12 @@ pub mod opcode;
 mod opcode_names;
 mod packet;
 mod parse;
+mod pose;
+mod progression;
 mod quest;
 mod roster;
 mod skills;
+mod spellbook;
 mod spells;
 mod taxi;
 mod trade;
@@ -42,6 +49,10 @@ mod trainer;
 mod update_object;
 mod vendor;
 mod world_state;
+pub use action_bar::{
+    set_action_button, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
+};
+pub use attack::{attack_swing, AttackerState};
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,
 };
@@ -60,12 +71,19 @@ pub use client::{
     channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
     creature_query, force_speed_ack, full_guid, join_channel, leave_channel, messagechat,
     messagechat_channel, messagechat_kind, messagechat_whisper, move_flag_ack, move_spline_done,
-    movement, pet_name_query, ping, played_time, random_roll, stand_state_change, teleport_ack,
-    text_emote,
+    movement, pet_name_query, ping, played_time, random_roll, teleport_ack, text_emote,
+};
+pub use combat_log::{
+    DamageShield, EnvironmentalDamageLog, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
+    SpellEnergizeLog, SpellHealLog, SpellLogMiss,
 };
 pub use death::{
     reclaim_corpse, resurrect_response, spirit_healer_activate, CorpseLocation,
     ResurrectRequestBody,
+};
+pub use duel::{
+    duel_accepted, duel_cancelled, read_duel_complete, read_duel_countdown, read_duel_requested,
+    read_duel_winner, DuelRequested, DuelWinner,
 };
 pub use gameobject::{gameobj_use, gameobject_query, GameObjectQueryInfo};
 pub use gossip::{
@@ -99,6 +117,8 @@ pub use movement::{JumpInfo, MovementInfo, SpeedKind, TransportPose};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use parse::parse_server;
+pub use pose::{set_sheathed, stand_state_change};
+pub use progression::{learn_talent, LevelUpInfo, XpGain};
 pub use quest::{
     dialog_status, quest_query, questgiver_accept_quest, questgiver_choose_reward,
     questgiver_complete_quest, questgiver_hello, questgiver_query_quest, questgiver_request_reward,
@@ -113,12 +133,10 @@ pub use roster::{
     CHAR_DELETE_SUCCESS, CLASS_WARRIOR, GENDER_MALE, RACE_HUMAN,
 };
 pub use skills::unlearn_skill;
+pub use spellbook::SpellCooldown;
 pub use spells::{
-    attack_swing, cancel_aura, cast_spell, cast_spell_gameobject, cast_spell_item, learn_talent,
-    set_action_button, set_sheathed, ActionButton, AttackerState, CastOutcome, DamageShield,
-    EnvironmentalDamageLog, LevelUpInfo, PeriodicAuraLog, PeriodicTick, SpellCastTargets,
-    SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss,
-    SpellStart, XpGain, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
+    cancel_aura, cast_spell, cast_spell_gameobject, cast_spell_item, CastOutcome, SpellCastTargets,
+    SpellGo, SpellStart,
 };
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,

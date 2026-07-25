@@ -182,6 +182,7 @@ pub fn self_model_fade_alpha(dist: f32, nearclip: f32, window: f32) -> f32 {
 /// blend material while feathering (the cutout ignores `α`), and drop the component once an appear fade
 /// latches opaque (handing the channel back to [`crate::interior`]). Only freshly-streamed entities carry
 /// a `RenderFade` — it's removed after [`APPEAR_FADE_SECS`] — so the steady-state cost is nil.
+#[allow(clippy::type_complexity)]
 pub(crate) fn apply_render_fade(
     time: Res<Time>,
     mut commands: Commands,
@@ -190,16 +191,22 @@ pub(crate) fn apply_render_fade(
         &RenderFade,
         &mut MeshTag,
         &mut MeshMaterial3d<WowModelMaterial>,
+        Option<&crate::doodad_anim::MatAnim>,
     )>,
 ) {
     let now = time.elapsed_secs();
-    for (entity, fade, mut tag, mut mat) in &mut q {
+    for (entity, fade, mut tag, mut mat, anim) in &mut q {
         let t = if fade.duration > 0.0 {
             (now - fade.started) / fade.duration
         } else {
             1.0
         };
-        let alpha = fade_alpha(fade.from, fade.to, t);
+        // The fade owns the alpha field while it lives, so it is also where the batch's animated
+        // material factor multiplies in — the reference's combine is literally a product,
+        // `A = instanceAlpha × colourAlpha × weight` (wow-re `m2-alpha-combine-cull.md`), and the
+        // fade ramp IS this instance's alpha. Without this a unit appearing mid-Death would flash
+        // its death-only geometry opaque for the length of the ramp.
+        let alpha = fade_alpha(fade.from, fade.to, t) * anim.map_or(1.0, |a| a.current);
         // `with_alpha` handles the `MeshTag == 0` opaque-sentinel — else a just-spawned object at
         // α 0 would flash fully opaque — and preserves the ground-shade byte, so a unit fading in
         // under MCSH shadow doesn't flash lit (the conventions live in `crate::mesh_tag`).

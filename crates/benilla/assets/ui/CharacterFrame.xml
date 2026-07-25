@@ -1061,9 +1061,32 @@
             BenillaPaperDollModel_SetFacing(frame.facing)
             PlaySound("igInventoryRotateCharacter")
         end
-        -- The held-button continuous spin (ref Model_OnUpdate, UIParent.lua:1444-1462,
-        -- ROTATIONS_PER_SECOND=0.5) needs GetButtonState()=="PUSHED" — no such method exists on our
-        -- Button (grepped) — so this ships CLICK-ONLY; no OnUpdate wired on the model frame.
+
+        -- ref Model_OnUpdate (UIParent.lua:1444-1462) — the HELD-button continuous spin, which is
+        -- where a rotate button's actual feel lives: half a turn per second (ROTATIONS_PER_SECOND,
+        -- UIParent.lua:2), against which the 0.03 click nudge above is a ~1.7° tap. Every 1.12 model
+        -- pane wires it (PaperDollFrame l.222-224, DressUpFrame.xml:202-204, TabardFrame.xml:406-408).
+        -- It used to be omitted here for want of `GetButtonState` — that method now answers "PUSHED"
+        -- for a LIVE mouse-held button (decision 0288 P3), so the ref's own loop ships verbatim.
+        -- Verbatim INCLUDES the ref's sign quirk: the held branches run OPPOSITE to the click helpers
+        -- (held-LEFT adds, held-RIGHT subtracts). Not a transcription slip — quoted, not re-derived.
+        function BenillaPaperDollModel_OnUpdate(frame, elapsed)
+            local step = elapsed * 2 * PI * ROTATIONS_PER_SECOND
+            if getglobal(frame:GetName() .. "RotateLeftButton"):GetButtonState() == "PUSHED" then
+                frame.facing = frame.facing + step
+                if frame.facing < 0 then
+                    frame.facing = frame.facing + (2 * PI)
+                end
+                BenillaPaperDollModel_SetFacing(frame.facing)
+            end
+            if getglobal(frame:GetName() .. "RotateRightButton"):GetButtonState() == "PUSHED" then
+                frame.facing = frame.facing - step
+                if frame.facing > (2 * PI) then
+                    frame.facing = frame.facing - (2 * PI)
+                end
+                BenillaPaperDollModel_SetFacing(frame.facing)
+            end
+        end
 
         -- ref CharacterModelFrame_OnMouseUp (l.31-35): a plain left-click-up on the model pane
         -- also auto-equips a held container item — the model pane doubles as a drop target even
@@ -1311,10 +1334,10 @@
                         </Layers>
                         <Frames>
                             <!-- Rotate buttons (ref l.234-271): 35x35, left then right chained off its
-                                 TOPRIGHT, both at the model pane's own TOPLEFT. Held-spin OMITTED
-                                 (this file's header comment: no GetButtonState) — click-only, so no
-                                 RegisterForClicks("LeftButtonDown",...) either (default LeftButtonUp
-                                 suffices). -->
+                                 TOPRIGHT, both at the model pane's own TOPLEFT.
+                                 `RegisterForClicks("LeftButtonDown","LeftButtonUp")` is the ref's own
+                                 (l.241-243/l.263-265): OnClick fires on BOTH edges, so one tap nudges
+                                 twice (2 × 0.03), and holding hands the spin to the pane's OnUpdate. -->
                             <Button name="BenillaCharacterModelFrameRotateLeftButton">
                                 <Size><AbsDimension x="35" y="35"/></Size>
                                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
@@ -1322,6 +1345,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
                                 <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                                 <Scripts>
+                                    <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
                                     <OnClick>BenillaPaperDollModel_RotateLeft(getglobal("BenillaCharacterModelFrame"))</OnClick>
                                 </Scripts>
                             </Button>
@@ -1332,6 +1356,7 @@
                                 <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
                                 <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
                                 <Scripts>
+                                    <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
                                     <OnClick>BenillaPaperDollModel_RotateRight(getglobal("BenillaCharacterModelFrame"))</OnClick>
                                 </Scripts>
                             </Button>
@@ -1345,6 +1370,8 @@
                                 BenillaPaperDollModel_OnLoad(self)
                                 BenillaSetBoothTexture(getglobal(self:GetName() .. "Texture"), "paperdoll")
                             </OnLoad>
+                            <!-- ref l.221-224: the pane drives the held-button spin every frame. -->
+                            <OnUpdate>BenillaPaperDollModel_OnUpdate(self, arg1)</OnUpdate>
                             <OnMouseUp>BenillaPaperDollModel_OnMouseUp(self, arg1)</OnMouseUp>
                             <OnReceiveDrag>AutoEquipCursorItem()</OnReceiveDrag>
                         </Scripts>

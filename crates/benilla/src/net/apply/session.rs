@@ -123,6 +123,7 @@ pub(super) fn disconnected(
     mail_pending: &mut crate::ui_mail::MailPending,
     trade: &mut crate::ui_trade::TradeSession,
     bank: &mut crate::ui_bank::BankOpen,
+    duel: &mut crate::ui_duel::DuelState,
     pending_transfer: &mut PendingTransfer,
 ) {
     warn!("net: {reason} — tearing down the streamed world");
@@ -169,6 +170,10 @@ pub(super) fn disconnected(
     trade.clear_session();
     // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.
     bank.clear_session();
+    // A pending challenge, a running duel, and its countdown all die with the socket
+    // (decision 0633) — the server drops the duel too (`Player::DuelComplete(DUEL_FLED)` on
+    // logout), and a stale arbiter guid would make the next AcceptDuel echo a dead object.
+    *duel = crate::ui_duel::DuelState::default();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

@@ -358,7 +358,7 @@ pub(super) fn spawn_glue_booth(
         bevy::camera::RenderTarget::Image(image.clone().into()),
         bevy::render::view::Hdr,
         bevy::core_pipeline::tonemapping::Tonemapping::None,
-        crate::ffx_glow::FfxGlow,
+        crate::ffx_glow::FfxGlow::WORLD,
         Msaa::Off,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
@@ -495,7 +495,7 @@ pub(super) fn sync_glue_scene(
         let Some(model) = scene.handle.as_ref().and_then(|h| m2s.get(h)) else {
             return; // still loading (the flat page shows in the meantime)
         };
-        if booth_light.buffer.is_none() {
+        if booth_light.studio.buffer.is_none() {
             return; // headless — no booth pipeline, no scene
         }
         // The scene's light: its **authored M2 rig** (ambient + the strongest key toward the
@@ -758,7 +758,7 @@ pub(super) fn sync_glue_booth(
                 (Some(buf), Some(s)) => {
                     super::material_variant(&mut s.variants, buf, material, materials, true)
                 }
-                _ => booth_light.variant(material, materials),
+                _ => booth_light.studio.variant(material, materials),
             }
         };
         let mut booth_parts = Vec::with_capacity(bake.parts.len());

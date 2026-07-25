@@ -83,6 +83,28 @@ fn target_player_name(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The client-local diagnostics' inputs, as one [`SystemParam`] — [`drain_chat_input`] is at the
+/// 16-parameter ceiling, and a named struct beats a nested tuple nobody can read.
+///
+/// - `camera`/`clock` feed **`/shot`**, the framing instrument (decision 0600).
+/// - `liquids`/`interior` feed **`/liquid`**, the swim diagnostic (decision 0634 follow-up): the
+///   interior claim is what decides which liquid surfaces the swim query is allowed to see, so the
+///   two only mean anything together.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct ChatProbes<'w, 's> {
+    camera: Query<
+        'w,
+        's,
+        &'static GlobalTransform,
+        (With<crate::player::WorldCamera>, Without<SelfPlayer>),
+    >,
+    clock: Option<Res<'w, crate::lighting::GameClock>>,
+    liquids: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
+    interior: Res<'w, crate::wmo_portal::CurrentWmoInterior>,
+}
+
+// One parameter per concern — the chat drain fans out to every command's consumer.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_chat_input(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut chat_log: ResMut<super::feed::ChatLog>,
@@ -102,9 +124,14 @@ pub(super) fn drain_chat_input(
     mut cast_events: MessageWriter<crate::creature_anim::CastEvent>,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
     mut go_targets: MessageWriter<crate::creature_anim::SpellGoTargets>,
-    world_camera: Query<&GlobalTransform, (With<crate::player::WorldCamera>, Without<SelfPlayer>)>,
-    clock: Option<Res<crate::lighting::GameClock>>,
+    probes: ChatProbes,
 ) {
+    let ChatProbes {
+        camera: world_camera,
+        clock,
+        liquids,
+        interior,
+    } = &probes;
     let Some(mut script) = script else {
         return;
     };
@@ -220,6 +247,57 @@ pub(super) fn drain_chat_input(
                     }
                 }
             }
+            ParsedChat::Liquid => {
+                // What the swim query actually sees here, and why. Prints the interior claim, the
+                // resolved verdict, and EVERY candidate footprint — a surface that should not be
+                // claiming shows up beside the one that should.
+                let Ok((_, feet)) = self_player.single().map(|(_, _, t)| ((), t.translation()))
+                else {
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        "liquid: no player yet".into(),
+                    ));
+                    continue;
+                };
+                let wow = benilla_assets::coords::bevy_to_wow(feet);
+                let indoors = interior.0.is_some();
+                let verdict = crate::liquid::liquid_at(liquids.iter(), wow, Some(indoors));
+                let mut lines = vec![
+                    format!(
+                        "liquid: feet [{:.2}, {:.2}, {:.2}] · indoors {indoors} ({})",
+                        wow[0],
+                        wow[1],
+                        wow[2],
+                        match interior.0 {
+                            Some(k) => format!(
+                                "wmo {} nameSet {} group {}",
+                                k.wmo_id, k.name_set, k.group_area_id
+                            ),
+                            None => "no WMO interior claim".into(),
+                        }
+                    ),
+                    match verdict {
+                        Some(h) => format!(
+                            "liquid: VERDICT {:?} surface z {:.2} ({:+.2} over feet)",
+                            h.kind,
+                            h.surface_z,
+                            h.surface_z - wow[2]
+                        ),
+                        None => "liquid: VERDICT none — not in liquid".into(),
+                    },
+                ];
+                let candidates = crate::liquid::describe_at(liquids.iter(), wow);
+                if candidates.is_empty() {
+                    lines.push("liquid: no footprint covers this XY at all".into());
+                }
+                lines.extend(candidates.into_iter().map(|c| format!("liquid:   {c}")));
+                for line in lines {
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        line,
+                    ));
+                }
+            }
             ParsedChat::PartyTest { arg } => match arg.as_str() {
                 "off" => group.clear_session(),
                 "invite" => group.pending_invite = Some("Partner".to_string()),
@@ -291,6 +369,20 @@ pub(super) fn drain_chat_input(
                     }
                 }
             }
+            // The duel verbs (decision 0633) enter the SAME intent queue the Era globals feed —
+            // the reference's own slash handlers are one-liners over `StartDuel`/`CancelDuel`, so
+            // routing through the queue keeps a single resolution path (spell lookup, streamed-
+            // player gate, arbiter echo) instead of a second one here.
+            ParsedChat::Duel { name } => {
+                if let Some(name) =
+                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                {
+                    script.queue_duel_request(benilla_ui::script::DuelRequest::StartByName(name));
+                }
+            }
+            ParsedChat::Forfeit => {
+                script.queue_duel_request(benilla_ui::script::DuelRequest::Cancel);
+            }
             ParsedChat::Help => {
                 // An honest benilla summary (the ref's HELP_TEXT_LINE pages are a settings-era
                 // nicety; this stays useful and never stale-quotes them).
@@ -298,7 +390,8 @@ pub(super) fn drain_chat_input(
                     "Chat: /s /y /p /g /o /raid /rw /bg, /w <name>, /r, /e",
                     "Channels: /join <name> [pw], /leave <name>, /chatlist <name>",
                     "Party: /invite /uninvite /promote [name — bare uses your target]",
-                    "Misc: /afk, /dnd, /random [min] [max], /played, /shot, /logout",
+                    "Duel: /duel [name — bare uses your target], /forfeit (/concede /yield)",
+                    "Misc: /afk, /dnd, /random [min] [max], /played, /shot, /liquid, /logout",
                 ] {
                     chat_log.push_event(super::event::ChatEvent::text_only(
                         super::event::ChatEventKind::System,
@@ -416,6 +509,11 @@ pub(super) enum ParsedChat {
     /// into chat and `config_base()`/shots.txt. Client-local, no wire traffic — how a chosen spot
     /// travels from the director's eye to the golden set as exact numbers.
     Shot,
+    /// `/liquid` — the swim diagnostic (decision 0634 follow-up): dump the interior claim, the
+    /// resolved liquid verdict, and every candidate footprint over the player's feet. Client-local,
+    /// no wire traffic. Built when the canal-tunnel "swim in air" survived the first fix — the
+    /// question "which surface is claiming this spot, and from which file" had no instrument.
+    Liquid,
     /// `/help` (aliases /h /?) — the command summary.
     Help,
     /// A `/name` line that resolved in `EmotesText` (`/wave` → text id 101) — sent as
@@ -449,6 +547,14 @@ pub(super) enum ParsedChat {
     /// `/promote` `/pr` — hand leadership over (`CMSG_GROUP_SET_LEADER`), same name-or-target
     /// law; the 1.12 wire takes a guid, resolved against the roster at dispatch.
     Promote { name: Option<String> },
+    /// `/duel [name]` — challenge a player (the duel spell cast at them). `None` = bare, which
+    /// falls back to the selected PLAYER exactly like the party commands do — the ref's
+    /// `SlashCmdList["DUEL"]` is `if GetSlashCmdTarget(msg) then StartDuel(...)`, so no name and
+    /// no player target is a silent no-op.
+    Duel { name: Option<String> },
+    /// `/forfeit` `/concede` `/yield` — `CancelDuel()`. Takes no argument and needs no state
+    /// check: one opcode covers decline/cancel/forfeit and the server reads the intent.
+    Forfeit,
     /// `/partytest [lead|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
     /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
     /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
@@ -568,6 +674,7 @@ pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>
         }
         "played" => ParsedChat::Played,
         "shot" => ParsedChat::Shot,
+        "liquid" => ParsedChat::Liquid,
         // The party membership commands (decision 0434; aliases quoted from GlobalStrings'
         // SLASH_INVITE/UNINVITE/PROMOTE 1-8, lines 3660-3780).
         "i" | "inv" | "invite" => ParsedChat::Invite {
@@ -579,6 +686,12 @@ pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>
         "pr" | "promote" => ParsedChat::Promote {
             name: slash_target_name(args),
         },
+        // The duel verbs (decision 0633; aliases quoted from GlobalStrings' SLASH_DUEL 1-2 and
+        // SLASH_DUEL_CANCEL 1-6, lines 3563-3569).
+        "duel" => ParsedChat::Duel {
+            name: slash_target_name(args),
+        },
+        "forfeit" | "concede" | "yield" => ParsedChat::Forfeit,
         "h" | "help" | "?" => ParsedChat::Help,
         // Not a recognized command — the EmotesText lookup against the whole slash-line
         // (`/wave`, `/lol`, …), exactly as before.

@@ -276,6 +276,33 @@ pub(crate) fn class_names(class: u8) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// Resolve a UnitPopup unit token to the **player guid** it names — `"target"` through the
+/// selection iff it really is a player (the target frame's PLAYER menu), a `"partyN"` token through
+/// the roster (the party frame's PARTY menu). `"player"` (yourself) and any unresolved token answer
+/// `None`.
+///
+/// Shared by every popup verb that acts on another player: trade's `InitiateTrade` (decision 0592
+/// P1) and inspect's `NotifyInspect` (decision 0631) both need exactly this step, so it lives here
+/// rather than once per window.
+pub(crate) fn player_token_guid(
+    token: &str,
+    selection: &Selection,
+    group: &crate::ui_party::GroupState,
+) -> Option<u64> {
+    match token {
+        "target" => selection
+            .guid
+            .filter(|g| benilla_protocol::guid::is_player(*g)),
+        "player" => None,
+        tok => tok
+            .strip_prefix("party")
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(1))
+            .and_then(|n| group.party_slots().nth(n))
+            .map(|m| m.guid),
+    }
+}
+
 /// Build a unit snapshot from a streamed object's descriptor (decision 0061's `ObjectFields`) plus
 /// its cache-resolved name and its `UnitReaction` value (`1..8`, or `0` for tokens whose reaction we
 /// don't resolve — everything but `"target"`; see [`feed_units`]).

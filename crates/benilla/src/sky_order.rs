@@ -8,18 +8,46 @@
 //! quads (their own back slice `[0.995, 1.0]`, the frame's LAST draw) paint over everything the
 //! z-buffer leaves visible.
 //!
-//! Bevy instead sorts every transparent by `view-z of the entity translation + depth_bias`, drawn
+//! Bevy instead sorts every transparent by `view-z of the mesh center + depth_bias`, drawn
 //! back-to-front — and our celestial entities are camera-anchored, so their raw distances are
 //! sort-order accidents (the camera-centred cloud dome sat at ~0 = drawn LAST, painting clouds
 //! over rain and over the glare — backwards on both counts). These biases turn the accident back
-//! into the reference's fixed order: spaced far above any real in-scene view-z (≲ the far plane,
-//! a few ×10³) so world distances can never reorder the sky, with the glare below zero so it draws
-//! after every world transparent — but still above [`crate::nameplates::NAMEPLATE_DEPTH_BIAS`],
-//! which keeps world text on top of the flare (the reference draws its text later still).
+//! into the reference's fixed order: spaced far below any real in-scene view-z (≳ −far plane, a
+//! few ×10³) so world distances can never reorder the sky and every world transparent draws over
+//! it, with the glare *above* zero so it draws after the world and the rain — but still below
+//! [`crate::nameplates::NAMEPLATE_DEPTH_BIAS`], which keeps world text on top of the flare (the
+//! reference draws its text later still).
 //!
 //! Precipitation deliberately has NO bias: an unbiased view-z of a few tens of units lands rain
 //! after the biased sky and before the glare — the reference's `weather` slot — without pinning
 //! rain-vs-world-transparent order we have no byte law for.
+//!
+//! ## Which way the bias points — the sign, read off Bevy 0.18 (never guessed again)
+//!
+//! Every rung below is a *signed* number in one direction, and the direction was inverted here for
+//! a week (decision 0639 — the whole ladder ran upside down; names sorted UNDER the water that
+//! erased them). Verified in the bevy 0.18.1 sources, so the next edit can check rather than
+//! recall:
+//!
+//! - `ViewRangefinder3d::distance` (`bevy_render/src/render_phase/rangefinder.rs`) returns the
+//!   **view-space z** of the point — *negative* in front of the camera, and MORE negative the
+//!   farther away (its own unit test puts points behind the eye at `+1`/`+2`).
+//! - `Transparent3d` sorts **ascending** on that value (`bevy_core_pipeline/src/core_3d/mod.rs`:
+//!   "Values increase towards the camera. Back-to-front ordering for transparent means we need an
+//!   ascending sort") — so the first item drawn is the most negative = the farthest.
+//! - The queue adds the material's bias to it (`bevy_pbr/src/material.rs`,
+//!   `RenderPhaseType::Transparent`: `rangefinder.distance(&center) + depth_bias`).
+//!
+//! ⇒ **A POSITIVE bias draws LATER (on top); a NEGATIVE bias draws EARLIER (behind).** Bevy's own
+//! `StandardMaterial::depth_bias` doc says it in words: "a positive depth bias will render closer
+//! to the camera while negative values cause the material to render behind other objects".
+//!
+//! The magnitude is not free, because the same field is *also* the rasterizer's depth bias
+//! (`bevy_pbr/src/pbr_material.rs` packs it into the pipeline key → `DepthBiasState::constant`,
+//! applied in depth ULPs ≈ 2⁻²³ *relative*, the same knob [`crate::target::ring`] uses at 8192 to
+//! beat coplanar noise). It is harmless for the sky rungs (every sky fragment overwrites its own
+//! depth, below) but it perturbs the depth TEST of anything depth-tested, so the world-side rungs
+//! stay as small as their ordering job allows.
 //!
 //! ## The depth law — every sky fragment forces the far depth
 //!
@@ -43,33 +71,36 @@
 //! the clear value: exactly "the world paints over the sky", independent of any shell radius. The
 //! shells now decide only *screen size and sky-internal parallax*, never occlusion.
 
-/// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them.
-pub(crate) const STARS_BIAS: f32 = 1.0e6;
+/// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them, so
+/// theirs is the ladder's LOWEST rung (see the sign law above).
+pub(crate) const STARS_BIAS: f32 = -1.0e6;
 /// The sun disc — second (`0x7e5b90` via `0x6d4a47`).
-pub(crate) const SUN_DISC_BIAS: f32 = 8.2e5;
+pub(crate) const SUN_DISC_BIAS: f32 = -8.2e5;
 /// The white moon — third; where the discs cross, the moon paints over the sun.
-pub(crate) const WHITE_MOON_BIAS: f32 = 8.1e5;
+pub(crate) const WHITE_MOON_BIAS: f32 = -8.1e5;
 /// moon02 — fourth (invisible in clear weather; ordered for its weather-seed surfacing).
-pub(crate) const MOON02_BIAS: f32 = 8.0e5;
+pub(crate) const MOON02_BIAS: f32 = -8.0e5;
 /// The cloud dome — last of the sky pass (`0x6d4a71`): clouds blend over a setting sun.
-pub(crate) const CLOUDS_BIAS: f32 = 6.0e5;
+pub(crate) const CLOUDS_BIAS: f32 = -6.0e5;
 /// The sun/moon glare quads — the frame's last render (`0x483740` tail): over the clouds and the
 /// rain, under the nameplates; the z-buffer (their forced far depth, `celestial.wgsl`) is what
-/// occludes them.
-pub(crate) const GLARE_BIAS: f32 = -5.0e4;
+/// occludes them. Only ~6× the far plane, not ~10⁵: a rung this far up is also a rasterizer bias
+/// (the sign law above), and nothing is gained by making it bigger than the ordering needs.
+pub(crate) const GLARE_BIAS: f32 = 2.0e4;
 
 /// The ladder IS the reference order — checked at compile time: monotonic through the sky pass,
-/// with rain (unbiased, view-z ≥ 0) between clouds and glare, the largest world-side decal bias
-/// far below the sky rungs, the glare above the nameplates so text stays readable through a
-/// flare, and rung gaps wide enough (> 10⁴ ≥ any real view-z at far ≲ 10⁴) that in-scene
-/// distances can never climb past them.
+/// every sky rung below the world (so world transparents draw over it) and below the world-side
+/// decal rung, then rain (unbiased view-z, ≈ 0), the glare above it, and the nameplates above the
+/// glare so text stays readable through a flare. Rung gaps stay wider than any view-z that could
+/// reorder them: > 10⁴ inside the sky (camera-anchored shells spread ±far·0.85 ≈ 2.6e3), and
+/// > 10⁴ on the world side (> the far plane, a few ×10³).
 const _: () = {
-    assert!(STARS_BIAS - SUN_DISC_BIAS > 1.0e4);
-    assert!(SUN_DISC_BIAS > WHITE_MOON_BIAS && WHITE_MOON_BIAS > MOON02_BIAS);
-    assert!(MOON02_BIAS - CLOUDS_BIAS > 1.0e4);
-    assert!(CLOUDS_BIAS - crate::ground_fx::GROUND_FX_DEPTH_BIAS > 1.0e4);
-    assert!(GLARE_BIAS < -1.0e4);
-    assert!(GLARE_BIAS > crate::nameplates::NAMEPLATE_DEPTH_BIAS + 1.0e4);
+    assert!(SUN_DISC_BIAS - STARS_BIAS > 1.0e4);
+    assert!(WHITE_MOON_BIAS > SUN_DISC_BIAS && MOON02_BIAS > WHITE_MOON_BIAS);
+    assert!(CLOUDS_BIAS - MOON02_BIAS > 1.0e4);
+    assert!(crate::ground_fx::GROUND_FX_DEPTH_BIAS - CLOUDS_BIAS > 1.0e4);
+    assert!(GLARE_BIAS - crate::ground_fx::GROUND_FX_DEPTH_BIAS > 1.0e4);
+    assert!(crate::nameplates::NAMEPLATE_DEPTH_BIAS - GLARE_BIAS > 1.0e4);
 };
 
 /// The depth law (module doc) is a property of the **shaders**, so it is checked there: every sky

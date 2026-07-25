@@ -16,6 +16,7 @@ fn moving_forward(speed: f32) -> MovementState {
 fn clip(anim_id: u16, move_speed: f32) -> AnimClip {
     AnimClip {
         anim_id,
+        seq_index: 0,
         node: AnimationNodeIndex::new(0),
         looping: true,
         duration: 1.0,

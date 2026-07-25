@@ -84,30 +84,30 @@ pub(crate) fn waterfx_spawn(
         Transform::from_translation(wow_to_bevy([cx, cy, surf - 0.15])),
     ));
 
-    // The synthetic water chunk: a 12×12 wet-cell lattice centred on the rig (2 triangles per
-    // cell, flat at the surface) + its footprint info — the same components the terrain streamer
-    // attaches to real liquid, so the foam emitter and patch builder run the shipped path.
+    // The synthetic water chunk: a 12×12 grid of wet cells centred on the rig, flat at the surface
+    // — the same components the terrain streamer attaches to real liquid, so the foam emitter and
+    // patch builder run the shipped path.
     let n = 12;
     let half = n as f32 * CELL * 0.5;
     let (x0, y0) = (cx - half, cy - half);
     let mut positions = Vec::new();
-    let mut indices = Vec::new();
     for iy in 0..=n {
         for ix in 0..=n {
             positions.push([x0 + ix as f32 * CELL, y0 + iy as f32 * CELL, surf]);
         }
     }
-    let stride = (n + 1) as u32;
-    for iy in 0..n as u32 {
-        for ix in 0..n as u32 {
-            let a = iy * stride + ix;
-            indices.extend_from_slice(&[a, a + 1, a + stride, a + 1, a + stride + 1, a + stride]);
-        }
-    }
     commands.spawn((
         WaterFxDummy,
-        WaterChunkInfo::new(x0, x0 + 2.0 * half, y0, y0 + 2.0 * half, surf),
-        FoamPatch { positions, indices },
+        WaterChunkInfo::new(
+            // The fixture stands in for an outdoor lake: ADT-sourced still water, so the
+            // `liquid_at` delegation answers it for an outdoors subject.
+            crate::liquid::LiquidSource::AdtChunk,
+            benilla_formats::LiquidKind::Still,
+            [n + 1, n + 1],
+            positions,
+            vec![true; n * n],
+        ),
+        FoamPatch,
         Transform::IDENTITY,
     ));
 

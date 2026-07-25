@@ -60,14 +60,31 @@ impl LiquidKind {
     }
 }
 
-/// One MCNK's liquid surface as an indexed triangle mesh in **raw WoW coords** (+Z up, flat).
+/// One liquid surface — an MCNK's MCLQ or a WMO group's MLIQ — as a **regular vertex grid** in raw
+/// WoW coords (+Z up), plus the triangle list the renderer draws.
 ///
-/// `positions`/`uvs` hold the full 9×9 grid (81 verts); verts under dry cells stay present but
-/// unreferenced. `indices` is 2 triangles per wet cell. Drawn two-sided (cull off), so winding
+/// The grid is the primary form: [`Self::grid`] gives its `[cols, rows]` vertex counts,
+/// `positions`/`uvs`/`depths` are that grid row-major (`j·cols + i`), and [`Self::wet`] says which
+/// of the `(cols−1)·(rows−1)` cells carry liquid. `indices` is the render derivative — 2 triangles
+/// per wet cell — so verts under dry cells stay present but unreferenced.
+///
+/// The queries (is this XY wet, how high is the surface here) read the **grid**, not the triangles:
+/// the reference samples the liquid height as a bilinear over the containing cell's four corners
+/// (VERIFIED `0x6b7500` `liquid_height_sample`, wow-re `system/terrain` — transcribed bit-exact
+/// there), which is a cell lookup, not a triangle search. Drawn two-sided (cull off), so winding
 /// is not load-bearing.
 #[derive(Debug, Clone)]
 pub struct LiquidMesh {
-    /// Vertex positions `[x, y, z]` in WoW yards — 81 entries (9×9 grid, row-major).
+    /// Vertex-grid dimensions `[cols, rows]` — the counts along the two grid axes, `cols` fastest.
+    /// MCLQ is always `[9, 9]`; MLIQ is the MLIQ header's `xverts`/`yverts` (Blackrock's magma is
+    /// `[55, 82]`). Every per-vertex array below is this grid, row-major.
+    pub grid: [u32; 2],
+    /// Per-**cell** liquid coverage, row-major over `(cols−1) × (rows−1)`: `true` where the tile
+    /// nibble says liquid (and, for MCLQ, its four corner heights are real). This is the source of
+    /// truth for containment — a liquid grid is sparse (nibble `0xf` = hole), so its bounding box
+    /// routinely spans dry ground it never touches (decision 0635).
+    pub wet: Vec<bool>,
+    /// Vertex positions `[x, y, z]` in WoW yards — `cols·rows` entries, row-major.
     pub positions: Vec<[f32; 3]>,
     /// Cell-index UVs (`¼` per cell, tiling) parallel to `positions`. No scroll for water.
     pub uvs: Vec<[f32; 2]>,
@@ -78,7 +95,8 @@ pub struct LiquidMesh {
     /// and the opacity ramp (`colorTex.a` = `127+2·row`, deeper = more opaque). Magma/slime reuse
     /// the union bytes for UVs (N/A here).
     pub depths: Vec<f32>,
-    /// Triangle indices into `positions` — 6 per wet cell.
+    /// Triangle indices into `positions` — 6 per wet cell, cells in row-major order. Derived from
+    /// [`Self::wet`]; the render form.
     pub indices: Vec<u32>,
     /// The surface's **sound-class nibble** — the majority wet cell's low nibble (terrain), or
     /// the `0x6ba970`-resolved nibble (WMO): `class = nibble & 3`, `FluidSpeed = nibble & 0xc`,
@@ -173,6 +191,7 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
     // corner (belt-and-suspenders). Track whether any wet cell is rapids → use fast_a for the
     // whole chunk (still/rapids virtually never mix in one MCNK; per-cell sets are a refinement).
     let mut indices = Vec::with_capacity(CELLS * CELLS * 6);
+    let mut wet = vec![false; CELLS * CELLS];
     let mut any_rapids = false;
     // Wet-cell nibble tally → the surface's majority sound-class nibble (`LiquidMesh::sound_nibble`).
     let mut nibble_counts = [0u32; 16];
@@ -198,6 +217,9 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
             if flag == RAPIDS_NIBBLE {
                 any_rapids = true;
             }
+            // The cell is liquid AND its corners are real — the same gate the triangles pass, so
+            // the grid the queries read and the mesh the renderer draws can never disagree.
+            wet[row * CELLS + col] = true;
             indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
         }
     }
@@ -217,6 +239,8 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
         .map(|(n, _)| n as u8)
         .unwrap_or(0);
     Some(LiquidMesh {
+        grid: [GRID as u32, GRID as u32],
+        wet,
         positions,
         uvs,
         depths,

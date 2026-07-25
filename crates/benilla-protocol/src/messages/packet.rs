@@ -352,23 +352,23 @@ pub enum ServerPacket {
         item_guid: u64,
     },
     /// `SMSG_INITIAL_SPELLS` — the player's spell book + active cooldowns, once at login
-    /// (layout in [`super::spells::read_initial_spells`]).
+    /// (layout in [`super::spellbook::read_initial_spells`]).
     InitialSpells {
         spell_ids: Vec<u16>,
         cooldowns: Vec<SpellCooldown>,
     },
     /// `SMSG_ACTION_BUTTONS` — the player's saved action bar, once at login: the occupied slots
-    /// of the 120-slot wire array (layout in [`super::spells::read_action_buttons`]).
+    /// of the 120-slot wire array (layout in [`super::action_bar::read_action_buttons`]).
     ActionButtons {
         buttons: Vec<ActionButton>,
     },
     /// `SMSG_LEARNED_SPELL` — a spell was added to the book after login (trainer/quest/level-up;
-    /// layout in [`super::spells::read_learned_spell`]). The first post-login spell-book mutation (0237).
+    /// layout in [`super::spellbook::read_learned_spell`]). The first post-login spell-book mutation (0237).
     LearnedSpell {
         spell_id: u16,
     },
     /// `SMSG_SUPERCEDED_SPELL` — a rank-up replaced its predecessor in the book + action bar
-    /// (layout in [`super::spells::read_superceded_spell`]).
+    /// (layout in [`super::spellbook::read_superceded_spell`]).
     SupercededSpell {
         old_spell_id: u16,
         new_spell_id: u16,
@@ -392,7 +392,7 @@ pub enum ServerPacket {
     /// animation trigger).
     AttackerState(AttackerState),
     /// `SMSG_AI_REACTION` — a creature flared aggro (2 HOSTILE) or a stealth pre-aggro alert
-    /// (0 ALERT) at someone (layout in [`super::spells::read_ai_reaction`]; decision 0277).
+    /// (0 ALERT) at someone (layout in [`super::attack::read_ai_reaction`]; decision 0277).
     AiReaction {
         unit: u64,
         reaction: u32,
@@ -423,7 +423,7 @@ pub enum ServerPacket {
     /// which never sends it (zero send sites; the cast-result fail is the live stop path).
     CancelAutoRepeat,
     /// `SMSG_SPELL_COOLDOWN` — server-pushed cooldowns for the player or pet, by caster guid
-    /// (layout + the `cooldown_ms == 0` "use Spell.dbc" fork in [`super::spells::read_spell_cooldown`];
+    /// (layout + the `cooldown_ms == 0` "use Spell.dbc" fork in [`super::spellbook::read_spell_cooldown`];
     /// decision 0137 phase 4).
     SpellCooldownList {
         caster: u64,
@@ -431,13 +431,13 @@ pub enum ServerPacket {
         cooldowns: Vec<(u32, u32)>,
     },
     /// `SMSG_ITEM_COOLDOWN` — put an item (by instance guid) on the client's fixed 30 s use
-    /// cooldown for its on-use spell (layout in [`super::spells::read_item_cooldown`]).
+    /// cooldown for its on-use spell (layout in [`super::spellbook::read_item_cooldown`]).
     ItemCooldown {
         item_guid: u64,
         spell_id: u32,
     },
     /// `SMSG_COOLDOWN_EVENT` — start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's
-    /// parked timers now (layout in [`super::spells::read_cooldown_event`]).
+    /// parked timers now (layout in [`super::spellbook::read_cooldown_event`]).
     CooldownEvent {
         spell_id: u32,
         caster: u64,
@@ -479,31 +479,31 @@ pub enum ServerPacket {
         kit_id: u32,
     },
     /// `SMSG_SPELLNONMELEEDAMAGELOG` — non-melee (spell) damage dealt (decision 0137 phase 2's
-    /// floating-combat-text data feed; layout in [`super::spells::read_spell_damage_log`]).
+    /// floating-combat-text data feed; layout in [`super::combat_log::read_spell_damage_log`]).
     SpellDamageLog(SpellDamageLog),
     /// `SMSG_PERIODICAURALOG` — periodic (DoT/HoT/regen) aura ticks (decision 0137 phase 2; layout
-    /// in [`super::spells::read_periodic_aura_log`]).
+    /// in [`super::combat_log::read_periodic_aura_log`]).
     PeriodicAuraLog(PeriodicAuraLog),
     /// `SMSG_SPELLHEALLOG` — a direct heal landing (decision 0578's center-combat-text feed;
-    /// layout in [`super::spells::read_spell_heal_log`]).
+    /// layout in [`super::combat_log::read_spell_heal_log`]).
     SpellHealLog(SpellHealLog),
     /// `SMSG_SPELLENERGIZELOG` — an instant power gain (decision 0578; layout in
-    /// [`super::spells::read_spell_energize_log`]).
+    /// [`super::combat_log::read_spell_energize_log`]).
     SpellEnergizeLog(SpellEnergizeLog),
     /// `SMSG_SPELLDAMAGESHIELD` — a damage-shield (Thorns-style) return hit (decision 0137 phase 2;
-    /// layout in [`super::spells::read_damage_shield`]).
+    /// layout in [`super::combat_log::read_damage_shield`]).
     DamageShield(DamageShield),
     /// `SMSG_ENVIRONMENTALDAMAGELOG` — environmental damage taken (fall/drowning/…; layout in
-    /// [`super::spells::read_environmental_damage_log`]).
+    /// [`super::combat_log::read_environmental_damage_log`]).
     EnvironmentalDamageLog(EnvironmentalDamageLog),
     /// `SMSG_SPELLLOGMISS` — a spell cast's per-target miss list (decision 0137 phase 2; layout in
-    /// [`super::spells::read_spell_log_miss`]).
+    /// [`super::combat_log::read_spell_log_miss`]).
     SpellLogMiss(SpellLogMiss),
     /// `SMSG_LOG_XPGAIN` — an XP award, kill or non-kill (decision 0137 phase 2; layout in
-    /// [`super::spells::read_xp_gain`]).
+    /// [`super::progression::read_xp_gain`]).
     XpGain(XpGain),
     /// `SMSG_LEVELUP_INFO` — our own ding, self-addressed only (decision 0304; layout in
-    /// [`super::spells::read_level_up_info`]).
+    /// [`super::progression::read_level_up_info`]).
     LevelUp(LevelUpInfo),
     /// `SMSG_QUESTGIVER_STATUS` — the questgiver dialog status for one NPC (`!`/`?` marker), a
     /// [`super::quest::dialog_status`] value. A world-marker concern (out of the panel slice, decision
@@ -829,6 +829,32 @@ pub enum ServerPacket {
         guid: u64,
         ready: u8,
     },
+    /// `SMSG_DUEL_REQUESTED` — a duel challenge. Sent to challenger and challenged alike; which
+    /// one we are is `challenger == our guid` (decision 0633).
+    DuelRequested {
+        arbiter: u64,
+        challenger: u64,
+    },
+    /// `SMSG_DUEL_OUTOFBOUNDS` — we left the 75 yd bubble around the duel flag; 10 s to return.
+    DuelOutOfBounds,
+    /// `SMSG_DUEL_INBOUNDS` — we came back inside (70 yd, the hysteresis edge).
+    DuelInBounds,
+    /// `SMSG_DUEL_COMPLETE` — the duel is over. `started` is false only when it ended before it
+    /// began (declined/cancelled), which is what earns the "Duel cancelled." line.
+    DuelComplete {
+        started: bool,
+    },
+    /// `SMSG_DUEL_WINNER` — the outcome line, broadcast to everyone nearby.
+    DuelWinner {
+        fled: bool,
+        winner: String,
+        loser: String,
+    },
+    /// `SMSG_DUEL_COUNTDOWN` — start the "Duel starting: N" tick. Already converted from the
+    /// wire's milliseconds to whole seconds ([`super::duel::read_duel_countdown`]).
+    DuelCountdown {
+        seconds: u32,
+    },
     /// A `SMSG_SPLINE_SET_*_SPEED` — a speed change on a unit we don't control (a creature, or a
     /// player mid-spline): `[packed guid][f32 speed]`, no counter, no ack (decision 0441 — how an
     /// observed unit's mounted speed reaches us).
@@ -1103,6 +1129,12 @@ impl ServerPacket {
             ServerPacket::ReadyCheckRequest | ServerPacket::ReadyCheckAnswer { .. } => {
                 "MSG_RAID_READY_CHECK".into()
             }
+            ServerPacket::DuelRequested { .. } => "SMSG_DUEL_REQUESTED".into(),
+            ServerPacket::DuelOutOfBounds => "SMSG_DUEL_OUTOFBOUNDS".into(),
+            ServerPacket::DuelInBounds => "SMSG_DUEL_INBOUNDS".into(),
+            ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),
+            ServerPacket::DuelWinner { .. } => "SMSG_DUEL_WINNER".into(),
+            ServerPacket::DuelCountdown { .. } => "SMSG_DUEL_COUNTDOWN".into(),
             ServerPacket::SplineSpeedChange { kind, .. } => {
                 format!("SMSG_SPLINE_SET_{kind:?}_SPEED")
             }

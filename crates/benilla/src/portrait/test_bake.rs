@@ -76,7 +76,12 @@ fn bake_test(
     let Some(model) = m2s.get(&handle) else {
         return false;
     };
-    let Some(light) = booth_light.buffer.clone() else {
+    // The portraits' studio light and the body pane's own (decision 0638) — the harness bakes each
+    // slot against the light that slot really uses, so the eyeball shows what ships.
+    let (Some(studio), Some(pane)) = (
+        booth_light.studio.buffer.clone(),
+        booth_light.pane.buffer.clone(),
+    ) else {
         return false;
     };
     // Optional real skin for the test bake (WOW_PORTRAIT_TEST_SKIN=<blp path>) — an untextured model
@@ -91,40 +96,46 @@ fn bake_test(
                 p.replace('\\', "/").to_ascii_lowercase()
             ))
         });
-    let parts: Vec<BoothPart> = model
-        .submeshes
-        .iter()
-        .map(|s| {
-            let mat = crate::model_render::model_material(
-                cache,
-                wow_mats,
-                s.texture.clone().or_else(|| skin.clone()),
-                s.blend,
-                s.two_sided,
-                false,
-                false,
-                s.emissive,
-                s.additive,
-                false,
-                s.no_depth_write,
-                s.no_depth_test,
-                s.fog_policy,
-                crate::model_render::ShadeSel::Lit, // booth studio look: never ground-shaded
-                0,
-                None,                // static UVs
-                s.rgb_anim.as_ref(), // seeded at its first key — the booth freezes at t = 0 anyway
-                None,  // booth: the studio buffer has no point table (count 0) — anchor moot
-                None,  // M2 carries no MOMT SIDN colour
-                false, // …nor the WINDOW flag
-                &light,
-            );
-            BoothPart {
-                skinned: Some(s.skinned_mesh.clone()),
-                static_mesh: s.mesh.clone(),
-                material: mat,
-            }
-        })
-        .collect();
+    let parts_against = |light: &bevy::render::render_resource::Buffer,
+                         cache: &mut crate::model_render::MaterialCache,
+                         wow_mats: &mut Assets<WowModelMaterial>| {
+        model
+            .submeshes
+            .iter()
+            .map(|s| {
+                let mat = crate::model_render::model_material(
+                    cache,
+                    wow_mats,
+                    s.texture.clone().or_else(|| skin.clone()),
+                    s.blend,
+                    s.two_sided,
+                    false,
+                    false,
+                    s.emissive,
+                    s.additive,
+                    false,
+                    s.no_depth_write,
+                    s.no_depth_test,
+                    s.fog_policy,
+                    crate::model_render::ShadeSel::Lit, // booth look: never ground-shaded
+                    0,
+                    None,                // static UVs
+                    s.rgb_anim.as_ref(), // seeded at its first key — the booth freezes at t = 0
+                    None,  // booth: no booth buffer has a point table (count 0) — anchor moot
+                    None,  // M2 carries no MOMT SIDN colour
+                    false, // …nor the WINDOW flag
+                    light,
+                );
+                BoothPart {
+                    skinned: Some(s.skinned_mesh.clone()),
+                    static_mesh: s.mesh.clone(),
+                    material: mat,
+                }
+            })
+            .collect::<Vec<BoothPart>>()
+    };
+    let parts = parts_against(&studio, cache, wow_mats);
+    let pane_parts = parts_against(&pane, cache, wow_mats);
     let (pivot_height, ground_radius) = model
         .bounds
         .map(|b| (b.pivot_z.map_or(0.0, |z| z + 0.0972), b.ring_footprint))
@@ -179,7 +190,7 @@ fn bake_test(
             commands,
             booth.root,
             booth.layer.clone(),
-            &parts,
+            &pane_parts, // the pane's own light, not the portraits' studio (decision 0638)
             &[],
             Some((
                 &model.skeleton,

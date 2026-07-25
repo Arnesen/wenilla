@@ -110,10 +110,16 @@ pub(crate) fn spawn_model_entities(
             0
         };
         let interior = sub.interior || interior_slot.is_some();
-        // Billboard cards (glow halos) are forced two-sided: they always face the camera, and a glow
-        // reads the same from either face, so we don't risk the card's plane normal pointing away from
-        // the viewer (which would backface-cull it to nothing).
-        let two_sided = sub.two_sided || sub.billboard.is_some();
+        // A billboard card is culled by the SAME rule as any other batch — its material's `0x04`
+        // flag, nothing else. This site used to force `|| sub.billboard.is_some()`, on the reasoning
+        // that a card whose plane normal points away from the viewer would backface-cull to nothing;
+        // that is precisely the mechanism the reference USES, and forcing it off is what drew the
+        // stray solid triangles beside working particle effects (decision 0629, bugs B05/B34).
+        // A billboard bone puts the model's +X toward the viewer, the cull is GL_BACK/CCW (wow-re
+        // `models.md` MOMT/M2 flag map, `m2-depth-blend-state.md` §0x04), so a −X-facing card is
+        // never seen — and an author who wanted one seen set `0x04` themselves: Elwynn's LampPost
+        // carries a two-sided −X card AND a single-sided +X glow card, one model, both rules.
+        let two_sided = sub.two_sided;
         // A lit interior M2 prop submesh (not a WMO group, not an emissive billboard glow card): it carries
         // its SH-probe slot in `MeshTag` and is steady (no distance fade), so the fade twin/`DoodadFade`
         // are skipped — otherwise the fade system would overwrite the slot the shader reads from the tag.

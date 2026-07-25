@@ -348,6 +348,13 @@ const FIELD_PLAYER_AMMO_ID: u16 = 1223; // UNIT_END+0x40B, INT — the equipped 
                                         // arbiter guid takes +0x0/+0x1). Bit 0x10 = PLAYER_FLAGS_GHOST (`Player.h:319`), set/cleared by
                                         // the ghost aura 8326's HandleAuraGhost at release/resurrect (decision 0308 §1).
 const FIELD_PLAYER_FLAGS: u16 = 190;
+// PLAYER_DUEL_ARBITER = UNIT_END(188) + 0x0 (GUID, PUBLIC), PLAYER_DUEL_TEAM = UNIT_END + 0x8
+// (INT, PUBLIC) — VERIFIED vmangos `UpdateFields_1_12_1.h:119,126`. The arbiter opens the player
+// block, which is why the real client caches a pointer to that base (`[player+0xe68]`) and indexes
+// both off it: `+0x00/+0x04` the arbiter halves, `+0x08` PLAYER_FLAGS, `+0x20` the duel team — the
+// three reads `UnitReaction 0x6061e0`'s duel leg makes (decision 0633).
+const FIELD_PLAYER_DUEL_ARBITER: u16 = 188;
+const FIELD_PLAYER_DUEL_TEAM: u16 = 196;
 const FIELD_PLAYER_FIELD_BYTES: u16 = 1222; // UNIT_END+0x40A, BYTES — vmangos `PLAYER_FIELD_BYTES`
                                             // (distinct from the appearance `PLAYER_BYTES`(193)):
                                             // flags / comboPoints / actionBars / HIGHEST_HONOR_RANK

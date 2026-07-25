@@ -29,7 +29,7 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_formats::WaterSoundCatalog;
 
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
-use crate::liquid::{LiquidSoundSource, Underwater};
+use crate::liquid::{LiquidSoundSource, Underwater, WaterChunkInfo};
 use crate::net::SelfPlayer;
 use crate::schedule::WorldStage;
 
@@ -94,7 +94,9 @@ fn load_water_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 fn drive_liquid_loops(
     mut state: ResMut<LiquidLoopState>,
     water_sounds: Option<Res<WaterSounds>>,
-    sources: Query<&LiquidSoundSource>,
+    // The pairing every liquid surface carries: the sound-class nibble beside the grid the
+    // nearest-point slew target is read from (both spawn paths insert them together).
+    sources: Query<(&LiquidSoundSource, &WaterChunkInfo)>,
     player: Query<&Transform, With<SelfPlayer>>,
     mut emitters: Query<&mut Transform, Without<SelfPlayer>>,
     underwater: Res<Underwater>,
@@ -134,8 +136,8 @@ fn drive_liquid_loops(
     // Scan: the nearest wet point per class within the radius (the ref's `nearest_liquid` walk;
     // AABB-clamp approximation, module docs).
     let mut best: [Option<(f32, [f32; 3], u8)>; 4] = [None, None, None, None];
-    for src in &sources {
-        let p = src.nearest_point_wow(player_wow[0], player_wow[1]);
+    for (src, info) in &sources {
+        let p = info.nearest_point_wow(player_wow[0], player_wow[1]);
         let d_sq = (p[0] - player_wow[0]).powi(2)
             + (p[1] - player_wow[1]).powi(2)
             + (p[2] - player_wow[2]).powi(2);

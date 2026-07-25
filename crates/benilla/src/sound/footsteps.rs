@@ -99,7 +99,9 @@ fn footstep_sounds(
         };
         // Wading picks the splash slot; swimming (deeper than the wade ceiling) is silent.
         let wow = bevy_to_wow(transform.translation());
-        let depth = water_surface_at(water.iter(), wow)
+        // `None` — this walks every unit, and only the local player has an interior claim
+        // (`liquid_at`'s named gap).
+        let depth = water_surface_at(water.iter(), wow, None)
             .map(|s| s - wow[2])
             .filter(|d| *d > 0.0);
         if depth.is_some_and(|d| d > WADE_MAX) {

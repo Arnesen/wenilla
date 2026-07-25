@@ -803,6 +803,8 @@ fn writer_loop(
                         w.item_text_query(text_id, mail_id)
                     }
                     ClientCommand::QueryNextMailTime => w.query_next_mail_time(),
+                    // The inspect request (decision 0631) — no reply is awaited; see the writer.
+                    ClientCommand::Inspect { target } => w.inspect(target),
                     // The player-trade arc (decision 0592) — the CMSG verbs onto the P0 writers.
                     ClientCommand::InitiateTrade { target } => w.initiate_trade(target),
                     ClientCommand::BeginTrade => w.begin_trade(),
@@ -853,6 +855,8 @@ fn writer_loop(
                         threshold,
                     } => w.loot_method(method, master, threshold),
                     ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
+                    ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
+                    ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
                     ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
                     ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
                     ClientCommand::ActivateTaxi {

@@ -10,6 +10,100 @@ use benilla_formats::{Chain, M2AnimSummary, M2Light};
 
 use crate::{model_key, yn};
 
+/// Sweep every `.m2` (under `prefix`, if given) and classify every BILLBOARD batch by which way its
+/// geometry faces — see the `Bbfacescan` command doc for why the sign decides visibility.
+///
+/// A billboard bone puts the model's **+X** toward the viewer (`billboard-bone-law`, spherical arm),
+/// so a batch whose winding normal is +X faces the camera and a −X one faces away. Single-sided
+/// (`two_sided` false, i.e. no material `0x04`), the away-facing ones are backface-culled by the
+/// reference from every angle — they are authored placeholders the author never saw.
+pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut cards) = (0u32, 0u32);
+    // The four populations. `away_single` is the one the renderer's forced-two-sided override
+    // changes: those and only those become visible when a card is not allowed to be culled.
+    let (mut toward, mut away_single, mut away_two, mut edge_on) = (0u32, 0u32, 0u32, 0u32);
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        let mut lines = Vec::new();
+        for (i, s) in subs.iter().enumerate() {
+            let Some(bb) = &s.billboard else { continue };
+            cards += 1;
+            // The winding normal's X component: +1 faces the viewer, −1 faces away.
+            let Some(fx) = facet_x(s) else {
+                edge_on += 1;
+                continue;
+            };
+            if fx > 0.5 {
+                toward += 1;
+            } else if fx < -0.5 {
+                if s.two_sided {
+                    away_two += 1;
+                } else {
+                    away_single += 1;
+                    lines.push(format!(
+                        "    batch {i:>3}: {:?} {:?} {} verts  facetX {fx:+.2}  tex {}",
+                        bb.kind,
+                        s.blend,
+                        s.positions.len(),
+                        s.texture.as_deref().unwrap_or("NONE"),
+                    ));
+                }
+            } else {
+                edge_on += 1;
+            }
+        }
+        if !lines.is_empty() {
+            println!("{name}");
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {cards} billboard batch(es): {toward} toward, \
+         {away_single} away+single-sided (reference culls these), {away_two} away+two-sided, \
+         {edge_on} edge-on/degenerate"
+    );
+    Ok(())
+}
+
+/// The X component of a batch's first-triangle winding normal, in WoW model space — `None` when the
+/// triangle is degenerate or the normal lies in the YZ plane (nothing to decide a facing from).
+fn facet_x(s: &benilla_formats::RenderSubmesh) -> Option<f32> {
+    let tri = s.indices.get(..3)?;
+    let p = |i: u32| s.positions.get(i as usize).copied();
+    let (a, b, c) = (p(tri[0])?, p(tri[1])?, p(tri[2])?);
+    let (u, v) = (
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+    );
+    let n = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    (len > 1e-9).then(|| n[0] / len)
+}
+
 /// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters.
 pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
     let names: Vec<String> = chain
@@ -1239,5 +1333,99 @@ pub fn m2lightscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         println!("      … and {rest} rarer colours (top {TALLY_ROWS} shown)");
     }
 
+    Ok(())
+}
+
+/// Sweep every `.m2` (under `prefix`, if given) and census the models whose batch visibility is
+/// **per sequence** — geometry the reference draws in one animation and skips in another, via the
+/// verified alpha combine (`A = colourAlpha × weight`, `A ≤ 0` culls; wow-re
+/// `m2-alpha-combine-cull.md`).
+///
+/// This is the population instrument for the class of bug where a client bakes the material tracks
+/// once and draws the result forever: every model listed here has at least one batch whose authored
+/// visibility CHANGES between sequences, so a single-sequence bake is guaranteed to be wrong for it
+/// in some animation. Per model it reports how many batches are **hidden in the model's first
+/// sequence** (what a doodad-shaped bake would show) versus hidden in *some* sequence, so the two
+/// failure directions — drawing geometry that should be hidden, and hiding geometry that should
+/// draw — are separated. `m2alpha` then explains one model in full.
+pub fn alphascan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut hits) = (0u32, 0u32);
+    let mut by_dir: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rows: Vec<(String, usize, usize, usize)> = Vec::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        let seq_count = benilla_formats::parse_m2_animations(&bytes).len();
+        if seq_count < 2 {
+            continue; // a one-sequence model can't disagree with itself
+        }
+        // A batch is "hidden in slot s" when its combined factor is 0 across that whole band. The
+        // sampling grid is coarse on purpose — a batch that so much as flickers non-zero is drawn.
+        let hidden_in = |sub: &benilla_formats::RenderSubmesh, slot: usize| -> bool {
+            sub.alpha_anim.as_ref().is_some_and(|a| {
+                (0..=16u16).all(|k| a.sample(Some(slot), f32::from(k) * 0.25) <= 0.0)
+            })
+        };
+        let (mut first, mut any, mut varies) = (0usize, 0usize, 0usize);
+        for sub in &subs {
+            let h0 = hidden_in(sub, 0);
+            let mut hid_any = h0;
+            let mut differs = false;
+            for slot in 1..seq_count {
+                let h = hidden_in(sub, slot);
+                hid_any |= h;
+                differs |= h != h0;
+            }
+            if h0 {
+                first += 1;
+            }
+            if hid_any {
+                any += 1;
+            }
+            if differs {
+                varies += 1;
+            }
+        }
+        if varies == 0 {
+            continue;
+        }
+        hits += 1;
+        let top = name.split_once('\\').map(|(d, _)| d).unwrap_or("<root>");
+        *by_dir.entry(top.to_ascii_lowercase()).or_default() += 1;
+        rows.push((name, varies, first, any));
+    }
+    // Loudest first: the models where the most geometry changes hands between sequences.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    println!(
+        "model                                                        varies  hid@seq0  hid@any"
+    );
+    for (name, varies, first, any) in rows.iter().take(60) {
+        println!("{name:<60}  {varies:>6}  {first:>8}  {any:>7}");
+    }
+    if rows.len() > 60 {
+        println!("… and {} more", rows.len() - 60);
+    }
+    println!("\n{hits} of {scanned} models author per-sequence batch visibility");
+    println!("by top-level directory:");
+    for (dir, n) in &by_dir {
+        println!("  {dir:<16} {n:>5}");
+    }
     Ok(())
 }

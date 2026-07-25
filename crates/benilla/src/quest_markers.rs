@@ -366,8 +366,9 @@ fn build_markers(
                 &mut materials,
                 sub.texture.clone(),
                 sub.blend,
-                // Billboard cards render two-sided (the doodad spawn's own rule).
-                sub.two_sided || sub.billboard.is_some(),
+                // The material's `0x04` flag alone, like every other batch (decision 0629) — the
+                // marker is a 353-vert SOLID `?`, so its back faces belong culled.
+                sub.two_sided,
                 false,
                 false,
                 sub.emissive,

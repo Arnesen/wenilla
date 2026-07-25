@@ -33,8 +33,34 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use crate::player::WorldCamera;
 
 /// Marks a camera rendering with the faithful FFXGlow pass (extracted to the render world).
-#[derive(Component, Clone, Copy, Default, ExtractComponent)]
-pub struct FfxGlow;
+///
+/// The pass is TWO things in one: the frame's single gamma→linear decode (mandatory on every view
+/// that draws our gamma-byte materials — decision 0161) and the glow add on top. `gain_scale`
+/// separates them: it multiplies the zone's [`FfxGlowGain`] for this view, so `0.0` keeps the
+/// decode and drops the glow.
+#[derive(Component, Clone, Copy, ExtractComponent)]
+pub struct FfxGlow {
+    /// Per-view multiplier on the zone glow weight. See [`Self::WORLD`] / [`Self::UI_PANE`].
+    pub gain_scale: f32,
+}
+
+impl FfxGlow {
+    /// The reference's own full-screen glow, at the zone's authored weight — the world camera, and
+    /// every booth bake that wants world parity.
+    pub const WORLD: Self = Self { gain_scale: 1.0 };
+    /// **Decode only, no glow** — for a bake that stands in for a 1.12 *UI model widget*. The
+    /// reference applies its FFX pass inside the WorldFrame's own paint (`0x48350e` → the apply
+    /// hook `0x6cd890`, wow-re `ffxeffects.md`); every UI frame paints afterwards, at its own
+    /// strata, so a `<PlayerModel>` pane is composited over an already-glowed world and never
+    /// glows itself. (The give-away in-game: the reference's chat text and buttons don't bloom.)
+    pub const UI_PANE: Self = Self { gain_scale: 0.0 };
+}
+
+impl Default for FfxGlow {
+    fn default() -> Self {
+        Self::WORLD
+    }
+}
 
 /// The per-zone glow weight `w` (`LightParams.glow` — authored data, synced from
 /// [`crate::lighting::WowLighting`] every frame).
@@ -87,7 +113,7 @@ fn ensure_ffx_glow(
         return;
     }
     for e in &cam {
-        commands.entity(e).insert(FfxGlow);
+        commands.entity(e).insert(FfxGlow::WORLD);
     }
 }
 
@@ -243,18 +269,24 @@ fn prepare_textures(
 struct FfxGlowNode;
 
 impl ViewNode for FfxGlowNode {
-    type ViewQuery = (&'static ViewTarget, &'static FfxGlowTextures);
+    type ViewQuery = (
+        &'static ViewTarget,
+        &'static FfxGlowTextures,
+        &'static FfxGlow,
+    );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (view_target, textures): QueryItem<'w, '_, Self::ViewQuery>,
+        (view_target, textures, glow): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FfxGlowPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let gain = world.resource::<FfxGlowGain>().0;
+        // The zone weight, scaled per view: 1× on the world (and the portrait bakes), 0× on a UI
+        // model pane, where the combine runs only for its gamma decode ([`FfxGlow::UI_PANE`]).
+        let gain = world.resource::<FfxGlowGain>().0 * glow.gain_scale;
         let death = world.resource::<FfxDeathFade>().0;
         let (Some(downsample), Some(gauss_h), Some(gauss_v), Some(combine)) = (
             pipeline_cache.get_render_pipeline(pipelines.downsample),

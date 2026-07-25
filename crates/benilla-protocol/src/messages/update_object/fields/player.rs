@@ -284,6 +284,21 @@ impl ObjectFields {
     pub fn player_is_ghost(&self) -> bool {
         self.player_flags() & 0x10 != 0
     }
+    /// `PLAYER_DUEL_ARBITER` (field 188, GUID) — the duel-flag GameObject of the duel this player
+    /// is in, `0` when they are in none. Set on both duellists by `Spell::EffectDuel`, cleared by
+    /// `Player::DuelComplete`; **PUBLIC**, so it streams for every player we can see and not just
+    /// ourselves — which is what lets the client resolve a duel relationship it is not part of.
+    /// Paired with [`Self::player_duel_team`] it is the whole client-side duel law (0633).
+    pub fn player_duel_arbiter(&self) -> u64 {
+        self.get_guid(FIELD_PLAYER_DUEL_ARBITER).unwrap_or(0)
+    }
+    /// `PLAYER_DUEL_TEAM` (field 196) — `0` until the countdown finishes, then `1` for the
+    /// challenger and `2` for the challenged (`Player::UpdateDuelFlag`). Non-zero on **both**
+    /// sides is what says the duel is actually under way: the arbiter is set from the moment of
+    /// the challenge, so hostility keys off the pair, never the arbiter alone (0633).
+    pub fn player_duel_team(&self) -> u32 {
+        self.get_u32(FIELD_PLAYER_DUEL_TEAM).unwrap_or(0)
+    }
     /// `PLAYER_FIELD_BYTES` byte 0 bit `0x08` — `PLAYER_FIELD_BYTE_RELEASE_TIMER`, "Display time
     /// till auto release spirit" (the header's own comment): set at death iff the map is
     /// non-instanceable, i.e. exactly when the server will force-release after 6:00. The client

@@ -147,6 +147,18 @@ fn client_bodies_golden() {
         0x013D,
         "CMSG_SET_SELECTION opcode"
     );
+    // CMSG_INSPECT (276 / 0x0114) — verified vmangos `Opcodes_1_12_1.h`; body is the same raw
+    // 8-byte guid (`WorldPackets::Misc::Inspect`), NOT a packed guid. Decision 0631.
+    assert_eq!(
+        messages::opcode::CMSG_INSPECT,
+        0x0114,
+        "CMSG_INSPECT opcode"
+    );
+    assert_eq!(
+        messages::full_guid(0x1234_5678_9abc_def0),
+        hx("f0debc9a78563412"),
+        "CMSG_INSPECT body (a raw guid, same shape as full_guid)"
+    );
     let mi = MovementInfo {
         flags: 0x1,
         timestamp: 0x0102_0304,

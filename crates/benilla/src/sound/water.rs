@@ -60,8 +60,9 @@ fn water_splashes(
         // The unit's collision height: the player capsule × the baked render scale (INTERIM for
         // creatures — module docs).
         let h = CAPSULE_HEIGHT * transform.scale.x.max(0.1);
-        let submerged =
-            water_surface_at(water.iter(), wow).is_some_and(|s| s - wow[2] > SPLASH_DEPTH_FRAC * h);
+        // `None` — every unit, not just the local player; see `liquid_at`'s named gap.
+        let submerged = water_surface_at(water.iter(), wow, None)
+            .is_some_and(|s| s - wow[2] > SPLASH_DEPTH_FRAC * h);
         let was = wet.insert(entity, submerged);
         // The symmetric edge: any crossing splashes — wading in past the line AND surfacing back
         // out of it (`was == None`, a unit first seen, arms silently). One splash at a time PER

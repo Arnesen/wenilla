@@ -12,7 +12,7 @@
 
 use benilla_m2::M2Model;
 
-use super::key_anim::{bake_track, KeyAnim};
+use super::key_anim::{bake_track, KeyAnim, SeqSlot};
 
 /// One baked UV-offset loop, seconds — see [`KeyAnim`]. The texture-transform translation
 /// channel's instantiation: values are the track's raw `(x, y)`.
@@ -34,10 +34,16 @@ fn is_zero(v: [f32; 2]) -> bool {
 /// Bake the batch's UV-offset loop, or `None` when the batch has no texture transform (the
 /// overwhelmingly common case), the looked-up record is absent (`0xffff` sentinel falls out of the
 /// bounds check), or its translation track never moves the UVs.
+///
+/// Deliberately **one sequence**, unlike the material-alpha bake next door: a UV loop is consumed
+/// through a shared per-MATERIAL registry (`doodad_anim::UvAnimMaterials` — one uniform for every
+/// instance of a batch), which has no per-instance sequence to key on. Making it per-sequence needs
+/// that registry to become per-instance first; every UV-animating model measured is a scroll that
+/// runs the same in every sequence, so nothing observable rests on it (recorded, not assumed).
 pub(super) fn bake_uv_anim(
     model: &M2Model,
     combo_index: u16,
-    seq0: Option<(u32, u32)>,
+    seq0: Option<SeqSlot>,
 ) -> Option<UvAnim> {
     let ti = *model.texture_transform_lookup.get(combo_index as usize)?;
     let t = model.texture_transforms.get(ti as usize)?;
@@ -60,12 +66,14 @@ mod tests {
         M2Vec3Track {
             interp,
             gseq,
+            ranges: Vec::new(),
             keys: keys.to_vec(),
         }
     }
 
     fn bake(t: &M2Vec3Track, gseq: &[u32], seq0: Option<(u32, u32)>) -> Option<UvAnim> {
-        super::super::key_anim::bake_track(t, gseq, seq0, |v| [v[0], v[1]], is_zero, is_zero)
+        let slot = seq0.map(|band| SeqSlot { index: 0, band });
+        super::super::key_anim::bake_track(t, gseq, slot, |v| [v[0], v[1]], is_zero, is_zero)
     }
 
     /// A keyless or never-moving track vanishes; a constant non-zero offset is kept period-0 (a

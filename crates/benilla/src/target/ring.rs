@@ -543,6 +543,19 @@ fn project_ring(
 /// faction falls through to the faction-template comparator (byte-exact `0x606640`) over both
 /// units' `UNIT_FIELD_FACTIONTEMPLATE`.
 ///
+/// **Before either of those, the duel leg** (decision 0633, byte-exact `UnitReaction 0x6061e0`).
+/// The real function runs a player-vs-player ladder *ahead of* the faction work, gated on
+/// `UNIT_FIELD_FLAGS` bit 3 (`0x8` `UNIT_FLAG_PVP_ATTACKABLE`, behaviourally "player-controlled")
+/// being set on **both** parties. Its first rung is the duel ([`duel_reaction`]): when both
+/// players carry a non-zero `PLAYER_DUEL_TEAM` **and** the same `PLAYER_DUEL_ARBITER`, the answer
+/// is `1` (hostile) for opposing teams and `4` (friendly) for the same team — `0x606296`'s
+/// `setne/dec/and 3/inc`, which maps *equal* → 4 and *unequal* → 1. That is the whole reason a
+/// duel opponent turns red, becomes attackable, and takes the combat flash without any of those
+/// systems knowing what a duel is. The ladder's later rungs — the party leg (`0x6062b0`) and the
+/// both-FFA leg (`0x60632c`) — are NOT implemented here: party colouring already runs through
+/// [`ring_variant`]'s own split, and FFA waits for PvP. Both are strictly *below* the duel rung,
+/// so their absence cannot change a duel's answer.
+///
 /// Deferred pieces of the real orchestration: contested-guard flag, forced reactions
 /// (`SMSG_SET_FORCED_REACTIONS`), and the summon +1 tail. Returns the **raw reaction rank**
 /// (`0..=7` — the scale the ring palette indexes: 0–1 red, 2 orange, 3 yellow, 4–7 green); the
@@ -554,6 +567,11 @@ pub(crate) fn ring_reaction(
     target_store: Option<&ObjectStore>,
     self_store: Option<&ObjectStore>,
 ) -> u8 {
+    if let (Some(target), Some(own)) = (target_store, self_store) {
+        if let Some(rank) = duel_reaction(&target.0, &own.0) {
+            return rank;
+        }
+    }
     let resolved = (|| {
         let catalog = &factions?.0;
         let self_store = self_store?;
@@ -573,6 +591,47 @@ pub(crate) fn ring_reaction(
         Some(target_tpl.reaction_toward(self_tpl) as u8)
     })();
     resolved.unwrap_or(Reaction::Neutral as u8)
+}
+
+/// `UNIT_FLAG_PVP_ATTACKABLE` — `UNIT_FIELD_FLAGS` bit 3. Behaviourally "player-controlled": the
+/// local player and other players carry it, wild creatures do not. `UnitReaction 0x606217`/
+/// `0x60622f` requires it on both parties before any player-vs-player rung runs, and `CanAttack
+/// 0x606a13` selects its three reaction legs on the same bit.
+const UNIT_FLAG_PVP_ATTACKABLE: u32 = 1 << 3;
+
+/// The duel rung of `UnitReaction` (`0x60626b`–`0x6062ad`, byte-exact). `Some(1)` when the two
+/// are duelling each other on **opposing** teams, `Some(4)` on the same team (the client's own
+/// arithmetic; only pets ever land there), `None` when no duel relates them — the caller then
+/// falls through to the faction work.
+///
+/// The gate is deliberately all three facts and not the arbiter alone: `PLAYER_DUEL_ARBITER` is
+/// set on both players the moment the challenge goes out, while `PLAYER_DUEL_TEAM` stays `0`
+/// until `Player::UpdateDuelFlag` fires at the end of the countdown. Testing only the arbiter
+/// would turn the opponent red during the popup and the 3-second count — before a blow may
+/// legally land.
+fn duel_reaction(
+    target: &benilla_protocol::ObjectFields,
+    own: &benilla_protocol::ObjectFields,
+) -> Option<u8> {
+    if own.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE == 0
+        || target.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE == 0
+    {
+        return None;
+    }
+    let own_team = own.player_duel_team();
+    let target_team = target.player_duel_team();
+    if own_team == 0 || target_team == 0 {
+        return None;
+    }
+    let arbiter = own.player_duel_arbiter();
+    if arbiter == 0 || arbiter != target.player_duel_arbiter() {
+        return None;
+    }
+    Some(if own_team == target_team {
+        Reaction::Friendly as u8
+    } else {
+        Reaction::Hostile as u8
+    })
 }
 
 #[cfg(test)]

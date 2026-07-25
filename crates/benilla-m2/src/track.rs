@@ -4,9 +4,10 @@
 
 use benilla_bytes::ByteExt;
 
-/// One typed `M2Track`, fully read: the interpolation type, the global-sequence tag, and the keys
-/// as **absolute global-timeline milliseconds** paired with values. The v256 track (stride `0x1c`):
-/// `interp`@0, `global_seq`@2, timestamps `M2Array`@`0x0c/0x10` (u32 ms), values `M2Array`@`0x14/0x18`.
+/// One typed `M2Track`, fully read: the interpolation type, the global-sequence tag, the
+/// per-sequence key **ranges**, and the keys as **absolute global-timeline milliseconds** paired
+/// with values. The v256 track (stride `0x1c`): `interp`@0, `global_seq`@2, interpolation_ranges
+/// `M2Array`@`0x04/0x08`, timestamps `M2Array`@`0x0c/0x10` (u32 ms), values `M2Array`@`0x14/0x18`.
 /// A sequence-timeline track (`gseq == 0xffff`) keys inside each sequence's absolute time band; a
 /// global-sequence track loops on `global_sequences[gseq]`'s own clock (wow-re
 /// `eval.md`/`doodad-anim-host.md`). Key count is `min(timestamps, values)` — vanilla art
@@ -18,6 +19,18 @@ pub struct M2Track<V> {
     pub interp: u16,
     /// Global-sequence index, `0xffff` = an ordinary sequence-timeline track.
     pub gseq: u16,
+    /// The per-sequence **key-index window** `(lo, hi)`, one entry per sequence in file order —
+    /// the array the reference's key search indexes by the playing sequence's slot before it ever
+    /// looks at a timestamp (VERIFIED wow-re `eval.md` FN1 `0x713d50` §1: `[track+8][idx*8+{0,4}]`;
+    /// an empty array is the `[track+4]==0` fallback, "search the whole key list").
+    ///
+    /// These are **brackets**, not the playable key set: `hi` routinely points at a key in a LATER
+    /// sequence's band, which is why selecting in-clip keys through this window instead of by
+    /// timestamp froze creatures at a garbage pose (benilla decision 0133). Its load-bearing use is
+    /// the other one — a band that keys nothing resolves to `keys[lo]` (`lo >= hi` ⇒ the degenerate
+    /// `{lo, lo, 0}` result), so this array says *exactly* what the reference holds there instead
+    /// of leaving it to a nearest-key approximation.
+    pub ranges: Vec<(u32, u32)>,
     /// `(absolute ms, value)` keys, file order (time-ascending within a band).
     pub keys: Vec<(u32, V)>,
 }
@@ -27,6 +40,7 @@ impl<V> Default for M2Track<V> {
         Self {
             interp: 0,
             gseq: 0,
+            ranges: Vec::new(),
             keys: Vec::new(),
         }
     }
@@ -72,7 +86,24 @@ fn track_read<V>(
     let keys = (0..n)
         .map_while(|i| b.u32_at(to + i * 4).zip(read_val(b, vo + i * val_size)))
         .collect();
-    M2Track { interp, gseq, keys }
+    // The per-sequence `(lo, hi)` key-index windows (`M2Array`@0x04/0x08, 8-byte entries) — see
+    // [`M2Track::ranges`]. A short/absent array reads as empty, which is the reference's own
+    // `[track+4] == 0` "no ranges" fallback.
+    let ranges = match b.u32_at(track_ofs + 0x04).zip(b.u32_at(track_ofs + 0x08)) {
+        Some((rn, ro)) => (0..rn as usize)
+            .map_while(|i| {
+                let e = ro as usize + i * 8;
+                b.u32_at(e).zip(b.u32_at(e + 4))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    M2Track {
+        interp,
+        gseq,
+        ranges,
+        keys,
+    }
 }
 
 fn rd_vec3(b: &[u8], o: usize) -> Option<[f32; 3]> {

@@ -52,6 +52,10 @@
         -- CharacterFrame row (area "left", pushable 0) — competes for/replaces the other left-slot
         -- windows exactly like Gossip/Merchant/Quest/QuestLog above.
         UIPanelWindows["BenillaCharacterFrame"] = { area = "left", pushable = 0 }
+        -- The inspect window (decision 0631, InspectFrame.xml): the ref's own InspectFrame row
+        -- (`Blizzard_InspectUI.lua:4` — area "left", pushable 0), so inspecting swaps out whichever
+        -- left-slot window was open, exactly as the character window does.
+        UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }
         -- The spellbook (decision 0216 §8, SpellBookFrame.xml): the ref's own SpellBookFrame row
         -- (area "left", pushable 0) — same left-slot competition as every window above.
         UIPanelWindows["BenillaSpellBookFrame"] = { area = "left", pushable = 0 }

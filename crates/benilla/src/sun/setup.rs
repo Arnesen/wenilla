@@ -242,7 +242,7 @@ pub(super) fn setup_sun(
             let weight = sub
                 .alpha_anim
                 .as_ref()
-                .and_then(|a| a.weight.as_ref())
+                .and_then(|a| a.seq(None).weight.as_ref())
                 .map_or(1.0, |w| w.sample(0.0));
             // `StarMaterial` (star.wgsl) — gamma-correct premultiplied blend so the soft dots blend
             // into the sky like the reference (our linear-space alpha blend over-brightens them).

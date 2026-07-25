@@ -83,9 +83,17 @@ pub(super) enum UiFixture {
     /// capture checks the header (left-flush, Say-white), the typed text past the live insets,
     /// and the three-piece input border.
     ChatEdit,
+    /// A **floating overhead name with the river surface behind it** — the world-text-vs-liquid
+    /// draw-order instrument. A named unit stands 25 yd out in the Elwynn river (the `water-noon`
+    /// camera), so its name projects onto the water *beyond* it: the exact geometry of the
+    /// director's Stormwind-canal report, where the plate sorted BEFORE the liquid and deep
+    /// water (`WATER_DEEP_ALPHA` = 1.0, fully opaque) painted the glyphs out. Nothing in the
+    /// sweep covered this — decision 0519 wrote the law and shipped it with the sort bias
+    /// pointing the wrong way, invisible to every gate. The name must read at full strength.
+    NameWater,
 }
 
-/// The capture viewpoints, anchored at Northshire Valley (the Human start, around `SPAWN_XY`
+/// The ON-DEMAND Northshire framings, anchored at the Human start (around `SPAWN_XY`
 /// `(-8949.95, -132.49)`, ground ≈ 83.5). Two framings from one spot exercise the whole stack the
 /// linear-HDR rework rebuilds:
 /// - a **ground** overlook (camera pitched down at textured terrain + the Abbey) across the day arc —
@@ -102,7 +110,83 @@ pub(super) const SKY_LOOK: [f32; 3] = [-8740.0, 80.0, 168.0]; // up + out: horiz
 // Abbey, one of the few buildings immune to it. Baselines must cover ordinary buildings too.
 pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 
+/// THE golden baseline: three spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
+/// numbers below verbatim from their `~/.benilla/shots.txt`) — the Northshire overlook toward the
+/// Abbey, a Stormwind canal view, and Elwynn water — each at noon and at night.
+///
+/// Six shots of maximal mutual difference. The old set was thirty, and the director judged the
+/// design bad: low-value repetition (four compass looks at one farmhouse, five frames from one
+/// Northshire camera, sixteen UI windows over the same backdrop), each one a real window popping
+/// open on their screen while they worked. The law is **a few spots chosen with the director, times
+/// a couple of day times**; everything else lives in [`ON_DEMAND`], invocable by name but out of the
+/// blessed sweep. (Decision 0632; ported from the sibling `substrate` fork's `notes/0025`, where the
+/// redesign was made and where it caught a real determinism bug — see `liquid::animate_liquid` — on
+/// its first run.)
 pub(super) const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "overlook-noon",
+        eye: OVERLOOK_EYE,
+        look: OVERLOOK_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "overlook-night",
+        eye: OVERLOOK_EYE,
+        look: OVERLOOK_LOOK,
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "canal-noon",
+        eye: CANAL_EYE,
+        look: CANAL_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "canal-night",
+        eye: CANAL_EYE,
+        look: CANAL_LOOK,
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "water-noon",
+        eye: WATER_EYE,
+        look: WATER_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "water-night",
+        eye: WATER_EYE,
+        look: WATER_LOOK,
+        minute: 0,
+        ui: None,
+    },
+];
+
+/// Director shot 1 — the Northshire overlook, north-east of the Abbey looking at it: terrain,
+/// trees, the Abbey WMO, stained glass, props.
+pub(super) const OVERLOOK_EYE: [f32; 3] = [-8955.0, -98.5, 91.1];
+pub(super) const OVERLOOK_LOOK: [f32; 3] = [-8912.9, -125.4, 87.7];
+
+/// Director shot 2 — the Stormwind canal (Cathedral Square side): water, bridge, walls, spires,
+/// far mountains.
+pub(super) const CANAL_EYE: [f32; 3] = [-8871.7, 724.6, 110.7];
+pub(super) const CANAL_LOOK: [f32; 3] = [-8836.7, 760.3, 112.3];
+
+/// Director shot 3 — Elwynn river, south-east of Northshire: open water dominant, shoreline blend,
+/// murloc camp, fog. Chosen by the director over the Goldshire inn interior, which stays in
+/// [`ON_DEMAND`] as the interior-path fixture.
+pub(super) const WATER_EYE: [f32; 3] = [-9527.0, -310.6, 70.8];
+pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
+
+/// Every remaining named viewpoint — the UI look-pass fixtures, the sun/moon/sky regression
+/// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
+/// debugging and look passes, but NOT part of the blessed baseline sweep.
+pub(super) const ON_DEMAND: &[Scenario] = &[
     Scenario {
         name: "house-north",
         eye: HOUSE_EYE,
@@ -146,25 +230,14 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
-    Scenario {
-        name: "northshire-noon",
-        eye: GROUND_EYE,
-        look: GROUND_LOOK,
-        minute: 720,
-        ui: None,
-    },
+    // `northshire-noon`/`northshire-night` are gone: the director's `overlook` frames the same
+    // valley from a spot they chose, at the same two day times. Dusk has no golden twin, so it
+    // stays as the warm-light/fog fixture.
     Scenario {
         name: "northshire-dusk",
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 1170, // 19:30 — warm dusk light + fog
-        ui: None,
-    },
-    Scenario {
-        name: "northshire-night",
-        eye: GROUND_EYE,
-        look: GROUND_LOOK,
-        minute: 0, // midnight — dark DBC colours + ambient
         ui: None,
     },
     Scenario {
@@ -376,5 +449,15 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::ChatEdit),
+    },
+    // An overhead NAME with the river surface behind it — the world-text-vs-liquid draw-order
+    // instrument (see [`UiFixture::NameWater`]). Same camera as `water-noon`, plus a named unit
+    // out in the water. Run with `WOW_CAPTURE=name-water`.
+    Scenario {
+        name: "name-water",
+        eye: WATER_EYE,
+        look: WATER_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::NameWater),
     },
 ];

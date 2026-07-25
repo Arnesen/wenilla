@@ -11,9 +11,10 @@ use crate::wire::{
 };
 
 use super::{
-    bank, channel, chat, death, gameobject, gossip, group, items, loot, mail, monster_move,
-    movement, opcode, quest, spells, taxi, trade, trainer, update_object, vendor, world_state,
-    Character, CreatureQueryInfo, ServerPacket, SpeedKind,
+    action_bar, attack, bank, channel, chat, combat_log, death, duel, gameobject, gossip, group,
+    items, loot, mail, monster_move, movement, opcode, progression, quest, spellbook, spells, taxi,
+    trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, ServerPacket,
+    SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -364,20 +365,20 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             }
         }
         opcode::SMSG_INITIAL_SPELLS => {
-            let (spell_ids, cooldowns) = spells::read_initial_spells(&mut r)?;
+            let (spell_ids, cooldowns) = spellbook::read_initial_spells(&mut r)?;
             ServerPacket::InitialSpells {
                 spell_ids,
                 cooldowns,
             }
         }
         opcode::SMSG_ACTION_BUTTONS => ServerPacket::ActionButtons {
-            buttons: spells::read_action_buttons(&mut r)?,
+            buttons: action_bar::read_action_buttons(&mut r)?,
         },
         opcode::SMSG_LEARNED_SPELL => ServerPacket::LearnedSpell {
-            spell_id: spells::read_learned_spell(&mut r)?,
+            spell_id: spellbook::read_learned_spell(&mut r)?,
         },
         opcode::SMSG_SUPERCEDED_SPELL => {
-            let (old_spell_id, new_spell_id) = spells::read_superceded_spell(&mut r)?;
+            let (old_spell_id, new_spell_id) = spellbook::read_superceded_spell(&mut r)?;
             ServerPacket::SupercededSpell {
                 old_spell_id,
                 new_spell_id,
@@ -388,18 +389,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::CastResult { spell_id, outcome }
         }
         opcode::SMSG_ATTACKSTART => {
-            let (attacker, victim) = spells::read_attack_start(&mut r)?;
+            let (attacker, victim) = attack::read_attack_start(&mut r)?;
             ServerPacket::AttackStart { attacker, victim }
         }
         opcode::SMSG_ATTACKSTOP => {
-            let (attacker, victim) = spells::read_attack_stop(&mut r)?;
+            let (attacker, victim) = attack::read_attack_stop(&mut r)?;
             ServerPacket::AttackStop { attacker, victim }
         }
         opcode::SMSG_ATTACKERSTATEUPDATE => {
-            ServerPacket::AttackerState(spells::read_attacker_state(&mut r)?)
+            ServerPacket::AttackerState(attack::read_attacker_state(&mut r)?)
         }
         opcode::SMSG_AI_REACTION => {
-            let (unit, reaction) = spells::read_ai_reaction(&mut r)?;
+            let (unit, reaction) = attack::read_ai_reaction(&mut r)?;
             ServerPacket::AiReaction { unit, reaction }
         }
         opcode::SMSG_SPELL_START => ServerPacket::SpellStart(spells::read_spell_start(&mut r)?),
@@ -414,26 +415,26 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_CANCEL_AUTO_REPEAT => ServerPacket::CancelAutoRepeat,
         opcode::SMSG_SPELL_COOLDOWN => {
-            let (caster, cooldowns) = spells::read_spell_cooldown(&mut r)?;
+            let (caster, cooldowns) = spellbook::read_spell_cooldown(&mut r)?;
             ServerPacket::SpellCooldownList { caster, cooldowns }
         }
         opcode::SMSG_ITEM_COOLDOWN => {
-            let (item_guid, spell_id) = spells::read_item_cooldown(&mut r)?;
+            let (item_guid, spell_id) = spellbook::read_item_cooldown(&mut r)?;
             ServerPacket::ItemCooldown {
                 item_guid,
                 spell_id,
             }
         }
         opcode::SMSG_COOLDOWN_EVENT => {
-            let (spell_id, caster) = spells::read_cooldown_event(&mut r)?;
+            let (spell_id, caster) = spellbook::read_cooldown_event(&mut r)?;
             ServerPacket::CooldownEvent { spell_id, caster }
         }
         opcode::SMSG_CLEAR_COOLDOWN => {
-            let (spell_id, caster) = spells::read_cooldown_event(&mut r)?;
+            let (spell_id, caster) = spellbook::read_cooldown_event(&mut r)?;
             ServerPacket::ClearCooldown { spell_id, caster }
         }
         opcode::SMSG_COOLDOWN_CHEAT => ServerPacket::CooldownCheat {
-            caster: spells::read_cooldown_cheat(&mut r)?,
+            caster: spellbook::read_cooldown_cheat(&mut r)?,
         },
         opcode::MSG_CHANNEL_START => {
             let (spell_id, duration_ms) = spells::read_channel_start(&mut r)?;
@@ -454,28 +455,30 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::PlaySpellVisual { unit, kit_id }
         }
         opcode::SMSG_SPELLNONMELEEDAMAGELOG => {
-            ServerPacket::SpellDamageLog(spells::read_spell_damage_log(&mut r)?)
+            ServerPacket::SpellDamageLog(combat_log::read_spell_damage_log(&mut r)?)
         }
         opcode::SMSG_PERIODICAURALOG => {
-            ServerPacket::PeriodicAuraLog(spells::read_periodic_aura_log(&mut r)?)
+            ServerPacket::PeriodicAuraLog(combat_log::read_periodic_aura_log(&mut r)?)
         }
         opcode::SMSG_SPELLDAMAGESHIELD => {
-            ServerPacket::DamageShield(spells::read_damage_shield(&mut r)?)
+            ServerPacket::DamageShield(combat_log::read_damage_shield(&mut r)?)
         }
         opcode::SMSG_SPELLHEALLOG => {
-            ServerPacket::SpellHealLog(spells::read_spell_heal_log(&mut r)?)
+            ServerPacket::SpellHealLog(combat_log::read_spell_heal_log(&mut r)?)
         }
         opcode::SMSG_SPELLENERGIZELOG => {
-            ServerPacket::SpellEnergizeLog(spells::read_spell_energize_log(&mut r)?)
+            ServerPacket::SpellEnergizeLog(combat_log::read_spell_energize_log(&mut r)?)
         }
         opcode::SMSG_ENVIRONMENTALDAMAGELOG => {
-            ServerPacket::EnvironmentalDamageLog(spells::read_environmental_damage_log(&mut r)?)
+            ServerPacket::EnvironmentalDamageLog(combat_log::read_environmental_damage_log(&mut r)?)
         }
         opcode::SMSG_SPELLLOGMISS => {
-            ServerPacket::SpellLogMiss(spells::read_spell_log_miss(&mut r)?)
+            ServerPacket::SpellLogMiss(combat_log::read_spell_log_miss(&mut r)?)
         }
-        opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(spells::read_xp_gain(&mut r)?),
-        opcode::SMSG_LEVELUP_INFO => ServerPacket::LevelUp(spells::read_level_up_info(&mut r)?),
+        opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(progression::read_xp_gain(&mut r)?),
+        opcode::SMSG_LEVELUP_INFO => {
+            ServerPacket::LevelUp(progression::read_level_up_info(&mut r)?)
+        }
         opcode::SMSG_QUESTGIVER_STATUS => {
             let (npc, status) = quest::read_questgiver_status(&mut r)?;
             ServerPacket::QuestGiverStatus { npc, status }
@@ -834,6 +837,31 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             group::ReadyCheck::Answer { guid, ready } => {
                 ServerPacket::ReadyCheckAnswer { guid, ready }
             }
+        },
+        // The duel family (decision 0633; bodies in `duel`). Both empty-body arms carry their
+        // whole meaning in the opcode.
+        opcode::SMSG_DUEL_REQUESTED => {
+            let req = duel::read_duel_requested(&mut r)?;
+            ServerPacket::DuelRequested {
+                arbiter: req.arbiter,
+                challenger: req.challenger,
+            }
+        }
+        opcode::SMSG_DUEL_OUTOFBOUNDS => ServerPacket::DuelOutOfBounds,
+        opcode::SMSG_DUEL_INBOUNDS => ServerPacket::DuelInBounds,
+        opcode::SMSG_DUEL_COMPLETE => ServerPacket::DuelComplete {
+            started: duel::read_duel_complete(&mut r)?,
+        },
+        opcode::SMSG_DUEL_WINNER => {
+            let w = duel::read_duel_winner(&mut r)?;
+            ServerPacket::DuelWinner {
+                fled: w.fled,
+                winner: w.winner,
+                loser: w.loser,
+            }
+        }
+        opcode::SMSG_DUEL_COUNTDOWN => ServerPacket::DuelCountdown {
+            seconds: duel::read_duel_countdown(&mut r)?,
         },
         // The observer speed legs (decision 0441): a unit we don't control changed speed — a
         // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET

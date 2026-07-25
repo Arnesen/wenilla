@@ -46,7 +46,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::collision::player_query_filter;
-use crate::liquid::{water_surface_at, WaterChunkInfo};
+use crate::liquid::WaterChunkInfo;
 
 use super::mover::Outcome;
 use super::{Player, CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, SKIN_WIDTH};
@@ -92,12 +92,21 @@ const SWIM_EXIT_DEPTH: f32 = SWIM_ENTER_DEPTH - SWIM_HYSTERESIS;
 /// the leave threshold and can't flicker out of the mode.
 const REST_CAP: f32 = SWIM_ENTER_DEPTH;
 
-/// The **Bevy-Y water surface** at the avatar's feet, if any water covers that XY — the shared
-/// swim/buoyancy query. [`water_surface_at`] answers in WoW Z; WoW Z maps straight to Bevy Y, so the
+/// The **Bevy-Y liquid surface** at the avatar's feet, if any liquid covers that XY — the shared
+/// swim/buoyancy query. [`liquid_at`] answers in WoW Z; WoW Z maps straight to Bevy Y, so the
 /// surface height above the feet is the same delta in either space and we lift the feet's Bevy Y by it.
-pub(super) fn surface_over_feet(water: &Query<&WaterChunkInfo>, feet: Vec3) -> Option<f32> {
+///
+/// Uses [`liquid_at`], not the water-only wrapper: **you swim in lava and slime too** — Blackrock's
+/// magma and Undercity's sludge are surfaces you enter, not ones you fall through (decision 0634).
+/// `indoors` is the player's live WMO-interior claim, which picks whose liquid answers.
+pub(super) fn surface_over_feet(
+    water: &Query<&WaterChunkInfo>,
+    feet: Vec3,
+    indoors: bool,
+) -> Option<f32> {
     let wow = bevy_to_wow(feet);
-    water_surface_at(water.iter(), wow).map(|surface_wow_z| feet.y + (surface_wow_z - wow[2]))
+    crate::liquid::liquid_at(water.iter(), wow, Some(indoors))
+        .map(|hit| feet.y + (hit.surface_z - wow[2]))
 }
 
 /// Update [`Player::swimming`] from the water surface over the feet, with the verified enter/leave

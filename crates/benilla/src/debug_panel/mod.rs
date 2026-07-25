@@ -393,8 +393,23 @@ fn debug_panel_ui(
                             // material-alpha loop (phase 2), and how many materials scroll their
                             // UVs (phase 3 — waterfalls).
                             let ticking = anim_hosts.iter().filter(|h| h.active).count();
+                            // Of the material samplers, how many resolve to **0 right now** — the
+                            // batches the reference culls this frame (`A <= 0`, wow-re
+                            // `m2-alpha-combine-cull`). Non-zero as soon as a voidwalker/banshee/
+                            // slime/infernal is in view: those models author geometry that only
+                            // appears on death, and this counter is what says we are hiding it
+                            // rather than drawing it. `dim` counts the partial factors — a batch
+                            // drawn, but not at full strength.
+                            let (mut hidden, mut dim) = (0usize, 0usize);
+                            for m in &mat_anims {
+                                if m.current <= 0.0 {
+                                    hidden += 1;
+                                } else if m.current < 1.0 {
+                                    dim += 1;
+                                }
+                            }
                             ui.label(format!(
-                                "animated doodads  ·  {} ({} ticking)  ·  {} material  ·  {} uv",
+                                "animated doodads  ·  {} ({} ticking)  ·  {} material                                  ({hidden} culled, {dim} dimmed)  ·  {} uv",
                                 anim_hosts.iter().count(),
                                 ticking,
                                 mat_anims.iter().count(),

@@ -89,8 +89,10 @@ mod ui_cast;
 mod ui_char;
 mod ui_chat;
 mod ui_craft;
+mod ui_duel;
 mod ui_gamma;
 mod ui_gossip;
+mod ui_inspect;
 mod ui_item_text;
 mod ui_items;
 mod ui_loot;
@@ -164,6 +166,7 @@ use ui_cast::UiCastPlugin;
 use ui_char::UiCharPlugin;
 use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
+use ui_duel::UiDuelPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
@@ -468,10 +471,16 @@ fn main() {
     // plain data the `Unit*` bindings read, and fires the matching WoW events.
     .add_plugins(UiUnitPlugin)
     .add_plugins(UiPartyPlugin)
+    // Duels (decision 0633): the wire session, the client-side countdown tick, the four Era
+    // events, and the accept/cancel/challenge intents.
+    .add_plugins(UiDuelPlugin)
     .add_plugins(UiTooltipPlugin)
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.
     .add_plugins(UiCharPlugin)
+    // The inspect feed (decision 0631): another player's equipment off their PUBLIC visible-item
+    // entries, plus the "inspect" booth's unit + yaw. Right after the character feed it mirrors.
+    .add_plugins(ui_inspect::InspectUiPlugin)
     .add_plugins(UiActionPlugin)
     // The aura feed (decisions 0255/0257): the player's insertion-ordered buff/debuff cache + the
     // self-only durations, pushed as the data the `UnitAura` bindings read; fires UNIT_AURA and

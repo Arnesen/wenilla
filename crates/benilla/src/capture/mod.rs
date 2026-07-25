@@ -133,8 +133,11 @@ pub(crate) struct FxViewState {
 /// the ground scenario's streamed tiles, high enough that terrain never intersects the model.
 pub(crate) const FXVIEW_POS: [f32; 3] = [-8960.0, -145.0, 90.0];
 
-/// Print the scenario names, one per line — the single source of truth `scripts/visual.sh` reads so the
-/// driver never drifts from the code. Invoked by `main` for `WOW_CAPTURE=list`.
+/// Print the BASELINE scenario names, one per line — the single source of truth
+/// `scripts/visual.sh` reads so the driver never drifts from the code. Invoked by `main` for
+/// `WOW_CAPTURE=list`. On-demand fixtures (the UI look-pass windows, sun/moon/sky, house-compass)
+/// are deliberately absent: the blessed sweep is the director-chosen spot×time set only, so a
+/// `visual.sh baseline` opens six windows on their screen and not thirty (decision 0632).
 pub(crate) fn print_scenario_names() {
     for s in SCENARIOS {
         println!("{}", s.name);
@@ -287,10 +290,20 @@ impl Plugin for CapturePlugin {
                 minute: 720,
                 ui: None,
             }
-        } else if let Some(&s) = SCENARIOS.iter().find(|s| s.name == name) {
+        // By name, EITHER table: the blessed six or an on-demand fixture. Only the sweep is
+        // narrowed — every old viewpoint is still capturable by name (decision 0632).
+        } else if let Some(&s) = SCENARIOS
+            .iter()
+            .chain(scenarios::ON_DEMAND.iter())
+            .find(|s| s.name == name)
+        {
             s
         } else {
-            let known: Vec<_> = SCENARIOS.iter().map(|s| s.name).collect();
+            let known: Vec<_> = SCENARIOS
+                .iter()
+                .chain(scenarios::ON_DEMAND.iter())
+                .map(|s| s.name)
+                .collect();
             eprintln!(
                 "WOW_CAPTURE={name:?} is not a known scenario; choose one of: {known:?} (or fxview, waterfx)"
             );

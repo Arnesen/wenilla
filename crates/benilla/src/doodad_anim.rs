@@ -246,14 +246,29 @@ fn gate_doodad_anim(
 }
 
 /// Per-submesh **animated material alpha** (decision 0130 phase 2): the batch's baked
-/// colour-alpha/weight loops + this instance's clock origin. [`sample_mat_anim`] keeps
+/// colour-alpha/weight loops + how this instance clocks them. [`sample_mat_anim`] keeps
 /// [`Self::current`] fresh; the model-`Visibility` authority multiplies it into the render-alpha
-/// `MeshTag` it already owns (a composed *input*, not a fifth tag writer — the 0066 protocol) and
+/// `MeshTag` it already owns (a composed *input*, not an extra tag writer — the 0066 protocol) and
 /// hides the batch at combined 0 (the verified `A ≤ 0` cull, wow-re `m2-alpha-combine-cull`).
+///
+/// The loops are baked **per sequence** (`benilla_formats::AlphaAnim`), so an instance also has to
+/// say *which* sequence it is playing — see [`Self::host`].
 #[derive(Component)]
 pub(crate) struct MatAnim {
     anim: std::sync::Arc<benilla_formats::AlphaAnim>,
-    /// `Time::elapsed_secs` at spawn — the clock origin (arm-time phase, like the bone host).
+    /// The entity whose `AnimationPlayer` decides which sequence's loops to read, re-resolved every
+    /// frame — the **unit lane**, where the played sequence changes constantly and the batch's
+    /// authored visibility changes with it (a voidwalker's upper armour is weight 0 in Stand and 1
+    /// only in Death). `None` for an instance pinned to one sequence for its life: a placed doodad
+    /// (armed once at load with `animations[0]`, wow-re `doodad-anim-host.md`) or a spell effect —
+    /// both then read [`Self::seq`] on the spawn clock, which is the pre-per-sequence behaviour.
+    host: Option<Entity>,
+    /// The sequence **file slot** to read: fixed at spawn for the pinned lanes, and the last one
+    /// resolved from [`Self::host`] for the unit lane. `None` ⇒ slot 0 (the bake's own degrade).
+    seq: Option<usize>,
+    /// `Time::elapsed_secs` at spawn — the clock origin (arm-time phase, like the bone host). Only
+    /// the pinned lanes use it; a hosted instance reads the player's own seek time instead, so its
+    /// alpha stays in phase with the pose that drives it.
     spawned_at: f32,
     /// Captures freeze the clock at 0 for deterministic frames (dimming constants still show).
     frozen: bool,
@@ -261,7 +276,8 @@ pub(crate) struct MatAnim {
     /// `DoodadFade` on the entity): the spell-effect parts (`entities::spell_fx`), whose alpha
     /// channel has no other writer. `false` on the doodad lane — there the fade writer owns the
     /// tag and composes [`Self::current`] in (and a lit interior prop's tag carries a packed
-    /// colour this flag must never overwrite).
+    /// colour this flag must never overwrite) — and on the unit lane, whose own compose is
+    /// [`crate::entities::apply_unit_mat_alpha`].
     pub(crate) drives_tag: bool,
     /// The last sampled combined factor (colour-alpha × weight), read by the visibility authority.
     pub current: f32,
@@ -273,9 +289,11 @@ impl MatAnim {
         now: f32,
         frozen: bool,
     ) -> Self {
-        let current = anim.sample(0.0);
+        let current = anim.sample(None, 0.0);
         Self {
             anim,
+            host: None,
+            seq: None,
             spawned_at: now,
             frozen,
             drives_tag: false,
@@ -284,33 +302,96 @@ impl MatAnim {
     }
 
     /// The spell-effect-lane constructor: never frozen (the `fxview` instrument ages effects
-    /// through captures; golden scenarios spawn no effects), and the sampled alpha drives the
-    /// part's render-alpha tag directly (see [`Self::drives_tag`]).
-    pub(crate) fn driving_tag(anim: std::sync::Arc<benilla_formats::AlphaAnim>, now: f32) -> Self {
+    /// through captures; golden scenarios spawn no effects), the sampled alpha drives the part's
+    /// render-alpha tag directly (see [`Self::drives_tag`]), and the instance is pinned to the one
+    /// sequence its rig plays (`seq` — the missile's InFlight, else the file-order-first clip).
+    pub(crate) fn driving_tag(
+        anim: std::sync::Arc<benilla_formats::AlphaAnim>,
+        now: f32,
+        seq: Option<usize>,
+    ) -> Self {
+        let mut m = Self::new(anim, now, false);
+        m.drives_tag = true;
+        m.seq = seq;
+        m.current = m.anim.sample(seq, 0.0);
+        m
+    }
+
+    /// The **unit-lane** constructor: the sequence (and its clock) come from `host`'s live
+    /// `AnimationPlayer`, so a creature's batches appear and disappear with the animation exactly
+    /// as authored. The tag is composed by [`crate::entities::apply_unit_mat_alpha`], not driven
+    /// here — the interior classifier and the appear-fade already own that channel.
+    pub(crate) fn following(
+        anim: std::sync::Arc<benilla_formats::AlphaAnim>,
+        host: Entity,
+    ) -> Self {
         Self {
-            drives_tag: true,
-            ..Self::new(anim, now, false)
+            host: Some(host),
+            ..Self::new(anim, 0.0, false)
         }
+    }
+
+    /// Whether this instance's tag alpha is the unit lane's to compose (see
+    /// [`crate::entities::apply_unit_mat_alpha`]).
+    pub(crate) fn composes_unit_tag(&self) -> bool {
+        self.host.is_some() && !self.drives_tag
     }
 }
 
-/// Sample every instance's material-alpha loops on its spawn clock; frozen (capture) instances
-/// keep their t=0 sample. Hidden instances sample too — the visibility authority's alpha cull
-/// reads [`MatAnim::current`], so a batch BORN at weight 0 (`HolyLight_Low_Head`'s light column,
-/// keyed `0 → 1` at 300 ms) must keep its clock running or the alpha-hide latches forever (the
-/// old skip-while-Hidden held `current` at the 0 that caused the hide — the invisible pala-heal
-/// flash). Sampling is a pure function of elapsed time on the spawn clock, so an instance hidden
-/// for any *other* reason (draw gate, far-clip) still lands right on re-appear, and the
-/// reference animation-evaluates the tracks every frame regardless of the cull
-/// (wow-re `m2-alpha-combine-cull`). Runs before the visibility authority so the tag it
-/// composes is this frame's value.
-fn sample_mat_anim(time: Res<Time>, mut q: Query<&mut MatAnim>) {
+/// The sequence slot + clip-local time a host is playing, for [`sample_mat_anim`]: the **base**
+/// animation with the greatest blend weight. Masked overlays (a torso-only swing, an arm's draw
+/// ceremony, the finger grip) run on their own graph nodes and are deliberately skipped — they
+/// pose bones, they don't reselect the sequence the material tracks read. During a cross-fade two
+/// base clips are live and the heavier one wins; the reference instead blends the two sampled
+/// scalars by λ (wow-re `eval.md` FN 0x71af20's blend leg), a sub-blend-time difference on tracks
+/// the corpus authors as 0/1 steps — recorded, not modelled.
+fn playing_seq(player: &AnimationPlayer, anims: &ModelAnimations) -> Option<(usize, f32)> {
+    player
+        .playing_animations()
+        .filter_map(|(node, active)| {
+            let clip = anims.clips.iter().find(|c| c.node == *node)?;
+            Some((clip.seq_index, active.seek_time(), active.weight()))
+        })
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(seq, t, _)| (seq, t))
+}
+
+/// Sample every instance's material-alpha loops: a hosted instance on its host's playing sequence
+/// and clip clock, a pinned one on its own spawn clock. Frozen (capture) instances keep their t=0
+/// sample. Hidden instances sample too — the visibility authority's alpha cull reads
+/// [`MatAnim::current`], so a batch BORN at weight 0 (`HolyLight_Low_Head`'s light column, keyed
+/// `0 → 1` at 300 ms) must keep its clock running or the alpha-hide latches forever (the old
+/// skip-while-Hidden held `current` at the 0 that caused the hide — the invisible pala-heal flash).
+/// Sampling is a pure function of the clock, so an instance hidden for any *other* reason (draw
+/// gate, far-clip) still lands right on re-appear, and the reference animation-evaluates the tracks
+/// every frame regardless of the cull (wow-re `m2-alpha-combine-cull`). Runs before the visibility
+/// authority so the tag it composes is this frame's value.
+fn sample_mat_anim(
+    time: Res<Time>,
+    hosts: Query<(&AnimationPlayer, &ModelAnimations)>,
+    mut q: Query<&mut MatAnim>,
+) {
     let now = time.elapsed_secs();
     for mut m in &mut q {
         if m.frozen {
             continue;
         }
-        m.current = m.anim.sample(now - m.spawned_at);
+        // A hosted instance whose host has no player yet (the frame before the rig arms, or a
+        // rest-pose GameObject) keeps its last resolved slot and reads it at t=0 — the sequence's
+        // opening pose, which is what a model sitting at bind pose shows.
+        let played = m
+            .host
+            .and_then(|h| hosts.get(h).ok())
+            .and_then(|(p, a)| playing_seq(p, a));
+        let (seq, elapsed) = match played {
+            Some((seq, t)) => {
+                m.seq = Some(seq);
+                (Some(seq), t)
+            }
+            None if m.host.is_some() => (m.seq, 0.0),
+            None => (m.seq, now - m.spawned_at),
+        };
+        m.current = m.anim.sample(seq, elapsed);
     }
 }
 
@@ -418,6 +499,7 @@ mod tests {
     fn clip(anim_id: u16) -> AnimClip {
         AnimClip {
             anim_id,
+            seq_index: 0,
             node: AnimationNodeIndex::new(1),
             looping: true,
             duration: 2.0,
@@ -456,6 +538,110 @@ mod tests {
             },
             first_seq,
         }
+    }
+
+    /// One batch's per-sequence alpha, as the bake emits it: slot 0 hidden, slot 1 visible.
+    fn two_seq_alpha() -> std::sync::Arc<benilla_formats::AlphaAnim> {
+        let hidden = benilla_formats::ScalarAnim {
+            period: 0.0,
+            step: true,
+            keys: vec![(0.0, 0.0)],
+        };
+        std::sync::Arc::new(
+            benilla_formats::AlphaAnim::new(vec![
+                benilla_formats::AlphaSeq {
+                    color: None,
+                    weight: Some(hidden),
+                },
+                benilla_formats::AlphaSeq::default(),
+            ])
+            .expect("a hiding sequence is worth carrying"),
+        )
+    }
+
+    fn seq_clip(anim_id: u16, seq_index: usize, node: usize) -> AnimClip {
+        AnimClip {
+            seq_index,
+            node: AnimationNodeIndex::new(node),
+            ..clip(anim_id)
+        }
+    }
+
+    /// The unit lane's resolution: a part reads the sequence its HOST is playing, and follows it
+    /// when the host changes animation. This is the plumbing B16/B20 turn on — with the old
+    /// single-sequence bake there was nothing to follow, so a voidwalker's death-only armour drew
+    /// in every animation.
+    #[test]
+    fn hosted_mat_anim_follows_the_host_sequence() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sample_mat_anim);
+
+        // Two clips: graph node 1 is file sequence 0 (which hides the batch), node 2 is slot 1.
+        let anims = anims(vec![seq_clip(0, 0, 1), seq_clip(1, 1, 2)], Some(0), false);
+        let mut player = AnimationPlayer::default();
+        player.play(AnimationNodeIndex::new(1)).repeat();
+        let host = app.world_mut().spawn((player, anims)).id();
+        let part = app
+            .world_mut()
+            .spawn(MatAnim::following(two_seq_alpha(), host))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().entity(part).get::<MatAnim>().unwrap().current,
+            0.0,
+            "playing sequence 0 ⇒ the batch is culled"
+        );
+
+        // Switch the host to the other sequence: the same part must now draw.
+        let world = app.world_mut();
+        let mut entity = world.entity_mut(host);
+        {
+            let mut p = entity.get_mut::<AnimationPlayer>().unwrap();
+            p.stop_all();
+            p.play(AnimationNodeIndex::new(2)).repeat();
+        }
+        app.update();
+        assert_eq!(
+            app.world().entity(part).get::<MatAnim>().unwrap().current,
+            1.0,
+            "playing sequence 1 ⇒ the batch draws"
+        );
+    }
+
+    /// A hosted part whose host has no `AnimationPlayer` yet (the frame before the rig arms, a
+    /// rest-pose GameObject) still resolves — to slot 0 at t=0, the sequence's opening pose. It
+    /// must not read as fully visible by default, or the batch flashes for a frame at spawn.
+    #[test]
+    fn hosted_mat_anim_without_a_player_reads_the_first_sequence() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_systems(Update, sample_mat_anim);
+        let host = app.world_mut().spawn(Transform::default()).id();
+        let part = app
+            .world_mut()
+            .spawn(MatAnim::following(two_seq_alpha(), host))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().entity(part).get::<MatAnim>().unwrap().current,
+            0.0
+        );
+    }
+
+    /// The pinned lanes are unchanged: a doodad/effect instance reads the slot it was built with,
+    /// on its own spawn clock, and never consults a host.
+    #[test]
+    fn pinned_mat_anim_reads_its_own_slot() {
+        let a = two_seq_alpha();
+        let doodad = MatAnim::new(a.clone(), 0.0, false);
+        assert_eq!(doodad.current, 0.0, "slot 0 — the one-time load arm");
+        assert!(!doodad.composes_unit_tag());
+        let effect = MatAnim::driving_tag(a, 0.0, Some(1));
+        assert_eq!(effect.current, 1.0, "the sequence the fx rig armed");
+        assert!(effect.drives_tag);
+        assert!(!effect.composes_unit_tag());
     }
 
     fn skeleton(joints: usize) -> ModelSkeleton {

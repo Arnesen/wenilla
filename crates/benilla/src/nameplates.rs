@@ -71,10 +71,14 @@ const SCALE_FLOOR: f32 = 0.2; // [0x80679c]
 const SCALE_KNEE: f32 = 4.0; // [0x8112a8]
 const SCALE_RATE: f32 = 1.5; // [0x8112ac]
 
-/// Transparent-sort bias on every plate material: names draw after every ordinary transparent
-/// (the reference draws its world text late in the frame — decision 0519) and after the celestial
-/// glare ([`crate::sky_order`] keeps its ladder above this floor so a flare never washes text).
-pub(crate) const NAMEPLATE_DEPTH_BIAS: f32 = -100_000.0;
+/// Transparent-sort bias on every plate material — the ladder's TOP rung: names draw after every
+/// ordinary transparent (the reference draws its world text late in the frame — decision 0519) and
+/// after the celestial glare ([`crate::sky_order`], whose rungs all sit below this one, so a flare
+/// never washes text). **Positive = drawn later**; the sign law, read off the bevy sources, is in
+/// [`crate::sky_order`] — it was inverted here and the water erased the glyphs (decision 0639).
+/// Small on purpose: 6× the far plane is all the ordering needs, and this same field doubles as
+/// the rasterizer depth bias on a layer that is depth-TESTED (walls must keep occluding names).
+pub(crate) const NAMEPLATE_DEPTH_BIAS: f32 = 4.0e4;
 
 /// benilla's nameplate config (the client's `0xce8720` cvar mask, reduced to what streams today).
 /// `UnitNameNPC` and `UnitNameOwn` are ON by the director's directives ("figure out text name
@@ -363,14 +367,16 @@ pub(crate) fn drive_nameplates(
                     alpha_mode: AlphaMode::Blend,
                     cull_mode: None,
                     // Sort names AFTER every ordinary transparent (Bevy's Transparent3d key is
-                    // `distance(aabb center) + depth_bias`, drawn back-to-front — a large
-                    // negative bias draws last = on top). Without it a WATER chunk whose AABB
-                    // center sat nearer the camera than the plate sorted in front and tinted
-                    // the name — the "name looks underwater from some angles" artifact
-                    // (director-reported, 2026-07-18; decision 0519). The ref draws its world
-                    // text late in the frame, after the liquid — this reproduces that order;
-                    // walls still occlude via the depth test, and plate-vs-plate ordering is
-                    // unchanged (uniform bias).
+                    // `view-z of the mesh center + depth_bias`, sorted ASCENDING = far first, so
+                    // a POSITIVE bias draws last = on top — the sign law is in `sky_order`).
+                    // Without it a WATER chunk whose center sat nearer the camera than the plate
+                    // sorted in front and tinted the name — the "name looks underwater from some
+                    // angles" artifact (director-reported, 2026-07-18; decision 0519). With the
+                    // sign inverted, as 0519 shipped it, deep water (alpha 1.0) erased the
+                    // glyphs outright — the canal report of 2026-07-25 (decision 0639). The ref
+                    // draws its world text late in the frame, after the liquid — this reproduces
+                    // that order; walls still occlude via the depth test, and plate-vs-plate
+                    // ordering is unchanged (uniform bias).
                     depth_bias: NAMEPLATE_DEPTH_BIAS,
                     ..default()
                 }),

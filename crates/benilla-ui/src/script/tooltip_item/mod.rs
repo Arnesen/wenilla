@@ -278,10 +278,14 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
 
     // GameTooltip:SetInventoryItem(unit, slot) → hasItem, hasCooldown — the equipped-slot hover
     // (paperdoll slots, buff-frame weapon enchants) and the shopping-compare listener's render
-    // (ref PaperDollFrame.lua:626). Self-only, like the equipped feed itself. On an ARMED
-    // shopping tooltip this renders the byte law's compare shape; the arm is consumed either
-    // way. hasCooldown is nil INTERIM (no equipped-cooldown feed yet — its truthiness gates the
-    // ref's re-poll only).
+    // (ref PaperDollFrame.lua:626). **Unit-keyed** through `Model::inv_slot`, the same router the
+    // `GetInventoryItem*` getters use: `"player"` from the self feed, the inspected token from the
+    // PUBLIC visible-item view (decision 0631 — the ref's inspect slot OnEnter calls exactly this,
+    // `InspectPaperDollFrame.xml:20`). An inspected item carries no durability/creator, so those
+    // lines simply don't render — the reference's own inspect tooltip shape. On an ARMED shopping
+    // tooltip this renders the byte law's compare shape; the arm is consumed either way.
+    // hasCooldown is nil INTERIM (no equipped-cooldown feed yet — its truthiness gates the ref's
+    // re-poll only).
     m.set(
         "SetInventoryItem",
         lua.create_function(|lua, (this, unit, slot): (Table, String, usize)| {
@@ -292,30 +296,24 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     Ok(t) => std::mem::take(&mut t.compare_armed),
                     Err(_) => false,
                 };
-                let view = if unit.eq_ignore_ascii_case("player") {
-                    model
-                        .inventory_slots
-                        .get(slot)
-                        .and_then(|s| s.as_ref())
-                        .filter(|s| s.item_id != 0)
-                        .map(|s| {
-                            (
-                                s.item_id,
-                                s.name.clone(),
-                                s.quality,
-                                render::ItemInstance {
-                                    durability: s.durability,
-                                    creator: s.creator.clone(),
-                                    has_text: false,
-                                    flags: s.flags,
-                                    // p6=1 in the ref — SetInventoryItem can never emit OPENABLE.
-                                    openable_source: false,
-                                },
-                            )
-                        })
-                } else {
-                    None
-                };
+                let view = model
+                    .inv_slot(&unit, slot)
+                    .filter(|s| s.item_id != 0)
+                    .map(|s| {
+                        (
+                            s.item_id,
+                            s.name.clone(),
+                            s.quality,
+                            render::ItemInstance {
+                                durability: s.durability,
+                                creator: s.creator.clone(),
+                                has_text: false,
+                                flags: s.flags,
+                                // p6=1 in the ref — SetInventoryItem can never emit OPENABLE.
+                                openable_source: false,
+                            },
+                        )
+                    });
                 match view {
                     Some((id, name, q, inst)) => (id, name, q, inst, armed),
                     None => return Ok(MultiValue::from_vec(vec![Value::Nil])),

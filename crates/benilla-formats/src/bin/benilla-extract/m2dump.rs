@@ -83,7 +83,11 @@ pub fn m2seq(chain: &mut Chain, internal_path: &str) -> Result<()> {
         .read_file(&name)
         .with_context(|| format!("reading '{name}' from chain"))?;
     let seqs = benilla_formats::parse_m2_animations(&data);
-    println!("idx  anim   mode   dur(s)   freq  replay   bones   keys");
+    // `band` is the sequence's absolute window on the model's global keyframe timeline: every
+    // non-global-sequence track selects its keys from it, so it is what says whether a track is
+    // actually keyed HERE or is holding a clamped value from some other sequence's band.
+    // NB `idx` is this list's index, not the file's: zero-duration sequences are dropped.
+    println!("idx  anim   mode   dur(s)   band(ms)          freq  replay   bones   keys");
     for (i, s) in seqs.iter().enumerate() {
         // How much data the sequence's own time band actually holds: bones with any
         // keyed track, and total keys across T/R/S (clamp constants included — a bone
@@ -101,10 +105,12 @@ pub fn m2seq(chain: &mut Chain, internal_path: &str) -> Result<()> {
             .map(|b| b.translation.len() + b.rotation.len() + b.scale.len())
             .sum();
         println!(
-            "{i:>3}  {:>4}  {}  {:>7.3}  {:>5}  ({}, {})  {bones:>5}  {keys:>5}",
+            "{i:>3}  {:>4}  {}  {:>7.3}  {:>7}..{:<7}  {:>5}  ({}, {})  {bones:>5}  {keys:>5}",
             s.anim_id,
             if s.looping { "loop " } else { "clamp" },
             s.duration,
+            s.start_ms,
+            s.end_ms,
             s.frequency,
             s.min_replay,
             s.max_replay,
@@ -575,6 +581,47 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
 /// when `colorAlpha · transparencyWeight ≤ 0`). Batches this dump *lists* are ones that survived
 /// that cull — when one of them turns out to be a stray primitive in game, these tables are where
 /// the answer has to be, so they print together.
+/// The facing readout for one batch (see the call site in [`m2batch`]): the first triangle's
+/// winding normal, the mean authored vertex normal, and their dot. `None` for a batch with no
+/// triangle to measure.
+fn winding(s: &benilla_formats::RenderSubmesh) -> Option<String> {
+    let tri = s.indices.get(..3)?;
+    let p = |i: u32| s.positions.get(i as usize).copied();
+    let (a, b, c) = (p(tri[0])?, p(tri[1])?, p(tri[2])?);
+    let sub = |u: [f32; 3], v: [f32; 3]| [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+    let cross = |u: [f32; 3], v: [f32; 3]| {
+        [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ]
+    };
+    let norm = |v: [f32; 3]| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        // A degenerate (zero-area) triangle has no direction to report — say so rather than
+        // printing NaNs that read like data.
+        (l > 1e-9).then(|| [v[0] / l, v[1] / l, v[2] / l])
+    };
+    let facet = norm(cross(sub(b, a), sub(c, a)));
+    let vsum = s.normals.iter().fold([0.0f32; 3], |acc, n| {
+        [acc[0] + n[0], acc[1] + n[1], acc[2] + n[2]]
+    });
+    let vnorm = norm(vsum);
+    let fmt = |v: Option<[f32; 3]>| match v {
+        Some(v) => format!("({:+.2}, {:+.2}, {:+.2})", v[0], v[1], v[2]),
+        None => "degenerate".to_string(),
+    };
+    let dot = match (facet, vnorm) {
+        (Some(f), Some(n)) => format!("{:+.2}", f[0] * n[0] + f[1] * n[1] + f[2] * n[2]),
+        _ => "-".to_string(),
+    };
+    Some(format!(
+        "facet {}  vnorm {}  dot {dot}",
+        fmt(facet),
+        fmt(vnorm)
+    ))
+}
+
 pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
     let name = normalize(internal_path);
     let data = chain
@@ -617,18 +664,31 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
             m.transparency_lookup,
         );
         if let Ok(skin) = m.parse_embedded_skin(&data, 0) {
-            println!(
-                "skin batches: {}",
-                join(
-                    skin.batches()
-                        .iter()
-                        .map(|b| format!(
-                            "flags 0x{:02x}/shader 0x{:02x}/texCount {}",
-                            b.flags, b.shader_id, b.texture_count
-                        ))
-                        .collect()
-                )
-            );
+            // One line per batch, because the batch → material/track mapping is the thing an alpha
+            // question turns on and it is NOT inferable from the render flags: `mat` indexes the
+            // materials list above, `color` the colour-alpha tracks (`ffff` = none), and `weight`
+            // indexes `transLookup` → the transparency track. The verified combine is
+            // `A = instanceAlpha × colors[color].alpha × transparency[transLookup[weight]].weight`
+            // (wow-re `m2-alpha-combine-cull.md`), so these three name every input to a batch's
+            // visibility.
+            println!("skin batches ({}):", skin.batches().len());
+            for (i, b) in skin.batches().iter().enumerate() {
+                let w = m
+                    .transparency_lookup
+                    .get(b.weight_combo_index as usize)
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "-".into());
+                println!(
+                    "  skin {i:>3}: mat {:>3}  color {:>5}  weight {:>3} -> track {w:>3}  \
+                     flags 0x{:02x}/shader 0x{:02x}/texCount {}",
+                    b.material_index,
+                    b.color_index,
+                    b.weight_combo_index,
+                    b.flags,
+                    b.shader_id,
+                    b.texture_count
+                );
+            }
         }
     }
     println!("{} render batch(es)", subs.len());
@@ -697,6 +757,235 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
             flags.join(" "),
             tex,
         );
+        // Which way the geometry FACES, in model space — the question a single-sided batch that
+        // renders when it shouldn't (or doesn't when it should) turns on. `facet` is the winding
+        // normal of the first triangle (`(p1−p0)×(p2−p0)`, WoW model axes); `vnorm` is the mean
+        // authored vertex normal. `dot` compares them: a batch whose winding disagrees with its own
+        // authored normals is wound back-to-front, and single-sided (`two_sided` absent above) it is
+        // culled from the side the author lit.
+        if let Some(w) = winding(s) {
+            println!("      {w}");
+        }
+    }
+    Ok(())
+}
+
+/// One track's value across sequence `seq_idx`'s band, under the reference's own key-search law
+/// (wow-re `eval.md` FN1 `0x713d50`): the search window is `ranges[seq_idx]`, and a window that
+/// collapses (`lo >= hi`) resolves to the single key `keys[lo]`. Returns `(lo, hi, held)` — the
+/// value range the batch takes across the band, and whether the band keys nothing (so the value is
+/// the bracket hold rather than authored motion).
+fn band_span(
+    track: &benilla_m2::M2ScalarTrack,
+    seq_idx: usize,
+    band: (u32, u32),
+) -> (f32, f32, bool) {
+    let (start, end) = band;
+    let in_band: Vec<f32> = track
+        .keys
+        .iter()
+        .filter(|&&(t, _)| t >= start && t <= end)
+        .map(|&(_, v)| v)
+        .collect();
+    if !in_band.is_empty() {
+        let lo = in_band.iter().copied().fold(f32::MAX, f32::min);
+        let hi = in_band.iter().copied().fold(f32::MIN, f32::max);
+        return (lo, hi, false);
+    }
+    // No key in the band: the reference's window has collapsed and it holds `keys[ranges[i].lo]`.
+    let held = track
+        .ranges
+        .get(seq_idx)
+        .and_then(|&(lo, _)| track.keys.get(lo as usize))
+        .map(|&(_, v)| v)
+        .unwrap_or(1.0);
+    (held, held, true)
+}
+
+/// Dump an M2's **per-sequence material alpha**: every colour-alpha / transparency track's keys,
+/// then the combined per-batch factor (`colour.alpha × transparency.weight`, the verified combine
+/// of wow-re `m2-alpha-combine-cull.md`) for **every sequence band**, not just the first.
+///
+/// This is the "which batches does the reference hide, and when" instrument. A batch whose factor
+/// is `0` in a band is one the real client **skips entirely** in that animation (`A ≤ 0` culls
+/// before the blend mode is read), so a row of zeros under Stand and ones under Death is a batch
+/// authored to appear only on death — exactly the voidwalker/banshee shape. `m2batch` gives the
+/// batch → track wiring this reads; `m2seq` gives the bands.
+pub fn m2alpha(chain: &mut Chain, internal_path: &str) -> Result<()> {
+    let name = normalize(internal_path);
+    let data = chain
+        .read_file(&name)
+        .with_context(|| format!("reading '{name}' from chain"))?;
+    let format = benilla_m2::parse_m2(&mut std::io::Cursor::new(data.as_slice()))
+        .map_err(|e| anyhow::anyhow!("parsing M2 '{name}': {e}"))?;
+    let m = format.model();
+    let Ok(skin) = m.parse_embedded_skin(&data, 0) else {
+        println!("no embedded skin — no batches to combine");
+        return Ok(());
+    };
+    // Sequences in **file order**, straight off the header array (count@0x1c/ofs@0x20, stride
+    // 0x44: anim id u16 @+0x00, band start/end u32 @+0x04/+0x08). Deliberately NOT
+    // `parse_m2_animations`, which drops zero-duration sequences and so renumbers the list — and
+    // the per-sequence `ranges` array below is indexed by the FILE slot.
+    let seqs: Vec<(u16, (u32, u32))> = {
+        let n = u32::from_le_bytes(data[0x1c..0x20].try_into().unwrap_or_default()) as usize;
+        let o = u32::from_le_bytes(data[0x20..0x24].try_into().unwrap_or_default()) as usize;
+        (0..n)
+            .map_while(|i| {
+                let e = o + i * 0x44;
+                (e + 0x44 <= data.len())
+                    .then(|| {
+                        (
+                            u16::from_le_bytes(data[e..e + 2].try_into().ok()?),
+                            (
+                                u32::from_le_bytes(data[e + 4..e + 8].try_into().ok()?),
+                                u32::from_le_bytes(data[e + 8..e + 12].try_into().ok()?),
+                            ),
+                        )
+                            .into()
+                    })
+                    .flatten()
+            })
+            .collect()
+    };
+
+    let keys = |t: &benilla_m2::M2ScalarTrack| {
+        if t.keys.is_empty() {
+            return "keyless".to_string();
+        }
+        let gs = if t.gseq == 0xffff {
+            String::new()
+        } else {
+            format!("gseq {} ", t.gseq)
+        };
+        format!(
+            "{gs}interp {} · {}\n       ranges: {}",
+            t.interp,
+            t.keys
+                .iter()
+                .map(|&(ms, v)| format!("{ms}={v:.3}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            // The per-sequence key windows the reference indexes by the playing sequence's file
+            // slot — printed so the `*` hold cells below can be checked against the file itself.
+            if t.ranges.is_empty() {
+                "none (whole-track search)".to_string()
+            } else {
+                t.ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(lo, hi))| format!("{i}:({lo},{hi})"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+        )
+    };
+    println!("colour-alpha tracks ({}):", m.color_alpha_tracks.len());
+    for (i, t) in m.color_alpha_tracks.iter().enumerate() {
+        println!("  #{i:<3} {}", keys(t));
+    }
+    println!("transparency tracks ({}):", m.transparency_tracks.len());
+    for (i, t) in m.transparency_tracks.iter().enumerate() {
+        println!("  #{i:<3} {}", keys(t));
+    }
+
+    // Each skin batch's two factor tracks, resolved exactly as the draw loop resolves them:
+    // colorIndex indexes `colors[]` DIRECTLY (out of range — incl. the 0xffff sentinel — means the
+    // factor doesn't apply); textureWeightComboIndex goes through `transLookup` (and applies only
+    // when the batch's textureCount is non-zero).
+    let batches = skin.batches();
+    let color_of = |b: &benilla_m2::SkinBatch| m.color_alpha_tracks.get(b.color_index as usize);
+    let weight_of = |b: &benilla_m2::SkinBatch| {
+        (b.texture_count != 0)
+            .then(|| {
+                m.transparency_lookup
+                    .get(b.weight_combo_index as usize)
+                    .and_then(|&t| m.transparency_tracks.get(t as usize))
+            })
+            .flatten()
+    };
+    println!("\nper-sequence combined alpha (colour × weight), SKIN-batch columns:");
+    print!("{:>4} {:>5} {:>16}", "idx", "anim", "band(ms)");
+    for i in 0..batches.len() {
+        print!("  {:>13}", format!("b{i}"));
+    }
+    println!();
+    for (i, &(anim_id, band)) in seqs.iter().enumerate() {
+        print!("{i:>4} {anim_id:>5} {:>7}..{:<7}", band.0, band.1);
+        for b in batches {
+            // A gseq-clocked track ignores the sequence band entirely (it runs on the global
+            // sequence's own clock), so report its full range rather than a band slice.
+            let span = |t: Option<&benilla_m2::M2ScalarTrack>| match t {
+                None => (1.0, 1.0, false),
+                Some(t) if t.keys.is_empty() => (1.0, 1.0, false),
+                Some(t) if t.gseq != 0xffff => {
+                    let lo = t.keys.iter().map(|&(_, v)| v).fold(f32::MAX, f32::min);
+                    let hi = t.keys.iter().map(|&(_, v)| v).fold(f32::MIN, f32::max);
+                    (lo, hi, false)
+                }
+                Some(t) => band_span(t, i, band),
+            };
+            let (clo, chi, chold) = span(color_of(b));
+            let (wlo, whi, whold) = span(weight_of(b));
+            let (lo, hi) = (clo * wlo, chi * whi);
+            let held = chold && whold;
+            let cell = if (hi - lo).abs() < 1e-4 {
+                format!("{lo:.3}{}", if held { "*" } else { "" })
+            } else {
+                format!("{lo:.2}..{hi:.2}")
+            };
+            // `HIDE` marks a batch the reference never draws in this sequence: the combine can
+            // only reach 0 there, and `A ≤ 0` skips the batch outright.
+            let cell = if hi <= 0.0 {
+                format!("{cell} HIDE")
+            } else {
+                cell
+            };
+            print!("  {cell:>13}");
+        }
+        println!();
+    }
+    println!(
+        "\n* = the band keys nothing: the value is `keys[ranges[seq].lo]`, the bracket the \
+         reference's collapsed key window holds (wow-re `eval.md` FN1)"
+    );
+
+    // The same question asked of OUR bake, per RENDER batch — which is not the same index space:
+    // a batch spanning several billboard bones splits into one submesh per bone, so `m2batch`'s
+    // render list runs longer than the skin list. This half is what the renderer will actually do,
+    // so a disagreement with the table above is a bug in the bake, not in the art.
+    let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+    let subs = benilla_formats::parse_m2_render_submeshes(&data, dir, &[])
+        .with_context(|| format!("parsing M2 render submeshes '{name}'"))?;
+    println!("\nas BAKED, per render batch (min..max sampled across each band):");
+    print!("{:>4} {:>5} {:>16}", "idx", "anim", "band(ms)");
+    for i in 0..subs.len() {
+        print!("  {:>13}", format!("r{i}"));
+    }
+    println!();
+    for (i, &(anim_id, band)) in seqs.iter().enumerate() {
+        print!("{i:>4} {anim_id:>5} {:>7}..{:<7}", band.0, band.1);
+        let period = (band.1.saturating_sub(band.0)) as f32 / 1000.0;
+        for sub in &subs {
+            let (lo, hi) = match &sub.alpha_anim {
+                None => (1.0, 1.0),
+                Some(a) => (0..=32)
+                    .map(|k| a.sample(Some(i), period * k as f32 / 32.0))
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v))),
+            };
+            let cell = if (hi - lo).abs() < 1e-4 {
+                format!("{lo:.3}")
+            } else {
+                format!("{lo:.2}..{hi:.2}")
+            };
+            let cell = if hi <= 0.0 {
+                format!("{cell} HIDE")
+            } else {
+                cell
+            };
+            print!("  {cell:>13}");
+        }
+        println!();
     }
     Ok(())
 }

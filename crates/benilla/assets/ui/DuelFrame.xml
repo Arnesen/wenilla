@@ -1,0 +1,86 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The duel UI (decision 0633): the reference's two duel dialogs on the shared StaticPopup
+        engine (UiPanels.xml) plus the UIParent duel-event driver, transcribed from the patch-chain
+        FrameXML (mpqx extraction, decision 0246): StaticPopup.lua l.1103-1120 (DUEL_REQUESTED +
+        DUEL_OUTOFBOUNDS), UIParent.lua l.98-101 (the registrations) + l.378-393 (the event arms).
+        Strings verbatim from GlobalStrings.lua.
+
+        Duels have no window of their own — these two dialogs ARE the whole duel UI. Everything
+        else is engine-side: the "Duel starting: N" countdown and the outcome line are
+        CHAT_MSG_SYSTEM lines `crate::ui_duel` composes (byte-verified: WoW.exe's own duel TU emits
+        both through the chat path with type 0x0A, not through any frame), and the four events
+        below are fired from that module's state edges.
+
+        The DUEL_OUTOFBOUNDS dialog is text-only — no buttons, timeout 10 — and its text is filled
+        by the StaticPopup engine's per-tick countdown branch, which already names it in both of
+        its special-case lists (UiPanels.xml: the show-time " " seeding and the OnUpdate re-format).
+        The 10 s is the client's dialog timeout, and it coincides with the server's own forfeit
+        window (`Player::CheckDuelDistance`) rather than driving it: the popup expiring is cosmetic,
+        the forfeit is the server's.
+    -->
+    <Script><![CDATA[
+        -- ── Strings (GlobalStrings.lua, verbatim) ───────────────────────────────────────────────
+        local DUEL_REQUESTED = "%s has challenged you to a duel."            -- l.957
+        local DUEL_OUTOFBOUNDS_TIMER = "Exiting duel area, you will forfeit in %d %s."  -- l.956
+        local ACCEPT = "Accept"
+        local DECLINE = "Decline"
+
+        -- ── The challenge dialog — StaticPopup.lua l.1103-1116, verbatim ────────────────────────
+        -- No accept-guard flag (unlike PARTY_INVITE): the ref's entry declines only on an explicit
+        -- OnCancel, so a timeout or an override hides it WITHOUT sending anything. That is not an
+        -- oversight to "fix" — the server's own 60 s is not a thing either; an unanswered challenge
+        -- simply sits until one side acts. ESC does decline (hideOnEscape routes through OnCancel).
+        StaticPopupDialogs["DUEL_REQUESTED"] = {
+            text = DUEL_REQUESTED,
+            button1 = ACCEPT,
+            button2 = DECLINE,
+            sound = "igPlayerInvite",
+            OnAccept = function()
+                AcceptDuel()
+            end,
+            OnCancel = function()
+                CancelDuel()
+            end,
+            timeout = 60,
+            hideOnEscape = 1,
+        }
+
+        -- ── The out-of-bounds warning — StaticPopup.lua l.1117-1120, verbatim ───────────────────
+        -- Two fields and nothing else: the engine's countdown branch owns the text.
+        StaticPopupDialogs["DUEL_OUTOFBOUNDS"] = {
+            text = DUEL_OUTOFBOUNDS_TIMER,
+            timeout = 10,
+        }
+
+        -- ── The UIParent event arms (UIParent.lua l.378-393, verbatim) ──────────────────────────
+        function BenillaDuelDriver_OnEvent()
+            if event == "DUEL_REQUESTED" then
+                StaticPopup_Show("DUEL_REQUESTED", arg1)
+            elseif event == "DUEL_OUTOFBOUNDS" then
+                StaticPopup_Show("DUEL_OUTOFBOUNDS")
+            elseif event == "DUEL_INBOUNDS" then
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+            elseif event == "DUEL_FINISHED" then
+                -- Both, unconditionally: a duel that ends while the challenge popup is still up
+                -- (the other side cancelled first) must not leave it there.
+                StaticPopup_Hide("DUEL_REQUESTED")
+                StaticPopup_Hide("DUEL_OUTOFBOUNDS")
+            end
+        end
+    ]]></Script>
+
+    <Frame name="BenillaDuelDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("DUEL_REQUESTED")
+                self:RegisterEvent("DUEL_OUTOFBOUNDS")
+                self:RegisterEvent("DUEL_INBOUNDS")
+                self:RegisterEvent("DUEL_FINISHED")
+            </OnLoad>
+            <OnEvent>BenillaDuelDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

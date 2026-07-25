@@ -778,6 +778,11 @@ pub(crate) enum ClientCommand {
     /// login to seed `HasNewMail()`/the minimap letter icon (decision 0544 P3, sent by
     /// `crate::ui_mail`'s world-enter one-shot).
     QueryNextMailTime,
+    /// Ask to inspect a player (`CMSG_INSPECT`, `u64 target`) — the UnitPopup INSPECT row
+    /// (decision 0631). Fire-and-forget: the reply echoes the guid and nothing else, and the window
+    /// paints from the already-streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields. Sent anyway because
+    /// server-side it also sets our selection (`MiscHandler.cpp:945`), as the real client's does.
+    Inspect { target: u64 },
     // ── The player-trade arc (decision 0592; writer bodies in benilla-protocol
     //    `world/writer/trade.rs`). ─────────────────────────────────────────────────────────────
     /// Offer to trade with a player (`CMSG_INITIATE_TRADE`, `u64 target`) — the UnitPopup TRADE row.
@@ -887,6 +892,14 @@ pub(crate) enum ClientCommand {
     /// submenu, decision 0434 §5): wire `icon` 0..7, `guid` 0 clears that icon's slot. Leader/
     /// assistant only server-side; echoes back as the delta form.
     SetRaidTarget { icon: u8, guid: u64 },
+    // ── The duel family (decision 0633; writer bodies in benilla-protocol
+    //    `world/writer/duel.rs`). Challenging is a `CastSpell` of the duel spell, not a verb here.
+    /// Accept a duel challenge (`CMSG_DUEL_ACCEPTED`) — the popup's Accept, and the challenger's
+    /// own auto-accept the instant its request echoes back.
+    DuelAccepted { arbiter: u64 },
+    /// Decline / cancel / forfeit a duel (`CMSG_DUEL_CANCELLED`) — one opcode for all three; the
+    /// server reads the intent from the duel's state.
+    DuelCancelled { arbiter: u64 },
     // ── The taxi/flight-master family (decision 0484 phase 1; writer bodies in
     //    benilla-protocol `messages::taxi`) ──────────────────────────────────────────────────
     /// Ask a nearby flight master's known status (`CMSG_TAXINODE_STATUS_QUERY`): the guid of the

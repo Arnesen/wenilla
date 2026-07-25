@@ -359,6 +359,17 @@ impl Plugin for EntitiesPlugin {
                 PostUpdate,
                 conform::conform_units.before(bevy::transform::TransformSystems::Propagate),
             )
+            // The unit lane's material-alpha compose: after every steady-state owner of the
+            // render-alpha field (the interior classifier, the visibility authority's own
+            // fade/effect writes), before the self-avatar feather that is allowed to override it.
+            .add_systems(
+                Update,
+                apply_unit_mat_alpha
+                    .after(crate::interior::classify_entity_interior)
+                    .after(crate::debug_panel::ModelVisSet)
+                    .after(apply_render_fade)
+                    .before(crate::player::apply_self_model_fade),
+            )
             // Arm a queued appear-fade once the world is on-screen, then drive it each frame; the despawn
             // fade-out re-arms the same `RenderFade` channel on stream-out. All disjoint from the interior
             // classifier + the doodad fade (they touch different entities / the same channel only while a
@@ -622,5 +633,56 @@ fn update_display_models(
                 );
             }
         }
+    }
+}
+
+/// Compose a unit part's **animated material alpha** into the render-alpha `MeshTag` field — the
+/// unit-lane half of the verified per-batch combine `A = instanceAlpha × colourAlpha × weight`
+/// (wow-re `m2-alpha-combine-cull.md`). The `A ≤ 0` *cull* is already the single `Visibility`
+/// authority's (`debug_panel::apply_model_visibility` ANDs `mat_factor > 0`); this is the partial
+/// factor, the dimming half, which only a `MeshTag` write can express.
+///
+/// A fourth alpha writer is exactly what decision 0066's protocol forbids, so this is not one: it
+/// writes **only** the alpha field, through [`crate::mesh_tag::with_alpha`] (the probe slot,
+/// interior-fog bit, shade byte and highlight bit all ride through), it writes the sampled factor
+/// **verbatim** rather than multiplying into what it finds — so re-running it is idempotent, unlike
+/// a compounding read-modify-write — and it is ordered after the steady-state owner (the interior
+/// classifier) so it re-asserts over that owner's whole-payload reclaim, exactly as
+/// `entity_shade::update_ground_shade` does for the shade byte.
+///
+/// Two owners deliberately keep the channel instead: a live **appear/despawn fade**
+/// (`RenderFade`/`PendingAppearFade` — excluded here, and `apply_render_fade` multiplies the factor
+/// into its own ramp), and the self-avatar zoom feather, which runs after this and wins on the self
+/// body while feathering (its own documented override).
+#[allow(clippy::type_complexity)]
+fn apply_unit_mat_alpha(
+    mut parts: Query<
+        (&crate::doodad_anim::MatAnim, &mut bevy::mesh::MeshTag),
+        (
+            Without<crate::model_fade::RenderFade>,
+            Without<crate::model_fade::PendingAppearFade>,
+        ),
+    >,
+    mut logged: Local<bool>,
+) {
+    let mut culled = 0usize;
+    for (anim, mut tag) in &mut parts {
+        if !anim.composes_unit_tag() {
+            continue;
+        }
+        if anim.current <= 0.0 {
+            culled += 1;
+        }
+        let bits = crate::mesh_tag::with_alpha(tag.0, anim.current);
+        if tag.0 != bits {
+            tag.0 = bits;
+        }
+    }
+    // One breadcrumb per session, the first frame a unit batch actually resolves to the reference's
+    // `A <= 0` cull — the machine-readable "this lane is live" signal for a bug whose symptom is
+    // geometry that should not be on screen. The live count is in the debug panel's material meter.
+    if !*logged && culled > 0 {
+        *logged = true;
+        info!("unit material alpha: {culled} batch(es) culled at A <= 0 (the first frame any did)");
     }
 }

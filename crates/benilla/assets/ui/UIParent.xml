@@ -64,6 +64,10 @@
         BATTLEFIELD_TAB_OFFSET_Y = 210
         PETACTIONBAR_YPOS = 97
 
+        -- ref UIParent.lua:2 — the model panes' held-button spin rate (half a turn per second),
+        -- read by every `Model_OnUpdate` transcription (the character window's + inspect's).
+        ROTATIONS_PER_SECOND = .5
+
         UIPARENT_MANAGED_FRAME_POSITIONS = {}
         -- Frames
         UIPARENT_MANAGED_FRAME_POSITIONS["MultiBarBottomLeft"] = {baseY = 17, reputation = 9, maxLevel = -5, anchorTo = "ActionButton1", point = "BOTTOMLEFT", rpoint = "TOPLEFT"}

@@ -13,6 +13,11 @@ use bevy::prelude::*;
 #[derive(Clone)]
 pub struct AnimClip {
     pub anim_id: u16,
+    /// The sequence's **file slot** ([`benilla_formats::ModelAnimation::seq_index`]) — not this
+    /// clip's index in [`ModelAnimations::clips`]. The key into a batch's per-sequence
+    /// material-alpha loops (`benilla_formats::AlphaAnim::seq`), so the lane that knows which clip
+    /// a unit is playing can sample the batch visibility that sequence authored.
+    pub seq_index: usize,
     pub node: AnimationNodeIndex,
     pub looping: bool,
     /// Clip length in seconds — used to seek a one-shot clip (Death) to its end pose, e.g. for a unit
@@ -231,6 +236,7 @@ mod tests {
     fn test_clip(anim_id: u16) -> AnimClip {
         AnimClip {
             anim_id,
+            seq_index: 0,
             node: AnimationNodeIndex::new(0),
             looping: true,
             duration: 1.0,

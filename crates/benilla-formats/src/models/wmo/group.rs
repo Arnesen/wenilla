@@ -287,11 +287,13 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
 
     // 2 tris per wet tile (low nibble `!= 0xf`). Winding is irrelevant (drawn two-sided).
     let mut indices = Vec::with_capacity(xt * yt * 6);
+    let mut wet = vec![false; xt * yt];
     for ty in 0..yt {
         for tx in 0..xt {
             if lq.tile_flags[ty * xt + tx] & 0xf == 0xf {
                 continue; // hole — no liquid on this tile
             }
+            wet[ty * xt + tx] = true;
             let tl = (ty * xv + tx) as u32;
             let tr = tl + 1;
             let bl = ((ty + 1) * xv + tx) as u32;
@@ -303,6 +305,8 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
         return None; // grid present but every tile a hole
     }
     Some(LiquidMesh {
+        grid: [xv as u32, yv as u32],
+        wet,
         positions,
         uvs,
         depths,

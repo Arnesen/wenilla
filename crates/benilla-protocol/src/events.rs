@@ -849,6 +849,25 @@ pub enum SessionEvent {
     /// One member's ready-check answer, forwarded to the leader only (`MSG_RAID_READY_CHECK`,
     /// non-empty body).
     ReadyCheckAnswer { guid: u64, ready: u8 },
+    /// A duel challenge (`SMSG_DUEL_REQUESTED`, decision 0633) — delivered to challenger and
+    /// challenged alike. `arbiter` is the duel-flag GameObject that identifies the duel and is
+    /// echoed on accept/cancel; `challenger` equal to our own guid means we are the one asking.
+    DuelRequested { arbiter: u64, challenger: u64 },
+    /// We left the duel-flag bubble (`SMSG_DUEL_OUTOFBOUNDS`) — the 10 s forfeit timer runs.
+    DuelOutOfBounds,
+    /// We are back inside the bubble (`SMSG_DUEL_INBOUNDS`) — the forfeit timer is cleared.
+    DuelInBounds,
+    /// The duel ended (`SMSG_DUEL_COMPLETE`). `started` is false only when it never began.
+    DuelComplete { started: bool },
+    /// The duel's outcome line (`SMSG_DUEL_WINNER`), broadcast to everyone nearby: `fled` picks
+    /// the retreat template over the knockout one.
+    DuelWinner {
+        fled: bool,
+        winner: String,
+        loser: String,
+    },
+    /// Start the duel countdown (`SMSG_DUEL_COUNTDOWN`) — already in whole seconds.
+    DuelCountdown { seconds: u32 },
     /// The taxi map (`SMSG_SHOWTAXINODES`, decision 0484): `flightmaster` is the NPC the menu
     /// opened on, `nearest_node` the node it sits at, `known_mask` the full known-node bitmask
     /// ([`TaxiMask::is_known`]). The wire's window-framing constant carries no state and is

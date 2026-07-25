@@ -351,7 +351,9 @@ pub(in crate::net) fn mark_swimming_creatures(
             continue; // players carry the real flag on the wire; GameObjects don't swim
         }
         let wow = bevy_to_wow(t.translation);
-        let depth = water_surface_at(water.iter(), wow).map_or(f32::MIN, |s| s - wow[2]);
+        // `None`: no per-unit interior claim exists (CurrentWmoInterior is the local player's
+        // down-ray), so both sources answer here — the pre-0634 behaviour, named in `liquid_at`.
+        let depth = water_surface_at(water.iter(), wow, None).map_or(f32::MIN, |s| s - wow[2]);
         let swimming = if marked {
             depth >= WADE_MAX - CREATURE_SWIM_EXIT_BAND
         } else {

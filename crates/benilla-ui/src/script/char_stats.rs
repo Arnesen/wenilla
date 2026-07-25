@@ -357,17 +357,40 @@ fn with_player_stats<T>(
     f(stats)
 }
 
-/// Read inventory slot `slot` (0..=20) under a short borrow — `"player"` token only, cloned out
-/// so the caller holds no borrow. `None` = empty/out-of-range/non-player.
+/// Read inventory slot `slot` under a short borrow, cloned out so the caller holds no borrow.
+/// `None` = empty / out of range / a token with no equipment source.
+///
+/// **Unit-keyed, and that is the reference's own shape** (decision 0631): the engine answers
+/// `GetInventoryItemTexture(unit, slot)` for any unit whose item data it holds, which is why the
+/// inspect paper doll reuses the very same bindings rather than a parallel `GetInspectItem*`
+/// family. Two sources, by token:
+///
+/// - `"player"` → the self feed ([`Model::inventory_slots`]), resolved from our PRIVATE
+///   `PLAYER_FIELD_INV_SLOT_*` guids → item objects → templates. Carries counts, durability,
+///   locks — everything an owned item object knows.
+/// - the **inspected** token → [`Model::inspect`], resolved from the target's PUBLIC
+///   `PLAYER_VISIBLE_ITEM_*` entries. No item objects exist for a foreign player (their inventory
+///   guids are server-private), so those views carry entry/icon/name/quality and nothing else —
+///   which is exactly why the reference's inspect window shows no stack counts or durability.
 fn player_inv_slot(lua: &Lua, token: &Option<String>, slot: i64) -> Option<InvSlotView> {
-    if token.as_deref() != Some("player") {
-        return None;
-    }
+    let token = token.as_deref()?;
+    let idx = usize::try_from(slot).ok()?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
-    usize::try_from(slot)
-        .ok()
-        .and_then(|i| model.inventory_slots.get(i))
-        .and_then(|s| s.clone())
+    model.inv_slot(token, idx).cloned()
+}
+
+impl Model {
+    /// The equipment slot `token` exposes at live-API id `slot`, or `None`. The one place the
+    /// two-source routing above is decided — shared by the `GetInventoryItem*` getters and
+    /// `GameTooltip:SetInventoryItem`, so a tooltip can never disagree with the icon under it.
+    pub(super) fn inv_slot(&self, token: &str, slot: usize) -> Option<&InvSlotView> {
+        let slots = if token.eq_ignore_ascii_case("player") {
+            &self.inventory_slots
+        } else {
+            &self.inspect.as_ref().filter(|v| v.unit == token)?.slots
+        };
+        slots.get(slot)?.as_ref()
+    }
 }
 
 /// Register the paper-doll stat/slot globals (decision 0208 §3).

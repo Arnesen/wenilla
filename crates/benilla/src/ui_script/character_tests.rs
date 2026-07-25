@@ -846,3 +846,94 @@ fn tab_round_trip_with_a_selected_skill_by_point() {
         s.errors()
     );
 }
+
+/// The rotate arrows, driven by the pointer exactly as a hand does (the director's report:
+/// "the 2 arrows for turning barely move it at all"). The ref's feel is TWO mechanisms, and the
+/// pane used to ship only the smaller one:
+///
+/// - a **tap** fires `OnClick` on BOTH edges (`RegisterForClicks("LeftButtonDown","LeftButtonUp")`,
+///   ref PaperDollFrame.xml l.241-243) — 2 × 0.03 rad, ~3.4°, which is all a tap is meant to be;
+/// - **holding** spins at `ROTATIONS_PER_SECOND` = half a turn per second through the pane's
+///   `OnUpdate` (ref `Model_OnUpdate`, UIParent.lua:1444-1462) — 100× the tap per second, and the
+///   only reason the arrows feel like anything.
+///
+/// The ref's held branches also run OPPOSITE to its click helpers (held-LEFT adds where
+/// click-LEFT subtracts); that quirk is quoted, so it is asserted here rather than "corrected".
+#[test]
+fn rotate_arrows_tap_twice_and_spin_while_held() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    // ROTATIONS_PER_SECOND lives here (the ref's UIParent.lua:2), like it does in the real client.
+    load_xml(&s, "UIParent.xml");
+    load_xml(&s, "CharacterFrame.xml");
+    s.set_unit("player", Some(player_unit()));
+    s.set_player_combat_stats(Some(combat_stats()));
+    s.run(r#"ToggleCharacter("BenillaPaperDollFrame")"#)
+        .unwrap();
+    s.resolve();
+
+    // The left arrow's centre, in screen points.
+    let btn = "BenillaCharacterModelFrameRotateLeftButton";
+    let (bx, by) = {
+        let l: f32 = s.eval(&format!("return {btn}:GetLeft()")).unwrap();
+        let r: f32 = s.eval(&format!("return {btn}:GetRight()")).unwrap();
+        let t: f32 = s.eval(&format!("return {btn}:GetTop()")).unwrap();
+        let b: f32 = s.eval(&format!("return {btn}:GetBottom()")).unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+
+    // Press and HOLD. The press edge is itself a click (−0.03 off the 0.61 default).
+    s.mouse_move(bx, by);
+    s.mouse_button(bx, by, "LeftButton", true);
+    let pressed = s.paperdoll_yaw();
+    assert!(
+        (pressed - 0.58).abs() < 1e-4,
+        "the press edge nudges once: {pressed}"
+    );
+
+    // Held for half a second: half of half a turn = +π/2 (the held-LEFT branch ADDS).
+    s.tick(0.5);
+    assert!(s.errors().is_empty(), "OnUpdate errors: {:?}", s.errors());
+    let spun = s.paperdoll_yaw();
+    assert!(
+        (spun - (pressed + std::f32::consts::FRAC_PI_2)).abs() < 1e-3,
+        "half a second held spins half of half a turn: {pressed} → {spun}"
+    );
+
+    // Release: the second click edge (another −0.03), and the spin stops dead.
+    s.mouse_button(bx, by, "LeftButton", false);
+    let released = s.paperdoll_yaw();
+    assert!(
+        (released - (spun - 0.03)).abs() < 1e-4,
+        "the release edge nudges again: {spun} → {released}"
+    );
+    s.tick(0.5);
+    assert!(
+        (s.paperdoll_yaw() - released).abs() < 1e-6,
+        "a released button does not keep spinning"
+    );
+
+    // The right arrow spins the other way (held-RIGHT subtracts).
+    let rbtn = "BenillaCharacterModelFrameRotateRightButton";
+    let (rx, ry) = {
+        let l: f32 = s.eval(&format!("return {rbtn}:GetLeft()")).unwrap();
+        let r: f32 = s.eval(&format!("return {rbtn}:GetRight()")).unwrap();
+        let t: f32 = s.eval(&format!("return {rbtn}:GetTop()")).unwrap();
+        let b: f32 = s.eval(&format!("return {rbtn}:GetBottom()")).unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+    s.mouse_move(rx, ry);
+    s.mouse_button(rx, ry, "LeftButton", true);
+    let before = s.paperdoll_yaw();
+    s.tick(0.25);
+    let after = s.paperdoll_yaw();
+    assert!(
+        (after - (before - std::f32::consts::FRAC_PI_4)).abs() < 1e-3,
+        "the right arrow spins the other way: {before} → {after}"
+    );
+    s.mouse_button(rx, ry, "LeftButton", false);
+    assert!(s.errors().is_empty(), "no handler errors: {:?}", s.errors());
+}

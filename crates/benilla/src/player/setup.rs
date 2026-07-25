@@ -31,7 +31,7 @@ fn spawn_fallback_camera(commands: &mut Commands) {
         super::WorldCamera,
         Hdr,
         Tonemapping::None,
-        crate::ffx_glow::FfxGlow,
+        crate::ffx_glow::FfxGlow::WORLD,
         Transform::from_xyz(0.0, 50.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
         FlyCam {
             yaw: 0.0,
@@ -113,7 +113,7 @@ pub(super) fn setup_player(
         Tonemapping::None,
         // The faithful FFXGlow pass (decision 0158/0161): the byte-pinned `scene + glow·blur²`
         // — and, in the gamma lane, the owner of the frame's single output decode.
-        crate::ffx_glow::FfxGlow,
+        crate::ffx_glow::FfxGlow::WORLD,
         Transform::from_translation(spawn + Vec3::new(0.0, 60.0, 60.0)).looking_at(spawn, Vec3::Y),
         // PHASE 0: no PBR ambient fill, no distance fog — pitch-black clean slate. The faithful scene
         // light is rebuilt in-shader from Light.dbc (terrain/model WGSL), not via Bevy PBR lights.

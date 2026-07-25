@@ -14,6 +14,7 @@ use benilla_m2::M2TextureType;
 
 use crate::Chain;
 
+use super::key_anim::SeqSlot;
 use super::mat_anim;
 use super::tex_anim;
 use super::{le_u16, le_u32, model_path, remap_submesh};
@@ -283,7 +284,16 @@ pub fn parse_m2_render_submeshes(
             })
             .collect()
     };
-    let seq0_band = seq_bands.first().map(|&(_, band)| band);
+    // The same list as the bake's addressing unit: file slot + band. The slot is what indexes a
+    // track's per-sequence key ranges, so it must stay the FILE order — no filtering.
+    let seq_slots: Vec<SeqSlot> = seq_bands
+        .iter()
+        .enumerate()
+        .map(|(index, &(_, band))| SeqSlot { index, band })
+        .collect();
+    // Slot 0 — the loop a placed doodad's one-time arm plays, and the only band the shared-material
+    // UV/tint registries can key on (see `tex_anim::bake_uv_anim`).
+    let seq0_slot = seq_slots.first().copied();
 
     let sections = skin.submeshes();
     let mut out = Vec::new();
@@ -378,32 +388,46 @@ pub fn parse_m2_render_submeshes(
         // The runtime half of the same combine (decision 0130 phase 2): whatever the static test
         // above could NOT fold away — a time-varying colour-alpha/weight loop, or a dimming non-1
         // constant — bakes to an [`AlphaAnim`] the app samples per instance on the model clock.
+        //
+        // Baked **once per sequence**: the tracks key on one absolute timeline that every sequence
+        // carves a band out of, and the reference re-reads them from the *playing* sequence's key
+        // window each frame. Baking only band 0 was right for a placed doodad (one arm, looped
+        // forever) and wrong for every creature — a batch authored to appear only on death reads
+        // its Stand value forever, so we draw geometry the reference hides.
         let alpha_anim = {
-            let color = model
-                .color_alpha_tracks
-                .get(batch.color_index as usize)
-                .and_then(|t| mat_anim::bake_scalar_anim(t, &model.global_sequences, seq0_band));
-            let weight = if batch.texture_count != 0 {
-                model
-                    .transparency_lookup
-                    .get(batch.weight_combo_index as usize)
-                    .and_then(|&t| model.transparency_tracks.get(t as usize))
-                    .and_then(|t| mat_anim::bake_scalar_anim(t, &model.global_sequences, seq0_band))
-            } else {
-                None // textureCount 0 ⇒ transparency factor not applied (verified gate)
-            };
-            (color.is_some() || weight.is_some()).then_some(AlphaAnim { color, weight })
+            let color_track = model.color_alpha_tracks.get(batch.color_index as usize);
+            // textureCount 0 ⇒ transparency factor not applied (verified gate).
+            let weight_track = (batch.texture_count != 0)
+                .then(|| {
+                    model
+                        .transparency_lookup
+                        .get(batch.weight_combo_index as usize)
+                        .and_then(|&t| model.transparency_tracks.get(t as usize))
+                })
+                .flatten();
+            let per_seq = seq_slots
+                .iter()
+                .map(|&slot| mat_anim::AlphaSeq {
+                    color: color_track.and_then(|t| {
+                        mat_anim::bake_scalar_anim(t, &model.global_sequences, Some(slot))
+                    }),
+                    weight: weight_track.and_then(|t| {
+                        mat_anim::bake_scalar_anim(t, &model.global_sequences, Some(slot))
+                    }),
+                })
+                .collect();
+            AlphaAnim::new(per_seq)
         };
         // The batch's UV-animation loop (decision 0130 phase 3): batch combo → texAnimLookup →
         // translation track, on the same clocks. Carried on the submesh; the renderer applies it.
-        let uv_anim = tex_anim::bake_uv_anim(model, batch.texture_transform_combo_index, seq0_band);
+        let uv_anim = tex_anim::bake_uv_anim(model, batch.texture_transform_combo_index, seq0_slot);
         // The batch's animated RGB tint (the M2Color colour track's runtime half): only a
         // time-varying track bakes — a `Some` here *replaces* the static vertex tint below (a
         // spell effect's white-hot flash cooling to red would otherwise freeze on its first key).
         let rgb_anim = model
             .color_rgb_tracks
             .get(batch.color_index as usize)
-            .and_then(|t| mat_anim::bake_rgb_anim(t, &model.global_sequences, seq0_band));
+            .and_then(|t| mat_anim::bake_rgb_anim(t, &model.global_sequences, seq0_slot));
         // M2 billboard bones: a batch's vertices ride billboard bones (glow cards, chains) that the
         // real client re-orients to the camera each frame — **each bone independently, about its own
         // pivot**. One batch often packs several such cards: a candelabra's candle glows share a single

@@ -1,0 +1,607 @@
+<Ui>
+    <!--
+        benilla's inspect window (decision 0631) — right-click a player → Inspect → their name,
+        portrait, level/race/class line, full-body model, and their 19 equipped items.
+
+        Dressed from the real 1.12.1 `Blizzard_InspectUI.xml`/`.lua` + `InspectPaperDollFrame.xml`/
+        `.lua`, extracted from the MPQ chain to session scratch this session (director-local
+        reference artifacts, never committed — the 0068/0138/0208 pattern; the `ref l.N` cites below
+        are into that extraction). Note the reference is NOT base FrameXML: it is the LoadOnDemand
+        addon `Blizzard_InspectUI` (`## LoadOnDemand: 1`). We implement no LoD mechanism for one
+        addon (decision 0631 §1) — this file simply loads with the rest, and `InspectUnit` below
+        stands in for the ref's `UIParentLoadAddOn`-then-show wrapper.
+
+        WHY THIS WINDOW NEEDS NO NEW READS: a player's worn gear rides `PLAYER_VISIBLE_ITEM_<n>_0`,
+        which is PUBLIC — the server streams it to every observer, and benilla already decodes it to
+        render other players' equipment. So the reference's own unit-keyed `GetInventoryItemTexture(
+        unit, slot)` family answers here exactly as it does for "player"; `Model::inv_slot` routes
+        the token to the inspect view (decision 0631 §2). Nothing waits on `SMSG_INSPECT` — it
+        echoes the guid and nothing else, and the ref paints immediately (`Blizzard_InspectUI.lua:
+        6-13` shows `NotifyInspect` and `ShowUIPanel` in the same breath).
+
+        Docks the left UIPanel slot like the character window (`UiPanels.xml`'s
+        `UIPanelWindows["BenillaInspectFrame"] = { area = "left", pushable = 0 }`, mirroring the
+        ref's own row `Blizzard_InspectUI.lua:4`) — so it competes for/replaces those windows rather
+        than stacking with them.
+
+        Naming: every frame here is Benilla-prefixed, this codebase's convention
+        (CharacterFrame.xml's header) — including the strings passed around internally. The two
+        addon-facing entry points keep their real global names (`InspectUnit`, and the engine's
+        `CanInspect`/`NotifyInspect`/`ClearInspectPlayer`), the same posture `ToggleCharacter`
+        takes.
+
+        Named deferrals (decision 0631; each re-cited at its site):
+          - The HONOR tab (`InspectHonorFrame`, ref tab 2) — needs `MSG_INSPECT_HONOR_STATS` plus an
+            entire honor/PvP model that does not exist here, and the OWN character window's Honor
+            tab isn't built either. The tab row ships ONE entry, the 0138/0208 "tabs arrive with
+            their pages" precedent.
+          - `InspectTitleText` / `InspectGuildText` — both `hidden="true"` in the ref itself, filled
+            only from PVP-rank / guild-query data (0208's own two named gaps). Not transcribed.
+          - Ctrl-click `DressUpItemLink` and shift-click chat-link insert (ref
+            `InspectPaperDollFrame.lua:104-112`) — 0208's named deferrals; the click recognizes the
+            modifiers and does nothing rather than falling through to a verb the ref wouldn't run.
+          - `UnitHasRelicSlot` (ref l.123, l.22) — vanilla-always-false, so the relic branch can
+            never fire. Dropped outright, as CharacterFrame.xml drops it.
+          - The held-button continuous spin (ref `InspectModelFrame_OnUpdate`, l.7-22) needs
+            `GetButtonState() == "PUSHED"`, which this engine's Button has no method for
+            (CharacterFrame.xml hit the identical wall) — click-only, so no OnUpdate is wired.
+    -->
+    <Script><![CDATA[
+        -- ── GlobalStrings values this window uses (ref-GlobalStrings.lua, cited per line — the
+        -- `X = X or "..."` idiom is this codebase's convention, CharacterFrame.xml/CastingBar.xml:
+        -- a real GlobalStrings.lua, if one ever loads, wins over the fallback). Declared HERE and
+        -- not borrowed from CharacterFrame.xml's identical line: load order must not be a hidden
+        -- dependency between two windows (it bit exactly this file — the level line errored
+        -- "string expected, got nil" when the window was driven without CharacterFrame loaded).
+        PLAYER_LEVEL = PLAYER_LEVEL or "Level %d %s %s"                -- :3075
+
+        -- The subframe roster (ref INSPECTFRAME_SUBFRAMES, l.2). One page ships; the Honor tab is a
+        -- named deferral (header), and this list is what keeps the tab machinery honest as it lands.
+        BENILLA_INSPECTFRAME_SUBFRAMES = { "BenillaInspectPaperDollFrame" }
+
+        -- The 19 inspect slots, in the ref's own `InspectPaperDollFrame_OnShow` order (l.60-78).
+        -- Note there is NO ammo slot and NO bag buttons: a foreign player exposes neither.
+        BENILLA_INSPECT_SLOTS = {
+            "Head", "Neck", "Shoulder", "Back", "Chest", "Shirt", "Tabard", "Wrist",
+            "Hands", "Waist", "Legs", "Feet", "Finger0", "Finger1", "Trinket0", "Trinket1",
+            "MainHand", "SecondaryHand", "Ranged",
+        }
+
+        -- ref InspectUnit: in the real client this is the FrameXML wrapper that load-on-demands the
+        -- addon and then shows the frame. We have no LoD (header), so it IS the show path — kept
+        -- under the real global name because that is what the UnitPopup row and any addon call.
+        function InspectUnit(unit)
+            BenillaInspectFrame_Show(unit)
+        end
+
+        -- ref InspectFrame_Show (l.6-13) verbatim in shape: hide first, gate on CanInspect, request,
+        -- remember the token, show. The CanInspect gate is the real client's `0x48a1b0` — a 10-yard
+        -- d² test (wow-re §5-VERIFIED), which the app folds together with is-a-player and
+        -- not-attackable (decision 0631 §"What the pin verified" 3/4).
+        function BenillaInspectFrame_Show(unit)
+            local frame = getglobal("BenillaInspectFrame")
+            HideUIPanel(frame)
+            if CanInspect(unit) then
+                NotifyInspect(unit)
+                frame.unit = unit
+                ShowUIPanel(frame)
+            end
+        end
+
+        -- ref InspectFrame_OnLoad (l.15-25). UNIT_PORTRAIT_UPDATE is NOT registered in the ref
+        -- either (its OnEvent has a branch for it, l.34-38, that can therefore never fire — a
+        -- reference bug, transcribed as the ref behaves, not as it reads).
+        function BenillaInspectFrame_OnLoad(frame)
+            frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+            frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+            frame:RegisterEvent("UNIT_NAME_UPDATE")
+            frame:RegisterEvent("UNIT_MODEL_CHANGED")
+            frame.unit = nil
+            PanelTemplates_SetNumTabs(frame, 1)
+            PanelTemplates_SetTab(frame, 1)
+        end
+
+        -- ref InspectFrame_OnEvent (l.27-45). The retarget branch re-runs InspectUnit on the STORED
+        -- TOKEN, so an inspect window follows a re-target — the token resolves to whoever is
+        -- selected now. That is the ref's real behavior, not a quirk of ours.
+        function BenillaInspectFrame_OnEvent(frame)
+            if not frame:IsVisible() then
+                return
+            end
+            if event == "PLAYER_TARGET_CHANGED" or event == "PARTY_MEMBERS_CHANGED" then
+                InspectUnit(frame.unit)
+            elseif event == "UNIT_NAME_UPDATE" then
+                if arg1 == frame.unit then
+                    getglobal("BenillaInspectNameText"):SetText(UnitName(arg1))
+                end
+            end
+        end
+
+        -- ref InspectFrame_OnShow (l.47-51), with ONE deliberate deviation: the unit is nil-guarded.
+        -- The ref calls SetPortraitTexture(portrait, this.unit) unguarded, and `this.unit` is nil on
+        -- any show that didn't come through InspectFrame_Show — `ToggleInspect` re-opening after
+        -- OnHide cleared it is the reachable one. In the real client that leaks a swallowed Lua
+        -- arg error every time (the same class decision 0413 caught in the merchant frame); ours
+        -- would throw out of OnShow and abandon the rest of it, so the window would open with a
+        -- stale name too. Guarding paints nothing instead, and the ref's own OnUpdate closes a
+        -- target-less window on the next frame regardless.
+        function BenillaInspectFrame_OnShow(frame)
+            PlaySound("igCharacterInfoOpen")
+            if frame.unit then
+                SetPortraitTexture(getglobal("BenillaInspectFramePortrait"), frame.unit)
+                getglobal("BenillaInspectNameText"):SetText(UnitName(frame.unit))
+            end
+        end
+
+        -- ref InspectFrame_OnHide (l.53-59): drop the token, play the close sound, and tell the
+        -- engine to stop inspecting (which stops the app's per-frame slot resolve). No subframe
+        -- hide-loop is needed (unlike BenillaCharacterFrame_OnHide's): the one page is a true
+        -- engine child of this frame, so it hides on the parent's cascade.
+        function BenillaInspectFrame_OnHide(frame)
+            frame.unit = nil
+            PlaySound("igCharacterInfoClose")
+            ClearInspectPlayer()
+        end
+
+        -- ref ToggleInspect (l.67-83) + InspectFrame_ShowSubFrame (l.85-93). With one page shipped
+        -- the interesting branch is the ref's own "clicking the tab of the page already showing
+        -- CLOSES the window" — transcribed rather than smoothed away, because that is what the real
+        -- tab does. ToggleInspect is BARE (not Benilla-prefixed), the addon-facing name, matching
+        -- this codebase's ToggleCharacter/ToggleQuestLog precedent.
+        function ToggleInspect(tab)
+            local subFrame = getglobal(tab)
+            if not subFrame then
+                return
+            end
+            local frame = getglobal("BenillaInspectFrame")
+            if frame:IsVisible() then
+                if subFrame:IsVisible() then
+                    HideUIPanel(frame)
+                else
+                    PlaySound("igCharacterInfoTab")
+                    BenillaInspectFrame_ShowSubFrame(tab)
+                end
+            else
+                ShowUIPanel(frame)
+                BenillaInspectFrame_ShowSubFrame(tab)
+            end
+        end
+
+        function BenillaInspectFrame_ShowSubFrame(frameName)
+            for _, name in ipairs(BENILLA_INSPECTFRAME_SUBFRAMES) do
+                local subFrame = getglobal(name)
+                if subFrame then
+                    if name == frameName then subFrame:Show() else subFrame:Hide() end
+                end
+            end
+        end
+
+        -- ref InspectFrame_OnUpdate (l.61-65): the window closes the moment there is no target.
+        -- Transcribed verbatim including its bluntness — the ref checks "target" specifically, even
+        -- when inspecting a party token, so inspecting a party member and then clearing your target
+        -- closes the window. That is the shipped 1.12 behavior.
+        function BenillaInspectFrame_OnUpdate(frame)
+            if not UnitExists("target") then
+                HideUIPanel(frame)
+            end
+        end
+
+        -- ── The paper-doll page (ref InspectPaperDollFrame.lua) ─────────────────────────────────
+
+        -- ref InspectPaperDollFrame_OnLoad (l.2-5).
+        function BenillaInspectPaperDollFrame_OnLoad(frame)
+            frame:RegisterEvent("UNIT_MODEL_CHANGED")
+            frame:RegisterEvent("UNIT_LEVEL")
+        end
+
+        -- ref InspectPaperDollFrame_OnEvent (l.41-50). The model branch is a no-op for us: the pane
+        -- samples the "inspect" booth slot, which the app re-bakes off the live unit's dressed look
+        -- on its own (decision 0631 §4) — there is no `SetUnit` to re-issue.
+        function BenillaInspectPaperDollFrame_OnEvent(frame)
+            local unit = getglobal("BenillaInspectFrame").unit
+            if arg1 and arg1 == unit and event == "UNIT_LEVEL" then
+                BenillaInspectPaperDollFrame_SetLevel()
+            end
+        end
+
+        -- ref InspectPaperDollFrame_SetLevel (l.52-55). The "?" placeholders match
+        -- CharacterFrame.xml's: UnitRace/UnitClass read nil for the one tick before the app's first
+        -- snapshot for this token lands (an unguarded format() errors on nil), which for a foreign
+        -- unit is a genuinely reachable window, not just a startup race.
+        function BenillaInspectPaperDollFrame_SetLevel()
+            local unit = getglobal("BenillaInspectFrame").unit
+            getglobal("BenillaInspectLevelText"):SetText(
+                format(PLAYER_LEVEL, UnitLevel(unit) or 0, UnitRace(unit) or "?", UnitClass(unit) or "?"))
+        end
+
+        -- ref InspectPaperDollFrame_OnShow (l.57-79): the level line then all 19 slots.
+        function BenillaInspectPaperDollFrame_OnShow()
+            BenillaInspectPaperDollFrame_SetLevel()
+            for _, slot in ipairs(BENILLA_INSPECT_SLOTS) do
+                BenillaInspectSlot_Update(getglobal("BenillaInspect" .. slot .. "Slot"))
+            end
+        end
+
+        -- ref InspectPaperDollItemSlotButton_OnLoad (l.81-93). `strsub(slotName, 8)` in the ref
+        -- strips its "Inspect" prefix to reach the GetInventorySlotInfo name; ours passes the bare
+        -- name in, CharacterFrame.xml's own convention (the prefix is longer here anyway).
+        function BenillaInspectSlot_OnLoad(button, slotName)
+            button:RegisterEvent("UNIT_INVENTORY_CHANGED")
+            local id, texture = GetInventorySlotInfo(slotName)
+            button.invSlotId = id
+            button.slotName = slotName
+            button.emptyTexture = texture
+            button.icon = getglobal(button:GetName() .. "IconTexture")
+            -- No RegisterForDrag and no right-click: an inspected item cannot be picked up, used, or
+            -- swapped. The ref registers no drag on these either — its OnClick (l.104-112) handles
+            -- ONLY ctrl (dressing room) and shift (chat link), both named deferrals here, so this
+            -- ships with the plain left-click registration and an inert handler.
+            button:RegisterForClicks("LeftButtonUp")
+            BenillaInspectSlot_Update(button)
+        end
+
+        -- ref InspectPaperDollItemSlotButton_OnEvent (l.95-102): only the inspected unit's own
+        -- inventory change repaints.
+        function BenillaInspectSlot_OnEvent(button)
+            if event == "UNIT_INVENTORY_CHANGED" and arg1 == getglobal("BenillaInspectFrame").unit then
+                BenillaInspectSlot_Update(button)
+            end
+        end
+
+        -- ref InspectPaperDollItemSlotButton_OnClick (l.104-112): both branches are named deferrals
+        -- (header), so this recognizes the modifiers and does nothing — deliberately inert rather
+        -- than falling through to a verb the reference would never have run on an inspected item.
+        function BenillaInspectSlot_OnClick(button, mouseButton)
+            if IsControlKeyDown() then
+                return -- DressUpItemLink: no dressing room yet
+            elseif IsShiftKeyDown() then
+                return -- chat-link insert: named deferral
+            end
+        end
+
+        -- ref InspectPaperDollItemSlotButton_Update (l.114-139). No count text and no broken tint:
+        -- a foreign player's gear comes from the PUBLIC visible-item entries, which carry no stack
+        -- count and no durability (decision 0631) — which is exactly why the reference's inspect
+        -- window shows neither. SetItemButtonCount's 0 branch is therefore always the one taken,
+        -- and is dropped with the count region.
+        function BenillaInspectSlot_Update(button)
+            local unit = getglobal("BenillaInspectFrame").unit
+            local textureName = GetInventoryItemTexture(unit, button.invSlotId)
+            if textureName then
+                button.icon:SetTexture(textureName)
+            else
+                button.icon:SetTexture(button.emptyTexture)
+            end
+            -- ref l.130-138: a tooltip already owned by this button re-renders in place.
+            if GameTooltip:IsOwned(button) then
+                BenillaInspectSlot_OnEnter(button)
+            end
+        end
+
+        -- ref InspectPaperDollItemSlotButtonTemplate's OnEnter (InspectPaperDollFrame.xml:18-28):
+        -- SetInventoryItem against the INSPECTED unit, falling back to the slot-name string.
+        function BenillaInspectSlot_OnEnter(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            local unit = getglobal("BenillaInspectFrame").unit
+            if not GameTooltip:SetInventoryItem(unit, button.invSlotId) then
+                GameTooltip:SetText(getglobal(strupper(button.slotName)) or button.slotName)
+            end
+            GameTooltip:Show()
+        end
+
+        -- ── The model pane (ref InspectModelFrame, l.24-39) ─────────────────────────────────────
+        -- A booth-texture stand-in, not a live <PlayerModel> — the settled doctrine (0105's
+        -- "I don't like 3d btw go for better 2d", 0208 §5, decision 0631 §4). `frame.facing` stands
+        -- in for the ref's `model.rotation`; the ref's sign convention is preserved verbatim
+        -- (rotate-left SUBTRACTS, rotate-right ADDS — ref l.29-39), as is its 0.61 default (l.25).
+        function BenillaInspectModel_OnLoad(frame)
+            frame.facing = 0.61
+            BenillaInspectModel_SetFacing(frame.facing)
+        end
+
+        function BenillaInspectModel_RotateLeft(frame)
+            frame.facing = frame.facing - 0.03
+            BenillaInspectModel_SetFacing(frame.facing)
+            PlaySound("igInventoryRotateCharacter")
+        end
+
+        function BenillaInspectModel_RotateRight(frame)
+            frame.facing = frame.facing + 0.03
+            BenillaInspectModel_SetFacing(frame.facing)
+            PlaySound("igInventoryRotateCharacter")
+        end
+
+        -- The character window's twin (CharacterFrame.xml's BenillaPaperDollModel_OnUpdate — the
+        -- same ref Model_OnUpdate, UIParent.lua:1444-1462, that EVERY 1.12 model pane wires:
+        -- PaperDollFrame l.222-224, DressUpFrame.xml:202-204, TabardFrame.xml:406-408). Held button
+        -- = half a turn per second; the 0.03 click above is the tap. The ref's held-vs-click sign
+        -- flip is quoted, not corrected.
+        function BenillaInspectModel_OnUpdate(frame, elapsed)
+            local step = elapsed * 2 * PI * ROTATIONS_PER_SECOND
+            if getglobal(frame:GetName() .. "RotateLeftButton"):GetButtonState() == "PUSHED" then
+                frame.facing = frame.facing + step
+                if frame.facing < 0 then
+                    frame.facing = frame.facing + (2 * PI)
+                end
+                BenillaInspectModel_SetFacing(frame.facing)
+            end
+            if getglobal(frame:GetName() .. "RotateRightButton"):GetButtonState() == "PUSHED" then
+                frame.facing = frame.facing - step
+                if frame.facing > (2 * PI) then
+                    frame.facing = frame.facing - (2 * PI)
+                end
+                BenillaInspectModel_SetFacing(frame.facing)
+            end
+        end
+    ]]></Script>
+
+    <!--
+        The inspect slot button. The ref's own template inherits ItemButtonTemplate
+        (InspectPaperDollFrame.xml:4-46); ItemButtonTemplate's XML isn't part of this session's
+        extraction, so its shape is taken from this codebase's prior reconstruction of it
+        (CharacterFrame.xml's BenillaPaperDollItemSlotTemplate) minus what inspect can't have:
+        no $parentCount region (no stack counts on public gear), no PushedTexture (nothing to press
+        — the click is inert), no cooldown.
+    -->
+    <Button name="BenillaInspectItemSlotTemplate" virtual="true">
+        <Size><AbsDimension x="37" y="37"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIconTexture"/>
+            </Layer>
+        </Layers>
+        <NormalTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="64" y="64"/></Size>
+            <Anchors>
+                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaInspectSlot_OnClick(self, arg1)</OnClick>
+            <OnEnter>BenillaInspectSlot_OnEnter(self)</OnEnter>
+            <OnLeave>GameTooltip:Hide()</OnLeave>
+            <OnEvent>BenillaInspectSlot_OnEvent(self)</OnEvent>
+        </Scripts>
+    </Button>
+
+    <Frame name="BenillaInspectFrame" hidden="true">
+        <!-- The real 384x512 window (ref l.4-14). No <Anchors> — ShowUIPanel SetPoints this to the
+             left slot on open (UiPanels.xml's convention, CharacterFrame.xml's precedent). -->
+        <Size><AbsDimension x="384" y="512"/></Size>
+        <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
+        <Layers>
+            <!-- Portrait 60x60 TOPLEFT (7,-6) (ref l.19-31) — the inspected unit's booth bake,
+                 pointed at the token in OnShow (unlike the character window's fixed "player"). -->
+            <Layer level="ARTWORK">
+                <Texture name="BenillaInspectFramePortrait">
+                    <Size><AbsDimension x="60" y="60"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-6"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Name: CENTER (6,232) wrapper, GameFontNormal centered inside it, white (ref l.35-64). -->
+            <Frame name="BenillaInspectNameFrame">
+                <Size><AbsDimension x="109" y="12"/></Size>
+                <Anchors><Anchor point="CENTER"><Offset><AbsDimension x="6" y="232"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer>
+                        <FontString name="BenillaInspectNameText" inherits="GameFontNormal" text="NAME">
+                            <Size><AbsDimension x="300" y="12"/></Size>
+                            <Anchors><Anchor point="CENTER"/></Anchors>
+                            <Color r="1.0" g="1.0" b="1.0"/>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
+                </Scripts>
+            </Frame>
+            <!-- Close: the ref's own position (CENTER of TOPRIGHT, -44,-25 — ref l.65-78) on the
+                 minimize-button art this codebase's close buttons all use. The +1 frame level is
+                 CharacterFrame.xml's documented compensation: the page's BACKGROUND art is a
+                 full-window sibling created after this button, so at level 0 it would paint over. -->
+            <Button name="BenillaInspectFrameCloseButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="CENTER" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-44" y="-25"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts>
+                    <OnLoad>self:SetFrameLevel(self:GetFrameLevel() + 1)</OnLoad>
+                    <OnClick>HideUIPanel(getglobal("BenillaInspectFrame"))</OnClick>
+                </Scripts>
+            </Button>
+            <!-- The tab row (ref l.79-99 — CENTER of BOTTOMLEFT +60,+61). One tab ships; HONOR
+                 (ref l.100-120) is a named deferral (header). The ref's tabs carry a hover tooltip
+                 (CHARACTER_INFO / HONOR); ours follows CharacterFrame.xml's own tab row, which
+                 carries none — the visible label already says what it does. -->
+            <Button name="BenillaInspectFrameTab1" inherits="CharacterFrameTabButtonTemplate" text="Character">
+                <Anchors><Anchor point="CENTER" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="60" y="61"/></Offset></Anchor></Anchors>
+                <Scripts><OnClick>ToggleInspect("BenillaInspectPaperDollFrame")</OnClick></Scripts>
+            </Button>
+
+            <!-- The paper-doll page (ref InspectPaperDollFrame, l.47-371). The ref uses
+                 setAllPoints="true"; frame-level setAllPoints is a no-op in this engine
+                 (CharacterFrame.xml's header), so it is sized to fill the parent instead. -->
+            <Frame name="BenillaInspectPaperDollFrame">
+                <Size><AbsDimension x="384" y="512"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                <HitRectInsets><AbsInset left="0" right="30" top="0" bottom="45"/></HitRectInsets>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <!-- The same four quadrant slabs the character tab uses (ref l.49-93). -->
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-L1">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-R1">
+                            <Size><AbsDimension x="128" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-BottomLeft">
+                            <Size><AbsDimension x="256" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-256"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture file="Interface\PaperDollInfoFrame\UI-Character-CharacterTab-BottomRight">
+                            <Size><AbsDimension x="128" y="256"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="256" y="-256"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <!-- "Level %d %s %s" under the name (ref l.94-102). -->
+                        <FontString name="BenillaInspectLevelText" inherits="GameFontNormalSmall">
+                            <Anchors>
+                                <Anchor point="TOP" relativeTo="BenillaInspectNameText" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-6"/></Offset></Anchor>
+                            </Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The model pane (ref PlayerModel InspectModelFrame, l.124-187): 233x300 at
+                         TOPLEFT (65,-78) — taller than the character window's 233x224 because the
+                         inspect page carries no stats block under it. A plain Frame sampling the
+                         "inspect" booth bake (header). -->
+                    <Frame name="BenillaInspectModelFrame">
+                        <Size><AbsDimension x="233" y="300"/></Size>
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="65" y="-78"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="$parentTexture">
+                                    <Size><AbsDimension x="233" y="300"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- Rotate buttons (ref l.148-185): 35x35, left then right chained off
+                                 its TOPRIGHT, both at the pane's own TOPLEFT. RegisterForClicks on
+                                 both edges + the pane's OnUpdate below = the ref's tap-and-hold. -->
+                            <Button name="BenillaInspectModelFrameRotateLeftButton">
+                                <Size><AbsDimension x="35" y="35"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-RotationLeft-Button-Up"/>
+                                <PushedTexture file="Interface\Buttons\UI-RotationLeft-Button-Down"/>
+                                <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                                <Scripts>
+                                    <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
+                                    <OnClick>BenillaInspectModel_RotateLeft(getglobal("BenillaInspectModelFrame"))</OnClick>
+                                </Scripts>
+                            </Button>
+                            <Button name="BenillaInspectModelFrameRotateRightButton">
+                                <Size><AbsDimension x="35" y="35"/></Size>
+                                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectModelFrameRotateLeftButton" relativePoint="TOPRIGHT"/></Anchors>
+                                <NormalTexture file="Interface\Buttons\UI-RotationRight-Button-Up"/>
+                                <PushedTexture file="Interface\Buttons\UI-RotationRight-Button-Down"/>
+                                <HighlightTexture file="Interface\Buttons\ButtonHilight-Round" alphaMode="ADD"/>
+                                <Scripts>
+                                    <OnLoad>self:RegisterForClicks("LeftButtonDown", "LeftButtonUp")</OnLoad>
+                                    <OnClick>BenillaInspectModel_RotateRight(getglobal("BenillaInspectModelFrame"))</OnClick>
+                                </Scripts>
+                            </Button>
+                        </Frames>
+                        <Scripts>
+                            <OnLoad>
+                                BenillaInspectModel_OnLoad(self)
+                                BenillaSetBoothTexture(getglobal(self:GetName() .. "Texture"), "inspect")
+                            </OnLoad>
+                            <OnUpdate>BenillaInspectModel_OnUpdate(self, arg1)</OnUpdate>
+                        </Scripts>
+                    </Frame>
+
+                    <!-- The 19 slots (ref l.188-358). Left column from TOPLEFT (21,-74) chaining
+                         -4 down; right column from (305,-74); the three weapon slots from
+                         BOTTOMLEFT (122,127) chaining +5 right. The ref's own geometry, and the
+                         same numbers the character window's doll uses. -->
+                    <Button name="BenillaInspectHeadSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="21" y="-74"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "HeadSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectNeckSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectHeadSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "NeckSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectShoulderSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectNeckSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "ShoulderSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectBackSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectShoulderSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "BackSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectChestSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectBackSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "ChestSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectShirtSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectChestSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "ShirtSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectTabardSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectShirtSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "TabardSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectWristSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectTabardSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "WristSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectHandsSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="305" y="-74"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "HandsSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectWaistSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectHandsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "WaistSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectLegsSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectWaistSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "LegsSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectFeetSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectLegsSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "FeetSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectFinger0Slot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectFeetSlot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "Finger0Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectFinger1Slot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectFinger0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "Finger1Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectTrinket0Slot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectFinger1Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "Trinket0Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectTrinket1Slot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectTrinket0Slot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-4"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "Trinket1Slot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectMainHandSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="122" y="127"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "MainHandSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectSecondaryHandSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectMainHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "SecondaryHandSlot")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="BenillaInspectRangedSlot" inherits="BenillaInspectItemSlotTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaInspectSecondaryHandSlot" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>BenillaInspectSlot_OnLoad(self, "RangedSlot")</OnLoad></Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>BenillaInspectPaperDollFrame_OnLoad(self)</OnLoad>
+                    <OnEvent>BenillaInspectPaperDollFrame_OnEvent(self)</OnEvent>
+                    <OnShow>BenillaInspectPaperDollFrame_OnShow()</OnShow>
+                </Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaInspectFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaInspectFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaInspectFrame_OnShow(self)</OnShow>
+            <OnHide>BenillaInspectFrame_OnHide(self)</OnHide>
+            <OnUpdate>BenillaInspectFrame_OnUpdate(self)</OnUpdate>
+        </Scripts>
+    </Frame>
+</Ui>

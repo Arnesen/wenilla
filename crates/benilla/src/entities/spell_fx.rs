@@ -328,6 +328,15 @@ pub(super) fn attach_effect_visuals(
         .collect();
     let joints = arm_effect_rig(commands, root, dm, preferred_anim);
     let rigged = !joints.is_empty() && dm.inverse_bindposes.is_some();
+    // The clip this instance runs (the missile's InFlight, else the file-order-first) — the same
+    // pick `arm_effect_rig` armed. Its **file sequence slot** is the key into each batch's
+    // per-sequence material-alpha loops: an effect that plays a non-first sequence must read that
+    // sequence's authored batch visibility, not sequence 0's.
+    let played = dm
+        .animations
+        .as_ref()
+        .and_then(|a| a.preferred_clip(preferred_anim));
+    let played_seq = played.map(|c| c.seq_index);
     commands.entity(root).with_children(|children| {
         for (part, material) in parts.iter().zip(&part_materials) {
             if part.billboard.is_some() {
@@ -360,7 +369,8 @@ pub(super) fn attach_effect_visuals(
             // The part's colour-alpha × weight loops, on this instance's clock: the sampler owns
             // the child's render-alpha tag (`drives_tag` — no other writer touches fx parts).
             if let Some(anim) = &part.alpha_anim {
-                let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now);
+                let mat_anim =
+                    crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
                 child.insert((
                     bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
                     mat_anim,
@@ -388,7 +398,7 @@ pub(super) fn attach_effect_visuals(
         ));
         // A card shares its batch's material-alpha loops (the billboard split copies them).
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now);
+            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
             spawned.insert((
                 bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
                 mat_anim,
@@ -428,7 +438,7 @@ pub(super) fn attach_effect_visuals(
             blend: part.blend,
         });
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now);
+            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
             spawned.insert((
                 bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
                 mat_anim,
@@ -453,14 +463,9 @@ pub(super) fn attach_effect_visuals(
             Some(root),
         );
     }
-    // The sequence this instance runs (the missile's InFlight, else the first clip) — its
-    // ribbons' per-sequence visibility keys off it, so the thrown weapon's trail shows in flight
-    // and never in the worn hand.
-    let played_anim = dm
-        .animations
-        .as_ref()
-        .and_then(|a| a.preferred_clip(preferred_anim))
-        .map(|c| c.anim_id);
+    // The same pick, as an `AnimationData` id — the ribbons' per-sequence visibility keys off it,
+    // so the thrown weapon's trail shows in flight and never in the worn hand.
+    let played_anim = played.map(|c| c.anim_id);
     for rb in &dm.ribbons {
         let (owner, use_pivot) = joints
             .get(rb.def.bone as usize)

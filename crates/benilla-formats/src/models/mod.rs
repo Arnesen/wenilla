@@ -34,7 +34,7 @@ pub use anim_summary::*;
 pub use bounds::*;
 pub use collision::*;
 pub use m2_batches::*;
-pub use mat_anim::{AlphaAnim, RgbAnim, ScalarAnim};
+pub use mat_anim::{AlphaAnim, AlphaSeq, RgbAnim, ScalarAnim};
 pub use records::*;
 pub use tex_anim::UvAnim;
 pub use types::*;

@@ -194,6 +194,7 @@ mod tests {
             graph: graph_handle.clone(),
             clips: vec![AnimClip {
                 anim_id: 0,
+                seq_index: 0,
                 node,
                 looping: true,
                 duration: DUR,

@@ -46,9 +46,13 @@ mod state;
 mod swim;
 mod wire_in;
 
+// `apply_self_model_fade` is `pub(crate)`-visible: it is the LAST writer of a self body part's
+// render-alpha field, so the unit-lane material-alpha compose (`entities::apply_unit_mat_alpha`)
+// orders itself before it and lets that documented override stand.
+pub(crate) use camera::apply_self_model_fade;
 use camera::{
-    apply_self_model_fade, apply_zoom_scroll, run_look_session, seat_camera, CameraProbe, FlyCam,
-    LookButton, CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT, CAM_PIVOT_FALLBACK,
+    apply_zoom_scroll, run_look_session, seat_camera, CameraProbe, FlyCam, LookButton,
+    CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT, CAM_PIVOT_FALLBACK,
 };
 pub(crate) use camera::{head_height, CameraControl, CameraPivot, WorldCamera, CAM_NEAR};
 // The shared avatar state + movement constants live in [`state`]; the private re-imports below are
@@ -223,9 +227,14 @@ fn control(
             ),
         >,
         Query<&ChildOf>,
+        // The player's live WMO-interior claim — the liquid query's delegation key: inside a
+        // building only that building's own MLIQ answers, outdoors only the ADT's (decision 0634,
+        // the "swim in air" fix). Fourth slot here rather than a 17th top-level param.
+        Res<crate::wmo_portal::CurrentWmoInterior>,
     ),
 ) {
     let (water, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
+    let indoors = world_q.3 .0.is_some();
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
     let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
         return;
@@ -659,7 +668,7 @@ fn control(
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
         // doesn't flicker between the two physics regimes.
-        let surface_y = swim::surface_over_feet(water, player.pos);
+        let surface_y = swim::surface_over_feet(water, player.pos, indoors);
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
         // Space while swimming = the ref's Jump routing (decision 0487, superseding 0479),
         // fired on the PRESS EDGE only — one hop per press, a held key does not re-fire

@@ -23,6 +23,7 @@ use crate::net::NetCommands;
 fn clip(anim_id: u16, node: u32, looping: bool) -> AnimClip {
     AnimClip {
         anim_id,
+        seq_index: 0,
         node: AnimationNodeIndex::new(node as usize),
         looping,
         duration: 1.0,

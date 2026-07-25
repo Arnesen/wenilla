@@ -11,18 +11,22 @@
 
     DEVIATIONS, deliberate (each waits for its arc):
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
-      BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: TRADE, INSPECT,
-      FOLLOW, DUEL (their CMSG families are their own slices), TARGET (the friends list),
-      GUILD_PROMOTE/GUILD_LEAVE (the guild arc), RESET_INSTANCES (instances). Everything a menu
-      SHOWS works. The PET menu and the RAID_* rank rows stay in the tables but are unreachable
-      (no "pet" token, no raid roster) — their OnClick branches are trimmed with the rest.
+      BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: FOLLOW (its CMSG
+      family is its own slice), TARGET (the friends list), GUILD_PROMOTE/GUILD_LEAVE (the guild
+      arc), RESET_INSTANCES (instances). TRADE came out with decision 0592 P1, DUEL with 0633,
+      INSPECT with 0631. Everything a menu SHOWS works. The PET menu and the RAID_* rank rows stay
+      in the tables but are unreachable (no "pet" token, no raid roster) — their OnClick branches
+      are trimmed with the rest.
     - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub → the
       TEXT stub below keeps the table lines verbatim (the ref's TEXT() is the localization
       identity).
     - The newbie tooltips on rows are OUT with the kit's (default-off cvar look).
-    - CheckInteractDistance is nil-guarded in the OnUpdate pass: every currently-shown row is
-      dist 0, and the guard keeps a future un-hidden row honest (no range gating) instead of
-      erroring.
+    - CheckInteractDistance now really gates (decision 0631): the binding landed with the inspect
+      row, off wow-re's §5-VERIFIED `check_interact_dist2` table {10², 11.1111², 10², 30²}. So every
+      SHOWN row with a non-zero `dist` grays out of range now — INSPECT (dist 1, 10 yd), TRADE
+      (dist 2, 11.11 yd) and DUEL (dist 3, 10 yd) — where TRADE and DUEL shipped ungated only
+      because the binding was nil when they landed. The nil-guard in the OnUpdate pass below is
+      kept as-is.
 -->
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
     <Script><![CDATA[
@@ -122,7 +126,7 @@
 
         -- The DEFERRED set (header): entries hidden until their backing arc lands.
         BENILLA_UNITPOPUP_DEFERRED = {
-            INSPECT = 1, FOLLOW = 1, DUEL = 1, TARGET = 1,
+            FOLLOW = 1, TARGET = 1,
             GUILD_PROMOTE = 1, GUILD_LEAVE = 1, RESET_INSTANCES = 1,
         };
 
@@ -298,6 +302,12 @@
                     -- Hidden until its arc lands (header) — checked FIRST so the ref chain
                     -- below never resurrects one.
                     UnitPopupShown[index] = 0;
+                elseif ( value == "DUEL" ) then
+                    -- Ref UnitPopup.lua l.311: shown only for a unit we can cooperate with — an
+                    -- enemy-faction player is already attackable, so there is nothing to arrange.
+                    if ( canCoop == 0 ) then
+                        UnitPopupShown[index] = 0;
+                    end
                 elseif ( value == "TRADE" ) then
                     -- Only shown for a unit we can cooperate with (ref UnitPopup.lua l.285) — you
                     -- cannot trade an enemy-faction player, so the row is hidden, not just doomed.
@@ -446,6 +456,16 @@
                                 if ( inParty == 0 or isLeader == 0 ) then
                                     enable = 0;
                                 end
+                            elseif ( value == "DUEL" ) then
+                                -- Ref UnitPopup.lua l.502-505, verbatim: greyed while either
+                                -- party is dead or a ghost, or while we lack full control
+                                -- (feared/charmed) — `HasFullControl` is nil-guarded like
+                                -- CheckInteractDistance above: benilla models no loss of control
+                                -- yet, so the clause is inert rather than an error. The row also
+                                -- carries dist = 3, so the shared range leg gates it too.
+                                if ( UnitIsDeadOrGhost("player") or (HasFullControl and not HasFullControl()) or UnitIsDeadOrGhost(dropdownFrame.unit) ) then
+                                    enable = 0;
+                                end
                             elseif ( value == "WHISPER" ) then
                                 if ( dropdownFrame.unit and not UnitIsConnected(dropdownFrame.unit) ) then
                                     enable = 0;
@@ -530,12 +550,20 @@
                     raidTargetIndex = 0;
                 end
                 SetRaidTargetIcon(unit, tonumber(raidTargetIndex));
+            elseif ( button == "DUEL" ) then
+                -- Challenge to a duel (decision 0633): the app resolves the unit token → player
+                -- guid → a cast of the duel spell (ref UnitPopup_OnClick l.559, StartDuelUnit).
+                StartDuelUnit(unit);
             elseif ( button == "TRADE" ) then
                 -- Offer to trade (decision 0592 P1): the app resolves the unit token → player guid
                 -- → CMSG_INITIATE_TRADE (ref UnitPopup_OnClick's TRADE arm, InitiateTrade(unit)).
                 InitiateTrade(unit);
+            elseif ( button == "INSPECT" ) then
+                -- Open the inspect window (decision 0631) — the ref UnitPopup_OnClick's INSPECT arm
+                -- verbatim: InspectUnit(unit), which gates on CanInspect and sends CMSG_INSPECT.
+                InspectUnit(unit);
             end
-            -- DEFERRED branches trimmed with their rows (header): INSPECT/TARGET/DUEL/FOLLOW,
+            -- DEFERRED branches trimmed with their rows (header): TARGET/FOLLOW,
             -- GUILD_*, RESET_INSTANCES, PET_*, RAID_LEADER/PROMOTE/DEMOTE/REMOVE.
             PlaySound("UChatScrollButton");
         end

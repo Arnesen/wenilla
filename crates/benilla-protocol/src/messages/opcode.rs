@@ -110,7 +110,7 @@ pub const SMSG_TRADE_STATUS_EXTENDED: u16 = 0x0121; // 289
 /// (`CMSG_SWAP_ITEM`, "opcode 268" in decimal). Decision 0526.
 pub const CMSG_SET_AMMO: u16 = 0x0268; // 616
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 296 — `MiscHandler.cpp:885`'s `HandleSetActionButtonOpcode`
-/// (decision 0216 §7/0218 §4). Body in [`super::spells::set_action_button`].
+/// (decision 0216 §7/0218 §4). Body in [`super::action_bar::set_action_button`].
 pub const CMSG_SET_ACTION_BUTTON: u16 = 0x0128; // 296
 pub const SMSG_ACTION_BUTTONS: u16 = 0x0129; // 297
 pub const SMSG_INITIAL_SPELLS: u16 = 0x012A; // 298
@@ -131,7 +131,7 @@ pub const SMSG_ATTACKSTART: u16 = 0x0143; // 323
 pub const SMSG_ATTACKSTOP: u16 = 0x0144; // 324
 pub const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A; // 330
 /// Creature aggro/alert flare (VERIFIED vmangos `Opcodes_1_12_1.h`: 316; body in
-/// [`super::spells::read_ai_reaction`]).
+/// [`super::attack::read_ai_reaction`]).
 pub const SMSG_AI_REACTION: u16 = 0x013C; // 316
 
 // The spell-visual pipeline wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 305/306/499/668/678;
@@ -175,7 +175,7 @@ pub const SMSG_UPDATE_AURA_DURATION: u16 = 0x0137; // 311
 
 /// The ding (VERIFIED vmangos `Opcodes_1_12_1.h`: 468) — our own level-up, self-addressed only
 /// (`Player::GiveLevel` builds it with no guid and sends straight to the leveling session). Body
-/// in [`super::spells::read_level_up_info`] — decision 0304.
+/// in [`super::progression::read_level_up_info`] — decision 0304.
 pub const SMSG_LEVELUP_INFO: u16 = 0x01D4; // 468
 
 // The combat-log wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 464/587/590/591/592) — decision 0137
@@ -287,10 +287,18 @@ pub const CMSG_CANCEL_AURA: u16 = 0x0136; // 310
 /// current channel unconditionally) but the real client writes it, so ours does too. Sent by the
 /// cast bar's local self-cancel (`benilla::ui_cast`) when movement/Esc ends our own channel.
 pub const CMSG_CANCEL_CHANNELLING: u16 = 0x013B; // 315
+/// VERIFIED vmangos `Opcodes_1_12_1.h`: 276. Body: a raw 8-byte guid ([`super::full_guid`] —
+/// `WorldPackets::Misc::Inspect`). The server sets our selection to it, refuses beyond
+/// `INSPECT_DISTANCE` (10.0y) or on `IsValidAttackTarget`, and otherwise replies `SMSG_INSPECT`
+/// (277) carrying **only the echoed guid** (`MiscHandler.cpp:943-960`). We deliberately do not
+/// parse that reply: it carries no data, the real client's inspect frame paints from the already-
+/// streamed PUBLIC `PLAYER_VISIBLE_ITEM_*` fields without waiting on it, and no FrameXML handler
+/// registers an inspect event. Decision 0631.
+pub const CMSG_INSPECT: u16 = 0x0114; // 276
 pub const CMSG_SET_SELECTION: u16 = 0x013D; // 317
 pub const CMSG_ATTACKSWING: u16 = 0x0141; // 321
 pub const CMSG_ATTACKSTOP: u16 = 0x0142; // 322
-/// VERIFIED vmangos `Opcodes_1_12_1.h`: 480. Body in [`super::spells::set_sheathed`].
+/// VERIFIED vmangos `Opcodes_1_12_1.h`: 480. Body in [`super::pose::set_sheathed`].
 pub const CMSG_SETSHEATHED: u16 = 0x01E0; // 480
 pub const CMSG_AUTH_SESSION: u16 = 0x01ED;
 pub const CMSG_SET_ACTIVE_MOVER: u16 = 0x026A;
@@ -496,7 +504,7 @@ pub const CMSG_AUTOSTORE_BANK_ITEM: u16 = 0x0282; // 642
 pub const CMSG_AUTOBANK_ITEM: u16 = 0x0283; // 643
 
 /// Spend talent points (VERIFIED vmangos `Opcodes_1_12_1.h`: 593) — body in
-/// [`super::spells::learn_talent`]; the server answers with the rank spell's learn effects
+/// [`super::progression::learn_talent`]; the server answers with the rank spell's learn effects
 /// (`SMSG_LEARNED_SPELL` etc.) and the refreshed `PLAYER_CHARACTER_POINTS1`. Decision 0304.
 pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 
@@ -598,6 +606,23 @@ pub const MSG_RAID_TARGET_UPDATE: u16 = 0x0321; // 801
 /// Same opcode both directions — an empty body starts/requests, a non-empty one answers (VERIFIED
 /// vmangos `Server/Packets/Group.cpp:84-96`, `:126-130`; see [`super::group::ReadyCheck`]).
 pub const MSG_RAID_READY_CHECK: u16 = 0x0322; // 802
+
+// The duel family (decision 0633) — the six inbound handlers WoW.exe registers in
+// `Ui/DuelInfo.cpp` at `0x4d4710` plus the two it sends from `AcceptDuel 0x4d4830` /
+// `CancelDuel 0x4d48b0`; server side VERIFIED vmangos `Server/Packets/Duel.{h,cpp}` +
+// `Handlers/DuelHandler.cpp`. There is no CMSG for *starting* a duel: the challenge is a normal
+// `CMSG_CAST_SPELL` of the spellbook spell whose `Effect[0]` is `SPELL_EFFECT_DUEL` (83).
+// Bodies in [`super::duel`].
+pub const SMSG_DUEL_REQUESTED: u16 = 0x0167; // 359
+pub const SMSG_DUEL_OUTOFBOUNDS: u16 = 0x0168; // 360
+pub const SMSG_DUEL_INBOUNDS: u16 = 0x0169; // 361
+pub const SMSG_DUEL_COMPLETE: u16 = 0x016A; // 362
+pub const SMSG_DUEL_WINNER: u16 = 0x016B; // 363
+pub const CMSG_DUEL_ACCEPTED: u16 = 0x016C; // 364
+pub const CMSG_DUEL_CANCELLED: u16 = 0x016D; // 365
+/// Milliseconds, not seconds — the client divides by 1000 (`0x4d4aef`). Live on 5875 despite the
+/// opcode's high number: `0x4d474a` registers a handler for it alongside the 0x167 block.
+pub const SMSG_DUEL_COUNTDOWN: u16 = 0x02B7; // 695
 
 // The mail arc (decision 0544; VERIFIED vmangos `Opcodes_1_12_1.h` + `Handlers/MailHandler.cpp`).
 // There is no `SMSG_SHOW_MAILBOX` on 5875 — the mailbox window opens entirely client-side; every

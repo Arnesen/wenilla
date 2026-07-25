@@ -50,7 +50,9 @@
 //!
 //! ## Deviations from the ref (deliberate) and what's still coarse
 //!
-//! High-res (256² vs 64²), studio light (fixed neutral vs the ref's ambient state), continuous
+//! High-res (256² vs 64²), a fixed neutral **studio light** on the round portraits (vs the ref's
+//! ambient state — the *body* panes instead carry the reference's own `<PlayerModel>` light, see
+//! [`model_pane_light_rows`]), continuous
 //! booth render vs dirty-byte bake, and the frozen Stand *phase* is t=0 (the ref's sampling clock
 //! is the verdict's one unsettled INFERRED point — t≈0 vs live phase; both are Stand, and t=0
 //! reproduces the ref wolf's open mouth). The creature *loading* stand-in is `-Monster` (our
@@ -84,6 +86,8 @@ pub(crate) use glue_booth::{
     CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard, PreviewPart,
     PreviewRider, SelectLook, GLUE_SLOT,
 };
+mod light;
+use light::{material_variant, model_pane_light_rows, studio_light_rows, BoothLight};
 mod test_bake;
 
 /// The portrait slots we bake, each with its own render layer/camera: the player + target unit
@@ -98,11 +102,18 @@ const SLOTS: [&str; 7] = [
 /// separate resolution ([`PAPERDOLL_SIZE`]), body framing ([`framing::body_frame`]), and a live yaw
 /// ([`PaperDollBooth`]) — so the two portrait slots stay pixel-identical.
 const PAPERDOLL_SLOT: &str = "paperdoll";
+/// The **inspect** window's model pane (decision 0631 §4) — the same full-body bake as
+/// [`PAPERDOLL_SLOT`], pointed at *another* player. It is the composition of what the existing
+/// slots already do separately: body framing like the paper doll, an arbitrary unit like
+/// `"target"`. Both run through [`sync_body_booth`]; only the unit and the yaw differ.
+const INSPECT_SLOT: &str = "inspect";
 /// World is layer 0, the UI quad pass layer 1; portraits sit on their own high layers so nothing in the
 /// world leaks into a booth and vice-versa (one layer per slot: base, base+1, …).
 const PORTRAIT_LAYER_BASE: usize = 2;
 /// The paper-doll booth's render layer — the next layer past the portrait slots.
 const PAPERDOLL_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
+/// The inspect booth's render layer — the next one past the paper doll's.
+const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
 /// The baked image is high-res (vs the ref's 64²) — the crisp modern look. Square; the UI quad
 /// shader cuts the inscribed circle at draw time (`ui_quad.wgsl`'s `circular`, the ref's stencil).
 const PORTRAIT_SIZE: u32 = 256;
@@ -190,6 +201,25 @@ impl Default for PaperDollBooth {
     }
 }
 
+/// The inspect window's model pane input (decision 0631 §4) — the [`PaperDollBooth`] twin, plus
+/// the one thing the paper doll never needs: **which unit**. `unit` is the entity
+/// [`crate::ui_inspect`] resolved the inspected token to this frame, `None` when nothing is being
+/// inspected (or the target isn't streamed), which empties the booth.
+#[derive(Resource)]
+pub(crate) struct InspectBooth {
+    pub(crate) yaw: f32,
+    pub(crate) unit: Option<Entity>,
+}
+
+impl Default for InspectBooth {
+    fn default() -> Self {
+        Self {
+            yaw: 0.61,
+            unit: None,
+        }
+    }
+}
+
 /// The key identifying what a booth currently has baked: the (mesh, material) identity of every
 /// mirrored [`PortraitPart`]. Any change in the unit's dressed look (gear swap, appearance refresh,
 /// different unit) changes the key → re-bake.
@@ -235,104 +265,6 @@ fn wake_booth<'a>(
 #[derive(Resource, Default)]
 struct Booths(HashMap<String, Booth>);
 
-/// The booth's **studio light**: its own copy of the shared-light storage buffer (the canonical
-/// [`crate::lighting::LIGHT_HEADER_ROWS`]-row std430 layout, lit lanes packed by the scene's own
-/// packer), written ONCE at startup with fixed neutral front-lit values — so a portrait reads the
-/// same at noon, midnight, or in a fog bank (the world buffer would render a night portrait pitch
-/// black). `variants` caches, per world
-/// material, its booth twin: an exact clone with only `light_buf` swapped — zero drift from the
-/// world-built material (same texture/blend/flags), different light.
-#[derive(Resource, Default)]
-struct BoothLight {
-    buffer: Option<bevy::render::render_resource::Buffer>,
-    variants: HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
-}
-
-impl BoothLight {
-    /// The booth twin of a world-built material: same everything, booth light buffer. Cached per
-    /// source material so twins dedup exactly like their sources.
-    fn variant(
-        &mut self,
-        world: &Handle<WowModelMaterial>,
-        materials: &mut Assets<WowModelMaterial>,
-    ) -> Handle<WowModelMaterial> {
-        let Some(buffer) = self.buffer.clone() else {
-            return world.clone(); // no booth buffer (headless tests) — fall back to the world light
-        };
-        material_variant(&mut self.variants, &buffer, world, materials, false)
-    }
-}
-
-/// The twin of a world-built material against `buffer`, cached in `variants` — same
-/// texture/blend/flags, only the light storage swapped. [`BoothLight::variant`] is this against
-/// the shared studio buffer; the create scene passes its own authored-rig buffer with `rig` set,
-/// which additionally flips the twin onto the [`crate::model_render::ShadeSel::Rig`] lane (the
-/// probe-slot SH eval + the buffer's point table — the scene's authored M2 light rig, decision
-/// 0429/0435) instead of the world sun/intensity lane the material was built for — and forces the
-/// twin's fog OFF: the glue CHARACTER model takes no fog in the reference (its fill callback
-/// stages none, its collector fog stays zeroed — wow-re `glue-model-lighting.md §5`; the
-/// background scene model, built by `sync_create_scene` with its own fog policy, keeps the
-/// `CharModelFogInfo` fog).
-fn material_variant(
-    variants: &mut HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
-    buffer: &bevy::render::render_resource::Buffer,
-    world: &Handle<WowModelMaterial>,
-    materials: &mut Assets<WowModelMaterial>,
-    rig: bool,
-) -> Handle<WowModelMaterial> {
-    if let Some(twin) = variants.get(&world.id()) {
-        return twin.clone();
-    }
-    let Some(mat) = materials.get(world) else {
-        return world.clone();
-    };
-    let mut twin = mat.clone();
-    twin.extension.light_buf = buffer.clone();
-    if rig {
-        twin.extension.sun_scale.x = crate::model_render::ShadeSel::Rig.selector();
-        // Force fog OFF while preserving every pipeline marker `specialize` keys on (bits 0-3
-        // AND the 0528 multiply markers, bits 7-8) — the mask is owned by `model_render`, next
-        // to the packer. A hand-rolled `as u8 & 0x0f` here once dropped the multiply markers
-        // and alpha-blended the char-select weapon sheen into a white blade.
-        twin.extension.clutter_fade.z = crate::model_render::replace_fog_policy(
-            twin.extension.clutter_fade.z,
-            benilla_formats::FogPolicy::Off,
-        );
-    }
-    let handle = materials.add(twin);
-    variants.insert(world.id(), handle.clone());
-    handle
-}
-
-/// The fixed studio-light rows (the shared-light std430 layout): neutral warm-white ambient +
-/// diffuse, the sun travelling from the camera's three-quarter side INTO the scene (so the face the
-/// portrait shows is the lit one), fog OFF (row 4 w=0), point lights off (row 12.w).
-///
-/// The lit-lane rows (0-2, the SH block, the sun DC) come from the SAME packer the scene light
-/// uses ([`crate::lighting::pack_model_core_rows`]) — this function used to hand-copy the layout
-/// and rendered black portraits the day 0354 moved the lit lanes onto rows it never wrote. Only
-/// the studio *values* live here; the layout lives in one place.
-fn studio_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADER_ROWS] {
-    // −sun_dir is the to-light vector: toward the camera side (−Z, a bit of −X from the yaw, up).
-    let sun_dir = Vec3::new(0.25, -0.45, 0.85).normalize();
-    let mut rows = [[0.0f32; 4]; crate::lighting::LIGHT_HEADER_ROWS];
-    crate::lighting::pack_model_core_rows(
-        &mut rows,
-        [0.58, 0.56, 0.54], // studio ambient — neutral warm-white
-        [0.85, 0.82, 0.78], // studio diffuse
-        sun_dir,
-    );
-    rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; w = terrain shininess convention)
-    rows[4] = [0.0, 0.0, 0.0, 0.0]; // fog color, w = 0: fog OFF in the booth
-    rows[5] = [0.0, 10_000.0, 0.0, 10_000.0]; // fog params (inert; farclip wall far away)
-                                              // 19.w = the exterior-intensity dial: booth parts are untagged (shade byte 0), so the exterior
-                                              // lane lands them on the lit 2.5 rung — 0.4 brings the studio to intensity 1.0, the neutral
-                                              // front-lit portrait rather than the noon-saturated outdoor rung. Rows 12.w (point gain) and
-                                              // 17.x (SIDN night) stay 0: no scene hot-spots, no night emissive in the booth.
-    rows[19] = [0.0, 0.0, 0.0, 0.4];
-    rows
-}
-
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
 /// (`BoothCam`, not `PortraitCamera` — that name is the authored M2 rig, `benilla_assets::PortraitCamera`.)
 #[derive(Component)]
@@ -345,6 +277,7 @@ impl Plugin for PortraitPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PortraitImages>()
             .init_resource::<PaperDollBooth>()
+            .init_resource::<InspectBooth>()
             .init_resource::<glue_booth::GluePreview>()
             .init_resource::<glue_booth::GluePreviewBake>()
             .init_resource::<Booths>()
@@ -361,6 +294,7 @@ impl Plugin for PortraitPlugin {
                     test_bake::sync_test_portraits,
                     sync_portraits,
                     sync_paperdoll,
+                    sync_inspect_booth,
                     glue_booth::sync_glue_booth,
                     glue_booth::sync_glue_scene,
                     // Last: it reads the wake/pending state every sync above may have armed.
@@ -416,15 +350,24 @@ fn setup_booths(
     // whole struct and wgpu validates the bound size against it at every draw. Only the studio header
     // rows are written; wgpu zero-initializes the rest, so `point_count = 0` and no scene point light
     // ever touches a portrait (the studio look is deliberately static).
-    let buffer = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-        label: Some("wow_portrait_light"),
-        size: crate::lighting::light_blob_bytes(),
-        usage: bevy::render::render_resource::BufferUsages::STORAGE
-            | bevy::render::render_resource::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&studio_light_rows()));
-    booth_light.buffer = Some(buffer);
+    let light_buffer =
+        |label: &'static str, rows: [[f32; 4]; crate::lighting::LIGHT_HEADER_ROWS]| {
+            let buffer = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+                label: Some(label),
+                size: crate::lighting::light_blob_bytes(),
+                usage: bevy::render::render_resource::BufferUsages::STORAGE
+                    | bevy::render::render_resource::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&rows));
+            buffer
+        };
+    booth_light.studio.buffer = Some(light_buffer("wow_portrait_light", studio_light_rows()));
+    // The body panes' own light — the reference `<PlayerModel>` widget's (see the fn's doc).
+    booth_light.pane.buffer = Some(light_buffer(
+        "wow_model_pane_light",
+        model_pane_light_rows(),
+    ));
 
     for (i, token) in SLOTS.iter().enumerate() {
         let image = images.add(new_target_image(PORTRAIT_SIZE));
@@ -459,7 +402,7 @@ fn setup_booths(
             // booth needs the same final node — the FFXGlow combine owns the frame's ONE decode.
             // This also keeps the bake at exact world parity (same glow, same transform chain);
             // without it the portrait reads one encode too bright.
-            crate::ffx_glow::FfxGlow,
+            crate::ffx_glow::FfxGlow::WORLD,
             Msaa::Off,
             Projection::from(PerspectiveProjection {
                 fov: PORTRAIT_FOV,
@@ -483,25 +426,31 @@ fn setup_booths(
         );
     }
 
-    // The paper-doll booth (decision 0208 §5): same off-screen pipeline as the portrait slots
-    // (transparent target, studio light, HDR + FfxGlow, negative order so the bake is ready before
-    // the world/UI cameras), but its own 512² target, its own layer, and a body-framing projection
-    // (aimed per-bake by `sync_paperdoll`). Kept a separate spawn so the two portrait cameras above
-    // stay byte-for-byte what the director approved.
+    // The two **body** booths — the character window's paper doll (decision 0208 §5) and the
+    // inspect window's pane (decision 0631 §4). Same off-screen pipeline as the portrait slots
+    // (transparent target, HDR + the FFXGlow node, negative order so the bake is ready before
+    // the world/UI cameras), but their own 512² targets, their own layers, and a body-framing
+    // projection (aimed per-bake by `sync_body_booth`). Kept a separate spawn from the portrait
+    // loop above so those two cameras stay byte-for-byte what the director approved.
+    for (i, (slot, layer_index)) in [
+        (PAPERDOLL_SLOT, PAPERDOLL_LAYER),
+        (INSPECT_SLOT, INSPECT_LAYER),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let image = images.add(new_target_image(PAPERDOLL_SIZE));
-        portraits.0.insert(
-            PAPERDOLL_SLOT.to_string(),
-            PortraitSource::Live(image.clone()),
-        );
-        let layer = RenderLayers::layer(PAPERDOLL_LAYER);
+        portraits
+            .0
+            .insert(slot.to_string(), PortraitSource::Live(image.clone()));
+        let layer = RenderLayers::layer(layer_index);
         let root = commands
             .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
             .id();
         commands.spawn((
             Camera3d::default(),
             Camera {
-                order: -100 + SLOTS.len() as isize,
+                order: -100 + (SLOTS.len() + i) as isize,
                 // A near-black backdrop like the portraits (the pipeline is proven opaque; the pane
                 // reads as a recessed dark panel, close to the ref's model-frame background). A
                 // transparent float-over-the-frame-art backdrop is a director's-call follow-up.
@@ -511,9 +460,12 @@ fn setup_booths(
             RenderTarget::Image(image.clone().into()),
             bevy::render::view::Hdr,
             Tonemapping::None,
-            crate::ffx_glow::FfxGlow,
+            // Decode, but NO glow: these two stand in for 1.12 `<PlayerModel>` widgets, which the
+            // reference paints in the UI strata — after the WorldFrame's own FFX apply — so they
+            // never carry the scene glow (decision 0638; [`crate::ffx_glow::FfxGlow::UI_PANE`]).
+            crate::ffx_glow::FfxGlow::UI_PANE,
             Msaa::Off,
-            // Placeholder — `sync_paperdoll` overwrites transform + projection from the player's
+            // Placeholder — `sync_body_booth` overwrites transform + projection from the unit's
             // bounds on the first bake. A plain perspective is harmless while the model is loading.
             Projection::from(PerspectiveProjection {
                 fov: PORTRAIT_FOV,
@@ -522,10 +474,10 @@ fn setup_booths(
                 ..default()
             }),
             layer.clone(),
-            BoothCam(PAPERDOLL_SLOT.to_string()),
+            BoothCam(slot.to_string()),
         ));
         booths.0.insert(
-            PAPERDOLL_SLOT.to_string(),
+            slot.to_string(),
             Booth {
                 layer,
                 root,
@@ -706,14 +658,14 @@ fn sync_portraits(
                 .map(|p| BoothPart {
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
-                    material: booth_light.variant(&p.material, &mut wow_mats),
+                    material: booth_light.studio.variant(&p.material, &mut wow_mats),
                 })
                 .collect();
             let booth_riders: Vec<BoothRider> = riders
                 .iter()
                 .map(|r| BoothRider {
                     mesh: r.static_mesh.clone(),
-                    material: booth_light.variant(&r.material, &mut wow_mats),
+                    material: booth_light.studio.variant(&r.material, &mut wow_mats),
                     bone: r.bone,
                     offset: r.offset,
                 })
@@ -724,7 +676,7 @@ fn sync_portraits(
                 .iter()
                 .map(|b| BoothBillboardSpec {
                     mesh: b.mesh.clone(),
-                    material: booth_light.variant(&b.material, &mut wow_mats),
+                    material: booth_light.studio.variant(&b.material, &mut wow_mats),
                     bone: b.bone,
                     kind: b.kind,
                 })
@@ -810,23 +762,100 @@ fn sync_paperdoll(
     if test_mode(&mut env_cache) {
         return; // the test bake owns the booths (it drives the paper doll too, see `bake_test`)
     }
-    let Some(booth) = booths.0.get_mut(PAPERDOLL_SLOT) else {
+    sync_body_booth(
+        PAPERDOLL_SLOT,
+        self_q.single().ok(),
+        paperdoll.yaw,
+        &mut last_yaw,
+        &mut commands,
+        &mut booths,
+        &mut portraits,
+        &mut booth_light,
+        creatures.as_deref(),
+        &ent_q,
+        &look,
+        &mut wow_mats,
+        &mut cams,
+        anim_data.as_deref(),
+    );
+}
+
+/// The inspect window's model pane (decision 0631 §4) — the paper doll's exact twin, pointed at
+/// whichever unit [`crate::ui_inspect`] resolved this frame instead of at the self player.
+#[allow(clippy::too_many_arguments)]
+fn sync_inspect_booth(
+    mut commands: Commands,
+    mut booths: ResMut<Booths>,
+    mut portraits: ResMut<PortraitImages>,
+    mut booth_light: ResMut<BoothLight>,
+    creatures: Option<Res<Creatures>>,
+    ent_q: Query<&NetEntity>,
+    look: DressedLook,
+    inspect: Res<InspectBooth>,
+    mut wow_mats: ResMut<Assets<WowModelMaterial>>,
+    mut env_cache: Local<Option<bool>>,
+    mut last_yaw: Local<Option<f32>>,
+    mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    anim_data: Option<Res<crate::creature_anim::AnimData>>,
+) {
+    if test_mode(&mut env_cache) {
+        return;
+    }
+    sync_body_booth(
+        INSPECT_SLOT,
+        inspect.unit,
+        inspect.yaw,
+        &mut last_yaw,
+        &mut commands,
+        &mut booths,
+        &mut portraits,
+        &mut booth_light,
+        creatures.as_deref(),
+        &ent_q,
+        &look,
+        &mut wow_mats,
+        &mut cams,
+        anim_data.as_deref(),
+    );
+}
+
+/// Bake `unit`'s full-body dressed look into the `slot` booth at `yaw` — the shared body of both
+/// body booths (decision 0208 §5 for the paper doll, 0631 §4 for inspect). `unit` is `None` when
+/// there is nothing to show, which empties the booth.
+#[allow(clippy::too_many_arguments)]
+fn sync_body_booth(
+    slot: &str,
+    unit: Option<Entity>,
+    yaw: f32,
+    last_yaw: &mut Option<f32>,
+    commands: &mut Commands,
+    booths: &mut Booths,
+    portraits: &mut PortraitImages,
+    booth_light: &mut BoothLight,
+    creatures: Option<&Creatures>,
+    ent_q: &Query<&NetEntity>,
+    look: &DressedLook,
+    wow_mats: &mut Assets<WowModelMaterial>,
+    cams: &mut Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    anim_data: Option<&crate::creature_anim::AnimData>,
+) {
+    let Some(booth) = booths.0.get_mut(slot) else {
         return;
     };
     // There is no 2D stand-in for a body pane — the bridge always points at the live target (an
-    // empty booth just renders the dark backdrop until the player model attaches).
+    // empty booth just renders the dark backdrop until the unit's model attaches).
     let live = PortraitSource::Live(booth.target.clone());
-    if portraits.0.get(PAPERDOLL_SLOT) != Some(&live) {
-        portraits.0.insert(PAPERDOLL_SLOT.to_string(), live);
+    if portraits.0.get(slot) != Some(&live) {
+        portraits.0.insert(slot.to_string(), live);
     }
-    // The player's dressed look — the same `PortraitPart`/`PortraitRider` descendants the "player"
-    // portrait slot mirrors. Empty while there's no player, or its model hasn't attached yet.
-    let (parts, riders, billboards) = match self_q.single() {
-        Ok(unit) => look.collect(unit),
-        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+    // The unit's dressed look — the same `PortraitPart`/`PortraitRider` descendants the portrait
+    // slots mirror. Empty while there's no unit, or its model hasn't attached yet.
+    let (parts, riders, billboards) = match unit {
+        Some(unit) => look.collect(unit),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
     if parts.is_empty() {
-        // No player / model not attached → empty the booth and forget the applied yaw (so it
+        // No unit / model not attached → empty the booth and forget the applied yaw (so it
         // re-applies on the next bake).
         if booth.baked.is_some() {
             commands.entity(booth.root).despawn_related::<Children>();
@@ -838,9 +867,7 @@ fn sync_paperdoll(
         }
         return;
     }
-    let unit = self_q
-        .single()
-        .expect("player present — parts came from its descendants");
+    let unit = unit.expect("unit present — parts came from its descendants");
     let key: PartsKey = parts
         .iter()
         .map(|p| (p.static_mesh.id(), p.material.id()))
@@ -851,7 +878,6 @@ fn sync_paperdoll(
     if parts_changed {
         let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
         let rig = creatures
-            .as_deref()
             .zip(display_id)
             .and_then(|(c, d)| c.display_rig(d));
         let booth_parts: Vec<BoothPart> = parts
@@ -859,14 +885,14 @@ fn sync_paperdoll(
             .map(|p| BoothPart {
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
-                material: booth_light.variant(&p.material, &mut wow_mats),
+                material: booth_light.pane.variant(&p.material, wow_mats),
             })
             .collect();
         let booth_riders: Vec<BoothRider> = riders
             .iter()
             .map(|r| BoothRider {
                 mesh: r.static_mesh.clone(),
-                material: booth_light.variant(&r.material, &mut wow_mats),
+                material: booth_light.pane.variant(&r.material, wow_mats),
                 bone: r.bone,
                 offset: r.offset,
             })
@@ -877,14 +903,14 @@ fn sync_paperdoll(
             .iter()
             .map(|b| BoothBillboardSpec {
                 mesh: b.mesh.clone(),
-                material: booth_light.variant(&b.material, &mut wow_mats),
+                material: booth_light.pane.variant(&b.material, wow_mats),
                 bone: b.bone,
                 kind: b.kind,
             })
             .collect();
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
-            &mut commands,
+            commands,
             booth.root,
             booth.layer.clone(),
             &booth_parts,
@@ -894,14 +920,13 @@ fn sync_paperdoll(
                     .as_ref()
                     .map(|ibp| (r.skeleton, ibp, r.animations))
             }),
-            anim_data.as_deref().map(|a| &a.0),
+            anim_data.map(|a| &a.0),
             BoothMotion::Frozen,
             [false, false], // a still portrait sheaths its weapons — no in-hand grip
             &booth_billboards,
         );
         // Body framing from the display's bounds — the full standing figure, feet-to-crown.
         let anchors = creatures
-            .as_deref()
             .zip(display_id)
             .and_then(|(c, d)| c.display_anchors(d))
             .unwrap_or(PortraitAnchors {
@@ -910,10 +935,10 @@ fn sync_paperdoll(
                 pivot_height: 0.0,
                 ground_radius: 0.0,
             });
-        aim(&mut cams, PAPERDOLL_SLOT, &body_frame(&anchors));
+        aim(cams, slot, &body_frame(&anchors));
         wake_booth(
             booth,
-            &wow_mats,
+            wow_mats,
             booth_parts
                 .iter()
                 .map(|p| &p.material)
@@ -925,7 +950,6 @@ fn sync_paperdoll(
     // Yaw → the model root's rotation (the ref's `Model:SetRotation`; a spin about WoW +Z-up
     // conjugates to a spin about Bevy +Y-up). Applied on a fresh bake (new root children) or
     // whenever the pane's yaw moves — never touched on an otherwise-idle frame.
-    let yaw = paperdoll.yaw;
     if parts_changed || *last_yaw != Some(yaw) {
         commands
             .entity(booth.root)

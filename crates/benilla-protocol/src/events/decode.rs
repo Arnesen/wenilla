@@ -418,6 +418,26 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::ReadyCheckAnswer { guid, ready } => {
             vec![SessionEvent::ReadyCheckAnswer { guid, ready }]
         }
+        ServerPacket::DuelRequested {
+            arbiter,
+            challenger,
+        } => vec![SessionEvent::DuelRequested {
+            arbiter,
+            challenger,
+        }],
+        ServerPacket::DuelOutOfBounds => vec![SessionEvent::DuelOutOfBounds],
+        ServerPacket::DuelInBounds => vec![SessionEvent::DuelInBounds],
+        ServerPacket::DuelComplete { started } => vec![SessionEvent::DuelComplete { started }],
+        ServerPacket::DuelWinner {
+            fled,
+            winner,
+            loser,
+        } => vec![SessionEvent::DuelWinner {
+            fled,
+            winner,
+            loser,
+        }],
+        ServerPacket::DuelCountdown { seconds } => vec![SessionEvent::DuelCountdown { seconds }],
         ServerPacket::DestroyObject { guid } => vec![SessionEvent::ObjectDestroyed(guid)],
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]

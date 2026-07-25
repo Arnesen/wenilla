@@ -9,6 +9,10 @@ use benilla_protocol::{decode, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
+/// vmangos `INTERACTION_DISTANCE` (`Objects/ObjectDefines.h:24`) — the range every NPC service
+/// opcode is gated on, silently.
+const INTERACTION_DISTANCE: f32 = 5.0;
+
 pub(crate) struct Vendor;
 
 impl Probe for Vendor {
@@ -37,13 +41,30 @@ impl Probe for Vendor {
             world
                 .vendors
                 .iter()
-                .map(|(&g, vp)| (g, (vp[0] - p[0]).hypot(vp[1] - p[1])))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(&g, vp)| (g, *vp, (vp[0] - p[0]).hypot(vp[1] - p[1])))
+                .min_by(|a, b| a.2.total_cmp(&b.2))
         });
-        let (vendor_guid, dist) = vendor.context(
+        let (vendor_guid, vendor_pos, dist) = vendor.context(
             "no UNIT_NPC_FLAG_VENDOR creature streamed in range (fresh Northshire spawn has none — \
              re-run with a longer --seconds after moving toward a vendor, or grant GM to teleport)",
         )?;
+        // The server refuses SILENTLY past interaction range, so an out-of-range send looks exactly
+        // like a broken wire: no packet, a 5s drain, "nothing arrived". Name the real cause here
+        // instead of leaving it to be re-diagnosed. VERIFIED vmangos `INTERACTION_DISTANCE = 5.0f`
+        // (`Objects/ObjectDefines.h:24`), checked by `Player::CanInteractWithNPC`'s last gate
+        // (`Objects/Player.cpp:2556`) — a 3D check with both bounding radii allowed for, so this 2D
+        // screen is approximate and deliberately generous.
+        if dist > INTERACTION_DISTANCE {
+            bail!(
+                "nearest vendor {vendor_guid:#x} is {dist:.1} yd away; vmangos refuses \
+                 CMSG_LIST_INVENTORY past INTERACTION_DISTANCE ({INTERACTION_DISTANCE:.0} yd) and \
+                 answers nothing at all. Stand on it and re-run:\n    \
+                 --say \".go xyz {:.1} {:.1} {:.1} 0\"",
+                vendor_pos[0],
+                vendor_pos[1],
+                vendor_pos[2],
+            );
+        }
         println!(
             "nearest vendor: guid {vendor_guid:#x} ({dist:.1} yd) — sending CMSG_LIST_INVENTORY"
         );
