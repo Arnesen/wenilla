@@ -6,14 +6,14 @@ use crate::wire::Vector3d;
 
 use super::{
     ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
-    CorpseLocation, DamageShield, EnvironmentalDamageLog, GameObjectQueryInfo, GossipOption,
-    GroupLootInfo, GroupMemberEntry, InitWorldStates, ItemInfo, ItemPushResult, JumpInfo,
-    LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
-    Object, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
-    QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody,
-    SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
-    TransportPose, VendorItem, XpGain,
+    CorpseLocation, DamageShield, EnvironmentalDamageLog, FriendEntry, FriendStatusUpdate,
+    GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry, InitWorldStates, ItemInfo,
+    ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon,
+    LootStartRoll, MailListEntry, Object, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete,
+    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
+    ResurrectRequestBody, SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo,
+    SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended,
+    TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -741,10 +741,25 @@ pub enum ServerPacket {
         counter: u32,
         on: bool,
     },
+    /// `SMSG_LOGOUT_COMPLETE` — the world session is over; we are back at character select.
     LogoutComplete,
+    /// `SMSG_LOGOUT_RESPONSE` — the server's answer to `CMSG_LOGOUT_REQUEST`, and the ONLY thing
+    /// that decides whether logging out is instant or a countdown. Body `{u32 reason, u8 instant}`
+    /// (vmangos `WorldPackets::Misc::LogoutResponse`; the real client reads the same pair — wow-re
+    /// `system/net/ledger.tsv` 0x5b4630 `Handle(0x4c) — {u32, u8}`).
+    ///
+    /// `reason` non-zero is a REFUSAL and no logout starts (vmangos `HandleLogoutRequestOpcode`:
+    /// 1 in combat, 3 jumping/falling, 2 GM-frozen). `instant` is set when the server logs you out
+    /// on the spot — resting (an inn or a city), on a taxi, or a GM account — in which case
+    /// `LogoutComplete` follows immediately; otherwise a 20-second server-side timer runs, which is
+    /// what the client's CAMP/QUIT dialog counts down.
     LogoutResponse {
-        result: u32,
+        reason: u32,
+        instant: bool,
     },
+    /// `SMSG_LOGOUT_CANCEL_ACK` — the server dropped a pending logout at our `CMSG_LOGOUT_CANCEL`.
+    /// Empty body; it is what takes the countdown dialog back down (`LOGOUT_CANCEL`).
+    LogoutCancelAck,
     /// `SMSG_PONG` — the echo of our `CMSG_PING`'s sequence number (the keepalive's return leg;
     /// the io layer matches it against the ping clock to measure the round-trip).
     Pong {
@@ -855,6 +870,20 @@ pub enum ServerPacket {
     DuelCountdown {
         seconds: u32,
     },
+    /// `SMSG_FRIEND_LIST` — the whole friend list, guids + presence (decision 0668). Pushed
+    /// unasked at login and on every `CMSG_FRIEND_LIST`; always complete, never a delta.
+    FriendList {
+        friends: Vec<FriendEntry>,
+    },
+    /// `SMSG_IGNORE_LIST` — the whole ignore list: guids and nothing else.
+    IgnoreList {
+        guids: Vec<u64>,
+    },
+    /// `SMSG_FRIEND_STATUS` — one result about one player: the ack for an add/remove, or the
+    /// login/logout broadcast every friend-lister receives.
+    FriendStatus(FriendStatusUpdate),
+    /// `SMSG_WHO` — the `/who` answer: up to 49 rows plus the true match total.
+    WhoResults(WhoResults),
     /// A `SMSG_SPLINE_SET_*_SPEED` — a speed change on a unit we don't control (a creature, or a
     /// player mid-spline): `[packed guid][f32 speed]`, no counter, no ack (decision 0441 — how an
     /// observed unit's mounted speed reaches us).
@@ -1107,6 +1136,7 @@ impl ServerPacket {
             ServerPacket::WaterWalk { on: false, .. } => "SMSG_MOVE_LAND_WALK".into(),
             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),
             ServerPacket::LogoutResponse { .. } => "SMSG_LOGOUT_RESPONSE".into(),
+            ServerPacket::LogoutCancelAck => "SMSG_LOGOUT_CANCEL_ACK".into(),
             ServerPacket::Pong { .. } => "SMSG_PONG".into(),
             ServerPacket::ForceSpeedChange { kind, .. } => {
                 format!("SMSG_FORCE_{kind:?}_SPEED_CHANGE")
@@ -1135,6 +1165,10 @@ impl ServerPacket {
             ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),
             ServerPacket::DuelWinner { .. } => "SMSG_DUEL_WINNER".into(),
             ServerPacket::DuelCountdown { .. } => "SMSG_DUEL_COUNTDOWN".into(),
+            ServerPacket::FriendList { .. } => "SMSG_FRIEND_LIST".into(),
+            ServerPacket::IgnoreList { .. } => "SMSG_IGNORE_LIST".into(),
+            ServerPacket::FriendStatus(..) => "SMSG_FRIEND_STATUS".into(),
+            ServerPacket::WhoResults(..) => "SMSG_WHO".into(),
             ServerPacket::SplineSpeedChange { kind, .. } => {
                 format!("SMSG_SPLINE_SET_{kind:?}_SPEED")
             }

@@ -96,6 +96,7 @@ mod ui_gossip;
 mod ui_inspect;
 mod ui_item_text;
 mod ui_items;
+mod ui_logout;
 mod ui_loot;
 mod ui_loot_roll;
 mod ui_mail;
@@ -108,6 +109,7 @@ mod ui_quest_log;
 mod ui_script;
 mod ui_session;
 mod ui_shapeshift;
+mod ui_social;
 mod ui_spellbook;
 mod ui_talent;
 mod ui_taxi;
@@ -172,6 +174,7 @@ use ui_duel::UiDuelPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
+use ui_logout::UiLogoutPlugin;
 use ui_loot::UiLootPlugin;
 use ui_loot_roll::UiLootRollPlugin;
 use ui_mail::UiMailPlugin;
@@ -183,6 +186,7 @@ use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
 use ui_script::UiScriptPlugin;
 use ui_shapeshift::UiShapeshiftPlugin;
+use ui_social::UiSocialPlugin;
 use ui_spellbook::UiSpellbookPlugin;
 use ui_talent::UiTalentPlugin;
 use ui_taxi::UiTaxiPlugin;
@@ -326,6 +330,16 @@ fn main() {
                                 thread_qos::QosClass::UserInteractive,
                             )
                         })),
+                        // `WOW_THREADS=1` serialises the systems that run this frame. Not a
+                        // performance dial — a **diagnostic**: a defect that alternates frame to
+                        // frame with no camera, geometry or draw-order change behind it is what an
+                        // unordered write between two systems looks like, and that is separable from
+                        // every other cause only by taking the concurrency away. Anything that
+                        // survives `WOW_THREADS=1` is not a race.
+                        max_threads: match std::env::var("WOW_THREADS").ok().as_deref() {
+                            Some("1") => 1,
+                            _ => TaskPoolOptions::default().compute.max_threads,
+                        },
                         ..TaskPoolOptions::default().compute
                     },
                     ..default()
@@ -481,6 +495,10 @@ fn main() {
     // Duels (decision 0633): the wire session, the client-side countdown tick, the four Era
     // events, and the accept/cancel/challenge intents.
     .add_plugins(UiDuelPlugin)
+    // Leaving (decision 0674): the game menu's Logout/Exit Game — the request, the server's
+    // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
+    .add_plugins(UiLogoutPlugin)
+    .add_plugins(UiSocialPlugin)
     .add_plugins(UiTooltipPlugin)
     // The character-window feed (decision 0208): the combat-stats/inventory snapshots + events
     // the paper doll reads, and the paper-doll booth's yaw mirror.
@@ -619,6 +637,20 @@ fn main() {
     // right behind it" (see `capture::PickProbePlugin`).
     if std::env::var("WOW_PICK").is_ok() {
         app.add_plugins(capture::PickProbePlugin);
+    }
+    // The render-phase census: `WOW_PHASE=<uniqueId>` reports, per frame, which phase each of one
+    // placement's batches landed in and where in the draw order — the one thing every scene-side
+    // instrument is blind to, namely whether a surface was submitted at all (see
+    // `capture::PhaseProbePlugin`).
+    if std::env::var("WOW_PHASE").is_ok() {
+        app.add_plugins(capture::PhaseProbePlugin);
+    }
+    // The depth readback: `WOW_DEPTH="<x>,<y>"` reports what depth actually won each named pixel,
+    // per frame, as a distance in yards — the link past submission that decides the pixel. Pair it
+    // with `WOW_PICK` at the same pixels to turn "what won" into "whose it was" (see
+    // `capture::DepthProbePlugin`).
+    if std::env::var("WOW_DEPTH").is_ok() {
+        app.add_plugins(capture::DepthProbePlugin);
     }
     // The bevy_ui node census — "who owns this rectangle" for UI outside the FrameXML quad pass
     // (see `capture::NodeProbePlugin`).

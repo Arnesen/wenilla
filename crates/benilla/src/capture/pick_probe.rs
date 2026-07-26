@@ -15,15 +15,28 @@
 //! invisible to a single cast and to the pixels alike: both look like the surface went away.
 //!
 //! Reporting the whole ray is the point. A surface that swaps with another between frames has a
-//! rival *behind* it at nearly the same depth, and the gap between hit 0 and hit 1 is the number
-//! that decides the diagnosis: an exact tie is a coplanar authoring tie (no depth precision can
-//! break it — only a deterministic order or a bias), while a few millimetres is a precision
-//! question. The nearest hit alone cannot tell those apart, and which one it is decides the fix.
+//! rival *behind* it, and the gap between hit 0 and hit 1 is the number that decides the diagnosis:
+//! an exact tie is a coplanar authoring tie (no depth precision can break it — only a deterministic
+//! order or a bias), while a few millimetres is a precision question. The nearest hit alone cannot
+//! tell those apart, and which one it is decides the fix.
+//!
+//! **The gap that decides it is the PERPENDICULAR one, not the distance along the ray** — reading
+//! the along-ray gap as the separation is how B38 was mis-diagnosed twice. Where the ray meets a
+//! surface obliquely it travels a long way between two planes that are barely apart; at the awning
+//! there, hit 0 and hit 1 are 1–2 yd apart *along the ray* and 3–45 cm apart perpendicular. Both
+//! are reported, along with each hit's **incidence angle**, because a surface nearly edge-on to the
+//! ray is lost or won by sub-pixel coverage rather than by depth, and that is a different defect
+//! wearing the same appearance.
+//!
+//! Each hit also names its **material and bound texture**, so "the same batch drew something else
+//! this frame" is visible at all — it is indistinguishable from a depth fight in the pixels, and
+//! ruling it out is what leaves the depth story standing.
 //!
 //! Coordinates are **screenshot pixels** — the same space `benilla-visual` reports boxes in — so a
 //! hotspot box can be pasted straight in. They are divided by the window's scale factor here, since
 //! `viewport_to_world` works in logical units and a Retina capture is 2× the logical window.
 
+use bevy::mesh::MeshTag;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
@@ -90,13 +103,60 @@ fn parse_pixels(spec: &str) -> Vec<Vec2> {
         .collect()
 }
 
-/// What a hit entity is asked for: its identity, the batch class it draws as, and the material
-/// carrying the WMO batch order (`Option` because a hit need not be a model batch at all).
+/// What a hit entity is asked for: its identity, the batch class it draws as, the material
+/// carrying the WMO batch order, and its per-instance `MeshTag` (`Option` because a hit need not be a
+/// model batch at all).
 type HitIdentity = (
     &'static WorldObject,
     Option<&'static crate::debug_panel::ModelPart>,
     Option<&'static MeshMaterial3d<WowModelMaterial>>,
+    Option<&'static MeshTag>,
 );
+
+/// Every shading input the batch actually has, as text — the five packed uniform rows and the base
+/// colour, printed per cast so a value that MOVES inside one material is visible at all.
+///
+/// This exists because comparing material **handles** across frames — the check that "eliminated" a
+/// distance-fade material swap for B38 (0665) — is blind to exactly this: the handle is stable while
+/// the contents move, and three of these are re-sampled per frame *by design* (`sun_scale.zw`'s UV
+/// animation, the tint lane's per-instance clone, the fade twin's alpha). `tint.w` is the WMO
+/// interior batch-class lane (0 exterior / 1 interior-unlit / 2 the MOCV lerp) — a term that
+/// re-lights every surface of one building together, which is B38's whole footprint.
+fn shading_of(mat: Option<&WowModelMaterial>) -> String {
+    let Some(m) = mat else {
+        return "<no WowModelMaterial>".to_string();
+    };
+    let e = &m.extension;
+    let c = m.base.base_color.to_srgba();
+    format!(
+        "wmo {:.0} fade {:.0}  class {:.1}  tint {:.3},{:.3},{:.3}  \
+         sidn {:.3},{:.3},{:.3} win {:.0}  sunsel {:.2} bias {:.0} uv {:.4},{:.4}  \
+         clutter {:.1},{:.1},{:.1},{:.1}  base {:.3},{:.3},{:.3},{:.3} {:?}",
+        e.model_flags.x,
+        e.model_flags.y,
+        e.tint.w,
+        e.tint.x,
+        e.tint.y,
+        e.tint.z,
+        e.sidn.x,
+        e.sidn.y,
+        e.sidn.z,
+        e.sidn.w,
+        e.sun_scale.x,
+        e.sun_scale.y,
+        e.sun_scale.z,
+        e.sun_scale.w,
+        e.clutter_fade.x,
+        e.clutter_fade.y,
+        e.clutter_fade.z,
+        e.clutter_fade.w,
+        c.red,
+        c.green,
+        c.blue,
+        c.alpha,
+        m.base.alpha_mode,
+    )
+}
 
 /// Everything needed to turn a hit entity into a line of text — bundled so the system keeps one
 /// parameter for "describe this hit" rather than two that must always travel together.
@@ -141,37 +201,85 @@ fn fire_pick(
             .with_filter(&filter)
             .never_early_exit();
         let hits = ray_cast.cast_ray(ray, &settings);
+        // The camera's GLOBAL transform, bit-exact, on the line that carries the cast index — so
+        // "did the camera move on this frame?" is answerable against "was this frame dim?" without
+        // aligning two logs by hand. It is deliberately *this* transform: it is the one
+        // `viewport_to_world` just used to build the ray, so a converging hit distance can be
+        // attributed to the camera or to the geometry rather than left ambiguous. A dump inside
+        // `seat_camera` cannot do that job — it prints the local `Transform` before propagation, and
+        // it has no frame index, which is how it got read against the wrong 75 frames once already.
+        let eye = cam_tf.translation();
         info!(
-            "pick#{cast} ({}, {}) [logical {:.1}, {:.1}]: {} hits",
+            "pick#{cast} ({}, {}) [logical {:.1}, {:.1}]: {} hits  eye [{:08x},{:08x},{:08x}] {:.6?}",
             pixel.x,
             pixel.y,
             logical.x,
             logical.y,
-            hits.len()
+            hits.len(),
+            eye.x.to_bits(),
+            eye.y.to_bits(),
+            eye.z.to_bits(),
+            eye,
         );
-        let mut previous: Option<f32> = None;
+        // Distance ALONG THE RAY is not the gap that decides a depth fight, and reading it as if it
+        // were is how B38 got called "not a depth fight" (0662). At a grazing angle the ray travels
+        // nearly parallel to both surfaces, so a yard of ray can separate two planes that are a hair
+        // apart — and near a line where two planes INTERSECT the perpendicular gap goes to zero
+        // while the along-ray gap stays large. So report the perpendicular distance from this hit's
+        // point to the previous hit's plane as well: that is the number a depth buffer sees.
+        let mut previous: Option<(f32, Vec3, Vec3)> = None;
         for (i, (entity, hit)) in hits.iter().enumerate() {
-            let gap = previous.map_or(String::new(), |p: f32| {
-                format!("  (+{:.5} yd behind the last)", hit.distance - p)
+            let gap = previous.map_or(String::new(), |(d, point, normal): (f32, Vec3, Vec3)| {
+                let perp = (hit.point - point).dot(normal).abs();
+                format!(
+                    "  (+{:.5} yd along the ray, but {:.5} yd PERPENDICULAR to the last)",
+                    hit.distance - d,
+                    perp,
+                )
             });
-            previous = Some(hit.distance);
-            let Ok((obj, part, mat)) = names.identity.get(*entity) else {
+            previous = Some((hit.distance, hit.point, hit.normal));
+            let Ok((obj, part, mat, tag)) = names.identity.get(*entity) else {
                 info!("  {i:2}  {:9.4} yd  <untagged>{gap}", hit.distance);
                 continue;
             };
             // The WMO authored batch order rides in the material's `sun_scale.y` (see
             // `model_render`): 0 means "no bias applied", which for a WMO batch is itself a finding.
-            let batch = mat
-                .and_then(|m| names.materials.get(&m.0))
+            let resolved = mat.and_then(|m| names.materials.get(&m.0));
+            let batch = resolved
                 .map(|m| m.extension.sun_scale.y as i32)
                 .unwrap_or(-1);
+            // The material + texture the hit actually draws with, per cast. A surface that swaps
+            // appearance while its GEOMETRY stays put (identical hits, identical order) is either
+            // being re-lit or bound to something else; only naming the bound texture each frame
+            // tells those apart, and "the same batch drew a different texture this frame" is
+            // otherwise completely invisible from the pixels.
+            let tex = resolved
+                .and_then(|m| m.base.base_color_texture.as_ref())
+                .map_or("-".to_string(), |h| format!("{:?}", h.id()));
+            // How edge-on is this surface to the ray? 90° is face-on; near 0° the triangle is nearly
+            // parallel to the view and covers a pixel by a hair, so which of it and whatever lies
+            // behind wins a pixel is decided by sub-pixel coverage rather than by depth — a
+            // completely different defect from a depth fight, and indistinguishable in the pixels.
+            let incidence = ray.direction.dot(hit.normal).abs().clamp(0.0, 1.0).asin();
             info!(
-                "  {i:2}  {:9.4} yd  {:?} #{:<10} bias {batch:3}  {:?}  {}{gap}",
+                "  {i:2}  {:9.4} yd  {:?} #{:<10} bias {batch:3}  {:?}  {:5.1}° to the ray  mat {:?}  tex {tex}  {}{gap}",
                 hit.distance,
                 obj.kind,
                 obj.id,
                 part.map(|p| p.blend),
+                incidence.to_degrees(),
+                mat.map(|m| m.0.id()),
                 obj.label,
+            );
+            // The contents, not the identity — the whole point (see [`shading_of`]). Printed for
+            // every hit on every cast: with `WOW_PICK_EVERY=0` that is a per-frame record of every
+            // shading input this batch has, which is the only way a term moving *inside* one
+            // material is visible. The per-instance tag rides the same line because bits 16..=29
+            // mean different things under the two material laws, so the pair must be read together.
+            info!(
+                "        {}  tag {}",
+                shading_of(resolved),
+                tag.map_or_else(|| "<none>".to_string(), |t| crate::mesh_tag::describe(t.0)),
             );
         }
     }

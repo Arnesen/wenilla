@@ -469,6 +469,7 @@ fn resolve_slot(
         creator,
         flags,
         equip_slots: find_equip_slot(t.inventory_type),
+        bar_placeable: t.placeable_on_action_bar(),
         cooldown: t.use_spell.and_then(|u| {
             let sd = spells.and_then(|s| s.get(u.spell_id));
             cooldowns
@@ -756,6 +757,7 @@ mod tests {
 
     fn slot(spell_id: u32, charges: i32) -> ItemSpellEntry {
         ItemSpellEntry {
+            index: 0,
             spell_id,
             trigger: 0,
             charges,

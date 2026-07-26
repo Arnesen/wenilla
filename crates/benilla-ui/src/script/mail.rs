@@ -727,6 +727,7 @@ mod tests {
 
         // Put a bag item on the cursor, then click the send slot: it attaches.
         s.model_mut().cursor = Some(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 5,
             item_id: 2589,
@@ -760,6 +761,7 @@ mod tests {
         use crate::script::cursor::{CursorItem, CursorPayload};
         let mut s = UiScript::new().unwrap();
         s.model_mut().cursor = Some(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 1,

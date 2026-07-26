@@ -147,6 +147,15 @@ impl super::UiScript {
     pub fn take_action_sets(&mut self) -> Vec<(u32, u32)> {
         std::mem::take(&mut self.model_mut().action_sets)
     }
+
+    /// Drain the GlobalStrings keys queued by engine-side client-local refusals since the last
+    /// call — the app resolves each against the VM's own GlobalStrings and fires
+    /// `UI_ERROR_MESSAGE`, standing in for the reference's inline `CGGameUI::DisplayError` (whose
+    /// engine can call it directly; ours is on the far side of the crate boundary). See
+    /// [`crate::script::model::Model::ui_errors`].
+    pub fn take_ui_errors(&mut self) -> Vec<&'static str> {
+        std::mem::take(&mut self.model_mut().ui_errors)
+    }
 }
 
 /// `checkCursor`'s truthiness (`UseAction`'s second argument): the reference's own numeric

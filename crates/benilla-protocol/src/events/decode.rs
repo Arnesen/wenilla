@@ -25,6 +25,10 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             realm: None,
         }],
         ServerPacket::LogoutComplete => vec![SessionEvent::LoggedOut],
+        ServerPacket::LogoutResponse { reason, instant } => {
+            vec![SessionEvent::LogoutResponse { reason, instant }]
+        }
+        ServerPacket::LogoutCancelAck => vec![SessionEvent::LogoutCancelled],
         ServerPacket::PlaySound { sound_id } => vec![SessionEvent::PlaySound { sound_id }],
         ServerPacket::PlayMusic { music_id } => vec![SessionEvent::PlayMusic { music_id }],
         ServerPacket::PlayObjectSound { sound_id, guid } => {
@@ -247,12 +251,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             timed: true,
         }],
         ServerPacket::QuestLogFull => vec![SessionEvent::QuestLogFull],
-        ServerPacket::QuestGiverInvalid { msg } => vec![SessionEvent::QuestGiverRefused {
-            quest_id: 0,
-            reason: msg,
-        }],
+        ServerPacket::QuestGiverInvalid { msg } => {
+            vec![SessionEvent::QuestGiverInvalid { reason: msg }]
+        }
         ServerPacket::QuestGiverFailed { quest_id, reason } => {
-            vec![SessionEvent::QuestGiverRefused { quest_id, reason }]
+            vec![SessionEvent::QuestGiverFailed { quest_id, reason }]
         }
         ServerPacket::GossipComplete => vec![SessionEvent::GossipComplete],
         ServerPacket::NpcText { text_id, blocks } => {
@@ -438,6 +441,10 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             loser,
         }],
         ServerPacket::DuelCountdown { seconds } => vec![SessionEvent::DuelCountdown { seconds }],
+        ServerPacket::FriendList { friends } => vec![SessionEvent::FriendList { friends }],
+        ServerPacket::IgnoreList { guids } => vec![SessionEvent::IgnoreList { guids }],
+        ServerPacket::FriendStatus(status) => vec![SessionEvent::FriendStatus(status)],
+        ServerPacket::WhoResults(results) => vec![SessionEvent::WhoResults(results)],
         ServerPacket::DestroyObject { guid } => vec![SessionEvent::ObjectDestroyed(guid)],
         ServerPacket::TriggerCinematic { cinematic_id } => {
             vec![SessionEvent::CinematicTriggered { cinematic_id }]

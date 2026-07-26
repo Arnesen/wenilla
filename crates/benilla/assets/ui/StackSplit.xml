@@ -126,7 +126,7 @@
             BenillaStackSplitFrame:Hide()
         end
 
-        -- OnHide (ref l.158-162): ANY hide — Okay, Cancel, or BenillaOnEscape's chain hook below —
+        -- OnHide (ref l.158-162): ANY hide — Okay, Cancel, or ToggleGameMenu's chain hook below —
         -- clears the owner's `hasStackSplit` flag (ref ItemButtonTemplate's OnHide, ContainerFrame.xml
         -- l.35-39, checks `this.hasStackSplit` to auto-close the spinner if the SLOT itself goes away
         -- mid-split — no consumer needs that half here, but the flag's own clear is this function's

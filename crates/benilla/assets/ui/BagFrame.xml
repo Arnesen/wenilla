@@ -687,8 +687,48 @@
             -- drag feedback, IsInventoryItemLocked — the bag-slot twin of BenillaBagSlot_Update).
             if IsInventoryItemLocked(invSlot) then
                 button.icon:SetVertexColor(0.4, 0.4, 0.4)
-            else
+            elseif button:IsEnabled() then
                 button.icon:SetVertexColor(1, 1, 1)
+            else
+                -- Disabled by Disable_BagButtons below: keep the grey. The reference needs no such
+                -- arm — its desaturation is a shader flag on the texture, untouched by an Update
+                -- that only re-sets the image — but ours IS a vertex colour (UiPanels.xml
+                -- SetDesaturation), so a bag update behind the open game menu would otherwise
+                -- repaint the icon bright under a button that stayed dead.
+                button.icon:SetVertexColor(0.5, 0.5, 0.5)
+            end
+        end
+
+        -- Disable_BagButtons / Enable_BagButtons — ref MainMenuBarBagButtons.lua l.102-128, called
+        -- by GameMenuFrame's OnShow/OnHide (decision 0674) and by nothing else: while the game menu
+        -- holds the screen, the whole bag row greys out. That is the *visible* half of a rule the
+        -- panel manager already enforces (ShowUIPanel's native-center gate refuses every window
+        -- while the menu is up — UiPanels.xml `CanOpenPanels`); without it the bags would look
+        -- clickable and simply do nothing.
+        --
+        -- Mapping onto benilla's row: the ref's MainMenuBarBackpackButton is BenillaBagToggle —
+        -- whose icon IS its NormalTexture (it carries no named $parentIcon region, so the greying
+        -- goes through GetNormalTexture) — and CharacterBag0..3Slot are BenillaBagBarSlot1..4, each
+        -- with the $parentIcon the Update path above also writes.
+        function Disable_BagButtons()
+            BenillaBagToggle:Disable()
+            SetDesaturation(BenillaBagToggle:GetNormalTexture(), 1)
+            for i = 1, 4 do
+                local slot = getglobal("BenillaBagBarSlot" .. i)
+                slot:Disable()
+                SetDesaturation(slot.icon, 1)
+            end
+        end
+
+        function Enable_BagButtons()
+            BenillaBagToggle:Enable()
+            SetDesaturation(BenillaBagToggle:GetNormalTexture(), nil)
+            for i = 1, 4 do
+                local slot = getglobal("BenillaBagBarSlot" .. i)
+                slot:Enable()
+                -- The slot's own paint decides the restored colour: an item locked on the cursor
+                -- wants 0.4 grey, not the flat white a bare SetDesaturation(nil) would leave.
+                BenillaBagBarSlot_Update(slot)
             end
         end
     ]]></Script>

@@ -5,9 +5,9 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, gossip, inspect, item_text,
-    loot, loot_roll, mail, merchant, party, quest, quest_log, skills, slider, spellbook, taxi,
-    trade, tradeskill, trainer, ActionSlot, AuraState, FontObject, ItemTemplateView,
-    PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    loot, loot_roll, mail, merchant, party, quest, quest_log, session, skills, slider, social,
+    spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, FontObject,
+    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -144,6 +144,14 @@ pub(crate) struct Model {
     /// Party/loot intents (`AcceptGroup`/`InviteToParty`/`SetLootMethod`/…) queued since the
     /// app's last [`super::UiScript::take_party_requests`] drain — the outbound seam ([`party`]).
     pub(crate) party_requests: Vec<party::PartyRequest>,
+    /// The social snapshot the app pushes (friends, ignores, the last `/who` — decision 0668):
+    /// `GetNumFriends`/`GetFriendInfo`/`GetWhoInfo`/… read it ([`social`]). Already
+    /// display-resolved (names, class/zone names) because the reference resolves them
+    /// engine-side too.
+    pub(crate) social: social::SocialState,
+    /// Social intents (`AddFriend`/`RemoveFriend`/`SendWho`/…) queued since the app's last
+    /// [`super::UiScript::take_social_requests`] drain — the outbound seam ([`social`]).
+    pub(crate) social_requests: Vec<social::SocialRequest>,
     /// Whisper targets `ChatFrame_SendTell` queued since the app's last
     /// [`super::UiScript::take_tell_requests`] drain — the app opens its chat edit box prefilled
     /// `/w <name> ` (the unit popup's WHISPER action; [`party`] registers the global).
@@ -152,6 +160,11 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_duel_requests`] drain — the outbound seam ([`duel`]). There is no
     /// duel *snapshot* beside it: everything the UI reads arrives as event arguments.
     pub(crate) duel_requests: Vec<duel::DuelRequest>,
+    /// Session-exit intents (`Logout`/`Quit`/`CancelLogout`/`ForceQuit`) queued since the app's
+    /// last [`super::UiScript::take_session_requests`] drain — the outbound seam ([`session`]).
+    /// Snapshot-less like the duel queue above: what the UI reads back (the camp/quit countdown)
+    /// arrives as the `PLAYER_CAMPING`/`PLAYER_QUITING`/`LOGOUT_CANCEL` events, not as state.
+    pub(crate) session_requests: Vec<session::SessionRequest>,
     /// PvP-flag toggles (`TogglePVP`) queued since the app's last
     /// [`super::UiScript::take_pvp_toggles`] drain — the outbound seam ([`pvp`]). A count, not a
     /// payload: `CMSG_TOGGLE_PVP` carries no body.
@@ -175,6 +188,14 @@ pub(crate) struct Model {
     /// the app into `CMSG_SET_ACTION_BUTTON`, one send per entry (client-authoritative, per-change
     /// — 0218 §4: a drag-swap is two sends, never atomic).
     pub(crate) action_sets: Vec<(u32, u32)>,
+    /// GlobalStrings keys for **client-local refusals the ENGINE raises** — the engine-free half
+    /// of the app's `ui_action::UiErrorKeys`, which cannot reach in here. The reference does this
+    /// inline (`push <errorId>; call CGGameUI::DisplayError 0x496720`) because its engine owns
+    /// both the refusal and the message; ours splits at the crate boundary, so the refusal queues
+    /// its key and the app's action feed resolves it against the VM's own GlobalStrings and fires
+    /// `UI_ERROR_MESSAGE`. Always `&'static str`: every tenant is a literal read out of the ref's
+    /// errorId table (`0xb4b498`, stride `0x14`), never runtime-built.
+    pub(crate) ui_errors: Vec<&'static str>,
 
     /// The player's known-spell book (decision 0216 §8, slice 5) — tabs + the flat slot list the
     /// `GetSpellTabInfo`/`GetSpellName`/… bindings read ([`spellbook`]). Durable player state like
@@ -632,8 +653,11 @@ impl Model {
             target_clear: false,
             party: party::PartyState::default(),
             party_requests: Vec::new(),
+            social: social::SocialState::default(),
+            social_requests: Vec::new(),
             tell_requests: Vec::new(),
             duel_requests: Vec::new(),
+            session_requests: Vec::new(),
             pvp_toggles: 0,
             sound_queue: Vec::new(),
             actions: HashMap::new(),
@@ -641,6 +665,7 @@ impl Model {
             bonus_bar_offset: 0,
             action_uses: Vec::new(),
             action_sets: Vec::new(),
+            ui_errors: Vec::new(),
             spellbook: spellbook::SpellBookState::default(),
             spell_casts: Vec::new(),
             casting: false,

@@ -53,6 +53,7 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
                     link: s.link.clone(),
                     quality: Some(u32::try_from(s.quality).unwrap_or(0)),
                     count: None,
+                    bar_placeable: s.bar_placeable,
                     equip_slots: s.equip_slots.clone(),
                 });
             match picked {
@@ -239,6 +240,7 @@ mod tests {
     fn doll_slots() -> crate::script::InventorySlots {
         let mut slots: crate::script::InventorySlots = Default::default();
         slots[1] = Some(InvSlotView {
+            bar_placeable: true,
             durability: None,
             flags: 0,
             item_id: 1234,
@@ -252,6 +254,7 @@ mod tests {
             creator: None,
         });
         slots[11] = Some(InvSlotView {
+            bar_placeable: true,
             durability: None,
             flags: 0,
             item_id: 555,
@@ -265,6 +268,7 @@ mod tests {
             creator: None,
         });
         slots[19] = Some(InvSlotView {
+            bar_placeable: true,
             durability: None,
             flags: 0,
             item_id: 999,
@@ -285,6 +289,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Helmet_02".into()),
                 count: 1,
@@ -426,6 +431,7 @@ mod tests {
         });
         // An equipped bag in Bag0Slot (id 20): its equip_slots is the four bag slots.
         slots[20] = Some(InvSlotView {
+            bar_placeable: true,
             durability: None,
             flags: 0,
             item_id: 4496,
@@ -461,6 +467,7 @@ mod tests {
         slots.insert(
             3,
             ContainerSlot {
+                bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
                 count: 1,
@@ -517,6 +524,7 @@ mod tests {
 
         // Spell/Action arms: always false (the fit-blind refusal).
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            passive: false,
             book_slot: 1,
             book_type: "spell".into(),
             spell_id: 1,

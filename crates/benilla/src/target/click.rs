@@ -626,13 +626,13 @@ fn interact_command(
     }
 }
 
-/// Drain the ESC chain's `ClearTarget()` (the last leg of `BenillaOnEscape` — the ref's
+/// Drain the ESC chain's `ClearTarget()` (the ref's ESC ladder's last close/cancel leg (`ToggleGameMenu` — the ref's
 /// `ToggleGameMenu` order, `UIParent.lua:1492`) and commit the deselect. The target drops ONLY
 /// when nothing earlier in the chain ate the press: a mid-cast ESC cancels the cast instead, an
 /// open window closes instead — the two-press behavior the raw-key clear this replaces couldn't
 /// express (it ran beside the chain, so the first ESC both canceled the cast AND dropped the
 /// target — the director's 0449 report). EditBox precedence rides the chain too: a focused box
-/// consumes ESCAPE before `BenillaOnEscape` ever runs.
+/// consumes ESCAPE before `ToggleGameMenu` ever runs.
 pub(super) fn clear_target_requests(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     mut selection: ResMut<Selection>,

@@ -176,6 +176,11 @@ pub(crate) fn model_material(
     } else {
         match blend {
             ModelBlend::Opaque => AlphaMode::Opaque,
+            // `WOW_NO_ALPHATEST=1` draws every cutout batch opaque — the A/B for "is the alpha test
+            // itself discarding this surface?", which is otherwise indistinguishable in the pixels
+            // from the surface losing a depth test or never being submitted. (B38: the flip
+            // survives it unchanged, so the cutout is not what removes the awning.)
+            ModelBlend::AlphaTest if std::env::var("WOW_NO_ALPHATEST").is_ok() => AlphaMode::Opaque,
             ModelBlend::AlphaTest => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
             // Mod/Mod2x ride the transparent pass (they multiply what's already drawn, so the
             // scene under them must exist); `specialize` swaps the actual blend state to the

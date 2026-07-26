@@ -420,6 +420,34 @@ pub(super) fn seat_camera(
     };
     let frac = (rig.collision_distance / boom_len).clamp(0.0, 1.0);
     cam_t.translation = head + boom * frac;
+    // `WOW_CAM_DUMP=frame`: the REALIZED pose, per frame, bit-exact — not the pose that was asked for.
+    //
+    // Every scripted probe sets `yaw`/`pitch`/`distance` and we then reason as though the camera is
+    // therefore where we put it. It is not: `collision_distance` is an exponentially-eased chase of a
+    // per-frame collision CAST, so a grazing hit that alternates gives an arm that snaps in and eases
+    // back out, and the camera keeps moving for as long as that lasts — with the scripted pose
+    // perfectly constant the whole time. B38's "the camera is static by construction, so nothing
+    // camera-derived can be the cause" (0671) rests entirely on that being untrue, and it was never
+    // measured. `open` is printed beside the eased arm so a hit/miss alternation in the CAST is
+    // visible even on a frame where the ease has not yet moved the camera far enough to see.
+    if std::env::var_os("WOW_CAM_DUMP").is_some() {
+        eprintln!(
+            "[cam] yaw {:.6} pitch {:.6} dist {:.6} open {:.6} coll {:.6} frac {:.6} \
+             pos [{:.6},{:.6},{:.6}] bits [{:08x},{:08x},{:08x}]",
+            cam.yaw,
+            cam.pitch,
+            rig.distance,
+            open,
+            rig.collision_distance,
+            frac,
+            cam_t.translation.x,
+            cam_t.translation.y,
+            cam_t.translation.z,
+            cam_t.translation.x.to_bits(),
+            cam_t.translation.y.to_bits(),
+            cam_t.translation.z.to_bits(),
+        );
+    }
 
     // Fade the avatar as the camera nears its pivot (zoom-in / a wall pulling the boom in): opaque
     // in third-person, ramping to invisible in first-person. Keyed off the *realized* camera→pivot

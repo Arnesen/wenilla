@@ -98,6 +98,7 @@ pub(super) fn seed_ui_fixture(
         ammo_type: 0,
         ranged_mod_range: 0.0,
         spells: Vec::new(),
+        spell_charges_0: 0,
         use_spell: None,
         bonding: 0,
         description: String::new(),
@@ -1049,6 +1050,7 @@ fn seed_bag_window(
     let slot = |disp: u32, count: u32, id: u32, name: &str, quality: u32| {
         benilla_ui::script::ContainerSlot {
             durability: None,
+            bar_placeable: true,
             texture: icon(disp),
             count,
             quality: Some(quality),
@@ -1122,6 +1124,7 @@ fn seed_equipped_bags(
     let slot =
         |disp: u32, count: u32, name: &str, quality: u32| benilla_ui::script::ContainerSlot {
             durability: None,
+            bar_placeable: true,
             texture: icon(disp),
             count,
             quality: Some(quality),

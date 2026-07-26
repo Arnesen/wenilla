@@ -657,7 +657,11 @@ fn writer_loop(
                         w.pet_name_query(pet_number, guid)
                     }
                     ClientCommand::ItemQuery { entry, guid } => w.item_query(entry, guid),
-                    ClientCommand::UseItem { bag_index, slot } => w.use_item(bag_index, slot, 0),
+                    ClientCommand::UseItem {
+                        bag_index,
+                        slot,
+                        spell_index,
+                    } => w.use_item(bag_index, slot, spell_index),
                     ClientCommand::AutoEquipItem { bag_index, slot } => {
                         w.auto_equip_item(bag_index, slot)
                     }
@@ -819,6 +823,7 @@ fn writer_loop(
                     } => w.set_trade_item(trade_slot, bag, slot),
                     ClientCommand::ClearTradeItem { trade_slot } => w.clear_trade_item(trade_slot),
                     ClientCommand::Logout => w.logout_request(),
+                    ClientCommand::LogoutCancel => w.logout_cancel(),
                     ClientCommand::CompleteCinematic => w.complete_cinematic(),
                     ClientCommand::MoveRootAck {
                         guid,
@@ -858,6 +863,13 @@ fn writer_loop(
                     ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
                     ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
                     ClientCommand::TogglePvp => w.toggle_pvp(),
+                    ClientCommand::FriendListRequest => w.friend_list(),
+                    ClientCommand::AddFriend { name } => w.add_friend(&name),
+                    ClientCommand::DelFriend { guid } => w.del_friend(guid),
+                    ClientCommand::AddIgnore { name } => w.add_ignore(&name),
+                    ClientCommand::DelIgnore { guid } => w.del_ignore(guid),
+                    ClientCommand::Who { request } => w.who(&request),
+                    ClientCommand::ChatIgnored { guid } => w.chat_ignored(guid),
                     ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
                     ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
                     ClientCommand::ActivateTaxi {

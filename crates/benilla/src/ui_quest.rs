@@ -28,6 +28,8 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::ui_action::{ui_error_text, UiError};
+use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_quest_log::QuestLog;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
@@ -57,6 +59,11 @@ pub(crate) struct QuestGiver {
     /// Per-guid dialog status (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's value, stored for a
     /// later world-marker slice.
     statuses: HashMap<u64, u32>,
+    /// Client messages the net apply queued for [`feed_quest`] to resolve and show — the
+    /// reference's `DisplayError(msgId)` split into (surface, GlobalStrings key + fills), so the
+    /// line comes from the VM's own strings and never from a hardcoded English literal
+    /// (decision 0669).
+    messages: Vec<(MsgSurface, UiError)>,
     /// The re-ask epoch — see [`Self::bump_reask`].
     reask: u32,
 }
@@ -137,10 +144,81 @@ impl QuestGiver {
         self.statuses.get(&npc).copied()
     }
 
+    /// The open panel's title when the panel IS `quest_id`'s — the `%s` fill for a refusal that
+    /// names the quest (decision 0669). The reference reads that title off the quest record it
+    /// looked the refusal up in; the panel being refused is the same quest, already in hand.
+    pub(crate) fn view_title(&self, quest_id: u32) -> Option<String> {
+        match self.view.as_ref()? {
+            QuestView::Detail(d) if d.quest_id == quest_id => Some(d.title.clone()),
+            QuestView::Progress(p) if p.quest_id == quest_id => Some(p.title.clone()),
+            QuestView::Reward(o) if o.quest_id == quest_id => Some(o.title.clone()),
+            _ => None,
+        }
+    }
+
+    /// Queue one client message for [`feed_quest`] to resolve and show — the net apply's half of
+    /// the reference's `DisplayError(msgId)` (decision 0669).
+    pub(crate) fn push_message(&mut self, surface: MsgSurface, msg: UiError) {
+        self.messages.push((surface, msg));
+    }
+
+    /// Take the queued client messages (drained by [`feed_quest`], which owns the VM).
+    pub(crate) fn take_messages(&mut self) -> Vec<(MsgSurface, UiError)> {
+        std::mem::take(&mut self.messages)
+    }
+
     /// Disconnect: drop the open window (mirrors the gossip/merchant session clears).
     pub(crate) fn clear_session(&mut self) {
         self.clear();
         self.statuses.clear();
+        self.messages.clear();
+    }
+}
+
+/// Where a client message is shown — the `kind` field (`+0x04`) of the reference's message record
+/// (`0xb4b498 + 20*msgId`), which `CGGameUI::DisplayError` (`0x496720`) dispatches on through the
+/// four-way jump at `0x496888`: **0 → the chat window** (`0x49a870`), 1 → `AddErrorMessage(text, 0)`
+/// (the yellow info line), **2 → `AddErrorMessage(text, 1)`** (the red error line), 3 → the console.
+/// Only the two the quest messages use are modeled (decision 0669); the info line has its own
+/// established route (`UI_INFO_MESSAGE`, decision 0340).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MsgSurface {
+    /// kind 0 — a chat-window system line.
+    Chat,
+    /// kind 2 — the red `UIErrorsFrame` line.
+    Error,
+}
+
+/// `SMSG_QUESTGIVER_QUEST_INVALID`'s `QuestFailedReason` → its GlobalStrings key, resolved to text
+/// through the VM's own `GlobalStrings.lua` at the feed. The FULL build-5875 table, read off the
+/// handler `0x5dbca0` (the `0x18f` arm of the quest demux `0x5e5910`): `lea eax,[reason-1]` /
+/// `cmp eax,0x15` / `movzx edx,[eax+0x5dbd30]` / `jmp [edx*4+0x5dbd14]` — a 22-byte case index into
+/// a 7-way jump table, every arm a `DisplayError(msgId)`. **Everything unlisted — including
+/// reason 0 and anything past 22 — falls to `ERR_QUEST_NEED_PREREQS`**, which is the ref's own
+/// `ja` default, not a guess. Cross-checks against vmangos `QuestDef.h`'s own per-value comments
+/// (decision 0669).
+pub(crate) fn questgiver_invalid_key(reason: u32) -> &'static str {
+    match reason {
+        1 => "ERR_QUEST_FAILED_LOW_LEVEL",         // msgId 142
+        6 => "ERR_QUEST_FAILED_WRONG_RACE",        // msgId 144
+        12 => "ERR_QUEST_ONLY_ONE_TIMED",          // msgId 146
+        13 => "ERR_QUEST_ALREADY_ON",              // msgId 148
+        20 => "ERR_QUEST_FAILED_MISSING_ITEMS",    // msgId 143
+        22 => "ERR_QUEST_FAILED_NOT_ENOUGH_MONEY", // msgId 145
+        _ => "ERR_QUEST_NEED_PREREQS",             // msgId 147 — the `ja` default
+    }
+}
+
+/// `SMSG_QUESTGIVER_QUEST_FAILED`'s reason → its GlobalStrings key. The full table, read off the
+/// handler `0x5dc840` (the `0x192` arm of the same demux): a three-way `cmp` chain on the reason —
+/// `4`/`0x32` → BAG_FULL, `0x11` → MAX_COUNT, everything else → the plain FAILED line. All three
+/// strings carry a `%s` the caller fills with the quest title (the ref pushes `questRecord+0x9c`
+/// alongside the msgId). Decision 0669.
+pub(crate) fn questgiver_failed_key(reason: u32) -> &'static str {
+    match reason {
+        4 | 50 => "ERR_QUEST_FAILED_BAG_FULL_S", // msgId 140 — "%s failed: Inventory is full."
+        17 => "ERR_QUEST_FAILED_MAX_COUNT_S",    // msgId 141 — "%s failed: Duplicate item found."
+        _ => "ERR_QUEST_FAILED_S",               // msgId 139 — "%s failed."
     }
 }
 
@@ -168,8 +246,17 @@ impl Plugin for UiQuestPlugin {
 /// of the giver's service range or the giver despawns. The per-guid `statuses` store survives, like
 /// every other close.
 impl NpcSession for QuestGiver {
+    /// `None` when the open panel's giver is an **item** (decision 0664): a quest-starter item
+    /// opens its detail panel with the ITEM's own guid as the giver, and an item is not a world
+    /// unit — there is no range to walk out of and no portrait to bake. Reporting the item guid
+    /// here would close the panel the frame it opened, since the range guard reads a guid it can't
+    /// resolve to a world entity as "the giver despawned". The drain still addresses its
+    /// `CMSG_QUESTGIVER_*` to `self.npc` (the item guid is exactly what the server wants back —
+    /// vmangos resolves an `HIGHGUID_ITEM` giver through `TYPEMASK_CREATURE_GAMEOBJECT_OR_ITEM`);
+    /// only the *session* face, whose whole meaning is "the live NPC this window is bound to",
+    /// says there is none.
     fn npc(&self) -> Option<u64> {
-        self.npc
+        self.npc.filter(|g| !benilla_protocol::guid::is_item(*g))
     }
 
     fn close(&mut self) {
@@ -309,6 +396,7 @@ fn feed_quest(
     quest_log: Res<QuestLog>,
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
+    mut chat: ResMut<ChatLog>,
     mut last: Local<Option<QuestState>>,
     mut last_name: Local<Option<String>>,
     mut last_npc: Local<Option<u64>>,
@@ -320,6 +408,31 @@ fn feed_quest(
     // QUEST_COMPLETE packet itself — no Lua handler owns it, so the feed queues it directly.
     if giver.take_completed_fanfare() {
         script.queue_sound_kit("QUESTCOMPLETED");
+    }
+    // The queued client messages (the refusal lines the net apply staged): resolve against the
+    // VM's own GlobalStrings first (immutable script), then show each on the surface its message
+    // record names — decision 0669's `DisplayError` kind. Drained BEFORE the snapshot's early-out
+    // so a refusal that also closes the panel still gets its line out this frame.
+    let lines: Vec<(MsgSurface, String)> = giver
+        .take_messages()
+        .into_iter()
+        .filter_map(|(surface, msg)| {
+            let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            ui_error_text(&msg, &get).map(|text| (surface, text))
+        })
+        .collect();
+    for (surface, text) in lines {
+        // The resolved line, greppable: the chat path has no log of its own, so without this a
+        // live probe can count lines but never read one (decision 0669's in-app leg).
+        debug!("ui_quest: message ({surface:?}) {text:?}");
+        match surface {
+            MsgSurface::Chat => {
+                chat.push_event(ChatEvent::text_only(ChatEventKind::System, text));
+            }
+            MsgSurface::Error => {
+                script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+            }
+        }
     }
     let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
     let fresh = snapshot(
@@ -442,6 +555,11 @@ fn drain_quest(
                     let _ = commands
                         .0
                         .send(ClientCommand::QuestgiverAccept { npc, quest });
+                    // `Script::AcceptQuest` (`0x501380`) closes the window on the CLICK, not on any
+                    // answer: send `0x189` (`0x5eac10`), then `0x501130(0,0)` — the same clear the
+                    // refusal handlers call, firing `QUEST_FINISHED`. Ours used to leave the panel
+                    // up waiting for a packet that never comes on a refused accept (decision 0669).
+                    giver.clear();
                 }
             }
             QuestAction::Continue => {
@@ -487,6 +605,35 @@ mod tests {
         quest_log.set_active_quests([100]);
         assert!(is_active_quest(100, &quest_log));
         assert!(!is_active_quest(200, &quest_log));
+    }
+
+    /// An item-sourced quest window (decision 0664) reports **no** NPC to the session face, so the
+    /// range guard can't close it the frame it opens — while the drain's own `self.npc` keeps the
+    /// item guid the `CMSG_QUESTGIVER_*` sends must carry.
+    #[test]
+    fn an_item_giver_is_not_an_npc_session() {
+        let item = 0x4000_0000_0000_0BAD_u64; // HIGHGUID_ITEM
+        let creature = 0xF130_0000_00C5_0001_u64; // HIGHGUID_UNIT
+        let detail = |npc: u64| {
+            QuestView::Detail(QuestDetails {
+                npc,
+                quest_id: 373,
+                title: "The Unsent Letter".into(),
+                details: String::new(),
+                objectives: String::new(),
+                auto_finish: 0,
+                choices: Vec::new(),
+                rewards: Vec::new(),
+                money: 0,
+                reward_spell: 0,
+            })
+        };
+        let mut giver = QuestGiver::default();
+        giver.open(item, detail(item));
+        assert_eq!(NpcSession::npc(&giver), None, "an item is not a live NPC");
+        assert_eq!(giver.npc, Some(item), "the wire address is unchanged");
+        giver.open(creature, detail(creature));
+        assert_eq!(NpcSession::npc(&giver), Some(creature));
     }
 
     #[test]
@@ -599,5 +746,125 @@ mod tests {
         giver.clear();
         assert!(!giver.is_open());
         assert_eq!(giver.status(0x99), Some(dialog_status::AVAILABLE));
+    }
+
+    /// The `0x18f` table, arm for arm off `0x5dbca0` — including the two edges that are easy to
+    /// get wrong: reason 0 and anything past the `cmp eax,0x15` bound fall to NEED_PREREQS (the
+    /// ref's `ja` default), and 2..=5 do too even though they sit INSIDE the jump table's range.
+    #[test]
+    fn questgiver_invalid_keys_match_the_reference_table() {
+        assert_eq!(questgiver_invalid_key(13), "ERR_QUEST_ALREADY_ON");
+        assert_eq!(questgiver_invalid_key(1), "ERR_QUEST_FAILED_LOW_LEVEL");
+        assert_eq!(questgiver_invalid_key(6), "ERR_QUEST_FAILED_WRONG_RACE");
+        assert_eq!(questgiver_invalid_key(12), "ERR_QUEST_ONLY_ONE_TIMED");
+        assert_eq!(questgiver_invalid_key(20), "ERR_QUEST_FAILED_MISSING_ITEMS");
+        assert_eq!(
+            questgiver_invalid_key(22),
+            "ERR_QUEST_FAILED_NOT_ENOUGH_MONEY"
+        );
+        for reason in [0, 2, 3, 4, 5, 7, 11, 14, 19, 21, 23, 99, u32::MAX] {
+            assert_eq!(
+                questgiver_invalid_key(reason),
+                "ERR_QUEST_NEED_PREREQS",
+                "reason {reason} must take the ref's `ja` default"
+            );
+        }
+    }
+
+    /// The `0x192` table off `0x5dc840`: the two named reasons plus the shared default.
+    #[test]
+    fn questgiver_failed_keys_match_the_reference_table() {
+        assert_eq!(questgiver_failed_key(4), "ERR_QUEST_FAILED_BAG_FULL_S");
+        assert_eq!(questgiver_failed_key(50), "ERR_QUEST_FAILED_BAG_FULL_S");
+        assert_eq!(questgiver_failed_key(17), "ERR_QUEST_FAILED_MAX_COUNT_S");
+        for reason in [0, 1, 5, 16, 18, 49, 51] {
+            assert_eq!(questgiver_failed_key(reason), "ERR_QUEST_FAILED_S");
+        }
+    }
+
+    /// The open panel is the `%s` fill for a refusal that names the quest — and only for ITS OWN
+    /// quest id (a stale panel must not name the wrong quest).
+    #[test]
+    fn view_title_answers_only_for_the_open_quest() {
+        let mut giver = QuestGiver::default();
+        assert_eq!(giver.view_title(100), None);
+        giver.open(
+            0x42,
+            QuestView::Detail(QuestDetails {
+                npc: 0x42,
+                quest_id: 100,
+                title: "A Threat Within".into(),
+                details: String::new(),
+                objectives: String::new(),
+                auto_finish: 0,
+                choices: vec![],
+                rewards: vec![],
+                money: 0,
+                reward_spell: 0,
+            }),
+        );
+        assert_eq!(giver.view_title(100).as_deref(), Some("A Threat Within"));
+        assert_eq!(giver.view_title(101), None);
+    }
+
+    /// The RUNTIME leg on the real client data (`equip_error`'s pattern): every key either table
+    /// can emit resolves to a non-empty string in the shipped 1.12 `GlobalStrings.lua`, the guard
+    /// against a typo'd key degrading a real refusal to silence. Also pins the director's repro
+    /// (reason 13 → "You are already on that quest") and the `%s` the FAILED family fills.
+    /// Skips without client data.
+    #[test]
+    fn every_quest_refusal_key_resolves_in_the_real_global_strings() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let g = |key: &str| s.lua().globals().get::<String>(key).ok();
+
+        for reason in 0..=60u32 {
+            for key in [
+                questgiver_invalid_key(reason),
+                questgiver_failed_key(reason),
+            ] {
+                let text = g(key).unwrap_or_default();
+                assert!(!text.is_empty(), "{key} (reason {reason}) missing");
+            }
+            // The FAILED family names the quest; the INVALID family never does.
+            assert!(g(questgiver_failed_key(reason))
+                .unwrap_or_default()
+                .contains("%s"));
+            assert!(!g(questgiver_invalid_key(reason))
+                .unwrap_or_default()
+                .contains("%s"));
+        }
+        // The director's line, end to end.
+        assert_eq!(
+            ui_error_text(&UiError::key(questgiver_invalid_key(13)), &g).as_deref(),
+            Some("You are already on that quest")
+        );
+        // …and the named one, filled.
+        assert_eq!(
+            ui_error_text(
+                &UiError {
+                    key: questgiver_failed_key(4),
+                    fill_s: Some("A Threat Within".into()),
+                    fill_d: None,
+                },
+                &g
+            )
+            .as_deref(),
+            Some("A Threat Within failed: Inventory is full.")
+        );
+        // The log-full line is the RED one and carries no fill.
+        assert_eq!(
+            ui_error_text(&UiError::key("ERR_QUEST_LOG_FULL"), &g).as_deref(),
+            Some("Your quest log is full.")
+        );
     }
 }

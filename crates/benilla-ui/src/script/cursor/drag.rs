@@ -234,6 +234,7 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -283,6 +284,7 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -321,6 +323,7 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -361,6 +364,7 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -397,6 +401,7 @@ mod tests {
         .unwrap();
         s.resolve();
         s.set_cursor_for_test(CursorPayload::Spell(crate::script::cursor::CursorSpell {
+            passive: false,
             book_slot: 1,
             book_type: "spell".into(),
             spell_id: 1,

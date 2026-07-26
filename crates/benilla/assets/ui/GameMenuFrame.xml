@@ -1,0 +1,306 @@
+<Ui>
+    <!--
+        The GAME MENU — the frame ESC opens (decision 0674). The last hole in the game shell's
+        outermost layer: until now ESC's chain ran out of things to close and did nothing, and the
+        Main Menu micro button was drawn but dead (MicroMenu.xml's SCOPE note).
+
+        Ground truth, all quoted rather than re-derived:
+        · **The frame** — ref `GameMenuFrame.xml` (patch.MPQ, extracted): 195x246, `frameStrata`
+          DIALOG, the UI-DialogBox backdrop with the 11/12/12/11 insets and 32px tile/edge, the
+          256x64 UI-DialogBox-Header at TOP +12 with MAIN_MENU centered 14px down it, and the
+          eight-button ladder — first button CENTER on the frame's TOP at (0,-37), each next one
+          TOP-to-BOTTOM at (0,-1), and Return to Game hung (0,-16) below Exit Game (the one gap in
+          the stack, which is what makes the last entry read as separate).
+        · **The button** — ref `GameMenuButtonTemplate` (UIPanelTemplates.xml l.403-410): a 144x21
+          `UIPanelButtonTemplate` (the UI-Panel-Button Up/Down/Disabled/Highlight four-state art,
+          TexCoords 0..0.625 / 0..0.6875) whose label trio is overridden to
+          GameFontHighlight/GameFontHighlight/GameFontDisable — i.e. the menu's labels are WHITE,
+          not the gold a normal panel button wears, and grey when disabled.
+        · **The labels** — GlobalStrings.lua (patch-2.MPQ), verbatim: VIDEOOPTIONS_MENU "Video
+          Options", SOUNDOPTIONS_MENU "Sound Options", UIOPTIONS_MENU "Interface Options",
+          KEY_BINDINGS "Key Bindings", MACROS "Macros", LOGOUT "Logout", EXIT_GAME "Exit Game",
+          RETURN_TO_GAME "Return to Game", MAIN_MENU "Main Menu". Declared as the real globals
+          (they are addon-visible API, decision 0068) and read back into each button's label in its
+          OnLoad — the ref's `text="LOGOUT"` attribute IS a global lookup, which this engine's
+          literal `text=` is not.
+        · **The sounds** — the ref's own OnClick lines: igMainMenuOption (the five option buttons),
+          igMainMenuLogout, igMainMenuQuit, igMainMenuContinue. All four kits verified present in
+          SoundEntries.dbc (patch-2.MPQ) alongside the igMainMenuOpen/Close pair already in use.
+        · **The two logout dialogs** — ref `StaticPopup.lua` l.564-600 (CAMP + QUIT), transcribed
+          onto the shared popup engine (UiPanels.xml), whose countdown-text branch already lists
+          both `which` names. Their driver events are the reference's own (`re/events/event-catalog
+          .tsv`: 276 PLAYER_CAMPING, 277 PLAYER_QUITING, 278 LOGOUT_CANCEL), fired by
+          `crate::ui_logout` off `SMSG_LOGOUT_RESPONSE`.
+
+        NAMES are the reference's, unprefixed (`GameMenuFrame`, `GameMenuButton*`) — the same call
+        MicroMenu.xml made for its straight transcriptions, and required here besides: `ToggleGameMenu`
+        and `GameMenuFrame` are Era API surface an addon addresses by name.
+
+        SCOPE / divergences (noted, not bugs):
+        - **Five buttons ship DISABLED**: Video/Sound/Interface Options, Key Bindings, Macros have no
+          panel behind them and won't for a long time. The director's call (this session) is that they
+          stay in the ladder — the frame keeps the ref's exact 195x246 and its exact silhouette — wearing
+          the template's own `-Disabled` art and grey label rather than being cut or left as clickable
+          no-ops. Each goes live by deleting one `self:Disable()` and writing the ref OnClick that is
+          already quoted beside it. (MicroMenu.xml made the opposite call for its dead icons, and says
+          why: three grey icons mid-row read as a broken bar. A menu of labels with some greyed is the
+          ordinary idiom — it reads as "not yet", which is the truth.)
+        - The ref frame is `toplevel="true" movable="true" parent="UIParent"`. Dropped: this engine has
+          no cross-file `parent=` attachment (SkillFrame.xml's header comment), no frame-level raise,
+          and `movable` is inert in the ref too (GameMenuFrame defines no drag scripts, so it never
+          actually moves). `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
+        - No `OptionsFrameCancel` rung in ToggleGameMenu (UiPanels.xml) — no OptionsFrame exists.
+    -->
+    <Script><![CDATA[
+        -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
+        -- verbatim. `X = X or "..."` so a later real strings table wins, the MicroMenu.xml idiom.
+        MAIN_MENU = MAIN_MENU or "Main Menu"
+        VIDEOOPTIONS_MENU = VIDEOOPTIONS_MENU or "Video Options"
+        SOUNDOPTIONS_MENU = SOUNDOPTIONS_MENU or "Sound Options"
+        UIOPTIONS_MENU = UIOPTIONS_MENU or "Interface Options"
+        KEY_BINDINGS = KEY_BINDINGS or "Key Bindings"
+        MACROS = MACROS or "Macros"
+        LOGOUT = LOGOUT or "Logout"
+        EXIT_GAME = EXIT_GAME or "Exit Game"
+        RETURN_TO_GAME = RETURN_TO_GAME or "Return to Game"
+        CAMP_TIMER = CAMP_TIMER or "%d %s until logout"
+        QUIT_TIMER = QUIT_TIMER or "%d %s until exit"
+        QUIT_NOW = QUIT_NOW or "Exit now"
+        CANCEL = CANCEL or "Cancel"
+
+        -- One label setter for the five that have nothing behind them yet: set the ref's text, then
+        -- disable (grey label + the template's -Disabled art). The whole divergence lives here, so
+        -- making one live is deleting its name from the call and writing its ref OnClick.
+        function GameMenuButton_Pending(button, text)
+            button:SetText(text)
+            button:Disable()
+        end
+
+        -- ── The two logout dialogs (ref StaticPopup.lua l.564-600) ──────────────────────────────
+        -- Both are countdown dialogs: their `text` is a format string the popup engine's per-tick
+        -- branch fills with the remaining time (StaticPopup_OnUpdate's which-list already names CAMP
+        -- and QUIT), so they open blank and count down. `timeout = 20` matches the server's own
+        -- logout timer (vmangos `WorldSession::LogoutRequest` → 20 s), which is what the countdown
+        -- is displaying — the client is not the authority here, it is narrating the server's clock.
+        --
+        -- The asymmetry between them is the reference's: CAMP offers only Cancel (the commented-out
+        -- CAMP_NOW/ForceLogout button is dead in 1.12 — "uncomment once forced logouts are completely
+        -- implemented"), while QUIT offers Exit now + Cancel, because a force-quit needs no server
+        -- round trip. Closing either one EARLY (button, ESC, or an override) cancels the logout;
+        -- letting it run out does not — the engine zeroes `timeleft` before hiding, which is exactly
+        -- what the ref's `if this.timeleft > 0` guard reads.
+        StaticPopupDialogs["CAMP"] = {
+            text = CAMP_TIMER,
+            button1 = CANCEL,
+            OnAccept = function()
+                CancelLogout()
+            end,
+            OnHide = function()
+                if this.timeleft > 0 then
+                    CancelLogout()
+                end
+            end,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
+
+        StaticPopupDialogs["QUIT"] = {
+            text = QUIT_TIMER,
+            button1 = QUIT_NOW,
+            button2 = CANCEL,
+            OnAccept = function()
+                ForceQuit()
+                this.timeleft = 0
+            end,
+            OnHide = function()
+                if this.timeleft > 0 then
+                    CancelLogout()
+                end
+            end,
+            timeout = 20,
+            whileDead = 1,
+            hideOnEscape = 1,
+        }
+
+        -- The camp/quit event driver. The ref handles these three in UIParent's own OnEvent
+        -- (UIParent.lua l.304-315); benilla has no UIParent frame, so this is a dedicated hidden
+        -- listener — the BenillaDeleteItemConfirmDriver shape.
+        function BenillaLogoutDriver_OnEvent()
+            if event == "PLAYER_CAMPING" then
+                StaticPopup_Show("CAMP")
+            elseif event == "PLAYER_QUITING" then
+                StaticPopup_Show("QUIT")
+            elseif event == "LOGOUT_CANCEL" then
+                StaticPopup_Hide("CAMP")
+                StaticPopup_Hide("QUIT")
+            end
+        end
+    ]]></Script>
+
+    <!-- ref GameMenuButtonTemplate (UIPanelTemplates.xml l.403-410) = UIPanelButtonTemplate at
+         144x21 with a white/white/grey label trio. UIPanelButtonTemplate itself is not transcribed
+         as a shared virtual (no other benilla file inherits it — each open-codes the same four-state
+         art, e.g. QuestFrame.xml l.753); its textures are inlined here with the ref TexCoords. -->
+    <Button name="GameMenuButtonTemplate" virtual="true">
+        <Size><AbsDimension x="144" y="21"/></Size>
+        <ButtonText name="$parentText"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+        <NormalFont inherits="GameFontHighlight"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+    </Button>
+
+    <Frame name="GameMenuFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="195" y="246"/></Size>
+        <Anchors><Anchor point="CENTER"/></Anchors>
+        <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+            <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+            <TileSize><AbsValue val="32"/></TileSize>
+            <EdgeSize><AbsValue val="32"/></EdgeSize>
+        </Backdrop>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="GameMenuFrameHeader" file="Interface\DialogFrame\UI-DialogBox-Header">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="12"/></Offset></Anchor></Anchors>
+                </Texture>
+                <FontString name="GameMenuFrameTitle" inherits="GameFontNormal">
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="GameMenuFrameHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The five with no panel behind them (header SCOPE note). Each keeps the ref's own
+                 OnClick quoted above it, so going live is deleting the _Pending call and pasting it:
+                     PlaySound("igMainMenuOption"); ShowUIPanel(OptionsFrame) -->
+            <Button name="GameMenuButtonOptions" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="TOP"><Offset><AbsDimension x="0" y="-37"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, VIDEOOPTIONS_MENU)</OnLoad></Scripts>
+            </Button>
+            <!-- ref: PlaySound("igMainMenuOption"); ShowUIPanel(SoundOptionsFrame) -->
+            <Button name="GameMenuButtonSoundOptions" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, SOUNDOPTIONS_MENU)</OnLoad></Scripts>
+            </Button>
+            <!-- ref: PlaySound("igMainMenuOption"); ShowUIPanel(UIOptionsFrame) -->
+            <Button name="GameMenuButtonUIOptions" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonSoundOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, UIOPTIONS_MENU)</OnLoad></Scripts>
+            </Button>
+            <!-- ref: PlaySound("igMainMenuOption"); KeyBindingFrame_LoadUI(); ShowUIPanel(KeyBindingFrame) -->
+            <Button name="GameMenuButtonKeybindings" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonUIOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, KEY_BINDINGS)</OnLoad></Scripts>
+            </Button>
+            <!-- ref: PlaySound("igMainMenuOption"); HideUIPanel(GameMenuFrame); ShowMacroFrame() -->
+            <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonKeybindings" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, MACROS)</OnLoad></Scripts>
+            </Button>
+
+            <!-- The three that are live. The ref's OnShow on both Logout and Quit disables the
+                 button while either logout dialog is already up (you cannot re-arm a running
+                 countdown); it runs on the menu's own show, which is when a re-opened menu has to
+                 re-read that state. -->
+            <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>self:SetText(LOGOUT)</OnLoad>
+                    <OnShow>
+                        if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
+                            self:Enable()
+                        else
+                            self:Disable()
+                        end
+                    </OnShow>
+                    <OnClick>
+                        PlaySound("igMainMenuLogout")
+                        Logout()
+                        HideUIPanel(GameMenuFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>self:SetText(EXIT_GAME)</OnLoad>
+                    <OnShow>
+                        if not StaticPopup_Visible("CAMP") and not StaticPopup_Visible("QUIT") then
+                            self:Enable()
+                        else
+                            self:Disable()
+                        end
+                    </OnShow>
+                    <OnClick>
+                        PlaySound("igMainMenuQuit")
+                        Quit()
+                        HideUIPanel(GameMenuFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="GameMenuButtonQuit" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-16"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>self:SetText(RETURN_TO_GAME)</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuContinue")
+                        HideUIPanel(GameMenuFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <!-- ref GameMenuFrame OnShow/OnHide, verbatim: the micro row's Main Menu button pushes in
+             while the menu is up, and the bag bar greys out under it (you cannot open bags from
+             behind the menu — ShowUIPanel's center gate would refuse the window anyway, so the
+             greying is the visible half of a rule the panel manager already enforces). Guarded, the
+             UiPanels.xml `CloseMenus and CloseMenus()` posture: a headless test loads this file
+             without the action bar behind it. -->
+        <Scripts>
+            <OnLoad>GameMenuFrameTitle:SetText(MAIN_MENU)</OnLoad>
+            <OnShow>
+                if UpdateMicroButtons then UpdateMicroButtons() end
+                if Disable_BagButtons then Disable_BagButtons() end
+            </OnShow>
+            <OnHide>
+                if UpdateMicroButtons then UpdateMicroButtons() end
+                if Enable_BagButtons then Enable_BagButtons() end
+            </OnHide>
+        </Scripts>
+    </Frame>
+
+    <!-- The camp/quit event listener (the ref's UIParent OnEvent arms — script block above). -->
+    <Frame name="BenillaLogoutDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("PLAYER_CAMPING")
+                self:RegisterEvent("PLAYER_QUITING")
+                self:RegisterEvent("LOGOUT_CANCEL")
+            </OnLoad>
+            <OnEvent>BenillaLogoutDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

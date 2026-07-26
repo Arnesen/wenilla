@@ -39,6 +39,7 @@
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
 //! | [`pvp`] | the one PvP-flag toggle |
+//! | [`social`] | friends, ignores, and `/who` |
 
 use std::net::TcpStream;
 
@@ -69,6 +70,7 @@ mod quest;
 mod selection;
 mod self_movement;
 mod skills;
+mod social;
 mod spells;
 mod taxi;
 mod trade;

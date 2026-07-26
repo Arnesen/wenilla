@@ -1,0 +1,257 @@
+//! `WOW_PHASE` — **what did the renderer actually do with this batch, frame by frame?**
+//!
+//! Every other flicker instrument we have reads the *scene*: `benilla-visual` says which pixels would
+//! not hold still, `WOW_PICK` says what geometry stands at them and whether it is visible. B38
+//! exhausted that layer. There, the awning is nearer than the plank behind it, writes depth, compares
+//! `GreaterEqual`, is not discarded and is not culled, and keeps the same mesh, material and texture
+//! on every single frame — and on half the frames the plank behind it wins the pixel anyway
+//! (decisions 0662, 0665). Under those facts that is impossible, so one of them stops being true
+//! somewhere *after* the scene and before the draw, and nothing we had could see into that gap.
+//!
+//! So: `WOW_PHASE=<uniqueId>` watches every model batch of one placed object and reports, per frame,
+//! which render phase each batch landed in and **where in the draw order** it sits. Absent from every
+//! phase means it was never submitted, which no amount of looking at pixels can distinguish from
+//! losing a depth test. Present, but at a different position than last frame, means the draw order
+//! moved — and for two surfaces that tie, draw order *is* the result.
+//!
+//! `WOW_PHASE_AT=<secs>` (default 20) / `WOW_PHASE_COUNT=<n>` (default 1) shape the sampling the same
+//! way the screenshot burst and the ray pick do, so a phase log and a frame stack line up frame for
+//! frame and "was it drawn?" can be read against "was this frame dim or bright?".
+//!
+//! Only the **main** 3D view's phases are read. Shadow and prepass views bin the same entities and
+//! would triple every line for nothing; a defect in *those* would show up as the wrong shadow, which
+//! is a different report.
+
+use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
+use bevy::prelude::*;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
+use bevy::render::sync_world::MainEntity;
+use bevy::render::{Render, RenderApp, RenderSystems};
+
+use crate::interact::WorldObject;
+use crate::terrain::WowModelMaterial;
+
+pub(crate) struct PhaseProbePlugin;
+
+impl Plugin for PhaseProbePlugin {
+    fn build(&self, app: &mut App) {
+        let Some(object) = std::env::var("WOW_PHASE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+        else {
+            warn!("phase: WOW_PHASE wants a placement uniqueId (e.g. 235256) — inert");
+            return;
+        };
+        let at = std::env::var("WOW_PHASE_AT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20.0);
+        let count = std::env::var("WOW_PHASE_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1u32)
+            .max(1);
+        app.insert_resource(PhaseWatch {
+            object,
+            at,
+            count,
+            batches: Vec::new(),
+            armed: false,
+        })
+        .add_systems(Update, collect_batches)
+        .add_plugins(ExtractResourcePlugin::<PhaseWatch>::default());
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            warn!("phase: no render app — inert");
+            return;
+        };
+        // After `PhaseSort`: binning and sorting are both settled, so membership and order are final.
+        render_app.add_systems(Render, report_phases.after(RenderSystems::PhaseSort));
+    }
+}
+
+/// The watch list, and the sampling window. Lives in the main world; the render half reads it through
+/// the extract boundary as a plain clone (it is a handful of entities once per sampled frame, so the
+/// cheap thing and the correct thing are the same).
+#[derive(Resource, Clone)]
+struct PhaseWatch {
+    /// The placement `uniqueId` whose batches to follow.
+    object: u32,
+    at: f32,
+    count: u32,
+    /// The watched batches: main-world entity, its WMO batch order, and how it draws.
+    batches: Vec<(Entity, i32, String)>,
+    /// Have we found the object and started sampling?
+    armed: bool,
+}
+
+impl ExtractResource for PhaseWatch {
+    type Source = PhaseWatch;
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+/// Find the object's batch entities once it has streamed in. Re-run until it is found, then hold:
+/// the set is per-placement and does not change, and re-collecting every frame would make the
+/// watch list itself a moving part of the measurement.
+fn collect_batches(
+    mut watch: ResMut<PhaseWatch>,
+    time: Res<Time>,
+    // `WorldObject` rides on **each submesh entity**, not on a parent that holds them as children —
+    // the same shape `WOW_PICK` relies on, where a single ray hit carries both its object identity
+    // and its batch. So the watch list is a filter over those entities, not a child walk.
+    parts: Query<(
+        Entity,
+        &WorldObject,
+        &crate::debug_panel::ModelPart,
+        &MeshMaterial3d<WowModelMaterial>,
+    )>,
+    materials: Res<Assets<WowModelMaterial>>,
+) {
+    if watch.armed || time.elapsed_secs() < watch.at {
+        return;
+    }
+    let want = watch.object;
+    let mut found: Vec<(Entity, i32, String)> = parts
+        .iter()
+        .filter(|(_, obj, _, _)| obj.id == want)
+        .map(|(e, _, part, mat)| {
+            // The WMO authored batch order rides in the material's `sun_scale.y` (`model_render`),
+            // which is also how `WOW_PICK` names a batch — so a phase line and a pick line describe
+            // the same surface by the same number.
+            let order = materials
+                .get(&mat.0)
+                .map_or(-1, |m| m.extension.sun_scale.y as i32);
+            (e, order, format!("{:?}", part.blend))
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    // Sort by batch order so the report reads in the WMO's authored order, not spawn order.
+    found.sort_by_key(|&(_, order, _)| order);
+    info!(
+        "phase: watching {} batches of #{want} for {} frames",
+        found.len(),
+        watch.count
+    );
+    watch.batches = found;
+    watch.armed = true;
+}
+
+/// Where each watched batch sits in each phase, this frame.
+fn report_phases(
+    watch: Option<Res<PhaseWatch>>,
+    opaque: Res<ViewBinnedRenderPhases<Opaque3d>>,
+    alpha_mask: Res<ViewBinnedRenderPhases<AlphaMask3d>>,
+    transparent: Res<ViewSortedRenderPhases<Transparent3d>>,
+    mut seen: Local<u32>,
+) {
+    let Some(watch) = watch else { return };
+    if !watch.armed || *seen >= watch.count {
+        return;
+    }
+    let frame = *seen;
+    *seen += 1;
+    // The whole-frame census, before the per-batch lines. Every instrument we have is scoped to the
+    // thing we already suspect — this object's batches, `WorldObject`-tagged ray hits, the depth
+    // between the opaque and transmissive passes — so a draw that is *none of those* is invisible to
+    // all of them at once. An alpha-blended sprite over the awning (a particle, a glow card) would
+    // halve the pixel while leaving depth, material, tag, draw order and the light buffer exactly as
+    // measured, which is precisely the contradiction B38 now sits in. A transparent count that moves
+    // between a bright and a dim frame names that draw; one that does not, rules out the whole family.
+    let transparent_total: usize = transparent.values().map(|p| p.items.len()).sum();
+    info!(
+        "phase#{frame} CENSUS opaque {} alphamask {} transparent {}",
+        binned_total(&opaque),
+        binned_total(&alpha_mask),
+        transparent_total,
+    );
+    for &(entity, submesh, ref blend) in &watch.batches {
+        let main = MainEntity::from(entity);
+        let mut found = Vec::new();
+        // The main view is whichever phase map holds the most entities: shadow and prepass views bin
+        // subsets, so the largest is the one that draws the frame. Picking by view entity would tie
+        // this to the camera's identity in the render world, which is not stable to read from here.
+        if let Some(pos) = binned_position::<Opaque3d>(&opaque, main) {
+            found.push(format!("Opaque3d @{pos}"));
+        }
+        if let Some(pos) = binned_position::<AlphaMask3d>(&alpha_mask, main) {
+            found.push(format!("AlphaMask3d @{pos}"));
+        }
+        for phase in transparent.values() {
+            if let Some(pos) = phase.items.iter().position(|item| item.entity.1 == main) {
+                found.push(format!("Transparent3d @{pos}"));
+            }
+        }
+        // "NOT SUBMITTED" is the whole point of the instrument: a batch that reached no phase was
+        // never drawn, and that is indistinguishable in the pixels from one that drew and lost.
+        // The entity, because **batch order does not identify a surface**: a WMO placement is many
+        // groups and the order is per-group, so one placement has several batches sharing an order
+        // (79 entities over 19 orders on the Far Watch Post tower). Keying a report by order alone
+        // silently merges them and can hide the one batch that moved.
+        info!(
+            "phase#{frame} {entity} batch order {submesh:3} {blend:10} -> {}",
+            if found.is_empty() {
+                "NOT SUBMITTED".to_string()
+            } else {
+                found.join(", ")
+            }
+        );
+    }
+}
+
+/// The entity's ordinal within the largest binned phase for `BPI`, walking bins in iteration order —
+/// which is the order the pass draws them, so the ordinal is a draw position and not just a yes/no.
+fn binned_position<BPI>(phases: &ViewBinnedRenderPhases<BPI>, main: MainEntity) -> Option<usize>
+where
+    BPI: bevy::render::render_phase::BinnedPhaseItem,
+{
+    let phase = phases.values().max_by_key(|p| {
+        p.multidrawable_meshes
+            .values()
+            .map(|bins| bins.values().map(|b| b.entities().len()).sum::<usize>())
+            .sum::<usize>()
+            + p.batchable_meshes
+                .values()
+                .map(|b| b.entities().len())
+                .sum::<usize>()
+    })?;
+    let mut n = 0usize;
+    for bins in phase.multidrawable_meshes.values() {
+        for bin in bins.values() {
+            if let Some(i) = bin.entities().get_index_of(&main) {
+                return Some(n + i);
+            }
+            n += bin.entities().len();
+        }
+    }
+    for bin in phase.batchable_meshes.values() {
+        if let Some(i) = bin.entities().get_index_of(&main) {
+            return Some(n + i);
+        }
+        n += bin.entities().len();
+    }
+    None
+}
+
+/// How many entities the main binned phase for `BPI` holds this frame — the census counterpart of
+/// [`binned_position`], picking the same "largest phase map is the main view" way so the two numbers
+/// describe the same view.
+fn binned_total<BPI>(phases: &ViewBinnedRenderPhases<BPI>) -> usize
+where
+    BPI: bevy::render::render_phase::BinnedPhaseItem,
+{
+    let count = |p: &bevy::render::render_phase::BinnedRenderPhase<BPI>| {
+        p.multidrawable_meshes
+            .values()
+            .map(|bins| bins.values().map(|b| b.entities().len()).sum::<usize>())
+            .sum::<usize>()
+            + p.batchable_meshes
+                .values()
+                .map(|b| b.entities().len())
+                .sum::<usize>()
+    };
+    phases.values().map(count).max().unwrap_or(0)
+}

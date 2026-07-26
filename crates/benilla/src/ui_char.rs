@@ -426,7 +426,7 @@ fn slot_view(
         .filter(|&g| g != 0)
         .and_then(|g| names.resolve(g, commands).map(str::to_string));
     let t = items.template(entry, guid, commands);
-    let (name, quality, display, link, equip_slots, class) = match t {
+    let (name, quality, display, link, equip_slots, class, bar_placeable) = match t {
         Some(t) => (
             Some(t.name.clone()),
             t.quality as i32,
@@ -439,8 +439,9 @@ fn slot_view(
             )),
             find_equip_slot(t.inventory_type),
             t.class,
+            t.placeable_on_action_bar(),
         ),
-        None => (None, 0, 0, None, Vec::new(), 0),
+        None => (None, 0, 0, None, Vec::new(), 0, false),
     };
     // The quiver's bag-bar count is what's INSIDE it: the ref's `GetInventoryItemCount("player",
     // bagSlot)` returns the ammo left in a worn ammo container — the "162" on the bag bar — and
@@ -471,6 +472,7 @@ fn slot_view(
         flags,
         locked: pending.contains(EQUIPMENT_BAG, live_id),
         equip_slots,
+        bar_placeable,
         creator,
     })
 }
@@ -552,6 +554,8 @@ fn inventory_slots(
             // fit — both stay the inert default.
             locked: false,
             equip_slots: Vec::new(),
+            // Ammo is a named deferral too: no drag path reaches the bar from this slot.
+            bar_placeable: false,
             creator: None,
         });
     }

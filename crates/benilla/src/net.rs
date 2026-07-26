@@ -18,7 +18,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use benilla_protocol::{
-    EntityKind, JumpInfo, MoveSpeeds, ObjectFields, SessionEvent, SpeedKind, TransportPose,
+    messages::WhoRequest, EntityKind, JumpInfo, MoveSpeeds, ObjectFields, SessionEvent, SpeedKind,
+    TransportPose,
 };
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
@@ -564,10 +565,17 @@ pub(crate) enum ClientCommand {
     /// about one, `0` for template-only); answered by an `ItemTemplate` event into the
     /// [`crate::items::Items`] cache. Sent by the cache's ask-once resolve, never directly.
     ItemQuery { entry: u32, guid: u64 },
-    /// Use an item by wire bag position (`CMSG_USE_ITEM` — bag 255 + absolute slot for the
-    /// backpack, a bag's own player-array slot 19–22 + inner slot otherwise). The container
-    /// drain maps the Lua `(bagID, slot)` space before sending.
-    UseItem { bag_index: u8, slot: u8 },
+    /// Use an item by wire bag position (`CMSG_USE_ITEM` — bag 255 + absolute slot for anything
+    /// in the player's own field array, i.e. an equipment slot, the backpack or the keyring; a
+    /// bag's own player-array slot 19–22 + inner slot otherwise). The container drain maps the
+    /// Lua `(bagID, slot)` space before sending. `spell_index` is the template block ordinal the
+    /// server should cast (`ItemInfo::use_spell_index`) — 0 for every item whose on-use spell is
+    /// its first block, which is nearly all of them.
+    UseItem {
+        bag_index: u8,
+        slot: u8,
+        spell_index: u8,
+    },
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, same bag addressing) — the drain's fork for an
     /// *equippable* click, mirroring the real client's equip-vs-use decision. Refusals come back
     /// as `InventoryFailure` events onto the UI error line.
@@ -890,6 +898,10 @@ pub(crate) enum ClientCommand {
     /// character), which the IO thread turns into a [`LoggedOutMessage`] + an immediate
     /// reconnect whose fresh roster is the select screen.
     Logout,
+    /// Call off a pending logout (`CMSG_LOGOUT_CANCEL`) — the CAMP/QUIT dialog's Cancel, decision
+    /// 0674. Only the non-instant logout has anything to cancel; the server acks with
+    /// `SMSG_LOGOUT_CANCEL_ACK`, which becomes the UI's `LOGOUT_CANCEL` event.
+    LogoutCancel,
     /// Join a chat channel (`CMSG_JOIN_CHANNEL` — `/join`, and the 0288 P6 zone auto-join).
     JoinChannel { name: String, password: String },
     /// Leave a chat channel (`CMSG_LEAVE_CHANNEL` — `/leave`).
@@ -975,6 +987,27 @@ pub(crate) enum ClientCommand {
     /// Decline / cancel / forfeit a duel (`CMSG_DUEL_CANCELLED`) — one opcode for all three; the
     /// server reads the intent from the duel's state.
     DuelCancelled { arbiter: u64 },
+    // ── The social family (decision 0668; writer bodies in benilla-protocol
+    //    `world/writer/social.rs`). Note the wire's own asymmetry: add by NAME, remove by GUID.
+    /// Refresh the friend list (`CMSG_FRIEND_LIST`) — the FrameXML's `ShowFriends()`. The list
+    /// also arrives unasked at login, so this is never the only path.
+    FriendListRequest,
+    /// Befriend a character by name (`CMSG_ADD_FRIEND`).
+    AddFriend { name: String },
+    /// Drop a friend by guid (`CMSG_DEL_FRIEND`) — the caller resolves the name first.
+    DelFriend { guid: u64 },
+    /// Ignore a character by name (`CMSG_ADD_IGNORE`).
+    AddIgnore { name: String },
+    /// Stop ignoring, by guid (`CMSG_DEL_IGNORE`).
+    DelIgnore { guid: u64 },
+    /// Tell the server we dropped an ignored player's whisper (`CMSG_CHAT_IGNORED`) so it can
+    /// answer them "X is ignoring you". The drop itself is entirely client-side — the server
+    /// keeps delivering an ignored player's chat, which is why the client has to filter *and*
+    /// report.
+    ChatIgnored { guid: u64 },
+    /// Run a `/who` (`CMSG_WHO`) — the filter string is already parsed into wire fields
+    /// (`ui_social::who_query`, which needs the DBCs the parse resolves names against).
+    Who { request: Box<WhoRequest> },
     /// Ask to flip our own PvP flag (`CMSG_TOGGLE_PVP`, empty body — decision 0646): `/pvp` and
     /// the unit popup's PvP row, both through the VM's intent queue. Nothing local changes; the
     /// answer is the descriptor's PvP bit (and flagging *off* waits out the server's 300 s timer).

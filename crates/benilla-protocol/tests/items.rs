@@ -238,8 +238,10 @@ fn item_query_response_full_weapon_golden() {
                     delay_ms: 2800,
                     ammo_type: 2,
                     ranged_mod_range: 1.5,
+                    spell_charges_0: 0,
                     spells: vec![
                         ItemSpellEntry {
+                            index: 0,
                             spell_id: 17_251,
                             trigger: 0,
                             charges: 0,
@@ -248,6 +250,7 @@ fn item_query_response_full_weapon_golden() {
                             category_cooldown_ms: 60_000,
                         },
                         ItemSpellEntry {
+                            index: 1,
                             spell_id: 671,
                             trigger: 1,
                             charges: 0,
@@ -403,7 +406,9 @@ fn item_query_response_consumable_all_zero_slots_are_empty_not_garbage() {
                     delay_ms: 0,
                     ammo_type: 0,
                     ranged_mod_range: 0.0,
+                    spell_charges_0: 0,
                     spells: vec![ItemSpellEntry {
+                        index: 0,
                         spell_id: 2024,
                         trigger: 0,
                         charges: 0,

@@ -109,8 +109,13 @@ pub struct ItemInfo {
     /// feeds the range formula.
     pub ranged_mod_range: f32,
     /// The 5-slot `ItemSpell` block, **filtered to entries with `spell_id != 0`**, in wire order —
-    /// every "Use:"/"Equip:"/"Chance on hit:" trigger line the tooltip can render.
+    /// every "Use:"/"Equip:"/"Chance on hit:" trigger line the tooltip can render. Each entry
+    /// carries its own [`ItemSpellEntry::index`], since this vector's positions are not the
+    /// template's block ordinals.
     pub spells: Vec<ItemSpellEntry>,
+    /// Spell **block 0**'s `SpellCharges` word, raw and unfiltered — the reference's
+    /// `template+0x144`, and the sole input to [`Self::has_finite_charges`].
+    pub spell_charges_0: i32,
     /// The first ON_USE (`SpellTrigger == 0`) spell block — what a right-click/action-bar use
     /// casts, and the key the item's cooldown tracks (the client's own 5-slot scan: spell id > 0,
     /// trigger == 0 — wow-re `wave-cooldown.md` `GetItemCooldown 0x6e2ed0`). `None` for items with
@@ -157,6 +162,32 @@ pub struct ItemInfo {
     pub bag_family: u32,
 }
 
+impl ItemInfo {
+    /// Does this item carry **finite charges**? The reference's
+    /// `template+0x144 != 0 && template+0x144 != -1` (wow-re `action-item-slot.md` §8.2) — the
+    /// gate on the use path's mode-`0x20` inventory search, which skips spent copies so a click
+    /// reaches one that still works. `-1` is the "unlimited" sentinel, `0` "no charges at all".
+    pub fn has_finite_charges(&self) -> bool {
+        self.spell_charges_0 != 0 && self.spell_charges_0 != -1
+    }
+
+    /// The **block ordinal** (0..4) of the first ON_USE spell — the third byte of `CMSG_USE_ITEM`
+    /// (wow-re `action-item-slot.md` §8.3). `None` for an item with no on-use spell. Almost
+    /// always 0, but an item whose block 0 is an ON_EQUIP proc and whose on-use sits in block 1
+    /// needs the real index or the server casts the wrong block.
+    pub fn use_spell_index(&self) -> Option<u8> {
+        self.spells.iter().find(|s| s.trigger == 0).map(|s| s.index)
+    }
+
+    /// Can this item be placed on an action-bar slot? `PlaceAction`'s only item filter, byte-read
+    /// (wow-re `action-item-slot.md` §5, `4e6571`–`4e6598`): **an on-use spell OR equippable**.
+    /// No quality, bind, class/subclass, container or level test exists anywhere on that path — a
+    /// bag (`InventoryType` 18) IS placeable; a grey trade good with neither is silently refused.
+    pub fn placeable_on_action_bar(&self) -> bool {
+        self.use_spell.is_some() || self.inventory_type != 0
+    }
+}
+
 /// One `Damage` block ([`ItemInfo::damages`] — block 0 is also mirrored into
 /// [`ItemInfo::dmg_min`]/[`ItemInfo::dmg_max`]/[`ItemInfo::dmg_type`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -174,6 +205,12 @@ pub struct ItemDamage {
 /// as [`ItemUseSpell`]'s (VERIFIED vmangos `ItemHandler.cpp:354-391`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemSpellEntry {
+    /// Which of the template's **five** spell blocks this is (0..4). Not the index in
+    /// [`ItemInfo::spells`] — that vector drops empty blocks, and the wire's own
+    /// `CMSG_USE_ITEM` spell byte is this block ordinal (wow-re `action-item-slot.md` §8.3: the
+    /// reference scans `SpellId[5]`/`SpellTrigger[5]` for the block it is casting and sends its
+    /// position).
+    pub index: u8,
     pub spell_id: u32,
     /// `ItemSpelltriggerType`: 0 ON_USE, 1 ON_EQUIP, 2 CHANCE_ON_HIT.
     pub trigger: u32,
@@ -297,15 +334,24 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
     // client's own 5-slot scan.
     let mut spells = Vec::new();
     let mut use_spell = None;
-    for _ in 0..5 {
+    // Block 0's charges, kept RAW — whether the item has finite charges is the reference's
+    // `template+0x144 != 0 && != -1` test on exactly this word ([`ItemInfo::has_finite_charges`],
+    // wow-re `action-item-slot.md` §8.2), which reads block 0 even when block 0 carries no spell
+    // and so never reaches `spells` below.
+    let mut spell_charges_0 = 0;
+    for block in 0..5u8 {
         let spell_id = read_u32_le(r)?;
         let trigger = read_u32_le(r)?;
         let charges = read_i32_le(r)?;
         let cooldown_ms = read_i32_le(r)?;
         let category = read_u32_le(r)?;
         let category_cooldown_ms = read_i32_le(r)?;
+        if block == 0 {
+            spell_charges_0 = charges;
+        }
         if spell_id != 0 {
             spells.push(ItemSpellEntry {
+                index: block,
                 spell_id,
                 trigger,
                 charges,
@@ -378,6 +424,7 @@ pub(super) fn read_item_query_response(r: &mut &[u8]) -> io::Result<(u32, Option
             ammo_type,
             ranged_mod_range,
             spells,
+            spell_charges_0,
             use_spell,
             bonding,
             description,

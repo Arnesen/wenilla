@@ -136,9 +136,55 @@ pub(crate) fn shade_of(tag: u32) -> u8 {
     ((tag & SHADE_MASK) >> SHADE_SHIFT) as u8
 }
 
+/// Human-readable decode of a `MeshTag`, for the probes (`WOW_PICK`'s per-frame shading dump).
+///
+/// It lives **here** because this module owns the bit conventions: a probe that re-derived the masks
+/// would silently drift the day a field moves — which is precisely how 0355 broke (the slot moved and
+/// one of its two writers kept the old bits). The masks stay private; this is the read-out.
+///
+/// The payload's meaning switches on **material state**, which a tag alone cannot know, so BOTH
+/// readings of bits 16..=29 are printed side by side: `shade` is the exterior law's byte, `slot` the
+/// interior law's probe index. A writer using the wrong law for its material is invisible in either
+/// reading alone and obvious in the pair — a shade byte of 255 and a slot of 255 are the same bits.
+pub(crate) fn describe(tag: u32) -> String {
+    if tag == 0 {
+        return "0 (untagged ⇒ opaque)".to_string();
+    }
+    let flags = match (tag & HIGHLIGHT_BIT != 0, tag & INTERIOR_FOG_BIT != 0) {
+        (true, true) => " hi+fog",
+        (true, false) => " hi",
+        (false, true) => " fog",
+        (false, false) => "",
+    };
+    format!(
+        "{tag:#010x}{flags} α {:.4} shade {} / slot {}",
+        (tag & ALPHA_MASK) as f32 / 65535.0,
+        shade_of(tag),
+        (tag >> SHADE_SHIFT) & 0x3fff,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_prints_both_readings_of_the_shared_bits() {
+        // The 0-sentinel is called out by name rather than decoded as "α 0.0000" (invisible), which
+        // is the one thing it never means.
+        assert!(describe(0).contains("untagged"));
+        // Exterior law: the shade byte. Interior law: the same bits as a slot. Both, always.
+        let t = with_shade(alpha_bits(1.0), 255);
+        assert!(describe(t).contains("shade 255"), "{}", describe(t));
+        assert!(describe(t).contains("slot 255"), "{}", describe(t));
+        // A probe payload reads back its slot, and carries the fog flag it bakes in.
+        let t = probe_bits(6660);
+        assert!(describe(t).contains("slot 6660"), "{}", describe(t));
+        assert!(describe(t).contains("fog"), "{}", describe(t));
+        // Both standalone flags are named, and neither is mistaken for payload.
+        assert!(describe(HIGHLIGHT_BIT | alpha_bits(0.5)).contains("hi"));
+        assert!(describe(HIGHLIGHT_BIT | INTERIOR_FOG_BIT | 1).contains("hi+fog"));
+    }
 
     #[test]
     fn highlight_bit_is_orthogonal_to_both_payloads() {

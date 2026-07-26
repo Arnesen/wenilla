@@ -391,10 +391,17 @@ pub(super) fn update_time_lighting(
     }
     // `WOW_FOG_DUMP=1`: the interior-fog crossfade live probe, 1 Hz — the committed pair + the
     // ramp t (the 4 s in/out is too fast for the per-game-minute light dump to catch).
-    if std::env::var_os("WOW_FOG_DUMP").is_some() {
-        let sec = time.elapsed_secs() as u32;
-        if *last_fog_dump != Some(sec) {
-            *last_fog_dump = Some(sec);
+    //
+    // `WOW_FOG_DUMP=frame` drops the throttle. 1 Hz is fast enough to watch a 4 s ramp travel and far
+    // too slow to see the **target** flip: `blend` switches hard between the scene triple and the
+    // staged interior one on `staged.is_some()`, so a target that alternates frame to frame alternates
+    // the committed fog frame to frame, and a once-a-second sample simply lands on whichever side it
+    // lands on. Rows 18/19 are read by WMO materials *alone*, which is exactly the footprint B38 shows
+    // (decision 0670: one WMO re-lit, terrain and sky untouched).
+    if let Some(mode) = std::env::var_os("WOW_FOG_DUMP") {
+        let sec = (mode != *"frame").then(|| time.elapsed_secs() as u32);
+        if sec.is_none() || *last_fog_dump != sec {
+            *last_fog_dump = sec;
             let b = |c: [f32; 3]| c.map(|v| (v * 255.0).round() as i32);
             eprintln!(
                 "[fog] t {:.2} target {:?} scene {:?} {:.0}/{:.0} interior {:?} {:.0}/{:.0}",

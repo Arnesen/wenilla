@@ -24,7 +24,7 @@
         UIPanelWindows["BenillaMerchantFrame"] = { area = "left", pushable = 0 }
         -- The mail window (decision 0544): the reference UIParent.lua l.37 registers MailFrame
         -- area="left", pushable=0. The OpenMailFrame is NOT a panel — it is a special-frame toplevel
-        -- (UIParent.lua l.46 UISpecialFrames), closed by ESC in BenillaOnEscape below (this v1 drops
+        -- (UIParent.lua l.46 UISpecialFrames), closed by ESC in ToggleGameMenu below (this v1 drops
         -- the UISpecialFrames table, so escapable toplevels are hard-listed there, like WorldMapFrame).
         UIPanelWindows["BenillaMailFrame"] = { area = "left", pushable = 0 }
         -- The trade window (decision 0592 P1, TradeFrame.xml): the ref's own UIParent.lua l.27
@@ -66,6 +66,10 @@
         -- guard already reads `info.whileDead` — ShowUIPanel's own comment: `UnitIsDead` doesn't
         -- exist yet, so the guard is inert either way today).
         UIPanelWindows["BenillaTalentFrame"] = { area = "left", pushable = 6 }
+        -- The social window (decision 0668) — the ref's own registration line verbatim
+        -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
+        -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
+        UIPanelWindows["BenillaFriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
         -- The crafting window (decision 0437 phase 2, TradeSkillFrame.xml): NOT an NPC session (it
         -- opens off your own cast, TradeSkillFrame.xml's own header comment) — the ref Lua's own
         -- registration line (Blizzard_TradeSkillUI.lua:13) is `{ area = "left", pushable = 3 }`,
@@ -76,6 +80,15 @@
         -- (grepped both ref files directly to confirm: `3` is TradeSkillFrame's own line-13 value,
         -- a different window/depth — CraftFrame.xml's own header comment has the same note).
         UIPanelWindows["BenillaCraftFrame"] = { area = "left", pushable = 4 }
+        -- The game menu (decision 0674, GameMenuFrame.xml) — the ref's own registration line
+        -- verbatim (`UIPanelWindows["GameMenuFrame"] = { area = "center", pushable = 0,
+        -- whileDead = 1 }`, UIParent.lua l.15), and the FIRST **center**-area row benilla ships.
+        -- "center" is not a position here, it is a MODE: a native-center frame takes the center
+        -- slot keeping its own anchor (the menu is screen-CENTER by its own XML), closes every
+        -- other window on the way in, and — while it holds the slot — makes ShowUIPanel refuse
+        -- every non-center panel (`CanOpenPanels` below). That is the rule behind "you can't open
+        -- anything with the ESC menu up". whileDead: dying is exactly when you want to log out.
+        UIPanelWindows["GameMenuFrame"] = { area = "center", pushable = 0, whileDead = 1 }
 
         -- The real client stores `.left`/`.center`/`.doublewide`/`.fullscreen` as fields directly on
         -- the `UIParent` frame table (UIParent.lua l.789-885). benilla has no `UIParent` frame object
@@ -154,16 +167,38 @@
             return slots.center
         end
 
-        -- ShowUIPanel(frame) — UIParent.lua l.649-751, v1 left+center slice only (pin §3 steps 1,3-5).
-        -- Skipped by scope: `CanOpenPanels()` (l.655 — no gate exists to open panels on yet),
-        -- full-screen (l.668-675) and native-center (l.677-689) precedence (no `full`/`center`-area
-        -- panel ships), and the `full`/`doublewide` branches (l.692-710 — no such row is registered).
+        -- CanOpenPanels() — UIParent.lua l.887-910. Its dead-player arms are commented out in the
+        -- reference itself (both of them, with the note that the fear/out-of-control gate was
+        -- "previously"); what survives is one rule: **a native-center frame open ⇒ nothing else
+        -- opens**. The game menu is the only such frame (decision 0674), so this reads: with the
+        -- ESC menu up, no window opens — not from a keybind, not from an NPC's OPEN_WINDOW.
+        function CanOpenPanels()
+            local centerFrame = GetCenterFrame()
+            if not centerFrame then
+                return 1
+            end
+            local info = UIPanelWindows[centerFrame:GetName()]
+            if info and info.area == "center" then
+                return nil
+            end
+            return 1
+        end
+
+        -- ShowUIPanel(frame) — UIParent.lua l.649-751, the left+center slice (pin §3 steps 1,3-5)
+        -- plus the native-center mode decision 0674 needed. Still skipped by scope: full-screen
+        -- (l.668-675, l.692-696 — no `full` row is registered; benilla's world map is a plain
+        -- toplevel, not a panel) and `doublewide` (l.707-710 — likewise none).
         function ShowUIPanel(frame, force)
             if not frame or frame:IsVisible() then
                 return
             end
 
             local info = UIPanelWindows[frame:GetName()]
+            -- l.655-657. Note the reference's own precedence: an UNREGISTERED frame is not gated
+            -- (the `info and` term), so a bare toplevel still shows with the menu up.
+            if not CanOpenPanels() and info and info.area ~= "center" then
+                return
+            end
             if not info then
                 frame:Show()
                 return
@@ -174,8 +209,35 @@
                 return
             end
 
+            -- l.677-689: with a native-center frame open, only another center request gets through
+            -- — `force` evicts it instead of refusing. Redundant with the CanOpenPanels gate above
+            -- for every caller that doesn't force (the reference double-checks it too); kept because
+            -- it is the ONLY path that can displace the menu, and dropping it would silently turn
+            -- `force` into a no-op. No benilla caller passes `force` yet.
+            local centerFrame = GetCenterFrame()
+            if centerFrame then
+                local centerInfo = UIPanelWindows[centerFrame:GetName()]
+                if centerInfo and centerInfo.area == "center" and info.area ~= "center" then
+                    if force then
+                        SetCenterFrame(nil)
+                    else
+                        return
+                    end
+                end
+            end
+
+            -- l.697-702: native-center frames just replace each other and take the screen —
+            -- everything else closes first. `skipSetPoint` is the load-bearing argument: the menu
+            -- keeps its own CENTER anchor instead of being dropped at the left-area seat.
+            if info.area == "center" then
+                CloseWindows()
+                CloseAllBags()
+                SetCenterFrame(frame, 1)
+                return
+            end
+
             if info.area ~= "left" then
-                -- No center/full/doublewide row is registered in v1 — defensive fallback only.
+                -- No full/doublewide row is registered — defensive fallback only.
                 frame:Show()
                 return
             end
@@ -269,15 +331,21 @@
         -- UIPanel (no slot registration) — it must be closed here explicitly, exactly as the real
         -- client closes its ContainerFrames outside the slot system. Naming BenillaBagFrame here
         -- mirrors UIParent.lua naming ContainerFrame in the very same function.
+        -- The five bag windows (the real fn's ContainerFrame1..NUM_CONTAINER_FRAMES): the backpack
+        -- plus the four equipped-bag windows. Chunk-LOCAL rather than BagFrame.xml's own
+        -- BENILLA_BAG_WINDOWS global, so every user below stays nil-safe on a surface without the
+        -- bag file (a headless panel test) — each still resolves per window through `getglobal`.
+        -- (It was three identical inline copies until the game menu needed a fourth.)
+        local BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
+                              "BenillaBagFrame3", "BenillaBagFrame4" }
+
         function CloseAllWindows(ignoreCenter)
             local bagsVisible = nil
-            -- Hide every open bag window — the backpack plus the four equipped-bag windows (the real
-            -- fn's ContainerFrame1..NUM_CONTAINER_FRAMES loop). Now that 'B' opens all bags at once
-            -- (BagFrame.xml BenillaBagToggle_OnClick), ESC must close all of them, not just the
-            -- backpack. The list is inlined (not BagFrame.xml's BENILLA_BAG_WINDOWS) so this stays
-            -- nil-safe on a surface without the bag file — a headless panel test — per window.
-            local bags = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2", "BenillaBagFrame3", "BenillaBagFrame4" }
-            for _, name in ipairs(bags) do
+            -- Hide every open bag window. Now that 'B' opens all bags at once (BagFrame.xml
+            -- BenillaBagToggle_OnClick), ESC must close all of them, not just the backpack. The bag
+            -- windows are NOT UIPanels (no slot registration) — they must be closed here explicitly,
+            -- exactly as the real client closes its ContainerFrames outside the slot system.
+            for _, name in ipairs(BAG_WINDOWS) do
                 local bag = getglobal(name)
                 if bag and bag:IsShown() then
                     bag:Hide()
@@ -286,6 +354,20 @@
             end
             local windowsVisible = CloseWindows(ignoreCenter)
             return bagsVisible or windowsVisible
+        end
+
+        -- CloseAllBags() — the ref ContainerFrame.lua l.702-707 (`CloseBackpack()` + `CloseBag(1..N)`),
+        -- called by ShowUIPanel's native-center branch above. Distinct from CloseBackpack below on
+        -- purpose: this is the UNCONDITIONAL close (the ref's CloseBag ignores the was-open memory),
+        -- because a center frame takes the whole screen — nothing is being "restored afterwards"
+        -- the way a vendor window restores the bags it opened.
+        function CloseAllBags()
+            for _, name in ipairs(BAG_WINDOWS) do
+                local bag = getglobal(name)
+                if bag and bag:IsShown() then
+                    bag:Hide()
+                end
+            end
         end
 
         -- OpenBackpack / CloseBackpack — the real ContainerFrame.lua globals (l.187-217) the
@@ -298,18 +380,16 @@
         -- benilla stores that on each frame (`wasOpen`). benilla DIVERGES from the ref here on
         -- purpose: the real OpenBackpack touches only the backpack, but ours opens EVERY equipped
         -- bag with the window (director's call — decision 0561 — matching the 'B' all-bags toggle),
-        -- so the names keep the ref's caller contract while the body loops the five windows. The
-        -- list is inlined (like CloseAllWindows above) and every step is guarded, so a surface
-        -- without the bag file — a headless panel test — no-ops rather than erroring.
+        -- so the names keep the ref's caller contract while the body loops the five windows. Every
+        -- step is guarded, so a surface without the bag file — a headless panel test — no-ops
+        -- rather than erroring.
         function OpenBackpack()
-            local bags = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
-                           "BenillaBagFrame3", "BenillaBagFrame4" }
             for bagId = 0, 4 do
                 -- The backpack (bag 0) always exists; an equipped-bag window only when a bag is in
                 -- the slot (the same existence test as BagFrame.xml's BenillaOpenAllBags).
                 local exists = bagId == 0
                     or (C_Container and C_Container.GetContainerNumSlots(bagId) > 0)
-                local bag = exists and getglobal(bags[bagId + 1])
+                local bag = exists and getglobal(BAG_WINDOWS[bagId + 1])
                 if bag then
                     if bag:IsShown() then
                         bag.wasOpen = 1  -- already open: leave it, and don't close it on window hide
@@ -323,9 +403,7 @@
         end
 
         function CloseBackpack()
-            local bags = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
-                           "BenillaBagFrame3", "BenillaBagFrame4" }
-            for _, name in ipairs(bags) do
+            for _, name in ipairs(BAG_WINDOWS) do
                 local bag = getglobal(name)
                 if bag and bag:IsShown() and not bag.wasOpen then
                     bag:Hide()           -- OnHide → igBackPackClose
@@ -333,30 +411,59 @@
             end
         end
 
-        -- BenillaOnEscape() — the ESC keybinding action, run by the host (crates/benilla ui_input)
-        -- when no EditBox consumed the ESCAPE key. The real client binds ESCAPE → TOGGLEGAMEMENU →
-        -- ToggleGameMenu() (UIParent.lua l.1465-1497); its no-menu branch is an if/elseif chain
-        -- (l.1482-1496) that tries, in order:
-        --     if     ( StaticPopup_EscapePressed() ) then
-        --     elseif ( OptionsFrame:IsVisible() )    then OptionsFrameCancel:Click()
-        --     elseif ( GameMenuFrame:IsVisible() )   then PlaySound("igMainMenuQuit"); HideUIPanel(GameMenuFrame)
-        --     elseif ( CloseMenus() )                then
-        --     elseif ( SpellStopCasting() )          then
-        --     elseif ( SpellStopTargeting() )        then
-        --     elseif ( CloseAllWindows() )           then   -- l.1491
-        --     elseif ( ClearTarget() )               then
-        --     else   PlaySound("igMainMenuOpen"); ShowUIPanel(GameMenuFrame)   -- l.1494-1495
-        -- benilla has no options / game menu / spell targeting yet, so those branches are
-        -- absent and the chain collapses to StaticPopup → CloseMenus → SpellStopCasting →
-        -- CloseAllWindows → ClearTarget, with no menu to open when nothing ate the press. The
-        -- ORDER is the law
-        -- (the director's two-press report, decision 0449): ESC mid-cast cancels the cast and
-        -- ONLY the cast; the target drops on a later press once nothing else claims it.
-        -- ONE benilla addition, ahead of the close: a held cursor item is dropped (ClearCursor). The
-        -- cursor-item model (decision 0068 T2) has no real-client ESC handling to mirror — vanilla
-        -- leaves the item on the cursor — so this is a deliberate benilla convenience (ESC as the
-        -- universal "get me out" key). Guarded so it stays inert were the cursor slice ever absent.
-        function BenillaOnEscape()
+        -- ToggleGameMenu(clicked) — UIParent.lua l.1465-1497, the ESCAPE binding's action
+        -- (TOGGLEGAMEMENU), run by the host (crates/benilla ui_script/input.rs) when no EditBox
+        -- consumed the key, and by the Main Menu micro button with `clicked = 1`. It was
+        -- benilla's own `BenillaOnEscape` while there was no menu to open (decision 0674 retires
+        -- that name — this IS the reference function now, and an addon-visible one).
+        --
+        -- TWO behaviours in one function, which is the reference's own shape:
+        --  · `clicked` (the micro button, l.1466-1480) — a TOGGLE. Menu up ⇒ close it; menu down ⇒
+        --    CloseMenus() + CloseAllWindows() first, then open. It never cancels a cast or drops a
+        --    target: clicking a button is not "get me out of this".
+        --  · no argument (the ESC key, l.1482-1496) — the LADDER, one eater per press, in order:
+        --        if     ( StaticPopup_EscapePressed() ) then
+        --        elseif ( OptionsFrame:IsVisible() )    then OptionsFrameCancel:Click()
+        --        elseif ( GameMenuFrame:IsVisible() )   then PlaySound("igMainMenuQuit"); HideUIPanel(GameMenuFrame)
+        --        elseif ( CloseMenus() )                then
+        --        elseif ( SpellStopCasting() )          then
+        --        elseif ( SpellStopTargeting() )        then
+        --        elseif ( CloseAllWindows() )           then   -- l.1491
+        --        elseif ( ClearTarget() )               then
+        --        else   PlaySound("igMainMenuOpen"); ShowUIPanel(GameMenuFrame)   -- l.1494-1495
+        --    The ORDER is the law (the director's two-press report, decision 0449): ESC mid-cast
+        --    cancels the cast and ONLY the cast; the target drops on a later press once nothing
+        --    else claims it; and only a press with NOTHING left to eat opens the menu.
+        --
+        -- Absent branches, and why: no OptionsFrame (nothing to cancel — GameMenuFrame.xml's five
+        -- disabled buttons are exactly that gap), and no SpellStopTargeting (no ground-target
+        -- cursor mode yet). ONE benilla ADDITION, ahead of everything: a held cursor item is
+        -- dropped (ClearCursor). The cursor-item model (decision 0068 T2) has no real-client ESC
+        -- handling to mirror — vanilla leaves the item on the cursor — so this is a deliberate
+        -- benilla convenience (ESC as the universal "get me out" key). Guarded so it stays inert
+        -- were the cursor slice ever absent. Three further benilla rungs sit between the popup and
+        -- CloseMenus (stack split, world map, open mail); each is commented at its own line with
+        -- the reference mechanism it stands in for.
+        function ToggleGameMenu(clicked)
+            -- Looked up rather than indexed off the global: a headless panel test loads this file
+            -- without GameMenuFrame.xml behind it, and the reference's bare `GameMenuFrame:` would
+            -- abort the whole chain there (the `CloseMenus and` guard two rungs down, same reason).
+            local menu = getglobal("GameMenuFrame")
+
+            -- The micro button's toggle (l.1466-1480).
+            if clicked then
+                if menu and menu:IsVisible() then
+                    PlaySound("igMainMenuQuit")
+                    HideUIPanel(menu)
+                elseif menu then
+                    if CloseMenus then CloseMenus() end
+                    CloseAllWindows()
+                    PlaySound("igMainMenuOpen")
+                    ShowUIPanel(menu)
+                end
+                return
+            end
+
             if CursorHasItem and CursorHasItem() then
                 ClearCursor()
             end
@@ -364,6 +471,16 @@
             -- defined with the popup engine below): OnCancel(data, "clicked") + hide, but ONLY for
             -- hideOnEscape entries, so e.g. the DEATH release popup ignores ESC like the ref's.
             if StaticPopup_EscapePressed() then
+                return
+            end
+            -- The menu itself closes next (l.1485-1487) — before every close/cancel rung below, so
+            -- ESC with the menu up only puts the menu away. (The OptionsFrame rung the reference
+            -- checks between these two has no benilla frame; GameMenuFrame.xml's disabled buttons
+            -- ARE that gap.) Note the sound: closing by ESC plays igMainMenuQuit, the same kit the
+            -- Exit Game button uses — the reference's choice, not a copy/paste slip here.
+            if menu and menu:IsVisible() then
+                PlaySound("igMainMenuQuit")
+                HideUIPanel(menu)
                 return
             end
             -- The stack-split spinner next (decision 0216 §6/slice 2, StackSplit.xml): the real
@@ -416,7 +533,37 @@
             if CloseAllWindows() then
                 return
             end
-            ClearTarget()
+            if ClearTarget() then
+                return
+            end
+            -- Nothing left to eat (l.1493-1495): the press opens the menu. ClearTarget answering
+            -- nil is what gets us here — which is why its `1`/nil return is load-bearing, and why
+            -- the ladder above must never return an unconditional truthy.
+            if menu then
+                PlaySound("igMainMenuOpen")
+                ShowUIPanel(menu)
+            end
+        end
+
+        -- SetDesaturation(texture, desaturation) — ref UIParent.lua l.1499-1510, verbatim. The
+        -- reference itself has a no-shader fallback, and OURS IS ALWAYS THAT PATH: this engine has
+        -- no SetDesaturated, so `shaderSupported` is false exactly as on a 1.12 card without the
+        -- desaturation shader, and the grey comes from the ref's own vertex-colour branch. Written
+        -- as the wrapper rather than open-coded at each call site so the day a real desaturation
+        -- lands, one function changes. First caller here is the game menu's bag-bar greying
+        -- (decision 0674); PartyFrame.xml's disconnected-member branch has been CALLING this
+        -- global since decision 0434 with nothing defining it — an error thrown every time a party
+        -- member went offline, which is why it went unnoticed.
+        function SetDesaturation(texture, desaturation)
+            if not texture then return end
+            local shaderSupported = texture.SetDesaturated and texture:SetDesaturated(desaturation)
+            if not shaderSupported then
+                if desaturation then
+                    texture:SetVertexColor(0.5, 0.5, 0.5)
+                else
+                    texture:SetVertexColor(1.0, 1.0, 1.0)
+                end
+            end
         end
 
         -- ── The shared dialog IS the ref's StaticPopup engine (decision 0308 §3) ─────────────────
@@ -432,9 +579,13 @@
         --     waits for the server, XP_LOSS's first Accept re-asks), OnCancel(data, reason)
         --     (reason ∈ "clicked"|"timeout"|"override"), OnUpdate(elapsed, dialog), timeout,
         --     StartDelay, delayText, sound, whileDead, hideOnEscape, cancels.
+        --   · hasEditBox + maxLetters + EditBoxOnEnterPressed are live (decision 0668's
+        --     ADD_FRIEND/ADD_IGNORE are the first customers): the box shows, caps its length,
+        --     opens empty, and re-anchors the buttons under itself.
         --   · Accepted but v1-inert: exclusive, showAlert (no alert icon/420-width yet),
         --     interruptCinematic (cinematics are acked instantly — 0196), notClosableByLogout,
-        --     preferredIndex, and the editbox/money variants.
+        --     preferredIndex, hasWideEditBox (guild MOTD/notes — the guild arc), and the money
+        --     variant.
         --   · text_arg1/2 stash on the DIALOG frame (the ref stashes them on the Text region;
         --     our regions don't carry Lua fields).
         --   · GetText("SECONDS"/"MINUTES") localization collapses to English singular/plural.
@@ -487,7 +638,13 @@
         function StaticPopup_Resize(dialog, which)
             local text = getglobal(dialog:GetName() .. "Text")
             local button1 = getglobal(dialog:GetName() .. "Button1")
-            dialog:SetHeight(16 + text:GetHeight() + 8 + button1:GetHeight() + 16)
+            local editBox = getglobal(dialog:GetName() .. "EditBox")
+            if StaticPopupDialogs[which] and StaticPopupDialogs[which].hasEditBox then
+                dialog:SetHeight(16 + text:GetHeight() + 8 + editBox:GetHeight() + 8
+                    + button1:GetHeight() + 16)
+            else
+                dialog:SetHeight(16 + text:GetHeight() + 8 + button1:GetHeight() + 16)
+            end
         end
 
         -- Ref l.1441-1700. Returns the dialog, or nil when refused (whileDead gate / no free
@@ -499,7 +656,7 @@
             end
 
             -- The whileDead gate (ref l.1447-1452). UnitIsDeadOrGhost lands with the death arc's
-            -- ghost predicate — guarded like CursorHasItem in BenillaOnEscape until then.
+            -- ghost predicate — guarded like CursorHasItem in ToggleGameMenu until then.
             if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") and not info.whileDead then
                 if info.OnCancel then
                     info.OnCancel()
@@ -573,21 +730,37 @@
                 text:SetText(format(info.text, text_arg1, text_arg2))
             end
 
+            -- The edit box (ref l.1599-1624): shown only for a hasEditBox entry, capped at the
+            -- entry's maxLetters, and always empty on open — a name left over from the last time
+            -- the dialog ran would be sent by a reflexive Enter. The wide variant is guild-only
+            -- (MOTD/notes), so it waits for the guild arc.
+            local editBox = getglobal(dialog:GetName() .. "EditBox")
+            if info.hasEditBox then
+                editBox:SetMaxLetters(info.maxLetters or 0)
+                editBox:SetText("")
+                editBox:Show()
+            else
+                editBox:Hide()
+            end
+
             -- The buttons (ref l.1634-1676; fixed 120 widths — header note). Button2 shows only
             -- when the entry names it AND DisplayButton2 (when present) allows it; a solo button1
-            -- re-seats centered under the text.
+            -- re-seats centered under the text. With an edit box the pair hangs off the BOX's
+            -- bottom instead of the text's (ref l.1641-1643), which is what leaves room for it.
+            local buttonAnchor = info.hasEditBox and (dialog:GetName() .. "EditBox")
+                or (dialog:GetName() .. "Text")
             local button1 = getglobal(dialog:GetName() .. "Button1")
             local button2 = getglobal(dialog:GetName() .. "Button2")
             if info.button2 and (not info.DisplayButton2 or info.DisplayButton2()) then
                 button1:ClearAllPoints()
                 button2:ClearAllPoints()
-                button1:SetPoint("TOPRIGHT", dialog:GetName() .. "Text", "BOTTOM", -6, -8)
+                button1:SetPoint("TOPRIGHT", buttonAnchor, "BOTTOM", -6, -8)
                 button2:SetPoint("LEFT", dialog:GetName() .. "Button1", "RIGHT", 13, 0)
                 button2:SetText(info.button2)
                 button2:Show()
             else
                 button1:ClearAllPoints()
-                button1:SetPoint("TOP", dialog:GetName() .. "Text", "BOTTOM", 0, -8)
+                button1:SetPoint("TOP", buttonAnchor, "BOTTOM", 0, -8)
                 button2:Hide()
             end
             if info.button1 then
@@ -640,6 +813,24 @@
             if not dontHide and (which == dialog.which) then
                 dialog:Hide()
             end
+        end
+
+        -- The edit box's two keys (ref StaticPopup.xml's template scripts). Enter runs the
+        -- entry's EditBoxOnEnterPressed hook, which by convention does the accept work and hides
+        -- the dialog itself; Escape dismisses the dialog through the ordinary cancel path so a
+        -- half-typed name never acts.
+        function StaticPopup_EditBoxOnEnterPressed(editBox)
+            local dialog = editBox:GetParent()
+            local info = StaticPopupDialogs[dialog.which]
+            if info and info.EditBoxOnEnterPressed then
+                info.EditBoxOnEnterPressed(dialog.data)
+            end
+        end
+
+        function StaticPopup_EditBoxOnEscapePressed(editBox)
+            local dialog = editBox:GetParent()
+            editBox:ClearFocus()
+            dialog:Hide()
         end
 
         -- Ref l.1832-1848: the open/close pair sounds on EVERY path, then the entry's own hook.
@@ -921,12 +1112,45 @@
             if not frame.selectedTab then return end
             for i = 1, frame.numTabs do
                 local tab = getglobal(frame:GetName() .. "Tab" .. i)
-                if i == frame.selectedTab then
+                if tab.isDisabled then
+                    PanelTemplates_SetDisabledTabState(tab)
+                elseif i == frame.selectedTab then
                     PanelTemplates_SelectTab(tab)
                 else
                     PanelTemplates_DeselectTab(tab)
                 end
             end
+        end
+
+        -- The disabled-tab arm (ref UIPanelTemplates.lua l.94-105 + l.135-148) — the piece this
+        -- kit deliberately omitted until a window needed it. First customer: the social window's
+        -- GUILD tab, which `InGuildCheck` disables for a character in no guild — i.e. permanently
+        -- until the guild arc exists (decision 0668). A disabled tab wears the INACTIVE
+        -- three-slice art (like an unselected tab) but is un-clickable with a greyed label, so it
+        -- reads as "there, not for you" rather than as the selected one.
+        function PanelTemplates_DisableTab(frame, index)
+            getglobal(frame:GetName() .. "Tab" .. index).isDisabled = 1
+            PanelTemplates_UpdateTabs(frame)
+        end
+
+        function PanelTemplates_EnableTab(frame, index)
+            local tab = getglobal(frame:GetName() .. "Tab" .. index)
+            tab.isDisabled = nil
+            tab:SetDisabledTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b)
+            PanelTemplates_UpdateTabs(frame)
+        end
+
+        function PanelTemplates_SetDisabledTabState(tab)
+            local name = tab:GetName()
+            getglobal(name .. "Left"):Show()
+            getglobal(name .. "Middle"):Show()
+            getglobal(name .. "Right"):Show()
+            tab:Disable()
+            tab.text = tab:GetText()
+            tab:SetDisabledTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b)
+            getglobal(name .. "LeftDisabled"):Hide()
+            getglobal(name .. "MiddleDisabled"):Hide()
+            getglobal(name .. "RightDisabled"):Hide()
         end
 
         function PanelTemplates_DeselectTab(tab)
@@ -1059,6 +1283,71 @@
     </Button>
 
     <!--
+        The SMALL tab button (ref `TabButtonTemplate`, UIPanelTemplates.xml l.303-402, transcribed
+        VERBATIM: the HelpFrameTab Active/Inactive three-slice pair on 16/32/16 slices, text at
+        BOTTOM +5, the ADD highlight at BOTTOM +2,-8). Not the same thing as
+        `CharacterFrameTabButtonTemplate` above — that one is the big *window* tab along a panel's
+        bottom edge; this is the compact tab a panel uses to switch a list INSIDE itself. The
+        social window's Friends/Ignore pair is the first customer (decision 0668); the reference
+        also uses it for the help frame and the raid pane.
+
+        Slice naming matches the big tab's, so the shared PanelTemplates_SelectTab/DeselectTab kit
+        drives both unchanged — "Disabled" is "selected" here too. Same OnUpdate text-fit for the
+        same reason (our GetStringWidth lands a frame late).
+    -->
+    <Button name="TabButtonTemplate" virtual="true">
+        <Size><AbsDimension x="115" y="32"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentLeftDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.25" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddleDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeftDisabled" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.25" right="0.75" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRightDisabled" file="Interface\HelpFrame\HelpFrameTab-Active">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddleDisabled" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentLeft" file="Interface\HelpFrame\HelpFrameTab-Inactive">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                    <TexCoords left="0" right="0.25" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\HelpFrame\HelpFrameTab-Inactive">
+                    <Size><AbsDimension x="32" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.25" right="0.75" top="0" bottom="1.0"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\HelpFrame\HelpFrameTab-Inactive">
+                    <Size><AbsDimension x="16" y="32"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.75" right="1.0" top="0" bottom="1.0"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <ButtonText name="$parentText">
+            <Size><AbsDimension x="0" y="13"/></Size>
+            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="5"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormalSmall"/>
+        <HighlightFont inherits="GameFontHighlightSmall"/>
+        <DisabledFont inherits="GameFontHighlightSmall"/>
+        <HighlightTexture name="$parentHighlightTexture" file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="5" y="32"/></Size>
+            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor></Anchors>
+        </HighlightTexture>
+        <Scripts>
+            <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>
+        </Scripts>
+    </Button>
+
+    <!--
         The shared dialog instance — the ref's StaticPopup1 (decision 0308 §3; the engine lives in
         the script block above). Geometry/art transcribed VERBATIM from the real StaticPopup.xml
         (mpqx extraction — template l.30-120: 320x72, the UI-DialogBox backdrop, text
@@ -1107,6 +1396,34 @@
                 <Anchors><Anchor point="LEFT" relativeTo="$parentButton1" relativePoint="RIGHT"><Offset><AbsDimension x="13" y="0"/></Offset></Anchor></Anchors>
                 <Scripts><OnClick>StaticPopup_OnClick(self:GetParent(), 2)</OnClick></Scripts>
             </Button>
+            <!-- The name-entry box (ref StaticPopup.xml l.84-140): 130x32 at BOTTOM +45, the
+                 chat-input three-slice border, hidden unless the entry sets hasEditBox. First
+                 customer: the social window's ADD_FRIEND / ADD_IGNORE dialogs (decision 0668).
+                 Enter runs the entry's own EditBoxOnEnterPressed (the ref's hook name) and Escape
+                 dismisses the whole dialog, which is the ref's EditBoxOnEscapePressed default. -->
+            <EditBox name="$parentEditBox" historyLines="1" hidden="true" autoFocus="false">
+                <Size><AbsDimension x="130" y="32"/></Size>
+                <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="45"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture file="Interface\ChatFrame\UI-ChatInputBorder-Left">
+                            <Size><AbsDimension x="75" y="32"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0" right="0.29296875" top="0" bottom="1.0"/>
+                        </Texture>
+                        <Texture file="Interface\ChatFrame\UI-ChatInputBorder-Right">
+                            <Size><AbsDimension x="75" y="32"/></Size>
+                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="10" y="0"/></Offset></Anchor></Anchors>
+                            <TexCoords left="0.70703125" right="1.0" top="0" bottom="1.0"/>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnEnterPressed>StaticPopup_EditBoxOnEnterPressed(self)</OnEnterPressed>
+                    <OnEscapePressed>StaticPopup_EditBoxOnEscapePressed(self)</OnEscapePressed>
+                </Scripts>
+                <FontString inherits="ChatFontNormal"/>
+            </EditBox>
         </Frames>
         <!-- The engine handlers (ref StaticPopup.xml template Scripts): open/close sounds ride
              inside StaticPopup_OnShow/OnHide so every path sounds; OnUpdate drives the countdown/

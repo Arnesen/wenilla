@@ -11,12 +11,13 @@
 
 use crate::messages::{
     ActionButton, AttackerState, ChannelNoticeTail, Character, DamageShield,
-    EnvironmentalDamageLog, GossipOption, GroupLootInfo, GroupMemberEntry, ItemInfo,
-    ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon,
-    LootStartRoll, MailListEntry, MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo,
-    PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward,
-    QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss,
-    TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, XpGain,
+    EnvironmentalDamageLog, FriendEntry, FriendStatusUpdate, GossipOption, GroupLootInfo,
+    GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
+    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MonsterMoveFacing, ObjectFields,
+    PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
+    QuestOfferReward, QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog,
+    SpellHealLog, SpellLogMiss, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -118,6 +119,14 @@ pub enum SessionEvent {
     /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`) — we are back at character select.
     /// The IO thread cycles the connection immediately; a fresh [`Self::CharacterList`] follows.
     LoggedOut,
+    /// The server answered `CMSG_LOGOUT_REQUEST` (`SMSG_LOGOUT_RESPONSE`) — and this is where the
+    /// camp countdown comes from (decision 0674). `reason` non-zero is a refusal (vmangos: 1 in
+    /// combat, 3 jumping/falling, 2 GM-frozen) and nothing further happens; `reason == 0` starts a
+    /// logout that is either `instant` — [`Self::LoggedOut`] follows at once (resting, on a taxi,
+    /// or a GM account) — or a 20-second server-side timer the client narrates.
+    LogoutResponse { reason: u32, instant: bool },
+    /// The server dropped a pending logout at our `CMSG_LOGOUT_CANCEL` (`SMSG_LOGOUT_CANCEL_ACK`).
+    LogoutCancelled,
     /// The session ended (socket closed / handshake failure); carries a human-readable reason.
     Disconnected { reason: String },
     /// An object entered range / was created: a unit, player, or GameObject at a raw-WoW pose. Carries
@@ -608,10 +617,15 @@ pub enum SessionEvent {
     QuestFailed { quest_id: u32, timed: bool },
     /// The log refused a new quest — no free slot (`SMSG_QUESTLOG_FULL`).
     QuestLogFull,
-    /// A questgiver interaction was rejected (`SMSG_QUESTGIVER_QUEST_INVALID` msg code /
-    /// `SMSG_QUESTGIVER_QUEST_FAILED` reason code — `quest_id` is `0` for INVALID, which
-    /// doesn't name the quest).
-    QuestGiverRefused { quest_id: u32, reason: u32 },
+    /// The giver won't OFFER the quest (`SMSG_QUESTGIVER_QUEST_INVALID`): one `QuestFailedReason`
+    /// msg code and no quest id — vmangos' `SendCanTakeQuestResponse`, the answer to a query or an
+    /// accept that fails `CanTakeQuest` ("already on that quest", "not high enough level").
+    QuestGiverInvalid { reason: u32 },
+    /// A quest the giver DID offer failed on accept (`SMSG_QUESTGIVER_QUEST_FAILED`): the
+    /// `{questId, reason}` pair, whose line names the quest. Kept apart from
+    /// [`Self::QuestGiverInvalid`] because the reference reads the two packets with two different
+    /// handlers and two different message tables (decision 0669).
+    QuestGiverFailed { quest_id: u32, reason: u32 },
     /// The gossip window closes (`SMSG_GOSSIP_COMPLETE`) — no menu is open server-side any more.
     GossipComplete,
     /// The greeting record for a gossip menu (`SMSG_NPC_TEXT_UPDATE`, answering our
@@ -868,6 +882,20 @@ pub enum SessionEvent {
     },
     /// Start the duel countdown (`SMSG_DUEL_COUNTDOWN`) — already in whole seconds.
     DuelCountdown { seconds: u32 },
+    /// The whole friend list (`SMSG_FRIEND_LIST`, decision 0668) — pushed unasked at login and
+    /// again for every `CMSG_FRIEND_LIST`. Always the complete list, never a delta, so it
+    /// replaces whatever is held. Names are NOT on the wire (see [`crate::messages::social`]);
+    /// the consumer resolves them through its name cache.
+    FriendList { friends: Vec<FriendEntry> },
+    /// The whole ignore list (`SMSG_IGNORE_LIST`) — the same replace-everything shape, guids only.
+    IgnoreList { guids: Vec<u64> },
+    /// One friend/ignore result (`SMSG_FRIEND_STATUS`): both the ack for an add/remove **and**
+    /// the broadcast a friend's login/logout sends to everyone listing them. The
+    /// [`friend_result`](crate::messages::friend_result) code says which, and carries the
+    /// presence tail for the two online flavours.
+    FriendStatus(FriendStatusUpdate),
+    /// A `/who` answer (`SMSG_WHO`) — at most 49 rows, plus the true match total.
+    WhoResults(WhoResults),
     /// The taxi map (`SMSG_SHOWTAXINODES`, decision 0484): `flightmaster` is the NPC the menu
     /// opened on, `nearest_node` the node it sits at, `known_mask` the full known-node bitmask
     /// ([`TaxiMask::is_known`]). The wire's window-framing constant carries no state and is

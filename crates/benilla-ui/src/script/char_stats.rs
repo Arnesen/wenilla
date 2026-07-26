@@ -162,6 +162,9 @@ impl Default for PlayerCombatStats {
 pub struct InvSlotView {
     /// The item's template entry (`GetInventoryItemID`).
     pub item_id: u32,
+    /// The doll twin of [`super::container::ContainerSlot::bar_placeable`] — an equipped item
+    /// dragged straight to the bar goes through the same filter.
+    pub bar_placeable: bool,
     /// Icon texture path (`Interface\Icons\…`); `None` while the template answer is in flight.
     pub icon: Option<String>,
     /// Stack count (`GetInventoryItemCount` — 1 for equipment, the bag-summed count for ammo).

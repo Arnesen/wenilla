@@ -25,6 +25,7 @@ fn one_item_backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 1,
@@ -47,7 +48,7 @@ fn one_item_backpack() -> ContainerState {
 }
 
 /// Load every window and drive the whole ESC-close path (UIParent.lua ToggleGameMenu → l.1491
-/// CloseAllWindows), the benilla shape (`BenillaOnEscape`): with the bag open, the loot window on
+/// CloseAllWindows): with the bag open, the loot window on
 /// the left slot, and an item on the cursor, ESC closes the bag AND the panel slot, releases the
 /// loot (OnHide → CloseLoot), and drops the held cursor. Also asserts the host-glue precedence: no
 /// EditBox focused ⇒ `key_input("ESCAPE")` does not consume, so the app runs the binding.
@@ -100,7 +101,7 @@ fn escape_closes_bag_and_panel_releases_loot_and_clears_cursor() {
     );
 
     // The escape binding (what the host runs on the unconsumed ESC).
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
 
     assert!(
         !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
@@ -159,7 +160,7 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
 
 /// ESC closes an open stack-split spinner (decision 0216 §6/slice 2, StackSplit.xml): this engine
 /// has no plain-frame keyboard capture (the real client's own `StackSplitFrame` OnKeyDown ESCAPE
-/// arm can't be driven), so the hook rides `BenillaOnEscape`'s shared chain instead — checked
+/// arm can't be driven), so the hook rides `ToggleGameMenu`'s shared chain instead — checked
 /// right after the confirm popup and before the world map, both similarly transient overlays.
 #[test]
 fn escape_closes_an_open_stack_split_frame() {
@@ -178,6 +179,7 @@ fn escape_closes_an_open_stack_split_frame() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
@@ -219,13 +221,13 @@ fn escape_closes_an_open_stack_split_frame() {
         .eval::<bool>("return BenillaStackSplitFrame:IsShown()")
         .unwrap());
 
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return BenillaStackSplitFrame:IsShown()")
             .unwrap(),
         "ESC closed the split frame"
     );
-    // ESC's unconditional cursor-clear (BenillaOnEscape's own first line) ran too — nothing was
+    // ESC's unconditional cursor-clear (ToggleGameMenu's own first line) ran too — nothing was
     // held anyway (the split branch already released it), so this just confirms no error.
     assert!(s.cursor_item().is_none());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
@@ -269,7 +271,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     // closes and eats the press — the cast, the windows, and the target all survive.
     s.set_casting(true);
     s.run("DropDownList1:Show()").unwrap();
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return DropDownList1:IsShown()").unwrap(),
         "ESC closed the open dropdown menu"
@@ -287,7 +289,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
 
     // Press 1 — mid-cast (the app's per-frame IsCasting mirror): the cast dies, NOTHING else.
     s.set_casting(true);
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
         "ESC mid-cast is eaten by SpellStopCasting — the bag stays open"
@@ -303,7 +305,7 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
 
     // Press 2 — the cancel resolved (next frame's mirror push): the windows close, target stays.
     s.set_casting(false);
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
         "idle ESC falls through SpellStopCasting's nil to CloseAllWindows"
@@ -315,15 +317,17 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     );
 
     // Press 3 — nothing left to eat: the target drops.
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         s.take_target_clear(),
         "the bare press reaches ClearTarget — the ladder's last rung"
     );
 
-    // Press 4 — no target either: the whole chain is a no-op (no menu to open yet).
+    // Press 4 — no target either: the chain runs out. In a full UI this press opens the game menu
+    // (decision 0674, `game_menu_tests`); this harness deliberately loads no GameMenuFrame.xml, so
+    // what it pins is the rung BELOW it — ClearTarget answering nil rather than eating the press.
     s.set_unit("target", None);
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.take_target_clear(),
         "ClearTarget answers nil with no target — nothing queued"

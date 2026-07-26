@@ -41,6 +41,7 @@ mod progression;
 mod quest;
 mod roster;
 mod skills;
+mod social;
 mod spellbook;
 mod spells;
 mod taxi;
@@ -134,6 +135,12 @@ pub use roster::{
     RACE_HUMAN,
 };
 pub use skills::unlearn_skill;
+pub use social::{
+    add_friend, add_ignore, del_friend, del_ignore, friend_list, friend_result, friend_status,
+    read_friend_list, read_friend_status, read_ignore_list, read_who, who, FriendEntry,
+    FriendOnline, FriendStatusUpdate, WhoEntry, WhoRequest, WhoResults, WHO_MAX_SEARCH_TERMS,
+    WHO_MAX_ZONES,
+};
 pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_gameobject, cast_spell_item, CastOutcome, SpellCastTargets,

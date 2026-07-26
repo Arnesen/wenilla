@@ -33,10 +33,12 @@ pub(crate) struct CastErrors(pub Vec<(u32, u8)>);
 #[derive(Resource, Default)]
 pub(crate) struct MountErrors(pub Vec<(bool, u32)>);
 
-/// One client-LOCAL red-line message: a GlobalStrings key plus the `DisplayError` argText
-/// fills. The 1.12 error formats use at most one `%s` and one `%d` ("Requires %s",
-/// "Requires %s %d" — wow-re cursor-system.md §8.8's lock-refusal toasts, decision 0545);
-/// a key whose string carries no token ignores its fills.
+/// One `DisplayError` message: a GlobalStrings key plus the argText fills. The 1.12 error
+/// formats use at most one `%s` and one `%d` ("Requires %s", "Requires %s %d" — wow-re
+/// cursor-system.md §8.8's lock-refusal toasts, decision 0545); a key whose string carries no
+/// token ignores its fills. Not red-line-only: this is the payload of the reference's ONE
+/// `CGGameUI::DisplayError` (`0x496720`) whatever surface the message's record names — the
+/// quest refusals carry their chat lines in it too (decision 0669).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct UiError {
     pub key: &'static str,
@@ -65,8 +67,9 @@ pub(crate) struct UiErrorKeys(pub Vec<UiError>);
 
 /// Resolve one [`UiError`] to its displayed text — `GetText(key)` + the `%s`/`%d` argText
 /// substitution ("Requires %s" + "Herbalism" → "Requires Herbalism", cursor-system.md §8.8).
-/// `None` (absent or empty key) = show nothing: GlobalStrings data-suppression, faithfully.
-pub(super) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+/// `None` (absent or empty key) = show nothing: GlobalStrings data-suppression, faithfully
+/// (the ref's own `[record+0x00]` null/empty guard at `0x4967bd`/`0x4967c5`).
+pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let mut text = get(e.key)?;
     if let Some(s) = &e.fill_s {
         text = text.replace("%s", s);
@@ -309,6 +312,13 @@ mod ui_error_tests {
             "That has already been used."
         );
         assert_eq!(g("ERR_USE_CANT_OPEN").unwrap(), "You can't open that.");
+        // The ENGINE's own by-key refusal (`benilla_ui`'s `place_action`, errorId `0x9e`). The
+        // key is the load-bearing half: an unresolvable one makes `ui_error_text` answer None and
+        // the refusal quietly goes back to being the divergence 0666 named.
+        assert_eq!(
+            g("ERR_PASSIVE_ABILITY").unwrap(),
+            "You can't put a passive ability in the action bar."
+        );
         // The wire-side totem fill's template (feed_actions' 0x78 arm): "Requires Mining Pick".
         assert_eq!(g("SPELL_FAILED_TOTEMS").unwrap(), "Requires %s");
 

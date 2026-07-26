@@ -124,6 +124,7 @@ pub(super) fn disconnected(
     trade: &mut crate::ui_trade::TradeSession,
     bank: &mut crate::ui_bank::BankOpen,
     duel: &mut crate::ui_duel::DuelState,
+    social: &mut crate::ui_social::SocialState,
     pending_transfer: &mut PendingTransfer,
 ) {
     warn!("net: {reason} — tearing down the streamed world");
@@ -175,6 +176,10 @@ pub(super) fn disconnected(
     // (decision 0633) — the server drops the duel too (`Player::DuelComplete(DUEL_FLED)` on
     // logout), and a stale arbiter guid would make the next AcceptDuel echo a dead object.
     *duel = crate::ui_duel::DuelState::default();
+    // The friend/ignore lists and the last `/who` are session state too (decision 0668): the
+    // server re-pushes both lists at the next login, and a stale ignore list would silence the
+    // wrong guids after a reconnect renumbers nothing but re-streams everything.
+    *social = crate::ui_social::SocialState::default();
     // The death stores are session-scoped too: a reclaim expiry, resurrect offer, or corpse
     // marker must not survive the socket (the reconnect re-sends the reclaim delay when dead).
     *death_net = crate::death::DeathNet::default();

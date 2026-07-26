@@ -649,6 +649,7 @@ mod tests {
                 ammo_type: 0,
                 ranged_mod_range: 0.0,
                 spells: Vec::new(),
+                spell_charges_0: 0,
                 use_spell: None,
                 bonding: 0,
                 description: String::new(),

@@ -240,6 +240,7 @@ fn build_light_data(
     mut data: ResMut<WowLightData>,
     time: Res<Time>,
     mut last_dump: Local<f64>,
+    mut last_rows_dump: Local<f64>,
 ) {
     let l = &*light;
     let fog_enable = if debug.lighting.disable_fog { 0.0 } else { 1.0 };
@@ -308,9 +309,16 @@ fn build_light_data(
     // measurable causes (a duplicate light stacking, a light at the wrong height, an over-driven
     // colour, a count that shouldn't be there), and every one of them is a number here. Throttled,
     // and capped at the nearest 8 so a torch-lit town doesn't flood the log.
-    if std::env::var_os("WOW_POINTS_DUMP").is_some() {
+    //
+    // `WOW_POINTS_DUMP=frame` drops the throttle. A once-a-second dump can only answer "is the pool
+    // right?", never "is it the *same* pool it was last frame?" — and B38's flicker turned out to
+    // alternate frame to frame, which a 1 Hz sample cannot see at all. Reading a per-second dump as
+    // evidence of per-frame stability is how that light was cleared once already (0665's parked
+    // culling test made the same mistake with a different instrument).
+    if let Some(mode) = std::env::var_os("WOW_POINTS_DUMP") {
+        let every = if mode == *"frame" { 0.0 } else { 1.0 };
         let now = time.elapsed_secs_f64();
-        if now - *last_dump >= 1.0 {
+        if now - *last_dump >= every {
             *last_dump = now;
             // How contested the three slots are for the chunk under the camera — the number that
             // decides whether ground pops as emitters move. Candidacy is the faithful Chebyshev
@@ -340,6 +348,43 @@ fn build_light_data(
                     rgb[0],
                     rgb[1],
                     rgb[2]
+                );
+            }
+        }
+    }
+    // `WOW_LIGHT_DUMP=frame` (or `=1` for 1 Hz): the WHOLE packed header, bit-exact, per frame.
+    //
+    // The point of dumping every row rather than the interesting ones is that B38 has now eliminated
+    // every *per-material* and *per-instance* shading input by measurement — they are bit-identical
+    // on bright and dim frames alike — which leaves this buffer and the view as the only things that
+    // can still be moving. A dump of selected rows would answer "did ambient move?"; only the full
+    // set answers "did ANY shading input move?", and that is the question worth a run. Rows are
+    // printed as raw f32 bits, so a change far below a printed decimal cannot hide.
+    if let Some(mode) = std::env::var_os("WOW_LIGHT_DUMP") {
+        let every = if mode == *"frame" { 0.0 } else { 1.0 };
+        let now = time.elapsed_secs_f64();
+        if now - *last_rows_dump >= every {
+            *last_rows_dump = now;
+            let hash = data
+                .0
+                .rows
+                .iter()
+                .flatten()
+                .fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
+                    (h ^ u64::from(v.to_bits())).wrapping_mul(0x1000_0000_01b3)
+                });
+            eprintln!("[light] rows {hash:#018x}");
+            for (i, r) in data.0.rows.iter().enumerate() {
+                eprintln!(
+                    "  {i:2} {:08x} {:08x} {:08x} {:08x}   {:9.5} {:9.5} {:9.5} {:9.5}",
+                    r[0].to_bits(),
+                    r[1].to_bits(),
+                    r[2].to_bits(),
+                    r[3].to_bits(),
+                    r[0],
+                    r[1],
+                    r[2],
+                    r[3],
                 );
             }
         }

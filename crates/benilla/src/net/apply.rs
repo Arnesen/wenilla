@@ -37,8 +37,8 @@ use loot::{
     loot_roll_won, loot_start_roll,
 };
 use quests::{
-    quest_complete, quest_detail, quest_failed, quest_giver_refused, quest_giver_status,
-    quest_greeting, quest_log_full, quest_objective_item, quest_objective_kill,
+    quest_complete, quest_detail, quest_failed, quest_giver_failed, quest_giver_invalid,
+    quest_giver_status, quest_greeting, quest_log_full, quest_objective_item, quest_objective_kill,
     quest_objectives_complete, quest_offer, quest_progress, quest_template,
 };
 use spells::{
@@ -127,6 +127,10 @@ pub(super) fn apply_net_updates(
             ResMut<crate::ui_bank::BankErrors>,
             ResMut<crate::world_state::WorldStates>,
             ResMut<crate::ui_duel::DuelState>,
+            ResMut<crate::ui_social::SocialState>,
+            // The pending logout/quit (decision 0674): the server's response and cancel-ack land
+            // here, and `crate::ui_logout` turns them into the countdown dialog.
+            ResMut<crate::ui_logout::LogoutState>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -251,6 +255,8 @@ pub(super) fn apply_net_updates(
             mut bank_errors,
             mut world_states,
             mut duel,
+            mut social,
+            mut logout,
         ),
     ) = caches;
     let (
@@ -311,6 +317,12 @@ pub(super) fn apply_net_updates(
             SessionEvent::LoggedOut => {
                 session::logged_out(&mut commands, &mut index, &mut self_guid, &mut logged_out)
             }
+            // The logout arc's two narration packets (decision 0674) — `crate::ui_logout` owns the
+            // decision table; this is only the hand-off.
+            SessionEvent::LogoutResponse { reason, instant } => {
+                logout.apply_response(reason, instant)
+            }
+            SessionEvent::LogoutCancelled => logout.apply_cancelled(),
             SessionEvent::Disconnected { reason } => {
                 disconnects.write(super::DisconnectedMessage {
                     reason: reason.clone(),
@@ -340,6 +352,7 @@ pub(super) fn apply_net_updates(
                     &mut trade_session,
                     &mut bank_open,
                     &mut duel,
+                    &mut social,
                     &mut aura.6,
                 );
             }
@@ -699,6 +712,20 @@ pub(super) fn apply_net_updates(
                         &format!("[{:#04x}] {}", m.chat_type, m.text.replace('\n', " ⏎ ")),
                     );
                 }
+                // The ignore gate (decision 0668): an ignored speaker is dropped SILENTLY —
+                // no line at all — which is the client's own `FriendList::IsIgnored 0x5ae5a0`
+                // check, VERIFIED for the sibling text-emote path (wow-re
+                // `system/ui/scratch/text-emote-composition.md`). A dropped WHISPER additionally
+                // tells the server, so the sender gets the "is ignoring you" answer: that is what
+                // `CMSG_CHAT_IGNORED` is for, and only the client can send it.
+                if social.is_ignored(m.sender_guid) {
+                    if m.chat_type == benilla_protocol::messages::CHAT_MSG_WHISPER {
+                        let _ = net_commands.0.send(crate::net::ClientCommand::ChatIgnored {
+                            guid: m.sender_guid,
+                        });
+                    }
+                    continue;
+                }
                 chat_log.push_wire(m);
             }
             SessionEvent::ChannelNotify {
@@ -798,6 +825,7 @@ pub(super) fn apply_net_updates(
                 arbiter,
                 challenger,
                 self_guid.0,
+                social.is_ignored(challenger),
             ),
             SessionEvent::DuelOutOfBounds => crate::ui_duel::apply::bounds(&mut duel, true),
             SessionEvent::DuelInBounds => crate::ui_duel::apply::bounds(&mut duel, false),
@@ -812,6 +840,20 @@ pub(super) fn apply_net_updates(
             SessionEvent::DuelCountdown { seconds } => {
                 crate::ui_duel::apply::countdown(&mut duel, seconds);
             }
+            // ── The social family (decision 0668): the friend/ignore lists, the `/who`
+            // answer, and the result codes that print their own chat lines. The lines and the
+            // Era events fire off the mirror in `ui_social::feed_social` — every one of them
+            // needs a NAME the drain has no cache handle for.
+            SessionEvent::FriendList { friends } => {
+                crate::ui_social::apply::friend_list(&mut social, friends)
+            }
+            SessionEvent::IgnoreList { guids } => {
+                crate::ui_social::apply::ignore_list(&mut social, guids)
+            }
+            SessionEvent::FriendStatus(update) => {
+                crate::ui_social::apply::friend_status(&mut social, update)
+            }
+            SessionEvent::WhoResults(results) => crate::ui_social::apply::who(&mut social, results),
             SessionEvent::LootResponse {
                 guid,
                 loot_type,
@@ -1230,9 +1272,10 @@ pub(super) fn apply_net_updates(
                 );
                 quest.bump_reask();
             }
-            SessionEvent::QuestLogFull => quest_log_full(&mut chat_log),
-            SessionEvent::QuestGiverRefused { quest_id, reason } => {
-                quest_giver_refused(quest_id, reason, &mut chat_log)
+            SessionEvent::QuestLogFull => quest_log_full(&mut quest),
+            SessionEvent::QuestGiverInvalid { reason } => quest_giver_invalid(reason, &mut quest),
+            SessionEvent::QuestGiverFailed { quest_id, reason } => {
+                quest_giver_failed(quest_id, reason, &mut quest, &mut quest_log, &net_commands)
             }
             SessionEvent::VendorInventory { vendor, items } => {
                 npc::vendor_inventory(vendor, items, &mut merchant)

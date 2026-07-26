@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use super::PROBE_WARMUP_FRAMES;
+use crate::net::{ObjectStore, SelfPlayer};
 
 /// The LIVE probe shot (`WOW_LIVE_SHOT=<png>`, delay via `WOW_LIVE_SHOT_AT` seconds, default 12):
 /// one screenshot of the primary window on a NORMAL connected run — the "what does the live scene
@@ -83,9 +84,44 @@ fn burst_path(out: &str, index: u32, count: u32) -> String {
 
 /// Fire the live screenshot(s) once the startup delay has elapsed — one per frame by default, so a
 /// burst samples *adjacent* frames and a per-frame instability has nowhere to hide.
-fn fire_live_shot(mut shot: ResMut<LiveShot>, time: Res<Time>, mut commands: Commands) {
+///
+/// **Refuses to fire while the avatar is dead or a ghost.** `preflight` already reports it, but a
+/// single WARN in a four-hundred-line log is not a gate: a ghost renders the whole world through the
+/// death filter, so every image in the burst is a desaturated wash and *every* measurement correlated
+/// against it — pixel series, hotspot runs, depth readback, the phase census — silently describes the
+/// filter instead of the scene. That cost a whole B38 session: eight bursts and three retracted
+/// mechanisms measured on a corpse, because the images still looked like a plausible frame. A loud
+/// no-op is worth far more than a burst that has to be recognised as garbage after the fact.
+fn fire_live_shot(
+    mut shot: ResMut<LiveShot>,
+    time: Res<Time>,
+    mut commands: Commands,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut refused: Local<bool>,
+) {
     if shot.taken >= shot.count || time.elapsed_secs() < shot.next_at {
         return;
+    }
+    if let Ok(store) = self_q.single() {
+        let what = if store.0.unit_is_dead() {
+            Some("DEAD")
+        } else if store.0.player_is_ghost() {
+            Some("A GHOST")
+        } else {
+            None
+        };
+        if let Some(what) = what {
+            if !*refused {
+                *refused = true;
+                error!(
+                    "live-shot: REFUSING to capture — the character is {what}, so the world renders \
+                     through the death filter and every pixel of this burst would describe that \
+                     filter, not the scene. Send WOW_PROBE_CHAT=\".revive\" (probe accounts are \
+                     gmlevel 6) and run again."
+                );
+            }
+            return;
+        }
     }
     let path = burst_path(&shot.out, shot.taken, shot.count);
     commands

@@ -23,7 +23,7 @@ use clap::Parser;
 
 use probes::{
     Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, Loot, Probe, QueryNames, Quest,
-    QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot, Vendor, WorldState,
+    QuestItem, QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot, Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -137,6 +137,17 @@ struct Cli {
     /// deploy's probes are gmlevel 6).
     #[arg(long)]
     questlog: bool,
+    /// Live-verify the quest-STARTER item wire (decision 0664): `.additem` the Northshire Gift
+    /// Voucher (entry 14646, starts quest 5805 "Welcome!"), find it in the backpack, and run the
+    /// fork a bag right-click makes for an item whose template carries a non-zero `StartQuest` —
+    /// `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the **item's own guid** (never `CMSG_USE_ITEM`,
+    /// which the server refuses with `EQUIP_ERR_ITEM_NOT_FOUND`, the red "The item was not found."
+    /// line) — requiring `SMSG_QUESTGIVER_QUEST_DETAILS`, then `CMSG_QUESTGIVER_ACCEPT_QUEST` on
+    /// the same guid, requiring BOTH the quest id landing in `PLAYER_QUEST_LOG` and the starter
+    /// item being destroyed. Cleans up after itself (`.quest remove`). Needs a GM account (the
+    /// deploy's probes are gmlevel 6).
+    #[arg(long)]
+    quest_item: bool,
     /// Live-verify the force-speed-change wire: GM `.modify speed 1.5` (self-targeted), require
     /// `SMSG_FORCE_RUN_SPEED_CHANGE` to arrive and parse (flat speed 10.5 = 1.5 × the 7.0 base),
     /// ack it (`CMSG_FORCE_RUN_SPEED_CHANGE_ACK` echoing counter + exact speed with our live pose),
@@ -339,6 +350,9 @@ fn main() -> Result<()> {
     }
     if cli.giverstatus {
         probes.push(Box::new(GiverStatus));
+    }
+    if cli.quest_item {
+        probes.push(Box::new(QuestItem));
     }
     if cli.questlog {
         probes.push(Box::new(QuestLog));

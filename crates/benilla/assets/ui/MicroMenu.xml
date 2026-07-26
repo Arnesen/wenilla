@@ -29,17 +29,17 @@
         bar plate doesn't paint over them. Same shape the bag bar next door already uses.
 
         SCOPE / real-client divergences (noted, not bugs):
-        - THREE buttons have no panel to open yet: Socials (no FriendsFrame), Main Menu (no
-          GameMenuFrame — ESC runs BenillaOnEscape's close chain instead, UiPanels.xml) and Help (no
-          HelpFrame). They are drawn, hover, and highlight like the rest, but their click is a no-op
-          — the same "art only, wired the day the panel lands" call the page up/down arrows on this
-          same bar already make. Deliberately NOT greyed with the ref's `-Disabled` art: three dead
-          grey buttons mid-row read as a broken bar, and the point of this slice is that the bar
-          reads whole. Each is one OnClick line away from live.
+        - ONE button has no panel to open yet: Help (no HelpFrame). It is drawn, hovers, and
+          highlights like the rest, but its click is a no-op — the same "art only, wired the day the
+          panel lands" call the page up/down arrows on this same bar already make. Deliberately NOT
+          greyed with the ref's `-Disabled` art: a dead grey button mid-row reads as a broken bar,
+          and the point of this slice is that the bar reads whole. It is one OnClick line from live.
+          (Socials went live with decision 0668, Main Menu with 0674.)
         - No GetBindingKey in this engine, so MicroButtonTooltipText's "(key)" suffix comes from a
           static table of the bindings we actually ship (ui_script/input.rs `bare_key_binding`:
-          C/P/N/L/M) rather than from a live binding lookup — the same call ActionBar.xml makes for
-          its HotKey corners. The three unbound buttons show a bare label.
+          C/P/N/L/M/O) rather than from a live binding lookup — the same call ActionBar.xml makes
+          for its HotKey corners. The two unbound buttons (Main Menu, Help) show a bare label —
+          ESCAPE is a real binding, but not one that table carries.
         - The hover is the ref's real two-line GameTooltip_AddNewbieTip (GameTooltip.xml): the label,
           then the button's NEWBIE_TOOLTIP_* explanation, at the default screen corner. An earlier
           note here claimed detailed tips were OFF in 1.12 and open-coded the else branch — the ref
@@ -144,16 +144,18 @@
             end
         end
 
-        -- ref UpdateMicroButtons (l.20-84): each button reflects whether its panel is up. The ref's
-        -- OptionsFrame/SoundOptionsFrame/UIOptionsFrame/KeyBindingFrame/MacroFrame arms of the
-        -- MainMenu test, and its keyring arm, have no frames here; the three unwired buttons
-        -- (Socials/MainMenu/Help) simply never push.
+        -- ref UpdateMicroButtons (l.20-84): each button reflects whether its panel is up. The
+        -- MainMenu arm is the ref's own six-way test (l.47-58) minus the five frames that don't
+        -- exist here — GameMenuFrame is the one that does (decision 0674), and it is the one the
+        -- reference lists first. Its keyring arm has no frame here; the still-unwired Help button
+        -- simply never pushes.
         function UpdateMicroButtons()
             BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("BenillaCharacterFrame"))
             BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("BenillaSpellBookFrame"))
             BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("BenillaTalentFrame"))
             BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("BenillaQuestLogFrame"))
             BenillaMicroButton_SetPushed(WorldMapMicroButton, BenillaMicro_PanelShown("WorldMapFrame"))
+            BenillaMicroButton_SetPushed(MainMenuMicroButton, BenillaMicro_PanelShown("GameMenuFrame"))
         end
 
         -- ref CharacterMicroButton_SetPushed/_SetNormal (l.109-117): the portrait shifts its window
@@ -297,13 +299,13 @@
         </Scripts>
     </Button>
 
-    <!-- No FriendsFrame in this client yet — drawn and hovering, click inert (SCOPE note). -->
     <Button name="SocialsMicroButton" inherits="BenillaMicroButtonTemplate">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="QuestLogMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
-            <OnLoad>BenillaMicroButton_OnLoad(self, "Socials", SOCIAL_BUTTON, nil, NEWBIE_TOOLTIP_SOCIAL)</OnLoad>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Socials", SOCIAL_BUTTON, "O", NEWBIE_TOOLTIP_SOCIAL)</OnLoad>
+            <OnClick>ToggleFriendsFrame(1)</OnClick>
         </Scripts>
     </Button>
 
@@ -317,13 +319,16 @@
         </Scripts>
     </Button>
 
-    <!-- No GameMenuFrame yet — ESC runs BenillaOnEscape's close chain instead (SCOPE note). -->
+    <!-- The game menu (decision 0674). `ToggleGameMenu(1)` is the ref's own OnClick — the argument
+         is what makes a CLICK a plain toggle (close it, or close everything and open it) instead of
+         the ESC key's one-eater-per-press ladder; UiPanels.xml has both halves. -->
     <Button name="MainMenuMicroButton" inherits="BenillaMicroButtonTemplate">
         <Anchors>
             <Anchor point="BOTTOMLEFT" relativeTo="WorldMapMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
             <OnLoad>BenillaMicroButton_OnLoad(self, "MainMenu", MAINMENU_BUTTON, nil, NEWBIE_TOOLTIP_MAINMENU)</OnLoad>
+            <OnClick>ToggleGameMenu(1)</OnClick>
         </Scripts>
     </Button>
 

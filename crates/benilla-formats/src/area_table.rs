@@ -76,6 +76,27 @@ impl AreaTableCatalog {
         None
     }
 
+    /// The id of the zone **named** `name`, case-insensitively — the reverse of [`Self::name`],
+    /// for the one caller that has a name and needs the id: `/who`'s `z-"Elwynn Forest"` term,
+    /// which goes on the wire as a zone id (decision 0668).
+    ///
+    /// Names are not unique across the table (a subzone can share its zone's name, instance rows
+    /// repeat), so a **top-level** row (`zone_id == 0`) wins over any other match — that is what
+    /// "zone" means to the caller. Linear, which is fine at one call per query.
+    pub fn id_for_name(&self, name: &str) -> Option<u32> {
+        let mut fallback = None;
+        for (id, row) in &self.by_id {
+            if !row.name.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            if row.zone_id == 0 {
+                return Some(*id);
+            }
+            fallback = Some(*id);
+        }
+        fallback
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

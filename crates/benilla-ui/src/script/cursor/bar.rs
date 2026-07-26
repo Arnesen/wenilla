@@ -21,6 +21,12 @@ use crate::script::{ActionSlot, Model};
 
 use super::{queue_cursor_update, CursorAction, CursorPayload};
 
+/// The GlobalStrings key the reference's passive-spell refusal shows — errorId `0x9e`'s entry in
+/// the errorId→key table (`0xb4b498 + 0x9e*0x14 = 0xb4c0f0` ← key ptr `0x84133c`), i.e.
+/// `ERR_PASSIVE_ABILITY` = "You can't put a passive ability in the action bar.". Queued onto
+/// `Model::ui_errors` for the app's action feed to resolve and fire.
+const PASSIVE_ON_BAR_ERROR: &str = "ERR_PASSIVE_ABILITY";
+
 /// Pack `(kind, action)` into the wire's `u32` slot word (`kind<<24 | action`, decision 0216 §1).
 fn pack(kind: u8, action: u32) -> u32 {
     (u32::from(kind) << 24) | (action & 0x00FF_FFFF)
@@ -78,6 +84,29 @@ pub(super) fn pickup_action(model: &mut Model, id: u32) -> bool {
 ///
 /// Returns whether the caller should repaint.
 pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
+    // The two accept filters, byte-read (wow-re `action-item-slot.md` §5 — decision 0666). Both
+    // reject with a **bare return**: no store, no clear, no packet — mechanically identical to
+    // clicking with an empty cursor, and the refused payload STAYS on the cursor.
+    //
+    // - ITEM: placeable iff it has an on-use spell OR is equippable (`4e6571`–`4e6598`). There is
+    //   no quality, bind, class/subclass, container or level test anywhere on that path — a BAG
+    //   is placeable; a grey trade good with neither is silently refused.
+    // - SPELL: a passive (`Attributes & 0x40`) is refused (`4e63ad`), and — unlike the ITEM
+    //   refusal, which is mute — it ALSO raises errorId `0x9e` through `CGGameUI::DisplayError`
+    //   (`4e63ad: push 0x9e; call 0x496720`). That id resolves through the errorId→key table at
+    //   base `0xb4b498`, stride `0x14`: entry `0xb4b498 + 0x9e*0x14 = 0xb4c0f0`, whose static-init
+    //   `4861ff: mov [0xb4c0f0], 0x84133c` names [`PASSIVE_ON_BAR_ERROR`] — "You can't put a
+    //   passive ability in the action bar." (The same arithmetic reproduces the independently
+    //   recorded `ERR_ATTACK_MOUNTED` anchor: `0xa4` → `0xb4c168`.) Closes 0666's named
+    //   divergence, which refused silently while the key was unpinned.
+    match &model.cursor {
+        Some(CursorPayload::Item(i)) if !i.bar_placeable => return false,
+        Some(CursorPayload::Spell(s)) if s.passive => {
+            model.ui_errors.push(PASSIVE_ON_BAR_ERROR);
+            return false;
+        }
+        _ => {}
+    }
     let Some(held) = model.cursor.take() else {
         return false;
     };
@@ -234,6 +263,7 @@ mod tests {
     fn place_action_item_payload_packs_the_item_kind_and_leaves_the_bag_untouched() {
         let mut s = UiScript::new().unwrap();
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -258,6 +288,7 @@ mod tests {
     fn place_action_spell_payload_packs_the_spell_kind() {
         let mut s = UiScript::new().unwrap();
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            passive: false,
             book_slot: 3,
             book_type: "spell".into(),
             spell_id: 133,
@@ -330,5 +361,106 @@ mod tests {
         s.tick(0.01);
         assert_eq!(s.eval::<i64>("return shows").unwrap(), 1);
         assert_eq!(s.eval::<i64>("return hides").unwrap(), 1);
+    }
+
+    /// `PlaceAction`'s ITEM filter (decision 0666): an item with neither an on-use spell nor an
+    /// equip slot — a grey trade good — is refused, and the refusal is a **bare return**: nothing
+    /// stored, nothing sent, and the payload is still on the cursor afterwards.
+    #[test]
+    fn a_non_usable_non_equippable_item_is_refused_and_stays_held() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: false, // no on-use spell, InventoryType 0
+            bag: 0,
+            slot: 1,
+            item_id: 2589, // Linen Cloth
+            texture: Some("Interface\\Icons\\INV_Fabric_Linen_01".into()),
+            link: None,
+            count: None,
+            quality: Some(1),
+            equip_slots: Vec::new(),
+        }));
+
+        assert!(!s.eval::<bool>("return PlaceAction(4)").unwrap());
+        assert!(!s.eval::<bool>("return HasAction(4)").unwrap(), "no store");
+        assert!(s.take_action_sets().is_empty(), "no packet");
+        assert!(
+            matches!(s.cursor_payload(), Some(CursorPayload::Item(_))),
+            "a refused payload stays on the cursor — the reference never clears it"
+        );
+        assert!(
+            s.take_ui_errors().is_empty(),
+            "the ITEM refusal is MUTE — only the SPELL arm carries a DisplayError (`4e63ad`); a \
+             toast here would be ours, not the reference's"
+        );
+    }
+
+    /// The SPELL twin: a passive cannot go on the bar (`Attributes & 0x40`) — and unlike the item
+    /// arm this one SPEAKS, raising errorId `0x9e` = `ERR_PASSIVE_ABILITY` (see
+    /// [`super::place_action`]). The refusal and the toast are separate halves: the refusal is
+    /// still a bare return, so nothing is stored, nothing is sent, and the spell stays held.
+    #[test]
+    fn a_passive_spell_is_refused_with_the_refs_error_and_stays_held() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            book_slot: 1,
+            book_type: "spell".into(),
+            spell_id: 674, // Dual Wield, a passive
+            texture: Some("Interface\\Icons\\Ability_DualWield".into()),
+            passive: true,
+        }));
+
+        assert!(!s.eval::<bool>("return PlaceAction(4)").unwrap());
+        assert!(!s.eval::<bool>("return HasAction(4)").unwrap());
+        assert!(s.take_action_sets().is_empty());
+        assert!(matches!(s.cursor_payload(), Some(CursorPayload::Spell(_))));
+        assert_eq!(
+            s.take_ui_errors(),
+            vec![super::PASSIVE_ON_BAR_ERROR],
+            "the ref's errorId 0x9e toast — 'You can't put a passive ability in the action bar.'"
+        );
+        assert!(
+            s.take_ui_errors().is_empty(),
+            "…and the queue drains, so the toast fires once per refusal"
+        );
+    }
+
+    /// The other half of the same law: an ACTIVE spell places normally and raises nothing. Guards
+    /// the obvious over-correction — a toast on every spell drop.
+    #[test]
+    fn an_active_spell_places_without_an_error() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            book_slot: 1,
+            book_type: "spell".into(),
+            spell_id: 133, // Fireball
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            passive: false,
+        }));
+
+        assert!(s.eval::<bool>("return PlaceAction(4)").unwrap());
+        assert!(s.eval::<bool>("return HasAction(4)").unwrap());
+        assert!(s.take_ui_errors().is_empty());
+    }
+
+    /// The positive control on the other side of both filters — a BAG (`InventoryType` 18, no
+    /// on-use spell) IS placeable, which is the one answer people find surprising.
+    #[test]
+    fn a_bag_is_placeable() {
+        let mut s = UiScript::new().unwrap();
+        s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true, // equippable (BAG), even with no on-use spell
+            bag: 0,
+            slot: 1,
+            item_id: 4496, // Small Brown Pouch
+            texture: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
+            link: None,
+            count: None,
+            quality: Some(1),
+            equip_slots: vec![20, 21, 22, 23],
+        }));
+
+        assert!(s.eval::<bool>("return PlaceAction(4)").unwrap());
+        assert_eq!(s.take_action_sets(), vec![(4, 0x8000_0000u32 | 4496)]);
     }
 }

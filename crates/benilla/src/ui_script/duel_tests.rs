@@ -70,7 +70,7 @@ fn decline_and_escape_both_cancel() {
     assert_eq!(s.take_duel_requests(), vec![DuelRequest::Cancel]);
 
     s.fire_event("DUEL_REQUESTED", vec![ScriptValue::Str("Twomage".into())]);
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert_eq!(s.take_duel_requests(), vec![DuelRequest::Cancel]);
     assert!(!s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap());
 }

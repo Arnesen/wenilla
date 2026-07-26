@@ -143,6 +143,7 @@ fn pickup_spell(model: &mut Model, id: u32, book_type: &str) -> bool {
         book_type: book_type.to_string(),
         spell_id: slot.spell_id,
         texture: slot.texture.clone(),
+        passive: slot.passive,
     };
     model.cursor = Some(CursorPayload::Spell(payload));
     queue_cursor_update(model);

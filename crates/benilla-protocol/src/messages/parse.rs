@@ -12,9 +12,9 @@ use crate::wire::{
 
 use super::{
     action_bar, attack, bank, channel, chat, combat_log, death, duel, gameobject, gossip, group,
-    items, loot, mail, monster_move, movement, opcode, progression, quest, spellbook, spells, taxi,
-    trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo, ServerPacket,
-    SpeedKind,
+    items, loot, mail, monster_move, movement, opcode, progression, quest, social, spellbook,
+    spells, taxi, trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo,
+    ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -768,9 +768,13 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::GameObjectQueryResponse { entry, info }
         }
         opcode::SMSG_LOGOUT_COMPLETE => ServerPacket::LogoutComplete,
+        // `{u32 reason, u8 instant}` — the `instant` byte is what the CAMP/QUIT countdown hangs
+        // on (see the variant's own doc); it used to be dropped on the floor here.
         opcode::SMSG_LOGOUT_RESPONSE => ServerPacket::LogoutResponse {
-            result: read_u32_le(&mut r)?,
+            reason: read_u32_le(&mut r)?,
+            instant: read_u8(&mut r)? != 0,
         },
+        opcode::SMSG_LOGOUT_CANCEL_ACK => ServerPacket::LogoutCancelAck,
         // The keepalive echo: our CMSG_PING's sequence number back (vmangos `_HandlePing` — the
         // body is the one u32 it read from us).
         opcode::SMSG_PONG => ServerPacket::Pong {
@@ -863,6 +867,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_DUEL_COUNTDOWN => ServerPacket::DuelCountdown {
             seconds: duel::read_duel_countdown(&mut r)?,
         },
+        // The social family (decision 0668; bodies in `social`). Both list packets are
+        // replace-everything snapshots; the status packet is one result about one player.
+        opcode::SMSG_FRIEND_LIST => ServerPacket::FriendList {
+            friends: social::read_friend_list(&mut r)?,
+        },
+        opcode::SMSG_IGNORE_LIST => ServerPacket::IgnoreList {
+            guids: social::read_ignore_list(&mut r)?,
+        },
+        opcode::SMSG_FRIEND_STATUS => {
+            ServerPacket::FriendStatus(social::read_friend_status(&mut r)?)
+        }
+        opcode::SMSG_WHO => ServerPacket::WhoResults(social::read_who(&mut r)?),
         // The observer speed legs (decision 0441): a unit we don't control changed speed — a
         // creature or mid-spline player (SPLINE family), or a freely-moving player (MOVE_SET
         // family, which carries a fresh pose too). No ack on either.

@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::BAG_PLAYER_INVENTORY;
-use benilla_ui::script::{ScriptValue, UiScript};
+use benilla_ui::script::{ScriptValue, UiScript, EQUIPMENT_BAG};
 
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
@@ -70,14 +70,18 @@ pub(super) fn drain_container_autoequips(
 }
 
 /// Drain the inventory-slot ids `UseInventoryItem` queued (decision 0208 phase 1b: the doll
-/// slot's right-click) and send `CMSG_USE_ITEM` directly against the equipped position (bag 255
-/// plus the 0-based wire slot — `HandleUseItemOpcode` takes equipped positions the same as bag
-/// ones, vmangos `ItemHandler.cpp`). Ids outside 1..=19 (ammo, the bag icons) are a no-op — the
-/// engine's own queue never receives them from the shipped XML (only the 19 named slot buttons
-/// wire `UseInventoryItem` this slice), but a stray Lua call is still refused rather than sent as
-/// nonsense.
+/// slot's right-click) and route the equipped position (bag 255 plus the 0-based wire slot —
+/// `HandleUseItemOpcode` takes equipped positions the same as bag ones, vmangos `ItemHandler.cpp`)
+/// through the shared use fork ([`super::item_use_command`]): the reference's doll click lands in
+/// the same `CGItem::Use` a bag click does (`0x4c7af0`), quest fork included — one of the five
+/// equippable quest-starters, worn and right-clicked, offers its quest instead of casting nothing.
+/// Ids outside 1..=19 (ammo, the bag icons) are a no-op — the engine's own queue never receives
+/// them from the shipped XML (only the 19 named slot buttons wire `UseInventoryItem` this slice),
+/// but a stray Lua call is still refused rather than sent as nonsense.
 pub(super) fn drain_inventory_uses(
     script: Option<NonSendMut<UiScript>>,
+    mut items: ResMut<Items>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
 ) {
     let Some(mut script) = script else {
@@ -89,11 +93,28 @@ pub(super) fn drain_inventory_uses(
             continue;
         }
         let slot = (id - 1) as u8;
+        // The doll's own slot ids ARE the wire slots (`wire_pos`'s EQUIPMENT_BAG law), so the
+        // equipped instance resolves off the player's INV array directly.
+        let (guid, start_quest, spell_index) = self_q
+            .iter()
+            .next()
+            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &items))
+            .and_then(|guid| {
+                let entry = items.object(guid)?.object_entry()?;
+                let t = items.template(entry, guid, &commands)?;
+                // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
+                // template is already in hand here for `start_quest`, so name the real one.
+                Some((Some(guid), t.start_quest, t.use_spell_index().unwrap_or(0)))
+            })
+            .unwrap_or((None, 0, 0));
         debug!("ui_items: use equipped item, lua slot {id} (wire 255/{slot})");
-        let _ = commands.0.send(ClientCommand::UseItem {
-            bag_index: BAG_PLAYER_INVENTORY,
+        let _ = commands.0.send(super::item_use_command(
+            guid,
+            start_quest,
+            BAG_PLAYER_INVENTORY,
             slot,
-        });
+            spell_index,
+        ));
     }
 }
 
@@ -216,6 +237,12 @@ pub(super) fn drain_container_uses(
         // needed it for the icon); unresolved falls back to USE, whose refusal is at least visible.
         // display_id feeds the synthetic pickup→place auto-equip sound (this path never moves the
         // cursor; a drag already gets that pair via the cursor-payload transitions).
+        //
+        // The equip arm carries the reference's own **quest guard** (`0x4fa3bd`–`0x4fa3cc`,
+        // decision 0664): `Script::UseContainerItem` equips only when the cache record's
+        // `StartQuest` (`[rec+0x1a8]`) is 0, so a quest-starter goes to the use fork *whatever* its
+        // inventoryType — the five equippable ones (Pendant of Myzrael, Arena Master, …) offer their
+        // quest on a right-click, they don't put themselves on.
         let resolved = self_q
             .iter()
             .next()
@@ -223,18 +250,28 @@ pub(super) fn drain_container_uses(
             .and_then(|guid| {
                 let entry = items.object(guid)?.object_entry()?;
                 let t = items.template(entry, guid, &commands)?;
-                Some((entry, t.inventory_type, t.display_info_id))
+                Some((
+                    guid,
+                    entry,
+                    t.inventory_type,
+                    t.display_info_id,
+                    t.start_quest,
+                    // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
+                    // template is right here, so send the real one rather than assuming 0.
+                    t.use_spell_index().unwrap_or(0),
+                ))
             });
+        let equippable = resolved.is_some_and(|(_, _, inv_type, _, q, _)| q == 0 && inv_type != 0);
         match resolved {
             // Ammo loads by entry (`CMSG_SET_AMMO`), NOT the equip swap wire — the stack stays in
             // the bag and `PLAYER_AMMO_ID` references it (decision 0526). The server refuses a
             // wrong/absent ranged weapon via `SMSG_INVENTORY_CHANGE_FAILURE`.
-            Some((entry, INVTYPE_AMMO, display_id)) => {
+            Some((_, entry, INVTYPE_AMMO, display_id, _, _)) if equippable => {
                 debug!("ui_items: set ammo entry {entry} (lua bag {bag} slot {slot})");
                 let _ = commands.0.send(ClientCommand::SetAmmo { entry });
                 equip_sound.write(crate::sound::AutoEquipSound { display_id });
             }
-            Some((_, inv_type, display_id)) if inv_type != 0 => {
+            Some((_, _, _, display_id, _, _)) if equippable => {
                 debug!("ui_items: auto-equip (lua bag {bag} → wire {bag_index}/{wire_slot})");
                 let _ = commands.0.send(ClientCommand::AutoEquipItem {
                     bag_index,
@@ -243,11 +280,16 @@ pub(super) fn drain_container_uses(
                 equip_sound.write(crate::sound::AutoEquipSound { display_id });
             }
             _ => {
-                debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot})");
-                let _ = commands.0.send(ClientCommand::UseItem {
+                let (guid, start_quest, spell_index) =
+                    resolved.map_or((None, 0, 0), |(guid, _, _, _, q, i)| (Some(guid), q, i));
+                debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot}, starts quest {start_quest})");
+                let _ = commands.0.send(super::item_use_command(
+                    guid,
+                    start_quest,
                     bag_index,
-                    slot: wire_slot,
-                });
+                    wire_slot,
+                    spell_index,
+                ));
             }
         }
     }

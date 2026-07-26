@@ -31,6 +31,14 @@ impl WorldWriter {
         self.send(opcode::CMSG_LOGOUT_REQUEST, &[])
     }
 
+    /// Call off a pending logout (`CMSG_LOGOUT_CANCEL`, empty body) — the CAMP/QUIT dialog's Cancel
+    /// (decision 0674). Only meaningful while the server's 20-second timer is running (a non-instant
+    /// [`logout_request`](Self::logout_request)); the server drops the timer, unroots the character
+    /// and answers `SMSG_LOGOUT_CANCEL_ACK`.
+    pub fn logout_cancel(&mut self) -> Result<()> {
+        self.send(opcode::CMSG_LOGOUT_CANCEL, &[])
+    }
+
     /// Acknowledge a triggered cinematic as finished (`CMSG_COMPLETE_CINEMATIC`, empty body) — the
     /// packet the real client sends when the cinematic ends or the player ESCs out. Must answer
     /// every `SMSG_TRIGGER_CINEMATIC` ([`SessionEvent::CinematicTriggered`]

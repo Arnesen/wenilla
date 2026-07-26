@@ -11,6 +11,8 @@
 //! of over versions: a burst of adjacent frames from a parked camera (`WOW_LIVE_SHOT_COUNT`), collapsed
 //! to where the picture would not hold still.
 
+pub mod relight;
+
 use image::RgbImage;
 
 /// A pixel counts as "changed" for [`Metrics::pct_over`] if any channel differs by more than this many

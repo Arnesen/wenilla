@@ -32,6 +32,7 @@ fn one_item_backpack() -> ContainerState {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
@@ -159,7 +160,7 @@ fn delete_item_confirm_no_clears_without_destroying() {
 }
 
 /// ESC routes through the ref's `StaticPopup_EscapePressed` — DELETE_ITEM is `hideOnEscape`, so
-/// its OnCancel runs with reason "clicked" exactly as a real No-click would. (`BenillaOnEscape`'s
+/// its OnCancel runs with reason "clicked" exactly as a real No-click would. (`ToggleGameMenu`'s
 /// existing unconditional `ClearCursor()` already empties the cursor before the popup branch, so
 /// this mainly proves the popup itself closes.)
 #[test]
@@ -167,7 +168,7 @@ fn escape_closes_the_delete_confirm_popup() {
     let mut s = setup();
     pick_up_and_drop_in_world(&mut s);
 
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "ESC closes the confirm popup"

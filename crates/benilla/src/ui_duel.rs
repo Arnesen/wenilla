@@ -31,12 +31,11 @@
 //!   text belong to the `DUEL_OUTOFBOUNDS` popup, and the *enforcement* is entirely the server's
 //!   (`Player::CheckDuelDistance`: 75 yd out, 70 yd back in, 10 s to return).
 //!
-//! Two deviations, both stated rather than hidden:
+//! One deviation, stated rather than hidden (the ignore branch — `0x4d4a33`'s silent
+//! `CMSG_DUEL_CANCELLED` for a challenge from an ignored player — is implemented as of decision
+//! 0668, which supplied the ignore list it needs):
 //!
-//! 1. **The ignore branch is absent.** The reference silently answers a challenge from an ignored
-//!    player with `CMSG_DUEL_CANCELLED` (`0x4d4a33`). benilla has no ignore list yet (it lands
-//!    with the friends/who slice of decision 0434), so no challenge is ever auto-declined.
-//! 2. **The challenger's name is resolved asynchronously.** The reference reads it off the
+//! 1. **The challenger's name is resolved asynchronously.** The reference reads it off the
 //!    challenger's `CGPlayer` and fires nothing at all if the object is missing (`0x4d4a72`).
 //!    benilla resolves through the [`NameCache`], which may need a `CMSG_NAME_QUERY` round trip —
 //!    so the popup can arrive a frame or two late instead of never. In practice the challenger is
@@ -162,6 +161,10 @@ pub(crate) mod apply {
 
     /// `SMSG_DUEL_REQUESTED` — store the arbiter, and either own the challenge (error line +
     /// immediate accept) or hand the popup to the feed.
+    ///
+    /// `ignored` short-circuits both: a challenge from a player on the ignore list is answered
+    /// with `CMSG_DUEL_CANCELLED` and nothing is shown (`0x4d4a33`). This is the branch decision
+    /// 0633 recorded as absent for want of an ignore list; decision 0668 supplies one.
     pub(crate) fn requested(
         duel: &mut DuelState,
         chat_log: &mut ChatLog,
@@ -169,7 +172,12 @@ pub(crate) mod apply {
         arbiter: u64,
         challenger: u64,
         own: Option<u64>,
+        ignored: bool,
     ) {
+        if ignored {
+            let _ = commands.0.send(ClientCommand::DuelCancelled { arbiter });
+            return;
+        }
         if duel.apply_requested(arbiter, challenger, own) {
             error_line(chat_log, ERR_DUEL_REQUESTED);
             let _ = commands.0.send(ClientCommand::DuelAccepted { arbiter });

@@ -80,6 +80,9 @@ pub struct CursorItem {
     /// [`doll::pickup_inventory_item`] reads it to decide a place-onto-doll-slot's fit;
     /// [`doll::cursor_can_go_in_slot`] serves it straight to `CURSOR_UPDATE`'s highlight.
     pub equip_slots: Vec<u8>,
+    /// Whether this item may be placed on an ACTION-BAR slot, captured at pickup from the
+    /// source's own `bar_placeable` — `PlaceAction`'s only item filter (decision 0666).
+    pub bar_placeable: bool,
 }
 
 /// A spell payload (`PickupSpell`, not yet built — anticipated by the enum for the spellbook
@@ -91,6 +94,9 @@ pub struct CursorSpell {
     pub book_type: String,
     pub spell_id: u32,
     pub texture: Option<String>,
+    /// `Attributes & 0x40` (`SPELL_ATTR_PASSIVE`) — a passive cannot go on the action bar
+    /// (`PlaceAction`'s other filter, `0x4e63ad`; decision 0666).
+    pub passive: bool,
 }
 
 /// An action-slot payload (`PickupAction`, not yet built — anticipated by the enum for the
@@ -261,6 +267,7 @@ pub(crate) fn split_container_item(model: &mut Model, bag: i64, slot: u32, count
         link: s.link.clone(),
         quality: s.quality,
         count: if whole { None } else { Some(n) },
+        bar_placeable: s.bar_placeable,
         equip_slots: s.equip_slots.clone(),
     };
     model.cursor = Some(CursorPayload::Item(item));
@@ -434,6 +441,7 @@ mod tests {
         slots.insert(
             1,
             crate::script::container::ContainerSlot {
+                bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
                 count: 5,
@@ -468,6 +476,7 @@ mod tests {
 
         // Item arm.
         s.set_cursor_for_test(CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,
@@ -489,6 +498,7 @@ mod tests {
 
         // Spell arm — the Era 4-tuple shape.
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            passive: false,
             book_slot: 3,
             book_type: "spell".into(),
             spell_id: 133,
@@ -525,6 +535,7 @@ mod tests {
     fn clear_cursor_widens_to_any_arm() {
         let mut s = UiScript::new().unwrap();
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            passive: false,
             book_slot: 1,
             book_type: "spell".into(),
             spell_id: 1,
@@ -543,6 +554,7 @@ mod tests {
         use super::{world_drop_click, WorldPick};
         let mut s = UiScript::new().unwrap();
         s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+            passive: false,
             book_slot: 3,
             book_type: "spell".into(),
             spell_id: 133,
@@ -567,6 +579,7 @@ mod tests {
 
         // An item drops (the popup path) on BOTH empty-world legs, never over an object.
         let item = CursorPayload::Item(CursorItem {
+            bar_placeable: true,
             bag: 0,
             slot: 1,
             item_id: 117,

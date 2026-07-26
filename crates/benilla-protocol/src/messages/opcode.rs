@@ -35,6 +35,8 @@ pub const SMSG_BINDPOINTUPDATE: u16 = 0x0155;
 pub const SMSG_SET_PROFICIENCY: u16 = 0x0127;
 pub const SMSG_LOGOUT_RESPONSE: u16 = 0x004C;
 pub const SMSG_LOGOUT_COMPLETE: u16 = 0x004D;
+/// 79 — the ack for [`CMSG_LOGOUT_CANCEL`] (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body.
+pub const SMSG_LOGOUT_CANCEL_ACK: u16 = 0x004F;
 pub const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
 pub const SMSG_DESTROY_OBJECT: u16 = 0x00AA;
 // The cinematic pair (VERIFIED vmangos `Opcodes_1_12_1.h`: 250/252). The server sends the trigger
@@ -197,6 +199,9 @@ pub const CMSG_CHAR_CREATE: u16 = 0x0036;
 pub const CMSG_CHAR_ENUM: u16 = 0x0037;
 pub const CMSG_PLAYER_LOGIN: u16 = 0x003D;
 pub const CMSG_LOGOUT_REQUEST: u16 = 0x004B;
+/// 78 — call off a pending logout (VERIFIED vmangos `Opcodes_1_12_1.h`), empty body; answered by
+/// [`SMSG_LOGOUT_CANCEL_ACK`]. The CAMP/QUIT dialog's Cancel (decision 0674).
+pub const CMSG_LOGOUT_CANCEL: u16 = 0x004E;
 pub const CMSG_NAME_QUERY: u16 = 0x0050; // 80
 pub const CMSG_CREATURE_QUERY: u16 = 0x0060; // 96
 /// VERIFIED vmangos `Opcodes_1_12_1.h:85`: 82. Body in [`super::client::pet_name_query`]. Answered
@@ -574,6 +579,21 @@ pub const SMSG_FORCE_MOVE_ROOT: u16 = 0x00E8; // 232
 pub const CMSG_FORCE_MOVE_ROOT_ACK: u16 = 0x00E9; // 233
 pub const SMSG_FORCE_MOVE_UNROOT: u16 = 0x00EA; // 234
 pub const CMSG_FORCE_MOVE_UNROOT_ACK: u16 = 0x00EB; // 235
+
+// The social family — the friend list, the ignore list, and `/who` (VERIFIED vmangos
+// `Opcodes_1_12_1.h` + `Server/Packets/Social.{h,cpp}`, `Handlers/MiscHandler.cpp`,
+// `SocialMgr.{h,cpp}`; client side wow-re's `FriendList.cpp` TU, `system/net/scratch/w2b.md`).
+// Bodies in [`super::social`]; decision 0668.
+pub const CMSG_WHO: u16 = 0x0062; // 98
+pub const SMSG_WHO: u16 = 0x0063; // 99
+pub const CMSG_FRIEND_LIST: u16 = 0x0066; // 102
+pub const SMSG_FRIEND_LIST: u16 = 0x0067; // 103
+pub const SMSG_FRIEND_STATUS: u16 = 0x0068; // 104
+pub const CMSG_ADD_FRIEND: u16 = 0x0069; // 105
+pub const CMSG_DEL_FRIEND: u16 = 0x006A; // 106
+pub const SMSG_IGNORE_LIST: u16 = 0x006B; // 107
+pub const CMSG_ADD_IGNORE: u16 = 0x006C; // 108
+pub const CMSG_DEL_IGNORE: u16 = 0x006D; // 109
 
 // The group/party family — invite/accept/decline/kick/leader/disband, the loot-method setting, the
 // roster push (`SMSG_GROUP_LIST`), party command feedback, live member stats for the party/raid

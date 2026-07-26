@@ -1,4 +1,4 @@
-//! [`super::feed_actions`] as a real Bevy system through a real Lua VM — the seam where the
+//! [`super::feed::feed_actions`] as a real Bevy system through a real Lua VM — the seam where the
 //! action bar's slot identity is resolved and pushed.
 //!
 //! What these pin is the **landed-template redisplay** (decision 0660): an ITEM slot's icon needs
@@ -16,7 +16,8 @@ use benilla_protocol::messages::{ActionButton, ACTION_KIND_ITEM};
 use benilla_ui::script::UiScript;
 use bevy::prelude::*;
 
-use super::{feed_actions, CastErrors, MountErrors, PlayerActions, UiErrorKeys};
+use super::feed::{feed_actions, MISSING_ITEM_ICON};
+use super::{CastErrors, MountErrors, PlayerActions, UiErrorKeys};
 use crate::entities::ItemDisplays;
 use crate::items::{test_template, Items};
 use crate::net::{ClientCommand, NetCommands};
@@ -78,19 +79,20 @@ fn fed_texture(app: &mut App) -> Option<String> {
         .unwrap()
 }
 
-/// The whole bug in one test: the first resolve issues the query and can only feed nothing; the
-/// frame the answer lands, the slot re-resolves and the real icon arrives. Before decision 0660 the
-/// second half never happened — the button kept the fallback question mark for the whole session,
-/// until some unrelated bar edit re-dirtied the feed.
+/// The whole bug in one test: the first resolve issues the query and can only show the
+/// placeholder; the frame the answer lands, the slot re-resolves and the real icon arrives.
+/// Before decision 0660 the second half never happened — the button kept the question mark for the
+/// whole session, until some unrelated bar edit re-dirtied the feed.
 #[test]
 fn a_landed_item_template_redisplays_the_action_slot() {
     let (mut app, rx) = app_with_food_on_the_bar();
 
     app.update();
     assert_eq!(
-        fed_texture(&mut app),
-        None,
-        "the first resolve of a cold entry IS the ask — it cannot have an icon yet"
+        fed_texture(&mut app).as_deref(),
+        Some(MISSING_ITEM_ICON),
+        "the first resolve of a cold entry IS the ask, so it can only show the reference's own \
+         placeholder — and never nil, since ref FrameXML HIDES the icon on a nil texture (0666)"
     );
     assert!(
         rx.try_iter()
@@ -154,9 +156,9 @@ fn an_unknown_entry_answers_once_and_settles() {
     app.update();
 
     assert_eq!(
-        fed_texture(&mut app),
-        None,
-        "an unknown entry has no display and so no icon"
+        fed_texture(&mut app).as_deref(),
+        Some(MISSING_ITEM_ICON),
+        "an unknown entry has no display, which is the resolver's OTHER route to the placeholder"
     );
     assert!(
         app.world()

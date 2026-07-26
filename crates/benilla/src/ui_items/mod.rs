@@ -16,9 +16,11 @@
 //! mapping the Lua bag space onto the wire's (backpack = bag 255 + the player-array slot 23…;
 //! equipped bags = their own array slot 19–22 + 0-based inner slot — VERIFIED vmangos `Player.h`
 //! enums + `UseItem::ReadFromWorldPacket`, shared by every drain here as [`wire_pos`]) and making
-//! the real client's **equip-vs-use fork**: an *equippable* item (template `inventoryType != 0`)
-//! goes out as `CMSG_AUTOEQUIP_ITEM` — a helm click puts the helm on — everything else as
-//! `CMSG_USE_ITEM`. Server refusals (`SMSG_INVENTORY_CHANGE_FAILURE` → [`EquipErrors`]) surface on
+//! the real client's **equip-vs-use fork**: an *equippable* item (template `inventoryType != 0`,
+//! and not a quest-starter) goes out as `CMSG_AUTOEQUIP_ITEM` — a helm click puts the helm on —
+//! everything else through the one use fork ([`item_use_command`], our `CGItem::Use`), which sends
+//! `CMSG_QUESTGIVER_QUERY_QUEST` for a quest-starter and `CMSG_USE_ITEM` for everything else
+//! (decision 0664). Server refusals (`SMSG_INVENTORY_CHANGE_FAILURE` → [`EquipErrors`]) surface on
 //! the red UI error line with the client's message strings. The cursor-payload drains (decision
 //! 0216, whole-space since slice 2) ride the same wire map: a queued pick/place/swap move →
 //! `CMSG_SWAP_INV_ITEM` (backpack-internal) or `CMSG_SWAP_ITEM` (either end an equipped bag) /
@@ -56,6 +58,9 @@ use feed::{feed_containers, feed_item_sets, feed_item_stats, feed_player_req};
 
 /// The backpack's fixed capacity (`PLAYER_FIELD_PACK_SLOT_1..` — 16 slots on the 1.12 wire).
 pub(super) const PACK_SLOTS: u8 = 16;
+/// The worn-equipment slots (`INV_SLOT` 0..18 — head through tabard, vmangos `PlayerSlots`), the
+/// first region of the reference's inventory walk (wow-re `action-item-slot.md` §8.2).
+pub(super) const EQUIPMENT_SLOTS: u8 = 19;
 /// The first equipped-bag inventory slot (`INV_SLOT` 19..22 hold bags 1..4).
 pub(super) const BAG_SLOT_FIRST: u8 = 19;
 /// Equipped bag count (live-API bag ids 1..=4).
@@ -233,27 +238,78 @@ pub(crate) fn count_of(store: &ObjectFields, items: &Items, entry: u32) -> u32 {
     total
 }
 
-/// The FIRST bag position (wire `(bag_index, 0-based slot)`, [`wire_pos`]'s own output shape)
-/// holding item `entry` — the backpack searched before the equipped bags, each in slot order
-/// (matches [`count_of`]'s own walk order). `None` if nothing matches. The action-bar item-use
-/// drain's resolve (decision 0216 §7, slice 4): an ITEM-kind action names an item id, not a bag
-/// position, so clicking it must find SOME instance to act on. The real client's own resolve
-/// order (does it prefer the backpack, or slot order at all?) is unverified — a §5 CONFIRM if a
-/// future pin disagrees; this is the simplest reading that needs no new wire round-trip.
-pub(crate) fn first_bag_slot(store: &ObjectFields, items: &Items, entry: u32) -> Option<(u8, u8)> {
-    for i in 0..PACK_SLOTS {
-        let guid = store.player_pack_slot(i).unwrap_or(0);
+/// How far [`find_item`] looks, and which copies count — the two mode bits the reference's own
+/// callers pass into the inventory walker `0x622420` (wow-re `action-item-slot.md` §8.2).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ItemSearch {
+    /// Mode `1` alone: the **equipment slots only** (0–18), no expansion. The equip-vs-use fork's
+    /// first stage — "is a copy of this already worn?" (`0x4e5fe7`'s `push 1`).
+    pub(crate) equipment_only: bool,
+    /// Mode bit `0x20`: skip a copy whose live `ITEM_FIELD_SPELL_CHARGES[0]` is `0` — the use
+    /// leg sets it when the TEMPLATE says the item has finite charges, so a click reaches a copy
+    /// that still has uses left instead of a spent one. Containers are never skipped by it.
+    pub(crate) live_charges_only: bool,
+}
+
+/// Where a copy of item `entry` is: the wire `(bag_index, 0-based slot)` pair ([`wire_pos`]'s own
+/// output shape) plus the **instance guid** that occupies it, since the use fork needs it
+/// ([`item_use_command`]). This is the reference's inventory search, byte-verified (wow-re
+/// `action-item-slot.md` §8.2: the walker `0x622420` over `PLAYER_FIELD_INV_SLOT_HEAD`, predicate
+/// `OBJECT_FIELD_ENTRY` equality).
+///
+/// **Order is load-bearing and is the reference's, not a guess** (it was one until 2026-07-26 —
+/// decision 0666 supersedes 0216 §7's "unverified but necessary" note): a single ascending pass
+/// over the player's own slot array, recursing depth-first into each container as it is passed —
+///
+/// > equipment 0–18 → bag slot 19 (then all of bag 1's contents) → 20 (+contents) → 21 (+contents)
+/// > → 22 (+contents) → backpack 23–38 → keyring 81–112.
+///
+/// Two things that fall out and both matter: **equipment is searched FIRST** (the old walk never
+/// looked at it at all, so an equipped trinket's action button was inert), and **a bag's contents
+/// come before the backpack** (the old walk had the backpack first). Bank and buyback are never
+/// searched — the walker's default mode expands to `0x47`, which omits the bank's `0x08`, and no
+/// bit exists for buyback at all. The **keyring** is the one region benilla does not model (no
+/// keyring container ships yet); it is last in the order, so nothing else shifts when it lands.
+pub(crate) fn find_item(
+    store: &ObjectFields,
+    items: &Items,
+    entry: u32,
+    search: ItemSearch,
+) -> Option<(u8, u8, u64)> {
+    // One candidate: the entry must match, and — under the charges filter — the instance must
+    // have uses left. A container is exempt from the charge test (the walker's own carve-out).
+    let hit = |guid: u64| -> bool {
         if guid == 0 {
-            continue;
+            return false;
         }
-        if items.object(guid).and_then(|f| f.object_entry()) == Some(entry) {
-            return Some((BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST + i));
+        let Some(f) = items.object(guid) else {
+            return false;
+        };
+        if f.object_entry() != Some(entry) {
+            return false;
+        }
+        if search.live_charges_only && f.container_num_slots().is_none_or(|n| n == 0) {
+            return f.item_spell_charges(0).is_none_or(|c| c != 0);
+        }
+        true
+    };
+
+    // Equipment 0–18, then the four equipped-bag slots 19–22 — the bag OBJECT is a candidate in
+    // its own right before its contents are (a bag on the bar is a real, placeable action).
+    for i in 0..EQUIPMENT_SLOTS {
+        let guid = store.player_inv_slot(i).unwrap_or(0);
+        if hit(guid) {
+            return Some((BAG_PLAYER_INVENTORY, i, guid));
         }
     }
-    for bag in 1..=BAGS {
-        let bag_guid = store.player_inv_slot(BAG_SLOT_FIRST + bag - 1).unwrap_or(0);
-        if bag_guid == 0 {
-            continue;
+    if search.equipment_only {
+        return None;
+    }
+    for bag in 0..BAGS {
+        let bag_slot = BAG_SLOT_FIRST + bag;
+        let bag_guid = store.player_inv_slot(bag_slot).unwrap_or(0);
+        if hit(bag_guid) {
+            return Some((BAG_PLAYER_INVENTORY, bag_slot, bag_guid));
         }
         let Some(bag_fields) = items.object(bag_guid) else {
             continue;
@@ -261,15 +317,59 @@ pub(crate) fn first_bag_slot(store: &ObjectFields, items: &Items, entry: u32) ->
         let num_slots = bag_fields.container_num_slots().unwrap_or(0).min(36) as u8;
         for j in 0..num_slots {
             let guid = bag_fields.container_slot(j).unwrap_or(0);
-            if guid == 0 {
-                continue;
-            }
-            if items.object(guid).and_then(|f| f.object_entry()) == Some(entry) {
-                return Some((SLOT_BAG_FIRST + bag - 1, j));
+            if hit(guid) {
+                return Some((bag_slot, j, guid));
             }
         }
     }
+    for i in 0..PACK_SLOTS {
+        let guid = store.player_pack_slot(i).unwrap_or(0);
+        if hit(guid) {
+            return Some((BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST + i, guid));
+        }
+    }
     None
+}
+
+/// **The item-use fork** — our `CGItem::Use` (`0x5d8d00`): the one place that decides what "using"
+/// an item actually sends. The reference has exactly one such function and every use surface calls
+/// it — the bag click (`Script::UseContainerItem` @ `0x4fa430`), the doll click
+/// (`Script::UseInventoryItem` → `0x4c7af0`) and the action bar (`UseAction`'s engine @ `0x4e607b`)
+/// — so the fork lives here rather than in any one drain (decision 0664: three call sites each
+/// re-deriving it is exactly how the quest fork came to be missing from all three).
+///
+/// A template whose **`StartQuest`** is non-zero never goes out as `CMSG_USE_ITEM`: the client
+/// sends `CMSG_QUESTGIVER_QUERY_QUEST{the ITEM's own guid, StartQuest}` (byte-verified — the
+/// `[rec+0x1a8] != 0` branch at `0x5d8dcc` calls the `0x186` builder `0x5eab80` with the CGItem's
+/// guid), and the server answers `SMSG_QUESTGIVER_QUEST_DETAILS` with the item as the giver
+/// (vmangos `HandleQuestgiverQueryQuestOpcode` resolves an `HIGHGUID_ITEM` guid through
+/// `TYPEMASK_CREATURE_GAMEOBJECT_OR_ITEM`) — i.e. the quest's accept panel. Sending `CMSG_USE_ITEM`
+/// instead is what draws *"The item was not found."*: `HandleUseItemOpcode` refuses any item whose
+/// `Spells[spellSlot].SpellId` is 0 with `EQUIP_ERR_ITEM_NOT_FOUND`, and **no** quest-starter
+/// carries an on-use spell (0 of the 215 in live `mangos.item_template`).
+///
+/// `guid: None` (the template/instance didn't resolve) falls through to the plain use, whose
+/// refusal is at least visible — the same fallback the equip fork makes.
+pub(crate) fn item_use_command(
+    guid: Option<u64>,
+    start_quest: u32,
+    bag_index: u8,
+    slot: u8,
+    spell_index: u8,
+) -> crate::net::ClientCommand {
+    match guid.filter(|_| start_quest != 0) {
+        Some(item) => crate::net::ClientCommand::QuestgiverQuery {
+            npc: item,
+            quest: start_quest,
+        },
+        None => crate::net::ClientCommand::UseItem {
+            bag_index,
+            slot,
+            // The template BLOCK ordinal the server should cast, not a flag (decision 0666); the
+            // callers that hold the template name it, the doll drain sends 0.
+            spell_index,
+        },
+    }
 }
 
 /// The client's quality→color escape for an item link (`GetItemQualityColor`'s table) — shared by
@@ -451,8 +551,43 @@ impl Plugin for UiItemsPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_equip_slot, wire_pos};
+    use super::{find_equip_slot, item_use_command, wire_pos};
+    use crate::net::ClientCommand;
     use benilla_ui::script::EQUIPMENT_BAG;
+
+    /// The use fork ([`item_use_command`], decision 0664): a non-zero `StartQuest` diverts to
+    /// `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid; everything else — including an
+    /// item whose template never resolved — stays a plain `CMSG_USE_ITEM` on the wire position.
+    #[test]
+    fn item_use_forks_a_quest_starter_to_the_giver_query() {
+        // "An Unsent Letter" (entry 2874, StartQuest 373 — live `mangos.item_template`): the item
+        // guid is the questgiver, not the bag position.
+        let letter = 0x4000_0000_0000_0BAD_u64;
+        assert!(matches!(
+            item_use_command(Some(letter), 373, 255, 23, 0),
+            ClientCommand::QuestgiverQuery { npc, quest } if npc == letter && quest == 373
+        ));
+        // A plain consumable (StartQuest 0) is the unchanged USE.
+        assert!(matches!(
+            item_use_command(Some(letter), 0, 255, 23, 1),
+            ClientCommand::UseItem {
+                bag_index: 255,
+                slot: 23,
+                // The template BLOCK ordinal rides through untouched (decision 0666).
+                spell_index: 1
+            }
+        ));
+        // No resolved instance (template still in flight): the fallback is the USE whose refusal
+        // is at least visible — never a query against guid 0.
+        assert!(matches!(
+            item_use_command(None, 373, 19, 4, 0),
+            ClientCommand::UseItem {
+                bag_index: 19,
+                slot: 4,
+                spell_index: 0
+            }
+        ));
+    }
 
     /// A dozen representative `InventoryType`s (decision 0208 phase 1b's own ask), spanning the
     /// single-slot rows, the two-slot rows, the weapon rows' MAINHAND/OFFHAND split, and the
@@ -532,5 +667,147 @@ mod tests {
         assert_eq!(wire_pos(EQUIPMENT_BAG, 69), Some((255, 68)), "BankBag6");
         assert_eq!(wire_pos(EQUIPMENT_BAG, 63), None, "the doll-space gap");
         assert_eq!(wire_pos(EQUIPMENT_BAG, 70), None, "past the bank bags");
+    }
+}
+
+/// [`find_item`] — the reference's inventory walk (decision 0666). Everything here is about
+/// **order**, because order is the whole finding: the walk it replaced never looked at equipment
+/// at all (an equipped trinket's action button was inert) and put the backpack ahead of the bags.
+#[cfg(test)]
+mod find_item_tests {
+    use super::{find_item, ItemSearch};
+    use crate::items::Items;
+    use benilla_protocol::ObjectFields;
+
+    // Descriptor indices, raw (the module's own consts are private; the codebase's test idiom).
+    const ENTRY: u16 = 3; // OBJECT_FIELD_ENTRY
+    const CHARGES: u16 = 16; // ITEM_FIELD_SPELL_CHARGES[0]
+    const NUM_SLOTS: u16 = 48; // CONTAINER_FIELD_NUM_SLOTS
+    const SLOT_1: u16 = 50; // CONTAINER_FIELD_SLOT_1 (2 fields per guid)
+    const INV_SLOT_HEAD: u16 = 486; // PLAYER_FIELD_INV_SLOT_HEAD (2 per guid, 23 slots)
+    const PACK_SLOT_1: u16 = 532; // PLAYER_FIELD_PACK_SLOT_1 (2 per guid, 16 slots)
+
+    const TRINKET: u32 = 12_930;
+    const BAG: u32 = 4_500;
+
+    /// A player whose slot array points at the given `(player-array index, guid)` pairs.
+    fn player(slots: &[(u16, u64)]) -> ObjectFields {
+        let mut pairs = Vec::new();
+        for &(idx, guid) in slots {
+            let base = if idx < 23 {
+                INV_SLOT_HEAD + 2 * idx
+            } else {
+                PACK_SLOT_1 + 2 * (idx - 23)
+            };
+            pairs.push((base, guid as u32));
+            pairs.push((base + 1, (guid >> 32) as u32));
+        }
+        ObjectFields::from_pairs(&pairs)
+    }
+
+    /// A plain item instance of `entry` (optionally with live charges).
+    fn item(store: &mut Items, guid: u64, entry: u32, charges: Option<i32>) {
+        let mut pairs = vec![(ENTRY, entry)];
+        if let Some(c) = charges {
+            pairs.push((CHARGES, c as u32));
+        }
+        store.insert_object(guid, ObjectFields::from_pairs(&pairs));
+    }
+
+    /// A container instance holding `contents` at its own inner slots.
+    fn bag(store: &mut Items, guid: u64, entry: u32, contents: &[(u8, u64)]) {
+        let mut pairs = vec![(ENTRY, entry), (NUM_SLOTS, 16)];
+        for &(i, item_guid) in contents {
+            pairs.push((SLOT_1 + 2 * u16::from(i), item_guid as u32));
+            pairs.push((SLOT_1 + 2 * u16::from(i) + 1, (item_guid >> 32) as u32));
+        }
+        store.insert_object(guid, ObjectFields::from_pairs(&pairs));
+    }
+
+    const ALL: ItemSearch = ItemSearch {
+        equipment_only: false,
+        live_charges_only: false,
+    };
+    const WORN: ItemSearch = ItemSearch {
+        equipment_only: true,
+        live_charges_only: false,
+    };
+    const CHARGED: ItemSearch = ItemSearch {
+        equipment_only: false,
+        live_charges_only: true,
+    };
+
+    /// Equipment comes FIRST — the trinket case. A copy worn in trinket slot 13 wins over an
+    /// identical copy sitting in the backpack, and the wire pair is the doll's `(255, 13)`.
+    #[test]
+    fn equipment_is_searched_before_everything_else() {
+        let mut items = Items::default();
+        item(&mut items, 0xE1, TRINKET, None);
+        item(&mut items, 0xB1, TRINKET, None);
+        let store = player(&[(13, 0xE1), (23, 0xB1)]);
+        assert_eq!(
+            find_item(&store, &items, TRINKET, ALL),
+            Some((255, 13, 0xE1))
+        );
+    }
+
+    /// …and the equipment-only stage stops at the doll: the backpack copy is invisible to it.
+    /// This is the stage that decides USE-in-place vs EQUIP.
+    #[test]
+    fn the_equipment_only_stage_ignores_the_bags() {
+        let mut items = Items::default();
+        item(&mut items, 0xB1, TRINKET, None);
+        let store = player(&[(23, 0xB1)]);
+        assert_eq!(find_item(&store, &items, TRINKET, WORN), None);
+        assert_eq!(
+            find_item(&store, &items, TRINKET, ALL),
+            Some((255, 23, 0xB1))
+        );
+    }
+
+    /// A bag's CONTENTS come before the backpack (the walk recurses depth-first as it passes each
+    /// container) — the leg the old backpack-first walk had backwards.
+    #[test]
+    fn bag_contents_precede_the_backpack() {
+        let mut items = Items::default();
+        item(&mut items, 0xC1, TRINKET, None);
+        item(&mut items, 0xB1, TRINKET, None);
+        bag(&mut items, 0xBA, BAG, &[(2, 0xC1)]);
+        let store = player(&[(19, 0xBA), (23, 0xB1)]);
+        assert_eq!(
+            find_item(&store, &items, TRINKET, ALL),
+            Some((19, 2, 0xC1)),
+            "bag 1's inner slot 2, addressed by the bag's own player-array index"
+        );
+    }
+
+    /// The bag OBJECT is a candidate in its own right, before its contents — a bag on the action
+    /// bar is a real, placeable action (`InventoryType` 18 passes PlaceAction's filter).
+    #[test]
+    fn an_equipped_bag_is_found_as_itself() {
+        let mut items = Items::default();
+        bag(&mut items, 0xBA, BAG, &[]);
+        let store = player(&[(19, 0xBA)]);
+        assert_eq!(find_item(&store, &items, BAG, ALL), Some((255, 19, 0xBA)));
+    }
+
+    /// The mode-`0x20` charge filter skips a SPENT copy and returns one with uses left — so a
+    /// click on a charged item reaches a copy that still works.
+    #[test]
+    fn the_charge_filter_skips_a_spent_copy() {
+        let mut items = Items::default();
+        item(&mut items, 0xB1, TRINKET, Some(0));
+        item(&mut items, 0xB2, TRINKET, Some(3));
+        let store = player(&[(23, 0xB1), (24, 0xB2)]);
+        assert_eq!(
+            find_item(&store, &items, TRINKET, ALL),
+            Some((255, 23, 0xB1)),
+            "without the filter the first copy wins, spent or not"
+        );
+        assert_eq!(
+            find_item(&store, &items, TRINKET, CHARGED),
+            Some((255, 24, 0xB2)),
+            "with it, the spent copy is skipped"
+        );
     }
 }

@@ -524,6 +524,7 @@ mod tests {
 
         let item = |bag: i64, slot: u32| {
             CursorPayload::Item(CursorItem {
+                bar_placeable: true,
                 bag,
                 slot,
                 item_id: 2589,
@@ -579,6 +580,7 @@ mod tests {
 
         // A spell payload is refused — put back untouched, nothing queued.
         s.model_mut().cursor = Some(CursorPayload::Spell(crate::script::cursor::CursorSpell {
+            passive: false,
             book_slot: 1,
             book_type: "spell".into(),
             spell_id: 133,

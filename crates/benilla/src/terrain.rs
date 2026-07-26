@@ -188,7 +188,22 @@ impl MaterialExtension for WowModelExt {
             // depth step — decisive for coplanar ties, negligible (sub-mm) against real separation.
             let order = key.bind_group_data.wmo_batch_order;
             if order != 0 {
-                ds.bias.constant = i32::from(order);
+                // DIAGNOSTIC (B38): `WOW_WMO_BIAS=0` drops the bias entirely, so the "both batches
+                // saturate to depth 1.0" theory can be tested. The log proves the branch was taken.
+                // `WOW_WMO_BIAS=0` drops the per-batch bias, the A/B that says whether a given
+                // flicker is this bias resolving (or failing to resolve) a tie. It answered B38:
+                // the flip is bit-identical with the bias gone, which also settles what the Metal
+                // backend does with the constant — `wgpu-hal` hands `bias.constant` to
+                // `setDepthBias` raw, and were that raw value ADDED to a reverse-Z depth (~0.02
+                // here) every WMO batch would clamp to 1.0 and tie, so removing it could not
+                // possibly leave the picture unchanged. It does, so the constant is being scaled by
+                // the depth format's ULP and the comment above means what it says.
+                let on = !matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0"));
+                ds.bias.constant = if on { i32::from(order) } else { 0 };
+                debug!(
+                    "wmo batch order {order}: bias {}  compare {:?}  depth_write {}",
+                    ds.bias.constant, ds.depth_compare, ds.depth_write_enabled,
+                );
             }
         }
         if key.bind_group_data.fade {

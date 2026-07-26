@@ -37,6 +37,11 @@ pub struct ContainerSlot {
     /// template's `inventoryType` via `ui_items::find_equip_slot`; the engine holds no item
     /// knowledge of its own.
     pub equip_slots: Vec<u8>,
+    /// Whether this item may be placed on an ACTION-BAR slot — app-resolved from the template
+    /// exactly like [`Self::equip_slots`] (the engine holds no item knowledge of its own).
+    /// `PlaceAction`'s only item filter, byte-read: an on-use spell OR equippable
+    /// (`ItemInfo::placeable_on_action_bar`, wow-re `action-item-slot.md` §5 — decision 0666).
+    pub bar_placeable: bool,
     /// The instance's live durability `(current, max)` — `ITEM_FIELD_DURABILITY`/`MAXDURABILITY`
     /// off the streamed item object; `None` for indestructible items (max 0) or while the create
     /// hasn't landed. The real-instance tooltip's "Durability X / Y" line reads it (a template
@@ -205,6 +210,7 @@ fn pickup_container_item(model: &mut super::Model, bag: i64, slot: u32) -> bool 
                     link: s.link.clone(),
                     quality: s.quality,
                     count: None,
+                    bar_placeable: s.bar_placeable,
                     equip_slots: s.equip_slots.clone(),
                 });
             match picked {
@@ -515,6 +521,7 @@ mod tests {
         slots.insert(
             1,
             ContainerSlot {
+                bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
                 count: 5,
@@ -689,6 +696,7 @@ mod tests {
         state.slots.insert(
             5,
             ContainerSlot {
+                bar_placeable: true,
                 durability: None,
                 texture: Some("Interface\\Icons\\INV_Misc_Gem_01".into()),
                 count: 1,

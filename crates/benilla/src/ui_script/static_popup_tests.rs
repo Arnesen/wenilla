@@ -141,7 +141,7 @@ fn showing_a_dialog_cancels_its_named_victim_with_override() {
 }
 
 /// ESC only closes hideOnEscape dialogs (ref StaticPopup_EscapePressed l.1879-1893): a
-/// non-escapable entry — the DEATH release popup's law — survives BenillaOnEscape.
+/// non-escapable entry — the DEATH release popup's law — survives ToggleGameMenu.
 #[test]
 fn escape_skips_dialogs_without_hide_on_escape() {
     let s = setup();
@@ -152,7 +152,7 @@ fn escape_skips_dialogs_without_hide_on_escape() {
            StaticPopup_Show("TEST_STICKY")"#,
     )
     .unwrap();
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "a non-hideOnEscape dialog ignores ESC (the DEATH popup law)"
@@ -164,7 +164,7 @@ fn escape_skips_dialogs_without_hide_on_escape() {
            StaticPopup_Show("TEST_STICKY")"#,
     )
     .unwrap();
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         !s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "the escapable variant closes"

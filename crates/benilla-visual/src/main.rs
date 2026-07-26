@@ -60,6 +60,7 @@ struct Opts {
     amplify: u32,
     toggle_delta: u8,
     pad: u32,
+    at: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -71,6 +72,7 @@ fn main() -> Result<()> {
         amplify: DEFAULT_AMPLIFY,
         toggle_delta: TOGGLE_MIN_DELTA,
         pad: DEFAULT_PAD,
+        at: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -98,6 +100,7 @@ fn main() -> Result<()> {
                     .parse()
                     .context("--pad not an integer")?
             }
+            "--at" => opts.at = Some(next(&mut it, "--at")?),
             "-h" | "--help" => {
                 print_usage();
                 return Ok(());
@@ -167,6 +170,14 @@ fn main() -> Result<()> {
                 .context("hotspot needs --out <strip.png>")?;
             hotspot(Path::new(dir), out, opts.toggle_delta, opts.pad)?;
         }
+        "series" => {
+            let [dir] = one(rest, "series")?;
+            let at = opts
+                .at
+                .as_deref()
+                .context("series needs --at \"<x>,<y>[;<x>,<y>…]\"")?;
+            series(Path::new(dir), at)?;
+        }
         "compose-dir" => {
             let [da, db] = two(rest, "compose-dir")?;
             let out = opts
@@ -181,6 +192,68 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What one named pixel *did*, frame by frame — the colour counterpart to the client's `WOW_DEPTH`.
+///
+/// The aggregate readings (`flicker`, `hotspot`) answer "which pixels would not hold still" over a
+/// whole region, which is the right question when you are looking for a defect and the wrong one once
+/// you have found it. Correlating a renderer-side probe against the pixels needs the opposite: *this*
+/// pixel, *these* frames, no averaging. Run `WOW_DEPTH` and `--at` on the same coordinates and the two
+/// logs line up frame for frame — "the colour changed here but the depth did not" is a fact you cannot
+/// get from a region mean, because a run mean over 19 000 pixels hides which of them moved.
+///
+/// It also guards the trap this exists inside: a burst that happens to contain **no** flip reads as a
+/// clean negative. The per-frame Δ makes an absent phenomenon obvious instead of invisible.
+fn series(dir: &Path, at: &str) -> Result<()> {
+    let pixels = parse_at(at)?;
+    let names = pngs(dir)?;
+    if names.is_empty() {
+        bail!("no PNGs in {}", dir.display());
+    }
+    let frames: Vec<image::RgbImage> = names
+        .iter()
+        .map(|n| load(&dir.join(n)))
+        .collect::<Result<_>>()?;
+    for (x, y) in pixels {
+        let (w, h) = (frames[0].width(), frames[0].height());
+        if x >= w || y >= h {
+            println!("({x}, {y}): outside the {w}x{h} frame");
+            continue;
+        }
+        println!("({x}, {y}):");
+        let mut prev: Option<f64> = None;
+        for (i, f) in frames.iter().enumerate() {
+            let p = f.get_pixel(x, y).0;
+            let luma =
+                0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]);
+            let delta = prev.map_or(String::new(), |q| format!("  Δ{:+.2}", luma - q));
+            println!(
+                "  {i:3}  rgb({:3}, {:3}, {:3})  luma {luma:6.2}{delta}",
+                p[0], p[1], p[2]
+            );
+            prev = Some(luma);
+        }
+    }
+    Ok(())
+}
+
+/// `"x,y;x,y"` → pixels. Strict: a typo here would silently report the wrong pixel's history.
+fn parse_at(spec: &str) -> Result<Vec<(u32, u32)>> {
+    spec.split(';')
+        .filter(|s| !s.trim().is_empty())
+        .map(|pair| {
+            let (x, y) = pair.split_once(',').context("--at wants \"<x>,<y>;…\"")?;
+            Ok((
+                x.trim()
+                    .parse()
+                    .with_context(|| format!("bad x in {pair:?}"))?,
+                y.trim()
+                    .parse()
+                    .with_context(|| format!("bad y in {pair:?}"))?,
+            ))
+        })
+        .collect()
 }
 
 /// Stitch every `*.png` present in both dirs into `left | right` side-by-side images under `out`.
@@ -347,9 +420,11 @@ fn hotspot(dir: &Path, out: &Path, toggle_delta: u8, pad: u32) -> Result<()> {
             .collect();
         println!("    {:>2} -> {:<2}  {}", i, i + 1, cols.join("  "));
     }
-    // The two extremes of run #0, per channel. If a two-state flip is one light term switching, the
-    // channel ratios come out equal; if the surface swapped to a different (differently-coloured)
-    // lighting lane, they do not — and that is the whole difference between the two diagnoses.
+    // The two extremes of run #0, per channel — the *levels*, which is all this line is. Read the
+    // ratios as description, never as a diagnosis: equal ratios rule out a scalar multiply and
+    // nothing else, since an ADDED light moves the three channels by different factors too. The
+    // reading that actually separates "one surface, re-lit" from "two surfaces" is the per-pixel
+    // affine fit printed below it (`benilla_visual::relight`).
     let s0 = &series[0];
     let lo = s0
         .iter()
@@ -368,6 +443,53 @@ fn hotspot(dir: &Path, out: &Path, toggle_delta: u8, pad: u32) -> Result<()> {
         hi.mean_rgb_from[0], hi.mean_rgb_from[1], hi.mean_rgb_from[2],
         ratio.join(" / "),
     );
+    // Same surface re-lit, or a different surface? Fit each run's pixels across its own biggest
+    // frame-to-frame step. High R² = the pattern survived the flip and only its gain/offset moved,
+    // so it is one surface being shaded differently; low R² = the two frames show different
+    // surfaces, whatever the means do.
+    println!(
+        "  across each run's biggest step — is it one surface re-lit? (R² near 1 = yes), \
+         against its quietest step as the control:"
+    );
+    for (i, r) in s.regions.iter().take(SERIES_RUNS).enumerate() {
+        let (Some(flip), Some(quiet)) = (
+            benilla_visual::relight::biggest_step(r, &frames),
+            benilla_visual::relight::quietest_step(r, &frames),
+        ) else {
+            continue;
+        };
+        let fit = benilla_visual::relight::relight(r, &frames[flip], &frames[flip + 1]);
+        let ctl = benilla_visual::relight::relight(r, &frames[quiet], &frames[quiet + 1]);
+        let per: Vec<String> = (0..3)
+            .map(|c| {
+                format!(
+                    "{:.2}x{:+.0} r²{:.3}",
+                    fit.gain[c], fit.offset[c], fit.r2[c]
+                )
+            })
+            .collect();
+        // The control is what licenses the verdict: a low R² on the flip only means "different
+        // surfaces" if the same pixels under the same pan fit tightly when they did NOT flip.
+        let verdict = if ctl.worst_r2() < 0.9 {
+            "no control — the pan alone decorrelates these pixels; fit says nothing"
+        } else if fit.worst_r2() > 0.9 {
+            "ONE SURFACE, re-lit"
+        } else if fit.worst_r2() < 0.5 {
+            "DIFFERENT SURFACES"
+        } else {
+            "inconclusive"
+        };
+        println!(
+            "    #{i} flip {:>2}->{:<2}  {}   worst r² {:.3}   | quiet {:>2}->{:<2} r² {:.3}  =>  {verdict}",
+            flip,
+            flip + 1,
+            per.join("  "),
+            fit.worst_r2(),
+            quiet,
+            quiet + 1,
+            ctl.worst_r2(),
+        );
+    }
     let rect = biggest.bounds.padded(pad, w, h);
     // The toggle map goes in as the first tile, so the sheet carries its own legend: this is the
     // region, and here is what the frames did inside it.
@@ -514,12 +636,15 @@ fn print_usage() {
            benilla-visual diff-dir    <dir_a> <dir_b> [--out <diff_dir>] [--fail <mae>] [--amplify <n>]\n  \
            benilla-visual flicker     <burst_dir>     [--out <envelope.png>] [--fail <mae>] [--amplify <n>] [--toggle-delta <n>]\n  \
            benilla-visual hotspot     <burst_dir>     --out <strip.png> [--toggle-delta <n>] [--pad <n>]\n  \
+           benilla-visual series      <burst_dir>     --at \"<x>,<y>[;<x>,<y>…]\"\n  \
            benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n\
          \n\
          flicker reads a WOW_LIVE_SHOT_COUNT burst (adjacent frames) in shot order and reports both\n\
          the parked reading (envelope) and the moving-camera one (toggles).\n\
          hotspot follows the toggle map: it measures the toggling pixels' shape — one solid run is a\n\
          surface blinking, many thin ones are z-fighting — and crops the largest into a contact sheet.\n\
+         series drops the averaging: one named pixel's rgb/luma per frame, to line up against the\n\
+         client's WOW_DEPTH log at the same coordinates.\n\
          Exits non-zero if any image's MAE exceeds --fail."
     );
 }

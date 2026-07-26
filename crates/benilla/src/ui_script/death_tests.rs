@@ -56,7 +56,7 @@ fn death_popup_counts_down_and_release_queues_repop() {
         "the countdown renders through the engine's DEATH per-tick text"
     );
     // ESC must NOT close it (no hideOnEscape on DEATH — the ref's law).
-    s.run("BenillaOnEscape()").unwrap();
+    s.run("ToggleGameMenu()").unwrap();
     assert!(
         s.eval::<bool>("return StaticPopup1:IsVisible()").unwrap(),
         "the DEATH popup ignores ESC"

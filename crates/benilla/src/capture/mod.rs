@@ -43,7 +43,9 @@ use crate::schedule::WorldStage;
 // The UI fixture seeding (the synthetic window states), the scenario table, and the live-run
 // probe instruments (`probes`) each live in their own file — the server-less harness (settle,
 // screenshot, perf probe) is this one's concern.
+mod depth_probe;
 mod fixtures;
+mod phase_probe;
 mod pick_probe;
 mod probe_bank;
 mod probe_castcancel;
@@ -56,7 +58,9 @@ mod probe_rig;
 mod probe_taxi;
 mod probes;
 mod scenarios;
+pub(crate) use depth_probe::DepthProbePlugin;
 use fixtures::seed_ui_fixture;
+pub(crate) use phase_probe::PhaseProbePlugin;
 pub(crate) use pick_probe::PickProbePlugin;
 pub(crate) use probe_bank::ProbeBankPlugin;
 pub(crate) use probe_castcancel::ProbeCastCancelPlugin;

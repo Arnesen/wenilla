@@ -1,0 +1,367 @@
+//! **Inward** — the action bar's *identity* feed: what each of the 120 slots shows.
+//!
+//! [`feed_actions`] resolves each occupied slot's icon (spell: Spell.dbc × SpellIcon.dbc; item: the
+//! item template chain, the same ask-once store the bags use) and count (item: the bag walk,
+//! `ui_items::count_of`), diffs against what the VM already holds, pushes the changed slots and
+//! fires `ACTIONBAR_SLOT_CHANGED` per transition.
+//!
+//! **What is gated and what is not** is the whole design here. The identity resolve runs on its two
+//! inputs having changed — `PlayerActions::dirty` (a real, if occasional, event: login or a local
+//! pickup/place) OR a landed item template ([`Items::template_epoch`], decision 0660: an ITEM
+//! icon's template is fetched ask-once, so the *first* resolve of a cold entry is the one that
+//! ISSUES the query and reads back nothing). Two things drift independently of BOTH and so refresh
+//! every frame instead: an ITEM slot's bag **count** (eating a stack down never touches
+//! `SMSG_ACTION_BUTTONS`) and a weapon-substituting **icon** ([`super::weapon_icon`], decisions
+//! 0230/0231 — a swap changes it without touching the action table). Gating those on the same flag
+//! is what leaves a stale Count fontstring or a stale Attack face.
+//!
+//! The feed also pumps the four red-error-line queues (cast fails, mount refusals, the app's
+//! by-key local refusals, and the ENGINE's own — `benilla_ui` is engine-free and cannot reach
+//! [`UiErrorKeys`], so a refusal raised inside the script crate queues its GlobalStrings key here
+//! instead) into `UI_ERROR_MESSAGE`, and the stance page (`GetBonusBarOffset`) — our descriptor's
+//! shapeshift-form byte indexed into `SpellShapeshiftForm.dbc`'s BonusActionBar column, wow-re
+//! byte-verified, firing `UPDATE_BONUS_ACTIONBAR` on change.
+
+use std::collections::{HashMap, HashSet};
+
+use bevy::prelude::*;
+
+use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use benilla_ui::script::{ActionSlot, ScriptValue, UiScript};
+
+use crate::entities::ItemDisplays;
+use crate::items::Items;
+use crate::net::{NetCommands, ObjectStore, SelfPlayer};
+
+use super::errors::{first_missing_totem, first_short_reagent, mount_result_key};
+use super::weapon_icon::{auto_attack_icon, substitutes_weapon_icon};
+use super::{
+    cast_fail, ui_error_text, CastErrors, MountErrors, PlayerActions, Spells, UiError, UiErrorKeys,
+};
+
+/// What an ITEM action shows when its icon cannot be resolved — the reference's own hardcoded
+/// literal at `0x847fe4`, returned by the item-icon resolver's failure block `0x5d8927` (wow-re
+/// `action-item-slot.md` §1/§4: exactly two engine sites binary-wide, zero Lua). Reached two ways:
+/// the template hasn't answered yet (displayId 0 — the login window decision 0660 closes), or the
+/// displayId has no `ItemDisplayInfo` row at all.
+pub(super) const MISSING_ITEM_ICON: &str = "Interface\\Icons\\INV_Misc_QuestionMark";
+
+/// The feed's memory of what it last pushed, for per-slot change events.
+#[derive(Default)]
+pub(super) struct FeedMemory {
+    pushed: HashMap<u32, ActionSlot>,
+    bonus_offset: u8,
+    /// The [`Items::template_epoch`] the last identity resolve ran at — the feed's half of the
+    /// landed-template redisplay (decision 0660). An advance re-resolves, exactly like a bar edit.
+    template_epoch: u64,
+}
+
+#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
+pub(super) fn feed_actions(
+    script: Option<NonSendMut<UiScript>>,
+    mut actions: ResMut<PlayerActions>,
+    mut cast_errors: ResMut<CastErrors>,
+    mut mount_errors: ResMut<MountErrors>,
+    mut ui_error_keys: ResMut<UiErrorKeys>,
+    spells: Option<Res<Spells>>,
+    self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    mut items: ResMut<Items>,
+    icons: Option<Res<ItemDisplays>>,
+    sub_classes: Option<Res<crate::ui_items::ItemSubClasses>>,
+    commands: Res<NetCommands>,
+    mut memory: Local<FeedMemory>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+
+    // Rejected casts surface as the client's red error line (UI_ERROR_MESSAGE → the errors
+    // frame), resolved through the byte-verified two-layer display ([`cast_fail`]) against the
+    // VM's own GlobalStrings — resolve first (immutable script), then fire (mutable).
+    // 0x78 TOTEMS / 0x5c REAGENTS are the argument-formatted reasons whose `%s` fill benilla
+    // models (decisions 0545 + 0552, the ref's shared fill arm `0x6e1e7f`): "Requires %s" /
+    // "Missing reagent: %s" + the FAILING slot's item name — re-derived here exactly as the
+    // check derived it (first missing totem / first short reagent against our bags). On an
+    // item-cache miss the ref queries and shows nothing that frame, then its DBCACHECALLBACK
+    // `0x6e29b0` REDISPLAYS when the answer lands — modeled by keeping the entry queued: the
+    // ask-once query is away, and the frame the template answers, the fill succeeds and fires.
+    let self_store = self_q.iter().next();
+    let mut await_template: Vec<(u32, u8)> = Vec::new();
+    let texts: Vec<String> = cast_errors
+        .0
+        .drain(..)
+        .filter_map(|(spell_id, reason)| {
+            let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
+            let get = |key: &str| script.lua().globals().get::<String>(key).ok();
+            // 0x19/0x1a/0x1b EQUIPPED_ITEM_CLASS* — the other argument-formatted family whose
+            // `%s` benilla models (`0x6e1db7`, the arm that resolves an item class/subclass name
+            // through `0x6e2380`): "Must have a **Wand** equipped", the SINGULAR DisplayName,
+            // where the spell tooltip's own requirement line takes the verbose plural. Purely a
+            // DBC read, so no query/redisplay round trip. A multi-bit mask resolves too — through
+            // ItemSubClassMask.dbc's group name, else the FIRST matching subclass (law
+            // §3-EQUIPITEM; the tooltip's twin joins instead).
+            if let (0x19..=0x1b, Some(d), Some(subs)) = (reason, d, sub_classes.as_deref()) {
+                if let Some(name) = (d.equipped_item_class >= 0)
+                    .then(|| {
+                        subs.0.requirement_display_name(
+                            d.equipped_item_class as u32,
+                            d.equipped_item_subclass_mask,
+                        )
+                    })
+                    .flatten()
+                {
+                    let key = cast_fail::CAST_FAIL_KEYS[reason as usize];
+                    return get(key)
+                        .filter(|s| !s.is_empty())
+                        .map(|t| t.replace("%s", &name));
+                }
+            }
+            if reason == 0x78 || reason == 0x5c {
+                let d = d?;
+                let failing = if reason == 0x78 {
+                    self_store
+                        .and_then(|s| first_missing_totem(d, s, &items))
+                        // No store to test against (a race): name the first tool at all.
+                        .or_else(|| d.totems.iter().copied().find(|&t| t != 0))
+                } else {
+                    self_store
+                        .and_then(|s| first_short_reagent(d, s, &items))
+                        .or_else(|| d.reagents.iter().map(|&(id, _)| id).find(|&id| id != 0))
+                }?;
+                let cached = items
+                    .template(failing, 0, &commands)
+                    .map(|i| i.name.clone());
+                let name = match cached {
+                    Some(name) => name,
+                    // Answered-unknown → the ref's callback fallback literal (`0x838044`);
+                    // still pending → keep the entry queued for the redisplay.
+                    None if items.template_answered_unknown(failing) => "UNKNOWN".to_string(),
+                    None => {
+                        await_template.push((spell_id, reason));
+                        return None;
+                    }
+                };
+                let key = if reason == 0x78 {
+                    "SPELL_FAILED_TOTEMS"
+                } else {
+                    "SPELL_FAILED_REAGENTS"
+                };
+                return get(key)
+                    .filter(|s| !s.is_empty())
+                    .map(|t| t.replace("%s", &name));
+            }
+            cast_fail::cast_fail_text(reason, d, &get)
+        })
+        .collect();
+    cast_errors.0.extend(await_template);
+    for text in texts {
+        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    }
+
+    // (Dis)mount refusals ride the same red line, keyed straight into GlobalStrings
+    // ([`mount_result_key`] — no format arguments in any of these strings).
+    let mount_texts: Vec<String> = mount_errors
+        .0
+        .drain(..)
+        .filter_map(|(mount, code)| {
+            let key = mount_result_key(mount, code)?;
+            script.lua().globals().get::<String>(key).ok()
+        })
+        .collect();
+    for text in mount_texts {
+        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    }
+
+    // Client-local by-key refusals (the `DisplayError` route — [`UiErrorKeys`]) ride the same
+    // red line; the key IS the GlobalStrings lookup, no code table between.
+    let key_texts: Vec<String> = ui_error_keys
+        .0
+        .drain(..)
+        .filter_map(|e| ui_error_text(&e, &|key| script.lua().globals().get::<String>(key).ok()))
+        .collect();
+    for text in key_texts {
+        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    }
+
+    // The ENGINE's own by-key refusals ride the very same line. `benilla_ui` is engine-free and
+    // cannot reach [`UiErrorKeys`], so a refusal raised inside the script crate (today: dropping a
+    // passive spell on the bar, `ERR_PASSIVE_ABILITY`) queues its key and we resolve it here —
+    // standing in for the reference's inline `push <errorId>; call CGGameUI::DisplayError`. One
+    // frame late by construction (the refusal happens during the input pass this feed precedes),
+    // which is invisible on a toast.
+    let engine_keys = script.take_ui_errors();
+    let engine_texts: Vec<String> = engine_keys
+        .into_iter()
+        .filter_map(|key| {
+            ui_error_text(&UiError::key(key), &|k| {
+                script.lua().globals().get::<String>(k).ok()
+            })
+        })
+        .collect();
+    for text in engine_texts {
+        script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
+    }
+
+    let store = self_q.iter().next();
+
+    // Stance page: our own descriptor's form byte, pushed on change (UPDATE_BONUS_ACTIONBAR is
+    // the client's event for exactly this transition — the bar re-picks its page on it).
+    let form = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
+    let offset = spells
+        .as_ref()
+        .and_then(|s| s.forms.get(&u32::from(form)))
+        .map(|f| f.bonus_bar)
+        .unwrap_or(0) as u8;
+    if offset != memory.bonus_offset {
+        debug!("ui_action: bonus bar offset {} (form {form})", offset);
+        memory.bonus_offset = offset;
+        script.set_bonus_bar_offset(offset);
+        script.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
+    }
+
+    // The identity resolve has TWO inputs, not one. `dirty` covers the action table; the item
+    // TEMPLATE cache is the other, and it fills asynchronously — an ITEM slot's icon needs a
+    // template that `Items::template` fetches **ask-once**, so the very first resolve of a cold
+    // entry is the call that ISSUES the query and it necessarily reads back `None`. Gating on
+    // `dirty` alone left that slot on the fallback question mark until some unrelated bar edit
+    // happened to re-dirty it — the login race that put a question mark on every fresh
+    // character's food/water button (decision 0660; verified live 2026-07-26: the Tough Jerky
+    // ask and the one and only feed landed 0.5 ms apart, in that order, and nothing re-fed).
+    // The epoch is the second input, so a landed answer redisplays like the ref's DBCACHECALLBACK.
+    let template_epoch = items.template_epoch();
+    if actions.dirty || template_epoch != memory.template_epoch {
+        actions.dirty = false;
+        memory.template_epoch = template_epoch;
+
+        // Resolve every occupied wire slot to its display, diff against what the VM holds, push +
+        // fire ACTIONBAR_SLOT_CHANGED (arg1 = the Lua action id) per transition. Item icons/counts
+        // resolve via the same ask-once template chain + bag walk the bags use
+        // (`ui_items::count_of`) — an in-flight template shows the fallback (no texture), and the
+        // epoch gate above re-runs this whole resolve the frame the answer lands.
+        let mut fresh: HashMap<u32, ActionSlot> = HashMap::new();
+        for (slot, button) in &actions.buttons {
+            let (texture, count) = match button.kind {
+                ACTION_KIND_SPELL => {
+                    // The melee auto-attack shows the equipped weapon icon, not spell 6603's `Temp`
+                    // placeholder (decision 0230); every other spell uses its own icon.
+                    let d = spells.as_ref().and_then(|s| s.catalog.get(button.action));
+                    let icon = d
+                        .and_then(|d| {
+                            auto_attack_icon(d, store, &mut items, icons.as_deref(), &commands)
+                        })
+                        .or_else(|| d.and_then(|d| d.icon.clone()));
+                    (icon, 0)
+                }
+                ACTION_KIND_ITEM => {
+                    // The question mark belongs HERE, not in the Lua (decision 0666, correcting
+                    // 0660's modeling note): the reference's resolver never returns nil for a
+                    // populated ITEM slot — an un-cached template (displayId 0) or a displayId
+                    // with no row both fall into `0x5d88b0`'s failure block `0x5d8927`, which
+                    // returns the hardcoded `INV_Misc_QuestionMark` at `0x847fe4`. Since ref
+                    // FrameXML *hides* the icon on a nil texture, feeding nil here and letting a
+                    // Lua `or` paint the fallback would show a BLANK button on faithful
+                    // FrameXML — the placeholder is the engine's, at two sites binary-wide.
+                    let texture = items
+                        .template(button.action, 0, &commands)
+                        .cloned()
+                        .and_then(|t| icons.as_ref()?.catalog.get(t.display_info_id)?.icon.clone())
+                        .unwrap_or_else(|| MISSING_ITEM_ICON.to_string());
+                    let count = store
+                        .map(|s| crate::ui_items::count_of(&s.0, &items, button.action))
+                        .unwrap_or(0);
+                    (Some(texture), count)
+                }
+                // Macro actions: no macro catalog yet (no macro window ships) — the engine-side
+                // fallback icon shows, matching the pre-slice-4 gap.
+                _ => (None, 0),
+            };
+            fresh.insert(
+                u32::from(*slot) + 1,
+                ActionSlot {
+                    texture,
+                    kind: button.kind,
+                    action: button.action,
+                    count,
+                },
+            );
+        }
+        let changed: Vec<u32> = fresh
+            .keys()
+            .chain(memory.pushed.keys())
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter(|a| fresh.get(a) != memory.pushed.get(a))
+            .collect();
+        for &action in &changed {
+            script.set_action(action, fresh.get(&action).cloned());
+        }
+        memory.pushed = fresh;
+        debug!(
+            "ui_action: fed {} changed slot(s) ({} occupied)",
+            changed.len(),
+            memory.pushed.len()
+        );
+        for action in changed {
+            script.fire_event(
+                "ACTIONBAR_SLOT_CHANGED",
+                vec![ScriptValue::Int(i64::from(action))],
+            );
+        }
+    }
+
+    // Two things drift independently of `dirty` (decision 0216 §7's module-doc note) and so must
+    // refresh every frame, not just on an action-table edit: an ITEM slot's COUNT (eating down a
+    // stack never touches SMSG_ACTION_BUTTONS) and the auto-attack's ICON (it tracks the equipped
+    // main-hand weapon, which a weapon swap changes without touching the action table — decision
+    // 0230). Gating either on `dirty` leaves it stale until the next unrelated action-bar edit.
+    // Bounded to the already-pushed slots (normally a handful) — the same per-frame bag walk /
+    // template lookup `count_of` already pays for the quest log's item objectives.
+    if let Some(store) = store {
+        for (&action, slot) in memory.pushed.iter_mut() {
+            let changed = match slot.kind {
+                ACTION_KIND_ITEM => {
+                    let fresh = crate::ui_items::count_of(&store.0, &items, slot.action);
+                    let changed = fresh != slot.count;
+                    if changed {
+                        slot.count = fresh;
+                    }
+                    changed
+                }
+                // A weapon-substituting icon tracks the equipped weapon — main-hand for Attack
+                // (decision 0230), the ranged slot for Auto Shot / wand Shoot (decision 0231's
+                // ranged case) — which a swap changes without touching the action table, so
+                // refresh it too. A normal spell's icon is stable, so it's skipped.
+                ACTION_KIND_SPELL => {
+                    let d = spells.as_ref().and_then(|s| s.catalog.get(slot.action));
+                    match d.filter(|d| substitutes_weapon_icon(d)) {
+                        Some(d) => {
+                            let fresh = auto_attack_icon(
+                                d,
+                                Some(store),
+                                &mut items,
+                                icons.as_deref(),
+                                &commands,
+                            )
+                            .or_else(|| d.icon.clone());
+                            let changed = fresh != slot.texture;
+                            if changed {
+                                slot.texture = fresh;
+                            }
+                            changed
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            };
+            if changed {
+                script.set_action(action, Some(slot.clone()));
+                script.fire_event(
+                    "ACTIONBAR_SLOT_CHANGED",
+                    vec![ScriptValue::Int(i64::from(action))],
+                );
+            }
+        }
+    }
+}

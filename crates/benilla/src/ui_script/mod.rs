@@ -406,6 +406,13 @@ fn load_default_ui(script: &UiScript) {
         // all already loaded above). The 'N' binding (ui_script/input.rs) calls its bare
         // ToggleTalentFrame().
         "TalentFrame.xml",
+        // The social window (decision 0668): the O-key friends/ignore/who window over the social
+        // API (`benilla-ui/src/script/social.rs`) + `crate::ui_social`'s feed/drain. Needs
+        // UiPanels (the panel manager, `CharacterFrameTabButtonTemplate`, and the StaticPopup
+        // engine its two name-entry dialogs register into), ScrollTemplates (three faux lists),
+        // GameTooltip (the newbie tips) and UIDropDownMenu (the who list's variable column) —
+        // all loaded above.
+        "FriendsFrame.xml",
         "GossipFrame.xml",
         "MerchantFrame.xml",
         // The mail window (decision 0544 P1/P2): the mailbox inbox, open-letter, and send tab over
@@ -471,6 +478,12 @@ fn load_default_ui(script: &UiScript) {
         // alongside QuestFrame (same arc); the 'L' binding below calls its ToggleQuestLog().
         "QuestLogFrame.xml",
         "ChatFrame.xml",
+        // The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
+        // event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
+        // everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's
+        // UpdateMicroButtons, BagFrame's Disable_BagButtons), and nothing depends on it: the ESC
+        // chain and the micro button both reach it by name at call time.
+        "GameMenuFrame.xml",
     ] {
         let entry = dir.join(file);
         let text = match std::fs::read_to_string(&entry) {
@@ -733,6 +746,9 @@ mod tooltip_compare_tests;
 mod escape_tests;
 
 #[cfg(test)]
+mod game_menu_tests;
+
+#[cfg(test)]
 mod delete_item_tests;
 
 #[cfg(test)]
@@ -743,6 +759,9 @@ mod death_tests;
 
 #[cfg(test)]
 mod duel_tests;
+
+#[cfg(test)]
+mod friends_tests;
 
 #[cfg(test)]
 mod quest_tests;

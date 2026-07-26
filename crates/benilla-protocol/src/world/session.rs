@@ -718,9 +718,9 @@ impl WorldSession {
         while std::time::Instant::now() < deadline {
             match self.recv() {
                 Ok(ServerPacket::LogoutComplete) => return Ok(()),
-                Ok(ServerPacket::LogoutResponse { result }) => {
-                    // A non-success result means the server refused (combat, etc.).
-                    denied = result != messages::LOGOUT_SUCCESS;
+                Ok(ServerPacket::LogoutResponse { reason, .. }) => {
+                    // A non-zero reason means the server refused (combat, falling, GM-frozen).
+                    denied = reason != messages::LOGOUT_SUCCESS;
                 }
                 Ok(_) => {}
                 Err(_) => {} // read-timeout tick — keep polling until the deadline

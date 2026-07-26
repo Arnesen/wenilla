@@ -304,6 +304,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_ThrowingKnife_02".into()),
             count: 200,
@@ -381,6 +382,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Sword_04".into()),
             count: 1,
@@ -486,6 +488,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Pelt_Wolf_01".into()),
             count: 4,
@@ -503,6 +506,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
     slots.insert(
         2,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Key_03".into()),
             count: 1,
@@ -694,6 +698,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
@@ -779,6 +784,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Gem_01".into()),
             count: 1,
@@ -906,6 +912,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,
@@ -1192,6 +1199,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     // SetInventoryItem arm. Bar slot 1 is inventory slot 20 (Bag0Slot).
     let mut inv: benilla_ui::script::InventorySlots = Default::default();
     inv[20] = Some(benilla_ui::script::InvSlotView {
+        bar_placeable: true,
         durability: None,
         flags: 0,
         item_id: 4496,

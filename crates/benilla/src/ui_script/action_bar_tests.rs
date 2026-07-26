@@ -483,6 +483,7 @@ fn shipped_bag_frame_drives_end_to_end() {
     slots.insert(
         1,
         ContainerSlot {
+            bar_placeable: true,
             durability: None,
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
             count: 5,

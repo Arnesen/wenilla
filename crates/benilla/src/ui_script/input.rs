@@ -225,12 +225,14 @@ pub(super) fn feed_ui_input(
         let chord = textkeys::chord(ev.key_code, mods, mac);
         if let Some(name) = named {
             let consumed = script.key_input(name);
-            // ESCAPE with no EditBox focused runs the escape binding — benilla's ToggleGameMenu
-            // analog (UiPanels.xml `BenillaOnEscape`): close the open windows (bag + panel slot) and
-            // drop a held cursor. A focused box consumes ESCAPE first (`key_input` returns true), so
-            // this never fires while typing — the real client's ESC precedence.
+            // ESCAPE with no EditBox focused runs the escape binding: the reference's own
+            // TOGGLEGAMEMENU action (UiPanels.xml `ToggleGameMenu`) — one eater per press down the
+            // close/cancel ladder, and the game menu when nothing is left to eat. No argument: the
+            // `clicked` form is the micro button's plain toggle. A focused box consumes ESCAPE
+            // first (`key_input` returns true), so this never fires while typing — the real
+            // client's ESC precedence.
             if name == "ESCAPE" && !consumed {
-                if let Err(e) = script.run("BenillaOnEscape()") {
+                if let Err(e) = script.run("ToggleGameMenu()") {
                     warn!("ui_script(escape): {e}");
                 }
             }
@@ -323,6 +325,9 @@ fn action_button_index(key: KeyCode) -> Option<u8> {
 /// - **M** TOGGLEWORLDMAP — the fullscreen map (decision 0203 phase 2).
 /// - **P** TOGGLESPELLBOOK — ref `Bindings.xml:582-583` (decision 0216 §8).
 /// - **N** TOGGLETALENTS — ref `Bindings.xml`: `ToggleTalentFrame()` (decision 0304).
+/// - **O** TOGGLEFRIENDSTAB — ref `Bindings.xml:618-620`: `ToggleFriendsFrame(1)`, the social
+///   window on its Friends tab (decision 0668). The bare TOGGLESOCIAL binding is the same window
+///   without a tab argument; 'O' is the tab-1 one in the client's default set.
 fn bare_key_binding(key: KeyCode) -> Option<(&'static str, &'static str)> {
     Some(match key {
         KeyCode::KeyB => ("BenillaBagToggle_OnClick()", "togglebackpack"),
@@ -334,6 +339,7 @@ fn bare_key_binding(key: KeyCode) -> Option<(&'static str, &'static str)> {
         KeyCode::KeyM => ("ToggleWorldMap()", "toggleworldmap"),
         KeyCode::KeyP => ("ToggleSpellBook(BOOKTYPE_SPELL)", "togglespellbook"),
         KeyCode::KeyN => ("ToggleTalentFrame()", "toggletalents"),
+        KeyCode::KeyO => ("ToggleFriendsFrame(1)", "togglesocial"),
         _ => return None,
     })
 }

@@ -14,6 +14,17 @@ impl ObjectFields {
     pub fn item_stack_count(&self) -> Option<u32> {
         self.get_u32(FIELD_ITEM_STACK_COUNT)
     }
+    /// `ITEM_FIELD_SPELL_CHARGES + i` — this *instance*'s remaining charges for its `i`th spell
+    /// block (`i < 5`), signed: negative = a consumable-on-empty counter, `0` = spent. Distinct
+    /// from the TEMPLATE's `ItemSpellEntry::charges`, which says how many a fresh copy carries.
+    /// Field 16 = `FIELD_ITEM_STACK_COUNT`(14) + DURATION(15) + 1 — the chain between the tested
+    /// STACK_COUNT and FLAGS(21) anchors, and the client's own `[item+0x114]+0x28` (wow-re
+    /// `action-item-slot.md` §8.2, the mode-`0x20` search filter that reads exactly this).
+    pub fn item_spell_charges(&self, i: u8) -> Option<i32> {
+        (i < 5)
+            .then(|| self.get_u32(FIELD_ITEM_STACK_COUNT + 2 + u16::from(i)))?
+            .map(|v| v as i32)
+    }
     /// `ITEM_FIELD_FLAGS` (field 21 — wire index; the client's item-relative index 15 + the 6
     /// object fields, VERIFIED wow-re inventory-alert-law): bit `0x08` = wrapped (a gift — never
     /// alerts, never reads broken), bit `0x10` = force-red (status 4 regardless of durability;

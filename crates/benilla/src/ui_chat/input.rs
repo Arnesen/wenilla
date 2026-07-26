@@ -470,6 +470,15 @@ pub(super) fn drain_chat_input(
             // over the same binding the popup row calls, so it enters the same intent queue
             // (decision 0646 §3; the `/duel` reasoning above, verbatim).
             ParsedChat::Pvp => script.queue_pvp_toggle(),
+            // Run the reference's own slash body (see the variant's doc). The argument is a Lua
+            // string literal, so it is escaped: a `/who` filter legitimately contains quotes
+            // (`z-"Elwynn Forest"`), and a newline would end the statement.
+            ParsedChat::Social { verb, arg } => {
+                let lua = format!("{}(\"{}\")", verb.lua_fn(), escape_lua_string(&arg));
+                if let Err(e) = script.run(&lua) {
+                    warn!("ui_chat(social): {e}");
+                }
+            }
             ParsedChat::Help => {
                 // An honest benilla summary (the ref's HELP_TEXT_LINE pages are a settings-era
                 // nicety; this stays useful and never stale-quotes them).
@@ -557,10 +566,14 @@ pub(super) fn drain_chat_input(
                 }
             }
             ParsedChat::ChatTest => chattest_battery(&mut chat_log),
-            ParsedChat::Logout => match commands.0.send(ClientCommand::Logout) {
-                Ok(()) => info!("chat: logout requested"),
-                Err(_) => warn!("chat: not connected; dropped {msg:?}"),
-            },
+            // `/logout` (and `/camp`) is the reference's own `SlashCmdList["LOGOUT"]` → `Logout()`,
+            // so it takes the SAME route the game menu's Logout button does (decision 0674): the
+            // request queues on the script seam, `crate::ui_logout` sends it and narrates the
+            // server's answer with the CAMP countdown. It used to send `CMSG_LOGOUT_REQUEST`
+            // straight from here, which meant a field logout looked like nothing happening for 20 s.
+            ParsedChat::Logout => {
+                script.queue_session_request(benilla_ui::script::SessionRequest::Logout)
+            }
             ParsedChat::Unknown => {
                 // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203).
                 chat_log.push_event(super::event::ChatEvent::text_only(
@@ -568,6 +581,51 @@ pub(super) fn drain_chat_input(
                     "Type '/help' for a listing of a few commands.".to_string(),
                 ));
             }
+        }
+    }
+}
+
+/// Escape a player-typed string for embedding in a Lua double-quoted literal: backslashes and
+/// quotes are escaped, and the two line terminators are dropped rather than escaped (nothing a
+/// slash command means can contain them, and a stray one would end the statement).
+fn escape_lua_string(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .flat_map(|c| {
+            let escaped = matches!(c, '\\' | '"');
+            escaped
+                .then_some('\\')
+                .into_iter()
+                .chain(std::iter::once(c))
+        })
+        .collect()
+}
+
+/// Which social slash command was typed — the selector for the Lua body it runs
+/// ([`ParsedChat::Social`], decision 0668).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SocialVerb {
+    /// `/who [filter]` — SLASH_WHO 1-2.
+    Who,
+    /// `/friends [name]` (aliases `/friend`) — SLASH_FRIENDS 1-4.
+    Friends,
+    /// `/removefriend <name>` (alias `/remfriend`) — SLASH_REMOVEFRIEND 1-4.
+    RemoveFriend,
+    /// `/ignore [name]` — SLASH_IGNORE 1-2. Toggles: an ignored name is un-ignored.
+    Ignore,
+    /// `/unignore [name]` — SLASH_UNIGNORE 1-2.
+    Unignore,
+}
+
+impl SocialVerb {
+    /// The Lua function in `FriendsFrame.xml` holding this verb's reference body.
+    fn lua_fn(self) -> &'static str {
+        match self {
+            Self::Who => "BenillaSlashWho",
+            Self::Friends => "BenillaSlashFriends",
+            Self::RemoveFriend => "BenillaSlashRemoveFriend",
+            Self::Ignore => "BenillaSlashIgnore",
+            Self::Unignore => "BenillaSlashUnignore",
         }
     }
 }
@@ -649,6 +707,13 @@ pub(super) enum ParsedChat {
     /// `/pvp` — `TogglePVP()` (decision 0646 §3). Takes no argument: the binding has no state
     /// form, and the server reads the toggle from our current preference.
     Pvp,
+    /// The social verbs (decision 0668) — `/who`, `/friends`, `/removefriend`, `/ignore`,
+    /// `/unignore`. Each carries the raw argument (`/who`'s is a whole filter string, not a
+    /// name), and each runs the reference's OWN `SlashCmdList` body, transcribed into
+    /// `FriendsFrame.xml` as `BenillaSlash*`: those bodies do more than send (a bare `/who`
+    /// opens the panel and fills its edit box, a bare `/ignore` opens the ignore list), and
+    /// keeping them in the FrameXML is what stops that behaviour being re-derived here.
+    Social { verb: SocialVerb, arg: String },
     /// `/partytest [lead|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
     /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
     /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
@@ -792,6 +857,30 @@ pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>
         // The PvP flag (decision 0646; GlobalStrings' SLASH_PVP 1-2, lines 3718-3719 — both
         // aliases are literally "/pvp").
         "pvp" => ParsedChat::Pvp,
+        // The social verbs (decision 0668; aliases quoted from GlobalStrings' SLASH_WHO 1-2,
+        // SLASH_FRIENDS 1-4, SLASH_REMOVEFRIEND 1-4, SLASH_IGNORE 1-2, SLASH_UNIGNORE 1-2 —
+        // lines 3585-3794). The argument is passed WHOLE: `/who`'s is a filter expression
+        // (`z-"Elwynn Forest" 1-10`), not a name, so `slash_target_name` must not touch it.
+        "who" => ParsedChat::Social {
+            verb: SocialVerb::Who,
+            arg: args.trim().to_string(),
+        },
+        "friend" | "friends" => ParsedChat::Social {
+            verb: SocialVerb::Friends,
+            arg: args.trim().to_string(),
+        },
+        "removefriend" | "remfriend" => ParsedChat::Social {
+            verb: SocialVerb::RemoveFriend,
+            arg: args.trim().to_string(),
+        },
+        "ignore" => ParsedChat::Social {
+            verb: SocialVerb::Ignore,
+            arg: args.trim().to_string(),
+        },
+        "unignore" => ParsedChat::Social {
+            verb: SocialVerb::Unignore,
+            arg: args.trim().to_string(),
+        },
         "h" | "help" | "?" => ParsedChat::Help,
         // Not a recognized command — the EmotesText lookup against the whole slash-line
         // (`/wave`, `/lol`, …), exactly as before.
