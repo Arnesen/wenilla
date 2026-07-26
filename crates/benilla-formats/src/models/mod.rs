@@ -33,6 +33,7 @@ pub use anim::*;
 pub use anim_summary::*;
 pub use bounds::*;
 pub use collision::*;
+pub(crate) use key_anim::{bake_track, SeqSlot};
 pub use m2_batches::*;
 pub use mat_anim::{AlphaAnim, AlphaSeq, RgbAnim, ScalarAnim};
 pub use records::*;

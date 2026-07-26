@@ -360,7 +360,10 @@ impl MatAnim {
 /// base clips are live and the heavier one wins; the reference instead blends the two sampled
 /// scalars by λ (wow-re `eval.md` FN 0x71af20's blend leg), a sub-blend-time difference on tracks
 /// the corpus authors as 0/1 steps — recorded, not modelled.
-fn playing_seq(player: &AnimationPlayer, anims: &ModelAnimations) -> Option<(usize, f32)> {
+pub(crate) fn playing_seq(
+    player: &AnimationPlayer,
+    anims: &ModelAnimations,
+) -> Option<(usize, f32)> {
     player
         .playing_animations()
         .filter_map(|(node, active)| {

@@ -461,6 +461,12 @@ pub(super) fn attach_effect_visuals(
             // The cloud anchors at the instance root — the emitter's bone only composes births
             // (the food sparkle's bone orbits; the risen stars must not swirl with it).
             Some(root),
+            // The effect's rig arms ONE clip; the emitters' rate/enabled windows ride that slot
+            // (a missile's InFlight is not file-order-first), on the instance's own spawn clock.
+            played_seq.map_or(
+                particles::EmitClock::Pinned,
+                particles::EmitClock::PinnedSeq,
+            ),
         );
     }
     // The same pick, as an `AnimationData` id — the ribbons' per-sequence visibility keys off it,

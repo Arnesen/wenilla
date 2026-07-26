@@ -133,7 +133,9 @@ pub(super) fn update_model_particles(
                 continue;
             };
             let u = (p.age / emitter.def.lifespan).clamp(0.0, 1.0);
-            let (rgba, size, _) = emitter.def.over_life.sample(u);
+            // 3-D model particles carry no texture atlas — only colour and size reach them.
+            let ol = emitter.def.over_life.sample(u);
+            let (rgba, size) = (ol.color, ol.size);
             let tf = if anchored {
                 Transform {
                     translation: emitter.anchor_pos + emitter.attach_rot * p.pos,

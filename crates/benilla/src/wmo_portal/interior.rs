@@ -439,6 +439,7 @@ mod tests {
             group_light_refs: Vec::new(),
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
+            doodad_owner: Default::default(),
         }
     }
 

@@ -113,6 +113,16 @@ pub struct WmoModel {
     /// attach path — a WMO MODD doodad never reaches it (create never calls SetMatrix; wow-re
     /// `trace-forensics-abbey-interior-d3d` §1.1).
     pub doodad_base: Vec<DoodadBase>,
+    /// Per-MODD **owning group** (the first group whose MODR refs name it), parallel to
+    /// [`Self::doodads`]; `None` for a MODD no group references.
+    ///
+    /// This is the prop's portal-cull key. The reference commits a WMO's doodads **per visible
+    /// group** — `0x695aa0` loops the group's own MODR refs at `group+0xe8`/count `+0x144`, called
+    /// from the visible-group walk `0x698720` (wow-re `m2-interior-doodad-base-light.md` §453,
+    /// `trace-forensics-abbey-interior-d3d.md` §90) — so a group the portal flood culled draws none
+    /// of its furniture. Without this the props outlive their own building: cull every group of a
+    /// dungeon and its lanterns, crates and cobwebs hang in the void (decision 0689).
+    pub doodad_owner: Vec<Option<u16>>,
     /// Per-group FOOTPRINT face set (render tris + baked MOCV + MOPY flags), indexed by absolute
     /// group index; `None` for exterior groups / groups without MOCV. The **GameObject M2** light
     /// lane samples it: the entity node's env-update attach down-rays the render mesh under the
@@ -278,22 +288,11 @@ pub fn floor168(c: [u8; 3]) -> [f32; 3] {
     floor_raise(c, 168)
 }
 
-/// Resolve every MODD placement's lighting base once, at load. Ownership and interior class follow
-/// the faithful create path: a doodad belongs to the group(s) whose **MODR** references it (the
-/// instantiate loop is per-group over MODR — never a spatial test), the owning group's
-/// interior/exterior class (`MOGI flags & 0x48`) picks the lane, and the owning group's **MOLR**
-/// list is its complete point-light candidate set. A MODD referenced by no group is never
-/// instantiated by the reference at all — Exterior here (the harmless default if our spawner shows
-/// it anyway).
-fn resolve_doodad_bases(
-    doodads: &[WmoDoodad],
-    groups: &[WmoGroupInfo],
-    group_doodad_refs: &[Vec<u16>],
-    group_light_refs: &[Vec<u16>],
-) -> Vec<DoodadBase> {
-    // Invert MODR: MODD index → owning group (first referencing group wins; a doodad shared by two
-    // groups gets one def per group in the reference — one instance and its first owner here).
-    let mut owner: Vec<Option<u16>> = vec![None; doodads.len()];
+/// Invert MODR: MODD index → its owning group. First referencing group wins — a doodad named by two
+/// groups gets one def *per group* in the reference; we instantiate it once, under its first owner.
+/// `None` = referenced by no group at all (the reference never instantiates such a MODD).
+fn modr_owners(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Option<u16>> {
+    let mut owner: Vec<Option<u16>> = vec![None; doodad_count];
     for (gi, refs) in group_doodad_refs.iter().enumerate() {
         for &di in refs {
             if let Some(slot) = owner.get_mut(di as usize) {
@@ -301,9 +300,28 @@ fn resolve_doodad_bases(
             }
         }
     }
+    owner
+}
+
+/// Resolve every MODD placement's lighting base once, at load. Ownership and interior class follow
+/// the faithful create path: a doodad belongs to the group(s) whose **MODR** references it (the
+/// instantiate loop is per-group over MODR — never a spatial test), the owning group's
+/// interior/exterior class (`MOGI flags & 0x48`) picks the lane, and the owning group's **MOLR**
+/// list is its complete point-light candidate set. A MODD referenced by no group is never
+/// instantiated by the reference at all — Exterior here (the harmless default if our spawner shows
+/// it anyway).
+///
+/// `owner` is [`modr_owners`]' inversion, shared with the portal-cull key ([`WmoModel::doodad_owner`])
+/// so the lighting lane and the cull can never disagree about which group a prop belongs to.
+fn resolve_doodad_bases(
+    doodads: &[WmoDoodad],
+    groups: &[WmoGroupInfo],
+    owner: &[Option<u16>],
+    group_light_refs: &[Vec<u16>],
+) -> Vec<DoodadBase> {
     doodads
         .iter()
-        .zip(&owner)
+        .zip(owner)
         .map(|(d, owner)| {
             let Some(gi) = owner else {
                 return DoodadBase::Exterior;
@@ -495,11 +513,13 @@ impl AssetLoader for WmoModelLoader {
             }
         }
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
-        // light lists are all fixed in the root/groups, so nothing here is ever re-derived.
+        // light lists are all fixed in the root/groups, so nothing here is ever re-derived. The MODR
+        // inversion is shared with the portal-cull key below, so the two can't disagree.
+        let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
         let doodad_base = resolve_doodad_bases(
             root.doodads(),
             root.group_infos(),
-            &group_doodad_refs,
+            &doodad_owner,
             &group_light_refs,
         );
 
@@ -534,6 +554,7 @@ impl AssetLoader for WmoModelLoader {
             lights: parse_wmo_lights(&bytes),
             group_bounds: root.group_infos().to_vec(),
             doodad_base,
+            doodad_owner,
             group_footprints,
             group_footprint_bounds,
             group_light_refs,
@@ -615,7 +636,11 @@ mod doodad_base_tests {
         let groups = [grp(true), grp(false)];
         let modr = vec![vec![0u16], vec![1u16]];
         let molr = vec![vec![7u16, 9u16], vec![3u16]];
-        let bases = resolve_doodad_bases(&doodads, &groups, &modr, &molr);
+        let owner = modr_owners(doodads.len(), &modr);
+        // The same inversion the portal cull keys props on (decision 0689): owned props name their
+        // group, the unreferenced one names none — so it is the one prop the cull can't hide.
+        assert_eq!(owner, vec![Some(0), Some(1), None]);
+        let bases = resolve_doodad_bases(&doodads, &groups, &owner, &molr);
         match &bases[0] {
             DoodadBase::Interior(b) => {
                 assert_eq!(b.light_refs, vec![7, 9]);
@@ -636,12 +661,29 @@ mod doodad_base_tests {
         let bases = resolve_doodad_bases(
             &[prop([120, 110, 150, 255])],
             &[grp(true)],
-            &[vec![0u16]],
+            &[Some(0)],
             &[Vec::new()],
         );
         match &bases[0] {
             DoodadBase::Interior(b) => assert!(b.light_refs.is_empty()),
             other => panic!("expected interior base, got {other:?}"),
         }
+    }
+
+    /// A MODD named by several groups resolves to its **first** referencing group, and the mapping is
+    /// dense over the doodad list — the portal cull keys every prop off this (decision 0689), so a
+    /// shared prop is culled with one real room rather than never culled at all. Out-of-range MODR
+    /// entries (a malformed group) are ignored rather than panicking.
+    #[test]
+    fn a_shared_modd_belongs_to_its_first_referencing_group() {
+        // g0 names doodad 2; g1 names 0 and 2; g2 names 1 — plus a ref past the end of the list.
+        let modr = vec![vec![2u16], vec![0u16, 2u16], vec![1u16, 99u16]];
+        assert_eq!(
+            modr_owners(3, &modr),
+            vec![Some(1), Some(2), Some(0)],
+            "doodad 2 is named by g0 and g1 — g0 wins"
+        );
+        // No groups at all ⇒ nothing is owned, and nothing is cullable.
+        assert_eq!(modr_owners(2, &[]), vec![None, None]);
     }
 }

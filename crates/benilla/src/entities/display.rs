@@ -83,9 +83,10 @@ pub(super) struct EntityPart {
     /// 0153: the brazier/torch "glow on the ground" family). `None` for ordinary geometry.
     pub(super) billboard: Option<benilla_assets::BillboardInfo>,
     /// The part's animated material-alpha loops (colour-alpha × transparency-weight, decision 0130
-    /// phase 2). The **effect lane** ([`super::spell_fx`]) samples them per instance (a spell
-    /// effect's staggered fade pulses); the unit/GameObject lane doesn't yet (its alpha channel is
-    /// owned by the appear-fade/interior writers — a named deferral). `None` for static batches.
+    /// phase 2, per-sequence since 0641). The **effect lane** ([`super::spell_fx`]) samples them
+    /// per instance on its armed slot; the unit/GameObject lane follows the host's live playing
+    /// sequence (`MatAnim::following` — 0641 collected the old deferral here). `None` for static
+    /// batches.
     pub(super) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
     /// The part's animated RGB tint (the M2Color colour track, time-varying only). The static
     /// vertex tint was skipped at parse for these parts: `material`/its variants are built with

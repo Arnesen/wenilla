@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use benilla_formats::open_chain;
+use benilla_formats::{open_chain, Chain};
 
 fn vanilla_data_dir() -> PathBuf {
     // crates/benilla-formats -> repo root -> WoW/Data
@@ -1135,4 +1135,70 @@ fn the_wdl_window_contains_the_cameras_own_tile() {
         .filter(|&(tx, ty)| wdl.is_present(tx as u32, ty as u32))
         .count();
     assert_eq!(window.len(), expected, "every present tile in the window");
+}
+
+/// A **tombstoned path must never fall through to the live copy a base archive still holds.**
+///
+/// `patch.MPQ` deletes 26 paths that `model.MPQ` and friends still carry in full — cut content the
+/// 1.12.1 client does not load (decision 0246). The failure this pins is silent and points the
+/// wrong way: a chain that resolved *past* the delete-marker would serve `OgreMage.m2`'s 386 KB as
+/// if it were current, looking entirely healthy while rendering a model the reference never draws.
+/// Until now the property was held by a comment in `Chain::read` and nothing else.
+///
+/// Found by comparing our corpus census against wow-re's: their chain over-enumerated by exactly
+/// these 26, because `list` took the winning listfile entry whatever its flags. Ours already
+/// filtered — the point of this test is that it stays that way.
+///
+/// Non-vacuous by construction: each name is first read straight out of the base archive that still
+/// holds it, so the test fails loudly if the pairing ever stops being a real tombstone-over-content
+/// case rather than passing on an absent file.
+#[test]
+fn tombstoned_paths_never_fall_through_to_the_base_copy() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+
+    // Tombstoned by `patch.MPQ`; still present, in full, in `model.MPQ` (measured: 386416 / 437456).
+    const DELETED: [&str; 2] = [
+        "Creature\\OgreMage\\OgreMage.m2",
+        "Creature\\OgreWarlord\\OgreWarlord.m2",
+    ];
+
+    let base = Chain::open(&data.join("model.MPQ")).expect("open model.MPQ alone");
+    let chain = Chain::open(&data).expect("open the vanilla patch chain");
+    let listed: std::collections::HashSet<String> = chain
+        .list()
+        .expect("list the chain")
+        .into_iter()
+        .map(|e| e.name.replace('/', "\\").to_ascii_lowercase())
+        .collect();
+
+    for name in DELETED {
+        // The positive control: the content really is still there to be served by mistake.
+        let live = base
+            .read(name)
+            .unwrap_or_else(|e| panic!("{name} must still exist in model.MPQ: {e}"));
+        assert!(
+            live.len() > 100_000,
+            "{name} is a real model in the base archive, got {} bytes",
+            live.len()
+        );
+
+        // And the composite refuses it on all three paths.
+        assert!(!chain.contains(name), "{name} is deleted from the chain");
+        let err = chain
+            .read(name)
+            .expect_err("reading a tombstoned path must fail, not return the base copy")
+            .to_string();
+        assert!(
+            err.contains("deleted from patch chain"),
+            "the error must name the tombstone, not a generic miss: {err}"
+        );
+        assert!(
+            !listed.contains(&name.to_ascii_lowercase()),
+            "{name} must not be enumerated"
+        );
+    }
 }

@@ -44,6 +44,12 @@ pub(super) fn apply_model_visibility(
         Option<&WmoGroupVis>,
         Option<&crate::doodad_anim::MatAnim>,
     )>,
+    // The building's own MLIQ surfaces (canals, dungeon pools, Ragefire's lava). They carry a
+    // `WmoGroupVis` like every other piece of their group but no `ModelPart` — they are not model
+    // submeshes and take none of the toggle/far-clip/fade rules above. A second QUERY, deliberately
+    // not a second SYSTEM: decision 0025 wants one `Visibility` authority, and this keeps it
+    // (decision 0689 — a culled room's water must go with the room, same as its furniture).
+    mut group_only: Query<(&WmoGroupVis, &mut Visibility), Without<ModelPart>>,
 ) {
     let m = &debug.models;
     // The (single) world Camera3d; the egui overlay is a Camera2d. None before it spawns → no distance
@@ -174,4 +180,23 @@ pub(super) fn apply_model_visibility(
             }
         },
     );
+
+    // The group-only audience: portal cull and nothing else. Serial — a building has a handful of
+    // liquid surfaces, not the ~100k submeshes above — and change-gated like every write here.
+    for (gv, mut vis) in &mut group_only {
+        let want = if !m.portal_cull
+            || instances
+                .get(gv.instance)
+                .ok()
+                .and_then(|inst| inst.visible.get(gv.group as usize).copied())
+                .unwrap_or(true)
+        {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
 }

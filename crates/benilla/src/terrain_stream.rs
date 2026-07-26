@@ -78,7 +78,17 @@ pub(crate) struct TerrainStreamer {
     /// The WDT failed to load (unheard of for a shipped map): stream ungated like pre-0476 rather
     /// than showing no world. Reset on map change.
     wdt_ungated: bool,
+    /// `true` once this map's global WMO has been registered as a placement (decision 0688) — on a
+    /// WMO-only map that one building is the whole world, so there is nothing else to stream.
+    /// Cleared on map change, which also releases the placement.
+    global_wmo: bool,
 }
+
+/// The placement id the map-global WMO is registered under. A WMO-only map authors **no** ADT tiles
+/// at all, so it contributes no MODF/MDDF uniqueIds this could collide with — and the value is the
+/// one the file itself carries in the dead `uniqueId` slot (the reference overwrites it from its own
+/// counter at `0xc9a320`, having no more use for it than we do).
+const GLOBAL_WMO_UID: u32 = u32::MAX;
 
 impl TerrainStreamer {
     /// Residency counts for the debug panel's World readout: `(spawned, requested)` — tiles whose
@@ -134,6 +144,10 @@ struct Placement {
     /// WMO doodad props (candle stands, banners) resolved once the WMO root loads — each its own M2,
     /// spawned across frames as its asset arrives. Empty for M2-doodad placements.
     doodads: Vec<WmoDoodadInst>,
+    /// The placement's [`crate::wmo_portal::WmoPortalInstance`] entity, spawned with the building's
+    /// groups. Held so the props — which spawn later, as their own M2 assets land — can be tagged
+    /// with the same instance and cull alongside the group that owns them.
+    portal_instance: Option<Entity>,
     /// How many loaded tiles reference this placement; despawned when it hits zero.
     refs: u32,
 }
@@ -143,6 +157,10 @@ struct Placement {
 struct WmoDoodadInst {
     handle: Handle<M2Model>,
     transform: Transform,
+    /// The prop's owning WMO group (its MODR referencer) — the portal-cull key, so a prop is hidden
+    /// with the room it furnishes. `None` for a MODD no group references (the reference never
+    /// instantiates one at all; we still show it, uncullable, rather than change what draws today).
+    group: Option<u16>,
     /// The prop's lighting ([`PropLight`], from `WmoModel::doodad_base` composed with this
     /// placement): exterior sky-lit, or the interior MODD-colour base + its owning group's MOLR
     /// lights placed in world space — folded into the prop's SH probe once its M2 loads (the fold
@@ -301,6 +319,9 @@ fn stream_terrain(
                 release_placement(&mut commands, placements, uid);
             }
         }
+        if std::mem::take(&mut state.global_wmo) {
+            release_placement(&mut commands, placements, GLOBAL_WMO_UID);
+        }
         state.map_dir = Some(dir.clone());
         state.wdt = Some(asset_server.load(format!("mpq://World/Maps/{dir}/{dir}.wdt")));
         state.wdt_ungated = false;
@@ -317,6 +338,34 @@ fn stream_terrain(
                 warn!("terrain: no WDT for map {dir} — streaming ungated (every tile probed)");
                 state.wdt_ungated = true;
             }
+        }
+    }
+
+    // A WMO-only map (decision 0688): the WDT says this map authors no terrain and its entire world
+    // is one building. Register it exactly like any ADT-placed WMO — same `Placement`, same
+    // spawn/collider/doodad/portal path — because that is what the reference does: its WDT branch
+    // hands the global MODF entry to the SAME consumer (`0x695650`) an ADT's MCRF walk does. It is
+    // registered once for the map and released on the map change above; nothing streams it in or
+    // out, since there is no "range" for a building that is the map.
+    if let Some(g) = wdt_index.and_then(|w| w.global_wmo()) {
+        if !state.global_wmo {
+            info!(
+                "terrain: map {dir} has no tiles — its world is one WMO ({})",
+                g.model
+            );
+            register_wmo(
+                placements,
+                &asset_server,
+                &WmoInstance {
+                    model: g.model.clone(),
+                    position: g.position,
+                    rotation: g.rotation,
+                    unique_id: GLOBAL_WMO_UID,
+                    doodad_set: g.doodad_set,
+                    name_set: g.name_set,
+                },
+            );
+            state.global_wmo = true;
         }
     }
 
@@ -488,6 +537,26 @@ fn stream_terrain(
             .tiles
             .get(&(cx, cy))
             .is_none_or(|t| t.entity.is_some());
+        // Until the WDT answers we don't yet know what this map is made of, so nothing under the
+        // focus can be called resident. Without this the post-worldport frames before the index
+        // lands read as "ground is up" — harmless on an ADT map (the tile entries below close the
+        // gap a frame later) but on a WMO-only map, where `desired` is empty forever, it is the
+        // difference between a loading screen and a glimpse of the void.
+        if wdt_index.is_none() && !state.wdt_ungated {
+            p.focus_resident = false;
+        }
+        // A WMO-only map's residency IS its one building (0688) — there are no tiles to count, so
+        // the bar and the clear-condition ride the placement instead. Counting it keeps
+        // `total > 0`, which is what `is_ready` requires before it will clear the screen at all.
+        if state.global_wmo {
+            let up = placements
+                .by_id
+                .get(&GLOBAL_WMO_UID)
+                .is_some_and(|p| p.spawned);
+            p.total += 1;
+            p.ready += usize::from(up);
+            p.focus_resident &= up;
+        }
     }
 }
 
@@ -513,6 +582,7 @@ fn register_doodad(placements: &mut Placements, asset_server: &AssetServer, d: &
             doodad_set: 0, // M2 doodads carry no doodad set
             name_set: 0,
             doodads: Vec::new(),
+            portal_instance: None,
             refs: 1,
         },
     );
@@ -539,6 +609,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             doodad_set: w.doodad_set,
             name_set: w.name_set,
             doodads: Vec::new(),
+            portal_instance: None,
             refs: 1,
         },
     );

@@ -211,24 +211,52 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
         // and never pours — reading its keys as a continuous rate is the exact misdiagnosis
         // behind the Eviscerate 0.5s-vs-2s gap (wow-re part-emission-burst-flag.md).
         let burst = if d.burst() { "BURST " } else { "" };
-        let rate = if d.emission_rate.keys.len() == 1 {
-            format!("{burst}rate {:.1}/s", d.emission_rate.first())
-        } else {
-            format!(
-                "{burst}rate keys {:?}",
-                d.emission_rate
-                    .keys
+        // PER-SEQUENCE timing (the runtime's actual sampling unit — the old print showed the two
+        // tracks rebased onto sequence 0's band, which read as authoritative and was exactly the
+        // B27 misparse). The quiet case stays quiet: one constant rate, no gate anywhere.
+        let views = d.timing.slot_views();
+        let rate = match d.timing.constant_rate() {
+            Some(r) => format!("{burst}rate {r:.1}/s"),
+            None => {
+                let per: Vec<String> = views
                     .iter()
-                    .map(|&(t, v)| (t, v as i32))
-                    .collect::<Vec<_>>()
-            )
+                    .enumerate()
+                    .map(|(s, (_, rate, _))| match rate {
+                        Some(keys) => format!(
+                            "s{s} {:?}",
+                            keys.iter().map(|&(t, v)| (t, v as i32)).collect::<Vec<_>>()
+                        ),
+                        None => format!("s{s} -"),
+                    })
+                    .collect();
+                format!("{burst}rate/seq [{}]", per.join("  "))
+            }
         };
-        // The enabled gate (clip-relative ms, like the rate keys): a one-shot effect's
-        // choreography — "why does this emitter only flash for 200 ms" reads right here.
-        let rate = if d.enabled.keys.len() == 1 {
-            rate // always-on (the overwhelmingly common shape) — no noise
+        // The enabled gate, per sequence slot (seconds from the slot's band start) — a one-shot
+        // effect's choreography, and a state GameObject's "which clips actually fire this".
+        let rate = if views.iter().all(|(_, _, e)| e.is_none()) {
+            rate // no gate authored anywhere (the overwhelmingly common shape) — no noise
         } else {
-            format!("{rate}  enabled {:?}", d.enabled.keys)
+            let per: Vec<String> = views
+                .iter()
+                .enumerate()
+                .map(|(s, (looping, _, enabled))| {
+                    let clock = if *looping { "" } else { "!" };
+                    match enabled {
+                        Some(keys) => {
+                            let w: Vec<String> = keys
+                                .iter()
+                                .map(|&(t, v)| {
+                                    format!("{t:.2}:{}", if v > 0.5 { "on" } else { "off" })
+                                })
+                                .collect();
+                            format!("s{s}{clock} {}", w.join(" "))
+                        }
+                        None => format!("s{s}{clock} on"),
+                    }
+                })
+                .collect();
+            format!("{rate}  enabled/seq [{}]", per.join("  "))
         };
         // A tail's streak length is |velocity|·tail_time — without it "how long is this
         // streak" needs a hand-parse of the raw record (the Eviscerate diagnosis gap).

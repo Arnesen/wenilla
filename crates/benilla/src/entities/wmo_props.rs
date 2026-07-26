@@ -321,6 +321,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                         // reference re-anchors every cloud to the emitter's live position), while
                         // an animated bone still never drags it.
                         Some(root),
+                        particles::EmitClock::Pinned, // a placed prop: the doodad law
                     ) {
                         // Parented: the off-map hide reaches the flame, and despawn cascades
                         // (the sim's direct GlobalTransform write runs post-propagation, so the

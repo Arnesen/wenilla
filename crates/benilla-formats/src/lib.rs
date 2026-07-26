@@ -129,15 +129,17 @@ pub use spell_visual::{
     load_spell_visual_catalog, SpellVisualCatalog, VisualKit, VisualStages, KIT_SLOT_TAGS,
     MISSILE_ATTACH_TABLE,
 };
+mod emit_timing;
+pub use emit_timing::EmitTiming;
 mod particles;
 pub use particles::{
-    parse_m2_particle_emitters, OverLife, ParticleBlend, ParticleEmitterDef, ParticleShape,
-    SplineData,
+    parse_m2_particle_emitters, CellRamp, OverLife, OverLifeSample, ParticleBlend,
+    ParticleEmitterDef, ParticleShape, SplineData,
 };
 mod ribbons;
 pub use ribbons::{parse_m2_ribbon_emitters, RibbonEmitterDef};
 mod value_track;
-pub use value_track::{OnOffTrack, TrackValue, ValueTrack};
+pub use value_track::{TrackValue, ValueTrack};
 mod models;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_collision, hand_grip_finger_poses,
@@ -168,7 +170,7 @@ mod wdl;
 /// World (x, y) ↔ ADT tile `(col, row)` — the same mapping the streamer uses to pick tiles
 /// (and the minimap uses to place its tile art, decision 0203: minimap `map<X>_<Y>.blp` names
 /// share the ADT index order, chain-verified — `AhnQiraj_27_46.adt` exists, the swap doesn't).
-pub use benilla_wdt::{tile_to_world, world_to_tile, WdtFile, WdtReader, WowVersion};
+pub use benilla_wdt::{tile_to_world, world_to_tile, GlobalWmo, WdtFile, WdtReader, WowVersion};
 pub use wdl::{WdlFile, WdlTileMesh};
 
 // The map arc (decision 0203), phase 0: the minimap tile hash catalog + the world-map DBCs.

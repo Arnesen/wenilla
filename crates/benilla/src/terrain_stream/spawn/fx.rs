@@ -143,8 +143,9 @@ pub(super) fn spawn_emitters_for(
             em,
             transform,
             owner,
-            None, // placed doodads/props are never attached models
+            None,                         // placed doodads/props are never attached models
             None, // anchor at the placement: an animated bone never drags the risen cloud
+            particles::EmitClock::Pinned, // a placed doodad's one-time arm: slot 0, spawn clock
         ) {
             commands.entity(e).insert(particles::EmitterFade {
                 radius: fade_radius,

@@ -1,10 +1,19 @@
 //! WDT (map tile table) reader + tile↔world coords for **WoW 1.12.1 (build 5875)** — in-repo,
 //! replacing `wow-wdt` (decision 0021).
 //!
-//! A vanilla `.wdt` is a tiny chunked file (`MVER`, `MPHD`, then `MAIN`); the only part the client
-//! streamer needs is **`MAIN`** — a 64×64 table of 8-byte entries whose flag bit 0 (`0x1`) marks
-//! "this tile has an `.adt`". We read that grid and ignore the rest. The coord helpers map a world
-//! `(x, y)` to its `(tile_x, tile_y)` and back, on the 64-tile, 533⅓-yd grid.
+//! A vanilla `.wdt` is a tiny chunked file (`MVER`, `MPHD`, `MAIN`, and — on a **WMO-only map** —
+//! `MWMO` + one `MODF`). Two things in it matter to the streamer:
+//!
+//! - **`MAIN`** — a 64×64 table of 8-byte entries whose flag bit 0 (`0x1`) marks "this tile has an
+//!   `.adt`".
+//! - **The global WMO** — `MPHD` dword0 bit 0 marks a map with **no terrain at all**, whose whole
+//!   world is one building placed by the single `MODF` entry after `MWMO`. 20 of the 43 shipped
+//!   maps are built this way (every WMO dungeon: the Blackrock pair, Gnomeregan, Dire Maul, the
+//!   Stockade…); on those maps `MAIN` is entirely empty and this placement *is* the map
+//!   (decision 0688).
+//!
+//! The coord helpers map a world `(x, y)` to its `(tile_x, tile_y)` and back, on the 64-tile,
+//! 533⅓-yd grid.
 //!
 //! Proven against `wow-wdt` over a real map's WDT during the decision-0021 migration (oracle test in
 //! git history); the `benilla-formats` terrain tests pin tile selection + world coords end-to-end.
@@ -56,11 +65,37 @@ pub struct TileInfo {
     pub has_adt: bool,
 }
 
-/// A parsed WDT: the 64×64 tile-existence grid.
+/// The single building that **is** a WMO-only map — the `MWMO` path plus the one `MODF` entry that
+/// follows it (decision 0688). Position/rotation are already in the same convention as an ADT's own
+/// MODF placements (`benilla_formats::WmoInstance`), so the streamer places it through the exact
+/// path it places any other building with.
+#[derive(Debug, Clone)]
+pub struct GlobalWmo {
+    /// `MWMO` root path (e.g. `world\wmo\dungeon\az_stormwindprisons\stormwindjail.wmo`).
+    pub model: String,
+    /// Position in WoW world coords (X north, Y west, Z up).
+    ///
+    /// Taken **raw** from the MODF, without the `32·533⅓ − v` corner-origin remap an ADT's
+    /// placements get: this entry is authored in world coords already. Every shipped WMO-only map
+    /// stores `(0, 0, 0)` here, and the remap would put the whole dungeon 24 km from its own
+    /// entrance — falsified against all 26 of the server's real entry points (decision 0688).
+    pub position: [f32; 3],
+    /// Euler rotation in **degrees** (X, Y, Z); Y is the heading about the up axis. Live data, not
+    /// always identity: Dire Maul is authored at `ry = 180°` while the other 19 maps sit at 0.
+    pub rotation: [f32; 3],
+    /// MODF doodad-set index — which *additional* prop set to show beyond the always-on set 0.
+    pub doodad_set: u16,
+    /// MODF name-set index — the placement's `WMOAreaTable.NameSetID` naming/audio variant.
+    pub name_set: u16,
+}
+
+/// A parsed WDT: the 64×64 tile-existence grid, plus the global WMO on a WMO-only map.
 #[derive(Debug)]
 pub struct WdtFile {
     /// `has_adt` per tile, indexed `y * 64 + x` (the on-disk MAIN order).
     has_adt: Vec<bool>,
+    /// The whole map, on a map with no terrain; `None` on an ADT map.
+    global_wmo: Option<GlobalWmo>,
 }
 
 impl WdtFile {
@@ -74,6 +109,12 @@ impl WdtFile {
             y,
             has_adt: self.has_adt[y * MAP_SIZE + x],
         })
+    }
+
+    /// The map's single global building, if this is a WMO-only map (`MPHD` bit 0) — the entire
+    /// world on such a map. `None` on an ADT map, where the ground comes from the tiles instead.
+    pub fn global_wmo(&self) -> Option<&GlobalWmo> {
+        self.global_wmo.as_ref()
     }
 }
 
@@ -91,9 +132,13 @@ impl<R: Read + Seek> WdtReader<R> {
         }
     }
 
-    /// Parse the WDT, returning the tile grid. Walks chunks until EOF, reading only `MAIN`.
+    /// Parse the WDT, returning the tile grid and (on a WMO-only map) the global WMO placement.
+    /// Walks chunks until EOF; everything but `MPHD`/`MAIN`/`MWMO`/`MODF` is skipped.
     pub fn read(&mut self) -> std::io::Result<WdtFile> {
         let mut has_adt: Option<Vec<bool>> = None;
+        let mut wmo_only = false;
+        let mut wmo_path: Option<String> = None;
+        let mut modf: Option<Vec<u8>> = None;
         loop {
             let mut hdr = [0u8; 8];
             if !read_full(&mut self.reader, &mut hdr)? {
@@ -101,32 +146,90 @@ impl<R: Read + Seek> WdtReader<R> {
             }
             // Chunk magics are stored reversed on disk; MAIN ⇒ "NIAM".
             let size = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as u64;
-            if &hdr[0..4] == b"NIAM" {
-                // 64×64 entries × 8 bytes (flags u32, area_id u32); bit 0 of flags = has_adt.
-                let count = MAP_SIZE * MAP_SIZE;
-                let mut buf = vec![0u8; count * 8];
-                self.reader.read_exact(&mut buf)?;
-                let grid = (0..count)
-                    .map(|i| {
-                        let flags = u32::from_le_bytes([
-                            buf[i * 8],
-                            buf[i * 8 + 1],
-                            buf[i * 8 + 2],
-                            buf[i * 8 + 3],
-                        ]);
-                        flags & 0x1 != 0
-                    })
-                    .collect();
-                has_adt = Some(grid);
-            } else {
-                self.reader.seek(SeekFrom::Current(size as i64))?;
+            match &hdr[0..4] {
+                // MPHD — only dword0 bit 0 is ever read: "this map has no terrain, its world is
+                // the global WMO below" (the reference reads exactly this one bit, @0x694810).
+                b"DHPM" if size >= 4 => {
+                    let mut buf = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut buf)?;
+                    wmo_only = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) & 0x1 != 0;
+                }
+                b"NIAM" => {
+                    // 64×64 entries × 8 bytes (flags u32, area_id u32); bit 0 of flags = has_adt.
+                    let count = MAP_SIZE * MAP_SIZE;
+                    let mut buf = vec![0u8; count * 8];
+                    self.reader.read_exact(&mut buf)?;
+                    let grid = (0..count)
+                        .map(|i| {
+                            let flags = u32::from_le_bytes([
+                                buf[i * 8],
+                                buf[i * 8 + 1],
+                                buf[i * 8 + 2],
+                                buf[i * 8 + 3],
+                            ]);
+                            flags & 0x1 != 0
+                        })
+                        .collect();
+                    has_adt = Some(grid);
+                }
+                // MWMO — one NUL-terminated path on a WMO-only map, and a zero-length stub on an
+                // ADT map (which is why the `wmo_only` flag, not this chunk, is the gate).
+                b"OMWM" if size > 0 => {
+                    let mut buf = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut buf)?;
+                    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                    let path = String::from_utf8_lossy(&buf[..end]).into_owned();
+                    if !path.is_empty() {
+                        wmo_path = Some(path);
+                    }
+                }
+                // MODF — exactly one 64-byte placement here (the ADT variant carries many).
+                b"FDOM" if size >= 64 => {
+                    let mut buf = vec![0u8; size as usize];
+                    self.reader.read_exact(&mut buf)?;
+                    modf = Some(buf);
+                }
+                _ => {
+                    self.reader.seek(SeekFrom::Current(size as i64))?;
+                }
             }
         }
         let has_adt = has_adt.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "WDT missing MAIN chunk")
         })?;
-        Ok(WdtFile { has_adt })
+        // A WMO-only map with no placement to show would be an empty void, so demand both parts
+        // before claiming one — a malformed header bit alone must not suppress the tile grid.
+        let global_wmo = match (wmo_only, wmo_path, modf) {
+            (true, Some(model), Some(e)) => Some(GlobalWmo {
+                model,
+                position: [f32_at(&e, 8), f32_at(&e, 12), f32_at(&e, 16)],
+                rotation: [f32_at(&e, 20), f32_at(&e, 24), f32_at(&e, 28)],
+                // 0x20..0x38 is the bounding box; the placement words follow it. (`uniqueId` at
+                // +4 is dead here — the reference overwrites it from its own counter @0xc9a320.)
+                doodad_set: u16_at(&e, 58),
+                name_set: u16_at(&e, 60),
+            }),
+            _ => None,
+        };
+        Ok(WdtFile {
+            has_adt,
+            global_wmo,
+        })
     }
+}
+
+/// Little-endian `f32` at `off` (0.0 past the end — callers have already length-checked the entry).
+fn f32_at(b: &[u8], off: usize) -> f32 {
+    b.get(off..off + 4)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0.0, f32::from_le_bytes)
+}
+
+/// Little-endian `u16` at `off` (0 past the end).
+fn u16_at(b: &[u8], off: usize) -> u16 {
+    b.get(off..off + 2)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u16::from_le_bytes)
 }
 
 /// Read exactly `buf.len()` bytes; `Ok(false)` on a clean EOF before any byte, `Ok(true)` on success.
@@ -192,6 +295,69 @@ mod tests {
 
     fn parse(bytes: Vec<u8>) -> std::io::Result<WdtFile> {
         WdtReader::new(Cursor::new(bytes), WowVersion::Classic).read()
+    }
+
+    /// A WMO-only map's on-disk shape: `MPHD` bit 0, an all-empty `MAIN`, then `MWMO` + one 64-byte
+    /// `MODF`. Field values are distinct primes-ish so a column slip can't pass.
+    fn synth_wmo_only_wdt(mphd_bit0: bool, with_modf: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let chunk = |magic: &[u8; 4], payload: &[u8], out: &mut Vec<u8>| {
+            out.extend_from_slice(magic);
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(payload);
+        };
+        chunk(b"REVM", &18u32.to_le_bytes(), &mut out);
+        let mut mphd = [0u8; 32];
+        mphd[0] = u8::from(mphd_bit0);
+        chunk(b"DHPM", &mphd, &mut out);
+        chunk(b"NIAM", &vec![0u8; MAP_SIZE * MAP_SIZE * 8], &mut out); // no tiles at all
+        chunk(b"OMWM", b"world\\wmo\\dungeon\\test\\t.wmo\0", &mut out);
+        if with_modf {
+            let mut e = [0u8; 64];
+            e[0..4].copy_from_slice(&0u32.to_le_bytes()); // nameId
+            e[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // uniqueId (dead)
+            for (i, v) in [11.0f32, 22.0, 33.0].iter().enumerate() {
+                e[8 + i * 4..12 + i * 4].copy_from_slice(&v.to_le_bytes()); // position
+            }
+            for (i, v) in [1.0f32, 180.0, 2.0].iter().enumerate() {
+                e[20 + i * 4..24 + i * 4].copy_from_slice(&v.to_le_bytes()); // rotation
+            }
+            // 0x20..0x38 bounding box left zero — we don't read it.
+            e[56..58].copy_from_slice(&7u16.to_le_bytes()); // flags (dead)
+            e[58..60].copy_from_slice(&3u16.to_le_bytes()); // doodadSet
+            e[60..62].copy_from_slice(&5u16.to_le_bytes()); // nameSet
+            chunk(b"FDOM", &e, &mut out);
+        }
+        out
+    }
+
+    /// The WMO-only branch end to end: the `MPHD` gate, the `MWMO` path, and every `MODF` column
+    /// the streamer places the building with. Position is read **raw** — no corner-origin remap.
+    #[test]
+    fn reads_the_global_wmo_of_a_wmo_only_map() {
+        let wdt = parse(synth_wmo_only_wdt(true, true)).expect("parses");
+        let g = wdt.global_wmo().expect("MPHD bit 0 ⇒ a global WMO");
+        assert_eq!(g.model, "world\\wmo\\dungeon\\test\\t.wmo");
+        assert_eq!(g.position, [11.0, 22.0, 33.0]);
+        assert_eq!(g.rotation, [1.0, 180.0, 2.0]);
+        assert_eq!((g.doodad_set, g.name_set), (3, 5));
+        // Such a map authors no tiles — the grid still parses, it's just empty.
+        assert!(!wdt.get_tile(32, 32).expect("in range").has_adt);
+    }
+
+    /// An ADT map carries a zero-length `MWMO` stub and no `MODF`; it must not claim a global WMO
+    /// (which would spawn a phantom building over real terrain).
+    #[test]
+    fn an_adt_map_has_no_global_wmo() {
+        let wdt = parse(synth_wdt(&[(30, 30)], false)).expect("parses");
+        assert!(wdt.global_wmo().is_none());
+        // …and neither does a malformed file that sets the bit but ships no placement: a stray
+        // header bit must degrade to "no global WMO", never to a half-built one.
+        let half = parse(synth_wmo_only_wdt(true, false)).expect("parses");
+        assert!(half.global_wmo().is_none());
+        // …nor one that ships the placement without the flag.
+        let unflagged = parse(synth_wmo_only_wdt(false, true)).expect("parses");
+        assert!(unflagged.global_wmo().is_none());
     }
 
     #[test]

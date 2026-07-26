@@ -132,6 +132,12 @@ enum Command {
     /// `0x134`) — the population instrument for the ribbon subsystem (weapon trails, streamers):
     /// which content actually authors one, before we build for it.
     Ribbonscan,
+    /// Sweep every `.m2` and census its particle emitters' over-life **flipbook** fields: cell
+    /// ramps that play BACKWARDS (`begin > end` — legal, shipped, and fatal to a reader that
+    /// clamps into the pair), tail streaks whose ramp differs from the head's, indices past the
+    /// atlas (the reference wraps the column and lets the row run off), per-segment repeat counts,
+    /// and the two degenerate shapes the reference itself falls back on. Decision 0685.
+    Cellscan,
     /// Sweep every `.m2` (optionally under a path prefix) and list the models whose MATERIAL
     /// table authors the MULTIPLY blend modes 5 (Mod) / 6 (Mod2x) — the ARMORREFLECT sheen
     /// family (decision 0528): the population instrument for the multiply-blend mechanism.
@@ -440,6 +446,7 @@ fn main() -> Result<()> {
         Command::M2batch { internal_path } => m2dump::m2batch(&mut chain, &internal_path)?,
         Command::M2alpha { internal_path } => m2dump::m2alpha(&mut chain, &internal_path)?,
         Command::Ribbonscan => scan::ribbonscan(&mut chain)?,
+        Command::Cellscan => scan::cellscan(&mut chain)?,
         Command::Blendscan { prefix } => scan::blendscan(&mut chain, prefix.as_deref())?,
         Command::Bbscan { prefix } => scan::bbscan(&mut chain, prefix.as_deref())?,
         Command::Bbfacescan { prefix } => scan::bbfacescan(&mut chain, prefix.as_deref())?,

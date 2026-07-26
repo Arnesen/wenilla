@@ -218,6 +218,9 @@ pub(super) fn spawn_loaded_placements(
                                     .entity(entity)
                                     .insert(WmoGroupVis { instance, group });
                             }
+                            // The props spawn later — each waits on its own M2 — so they can't be
+                            // tagged here; hold the instance for them (decision 0689).
+                            p.portal_instance = Some(instance);
                         }
                         ents.push(instance); // despawns with the placement
                     }
@@ -226,14 +229,29 @@ pub(super) fn spawn_loaded_placements(
                     // spawned at the placement transform on the shared per-kind material. Appended
                     // AFTER the portal-instance zip above, which requires `ents` to still be exactly the
                     // submeshes in order.
-                    spawn_wmo_liquids(
-                        &mut commands,
-                        m.group_liquids.iter().flatten(),
-                        liquid_assets.as_deref(),
-                        &mut meshes,
-                        p.transform,
-                        &mut ents,
-                    );
+                    // Spawned a group at a time so each surface can take that group's cull key: a
+                    // pool belongs to the room it sits in, and a culled room's lava must go with it
+                    // (decision 0689 — the same defect as the props, on the same building).
+                    for (gi, lq) in m.group_liquids.iter().enumerate() {
+                        let Some(lq) = lq else { continue };
+                        let first = ents.len();
+                        spawn_wmo_liquids(
+                            &mut commands,
+                            std::iter::once(lq),
+                            liquid_assets.as_deref(),
+                            &mut meshes,
+                            p.transform,
+                            &mut ents,
+                        );
+                        if let Some(instance) = p.portal_instance {
+                            for &e in &ents[first..] {
+                                commands.entity(e).insert(WmoGroupVis {
+                                    instance,
+                                    group: gi as u16,
+                                });
+                            }
+                        }
+                    }
                     // Building colliders (avian): the flattened group tris baked at this placement's
                     // transform — *two* meshes, because the client gathers different WMO faces for the
                     // player body (walking: drops DETAIL) and the camera/LOS (drops NOCAMCOLLIDE, keeps
@@ -302,6 +320,9 @@ pub(super) fn spawn_loaded_placements(
 
         // 2. Spawn each WMO doodad prop as its M2 asset finishes loading (across frames). Their
         //    entities join `p.entities`, so they despawn with the placement. Empty for M2 doodads.
+        // Copied out before the loop borrows `p.doodads`: the props tag onto the same portal
+        // instance their building's groups did (decision 0689).
+        let portal_instance = p.portal_instance;
         for d in &mut p.doodads {
             if d.spawned {
                 continue;
@@ -374,6 +395,17 @@ pub(super) fn spawn_loaded_placements(
             // returns it to the table whoever does the despawn.
             if let (Some(slot), Some(&first)) = (interior_slot, ents.first()) {
                 commands.entity(first).insert(PropProbeSlot(slot));
+            }
+            // Portal-cull the prop with the group that owns it — the reference commits a WMO's
+            // doodads per VISIBLE group (`0x695aa0` over the group's MODR refs, from the
+            // visible-group walk `0x698720`), so furniture never outlives its room. Every submesh
+            // spawned above is this one prop, so they all take the same key (decision 0689).
+            if let (Some(instance), Some(group)) = (portal_instance, d.group) {
+                for &entity in &ents {
+                    commands
+                        .entity(entity)
+                        .insert(WmoGroupVis { instance, group });
+                }
             }
             // Prop collider (avian): a static trimesh from the prop's collision hull at its world
             // transform — collide-iff-hull, exactly like a map doodad, so a weapon rack / crate / cargo
@@ -491,6 +523,9 @@ fn resolve_wmo_doodads(
             out.push(WmoDoodadInst {
                 handle: asset_server.load(m2_url(&d.model)),
                 transform: wmo_world.mul_transform(local),
+                // The MODR owner, resolved with the lighting base at load — the prop's portal-cull
+                // key, so a lantern is hidden with the room it hangs in (decision 0689).
+                group: wmo.doodad_owner.get(di).copied().flatten(),
                 light,
                 spawned: false,
             });

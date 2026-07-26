@@ -236,6 +236,7 @@ mod tests {
             group_light_refs: Vec::new(),
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
+            doodad_owner: Default::default(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);
@@ -315,6 +316,7 @@ mod tests {
             group_light_refs: Vec::new(),
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
+            doodad_owner: Default::default(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);

@@ -24,10 +24,13 @@
 //! +0x1dc enabled(M2Track<u8>, step) — the emission ON/OFF gate, closing the record at 0x1f8.
 //! ```
 //!
-//! The keyed tracks here (emission rate, enabled) parse through the shared [`crate::value_track`]
-//! kernel: **rebased to the first sequence's band** at parse (see its module doc for the
-//! global-timeline law), so the runtime emitter clock (seconds since the effect spawned) samples
-//! them directly.
+//! The two keyed tracks here (emission rate, enabled) bake **one loop per sequence** into
+//! [`EmitTiming`] through the same FN1 kernel as the material alpha (`models::key_anim`,
+//! decision 0641): the reference samples both per frame through the *playing* sequence's own key
+//! window (`0x713d50` — wow-re `part-emission-rate-animated.md` §2/§3), so what an emitter does
+//! is a function of which sequence its model instance is playing. A quest GameObject authors its
+//! explosion inside one-shot clips and an OFF window in every idle sequence; baking only
+//! sequence 0's band parked that choreography at its end value forever (bug B27).
 //!
 //! The record tail (+0x180..) is the wow-re `part-simspace-fields.md` §5-verified map (their
 //! `ac915a7d`): the loader `0x70ebd0` remaps file+0x188/+0x18c → runtime twinkleScale min/max
@@ -36,9 +39,10 @@
 use std::io::Cursor;
 
 use anyhow::Result;
-use benilla_m2::parse_m2;
+use benilla_m2::{parse_m2, M2ScalarTrack};
 
-use crate::value_track::{seq0_band, track_enabled, track_keys_with, OnOffTrack, ValueTrack};
+use crate::emit_timing::EmitTiming;
+use crate::models::SeqSlot;
 
 /// Emitter spawn shape (file `emitterType` @ +0x2a). Only `Plane` is needed for campfires/torches;
 /// `Sphere` (e.g. dust clouds) and `Spline` follow.
@@ -62,47 +66,154 @@ pub enum ParticleBlend {
     Opaque,
 }
 
+/// One segment's integer **flipbook cell ramp** — the authored `(begin, end)` pair and the
+/// `(base, span)` the reference derives from it at load (`0x7b9da0` head / `0x7b9de0` tail, both
+/// pure-integer; wow-re `part-cell-flipbook-ramp.md` §2).
+///
+/// The two build arms are deliberately **asymmetric**, and that asymmetry is the whole mechanism:
+/// the ramp covers `N = |end − begin| + 1` cells, each getting `1/N` of the segment, travelling in
+/// the **authored direction**.
+///
+/// ```text
+/// end >= begin : base = begin,      span = end − begin + 1   (forward)
+/// end <  begin : base = begin + 1,  span = end − begin − 1   (NEGATIVE — plays backwards)
+/// ```
+///
+/// **A decreasing pair is legal, shipped, and means "run the flipbook in reverse"** — four models
+/// author one (`DwarvenBrazier01`'s settling flame, `ShadowWordSilence_Breath`'s 32-frame reverse
+/// sweep). There is no swap and no clamp anywhere on the reference's path; an earlier reading here
+/// clamped into `[begin, end]`, which both mangled the reverse ramps and panicked outright on them
+/// (decision 0685).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellRamp {
+    /// The authored pair, verbatim (the reference archives it at `rec+0x3c/+0x40` and never reads
+    /// it back — kept here because it is what a dump should show).
+    pub begin: u16,
+    pub end: u16,
+    base: i32,
+    span: i32,
+}
+
+impl CellRamp {
+    /// Build from an authored `(begin, end)` pair — `0x7b9da0`'s two arms, verbatim.
+    pub fn new(begin: u16, end: u16) -> Self {
+        let (b, e) = (i32::from(begin), i32::from(end));
+        let (base, span) = if e >= b {
+            (b, e - b + 1)
+        } else {
+            (b + 1, e - b - 1)
+        };
+        Self {
+            begin,
+            end,
+            base,
+            span,
+        }
+    }
+
+    /// The cell index at segment fraction `t` — **`t` must already carry the endpoint inset** (and
+    /// the repeat wrap, if any); see [`OverLife::sample`].
+    ///
+    /// `floor(base + span·t) & 0xFF`. The mask is the reference's mod-256 wrap (its fast-floor
+    /// idiom `bits(x + 512.0) >> 14` yields a byte), **not** a clamp into the authored range or the
+    /// atlas — bounding the index is the atlas walk's business, and it only masks the column.
+    pub fn sample(&self, t: f32) -> u16 {
+        // Saturating float→int (NaN → 0) rather than the reference's raw mantissa read: a `mid` of
+        // 0 or 1 makes the reference's own segment span 1/0 and walks NaN into this floor, and we
+        // will not reproduce a fault. No shipped emitter authors that mid (corpus-swept).
+        let v = self.base as f32 + self.span as f32 * t;
+        ((v.floor() as i32) & 0xFF) as u16
+    }
+}
+
 /// The baked **over-life** ramps (record tail, +0x14c..) sampled by a particle's normalized age `u =
-/// age/lifespan`. Each of color, size and cell is a **3-key ramp** evaluated as two linear segments
-/// split at [`Self::mid`]: key0→key1 over `u∈[0,mid]`, then key1→key2 over `u∈[mid,1]`. Byte layout +
-/// math verified in `wow-5875-re` (`FUN_0070ebd0` builder, `FUN_007b9b10` evaluator) and difftested
+/// age/lifespan`. Colour and size are **3-key ramps** evaluated as two linear segments split at
+/// [`Self::mid`]: key0→key1 over `u∈[0,mid]`, then key1→key2 over `u∈[mid,1]`. The flipbook cells
+/// are a different shape — a `(begin, end)` [`CellRamp`] **per segment**, and there are two
+/// independent sets of them (head quad, tail streak). Byte layout + math verified in `wow-5875-re`
+/// (`FUN_0070ebd0` builder, `FUN_007b9b10` evaluator, `part-cell-flipbook-ramp.md`) and difftested
 /// against `ElwynnCampfire.m2`. These drive the believable flame fade / grow / flicker.
 #[derive(Debug, Clone, Copy)]
 pub struct OverLife {
-    /// Normalized age (`+0x14c`) splitting the two ramp segments.
+    /// Normalized age (`+0x14c`) splitting the two ramp segments. The reference's split is
+    /// **inclusive toward segment A** (`age > lifespan·mid` is the only way into B).
     pub mid: f32,
     /// RGBA keys k0/k1/k2 (`+0x150/+0x154/+0x158`, packed BGRA u32 → linear 0..1). The **A** channel
     /// is the particle's additive weight (its over-life opacity); there is no separate alpha array.
     pub color: [[f32; 4]; 3],
     /// Uniform particle size keys k0/k1/k2 (`+0x15c/+0x160/+0x164`, yards).
     pub scale: [f32; 3],
-    /// Head texture-cell index range `[begin, end]` for segment A (`u≤mid`, `+0x168/+0x16a`) and
-    /// segment B (`u>mid`, `+0x16e/+0x170`) — the cell animated across the `rows×cols` atlas.
-    pub cell_a: [u16; 2],
-    pub cell_b: [u16; 2],
+    /// The **head** quad's flipbook ramp, per segment: A (`+0x168/+0x16a`), B (`+0x16e/+0x170`).
+    pub head_cells: [CellRamp; 2],
+    /// The **tail** streak's own, independent flipbook ramp: A (`+0x174/+0x176`), B
+    /// (`+0x178/+0x17a`). The reference emits two cell indices per particle and the tail quad reads
+    /// this one — a model whose tail ramp differs from its head ramp animates the streak
+    /// separately (wow-re `part-cell-flipbook-ramp.md` §4, correcting `part-quad-tail-twinkle.md`).
+    pub tail_cells: [CellRamp; 2],
+    /// Per-segment flipbook **repeat count** (`+0x16c`/`+0x172`, `fild`-converted at load). `1.0`
+    /// (the ctor default, and what nearly all content authors) is one pass; anything else cycles
+    /// the cell ramp `fmod(t·repeat, 1.0)` times across the segment. Colour and size do not cycle.
+    pub repeat: [f32; 2],
+}
+
+/// One evaluation of the over-life ramps — the reference's `0x7b9b10` writes exactly these four
+/// outputs (colour, **two** cell indices, size) from one call.
+#[derive(Debug, Clone, Copy)]
+pub struct OverLifeSample {
+    /// Linear RGBA; the A channel is the particle's over-life opacity/additive weight.
+    pub color: [f32; 4],
+    /// Half-extent in yards.
+    pub size: f32,
+    /// Atlas cell for the head quad.
+    pub head_cell: u16,
+    /// Atlas cell for the tail streak (independent of [`Self::head_cell`]).
+    pub tail_cell: u16,
 }
 
 impl OverLife {
-    /// Sample the ramps at normalized age `u` (0..1): `(rgba, size_yards, cell_index)`.
-    pub fn sample(&self, u: f32) -> ([f32; 4], f32, u16) {
+    /// Sample every ramp at normalized age `u` (0..1).
+    pub fn sample(&self, u: f32) -> OverLifeSample {
         let u = u.clamp(0.0, 1.0);
+        // A `mid` of 0 divides by zero in the reference (§7 of the wow-re note: it walks NaN into
+        // the sampler); no shipped emitter authors one, and we refuse to reproduce the fault.
         let mid = self.mid.clamp(1e-3, 1.0);
-        let (a, b, t, cell) = if u <= mid {
-            (0, 1, u / mid, self.cell_a)
+        let (k0, k1, t, seg) = if u <= mid {
+            (0, 1, u / mid, 0)
         } else {
-            (1, 2, (u - mid) / (1.0 - mid).max(1e-3), self.cell_b)
+            (1, 2, (u - mid) / (1.0 - mid).max(1e-3), 1)
         };
-        let t = t.clamp(0.0, 1.0);
+        // **The endpoint inset, and it is the only normalized time the reference has.** `0x7b9b10`
+        // computes `t·0.99 + 0.005` once, over its own `age` argument slot, and every consumer
+        // reloads that slot — all four colour channels, the size, and both cell ramps (verified
+        // instruction by instruction, wow-re `part-cell-flipbook-ramp.md` §3a "scope of the
+        // inset"). So a particle at a segment's start sits **0.5 % along** its colour and size
+        // ramps, never exactly on the authored key, and 99.5 % at the end.
+        //
+        // For the CELLS the inset is not a rounding artefact but load-bearing: co-designed with
+        // the ramp's ±1, it is the only thing making `cell(0) == begin` and `cell(1) == end` hold
+        // in BOTH directions (a raw `t` floors one past the end going forward, one past the begin
+        // going backward). Exact while `0.005·N < 1` — 200 cells; the largest shipped atlas is 8×8.
+        let t = t.clamp(0.0, 1.0) * 0.99 + 0.005;
         let mut color = [0.0; 4];
         for (c, slot) in color.iter_mut().enumerate() {
-            *slot = self.color[a][c] + (self.color[b][c] - self.color[a][c]) * t;
+            *slot = self.color[k0][c] + (self.color[k1][c] - self.color[k0][c]) * t;
         }
-        let size = self.scale[a] + (self.scale[b] - self.scale[a]) * t;
-        // cell = floor(begin + (end-begin+1)·t), clamped to [begin, end].
-        let span = (i32::from(cell[1]) - i32::from(cell[0]) + 1).max(1) as f32;
-        let idx = (f32::from(cell[0]) + span * t).floor() as i32;
-        let cell_index = idx.clamp(i32::from(cell[0]), i32::from(cell[1])) as u16;
-        (color, size, cell_index)
+        let size = self.scale[k0] + (self.scale[k1] - self.scale[k0]) * t;
+        // The repeat count cycles the FLIPBOOK ONLY — an explicit verified negative, and visible in
+        // the reference's own ordering: colour and size are computed and stored out before the
+        // `rec+0x50 != 1.0` branch is even evaluated, and the wrapped coefficient never becomes `t`
+        // (§3b). So a 5× swarm emitter flaps its wings five times while fading exactly once.
+        let ct = if self.repeat[seg] != 1.0 {
+            (t * self.repeat[seg]).fract()
+        } else {
+            t
+        };
+        OverLifeSample {
+            color,
+            size,
+            head_cell: self.head_cells[seg].sample(ct),
+            tail_cell: self.tail_cells[seg].sample(ct),
+        }
     }
 }
 
@@ -225,7 +336,11 @@ pub struct ParticleEmitterDef {
     pub recursion_model: Option<String>,
     /// Particle texture (`.blp` path, as embedded in the M2 textures table). `None` if unresolved.
     pub texture: Option<String>,
-    /// Texture atlas size for cell animation (`1×1` = a single static cell).
+    /// Texture atlas size for cell animation (`1×1` = a single static cell). **Both are non-zero
+    /// powers of two**: the reference's setter (`0x7b4ed0`) demands it — it derives `log2(cols)`
+    /// and the two reciprocals — and on a bad pair writes *none* of its five fields, leaving the
+    /// ctor's `1×1`. [`parse_m2_particle_emitters`] mirrors that fallback, so the atlas walk can
+    /// mask instead of divide. No shipped emitter trips it (corpus-swept, decision 0685).
     pub tile_rows: u16,
     pub tile_cols: u16,
     /// 0 = head (camera quad), 1 = tail (speed-stretched), 2 = both. We render head first.
@@ -243,21 +358,11 @@ pub struct ParticleEmitterDef {
     pub gravity: f32,
     /// Particle lifetime (seconds) — killed at this age.
     pub lifespan: f32,
-    /// Particles spawned per second — the one emission parameter parsed as its **full keyed track**
-    /// ([`ValueTrack`]), because the one-shot combat effects author their bursts on it (see
-    /// [`ValueTrack`]'s doc). The other nine stay `value[0]`-baked: constant in every model this
-    /// renderer draws (verified across the spurt family + the ambient props).
-    pub emission_rate: ValueTrack,
-    /// The emission ON/OFF gate ([`OnOffTrack`], file `+0x1dc`) — the one-shot effects'
-    /// choreography track. Sampled on the same clip clock as `emission_rate`.
-    pub enabled: OnOffTrack,
-    /// The clip clock's WRAP: `Some(first sequence's span ms)` when that sequence LOOPS — the
-    /// client samples the two tracks above on `m2_animate`'s sequence time, which wraps there,
-    /// re-firing windowed tracks every pass (a precast hold's pulsing hand flash). A CLAMPED
-    /// sequence holds its end instead — and a discrete kit instance is reaped at exactly one
-    /// pass (`spell_fx`), so its boundary never renders; `None` keeps the end-clamp hold.
-    /// (wow-re `part-emission-rate-animated.md`: the per-frame `m2_animate` sampler.)
-    pub clip_wrap_ms: Option<f32>,
+    /// The two per-frame-sampled emission tracks — spawn rate (`+0xdc`) and the ON/OFF gate
+    /// (`+0x1dc`) — baked **one loop per sequence** ([`EmitTiming`]). The other nine emission
+    /// M2Tracks stay `value[0]`-baked: constant in every model this renderer draws (verified
+    /// across the spurt family + the ambient props; a named residual if a model ever authors one).
+    pub timing: EmitTiming,
     /// Plane emitter full extents (yards); spawn points are drawn from the `±½·extent` rectangle.
     pub area_length: f32,
     pub area_width: f32,
@@ -484,10 +589,46 @@ fn track_first(b: &[u8], track: usize, default: f32) -> f32 {
     le_f32(b, ofs)
 }
 
-/// Read a vanilla M2Track's full `(timestamp ms, f32)` key list, band-rebased — the shared
-/// kernel's reader with the scalar decode ([`track_keys_with`]).
-fn track_keys(b: &[u8], track: usize, default: f32, band: (u32, u32)) -> ValueTrack {
-    track_keys_with(b, track, default, band, 4, le_f32)
+/// Read one raw vanilla M2Track (28 bytes at `track`) into the shared typed shape — **absolute**
+/// key timestamps plus the per-sequence `ranges` windows the FN1 bake indexes. `benilla-m2` skips
+/// the cosmetic chunks, so the two emitter timing tracks are lifted here; `elem`/`read` decode one
+/// value (`f32`, or the enabled gate's `u8` projected to 0/1).
+fn read_raw_track(
+    b: &[u8],
+    track: usize,
+    elem: usize,
+    read: impl Fn(&[u8], usize) -> f32,
+) -> M2ScalarTrack {
+    let mut out = M2ScalarTrack {
+        gseq: 0xffff,
+        ..M2ScalarTrack::default()
+    };
+    if track + 0x1c > b.len() {
+        return out;
+    }
+    out.interp = le_u16(b, track);
+    out.gseq = le_u16(b, track + 2);
+    let (rn, ro) = (le_u32(b, track + 4) as usize, le_u32(b, track + 8) as usize);
+    let (tn, to) = (
+        le_u32(b, track + 0x0c) as usize,
+        le_u32(b, track + 0x10) as usize,
+    );
+    let (vn, vo) = (
+        le_u32(b, track + 0x14) as usize,
+        le_u32(b, track + 0x18) as usize,
+    );
+    if ro + rn * 8 <= b.len() {
+        out.ranges = (0..rn)
+            .map(|i| (le_u32(b, ro + i * 8), le_u32(b, ro + i * 8 + 4)))
+            .collect();
+    }
+    let n = tn.min(vn);
+    if n > 0 && to + n * 4 <= b.len() && vo + n * elem <= b.len() {
+        out.keys = (0..n)
+            .map(|i| (le_u32(b, to + i * 4), read(b, vo + i * elem)))
+            .collect();
+    }
+    out
 }
 
 fn blend_of(v: u8) -> ParticleBlend {
@@ -538,10 +679,42 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
         return Ok(Vec::new());
     }
 
-    // The first sequence's absolute time band — the window the keyed tracks below are rebased
-    // onto (`value_track::seq0_band`).
-    let band = seq0_band(bytes);
-    let clip_wrap_ms = crate::value_track::seq0_wrap_ms(bytes);
+    // Every FILE sequence slot's band + loop flag (entry stride 0x44: band start/end @ +0x04/+0x08,
+    // flags @ +0x10, bit 0 CLEAR = loops) — the addressing unit the per-sequence timing bake needs,
+    // the same walk as `m2_batches`. A sequence-less model gets one synthetic whole-timeline slot
+    // so an authored track still bakes (raw timestamps, the pre-sequence degenerate).
+    let (mut seq_slots, mut looping) = {
+        let (n, o) = (le_u32(bytes, 0x1c) as usize, le_u32(bytes, 0x20) as usize);
+        (0..n)
+            .map_while(|i| {
+                let e = o + i * 0x44;
+                (e + 0x44 <= bytes.len()).then(|| {
+                    (
+                        SeqSlot {
+                            index: i,
+                            band: (le_u32(bytes, e + 0x04), le_u32(bytes, e + 0x08)),
+                        },
+                        le_u32(bytes, e + 0x10) & 1 == 0,
+                    )
+                })
+            })
+            .unzip::<_, _, Vec<_>, Vec<_>>()
+    };
+    if seq_slots.is_empty() {
+        seq_slots.push(SeqSlot {
+            index: 0,
+            band: (0, u32::MAX),
+        });
+        looping.push(true);
+    }
+    // The global-sequence duration table (header +0x14/+0x18) — a gseq-tagged timing track loops
+    // on its own free clock, same law as every other channel.
+    let gseq: Vec<u32> = {
+        let (n, o) = (le_u32(bytes, 0x14) as usize, le_u32(bytes, 0x18) as usize);
+        (0..n)
+            .map_while(|i| (o + i * 4 + 4 <= bytes.len()).then(|| le_u32(bytes, o + i * 4)))
+            .collect()
+    };
 
     // Decode a packed BGRA `CImVector` color key → linear RGBA 0..1 (A = over-life opacity).
     let color_key = |o: usize| -> [f32; 4] {
@@ -588,6 +761,12 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
                 SplineData::new((0..n).map(|p| le_vec3(bytes, ofs + p * 12)).collect())
             })
             .flatten();
+        // ROWS @+0x30 / COLUMNS @+0x32, both required non-zero powers of two — the reference's
+        // `0x7b4ed0` bails on a bad pair having written nothing, leaving its ctor's 1×1.
+        let tiles = match (le_u16(bytes, e + 0x30), le_u16(bytes, e + 0x32)) {
+            (r, c) if r.is_power_of_two() && c.is_power_of_two() => (r, c),
+            _ => (1, 1),
+        };
         let over_life = OverLife {
             mid: le_f32(bytes, e + 0x14c),
             color: [
@@ -600,8 +779,22 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
                 le_f32(bytes, e + 0x160),
                 le_f32(bytes, e + 0x164),
             ],
-            cell_a: [le_u16(bytes, e + 0x168), le_u16(bytes, e + 0x16a)],
-            cell_b: [le_u16(bytes, e + 0x16e), le_u16(bytes, e + 0x170)],
+            // The +0x168..+0x17b block is TEN u16s, read `{head A, head B, tail A, tail B}` with a
+            // repeat count wedged after each head pair — not the eight that wowdev's
+            // `lifespanUVAnim[3]/decayUVAnim[3]/tailUVAnim[2]` naming implies (wow-re
+            // `part-cell-flipbook-ramp.md` §1; +0x17c is already the tail LENGTH dword).
+            head_cells: [
+                CellRamp::new(le_u16(bytes, e + 0x168), le_u16(bytes, e + 0x16a)),
+                CellRamp::new(le_u16(bytes, e + 0x16e), le_u16(bytes, e + 0x170)),
+            ],
+            tail_cells: [
+                CellRamp::new(le_u16(bytes, e + 0x174), le_u16(bytes, e + 0x176)),
+                CellRamp::new(le_u16(bytes, e + 0x178), le_u16(bytes, e + 0x17a)),
+            ],
+            repeat: [
+                f32::from(le_u16(bytes, e + 0x16c)),
+                f32::from(le_u16(bytes, e + 0x172)),
+            ],
         };
         out.push(ParticleEmitterDef {
             flags: le_u32(bytes, e + 0x04),
@@ -611,11 +804,10 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
             spline,
             geometry_model,
             recursion_model,
-            clip_wrap_ms,
             blend: blend_of(bytes[e + 0x28]),
             texture,
-            tile_rows: le_u16(bytes, e + 0x30).max(1),
-            tile_cols: le_u16(bytes, e + 0x32).max(1),
+            tile_rows: tiles.0,
+            tile_cols: tiles.1,
             head_tail: bytes[e + 0x2c],
             emission_speed: track_first(bytes, e + 0x34, 0.0),
             speed_variation: track_first(bytes, e + 0x50, 0.0),
@@ -623,8 +815,13 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
             horizontal_range: track_first(bytes, e + 0x88, 0.0),
             gravity: track_first(bytes, e + 0xa4, 0.0),
             lifespan: track_first(bytes, e + 0xc0, 1.0),
-            emission_rate: track_keys(bytes, e + 0xdc, 0.0, band),
-            enabled: track_enabled(bytes, e + 0x1dc, band),
+            timing: EmitTiming::bake(
+                &read_raw_track(bytes, e + 0xdc, 4, le_f32),
+                &read_raw_track(bytes, e + 0x1dc, 1, |b, o| f32::from(b[o] != 0)),
+                &seq_slots,
+                looping.clone(),
+                &gseq,
+            ),
             area_length: track_first(bytes, e + 0xf8, 0.0),
             area_width: track_first(bytes, e + 0x114, 0.0),
             z_source: track_first(bytes, e + 0x130, 0.0),
@@ -700,7 +897,7 @@ mod tests {
         let defs = parse_m2_particle_emitters(&bytes).expect("parse emitters");
         assert_eq!(defs.len(), 4);
         // Emitter 0 — the red spray: starts hot (100/s at t=0), the old bake's one working case.
-        assert_eq!(defs[0].emission_rate.first(), 100.0);
+        assert_eq!(defs[0].timing.rate(None, 0.0), 100.0);
         // Emitter 3 — the starflash: additive, STARFLASH texture, burst-keyed (first key 0,
         // peak 20/s inside the 67–100 ms window, dead again by 133 ms).
         let flash = &defs[3];
@@ -709,17 +906,17 @@ mod tests {
             .as_deref()
             .is_some_and(|t| t.to_ascii_uppercase().contains("STARFLASH")));
         assert_eq!(flash.blend, ParticleBlend::Add);
-        assert_eq!(flash.emission_rate.first(), 0.0, "value[0] bake = silence");
-        assert_eq!(flash.emission_rate.peak(), 20.0);
-        assert_eq!(flash.emission_rate.step_ms(80.0), 20.0);
-        assert_eq!(flash.emission_rate.step_ms(200.0), 0.0);
+        assert_eq!(flash.timing.rate(None, 0.0), 0.0, "silent at t=0");
+        assert_eq!(flash.timing.peak_rate(), 20.0);
+        assert_eq!(flash.timing.rate(None, 0.080), 20.0);
+        assert_eq!(flash.timing.rate(None, 0.200), 0.0);
         // Emitters 1/2 — the glowball droplets, same burst shape, peaks 200.
-        assert_eq!(defs[1].emission_rate.peak(), 200.0);
-        assert_eq!(defs[2].emission_rate.peak(), 200.0);
+        assert_eq!(defs[1].timing.peak_rate(), 200.0);
+        assert_eq!(defs[2].timing.peak_rate(), 200.0);
         // The spray's enabled track cuts emission at 500 ms — exactly where its rate track goes
         // negative (the authored tail the old always-on read let the floor-at-0 hide).
-        assert!(defs[0].enabled.on_at(400.0));
-        assert!(!defs[0].enabled.on_at(600.0));
+        assert!(defs[0].timing.emitting(None, 0.4));
+        assert!(!defs[0].timing.emitting(None, 0.6));
     }
 
     /// The real `Feint_Impact_Chest.m2` (the Eviscerate/Feint impact) — the BURST-flag split
@@ -749,9 +946,9 @@ mod tests {
         assert!(impact[3].burst(), "crescents are a one-shot burst");
         // The STEP rate law that arms the burst count: silent before the 67 ms key, the full
         // value at it, held past it (where the burst latch keeps it from ever mattering).
-        assert_eq!(impact[0].emission_rate.step_ms(50.0), 0.0);
-        assert_eq!(impact[0].emission_rate.step_ms(67.0), 30.0);
-        assert_eq!(impact[0].emission_rate.step_ms(1500.0), 30.0);
+        assert_eq!(impact[0].timing.rate(None, 0.050), 0.0);
+        assert_eq!(impact[0].timing.rate(None, 0.067), 30.0);
+        assert_eq!(impact[0].timing.rate(None, 1.500), 30.0);
         let cast = parse_m2_particle_emitters(
             &chain
                 .read_file("Spells\\Eviscerate_Cast_Hands.m2")
@@ -827,9 +1024,12 @@ mod tests {
         .expect("parse emitters");
         assert_eq!(cast.len(), 3);
         for em in &cast {
-            assert!(em.enabled.on_at(100.0), "the flash is ON at its start");
             assert!(
-                !em.enabled.on_at(250.0),
+                em.timing.emitting(None, 0.1),
+                "the flash is ON at its start"
+            );
+            assert!(
+                !em.timing.emitting(None, 0.25),
                 "and OFF from 200 ms — the 1.0 s clip does not burn through"
             );
         }
@@ -840,19 +1040,22 @@ mod tests {
         )
         .expect("parse emitters");
         assert_eq!(impact.len(), 6);
-        assert_eq!(impact[0].emission_rate.step_ms(0.0), 0.0);
+        assert_eq!(impact[0].timing.rate(None, 0.0), 0.0);
         assert_eq!(
-            impact[0].emission_rate.step_ms(133.0),
+            impact[0].timing.rate(None, 0.133),
             60.0,
             "the plume bursts at impact"
         );
-        assert!(impact[1].enabled.on_at(100.0));
+        assert!(impact[1].timing.emitting(None, 0.1));
         assert!(
-            !impact[1].enabled.on_at(400.0),
+            !impact[1].timing.emitting(None, 0.4),
             "shockwave window is 300 ms"
         );
-        assert!(!impact[4].enabled.on_at(50.0), "smoke starts staggered…");
-        assert!(impact[4].enabled.on_at(200.0));
-        assert!(!impact[4].enabled.on_at(700.0), "…and ends by 567 ms");
+        assert!(
+            !impact[4].timing.emitting(None, 0.05),
+            "smoke starts staggered…"
+        );
+        assert!(impact[4].timing.emitting(None, 0.2));
+        assert!(!impact[4].timing.emitting(None, 0.7), "…and ends by 567 ms");
     }
 }

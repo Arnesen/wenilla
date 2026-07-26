@@ -109,7 +109,7 @@ fn inherit_trigger(accum: &mut f32, held: &mut Vec3, dt: f32, delta: Vec3, live:
 fn drive_child(
     child: &mut ChildEmitter,
     parent: &[Particle],
-    clip_ms: f32,
+    rate: f32,
     emitting: bool,
     scale: f32,
     dt: f32,
@@ -120,8 +120,8 @@ fn drive_child(
     let origin = Vec3::from(child.def.position);
     for p in parent {
         accumulate_emission(
-            &child.def,
-            clip_ms,
+            child.def.burst(),
+            rate,
             emitting,
             scale,
             dt,
@@ -214,6 +214,10 @@ pub(super) fn simulate_particles(
             Without<ChildDraw>,
         ),
     >,
+    // Hosted emitters' sequence source (the unit/GameObject lane): the host root's live
+    // `AnimationPlayer` names the playing sequence + clip time, same resolution as the
+    // material-alpha sampler (`doodad_anim::playing_seq`).
+    hosts: Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
 ) {
     let Ok((cam_tf, frustum)) = cam.single() else {
         return;
@@ -384,6 +388,8 @@ pub(super) fn simulate_particles(
             inherit_vel,
             gate_prev,
             age,
+            host,
+            seq,
             rng,
             mesh,
             texture,
@@ -549,23 +555,38 @@ pub(super) fn simulate_particles(
         //    byte-verified): spawn count × clamp(1 − (camDist − 50)·0.02, 0.25, 1.0) — full rate
         //    inside 50 yd, linear falloff, a 25% floor from 87.5 yd out, never zero — and × the
         //    `particleDensity` CVar.
-        //    The enabled M2Track (file +0x1dc) gates NEW emission on the same clip clock — the
+        //    The enabled M2Track (file +0x1dc) gates NEW emission on the same clock — the
         //    one-shot effects' choreography (a 200 ms hand flash inside a 1.0 s clip; the impact
         //    model's six staggered windows). Live particles are untouched — they finish their
         //    lifespans exactly like the drain above.
-        // The clip clock: emitter age in ms, WRAPPED when the model's first sequence loops
-        // (the client's m2_animate sequence time — a hold kit's windowed flash re-fires every
-        // pass); a clamped sequence's tracks end-hold, bounded by the instance reap.
-        let clip_ms = {
-            let ms = *age * 1000.0;
-            def.clip_wrap_ms.map_or(ms, |w| ms % w)
+        // The sequence clock (`EmitTiming`, decision 0641's structure one channel over): a HOSTED
+        // emitter reads its host's live playing sequence + clip time each frame — the reference's
+        // `m2_animate` emitter phase samples the CURRENT sequence record, which is why a quest
+        // GameObject's explosion fires in its one-shot clips and reads OFF in every idle window
+        // (bug B27). A host with no live player yet keeps its last slot at that slot's opening
+        // pose. Pinned lanes (doodads, effect rigs, booths) run their slot on the spawn-age
+        // clock; `EmitTiming` wraps a looping band and end-holds a clamped one.
+        let (clock_seq, elapsed_s) = match *host {
+            Some(h) => match hosts
+                .get(h)
+                .ok()
+                .and_then(|(p, a)| crate::doodad_anim::playing_seq(p, a))
+            {
+                Some((s, t)) => {
+                    *seq = Some(s);
+                    (Some(s), t)
+                }
+                None => (*seq, 0.0),
+            },
+            None => (*seq, *age),
         };
-        let emitting = !*draining && def.enabled.on_at(clip_ms);
+        let emitting = !*draining && def.timing.emitting(clock_seq, elapsed_s);
+        let rate = def.timing.rate(clock_seq, elapsed_s);
         let dist_lod =
             (1.0 - (placement.translation.distance(e_cam_pos) - 50.0) * 0.02).clamp(0.25, 1.0);
         let burst = accumulate_emission(
-            def,
-            clip_ms,
+            def.burst(),
+            rate,
             emitting,
             density * dist_lod,
             dt,
@@ -573,7 +594,7 @@ pub(super) fn simulate_particles(
             gate_prev,
         );
         if burst > 0.0 && crate::dbg_trace::enabled() {
-            crate::dbg_trace::line("fx", &format!("burst n={burst} clip_ms={clip_ms:.0}"));
+            crate::dbg_trace::line("fx", &format!("burst n={burst} t={elapsed_s:.2}s"));
         }
         while *accumulator >= 1.0 && particles.len() < MAX_PARTICLES {
             *accumulator -= 1.0;
@@ -607,7 +628,7 @@ pub(super) fn simulate_particles(
             if anchored && def.ground_snap() {
                 let world = *anchor_pos + *attach_rot * pos;
                 if let Some(hit) = spatial.cast_ray(world, Dir3::NEG_Y, 20.0, true, &snap_filter) {
-                    let lifted = world.y - hit.distance + def.over_life.sample(0.0).1;
+                    let lifted = world.y - hit.distance + def.over_life.sample(0.0).size;
                     pos = attach_inv * (Vec3::new(world.x, lifted, world.z) - *anchor_pos);
                 }
             }
@@ -669,17 +690,17 @@ pub(super) fn simulate_particles(
 
         // 2b. CHILD emitters (wow-re `part-child-recursion.md`): each drives off the live pool
         //     — post-integration, post-birth, exactly the window the reference's per-particle
-        //     child loop sees — with the child's OWN rate/enabled tracks on its own clip wrap.
+        //     child loop sees — with the child's OWN rate/enabled tracks on its own model's
+        //     slot-0 clock (a recursion model has no host of its own; the parent's age drives).
         //     A draining parent stops driving; child pools live out their spans (the despawn
         //     above waits for them).
         for child in children.iter_mut() {
-            let raw_ms = *age * 1000.0;
-            let c_ms = child.def.clip_wrap_ms.map_or(raw_ms, |w| raw_ms % w);
-            let c_emitting = !*draining && child.def.enabled.on_at(c_ms);
+            let c_emitting = !*draining && child.def.timing.emitting(None, *age);
+            let c_rate = child.def.timing.rate(None, *age);
             drive_child(
                 child,
                 particles,
-                c_ms,
+                c_rate,
                 c_emitting,
                 density * dist_lod,
                 dt,
@@ -876,10 +897,7 @@ mod tests {
             area_width: 0.0,
             ..crate::particles::tests::plain_def()
         });
-        child.def.emission_rate = benilla_formats::ValueTrack {
-            keys: vec![(0, 100.0)],
-            interp: 0,
-        };
+        child.def.timing = benilla_formats::EmitTiming::constant(100.0);
         // Two live parents, far apart, distinct velocities.
         let parents = [
             particle(Vec3::X * 10.0, Vec3::Y * 3.0),
@@ -889,7 +907,7 @@ mod tests {
         super::drive_child(
             &mut child,
             &parents,
-            0.0,
+            100.0,
             true,
             1.0,
             0.1,
@@ -914,7 +932,7 @@ mod tests {
         super::drive_child(
             &mut child,
             &[],
-            0.0,
+            100.0,
             true,
             1.0,
             0.1,

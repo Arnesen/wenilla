@@ -771,12 +771,18 @@ fn fire_particle_census(
             })
             .unwrap_or_default();
         let d = e.def();
-        let rate_keys: Vec<String> = d
-            .emission_rate
-            .keys
-            .iter()
-            .map(|(t, v)| format!("{t}:{v:.1}"))
-            .collect();
+        // The rate summary: the constant (the common shape), else each slot's key count — the
+        // full per-sequence choreography lives in `benilla-extract m2anim`, not a census line.
+        let rate_keys: Vec<String> = match d.timing.constant_rate() {
+            Some(r) => vec![format!("{r:.1}")],
+            None => d
+                .timing
+                .slot_views()
+                .iter()
+                .enumerate()
+                .map(|(s, (_, r, _))| format!("s{s}:{}k", r.map_or(0, <[(f32, f32)]>::len)))
+                .collect(),
+        };
         // The orientation fingerprint (world plane normal + thickness/radius) is the numeric
         // "which way does this cloud face" — the flat-vs-standing question a screenshot can
         // only suggest (the InstancePortal swirl-plane investigation).

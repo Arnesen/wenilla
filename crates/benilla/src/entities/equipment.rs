@@ -923,6 +923,9 @@ pub(super) fn attach_held_items(
                     Some((root, [0.0; 3])),
                     Some(root), // a held item is an attached model — the flame fans with the swing
                     Some(root), // whole-model owner: anchor == owner, the plain carry
+                    // A held item spawns no rig; its emitters run the item model's own slot-0
+                    // loop on the spawn clock (the torch burns always — the doodad law).
+                    crate::particles::EmitClock::Pinned,
                 );
             }
             // The item's own M2 point light — **the held torch's glow** (decision 0016's law on the

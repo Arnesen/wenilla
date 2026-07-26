@@ -909,6 +909,11 @@ pub(super) fn attach_entity_visuals(
                         Some(owner),
                         None, // a unit's OWN model is not an attached model (`[model+0x17c]` = 0)
                         Some(entity), // the cloud anchors at the unit; bones compose births only
+                        // The emitters' rate/enabled read this instance's PLAYING sequence — a
+                        // unit's or GameObject's `AnimationPlayer` on the root. A quest object's
+                        // explosion is authored inside its one-shot clips with an OFF window at
+                        // idle (B27); a creature's death-only smoke is the same shape.
+                        particles::EmitClock::Host(entity),
                     );
                 }
             }

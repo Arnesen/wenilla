@@ -108,9 +108,24 @@ pub(super) fn expand_quads(
             placement.rotation * (wow_to_bevy([-1.0, 0.0, 0.0]) * s),
         )
     });
-    let cols = def.tile_cols.max(1);
-    let rows = def.tile_rows.max(1);
+    // Atlas walk (byte-verified `0x7b2a50` @0x7b2bd5 head / @0x7b304e tail, wow-re
+    // `part-cell-flipbook-ramp.md` §4): `col = idx & (COLUMNS−1)`, `row = idx >> log2(COLUMNS)`.
+    // COLUMNS is a power of two by construction — the reference validates it at load and falls
+    // back to a 1×1 grid otherwise, which the parse mirrors. **The column WRAPS and the row does
+    // NOT**: there is no clamp into the atlas anywhere on the reference's path, so an index past
+    // the last cell yields `V ≥ 1.0` and is handed to the sampler's (repeat) addressing — landing
+    // back on row 0, not on the final cell. 553 emitters author exactly that, at the tail of a
+    // flame's flipbook (decision 0685); a `min(rows·cols − 1)` here held the last cell instead.
+    let (cols, rows) = (def.tile_cols, def.tile_rows);
     let (inv_cols, inv_rows) = (1.0 / cols as f32, 1.0 / rows as f32);
+    let cell_uv = |idx: u16| {
+        let cx = f32::from(idx & (cols - 1));
+        let cy = f32::from(idx >> cols.trailing_zeros());
+        (
+            (cx * inv_cols, (cx + 1.0) * inv_cols),
+            (cy * inv_rows, (cy + 1.0) * inv_rows),
+        )
+    };
     for p in particles {
         let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
         // The twinklePercent draw-gate (byte-verified `0x7b2adc`): while percent < 1 (never on
@@ -120,7 +135,8 @@ pub(super) fn expand_quads(
             continue;
         }
         let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
-        let (rgba, size, cell) = def.over_life.sample(u_age);
+        let ol = def.over_life.sample(u_age);
+        let (rgba, size) = (ol.color, ol.size);
         // RAW authored RGB — the gamma-space decode happens ONCE, in the material's fragment
         // (`wow_particle.wgsl`, decision 0152), where it also covers the texture term that a
         // CPU-side vertex linearisation (0150) could not reach. Alpha is a blend weight — raw
@@ -144,12 +160,6 @@ pub(super) fn expand_quads(
         // alike burn steady; the old base+rand reading collapsed the kobold candle to zero),
         // × the instance scale iff flagged.
         let half = size * def.twinkle(noise) * scale;
-        // Texture-atlas cell → sub-rect UV (v increases downward in image space).
-        let cell = cell.min(rows * cols - 1);
-        let cx = (cell % cols) as f32;
-        let cy = (cell / cols) as f32;
-        let (u0, u1) = (cx * inv_cols, (cx + 1.0) * inv_cols);
-        let (v0, v1) = (cy * inv_rows, (cy + 1.0) * inv_rows);
         let mut push_quad = |corners: [Vec3; 4], quv: [[f32; 2]; 4]| {
             let b = positions.len() as u32;
             for (c, t) in corners.iter().zip(quv) {
@@ -169,6 +179,7 @@ pub(super) fn expand_quads(
         // HEAD quad (particleType 0/2), drawn first (`0x7b2bc9`): a camera-facing billboard,
         // or — XY-quad emitters — the flat plane basis computed above.
         if def.head_tail != 1 {
+            let ((u0, u1), (v0, v1)) = cell_uv(ol.head_cell);
             let (base_r, base_u) = plane_basis.unwrap_or((cam_right, cam_up));
             // Quad spin (file +0x198): rotate in-plane by `angle = spin·age` (the fcos/fsin
             // fold at `0x7b2ddc`; on an XY quad the same form IS the reference's Rodrigues
@@ -196,9 +207,18 @@ pub(super) fn expand_quads(
         // TAIL quad (particleType 1/2, byte-verified `0x7b3041`): a velocity-projected streak
         // trailing the motion — world length |velocity|·tailTime (flag 0x400 grows it from
         // zero with age), width 2·half perpendicular IN SCREEN SPACE, U running along the
-        // tail (0 at the particle → 1 at the tip), same flipbook cell. A view-parallel
-        // velocity (degenerate screen length) falls back to a plain billboard.
+        // tail (0 at the particle → 1 at the tip). A view-parallel velocity (degenerate screen
+        // length) falls back to a plain billboard.
+        //
+        // The streak reads its **own** flipbook cell — a second, independently authored ramp
+        // (file+0x174..+0x17b), not the head's. The reference emits two cell indices per particle
+        // and the tail block reads the second (`[ebp-0x40]` @0x7b3054). 14 shipped emitters on a
+        // real atlas — Fire Bolt / Flamestrike / Banish / Hellfire / Vanish impacts, the elemental
+        // totems — author a head ramp that walks all 64 cells and a tail ramp pinned at cell 0;
+        // handing the head's cell to the streak animated it through the whole sheet (decision
+        // 0685, correcting wow-re's own `part-quad-tail-twinkle.md` §2).
         if def.head_tail >= 1 {
+            let ((u0, u1), (v0, v1)) = cell_uv(ol.tail_cell);
             let vel_world = if anchored {
                 frame.attach_rot * p.vel
             } else {

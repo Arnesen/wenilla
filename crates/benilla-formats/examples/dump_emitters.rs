@@ -37,7 +37,19 @@ fn main() -> anyhow::Result<()> {
             e.lifespan,
             e.drag
         );
-        println!("  rate {:?}", e.emission_rate);
+        match e.timing.constant_rate() {
+            Some(r) => println!("  rate {r}/s (constant, every sequence)"),
+            None => {
+                for (slot, (looping, rate, enabled)) in e.timing.slot_views().iter().enumerate() {
+                    println!(
+                        "  seq {slot}{}: rate {:?} enabled {:?}",
+                        if *looping { "" } else { " (clamped)" },
+                        rate,
+                        enabled
+                    );
+                }
+            }
+        }
         println!(
             "  area {}x{} zsrc {} tail {} spin {}",
             e.area_length, e.area_width, e.z_source, e.tail_time, e.spin

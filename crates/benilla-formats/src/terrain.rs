@@ -767,4 +767,55 @@ mod tests {
         // A column past the chunk's east edge is off the footprint entirely.
         assert_eq!(c.height_at([quarter_x, far_y - 5.0, 0.0]), None);
     }
+
+    /// The real 5875 map set: which maps have terrain and which are a single global WMO
+    /// (decision 0688). 20 of the 43 shipped WDTs author **zero** ADT tiles — on those maps the
+    /// global WMO is the entire world, and a client that ignores it renders a void you fall
+    /// through. Skips without client data.
+    #[test]
+    fn real_wdts_split_into_adt_maps_and_wmo_only_maps() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+
+        // A WMO-only map, an ADT map, and the one map whose placement is NOT identity — the three
+        // cases the streamer has to tell apart.
+        let jail = read_wdt(&mut chain, "StormwindJail").expect("StormwindJail.wdt");
+        let g = jail
+            .global_wmo()
+            .expect("the Stockade is one WMO, no terrain");
+        assert_eq!(
+            g.model.to_ascii_lowercase(),
+            "world\\wmo\\dungeon\\az_stormwindprisons\\stormwindjail.wmo"
+        );
+        // Authored at the world origin, unrotated: the placement the whole dungeon hangs off.
+        assert_eq!(g.position, [0.0, 0.0, 0.0]);
+        assert_eq!(g.rotation, [0.0, 0.0, 0.0]);
+        assert!(
+            (0..64).all(|y| (0..64).all(|x| !tile_exists(&jail, x, y))),
+            "a WMO-only map authors no ADT tiles at all"
+        );
+
+        // Deadmines is the control: the reports that opened 0688 said it alone kept you standing,
+        // and this is why — it ships real terrain, so the missing global-WMO branch never bit.
+        let deadmines = read_wdt(&mut chain, "DeadminesInstance").expect("DeadminesInstance.wdt");
+        assert!(deadmines.global_wmo().is_none());
+        let tiles = (0..64)
+            .flat_map(|y| (0..64).map(move |x| (x, y)))
+            .filter(|&(x, y)| tile_exists(&deadmines, x, y))
+            .count();
+        assert_eq!(tiles, 36, "Deadmines ships 36 ADT tiles");
+
+        // Dire Maul is the reason the rotation column is read rather than assumed: it is the only
+        // shipped map placed at a heading, and dropping it would spin the dungeon 180° about the
+        // origin — every room mirrored onto the wrong side of the map.
+        let dm = read_wdt(&mut chain, "DireMaul").expect("DireMaul.wdt");
+        assert_eq!(
+            dm.global_wmo().expect("WMO-only").rotation,
+            [0.0, 180.0, 0.0]
+        );
+    }
 }

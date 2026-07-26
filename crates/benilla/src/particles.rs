@@ -160,6 +160,16 @@ pub struct ParticleEmitter {
     /// against (an effect model's emitters spawn at its clip start, so age == clip time). Ambient
     /// props' constant tracks are age-invariant.
     age: f32,
+    /// The emission clock's SEQUENCE source (`EmitTiming`, decision 0641's host resolution one
+    /// channel over): the entity whose live `AnimationPlayer` names the playing sequence + clip
+    /// time — a unit's / GameObject's emitters read the *playing* sequence's key window, so a
+    /// quest object's explosion fires in its one-shot clips and stays OFF at idle. `None` = a
+    /// pinned lane (placed doodad, effect rig, booth) on the spawn-age clock.
+    host: Option<Entity>,
+    /// The sequence FILE slot the timing samples: the pinned slot an effect's rig armed, or the
+    /// host's last resolved slot (kept across frames where the host has no live player — the
+    /// pre-arm frame reads that slot's opening pose). `None` ⇒ slot 0 (the doodad law).
+    seq: Option<usize>,
     rng: u32,
     mesh: Handle<Mesh>,
     /// The particle texture — also held here (not just on the material) so the sim can withhold drawing
@@ -517,6 +527,7 @@ pub fn spawn_emitter(
     owner: Option<(Entity, [f32; 3])>,
     attach: Option<Entity>,
     anchor: Option<Entity>,
+    clock: EmitClock,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES spawns no emitters at all.
     if std::env::var_os("WOW_NO_PARTICLES").is_some() {
@@ -542,12 +553,17 @@ pub fn spawn_emitter(
         ];
         entity
     });
-    // Gate on the rate track's PEAK, not its first key: a one-shot burst emitter (the blood
-    // spurt's starflash/glowball, 0140 fold-back) keys `0 → 200 → 0` — value[0] is 0 but it
-    // absolutely emits.
-    if def.lifespan <= 0.0 || def.emission_rate.peak() <= 0.0 {
+    // Gate on the rate track's PEAK over every sequence, not its first key: a one-shot burst
+    // emitter (the blood spurt's starflash/glowball, 0140 fold-back) keys `0 → 200 → 0` — value[0]
+    // is 0 but it absolutely emits.
+    if def.lifespan <= 0.0 || def.timing.peak_rate() <= 0.0 {
         return None; // emits nothing
     }
+    let (host, seq) = match clock {
+        EmitClock::Pinned => (None, None),
+        EmitClock::PinnedSeq(s) => (None, Some(s)),
+        EmitClock::Host(h) => (Some(h), None),
+    };
     let material = particle_material(&def, &texture, materials, light);
     let mesh = meshes.add(blank_particle_mesh());
     // Seed the RNG from the placement position so two campfires don't flicker in lockstep.
@@ -580,6 +596,8 @@ pub fn spawn_emitter(
                     inherit_vel: Vec3::ZERO,
                     gate_prev: false,
                     age: 0.0,
+                    host,
+                    seq,
                     rng,
                     mesh,
                     texture,
@@ -660,7 +678,7 @@ pub(crate) fn wire_child_emitters(
             .take(4)
             .filter_map(|em| {
                 let texture = em.texture.clone()?;
-                if em.def.lifespan <= 0.0 || em.def.emission_rate.peak() <= 0.0 {
+                if em.def.lifespan <= 0.0 || em.def.timing.peak_rate() <= 0.0 {
                     return None;
                 }
                 let material = particle_material(&em.def, &texture, &mut materials, &light);
@@ -694,15 +712,31 @@ pub(crate) fn wire_child_emitters(
     }
 }
 
+/// Which sequence clock an emitter's rate/enabled tracks sample against
+/// ([`benilla_formats::EmitTiming`] — one baked loop per sequence, so the consumer names the
+/// sequence). Callers pick per lane at [`spawn_emitter`].
+#[derive(Clone, Copy, Default)]
+pub enum EmitClock {
+    /// Slot 0 on the spawn-age clock — a placed doodad's one-time arm (the pre-per-sequence law,
+    /// still correct there), the portrait booths, and any lane with no rig to ask.
+    #[default]
+    Pinned,
+    /// A fixed armed slot on the spawn-age clock — a spell effect's rig arms one clip at spawn
+    /// and the emitters ride it (a missile's InFlight is not file-order-first).
+    PinnedSeq(usize),
+    /// A live host's `AnimationPlayer` decides the slot **and the clip time** each frame — units
+    /// and GameObjects, whose playing sequence changes; the reference's `m2_animate` emitter
+    /// phase samples the CURRENT sequence record (wow-re `part-emission-rate-animated.md` §2).
+    Host(Entity),
+}
+
 /// One frame of the emission front end: how many births the pool is owed, loaded into
 /// `accumulator` (fractional; the caller's birth loop drains whole particles). The reference's
 /// per-frame emitter pass + spawn driver (`0x718960` / `0x7b5550`, wow-re
 /// `part-emission-burst-flag.md` + `part-emission-rate-animated.md`):
 ///
-/// - The rate is sampled at the clip clock by the reference's own track law
-///   ([`ValueTrack::sampled_ms`] — STEP for interp-0 tracks, linear for the rest, held past the
-///   last key; the corpus authors bursts as step and pour ramps as linear) and the gate is
-///   `(enabled && rate > 0)`.
+/// - `rate`/`emitting` arrive already sampled from the playing sequence's key window
+///   ([`benilla_formats::EmitTiming`]) and the gate is `(enabled && rate > 0)`.
 /// - A **continuous** emitter (file flag 0x8000 clear) pours `rate · density·LOD · dt`.
 /// - A **BURST** emitter (flag set) loads `ftol(rate · density·LOD)` ONCE on the gate's rising
 ///   edge and re-arms when it falls (a looping clip's next pass re-fires it); the pour never
@@ -711,8 +745,8 @@ pub(crate) fn wire_child_emitters(
 ///
 /// Returns the burst count loaded this frame (0.0 otherwise) — the `fx` trace's measurement hook.
 fn accumulate_emission(
-    def: &ParticleEmitterDef,
-    clip_ms: f32,
+    is_burst: bool,
+    rate: f32,
     emitting: bool,
     scale: f32,
     dt: f32,
@@ -722,14 +756,10 @@ fn accumulate_emission(
     if !emitting {
         *accumulator = 0.0;
     }
-    let rate = if emitting {
-        def.emission_rate.sampled_ms(clip_ms).max(0.0)
-    } else {
-        0.0
-    };
+    let rate = if emitting { rate.max(0.0) } else { 0.0 };
     let gate = rate > 0.0;
     let mut burst = 0.0;
-    if def.burst() {
+    if is_burst {
         if gate && !*gate_prev {
             burst = (rate * scale).trunc();
             *accumulator = burst;
@@ -772,7 +802,7 @@ impl Plugin for ParticlePlugin {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use benilla_formats::{OverLife, ParticleShape, ValueTrack};
+    use benilla_formats::{CellRamp, OverLife, ParticleShape};
 
     /// The minimal def, exposed for sibling-module tests (the sim's child-drive test).
     pub(crate) fn plain_def() -> ParticleEmitterDef {
@@ -875,18 +905,13 @@ pub(crate) mod tests {
             tile_rows: 1,
             tile_cols: 1,
             head_tail: 0,
-            clip_wrap_ms: None,
             emission_speed: 1.0,
             speed_variation: 0.0,
             vertical_range: 0.5,
             horizontal_range: std::f32::consts::PI,
             gravity: 0.0,
             lifespan: 1.0,
-            emission_rate: ValueTrack {
-                keys: vec![(0, 10.0)],
-                interp: 0,
-            },
-            enabled: benilla_formats::OnOffTrack::default(),
+            timing: benilla_formats::EmitTiming::constant(10.0),
             area_length: 2.0,
             area_width: 4.0,
             z_source: 0.0,
@@ -911,88 +936,57 @@ pub(crate) mod tests {
                 mid: 0.5,
                 color: [[1.0; 4]; 3],
                 scale: [1.0; 3],
-                cell_a: [0, 0],
-                cell_b: [0, 0],
+                head_cells: [CellRamp::new(0, 0); 2],
+                tail_cells: [CellRamp::new(0, 0); 2],
+                repeat: [1.0; 2],
             },
         }
     }
 
     /// The BURST emission model (file flag 0x8000 — Feint/Eviscerate impact's plume+crescents):
-    /// one `ftol(rate·scale)` puff on the rising edge of `(enabled && step-sampled rate > 0)`,
-    /// latched while the gate holds, re-armed when it falls. The STEP rate law means a
-    /// `{0:0, 67:30}` track is silent before 67 ms — the puff fires AT the key, full-count.
+    /// one `ftol(rate·scale)` puff on the rising edge of `(enabled && rate > 0)`, latched while
+    /// the gate holds, re-armed when it falls. (The rate/enabled *sampling* laws — step vs lerp
+    /// vs held tail, per sequence window — are pinned in `benilla-formats`' `emit_timing` tests,
+    /// where the bake lives.)
     #[test]
     fn burst_emitter_fires_once_on_the_rising_edge() {
-        let mut d = def(ParticleShape::Plane);
-        d.flags = 0x8000;
-        d.emission_rate = ValueTrack {
-            keys: vec![(0, 0.0), (67, 30.0)],
-            interp: 0, // every corpus burst authors a STEP rate track (census-verified)
-        };
         let (mut acc, mut prev) = (0.0, false);
         assert_eq!(
-            accumulate_emission(&d, 50.0, true, 1.0, 0.016, &mut acc, &mut prev),
+            accumulate_emission(true, 0.0, true, 1.0, 0.016, &mut acc, &mut prev),
             0.0,
-            "step-sampled rate is 0 before the 67 ms key — no gate, no burst"
+            "rate 0 — no gate, no burst"
         );
         assert_eq!(acc, 0.0);
         assert_eq!(
-            accumulate_emission(&d, 70.0, true, 1.0, 0.016, &mut acc, &mut prev),
+            accumulate_emission(true, 30.0, true, 1.0, 0.016, &mut acc, &mut prev),
             30.0,
-            "the frame the sample steps to 30: one full-count burst"
+            "the frame the rate rises: one full-count burst"
         );
         assert_eq!(acc, 30.0);
         acc = 0.0; // the birth loop drains it
-        accumulate_emission(&d, 500.0, true, 1.0, 0.016, &mut acc, &mut prev);
-        accumulate_emission(&d, 1500.0, true, 1.0, 0.016, &mut acc, &mut prev);
+        accumulate_emission(true, 30.0, true, 1.0, 0.016, &mut acc, &mut prev);
+        accumulate_emission(true, 30.0, true, 1.0, 0.016, &mut acc, &mut prev);
         assert_eq!(acc, 0.0, "held-high gate stays latched — never a pour");
         // The gate falls (drain/disable) → re-arms → the next rise bursts again (a looping
         // clip's next pass), the count ftol-truncated through density·LOD.
-        accumulate_emission(&d, 1600.0, false, 1.0, 0.016, &mut acc, &mut prev);
+        accumulate_emission(true, 30.0, false, 1.0, 0.016, &mut acc, &mut prev);
         assert_eq!(
-            accumulate_emission(&d, 70.0, true, 0.55, 0.016, &mut acc, &mut prev),
+            accumulate_emission(true, 30.0, true, 0.55, 0.016, &mut acc, &mut prev),
             16.0,
             "ftol(30 · 0.55) = 16"
         );
     }
 
-    /// The continuous emission model (flag clear) still pours `rate·dt` — and drops its owed
+    /// The continuous emission model (flag clear) pours `rate·dt` — and drops its owed
     /// fraction while disabled (the pre-existing drain hygiene).
     #[test]
     fn continuous_emitter_pours_rate_dt() {
-        let mut d = def(ParticleShape::Plane);
-        d.emission_rate = ValueTrack {
-            keys: vec![(0, 0.0), (67, 30.0)],
-            interp: 0,
-        };
         let (mut acc, mut prev) = (0.0, false);
-        accumulate_emission(&d, 100.0, true, 1.0, 0.1, &mut acc, &mut prev);
-        accumulate_emission(&d, 200.0, true, 1.0, 0.1, &mut acc, &mut prev);
+        accumulate_emission(false, 30.0, true, 1.0, 0.1, &mut acc, &mut prev);
+        accumulate_emission(false, 30.0, true, 1.0, 0.1, &mut acc, &mut prev);
         assert!((acc - 6.0).abs() < 1e-4, "30/s × 0.2 s, no burst latch");
-        accumulate_emission(&d, 300.0, false, 1.0, 0.1, &mut acc, &mut prev);
+        accumulate_emission(false, 30.0, false, 1.0, 0.1, &mut acc, &mut prev);
         assert_eq!(acc, 0.0, "disabled zeroes the owed fraction");
-    }
-
-    /// A LINEAR (interp 1) rate ramp pours the lerped envelope — the BloodSpurt shape (`0 → 100
-    /// → … → 0` authored interp 1 corpus-wide): mid-ramp the pour runs at the interpolated rate,
-    /// not the previous key's step (which over-poured every falling tail and muted every rise).
-    #[test]
-    fn continuous_lerp_ramp_pours_the_interpolated_rate() {
-        let mut d = def(ParticleShape::Plane);
-        d.emission_rate = ValueTrack {
-            keys: vec![(0, 0.0), (100, 100.0), (200, 0.0)],
-            interp: 1,
-        };
-        let (mut acc, mut prev) = (0.0, false);
-        accumulate_emission(&d, 50.0, true, 1.0, 0.1, &mut acc, &mut prev);
-        assert!((acc - 5.0).abs() < 1e-4, "rising mid-ramp: 50/s × 0.1 s");
-        accumulate_emission(&d, 150.0, true, 1.0, 0.1, &mut acc, &mut prev);
-        assert!((acc - 10.0).abs() < 1e-4, "falling mid-ramp: 50/s again");
-        accumulate_emission(&d, 500.0, true, 1.0, 0.1, &mut acc, &mut prev);
-        assert!(
-            (acc - 10.0).abs() < 1e-4,
-            "held last key 0: the ramp self-closes"
-        );
     }
 
     /// The follow-delta response line (`0x7b5d30`): the line through the two authored

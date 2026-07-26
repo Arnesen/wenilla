@@ -624,6 +624,8 @@ pub(super) fn sync_glue_scene(
                 Some(owner),
                 None, // a backdrop scene is never an attached model
                 Some(scene.root),
+                // A glue scene loops its one authored clip forever — the doodad law.
+                crate::particles::EmitClock::Pinned,
             ) {
                 commands
                     .entity(e)

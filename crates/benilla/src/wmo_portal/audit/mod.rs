@@ -223,6 +223,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_light_refs: Vec::new(),
         group_liquids: Vec::new(),
         doodad_base: Vec::new(),
+        doodad_owner: Vec::new(),
     };
     Subject {
         model,

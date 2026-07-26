@@ -159,51 +159,6 @@ impl ValueTrack<f32> {
     }
 }
 
-/// An **ON/OFF gate** M2Track (`M2Track<u8>`, step-interpolated): the emission gate on particle
-/// (`+0x1dc`) and ribbon (`+0xc0` visibility) records. This is how one-shot effect models
-/// choreograph their emitters inside the clip — `Fire_Cast_Hand.m2` enables its hand-flash
-/// emitters for exactly the first 200 ms of its 1.0 s clip; `MoltenBlast_Impact_Chest.m2`
-/// staggers six emitters across 200–570 ms windows. A cleared gate stops NEW emission only; live
-/// particles finish their lifespan (the same law as the ribbon `block+0xbc` gate, wow-re
-/// `ribbon-emitter-spec.md` §6.3).
-#[derive(Debug, Clone)]
-pub struct OnOffTrack {
-    /// `(timestamp ms, on)` keys, ascending — rebased to the first sequence's band like
-    /// [`ValueTrack`]. Empty never occurs from the parsers (the fallback is a single always-on
-    /// key).
-    pub keys: Vec<(u32, bool)>,
-}
-
-impl Default for OnOffTrack {
-    fn default() -> Self {
-        Self::always_on()
-    }
-}
-
-impl OnOffTrack {
-    /// The parse-fallback shape: a single key at t=0, on.
-    pub(crate) fn always_on() -> Self {
-        Self {
-            keys: vec![(0, true)],
-        }
-    }
-
-    /// Step-sample at `ms` since clip start: the last key at or before `ms` (M2 step
-    /// interpolation — nearest-previous), the first key's value before it, `true` for a keyless
-    /// track (never emitted by the parse).
-    pub fn on_at(&self, ms: f32) -> bool {
-        let mut on = self.keys.first().is_none_or(|&(_, v)| v);
-        for &(t, v) in &self.keys {
-            if (t as f32) <= ms {
-                on = v;
-            } else {
-                break;
-            }
-        }
-        on
-    }
-}
-
 /// Rebase one keyed track from the vanilla global timeline onto a sequence's `[start, end]` band
 /// (clip-relative ms): in-band keys shift by `−start`; of the keys at/before `start` only the
 /// last survives, collapsed to `t = 0` (it IS the value the band starts on, per the
@@ -242,20 +197,6 @@ pub(crate) fn seq0_band(bytes: &[u8]) -> (u32, u32) {
     } else {
         (0, u32::MAX)
     }
-}
-
-/// The emitter clip clock's wrap width: `Some(first sequence's span ms)` when that sequence
-/// LOOPS (flags bit0 clear — the verified polarity, `models/anim.rs`), else `None`. The client
-/// samples emitter tracks on `m2_animate`'s sequence time, which wraps at a looping sequence's
-/// end — windowed rate/enabled tracks re-fire every pass; a clamped sequence holds instead.
-pub(crate) fn seq0_wrap_ms(bytes: &[u8]) -> Option<f32> {
-    let (n_seq, o_seq) = (le_u32(bytes, 0x1c) as usize, le_u32(bytes, 0x20) as usize);
-    if n_seq == 0 || o_seq + 0x44 > bytes.len() {
-        return None;
-    }
-    let span = le_u32(bytes, o_seq + 8).saturating_sub(le_u32(bytes, o_seq + 4));
-    let looping = le_u32(bytes, o_seq + 0x10) & 1 == 0;
-    (looping && span > 0).then_some(span as f32)
 }
 
 /// A vanilla M2Track's key sub-arrays: `(gseq, n, timestamps offset, values offset)` — `None` if
@@ -302,25 +243,6 @@ pub(crate) fn track_keys_with<V: TrackValue>(
         keys,
         interp: le_u16(b, track),
     }
-}
-
-/// Read an ON/OFF gate M2Track (u8 values) — see [`OnOffTrack`]. Same band rebase as
-/// [`track_keys_with`]; a keyless/out-of-range track is always-on (the loader's default,
-/// `0x70f80e: mov byte[...+0xbc], 1`).
-pub(crate) fn track_enabled(b: &[u8], track: usize, band: (u32, u32)) -> OnOffTrack {
-    let Some((gseq, n, tofs, vofs)) = track_arrays(b, track) else {
-        return OnOffTrack::always_on();
-    };
-    if vofs + n > b.len() {
-        return OnOffTrack::always_on();
-    }
-    let mut keys: Vec<(u32, bool)> = (0..n)
-        .map(|i| (le_u32(b, tofs + i * 4), b[vofs + i] != 0))
-        .collect();
-    if gseq == 0xffff {
-        rebase_keys_to_band(&mut keys, band.0, band.1);
-    }
-    OnOffTrack { keys }
 }
 
 #[cfg(test)]
@@ -436,19 +358,5 @@ mod tests {
         let mut keys = vec![(0u32, 100.0f32), (500, -100.0), (667, -100.0)];
         rebase_keys_to_band(&mut keys, 0, 667);
         assert_eq!(keys, vec![(0, 100.0), (500, -100.0), (667, -100.0)]);
-    }
-
-    /// Step sampling on the enabled gate: nearest-previous key, first value before the first key.
-    #[test]
-    fn enabled_track_steps() {
-        let t = OnOffTrack {
-            keys: vec![(0, false), (133, true), (567, false)],
-        };
-        assert!(!t.on_at(0.0));
-        assert!(!t.on_at(100.0), "step, not lerp — off until the 133 ms key");
-        assert!(t.on_at(133.0));
-        assert!(t.on_at(500.0));
-        assert!(!t.on_at(600.0));
-        assert!(OnOffTrack::always_on().on_at(0.0));
     }
 }

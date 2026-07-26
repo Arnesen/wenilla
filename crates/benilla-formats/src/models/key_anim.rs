@@ -55,7 +55,7 @@ impl Lerp for [f32; 4] {
 /// is what indexes the track's [`M2Track::ranges`] — NOT an index into a filtered animation list)
 /// and that sequence's absolute `(start_ms, end_ms)` band.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SeqSlot {
+pub(crate) struct SeqSlot {
     pub index: usize,
     pub band: (u32, u32),
 }
@@ -76,14 +76,27 @@ pub struct KeyAnim<V> {
 impl<V: Lerp> KeyAnim<V> {
     /// Sample at `elapsed` seconds on the loop clock; `empty` is the channel's identity for the
     /// keyless case (the bake never emits that — each channel's `sample` supplies it).
-    pub(super) fn sample_or(&self, elapsed: f32, empty: V) -> V {
+    pub(crate) fn sample_or(&self, elapsed: f32, empty: V) -> V {
+        self.sample_clocked(elapsed, true, empty)
+    }
+
+    /// [`Self::sample_or`] with the clock law explicit: `wrap` = the playing sequence LOOPS
+    /// (`t mod period` — the kernel's modulo wrap re-fires windowed tracks every pass); `!wrap` =
+    /// it CLAMPS (`min(t, period)` — the clock parks at the band end and the track holds its tail
+    /// value there, never wrapping back to the band-start value). The distinction is what keeps a
+    /// clamped one-shot clip's end state honest: at `t == period` a modulo would alias to `0`.
+    pub(crate) fn sample_clocked(&self, elapsed: f32, wrap: bool, empty: V) -> V {
         let Some(&(t0, v0)) = self.keys.first() else {
             return empty;
         };
         if self.period <= 0.0 || self.keys.len() == 1 {
             return v0;
         }
-        let t = elapsed.rem_euclid(self.period);
+        let t = if wrap {
+            elapsed.rem_euclid(self.period)
+        } else {
+            elapsed.clamp(0.0, self.period)
+        };
         if t <= t0 {
             return v0;
         }
@@ -169,7 +182,7 @@ pub(super) fn sample_window<V: Lerp>(
 /// `gseq_durations` is the model's global-sequence table (ms); `seq` the sequence to bake for
 /// (see [`SeqSlot`]). A `gseq`-tagged track ignores `seq` entirely — it runs on the global
 /// sequence's own free clock, the same loop in every animation.
-pub(super) fn bake_track<T: Copy, V: Lerp + PartialEq>(
+pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     track: &M2Track<T>,
     gseq_durations: &[u32],
     seq: Option<SeqSlot>,

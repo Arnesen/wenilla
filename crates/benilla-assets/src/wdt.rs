@@ -3,10 +3,12 @@
 //! Decodes a map's tiny `.wdt` into a [`WdtIndex`] — the 64×64 `MAIN` tile-existence grid the
 //! terrain streamer consults before requesting any `.adt` (decision 0476): open ocean authors no
 //! tiles, and probing them wholesale spammed asset-server NotFound errors on every boat crossing.
+//! It also carries the map's **global WMO** where there is one (decision 0688): on the 20 shipped
+//! maps that author no terrain at all, that single placement is the entire world.
 //! The parse itself is `benilla-wdt`'s [`WdtReader`] (oracle-tested in the 0021 migration); this
 //! module only wraps it in the Bevy asset machinery.
 
-use benilla_formats::{WdtFile, WdtReader, WowVersion};
+use benilla_formats::{GlobalWmo, WdtFile, WdtReader, WowVersion};
 use bevy::asset::io::Reader;
 use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::reflect::TypePath;
@@ -23,6 +25,12 @@ impl WdtIndex {
         self.0
             .get_tile(tile_x as usize, tile_y as usize)
             .is_some_and(|t| t.has_adt)
+    }
+
+    /// The map's single global building, on a map with no terrain (`MPHD` bit 0) — see
+    /// [`GlobalWmo`]. `None` on an ADT map.
+    pub fn global_wmo(&self) -> Option<&GlobalWmo> {
+        self.0.global_wmo()
     }
 }
 
