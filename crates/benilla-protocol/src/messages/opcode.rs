@@ -219,6 +219,15 @@ pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
 /// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
 /// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.
 pub const CMSG_GAMEOBJ_USE: u16 = 0x00B1; // 177
+/// VERIFIED vmangos `Opcodes_1_12_1.h:183`: 180 — and the reference writes this literal
+/// (`0x5e2110`, its area-trigger check, builds `0xb4` + the trigger id). Body in
+/// [`super::area_trigger`]: the `AreaTrigger.dbc` id the player just walked into.
+pub const CMSG_AREATRIGGER: u16 = 0x00B4; // 180
+/// VERIFIED vmangos `Opcodes_1_12_1.h:697`: 696. Body in
+/// [`super::area_trigger::read_area_trigger_message`] — why a trigger refused (level, ghost form,
+/// battleground faction). The reference displays it through the same system-message sink as
+/// `SMSG_NOTIFICATION` (`0x4945b0`).
+pub const SMSG_AREA_TRIGGER_MESSAGE: u16 = 0x02B8; // 696
 pub const CMSG_MESSAGECHAT: u16 = 0x0095;
 pub const SMSG_MESSAGECHAT: u16 = 0x0096;
 // The channel family (VERIFIED vmangos `Server/Protocol/Opcodes_1_12_1.h:154-171`, decimal

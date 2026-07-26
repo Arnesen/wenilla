@@ -37,9 +37,12 @@ pub(crate) enum DoodadAnimTier<'a> {
     /// Only free-running global-sequence channels (candelabra glow pulses): joints +
     /// [`GlobalSeqDrive`], **no** `AnimationPlayer` — the cheapest animated tier.
     GlobalSeqOnly,
-    /// The file-order-first sequence moves bones (flags, windmills, torch flames): joints + an
-    /// `AnimationPlayer` looping this clip — the client's one-time load arm. Global-sequence
-    /// channels ride along if the model also has them.
+    /// The **loader-idle seed** moves bones (flags, windmills, torch flames): joints + an
+    /// `AnimationPlayer` looping this clip — the client's one-time load arm. That seed is animation
+    /// id 0 (Stand) resolved through the model's own `playableAnimationLookup`, NOT the file-order
+    /// first sequence (decision 0637; the variant name predates the correction and is kept because
+    /// it is the tier's identity, not a claim about which sequence). Global-sequence channels ride
+    /// along if the model also has them.
     FirstSeq(&'a AnimClip),
 }
 
@@ -75,9 +78,11 @@ pub(crate) struct AnimHostSpawn {
 
 /// Spawn the animation host for one placed M2, if [`classify`] says it animates: an anim-root entity
 /// at the placement transform, the joint hierarchy as its children (so despawning the root cascades),
-/// and — per tier — an `AnimationPlayer` looping the file-order-first sequence's clip (the client's
-/// one-time load arm, wow-re `doodad-anim-host.md`: `0x7121a0(bone 0, animations[0].id, linkFlag=1)`
-/// once, at `0x70ebd0`) and/or the free-running [`GlobalSeqDrive`]. `None` ⇒ the model is static and
+/// and — per tier — an `AnimationPlayer` looping the **loader-idle seed's** clip (the client's
+/// one-time load arm at `0x70ebd0`: `0x7121a0(bone 0, animation id 0 resolved through the model's
+/// own `playableAnimationLookup`, linkFlag=1)` once — wow-re `gameobject-anim-arm.md` §1, which
+/// CORRECTED `doodad-anim-host.md` §1's prose reading of `animations[0].id`; decision 0637) and/or
+/// the free-running [`GlobalSeqDrive`]. `None` ⇒ the model is static and
 /// the caller keeps today's path untouched.
 pub(crate) fn spawn_anim_host(
     commands: &mut Commands,
@@ -182,6 +187,9 @@ fn gate_doodad_anim(
         (&GlobalTransform, &bevy::camera::primitives::Frustum),
         With<crate::player::WorldCamera>,
     >,
+    // The far-clip wall — the meshless host's draw-set gate needs the same depth bound the
+    // emitters and the doodad meshes use.
+    view: Res<crate::view::ViewDistance>,
     mut logged: Local<bool>,
 ) {
     // One breadcrumb per session, the first frame any host exists — the machine-readable "doodads
@@ -197,18 +205,25 @@ fn gate_doodad_anim(
             // Meshless (particles-only) host: the emitters' own draw-set law (see the `fade`
             // field doc) — the reference ticks animation for any model in the draw set, and a
             // 0-batch model is admitted on its fade sphere exactly like its emitters are.
+            // "Exactly like" is now literal: this calls `EmitterFade::in_draw_set`, the single
+            // spelling of the rule, rather than a second copy of it. The copy is how the far-clip
+            // term went missing here as well as in the emitters (decision 0678 / bug B39) — a
+            // meshless fire prop kept animating its bones at any distance past the wall.
             let (radius, center) = host.fade;
             world_cam.is_some_and(|(cam_tf, frustum)| {
                 let cam_pos = cam_tf.translation();
-                let (dx, dz) = (center.x - cam_pos.x, center.z - cam_pos.z);
-                crate::model_fade::doodad_fade_alpha(radius, (dx * dx + dz * dz).sqrt()) > 0.0
-                    && frustum.intersects_sphere(
+                crate::particles::EmitterFade { radius, center }.in_draw_set(
+                    cam_pos,
+                    Vec3::from(cam_tf.forward()),
+                    view.farclip,
+                    frustum.intersects_sphere(
                         &bevy::camera::primitives::Sphere {
                             center: center.into(),
                             radius,
                         },
                         false,
-                    )
+                    ),
+                )
             })
         } else {
             host.meshes
@@ -522,6 +537,7 @@ mod tests {
             graph: Handle::default(),
             clips,
             playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
             hand_close: [None, None],
             global_bones: if gseq {
                 vec![GlobalBone {
@@ -701,6 +717,9 @@ mod tests {
     fn gate_pauses_hidden_and_resumes_on_the_shared_clock() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins); // Time
+                                         // The gate reads the far-clip wall (0678) — this host is mesh-BACKED, so it takes the
+                                         // `Visibility` branch and never consults it, but the system still needs the resource.
+        app.init_resource::<crate::view::ViewDistance>();
         app.add_systems(Update, gate_doodad_anim);
 
         let mesh = app.world_mut().spawn(Visibility::Inherited).id();

@@ -460,6 +460,10 @@ impl AssetLoader for M2ModelLoader {
             // loader-idle seed below resolves through it.
             let playable_animation_lookup =
                 parse_m2_playable_animation_lookup(&bytes).unwrap_or_default();
+            // The model's own "do I author id X" table (the reference's `0x711960`) — the
+            // GameObject arm's missing-sequence remap branches on it (`ModelAnimations::owns`).
+            let animation_lookup =
+                benilla_formats::parse_m2_animation_lookup(&bytes).unwrap_or_default();
             let mut clips = Vec::new();
             // The loader-idle seed (decision 0637, wow-re `gameobject-anim-arm.md` §1 — the
             // corrected `0x71019b` read): the loader arms **animation id 0 ("Stand")** resolved
@@ -557,6 +561,7 @@ impl AssetLoader for M2ModelLoader {
                     graph,
                     clips,
                     playable_animation_lookup,
+                    animation_lookup,
                     hand_close,
                     global_bones,
                     first_seq,

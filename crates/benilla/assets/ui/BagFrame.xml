@@ -699,6 +699,12 @@
             end
         end
 
+        -- The bag BAR's five buttons (the backpack toggle + the four equipped-bag slots) — the row
+        -- Disable_/Enable_BagButtons greys as a unit. Distinct from UiPanels.xml's BAG_WINDOWS,
+        -- which is the five bag *windows* those buttons open.
+        BENILLA_BAG_BUTTONS = { "BenillaBagToggle", "BenillaBagBarSlot1", "BenillaBagBarSlot2",
+                                "BenillaBagBarSlot3", "BenillaBagBarSlot4" }
+
         -- Disable_BagButtons / Enable_BagButtons — ref MainMenuBarBagButtons.lua l.102-128, called
         -- by GameMenuFrame's OnShow/OnHide (decision 0674) and by nothing else: while the game menu
         -- holds the screen, the whole bag row greys out. That is the *visible* half of a rule the
@@ -706,29 +712,34 @@
         -- while the menu is up — UiPanels.xml `CanOpenPanels`); without it the bags would look
         -- clickable and simply do nothing.
         --
-        -- Mapping onto benilla's row: the ref's MainMenuBarBackpackButton is BenillaBagToggle —
-        -- whose icon IS its NormalTexture (it carries no named $parentIcon region, so the greying
-        -- goes through GetNormalTexture) — and CharacterBag0..3Slot are BenillaBagBarSlot1..4, each
-        -- with the $parentIcon the Update path above also writes.
+        -- Mapping onto benilla's row: the ref's MainMenuBarBackpackButton is BenillaBagToggle and
+        -- CharacterBag0..3Slot are BenillaBagBarSlot1..4 — and in BOTH cases the greying goes onto
+        -- the button's `$parentIcon` LAYER texture, never onto a state texture. That is the
+        -- reference's own structure and it is load-bearing here: a disabled button draws its
+        -- DisabledTexture, and with none set it draws no state texture at all
+        -- (`ButtonState::region_visible`), so greying a NormalTexture would grey something already
+        -- gone. The four slots' UI-Quickslot2 rings ARE state textures and do vanish while
+        -- disabled unless the slot states one explicitly — so what you should see is the
+        -- ring stay put and the bag icon grey — which is why each slot repeats its ring as
+        -- DisabledTexture (see the slot instances below).
         function Disable_BagButtons()
-            BenillaBagToggle:Disable()
-            SetDesaturation(BenillaBagToggle:GetNormalTexture(), 1)
-            for i = 1, 4 do
-                local slot = getglobal("BenillaBagBarSlot" .. i)
-                slot:Disable()
-                SetDesaturation(slot.icon, 1)
+            for _, button in ipairs(BENILLA_BAG_BUTTONS) do
+                local b = getglobal(button)
+                b:Disable()
+                SetDesaturation(b.icon, 1)
             end
         end
 
         function Enable_BagButtons()
-            BenillaBagToggle:Enable()
-            SetDesaturation(BenillaBagToggle:GetNormalTexture(), nil)
+            for _, button in ipairs(BENILLA_BAG_BUTTONS) do
+                local b = getglobal(button)
+                b:Enable()
+                SetDesaturation(b.icon, nil)
+            end
+            -- The four slots' own paint decides their restored colour: an item locked on the cursor
+            -- wants 0.4 grey, not the flat white SetDesaturation(nil) just left.
             for i = 1, 4 do
-                local slot = getglobal("BenillaBagBarSlot" .. i)
-                slot:Enable()
-                -- The slot's own paint decides the restored colour: an item locked on the cursor
-                -- wants 0.4 grey, not the flat white a bare SetDesaturation(nil) would leave.
-                BenillaBagBarSlot_Update(slot)
+                BenillaBagBarSlot_Update(getglobal("BenillaBagBarSlot" .. i))
             end
         end
     ]]></Script>
@@ -1234,7 +1245,20 @@
                 <Offset><AbsDimension x="-6" y="2"/></Offset>
             </Anchor>
         </Anchors>
-        <NormalTexture file="Interface\Buttons\Button-Backpack-Up"/>
+        <!-- The backpack art is a LAYER texture, not the NormalTexture — the reference's own
+             structure (MainMenuBarBackpackButton inherits ItemButtonTemplate and sets
+             `MainMenuBarBackpackButtonIconTexture` in its OnLoad; the state textures are the
+             template's ring). It matters because `Disable_BagButtons` (decision 0674) disables this
+             button while the game menu is up, and a *state* texture with no DisabledTexture beside
+             it is not drawn in the disabled state (`ButtonState::region_visible` — the byte rule at
+             `SetState 0x779790`), so the backpack icon vanished outright instead of greying
+             (director-reported). As a layer it is untouched by button state, exactly like the four
+             bag-bar slots' own `$parentIcon`, and the greying is the vertex tint on it. -->
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon" file="Interface\Buttons\Button-Backpack-Up"/>
+            </Layer>
+        </Layers>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <!-- The lit ring while the backpack window is open (ref MainMenuBarBackpackButton
              l.104) — a CheckButton like the ref's; OnShow/OnHide of the window drive it. -->
@@ -1242,7 +1266,10 @@
         <Scripts>
             <!-- Seat the backpack icon above the bar art too (same reason as the bag-bar slots —
                  BenillaActionBarArt_SeatAbove's comment). -->
-            <OnLoad>if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(self) end</OnLoad>
+            <OnLoad>
+                self.icon = getglobal("BenillaBagToggleIcon")
+                if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(self) end
+            </OnLoad>
             <OnClick>BenillaBagToggle_OnClick()</OnClick>
             <OnEnter>BenillaBagToggle_OnEnter(self)</OnEnter>
             <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
@@ -1268,6 +1295,17 @@
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
         </NormalTexture>
+        <!-- The same ring again as the DISABLED art, so the slot keeps its frame while
+             Disable_BagButtons has the row greyed under the game menu (decision 0674). A button
+             with no DisabledTexture draws NO state texture when disabled
+             (`ButtonState::region_visible`) — the ring would blink out of the bar entirely. The
+             reference needs no such line because its widget keeps the previously shown texture up
+             when the new state's slot is empty (`SetState 0x779790`'s gated hide); ours states it
+             instead of relying on that. -->
+        <DisabledTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="66" y="66"/></Size>
+            <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
+        </DisabledTexture>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <!-- The lit ring while this bag's window is open (ref BagSlotButtonTemplate l.52). -->
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
@@ -1294,6 +1332,17 @@
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
         </NormalTexture>
+        <!-- The same ring again as the DISABLED art, so the slot keeps its frame while
+             Disable_BagButtons has the row greyed under the game menu (decision 0674). A button
+             with no DisabledTexture draws NO state texture when disabled
+             (`ButtonState::region_visible`) — the ring would blink out of the bar entirely. The
+             reference needs no such line because its widget keeps the previously shown texture up
+             when the new state's slot is empty (`SetState 0x779790`'s gated hide); ours states it
+             instead of relying on that. -->
+        <DisabledTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="66" y="66"/></Size>
+            <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
+        </DisabledTexture>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>
@@ -1319,6 +1368,17 @@
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
         </NormalTexture>
+        <!-- The same ring again as the DISABLED art, so the slot keeps its frame while
+             Disable_BagButtons has the row greyed under the game menu (decision 0674). A button
+             with no DisabledTexture draws NO state texture when disabled
+             (`ButtonState::region_visible`) — the ring would blink out of the bar entirely. The
+             reference needs no such line because its widget keeps the previously shown texture up
+             when the new state's slot is empty (`SetState 0x779790`'s gated hide); ours states it
+             instead of relying on that. -->
+        <DisabledTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="66" y="66"/></Size>
+            <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
+        </DisabledTexture>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>
@@ -1344,6 +1404,17 @@
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
         </NormalTexture>
+        <!-- The same ring again as the DISABLED art, so the slot keeps its frame while
+             Disable_BagButtons has the row greyed under the game menu (decision 0674). A button
+             with no DisabledTexture draws NO state texture when disabled
+             (`ButtonState::region_visible`) — the ring would blink out of the bar entirely. The
+             reference needs no such line because its widget keeps the previously shown texture up
+             when the new state's slot is empty (`SetState 0x779790`'s gated hide); ours states it
+             instead of relying on that. -->
+        <DisabledTexture file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="66" y="66"/></Size>
+            <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
+        </DisabledTexture>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>

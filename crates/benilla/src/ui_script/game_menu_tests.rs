@@ -473,6 +473,193 @@ fn escape_during_a_countdown_cancels_it_and_does_not_open_the_menu() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The world map is subject to the menu like everything else (director-reported: it was "the only
+/// one not blocked"). It was a plain toplevel showing itself with a bare `WorldMapFrame:Show()`,
+/// so the panel manager never saw it and `CanOpenPanels()` never got a say; it is now the ref's own
+/// `area = "full"` row and its toggle goes through ShowUIPanel.
+///
+/// Both directions matter, and the second is the one a bare `IsVisible()` check would miss: the map
+/// must also VACATE the full-screen slot when it closes, or the stale slot refuses every panel
+/// afterwards.
+#[test]
+fn the_world_map_cannot_open_behind_the_menu_and_gives_its_slot_back() {
+    let s = harness_with(&[
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml", // the map's continent/zone pickers initialize into it at OnLoad
+        "ScrollTemplates.xml",
+        "WorldMapFrame.xml",
+    ]);
+
+    // Opens normally, and takes the full-screen slot.
+    s.run("ToggleWorldMap()").unwrap();
+    assert!(s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert!(s
+        .eval::<bool>("return GetFullScreenFrame():GetName() == \"WorldMapFrame\"")
+        .unwrap());
+
+    // Closing gives the slot back — a stale full-screen frame would block every later panel.
+    s.run("ToggleWorldMap()").unwrap();
+    assert!(!s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert!(
+        s.eval::<bool>("return GetFullScreenFrame() == nil")
+            .unwrap(),
+        "the map vacated the full-screen slot"
+    );
+
+    // With the menu up, it must not open — from the M binding or from the micro button, both of
+    // which are this same ToggleWorldMap.
+    s.run("ToggleGameMenu(1)").unwrap();
+    assert!(s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap());
+    s.run("ToggleWorldMap()").unwrap();
+    assert!(
+        !s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap(),
+        "the map must not open behind the game menu"
+    );
+    assert!(s
+        .eval::<bool>("return GetFullScreenFrame() == nil")
+        .unwrap());
+
+    // And it opens again the moment the menu is gone.
+    s.run("ToggleGameMenu(1)").unwrap();
+    s.run("ToggleWorldMap()").unwrap();
+    assert!(s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The other direction of the same rule (ref `ShowUIPanel` l.668-675): with the map holding the
+/// full screen, nothing opens behind IT either — and ESC closes the map first, so the press that
+/// would have opened the menu goes to the map instead (one eater per press).
+#[test]
+fn nothing_opens_behind_the_world_map_and_escape_closes_it_first() {
+    let s = harness_with(&[
+        "GameTooltip.xml",
+        "UIDropDownMenu.xml",
+        "ScrollTemplates.xml",
+        "WorldMapFrame.xml",
+        "MerchantFrame.xml",
+        "LootFrame.xml",
+    ]);
+    s.run("ToggleWorldMap()").unwrap();
+
+    s.run("ShowUIPanel(BenillaLootFrame)").unwrap();
+    assert!(
+        !s.eval::<bool>("return BenillaLootFrame:IsVisible()")
+            .unwrap(),
+        "a left-area panel must not open behind the full-screen map"
+    );
+
+    // ESC: the map's own rung eats the press (it stands in for the reference frame's OnKeyDown).
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(!s.eval::<bool>("return WorldMapFrame:IsVisible()").unwrap());
+    assert!(
+        !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
+        "…and did not also open the menu"
+    );
+    assert!(s
+        .eval::<bool>("return GetFullScreenFrame() == nil")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The bag row under an open menu, pinned at the QUAD level — because "greyed out" and "gone" are
+/// the same thing to an `IsEnabled()` assertion, and the difference is what the director saw: the
+/// first cut of `Disable_BagButtons` disabled buttons whose art was their NormalTexture, and a
+/// disabled button with no DisabledTexture draws no state texture at all
+/// (`ButtonState::region_visible`, the byte rule at `SetState 0x779790`) — so the backpack icon
+/// vanished off the bar instead of dimming.
+///
+/// What must hold with the menu up: every one of the five buttons still DRAWS its art, and every
+/// one is tinted grey. And on the way back out, tinted white again.
+#[test]
+fn the_bag_row_greys_under_the_menu_without_any_of_it_disappearing() {
+    let mut s = harness_with(&[
+        "MerchantFrame.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "BagFrame.xml",
+    ]);
+    s.set_money(0);
+    s.set_container(0, Some(backpack()));
+    s.resolve();
+
+    // The backpack icon + the four slot rings, by name.
+    let art = |s: &UiScript, owner: &str| -> Vec<(String, Option<[f32; 4]>)> {
+        s.extract()
+            .into_iter()
+            .filter(|eq| s.quad_owner_name(eq.target).as_deref() == Some(owner))
+            .filter_map(|eq| match &eq.content {
+                benilla_ui::script::QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    ..
+                } => Some((p.clone(), *color)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    for owner in [
+        "BenillaBagToggle",
+        "BenillaBagBarSlot1",
+        "BenillaBagBarSlot2",
+        "BenillaBagBarSlot3",
+        "BenillaBagBarSlot4",
+    ] {
+        assert!(
+            !art(&s, owner).is_empty(),
+            "{owner} draws art before the menu opens"
+        );
+    }
+
+    s.run("ToggleGameMenu(1)").unwrap();
+    s.resolve();
+    for owner in [
+        "BenillaBagToggle",
+        "BenillaBagBarSlot1",
+        "BenillaBagBarSlot2",
+        "BenillaBagBarSlot3",
+        "BenillaBagBarSlot4",
+    ] {
+        let drawn = art(&s, owner);
+        assert!(
+            !drawn.is_empty(),
+            "{owner} must still DRAW under the open menu — greyed is not gone"
+        );
+    }
+    // The backpack icon specifically: still its own art, and tinted to SetDesaturation's grey.
+    let toggle = art(&s, "BenillaBagToggle");
+    assert!(
+        toggle
+            .iter()
+            .any(|(p, _)| p == "Interface\\Buttons\\Button-Backpack-Up"),
+        "the backpack image is still on the bar: {toggle:?}"
+    );
+    assert!(
+        toggle
+            .iter()
+            .any(|(p, c)| p == "Interface\\Buttons\\Button-Backpack-Up"
+                && c.is_some_and(|c| (c[0] - 0.5).abs() < 0.01)),
+        "…and it is greyed, not full-bright: {toggle:?}"
+    );
+
+    s.run("ToggleGameMenu(1)").unwrap();
+    s.resolve();
+    let toggle = art(&s, "BenillaBagToggle");
+    assert!(
+        toggle
+            .iter()
+            .any(|(p, c)| p == "Interface\\Buttons\\Button-Backpack-Up"
+                && c.is_none_or(|c| (c[0] - 1.0).abs() < 0.01)),
+        "closing the menu restores full colour: {toggle:?}"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaBagToggle:IsEnabled()")
+            .unwrap(),
+        "…and the button works again"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// A one-item backpack (the escape/bag tests' fixture, duplicated so this file is self-contained).
 fn backpack() -> ContainerState {
     let mut slots = std::collections::HashMap::new();

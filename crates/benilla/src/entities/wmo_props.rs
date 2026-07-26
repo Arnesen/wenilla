@@ -30,9 +30,15 @@
 //!   refreshes the placement from the owner's propagated `GlobalTransform` every frame and the
 //!   risen cloud re-anchors to the prop's live position (the reference's per-frame
 //!   `translate(−emitterPos)` draw-matrix rebuild: a moving model carries its flame). No
-//!   [`crate::particles::EmitterFade`] — that gate's centre is a baked world point; like every
-//!   entity-owned emitter, the population is bounded by server visibility instead. The emitter
-//!   entity parents under the gameobject, so the off-map hide reaches it and despawn cascades.
+//!   [`crate::particles::EmitterFade`] — that gate's centre is a baked world point, and a mover has
+//!   none. The emitter entity parents under the gameobject, so the off-map hide reaches it and
+//!   despawn cascades.
+//!   ⚠ **This used to say the population is "bounded by server visibility instead". That was
+//!   wrong, and a transport is the exact counter-example** (decision 0678, bug B39): vmangos
+//!   streams transports **map-wide**, so a ship's deck lanterns are resident from anywhere on the
+//!   map. Measured from Durotar: 56 emitters ticking and drawing at 4853–7080 yd, this boat's
+//!   lanterns among them. The bound is now the far-clip wall, applied in
+//!   [`crate::particles`]' sim to every world-lane emitter regardless of `EmitterFade`.
 //! - **M2 point lights** (the lantern's glow source) spawn as CHILDREN at the prop-local
 //!   position — propagation carries the source with the hull, and the hide/despawn follow.
 //! - **Interior cabin props** (an INDOOR-group MODD — ~118 of the ship's 133) take the interior

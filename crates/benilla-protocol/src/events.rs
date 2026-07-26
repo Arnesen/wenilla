@@ -443,6 +443,11 @@ pub enum SessionEvent {
     /// A server notice (`SMSG_NOTIFICATION`) — pre-formatted text the real client flashes in the
     /// red UIErrorsFrame ("You do not know that language", trade refusals, and kin).
     Notification { text: String },
+    /// An area trigger refused (`SMSG_AREA_TRIGGER_MESSAGE`) — pre-formatted text explaining why a
+    /// portal or instance entrance did nothing ("You must be at least level 58 to enter…", "You
+    /// cannot enter … while in ghost form."). The reference sends it to the same system-message
+    /// sink as [`Self::Notification`].
+    AreaTriggerMessage { text: String },
     /// Answers `/played` (`SMSG_PLAYED_TIME`, our `CMSG_PLAYED_TIME`): total played time + time
     /// since the last level-up, both in seconds.
     PlayedTime { total: u32, level: u32 },

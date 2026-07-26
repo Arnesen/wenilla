@@ -112,7 +112,7 @@ impl ItemDisplayCatalog {
 /// column pins). Unpinned integer columns are still typed `UInt32` (matching the file's own record
 /// stride) even though nothing reads them, so the schema's field-count check against the real header
 /// stays exact.
-fn item_display_info_schema() -> Schema {
+pub(crate) fn item_display_info_schema() -> Schema {
     let mut s = Schema::new("ItemDisplayInfo");
     for (name, ty) in [
         ("ID", FieldType::UInt32),

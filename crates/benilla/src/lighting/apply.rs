@@ -77,7 +77,9 @@ pub(super) fn apply_wow_lighting(
     // fog off via `fog_color.w`. (The sky-dome horizon is unaffected — it reads the fog *colour*.)
     let mut tu = l.terrain_uniforms(t.disable_fog);
     // Live hard far-clip wall: terrain.wgsl + wow_model.wgsl read fog_params.w (from the shared buffer)
-    // and discard fragments beyond it. WDL/liquid ignore .w (they render to the horizon behind the wall).
+    // and discard fragments beyond it; liquid.wgsl does the same. `wdl.wgsl` reads the SAME value from
+    // the other side — its band starts at `farclip − 33` and its depth is clamped behind the wall, so
+    // the horizon backdrop tracks the slider without a seam (decision 0684).
     tu.fog_params.w = farclip;
     // WDL distant terrain shares the terrain fog exactly (it's unlit white × this fog — the only
     // lever it has). One shared material, so this is a single write on each light change.

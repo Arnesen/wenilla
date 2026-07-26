@@ -48,9 +48,11 @@ const POS_SCALE: f32 = 36.0;
 /// Light.dbc weather param slots: [0]=clear, [1]=clear-underwater, [2]=storm, [3]=storm-underwater,
 /// [4]=death.
 const SLOT_CLEAR: usize = 0;
-/// `[1]` clear-underwater: the denser/greener fog + cooler light the client switches to when the eye
-/// is submerged (VERIFIED apitrace WoW.18: ~38 yd teal fog + blue ambient/diffuse vs the ~1284 yd
-/// surface fog). Same band-row meanings as the clear slot, just a different `LightParams` id.
+/// `[1]` clear-underwater: the denser fog + cooler light the client switches to when the eye is
+/// submerged in **water** (VERIFIED apitrace WoW.18: ~38 yd teal fog + blue ambient/diffuse vs the
+/// ~1284 yd surface fog). Same band-row meanings as the clear slot, just a different `LightParams` id.
+/// Reached only by [`Submersion::Water`] — magma and slime never consult a zone slot at all
+/// (see [`PARAM_MAGMA`]).
 const SLOT_CLEAR_UNDERWATER: usize = 1;
 const SLOT_STORM: usize = 2;
 const SLOT_STORM_UNDERWATER: usize = 3;
@@ -60,9 +62,68 @@ const SLOT_STORM_UNDERWATER: usize = 3;
 /// priority over weather/underwater exactly as the single global slot does.
 const SLOT_DEATH: usize = 4;
 
+/// The **fixed global `LightParams` rows** the reference uses for submersion in the two fullbright
+/// liquids — byte-VERIFIED (`0x6d2371` routes magma and slime to their own leg *before* the slot
+/// selection: magma at `0x6d23e1` reads row 7, slime at `0x6d239e` reads row 6, each guarded on the
+/// table's `maxId`). These are **zone-independent** and nothing in `Light.dbc` references them, which
+/// is why no position-keyed dump ever surfaced them: submersion in lava does not read the zone's
+/// underwater slot at all.
+///
+/// The shipped rows are exactly the vanilla look, which is the cross-check that earned this:
+/// magma fog `[200,52,0]` at **27 yd** with start fraction **−2.0** (67 % fiery orange at the eye),
+/// slime fog `[0,255,0]` at **50 yd** with **−1.0** (50 % green). There is no separate magma/slime
+/// fog constant anywhere in the binary (VERIFIED negative) — these two rows *are* the distinct look.
+const PARAM_SLIME: u32 = 6;
+const PARAM_MAGMA: u32 = 7;
+
+/// What the camera eye is submerged in, if anything — the atmosphere selector. Water and ocean pick
+/// the zone's *underwater slot*; magma and slime replace the whole area blend with a fixed global row
+/// (see [`PARAM_MAGMA`]/[`PARAM_SLIME`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Submersion {
+    /// Dry — the ordinary clear/storm slot.
+    #[default]
+    Dry,
+    /// Under water, ocean or rapids: the zone's own underwater `LightParams`, area-blended as usual.
+    Water,
+    /// Under magma: the fixed global row, verbatim.
+    Magma,
+    /// Under slime: the fixed global row, verbatim.
+    Slime,
+}
+
+impl Submersion {
+    /// Submerged in **any** liquid.
+    pub fn any(self) -> bool {
+        self != Submersion::Dry
+    }
+
+    /// Submerged specifically in a WATER kind (water / ocean / rapids) — the predicate for the
+    /// consumers that are about water rather than about liquid: the `UnderWaterLoop` ambience bed and
+    /// the "Underwater" reverb-preference column.
+    ///
+    /// Deliberately NOT [`Self::any`]: whether the reference swaps the submerged ambience bed and the
+    /// reverb preset for **lava and slime** as well is unverified, and widening it silently on the way
+    /// past would be inventing a behaviour. The atmosphere is verified per kind; the audio is not.
+    pub fn is_water(self) -> bool {
+        self == Submersion::Water
+    }
+
+    /// The fixed global `LightParams` row this submersion replaces the whole blend with, if any.
+    /// `None` for [`Submersion::Dry`] and [`Submersion::Water`], which go through the slot selection.
+    fn fixed_param(self) -> Option<u32> {
+        match self {
+            Submersion::Magma => Some(PARAM_MAGMA),
+            Submersion::Slime => Some(PARAM_SLIME),
+            Submersion::Dry | Submersion::Water => None,
+        }
+    }
+}
+
 /// Pick the `LightParams` slot for the current ghost/weather/submersion state (see `SLOT_*`).
 /// Ghost wins outright — the client keeps ONE active slot, and the ghost watcher owns it while
-/// the flag is up.
+/// the flag is up. Only [`Submersion::Water`] reaches the underwater slots; the fullbright liquids
+/// never get here (their fixed row short-circuits the blend).
 fn weather_slot(ghost: bool, stormy: bool, underwater: bool) -> usize {
     if ghost {
         return SLOT_DEATH;
@@ -304,6 +365,19 @@ impl LightCatalog {
             }
             x => x,
         };
+        self.debug_param(p, time);
+    }
+
+    /// Debug: [`Self::debug_bands`] for an explicitly named `LightParams` id, with no position and no
+    /// slot selection. The instrument for the rows **nothing in `Light.dbc` references**: magma and
+    /// slime submersion do not read a zone's underwater slot at all, they read the fixed global rows
+    /// 7 and 6 (VERIFIED `0x6d2371`, guards `maxId >= 7`/`>= 6`), which no position-keyed dump can
+    /// ever reach.
+    pub fn debug_param(&self, p: u32, time: u32) {
+        if p < 1 {
+            println!("(LightParams ids are 1-based)");
+            return;
+        }
         println!("LightParams {p} @ time {time} half-min — all int rows (sRGB 0..255):");
         for b in 0..18u32 {
             let key = (p - 1) * 18 + b + 1;
@@ -348,10 +422,20 @@ impl LightCatalog {
         pos: [f32; 3],
         time: u32,
         stormy: bool,
-        underwater: bool,
+        submersion: Submersion,
         ghost: bool,
     ) -> Atmosphere {
-        let slot = weather_slot(ghost, stormy, underwater);
+        // Magma/slime submersion replaces the WHOLE area blend with one fixed global row — the
+        // reference branches out at `0x6d2371`, before the slot selection, so there is no zone
+        // sphere blend and no storm lerp on this leg (see [`PARAM_MAGMA`]). Guarded on the row
+        // actually existing, matching the binary's own `maxId` guard: a chain without it falls
+        // through to the ordinary atmosphere rather than inventing one.
+        if let Some(p) = submersion.fixed_param() {
+            if self.has_param(p) {
+                return self.sample_param(p, time);
+            }
+        }
+        let slot = weather_slot(ghost, stormy, submersion == Submersion::Water);
         let atmo_of = |l: &Light| -> Option<Atmosphere> {
             // Fall back to the clear slot if the requested slot is unset for this light (e.g. a zone
             // with no dedicated underwater param degrades to the above-water atmosphere).
@@ -453,7 +537,7 @@ impl LightCatalog {
             );
         }
         let picked = self.sample(map, pos, time, false);
-        let blended = self.sample_blended(map, pos, time, false, false, false);
+        let blended = self.sample_blended(map, pos, time, false, Submersion::Dry, false);
         println!(
             "  => pick_light : amb {} sun {}",
             c(picked.ambient),
@@ -464,6 +548,87 @@ impl LightCatalog {
             c(blended.ambient),
             c(blended.sun_diffuse)
         );
+    }
+
+    /// Debug: the **per-weather-slot** resolve at `pos` — for each of the five `Light.dbc` param
+    /// slots (clear / clear-underwater / storm / storm-underwater / death), which `LightParams` id
+    /// the picked sphere and the continent global each name, whether the slot is UNSET (and so falls
+    /// back to clear), and the fog/ambient/diffuse the blend actually resolves.
+    ///
+    /// The companion to [`Self::debug_bands`], which only ever dumps the clear slot: an underwater or
+    /// ghost atmosphere that reads wrong is either a slot the data leaves unset (→ we correctly show
+    /// the surface atmosphere) or a slot whose values we mis-consume, and those two look identical
+    /// from inside the game. This tells them apart in one command.
+    pub fn debug_slots(&self, map: u32, pos: [f32; 3], time: u32) {
+        const NAMES: [&str; 5] = [
+            "clear",
+            "clear-underwater",
+            "storm",
+            "storm-underwater",
+            "death",
+        ];
+        let c = |x: [f32; 3]| {
+            format!(
+                "[{:3} {:3} {:3}]",
+                (x[0] * 255.0) as u8,
+                (x[1] * 255.0) as u8,
+                (x[2] * 255.0) as u8
+            )
+        };
+        let picked = self.pick_light(map, pos);
+        let global = self.lights.iter().find(|l| l.map == map && l.global);
+        println!(
+            "Light slots on map {map} at [{:.1} {:.1} {:.1}], time {time} half-min:",
+            pos[0], pos[1], pos[2]
+        );
+        match picked {
+            Some(l) if l.global => {
+                println!("  picked sphere : (none local — the continent global)")
+            }
+            Some(l) => println!(
+                "  picked sphere : local, falloff {:.0}->{:.0} yd, params {:?}",
+                l.falloff_start, l.falloff_end, l.params
+            ),
+            None => println!("  picked sphere : (no light covers this position)"),
+        }
+        if let Some(g) = global {
+            println!("  continent glob: params {:?}", g.params);
+        }
+        println!(
+            "  {:<17} {:>6} {:>6} {:>9} {:>6}  {:<15} {:<15} {:<15}",
+            "slot", "picked", "global", "fog_end", "frac", "fog_color", "ambient", "diffuse"
+        );
+        for (slot, name) in NAMES.iter().enumerate() {
+            // The same UNSET→clear fallback both sample paths apply, reported per source so an
+            // "unset everywhere" slot is visibly distinct from one carrying real values.
+            let show = |l: Option<&Light>| match l.map(|l| l.params[slot]) {
+                None => "     -".to_string(),
+                Some(0) => " unset".to_string(),
+                Some(p) => format!("{p:>6}"),
+            };
+            let a = self.sample_blended(
+                map,
+                pos,
+                time,
+                slot == SLOT_STORM || slot == SLOT_STORM_UNDERWATER,
+                if slot == SLOT_CLEAR_UNDERWATER || slot == SLOT_STORM_UNDERWATER {
+                    Submersion::Water
+                } else {
+                    Submersion::Dry
+                },
+                slot == SLOT_DEATH,
+            );
+            println!(
+                "  {name:<17} {} {} {:>9.1} {:>6.2}  {:<15} {:<15} {:<15}",
+                show(picked),
+                show(global),
+                a.fog_end,
+                a.fog_start_frac,
+                c(a.fog_color),
+                c(a.ambient),
+                c(a.sun_diffuse)
+            );
+        }
     }
 
     fn pick_light(&self, map: u32, pos: [f32; 3]) -> Option<&Light> {
@@ -482,6 +647,15 @@ impl LightCatalog {
             }
         }
         local.or(global)
+    }
+
+    /// Whether `LightParams` `p` actually has band rows in this chain — the client's `maxId` guard on
+    /// the fixed magma/slime rows. Checks the fog-colour row, which every real record carries.
+    fn has_param(&self, p: u32) -> bool {
+        p >= 1
+            && self
+                .int_bands
+                .contains_key(&((p - 1) * 18 + IB_FOG_COLOR + 1))
     }
 
     fn sample_param(&self, p: u32, t: u32) -> Atmosphere {

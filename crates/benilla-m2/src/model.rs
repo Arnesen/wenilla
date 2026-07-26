@@ -268,6 +268,12 @@ pub struct M2Model {
     /// (`$CSL`/`$CSR`/`$CST`), the ranged release (`$BWR`), the bow anchors, the sound/impact tags'
     /// anchor points.
     pub event_markers: Vec<M2EventMarker>,
+    /// The model's **AnimationLookup** (header `+0x24`/`+0x28`): row `i` is the file slot of this
+    /// model's first sequence for `AnimationData.dbc` id `i`, or `0xffff` where it authors none.
+    /// This is the table behind the reference's ownership predicate — see [`M2Model::owns_animation`].
+    /// Note the table is *short*: a model's `nAnimationLookup` stops just past the highest id it
+    /// authors, so an id beyond the end reads as the out-of-bounds sentinel, i.e. **not owned**.
+    pub animation_lookup: Vec<u16>,
     /// The model's baked **PlayableAnimationLookup** (decision 0082 — see [`M2PlayableAnim`]): row `i`
     /// is the model's own precomputed substitute for requested `AnimationData.dbc` id `i`. Empty for a
     /// version past 263 (the array is dropped) or a model whose header couldn't be read that far — the
@@ -276,6 +282,22 @@ pub struct M2Model {
     /// Embedded skin-profile array `(count, file_offset)` — `parse_embedded_skin` reads from here.
     pub(crate) views: (u32, u32),
     pub(crate) version: u32,
+}
+
+impl M2Model {
+    /// **Does this model author `AnimationData.dbc` id `anim_id`?** — the reference's `0x711960`,
+    /// byte-for-byte: a bounds-checked read of [`Self::animation_lookup`] (`0x710310` returns the
+    /// `0xffff` sentinel for an out-of-range index) compared against `0xffff`.
+    ///
+    /// This is the predicate the GameObject animation arm branches on when the substate's animation
+    /// id is missing from the model (wow-re `gameobject-anim-arm.md` §2c's four-way remap), so it
+    /// must answer exactly as the reference does — including for an id past the table's end, which
+    /// is **not owned** even if some later mechanism could reach a sequence carrying it.
+    pub fn owns_animation(&self, anim_id: u16) -> bool {
+        self.animation_lookup
+            .get(anim_id as usize)
+            .is_some_and(|&slot| slot != 0xffff)
+    }
 }
 
 /// Holds the parsed model (mirrors the reference's `parse_m2(..).model()` shape).

@@ -63,7 +63,7 @@ pub use ground_effects::{
     GroundEffectCatalog,
 };
 mod light;
-pub use light::{Atmosphere, LightCatalog};
+pub use light::{Atmosphere, LightCatalog, Submersion};
 mod loading_screen;
 pub use loading_screen::{load_loading_screens, LoadingScreenCatalog};
 mod liquid;
@@ -74,6 +74,8 @@ mod anim_data;
 pub use anim_data::{load_anim_data_catalog, AnimDataCatalog, AnimEntry};
 mod quest_headers;
 pub use quest_headers::{load_quest_header_names, QuestHeaderNames};
+mod area_trigger;
+pub use area_trigger::{load_area_trigger_catalog, AreaTriggerCatalog, AreaTriggerRow};
 mod area_sound;
 pub use area_sound::{
     load_area_sound_catalog, AreaAudio, AreaEntry, AreaSoundCatalog, SoundAmbienceEntry,
@@ -141,20 +143,20 @@ pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_collision, hand_grip_finger_poses,
     load_m2_animation_summary, load_m2_bounds, load_m2_collision_hull, load_m2_mesh,
     load_m2_mesh_skinned, load_object_model, load_wmo, load_wmo_collision_tris,
-    m2_ribbon_emitter_count, m2_texture_transform_count, parse_m2_animation_summary,
-    parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
-    parse_m2_collision_hull, parse_m2_event_markers, parse_m2_global_sequence_bones,
-    parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
-    parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
-    parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
-    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
-    wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind,
-    BoneKeys, BoneScaleAnim, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy,
-    FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment,
-    M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, PlayableAnim, RenderSubmesh,
-    RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
-    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot,
+    m2_ribbon_emitter_count, m2_texture_transform_count, parse_m2_animation_lookup,
+    parse_m2_animation_summary, parse_m2_animations, parse_m2_attachments, parse_m2_bounds,
+    parse_m2_camera, parse_m2_collision_hull, parse_m2_event_markers,
+    parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_playable_animation_lookup,
+    parse_m2_portrait_camera, parse_m2_render_submeshes, parse_m2_skeleton,
+    parse_m2_string_anchors, parse_wmo_fogs, parse_wmo_lights, parse_wmo_portals, parse_wmo_root,
+    wmo_group_doodad_refs, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
+    wmo_group_liquid_mesh, wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent,
+    Billboard, BillboardKind, BoneKeys, BoneScaleAnim, CharSkinSlot, CollisionMesh,
+    EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone, GlobalSeqChannel,
+    GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light, M2PortraitCamera, ModelAnimation,
+    ModelBlend, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone,
+    StringAnchors, UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader,
+    WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot,
 };
 mod terrain;
 pub use terrain::{
@@ -351,6 +353,40 @@ pub fn blp_bytes_to_mip_chain(bytes: &[u8]) -> Result<BlpMipChain> {
 fn schema_for(dbc_name: &str) -> Option<Schema> {
     let base = dbc_name.rsplit(['/', '\\']).next().unwrap_or(dbc_name);
 
+    // Tables whose schema a typed loader in this crate already declares: reuse *that* constructor
+    // rather than re-transcribing the layout here, so a dump can never disagree with what the client
+    // actually reads (the six hand-written schemas below predate any loader for their table).
+    // The appearance family is registered because "which row does this NPC render from?" is a
+    // recurring question; the crate has ~30 more loader schemas that could join this list one line
+    // at a time as they are needed.
+    for (name, ctor) in [
+        (
+            "CreatureDisplayInfo.dbc",
+            creatures::creature_display_info_schema as fn() -> Schema,
+        ),
+        (
+            "CreatureDisplayInfoExtra.dbc",
+            creatures::creature_display_info_extra_schema,
+        ),
+        (
+            "CreatureModelData.dbc",
+            creatures::creature_model_data_schema,
+        ),
+        ("CharHairGeosets.dbc", characters::char_hair_geosets_schema),
+        (
+            "CharacterFacialHairStyles.dbc",
+            characters::char_facial_hair_schema,
+        ),
+        ("HelmetGeosetVisData.dbc", characters::helmet_vis_schema),
+        ("CharSections.dbc", characters::char_sections_schema),
+        ("ItemDisplayInfo.dbc", items::item_display_info_schema),
+        ("AreaTrigger.dbc", area_trigger::area_trigger_schema),
+    ] {
+        if base.eq_ignore_ascii_case(name) {
+            return Some(ctor());
+        }
+    }
+
     if base.eq_ignore_ascii_case("TaxiNodes.dbc") {
         // 16 fields (record_size 64), verified against build 5875.
         let mut s = Schema::new("TaxiNodes");
@@ -477,7 +513,9 @@ pub fn dbc_to_csv(dbc_bytes: &[u8], dbc_name: &str, out: &Path) -> Result<(u32, 
         anyhow::anyhow!(
             "no schema defined for '{dbc_name}' ({fields} fields); known: TaxiNodes.dbc, \
              AreaTable.dbc, GameObjectDisplayInfo.dbc, TaxiPath.dbc, TaxiPathNode.dbc, \
-             TransportAnimation.dbc"
+             TransportAnimation.dbc, CreatureDisplayInfo.dbc, CreatureDisplayInfoExtra.dbc, \
+             CreatureModelData.dbc, CharHairGeosets.dbc, CharacterFacialHairStyles.dbc, \
+             HelmetGeosetVisData.dbc, CharSections.dbc, ItemDisplayInfo.dbc"
         )
     })?;
 
@@ -566,5 +604,45 @@ mod tests {
             "no-mipmaps BLP must yield 1 level, not 0"
         );
         assert_eq!(chain.mips[0].len(), 2 * 2 * 4);
+    }
+
+    /// Every table the CSV dumper claims in its error hint really has a schema, and each dumps
+    /// against the **shipped** file — which is the only check that matters, because `with_schema`
+    /// rejects a field-count mismatch and `dbc_to_csv` would otherwise fail only when a session
+    /// reached for it mid-investigation. Skips without the client data.
+    #[test]
+    fn registered_dbc_schemas_dump_the_shipped_tables() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = open_chain(&data).expect("open chain");
+        let out = std::env::temp_dir().join("benilla-schema-registry-test.csv");
+        for table in [
+            "CreatureDisplayInfo",
+            "CreatureDisplayInfoExtra",
+            "CreatureModelData",
+            "CharHairGeosets",
+            "CharacterFacialHairStyles",
+            "HelmetGeosetVisData",
+            "CharSections",
+            "ItemDisplayInfo",
+            "TaxiNodes",
+            "AreaTable",
+            "GameObjectDisplayInfo",
+            "TaxiPath",
+            "TaxiPathNode",
+            "TransportAnimation",
+        ] {
+            let path = format!("DBFilesClient\\{table}.dbc");
+            let bytes = chain
+                .read_file(&path)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let (rows, _) = dbc_to_csv(&bytes, &path, &out)
+                .unwrap_or_else(|e| panic!("{table} schema does not fit the shipped file: {e}"));
+            assert!(rows > 0, "{table} has rows");
+        }
+        let _ = std::fs::remove_file(&out);
     }
 }

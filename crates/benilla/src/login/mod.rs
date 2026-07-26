@@ -116,6 +116,13 @@ impl LoginIntent {
         self.creds = None;
         self.retry_at = None;
     }
+
+    /// The account this session authenticated as, however it got there — the env fast path or the
+    /// login screen. The one honest answer to "whose body is this?", which is what decides whether
+    /// the probe shield has any business touching it (decision 0677).
+    pub(crate) fn account(&self) -> Option<&str> {
+        self.creds.as_ref().map(|(user, _)| user.as_str())
+    }
 }
 
 /// Send one login attempt to the parked IO thread, stamped with the current abandon generation.

@@ -61,9 +61,15 @@ pub(super) use glue_preview::build_glue_preview;
 ///     like the creature path (GOs are few — the doodad host's draw-gate isn't warranted for them).
 ///
 ///     The reference *also* runs a second, GameObject-specific arm off `GAMEOBJECT_STATE` +
-///     `GAMEOBJECT_ANIMPROGRESS` (same note, §1). Not modelled here: for every GO benilla renders
-///     today it resolves to the same Stand this seed already arms — a named deferral, not a claim
-///     that the overlay doesn't exist.
+///     `GAMEOBJECT_ANIMPROGRESS` (same note, §2), and it lands AFTER this seed, so where both apply
+///     the state arm is what is seen. benilla runs that arm only for the door/button/chest types
+///     ([`crate::go_anim::go_animates`]). **That gate is a known narrowing, and it is not free:**
+///     `benilla-extract goanimscan` measures 251 of 1582 GameObjectDisplayInfo models as
+///     STATE-SENSITIVE (some reachable substate plays a different sequence from this seed), which on
+///     the live world data is **1979 spawns** sitting on such a model with a GO type left off the
+///     machine — books, traps, goobers, generic props. Widening it waits on the wow-re type census
+///     (which of the 30 types allocate the `[GO+0x210]` handler at the `0x5f708c` dispatch); the
+///     seed below is what those types render in the meantime.
 ///
 /// Global-sequence channels ride along regardless of flavour. Returns the joints + inverse-bindposes
 /// for the caller to bind each submesh's skinned twin, or `None` when the model has no inverse
@@ -87,17 +93,24 @@ fn setup_skinned_instance(
         commands.entity(entity).insert(bb);
     }
     if let Some(anims) = d.animations.as_ref() {
-        // A non-state GameObject loops its first sequence directly on the player (the loader-idle
-        // seed); a creature/door leaves the player idle here for its driver to arm.
-        let idle_loop = kind == EntityKind::GameObject && !go_state_machine;
+        // **Every** GameObject instance gets the loader-idle seed, state machine or not — the
+        // reference's `0x70ebd0` tail arms bone 0 the moment the M2 goes LIVE and has exactly two
+        // callers, so no M2 instance in the client ever exists with nothing armed (wow-re
+        // `gameobject-anim-arm.md` §1/§2e). For a door/chest the object-layer arm lands *after* it
+        // and overrides it (§2, "because it lands after the loader seed, it is the effective arm");
+        // seeding first is what stops the one-frame BIND POSE our state GOs used to render on their
+        // first displayed frame, before `go_anim` had a chance to run — the "explodes for a split
+        // second" report. The seed is played THROUGH the transitions object so that first arm
+        // cleanly fades out of it; playing it bare on the player would leave two clips live at once.
         let mut player = AnimationPlayer::default();
-        if idle_loop {
+        let mut transitions = AnimationTransitions::new();
+        if kind == EntityKind::GameObject {
             if let Some(clip) = anims.first_seq.and_then(|i| anims.clips.get(i)) {
                 // Loop iff the sequence says so (`M2Sequence.flags & 1 == 0`) — the kernel's own
                 // end-of-band law (wow-re `gameobject-anim-arm.md` §2, byte-verified at
                 // `0x714585`): bit0 clear loops on the modulo wrap, bit0 set plays the window and
                 // then FREEZES at `end_ms`. An unconditional repeat replayed one-shot idles.
-                let active = player.play(clip.node);
+                let active = transitions.play(&mut player, clip.node, std::time::Duration::ZERO);
                 if clip.looping {
                     active.repeat();
                 }
@@ -111,13 +124,14 @@ fn setup_skinned_instance(
         match kind {
             EntityKind::GameObject if go_state_machine => {
                 commands.entity(entity).insert((
-                    // Cross-fades the open/close transition over the clip's blend-in time (0242/0049).
-                    AnimationTransitions::new(),
+                    // Cross-fades the open/close transition over the clip's blend-in time (0242/0049),
+                    // and carries the seed above as the pose the first arm transitions out of.
+                    transitions,
                     crate::go_anim::GoAnim::default(),
                 ));
             }
             // A loader-idle GameObject needs no driver and no transitions — the looping player IS the
-            // whole animation.
+            // whole animation, and nothing will ever arm over it.
             EntityKind::GameObject => {}
             _ => {
                 commands

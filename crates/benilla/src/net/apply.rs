@@ -84,6 +84,9 @@ pub(super) fn apply_net_updates(
         MessageWriter<super::LoginStageMessage>,
         MessageWriter<super::LoginFailedMessage>,
         MessageWriter<super::DisconnectedMessage>,
+        // The server's own answer to a GM dot-command, readable rather than only logged — the
+        // probe shield's confirmation channel (decision 0677).
+        MessageWriter<super::ServerSaidMessage>,
     ),
     // One tuple param (the 16-SystemParam ceiling): the ask-once query caches + the gossip/merchant
     // state the net drain fills for the NPC-interaction windows (decision 0081).
@@ -272,6 +275,7 @@ pub(super) fn apply_net_updates(
         mut login_stages,
         mut login_failures,
         mut disconnects,
+        mut server_said,
     ) = session_msgs;
     // Descriptor seeds/deltas for objects created *earlier in this same drain* can't land on their
     // entities yet (the spawn `Command` hasn't run), so they accumulate here and flush once at the end.
@@ -697,6 +701,11 @@ pub(super) fn apply_net_updates(
                 // Ordinary chat stays at `debug!`: conversation, not diagnosis, and high volume.
                 if m.chat_type == 0x0A {
                     info!("net: server says — {}", m.text);
+                    // …and as a message, for the senders that must know whether their command
+                    // landed. Server state with no descriptor field (god mode) has no other tell.
+                    server_said.write(super::ServerSaidMessage {
+                        text: m.text.clone(),
+                    });
                 } else {
                     debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
                 }
@@ -743,6 +752,9 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::ChatWrongFaction => chat::chat_wrong_faction(&mut chat_log),
             SessionEvent::Notification { text } => chat::notification(text, &mut chat_log),
+            SessionEvent::AreaTriggerMessage { text } => {
+                chat::area_trigger_message(text, &mut chat_log)
+            }
             SessionEvent::PlayedTime { total, level } => {
                 chat::played_time(total, level, &mut chat_log)
             }

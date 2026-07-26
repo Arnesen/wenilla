@@ -98,6 +98,9 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         }
         ServerPacket::ChatWrongFaction => vec![SessionEvent::ChatWrongFaction],
         ServerPacket::Notification { text } => vec![SessionEvent::Notification { text }],
+        ServerPacket::AreaTriggerMessage { text } => {
+            vec![SessionEvent::AreaTriggerMessage { text }]
+        }
         ServerPacket::PlayedTime { total, level } => {
             vec![SessionEvent::PlayedTime { total, level }]
         }

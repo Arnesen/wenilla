@@ -388,6 +388,14 @@ impl ParticleEmitter {
         &self.def
     }
 
+    /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter
+    /// with no [`EmitterFade`] (entity-owned: creatures, GameObjects, spell kits). A faded
+    /// emitter's distance is measured to its OWNER's sphere instead, because that sphere is what
+    /// the draw-set gate actually tests.
+    pub(crate) fn anchor_world(&self) -> Vec3 {
+        self.anchor_pos
+    }
+
     /// The cloud-orientation fingerprint — read by the particle census probe: the live cloud's
     /// WORLD centroid, best-fit plane normal (unit), RMS thickness along it, and RMS in-plane
     /// radius, from the same composition the quad expansion draws with. The numeric "which way
@@ -466,6 +474,36 @@ pub struct EmitterFade {
     /// The owner doodad's world bbox centre — the fade measures horizontal distance to this
     /// (matching the doodad's own gate in `debug_panel::visibility`), not the emitter position.
     pub center: Vec3,
+}
+
+impl EmitterFade {
+    /// The **draw-set admission rule** in one place: is the owner doodad in the frame's scene
+    /// worklist, and therefore does its emitter tick and draw this frame?
+    ///
+    /// Three terms, all against the owner's fade sphere (the reference's `[rec+0x68]`):
+    /// 1. the radius-tiered distance fade hasn't reached zero (`FUN_00683f80`),
+    /// 2. the sphere is inside the far-clip wall ([`crate::view::within_farclip`]),
+    /// 3. `lateral_in_frustum` — the caller's frustum sphere test on the side/near planes.
+    ///
+    /// Term 2 is the one bug B39 was missing (decision 0678), and it cannot be folded into term 1:
+    /// [`crate::model_fade::doodad_fade_alpha`] returns a flat `1.0` for any owner bigger than
+    /// [`crate::model_fade::NEVER_FADE_RADIUS`], so for exactly the props that carry the big
+    /// effects — braziers, bonfires, portal frames — term 1 admits at *every* distance.
+    ///
+    /// Pure and total so the rule is pinned by tests without an ECS (the `model_fade` pattern).
+    pub fn in_draw_set(
+        &self,
+        cam_pos: Vec3,
+        cam_fwd: Vec3,
+        farclip: f32,
+        lateral_in_frustum: bool,
+    ) -> bool {
+        let (dx, dz) = (self.center.x - cam_pos.x, self.center.z - cam_pos.z);
+        let horiz = (dx * dx + dz * dz).sqrt();
+        crate::model_fade::doodad_fade_alpha(self.radius, horiz) > 0.0
+            && crate::view::within_farclip(farclip, cam_pos, cam_fwd, self.center, self.radius)
+            && lateral_in_frustum
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // the spawn's full wiring: assets + owner/attach frames
@@ -739,6 +777,90 @@ pub(crate) mod tests {
     /// The minimal def, exposed for sibling-module tests (the sim's child-drive test).
     pub(crate) fn plain_def() -> ParticleEmitterDef {
         def(ParticleShape::Plane)
+    }
+
+    /// Camera at the origin looking down −Z (Bevy's convention), and an owner sphere `depth` yd
+    /// straight ahead — the geometry every draw-set test below uses.
+    fn gate(radius: f32, depth: f32, farclip: f32) -> bool {
+        EmitterFade {
+            radius,
+            center: Vec3::new(0.0, 0.0, -depth),
+        }
+        .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true)
+    }
+
+    /// **The B39 defect, pinned** (decision 0678). An owner bigger than `NEVER_FADE_RADIUS` never
+    /// distance-fades, so the fade term admits it at every distance — the far-clip term is the only
+    /// thing that stops its emitter. Reverting that term makes this test fail, which is the point:
+    /// a big fire prop's flames used to draw a kilometre away, over terrain the same wall had
+    /// already discarded.
+    #[test]
+    fn a_never_fading_owner_is_still_bounded_by_the_wall() {
+        let big = crate::model_fade::NEVER_FADE_RADIUS + 5.0;
+        // The fade term alone says "draw" at any distance — that is what made this invisible.
+        assert_eq!(crate::model_fade::doodad_fade_alpha(big, 5000.0), 1.0);
+        assert!(gate(big, 500.0, 777.0), "inside the wall: draws");
+        assert!(!gate(big, 1000.0, 777.0), "past the wall: must NOT draw");
+        // ...and it tracks the live farclip, not a constant: the same emitter at the vanilla
+        // minimum view distance is out, at the panel's maximum it is back in.
+        assert!(!gate(big, 500.0, 177.0));
+        assert!(gate(big, 1000.0, 1200.0));
+    }
+
+    /// The wall never *replaces* the fade cutoff — a small prop still pops at its own band end
+    /// (40→50 yd) far inside the wall. Both terms are live; neither subsumes the other.
+    #[test]
+    fn the_wall_does_not_replace_the_size_fade() {
+        assert!(gate(0.3, 45.0, 777.0), "mid-band: still drawing");
+        assert!(
+            !gate(0.3, 60.0, 777.0),
+            "past the 50-yd band end, nowhere near the wall"
+        );
+    }
+
+    /// The lateral frustum term is ANDed, not implied: an owner dead ahead and well inside the
+    /// wall is still out when the caller's frustum test rejects it (off-screen).
+    #[test]
+    fn the_lateral_frustum_term_is_anded() {
+        let f = EmitterFade {
+            radius: 2.0,
+            center: Vec3::new(0.0, 0.0, -60.0),
+        };
+        assert!(f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true));
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, false));
+    }
+
+    /// The emitter gate and the owner mesh's own cull must agree on the boundary — they read the
+    /// same `within_farclip` now, and this pins that they cannot drift apart again. An emitter
+    /// admitted where its owner's mesh is culled IS bug B39.
+    ///
+    /// Scoped to owners **above** `NEVER_FADE_RADIUS` on purpose: there the size-fade term is a
+    /// constant `1.0`, so the gate reduces to the wall alone and the comparison is exact. Below it
+    /// the two rules legitimately differ (the mesh keeps drawing while the fade feathers it out),
+    /// so an equality there would be asserting something false — and these are the owners that
+    /// carry the big effects the report is about anyway.
+    #[test]
+    fn the_emitter_gate_agrees_with_the_owner_meshs_cull() {
+        let (cam, fwd) = (Vec3::ZERO, Vec3::NEG_Z);
+        for farclip in [177.0f32, 777.0, 1200.0] {
+            for depth in [100.0f32, 700.0, 776.0, 777.0, 778.0, 900.0, 2000.0] {
+                for radius in [crate::model_fade::NEVER_FADE_RADIUS + 0.01, 12.0, 40.0] {
+                    let center = Vec3::new(0.0, 0.0, -depth);
+                    assert_eq!(
+                        crate::model_fade::doodad_fade_alpha(radius, depth),
+                        1.0,
+                        "precondition: this owner never size-fades"
+                    );
+                    let mesh_drawn = crate::view::within_farclip(farclip, cam, fwd, center, radius);
+                    let emitter_drawn =
+                        EmitterFade { radius, center }.in_draw_set(cam, fwd, farclip, true);
+                    assert_eq!(
+                        mesh_drawn, emitter_drawn,
+                        "wall disagreement at farclip {farclip} depth {depth} radius {radius}"
+                    );
+                }
+            }
+        }
     }
 
     /// A minimal def for kernel tests — only the fields [`emit_local`] reads matter.

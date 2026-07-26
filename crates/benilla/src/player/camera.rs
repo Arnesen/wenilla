@@ -4,6 +4,7 @@
 //! person. Split out of the controller — this owns the camera's pose and input session, not the
 //! avatar/movement/networking [`super::control`] drives with it.
 
+use bevy::ecs::entity::EntityHashSet;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
@@ -482,6 +483,19 @@ pub(super) fn seat_camera(
 /// entity (itself a descendant of the root, at varying depth) — an earlier direct-`Children`-only version
 /// silently skipped every attach model. The self-player entity is singular, so a per-frame tree walk over
 /// its handful of joints + submeshes is nil cost.
+///
+/// **The tree is not the whole model.** An M2's BILLBOARD batches can't be tree children — their mesh is
+/// centred on the bone pivot and their transform belongs to the billboard system, so every one of them is
+/// a world ROOT entity that merely *follows* an anchor inside the tree (decision 0153). The descendant
+/// walk therefore cannot see them, and the night-elf eye glow — two additive `…EYEGLOW.BLP` billboard
+/// quads at head height — went on burning in mid-air after the body it belongs to had gone (reported
+/// first-hand; ledger B71). Cards are picked up here by testing their follow-anchor against the walked
+/// set, and folded into the same α — the idiom [`crate::blob_shadow`] already uses for the other
+/// world-root follower of the self avatar ("the self first-person fade rides the same model-fade slot in
+/// the reference"). One multiply covers both halves: it feathers with the body, and at α 0 the additive
+/// compose (`wow_model.wgsl`: `out_rgb *= faded_alpha`) takes the card to black, which for an ADD blend
+/// is gone. That deliberately avoids `Visibility`, which the card's own hidden-owner mirror authors every
+/// frame in a different system.
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
@@ -495,8 +509,19 @@ pub(crate) fn apply_self_model_fade(
             &mut Visibility,
             Option<&mut crate::interior::InteriorLit>,
         ),
-        (Without<RenderFade>, Without<PendingAppearFade>),
+        (
+            Without<RenderFade>,
+            Without<PendingAppearFade>,
+            // Disjointness for the card query below (both want `&mut MeshTag`); a card never
+            // carries `FadeMaterials`, so this excludes nothing.
+            Without<crate::billboard::BillboardCard>,
+        ),
     >,
+    mut cards: Query<(
+        &crate::billboard::BillboardCard,
+        &mut MeshTag,
+        Option<&crate::doodad_anim::MatAnim>,
+    )>,
     mut was_fading: Local<bool>,
 ) {
     let fading = rig.self_fade_alpha < 1.0;
@@ -508,14 +533,42 @@ pub(crate) fn apply_self_model_fade(
         *was_fading = false;
         return;
     };
-    apply_self_fade_to_descendants(root, rig.self_fade_alpha, &children_of, &mut parts);
+    // The walked set doubles as "which anchors belong to this model" for the card pass — built only
+    // while fading, so the steady state (the early return above) never pays for it.
+    let mut walked = EntityHashSet::default();
+    apply_self_fade_to_descendants(
+        root,
+        rig.self_fade_alpha,
+        &children_of,
+        &mut parts,
+        &mut walked,
+    );
+    let alpha = rig.self_fade_alpha.clamp(0.0, 1.0);
+    for (card, mut tag, anim) in &mut cards {
+        if !card
+            .follows()
+            .is_some_and(|anchor| walked.contains(&anchor))
+        {
+            continue;
+        }
+        // The card's steady author is `entities::apply_unit_mat_alpha`, ordered before this system,
+        // which writes the batch's per-sequence factor every frame — so composing from `current`
+        // (not from the tag we'd read back) keeps that animation alive under the fade, and the
+        // release frame's `α = 1` write lands exactly on the value it would have had.
+        let authored = anim.map_or(1.0, |a| a.current);
+        let bits = crate::mesh_tag::with_alpha(tag.0, authored * alpha);
+        if tag.0 != bits {
+            tag.0 = bits;
+        }
+    }
     *was_fading = fading;
 }
 
 /// Depth-first helper for [`apply_self_model_fade`]: apply the fade (or, at `α ≥ 1`, the release) to
 /// `entity` if it's a fadeable part, then recurse into its children regardless (a joint or an attach-model
 /// root carries no `FadeMaterials` itself but must still be descended through to reach the mesh leaves
-/// under it).
+/// under it). Every entity visited — parts, joints, attach roots, billboard anchors alike — is recorded
+/// in `walked`, which the caller uses to recognise the world-root billboard cards that follow this model.
 #[allow(clippy::type_complexity)]
 fn apply_self_fade_to_descendants(
     entity: Entity,
@@ -529,9 +582,15 @@ fn apply_self_fade_to_descendants(
             &mut Visibility,
             Option<&mut crate::interior::InteriorLit>,
         ),
-        (Without<RenderFade>, Without<PendingAppearFade>),
+        (
+            Without<RenderFade>,
+            Without<PendingAppearFade>,
+            Without<crate::billboard::BillboardCard>,
+        ),
     >,
+    walked: &mut EntityHashSet,
 ) {
+    walked.insert(entity);
     if let Ok((fm, mut tag, mut mat, mut vis, lit)) = parts.get_mut(entity) {
         if alpha >= 1.0 {
             // The release edge (runs once, on the frame the fade ends — decision 0213): un-hide,
@@ -584,7 +643,7 @@ fn apply_self_fade_to_descendants(
     }
     if let Ok(children) = children_of.get(entity) {
         for &child in children {
-            apply_self_fade_to_descendants(child, alpha, children_of, parts);
+            apply_self_fade_to_descendants(child, alpha, children_of, parts, walked);
         }
     }
 }
@@ -650,5 +709,93 @@ pub(super) fn fly_free(
             1.0
         };
         cam_t.translation += dir.normalize() * cam.speed * boost * dt;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_assets::BillboardInfo;
+    use benilla_formats::BillboardKind;
+
+    use crate::billboard::BillboardCard;
+    use crate::mesh_tag::alpha_bits;
+
+    /// The self-avatar's zoom-to-first-person fade reaches its BILLBOARD cards — the night-elf eye
+    /// glow (ledger B71: two additive quads left burning in mid-air after the body was hidden).
+    /// A card is a world ROOT following an anchor inside the model (decision 0153), so the fade's
+    /// descendant walk can only claim it through that anchor — and must claim ONLY its own: every
+    /// brazier and lamppost in the zone is a card too, and dimming those with the player's zoom
+    /// would be a far worse bug than the one being fixed.
+    #[test]
+    fn self_fade_reaches_the_avatars_billboard_cards_and_no_others() {
+        let info = BillboardInfo {
+            bone: 0,
+            pivot: Vec3::new(0.0, 2.14, 0.0), // the eye-glow bone, head height
+            normal: Vec3::Z,
+            kind: BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: vec![],
+        };
+        let mut app = App::new();
+        app.init_resource::<CameraControl>();
+        app.add_systems(Update, apply_self_model_fade);
+
+        // The avatar: root -> joint (the eye-glow bone). Its card follows the joint.
+        let avatar = app.world_mut().spawn(SelfPlayer).id();
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut().entity_mut(avatar).add_child(joint);
+        let eye_glow = app
+            .world_mut()
+            .spawn((
+                BillboardCard::following_joint(&info, joint),
+                MeshTag(alpha_bits(1.0)),
+            ))
+            .id();
+        // A brazier across the square: same mechanism, another model entirely.
+        let brazier_anchor = app.world_mut().spawn(Transform::default()).id();
+        let brazier = app
+            .world_mut()
+            .spawn((
+                BillboardCard::following(&info, brazier_anchor),
+                MeshTag(alpha_bits(1.0)),
+            ))
+            .id();
+
+        let tag_of = |app: &App, e: Entity| app.world().entity(e).get::<MeshTag>().unwrap().0;
+
+        // Mid-feather: the glow rides the body's alpha down.
+        app.world_mut()
+            .resource_mut::<CameraControl>()
+            .self_fade_alpha = 0.5;
+        app.update();
+        assert_eq!(
+            tag_of(&app, eye_glow),
+            alpha_bits(0.5),
+            "the avatar's card feathers with the body"
+        );
+        assert_eq!(
+            tag_of(&app, brazier),
+            alpha_bits(1.0),
+            "another model's card is untouched by the player's zoom"
+        );
+
+        // First person: the additive compose (`out_rgb *= faded_alpha`) takes it to black.
+        app.world_mut()
+            .resource_mut::<CameraControl>()
+            .self_fade_alpha = 0.0;
+        app.update();
+        assert_eq!(tag_of(&app, eye_glow), alpha_bits(0.0));
+
+        // Back out to third person — the release frame hands the authored value back.
+        app.world_mut()
+            .resource_mut::<CameraControl>()
+            .self_fade_alpha = 1.0;
+        app.update();
+        assert_eq!(
+            tag_of(&app, eye_glow),
+            alpha_bits(1.0),
+            "the release edge restores the card, like the body parts"
+        );
     }
 }

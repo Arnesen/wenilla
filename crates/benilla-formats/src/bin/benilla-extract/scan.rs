@@ -1936,3 +1936,191 @@ pub fn bonescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+/// The GameObject animation arm's LUT (wow-re `gameobject-anim-arm.md` §2c, `.data 0x8607e4`):
+/// internal **substate** → the `AnimationData.dbc` id the object layer arms.
+const SUBSTATE_ANIM: [u16; 13] = [
+    145, // 0  Spawn      — NO client path produces this substate (§2c census)
+    147, // 1  Closed     (rest)
+    148, // 2  Open       (motion)
+    149, // 3  Opened     (rest)
+    146, // 4  Close      (motion)
+    150, // 5  Destroy    (motion)
+    151, // 6  Destroyed  (rest)
+    152, // 7  Rebuild    (motion)
+    153, 154, 155, 156, // 8..11 Custom0-3 — reachable only via SMSG_GAMEOBJECT_CUSTOM_ANIM
+    157, // 12 Despawn
+];
+
+/// The six substates a `GAMEOBJECT_STATE` × `GAMEOBJECT_ANIMPROGRESS` pair can actually produce
+/// (§2b). Substate 0 (Spawn) has no producer at all, and 8..12 come from other opcodes entirely.
+const REACHABLE: [(usize, &str); 6] = [
+    (1, "READY  settled"),
+    (4, "READY  mid    "),
+    (3, "ACTIVE settled"),
+    (2, "ACTIVE mid    "),
+    (6, "ALT    settled"),
+    (5, "ALT    mid    "),
+];
+
+/// The §2c four-way remap: what the arm actually requests when the model doesn't author the
+/// substate's LUT id. Returns `(id, rate0)` — `rate0` marks the two legs that freeze a *motion*
+/// clip at frame 0 to stand in for a missing *rest* pose.
+fn go_remap(m: &benilla_m2::M2Model, id: u16) -> (u16, bool) {
+    if m.owns_animation(id) {
+        return (id, false);
+    }
+    match id {
+        // Close missing: keep it (op4 resolves onward) if Open exists, else fall to Closed.
+        146 => (if m.owns_animation(148) { 146 } else { 147 }, false),
+        // Closed missing: keep it if Close exists; else freeze Open at frame 0; else Stand.
+        147 if m.owns_animation(146) => (147, false),
+        147 if m.owns_animation(148) => (148, true),
+        147 => (0, false),
+        // Open missing: keep it if Close exists; else Destroy if present; else Opened.
+        148 => (
+            if m.owns_animation(146) {
+                148
+            } else if m.owns_animation(150) {
+                150
+            } else {
+                149
+            },
+            false,
+        ),
+        // Opened missing: keep it if Open exists; else freeze Close at frame 0; else Destroyed.
+        149 if m.owns_animation(148) => (149, false),
+        149 if m.owns_animation(146) => (146, true),
+        149 => (151, false),
+        // Outside the door group there is no remap — the id goes to op4 as-is.
+        other => (other, false),
+    }
+}
+
+/// op4's own id → played sequence resolve (`0x7121a0` via `0x711bf0`): the model's
+/// `playableAnimationLookup` row (when the id is in range), then `animationLookup` to a file slot.
+/// `None` when nothing playable comes out — the reference arms nothing and the pose simply stands.
+fn go_resolve_slot(m: &benilla_m2::M2Model, id: u16) -> Option<(u16, u16)> {
+    let played = m
+        .playable_animation_lookup
+        .get(id as usize)
+        .map_or(id, |p| p.resolved_id);
+    let slot = *m.animation_lookup.get(played as usize)?;
+    (slot != 0xffff).then_some((played, slot))
+}
+
+/// The generic loader seed (§1, `0x71019b`): resolve id 0, and arm **id 0** when the model owns what
+/// that resolves to — only the degenerate leg (owning nothing reachable) falls back to the raw
+/// `animations[0]` dword.
+fn go_loader_seed(
+    m: &benilla_m2::M2Model,
+    seqs: &[benilla_formats::ModelAnimation],
+) -> Option<(u16, u16)> {
+    let resolved = m
+        .playable_animation_lookup
+        .first()
+        .map_or(0, |p| p.resolved_id);
+    if m.owns_animation(resolved) {
+        go_resolve_slot(m, 0)
+    } else {
+        // The degenerate leg: `animations[0]`'s low16 — the file-order-first sequence's own id.
+        go_resolve_slot(m, seqs.first()?.anim_id)
+    }
+}
+
+/// Sweep every model named by **GameObjectDisplayInfo.dbc** and resolve, per model, what the
+/// reference's GameObject animation arm plays in each reachable `GAMEOBJECT_STATE` ×
+/// `GAMEOBJECT_ANIMPROGRESS` substate — see the `Goanimscan` command doc.
+pub fn goanimscan(chain: &mut Chain) -> Result<()> {
+    let catalog =
+        benilla_formats::load_gameobject_catalog(chain).context("GameObjectDisplayInfo.dbc")?;
+    // displayId → path, deduped to one entry per model (many displays share a model).
+    let mut models: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    for (id, path) in catalog.iter() {
+        let key = model_key(path);
+        if key.ends_with(".m2") {
+            models.entry(key).or_default().push(id);
+        }
+    }
+    for ids in models.values_mut() {
+        ids.sort_unstable();
+    }
+    let (mut parsed, mut no_seq, mut blind, mut sensitive, mut needs_remap, mut rate0) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    for (path, displays) in &models {
+        let Ok(bytes) = chain.read_file(path) else {
+            continue;
+        };
+        let Ok(fmt) = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes)) else {
+            continue;
+        };
+        let m = fmt.model();
+        parsed += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            no_seq += 1;
+            continue;
+        }
+        let seed = go_loader_seed(m, &seqs);
+        let mut lines = Vec::new();
+        let (mut differs, mut remapped, mut froze) = (false, false, false);
+        for (sub, label) in REACHABLE {
+            let lut = SUBSTATE_ANIM[sub];
+            let (req, r0) = go_remap(m, lut);
+            let armed = go_resolve_slot(m, req);
+            remapped |= req != lut;
+            froze |= r0;
+            differs |= armed.map(|(_, s)| s) != seed.map(|(_, s)| s);
+            lines.push(format!(
+                "   {label} sub{sub}  lut {lut}{}  ->  {}{}",
+                if req == lut {
+                    String::new()
+                } else {
+                    format!(" (remap {req})")
+                },
+                match armed {
+                    Some((id, slot)) => format!("id {id} slot {slot}"),
+                    None => "NOTHING".to_string(),
+                },
+                if r0 { "  [rate 0 — frozen]" } else { "" },
+            ));
+        }
+        if differs {
+            sensitive += 1;
+        } else {
+            blind += 1;
+        }
+        remapped.then(|| needs_remap += 1);
+        froze.then(|| rate0 += 1);
+        // Only the state-SENSITIVE models are worth printing: on every other one the arm lands on
+        // the same sequence the loader seed already holds, so `GAMEOBJECT_STATE` is unobservable.
+        if differs {
+            println!("{path}  ({} sequences, displays {displays:?})", seqs.len());
+            println!(
+                "   loader seed              ->  {}",
+                match seed {
+                    Some((id, slot)) => format!("id {id} slot {slot}"),
+                    None => "NOTHING".to_string(),
+                }
+            );
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    println!(
+        "\n{} GameObjectDisplayInfo M2 models, {parsed} parsed, {no_seq} with no sequences",
+        models.len()
+    );
+    println!(
+        "  STATE-BLIND    {blind}  — every reachable substate lands on the loader seed's own \
+         sequence, so GAMEOBJECT_STATE cannot be seen on this model at all"
+    );
+    println!(
+        "  STATE-SENSITIVE {sensitive}  — at least one substate plays something else: exactly the \
+         models a GO type that skips the arm renders in the wrong pose"
+    );
+    println!("  needing the §2c remap on some substate: {needs_remap}");
+    println!("  hitting a rate-0 freeze leg (a motion clip standing in for a missing rest pose): {rate0}");
+    Ok(())
+}

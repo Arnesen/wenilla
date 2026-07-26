@@ -347,7 +347,7 @@ fn blit_over(dst: &mut BlpMipChain, src: &BlpMipChain, tile: Tile) {
 }
 
 /// CharSections.dbc — 10 fields in build 5875 (verified); 3 string columns are texture-name offsets.
-fn char_sections_schema() -> Schema {
+pub(crate) fn char_sections_schema() -> Schema {
     let mut s = Schema::new("CharSections");
     for (name, ty) in [
         ("ID", FieldType::UInt32),

@@ -82,8 +82,10 @@ pub(super) fn apply_model_visibility(
                     };
                     // Planar depth along the camera-forward axis (the SAME coordinate the per-pixel wall
                     // uses) of the bound's nearest point — so the cull and the wall agree and the object
-                    // dissolves through the boundary with no pop, even off-centre.
-                    (center - c).dot(fwd) - radius <= view.farclip
+                    // dissolves through the boundary with no pop, even off-centre. The rule itself lives
+                    // in `view::within_farclip`; the particle draw-set gate reads the same one, because
+                    // an emitter outliving its own doodad past the wall is exactly what B39 reported.
+                    crate::view::within_farclip(view.farclip, c, fwd, center, radius)
                 }
             };
 

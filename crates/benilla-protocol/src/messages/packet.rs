@@ -329,6 +329,12 @@ pub enum ServerPacket {
     Notification {
         text: String,
     },
+    /// `SMSG_AREA_TRIGGER_MESSAGE` — why an area trigger refused us ("You must be at least level 58
+    /// to enter…"); `u32 length` + one cstring (vmangos `WorldSession::SendAreaTriggerMessage`,
+    /// `Server/WorldSession.cpp:882-898`).
+    AreaTriggerMessage {
+        text: String,
+    },
     /// `SMSG_PLAYED_TIME` — answers our `CMSG_PLAYED_TIME` (`/played`): total played time + time
     /// since the last level-up, both in seconds (layout in [`super::chat::read_played_time`]).
     PlayedTime {
@@ -1053,6 +1059,7 @@ impl ServerPacket {
             ServerPacket::ChatPlayerNotFound { .. } => "SMSG_CHAT_PLAYER_NOT_FOUND".into(),
             ServerPacket::ChatWrongFaction => "SMSG_CHAT_WRONG_FACTION".into(),
             ServerPacket::Notification { .. } => "SMSG_NOTIFICATION".into(),
+            ServerPacket::AreaTriggerMessage { .. } => "SMSG_AREA_TRIGGER_MESSAGE".into(),
             ServerPacket::PlayedTime { .. } => "SMSG_PLAYED_TIME".into(),
             ServerPacket::RandomRoll { .. } => "MSG_RANDOM_ROLL".into(),
             ServerPacket::InitialSpells { .. } => "SMSG_INITIAL_SPELLS".into(),

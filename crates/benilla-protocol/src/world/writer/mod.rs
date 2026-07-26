@@ -40,6 +40,7 @@
 //! | [`mail`] | the mailbox |
 //! | [`pvp`] | the one PvP-flag toggle |
 //! | [`social`] | friends, ignores, and `/who` |
+//! | [`area_trigger`] | the one "I walked into trigger N" report |
 
 use std::net::TcpStream;
 
@@ -49,6 +50,7 @@ use benilla_srp::vanilla_header::EncrypterHalf;
 use super::send_packet;
 
 mod action_bar;
+mod area_trigger;
 mod attack;
 mod bank;
 mod channel;

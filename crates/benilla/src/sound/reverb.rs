@@ -67,7 +67,7 @@ fn zone_reverb(
     let (Some(areas), Some(providers)) = (areas, providers) else {
         return;
     };
-    let column = usize::from(underwater.0);
+    let column = usize::from(underwater.0.is_water());
     let pref = if config.enabled {
         interior
             .0

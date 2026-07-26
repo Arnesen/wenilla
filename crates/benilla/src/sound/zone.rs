@@ -321,7 +321,7 @@ fn zone_audio(
         .is_ok_and(|store| store.0.player_is_ghost());
     let desired = if ghost {
         kits.id_by_name("Ghost").unwrap_or(0)
-    } else if underwater.0 {
+    } else if underwater.0.is_water() {
         UNDERWATER_LOOP_KIT
     } else if weather.0 != 0 && area_interior.0.is_none() {
         // The selector's weather branch (`0x460bd0`, 0x460bf7–0x460c17; wow-re
@@ -350,7 +350,7 @@ fn zone_audio(
         // branch (`0x458650` → `0x460af0(param=1)`, wow-re §5 B16, correcting the old "5 s
         // underwater" of B6). Every other ambience swap — interior, area, day↔night — is the one
         // 5.0 s crossfade (`0x460b00`'s fade branch).
-        let fade_ms = if underwater.0 != zone.was_underwater {
+        let fade_ms = if underwater.0.is_water() != zone.was_underwater {
             0
         } else {
             AMBIENCE_TRANSITION_FADE_MS
@@ -359,7 +359,7 @@ fn zone_audio(
             zone, &mut out, &mut kits, &assets, &config, desired, fade_ms, now,
         );
     }
-    zone.was_underwater = underwater.0;
+    zone.was_underwater = underwater.0.is_water();
 
     // ---- music transport ----
     // Reap a finished track → schedule the next after a fresh silence interval.

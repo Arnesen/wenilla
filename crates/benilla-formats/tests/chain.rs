@@ -961,3 +961,178 @@ fn decodes_azeroth_wdl_against_apitrace_ground_truth() {
     assert!((xmax - (-8533.3)).abs() < 0.5, "tile origin X, got {xmax}");
     assert!((ymax - (-1066.7)).abs() < 0.5, "tile origin Y, got {ymax}");
 }
+
+/// The two **fixed global `LightParams` rows** magma and slime submersion read (`light::PARAM_MAGMA`
+/// / `PARAM_SLIME`, byte-VERIFIED `0x6d2371`), pinned against the shipped client.
+///
+/// This is the cross-check that earned the finding rather than merely repeating it: nothing in
+/// `Light.dbc` references rows 6 or 7, so no position-keyed sample can reach them and no zone can
+/// vouch for them. What vouches for them is that they decode to *exactly* the vanilla lava and slime
+/// view — dense fiery orange and dense pure green — which a wrong pair of row numbers would not.
+#[test]
+fn magma_and_slime_submersion_read_the_fixed_global_light_params() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let cat = benilla_formats::LightCatalog::load(&mut chain).expect("load Light DBCs");
+    let to255 = |c: [f32; 3]| {
+        [
+            (c[0] * 255.0).round() as i32,
+            (c[1] * 255.0).round() as i32,
+            (c[2] * 255.0).round() as i32,
+        ]
+    };
+
+    // Two positions on different continents whose CLEAR atmospheres differ — the fixed rows must be
+    // identical at both, because they are zone-independent. This is the property that separates "a
+    // fixed global row" from "a zone underwater slot that happens to look right at one pin".
+    let pins = [
+        (0u32, [-7531.21f32, -1123.64, 172.58]), // Blackrock Mountain (the B24/B68 lava pin)
+        (1u32, [-5075.53f32, -2063.09, -50.10]), // Thousand Needles (the B68 water pin)
+    ];
+    for kind in [
+        benilla_formats::Submersion::Magma,
+        benilla_formats::Submersion::Slime,
+    ] {
+        let sampled: Vec<_> = pins
+            .iter()
+            .map(|(map, pos)| cat.sample_blended(*map, *pos, 1440, false, kind, false))
+            .collect();
+        assert_eq!(
+            to255(sampled[0].fog_color),
+            to255(sampled[1].fog_color),
+            "{kind:?} is zone-INDEPENDENT: the fixed row must not vary by position"
+        );
+        assert_eq!(
+            sampled[0].fog_end, sampled[1].fog_end,
+            "{kind:?} fog end must not vary by position"
+        );
+    }
+
+    // Magma → row 7. Dense fiery orange, and the shortest fog in the client: 972/36 = 27 yd, with a
+    // −2.0 start fraction putting `1 − 27/(27+54)` = 67 % of it at the eye itself.
+    let magma = cat.sample_blended(
+        0,
+        pins[0].1,
+        1440,
+        false,
+        benilla_formats::Submersion::Magma,
+        false,
+    );
+    assert_eq!(
+        to255(magma.fog_color),
+        [200, 52, 0],
+        "magma fog (row 7 int 7)"
+    );
+    assert_eq!(to255(magma.ambient), [255, 55, 0], "magma ambient");
+    assert!(
+        (magma.fog_end - 27.0).abs() < 0.01,
+        "magma fog end 972/36 = 27 yd, got {}",
+        magma.fog_end
+    );
+    assert!(
+        (magma.fog_start_frac + 2.0).abs() < 1e-6,
+        "magma start fraction −2.0, got {}",
+        magma.fog_start_frac
+    );
+
+    // Slime → row 6. Pure green at 1800/36 = 50 yd, −1.0 start = 50 % at the eye.
+    let slime = cat.sample_blended(
+        0,
+        pins[0].1,
+        1440,
+        false,
+        benilla_formats::Submersion::Slime,
+        false,
+    );
+    assert_eq!(
+        to255(slime.fog_color),
+        [0, 255, 0],
+        "slime fog (row 6 int 7)"
+    );
+    assert_eq!(to255(slime.ambient), [0, 60, 0], "slime ambient");
+    assert!(
+        (slime.fog_end - 50.0).abs() < 0.01,
+        "slime fog end 1800/36 = 50 yd, got {}",
+        slime.fog_end
+    );
+    assert!(
+        (slime.fog_start_frac + 1.0).abs() < 1e-6,
+        "slime start fraction −1.0, got {}",
+        slime.fog_start_frac
+    );
+
+    // And the whole point: neither is the zone's own underwater atmosphere. At the Thousand Needles
+    // pin the water murk is the olive-brown LP 203 — being in lava there must not show it.
+    let water = cat.sample_blended(
+        1,
+        pins[1].1,
+        1440,
+        false,
+        benilla_formats::Submersion::Water,
+        false,
+    );
+    assert_ne!(
+        to255(water.fog_color),
+        to255(magma.fog_color),
+        "lava must not inherit the zone's water murk"
+    );
+    assert_ne!(
+        to255(water.fog_color),
+        to255(slime.fog_color),
+        "slime must not inherit the zone's water murk"
+    );
+    // Dry is different again — the guard against "everything resolved to one fallback".
+    let dry = cat.sample_blended(
+        1,
+        pins[1].1,
+        1440,
+        false,
+        benilla_formats::Submersion::Dry,
+        false,
+    );
+    assert_ne!(
+        to255(dry.fog_color),
+        to255(water.fog_color),
+        "the water pin's underwater slot must differ from its clear slot"
+    );
+}
+
+/// The far band's tile window **contains the camera's own tile** (decision 0684). Dropping it was
+/// invisible at the default view distance — a 533 yd tile sits inside a 777 yd wall, so it would
+/// have been discarded anyway — and a hole above the horizon at any lower one, where the own tile is
+/// the only thing that draws the near horizon. The director found it at view distance 320 in
+/// Weazel's Crater; this pins the window at the coordinates they reported.
+#[test]
+fn the_wdl_window_contains_the_cameras_own_tile() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let wdl = benilla_formats::WdlFile::load(&mut chain, "Kalimdor").expect("load Kalimdor.wdl");
+
+    // Weazel's Crater, Thousand Needles — the report's spot. The client's debug panel read
+    // `tile 39,42` standing there, which is what `world_to_tile` must agree on.
+    let (x, y) = (-5841.9_f32, -3802.4);
+    let own = benilla_wdt::world_to_tile(x, y);
+    assert_eq!(own, (39, 42), "the reported tile for Weazel's Crater");
+    assert!(wdl.is_present(own.0, own.1), "the own tile is authored");
+
+    let window = wdl.tiles_in_ring(x, y, 5);
+    assert!(
+        window.contains(&own),
+        "the camera's own WDL tile must be in the window — without it the near horizon is a hole"
+    );
+    // And it is a full (2r+1)² window, not a ring: every present tile within the radius.
+    let expected = (-5i32..=5)
+        .flat_map(|dy| (-5i32..=5).map(move |dx| (own.0 as i32 + dx, own.1 as i32 + dy)))
+        .filter(|&(tx, ty)| (0..64).contains(&tx) && (0..64).contains(&ty))
+        .filter(|&(tx, ty)| wdl.is_present(tx as u32, ty as u32))
+        .count();
+    assert_eq!(window.len(), expected, "every present tile in the window");
+}

@@ -23,6 +23,7 @@
 
 use benilla_assets::BillboardInfo;
 use benilla_formats::{BillboardKind, BoneScaleAnim};
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::player::WorldCamera;
@@ -32,8 +33,15 @@ use crate::player::WorldCamera;
 /// per-frame system rewrites the entity transform from these — including `Visibility` (the
 /// hidden-owner mirror), so a card requires it rather than trusting every spawn site's `Mesh3d`
 /// to bring it along.
+///
+/// It requires a [`MeshTag`] for the same reason: a card is a world ROOT, so every per-model alpha
+/// that reaches an ordinary submesh by descending the model's tree has to reach a card through its
+/// own tag instead (`player::apply_self_model_fade` — the zoom-to-first-person feather). Only the
+/// alpha-animated spawn sites used to bring one, which left the channel *incidentally* present;
+/// the default `MeshTag(0)` is the shader's untagged-⇒-opaque sentinel, so requiring it changes
+/// nothing about how a card draws.
 #[derive(Component)]
-#[require(Transform, Visibility)]
+#[require(Transform, Visibility, MeshTag)]
 pub struct BillboardCard {
     world_pivot: Vec3,
     scale: f32,
@@ -122,6 +130,14 @@ impl BillboardCard {
             self.phase_ms = arm_ms.wrapping_neg();
         }
         self.seq_translation = anim;
+    }
+
+    /// The entity this card follows, if any — the anchor/joint that decides both where it sits and
+    /// which model it BELONGS to. A card is a world root, so a system that walks a model's tree
+    /// (the self-avatar fade) can only recognise the model's own cards by testing this against the
+    /// entities it walked.
+    pub(crate) fn follows(&self) -> Option<Entity> {
+        self.follow
     }
 
     /// Re-seat a card that FOLLOWS something (the questgiver `!`/`?` markers over a unit that can

@@ -430,11 +430,12 @@ fn debug_panel_ui(
                             }
 
                             ui.add_space(6.0);
-                            // Faithful `farclip`: doodads/WMOs hard-pop out past this (no fade). Vanilla
-                            // range [177, 777]; the slider goes a little past 777 only for A/B against the
-                            // old "draw everything in the tile window" look.
+                            // Faithful `farclip`: doodads/WMOs hard-pop out past this (no fade). The
+                            // range (and why it runs past vanilla's 777) is `view::FARCLIP_RANGE`,
+                            // shared with the `$WOW_FARCLIP` capture knob so a setting seen here can
+                            // be reproduced headlessly.
                             ui.add(
-                                egui::Slider::new(&mut view.farclip, 177.0..=1200.0)
+                                egui::Slider::new(&mut view.farclip, crate::view::FARCLIP_RANGE)
                                     .text("view distance / farclip (yd)"),
                             );
                         });

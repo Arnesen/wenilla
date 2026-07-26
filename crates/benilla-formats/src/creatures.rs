@@ -189,7 +189,7 @@ impl CreatureCatalog {
 }
 
 /// CreatureModelData.dbc — 16 fields in build 5875 (no `mountHeight`). We read ID, ModelName, scale.
-fn creature_model_data_schema() -> Schema {
+pub(crate) fn creature_model_data_schema() -> Schema {
     let mut s = Schema::new("CreatureModelData");
     for (name, ty) in [
         ("ID", FieldType::UInt32),
@@ -215,7 +215,7 @@ fn creature_model_data_schema() -> Schema {
 }
 
 /// CreatureDisplayInfo.dbc — 12 fields in build 5875. We read ID, ModelID, scale, 3 skin textures.
-fn creature_display_info_schema() -> Schema {
+pub(crate) fn creature_display_info_schema() -> Schema {
     let mut s = Schema::new("CreatureDisplayInfo");
     for (name, ty) in [
         ("ID", FieldType::UInt32),
@@ -242,7 +242,7 @@ fn creature_display_info_schema() -> Schema {
 /// cross-checked with vmangos `DBCStructure.h`). We read the appearance selectors, the 10 equipment
 /// columns (8..17 — `ItemDisplayInfo` display ids for the worn armor geosets + helm/shoulder attach),
 /// and the bake name.
-fn creature_display_info_extra_schema() -> Schema {
+pub(crate) fn creature_display_info_extra_schema() -> Schema {
     let mut s = Schema::new("CreatureDisplayInfoExtra");
     for (name, ty) in [
         ("ID", FieldType::UInt32),

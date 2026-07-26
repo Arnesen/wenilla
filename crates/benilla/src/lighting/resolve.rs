@@ -124,7 +124,16 @@ pub(super) fn setup_lighting(
     // SPAWN_XY (no local sphere covers it, α=0 → blended ≡ global) but right anywhere spheres overlap.
     let atmo = catalog
         .as_ref()
-        .map(|c| c.sample_blended(0, [SPAWN_XY.0, SPAWN_XY.1, 83.5], 1440, false, false, false))
+        .map(|c| {
+            c.sample_blended(
+                0,
+                [SPAWN_XY.0, SPAWN_XY.1, 83.5],
+                1440,
+                false,
+                benilla_formats::Submersion::Dry,
+                false,
+            )
+        })
         .unwrap_or(Atmosphere::DEFAULT);
     if let Some(cat) = catalog {
         commands.insert_resource(LightSampler(cat));
@@ -253,7 +262,10 @@ pub(super) fn update_time_lighting(
     // fog + cool light. Feeding it through the normal atmosphere → `WowLighting` path means every
     // existing consumer (terrain/model/water/WDL fog + the clear colour) becomes underwater for free
     // (VERIFIED apitrace WoW.18: the reference just switches the active param; no overlay quad).
-    let submerged = underwater.as_ref().is_some_and(|u| u.0);
+    let submerged = underwater
+        .as_ref()
+        .map(|u| u.0)
+        .unwrap_or(benilla_formats::Submersion::Dry);
     // The ghost-world atmosphere (decision 0308 §7, byte-VERIFIED death-light.md): while
     // PLAYER_FLAGS_GHOST is up the active LightParams slot is 4 — the death profile — applied
     // instantly (the client rebuilds its color tables per frame off the single active slot).
@@ -312,9 +324,13 @@ pub(super) fn update_time_lighting(
     // The camera-in-WMO interior-fog crossfade (see [`WmoFogRamp`]) — computed as its OWN triple;
     // the scene fog above stays untouched (the round-5 global-overwrite washed the outside view
     // golden through the door — director-caught, corrected per the round-6 Q-I lane map).
-    // Submerged, the underwater Light param owns everything — the MFOG record's own underwater
-    // block (`+0x24`, gated record flags 0x100/0x10) is a recorded, deferred lane.
-    let (wmo_fog_color, wmo_fog_start, wmo_fog_end) = if submerged {
+    // Submerged, the submerged Light param owns everything — the MFOG record's own underwater
+    // block (`+0x24`, gated record flags 0x100/0x10) is a recorded, deferred lane. Bypassing the ramp
+    // rather than blending through it is also what the reference does for the fullbright liquids
+    // specifically: submerged in magma or slime *inside* an MFOG interior it **snaps** the fog block
+    // instantly (VERIFIED `0x6cef6f-85`) instead of taking the 4 s crossfade — which is the case that
+    // matters here, since Undercity's slime is WMO liquid.
+    let (wmo_fog_color, wmo_fog_start, wmo_fog_end) = if submerged.any() {
         (atmo.fog_color, fog_start, fog_end)
     } else {
         wmo_ramp.blend(

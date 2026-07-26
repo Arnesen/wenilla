@@ -150,6 +150,22 @@ impl CharacterGeosets {
     }
 
     /// Load both customization DBCs from the patch chain.
+    ///
+    /// **A duplicated `(race, sex, variation)` key resolves to the FIRST row** (decision 0682). Both
+    /// consumers are *linear scans* of the loaded table — `0x478540` for the hair geoset, `0x478740`
+    /// for the facial-hair record (wow-re RF-0073; `object-layer/scratch/r1.md:358` calls `0x478540`
+    /// "a loaded-DBC linear scan, NOT a pool") — so the earliest matching record is the one the
+    /// reference returns, where a last-write `HashMap::insert` would take the latest.
+    ///
+    /// It matters exactly once in the shipped data, and it was B11: `CharHairGeosets` carries **four**
+    /// rows for **(race 9 goblin, sex 0, variation 0)** — ids 241–244, geosets 1 / 2 / 1 / 2, the only
+    /// duplicated key in the file (243/244 read as the goblin-*female* pair with a zeroed sex column,
+    /// which is why goblin females, having no row at all, were always right). Geoset 1 is the bare
+    /// scalp; geoset 2 is that scalp **plus** a 38-vertex topknot whose texture slot is `Monster1` —
+    /// a slot no character-model goblin display fills, so it drew flat white (decision 0157). All 314
+    /// character-model goblin displays select variation 0, so last-write put a white tuft on every one
+    /// of them. `CharacterFacialHairStyles` has no duplicate keys today; it takes the same rule
+    /// because the same scan law governs it.
     pub fn load(chain: &mut Chain) -> Result<Self> {
         let hair = {
             let bytes = chain
@@ -162,7 +178,9 @@ impl CharacterGeosets {
                 if let (Some(race), Some(sex), Some(var), Some(geoset)) =
                     (u32_at(r, 1), u32_at(r, 2), u32_at(r, 3), u32_at(r, 4))
                 {
-                    m.insert((race as u8, sex as u8, var as u8), geoset);
+                    // FIRST row wins — see the duplicate-key note on [`CharacterGeosets::load`].
+                    m.entry((race as u8, sex as u8, var as u8))
+                        .or_insert(geoset);
                 }
             }
             m
@@ -187,7 +205,8 @@ impl CharacterGeosets {
                         u32_at(r, 7).unwrap_or(0),
                         u32_at(r, 8).unwrap_or(0),
                     ];
-                    m.insert((race as u8, sex as u8, var as u8), g);
+                    // FIRST row wins — see the duplicate-key note on [`CharacterGeosets::load`].
+                    m.entry((race as u8, sex as u8, var as u8)).or_insert(g);
                 }
             }
             m
@@ -216,7 +235,7 @@ impl CharacterGeosets {
 }
 
 /// CharHairGeosets.dbc — 6 fields in build 5875 (verified against the file header).
-fn char_hair_geosets_schema() -> Schema {
+pub(crate) fn char_hair_geosets_schema() -> Schema {
     let mut s = Schema::new("CharHairGeosets");
     for (name, ty) in [
         ("ID", FieldType::UInt32),
@@ -233,7 +252,7 @@ fn char_hair_geosets_schema() -> Schema {
 
 /// HelmetGeosetVisData.dbc — 6 fields in build 5875 (verified: the loader `0x546f00` asserts
 /// fieldCount 6 / recordSize 0x18; the 5 mask columns are **race** bitmasks, RF-0083).
-fn helmet_vis_schema() -> Schema {
+pub(crate) fn helmet_vis_schema() -> Schema {
     let mut s = Schema::new("HelmetGeosetVisData");
     for (name, ty) in [
         ("ID", FieldType::UInt32),
@@ -249,7 +268,7 @@ fn helmet_vis_schema() -> Schema {
 }
 
 /// CharacterFacialHairStyles.dbc — 9 fields in build 5875 (verified); no ID column (keyed race/sex/var).
-fn char_facial_hair_schema() -> Schema {
+pub(crate) fn char_facial_hair_schema() -> Schema {
     let mut s = Schema::new("CharacterFacialHairStyles");
     for (name, ty) in [
         ("RaceID", FieldType::UInt32),
@@ -419,5 +438,68 @@ mod tests {
         };
         let set = cg.visible_geosets(1, 0, 0, 0, &EquipGeosets::default());
         assert!(set.contains(&1), "max(1, 0) = scalp geoset 1");
+    }
+
+    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
+    fn vanilla_data_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
+    }
+
+    /// **B11, against the shipped DBC** (decision 0682): `CharHairGeosets` carries four rows for the
+    /// goblin male's only hairstyle, and the reference's linear scan takes the first — geoset **1**,
+    /// the bare scalp. Last-write took id 244's geoset **2**, which adds an untextured topknot.
+    ///
+    /// Three things are pinned here because each on its own could rot: that the shipped file really
+    /// does duplicate that key (the defect only exists if it does), that we resolve it to 1, and that
+    /// **no other key in the table is duplicated** — which is what bounds this change to goblins.
+    #[test]
+    fn goblin_male_hair_takes_the_first_of_four_duplicate_rows() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+
+        // The file's own rows, read independently of the loader, so the test states the premise it
+        // rests on rather than assuming it.
+        let bytes = chain.read_file(CHAR_HAIR_GEOSETS).expect("CharHairGeosets");
+        let rs = parse(&bytes, char_hair_geosets_schema(), "CharHairGeosets").expect("parse");
+        let mut keys: HashMap<(u32, u32, u32), Vec<u32>> = HashMap::new();
+        for r in rs.records() {
+            if let (Some(race), Some(sex), Some(var), Some(geoset)) =
+                (u32_at(r, 1), u32_at(r, 2), u32_at(r, 3), u32_at(r, 4))
+            {
+                keys.entry((race, sex, var)).or_default().push(geoset);
+            }
+        }
+        let dups: Vec<_> = keys.iter().filter(|(_, v)| v.len() > 1).collect();
+        assert_eq!(
+            dups.len(),
+            1,
+            "exactly one duplicated (race,sex,variation) key ships; got {dups:?}"
+        );
+        assert_eq!(
+            keys.get(&(9, 0, 0)).map(Vec::as_slice),
+            Some([1u32, 2, 1, 2].as_slice()),
+            "the goblin-male block is the duplicate, in file order"
+        );
+
+        // And the loader resolves it the reference's way.
+        let cg = CharacterGeosets::load(&mut chain).expect("load customization tables");
+        let set = cg.visible_geosets(9, 0, 0, 0, &EquipGeosets::default());
+        assert!(
+            set.contains(&1),
+            "goblin male shows the bare scalp (geoset 1)"
+        );
+        assert!(
+            !set.contains(&2),
+            "goblin male does NOT show geoset 2 — the white topknot of B11"
+        );
+        // The goblin female has no row at all (race 9 ships only sex-0 rows), so she falls to the
+        // region base, which is the same scalp. She was never affected; assert it so a future
+        // "fix" to the sex column has to notice her.
+        let f = cg.visible_geosets(9, 1, 0, 0, &EquipGeosets::default());
+        assert!(f.contains(&1) && !f.contains(&2), "goblin female unchanged");
     }
 }

@@ -734,6 +734,7 @@ fn writer_loop(
                     }
                     ClientCommand::UnlearnSkill { skill_id } => w.unlearn_skill(skill_id),
                     ClientCommand::GameObjUse { guid } => w.gameobj_use(guid),
+                    ClientCommand::AreaTrigger { trigger_id } => w.area_trigger(trigger_id),
                     ClientCommand::GameObjectQuery { entry, guid } => w.gameobject_query(entry, guid),
                     ClientCommand::CastSpellGameObject { spell_id, go_guid } => {
                         w.cast_spell_gameobject(spell_id, go_guid)

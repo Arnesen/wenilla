@@ -11,10 +11,10 @@ use crate::wire::{
 };
 
 use super::{
-    action_bar, attack, bank, channel, chat, combat_log, death, duel, gameobject, gossip, group,
-    items, loot, mail, monster_move, movement, opcode, progression, quest, social, spellbook,
-    spells, taxi, trade, trainer, update_object, vendor, world_state, Character, CreatureQueryInfo,
-    ServerPacket, SpeedKind,
+    action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
+    gossip, group, items, loot, mail, monster_move, movement, opcode, progression, quest, social,
+    spellbook, spells, taxi, trade, trainer, update_object, vendor, world_state, Character,
+    CreatureQueryInfo, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -342,6 +342,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_CHAT_WRONG_FACTION => ServerPacket::ChatWrongFaction,
         opcode::SMSG_NOTIFICATION => ServerPacket::Notification {
             text: chat::read_notification(&mut r)?,
+        },
+        opcode::SMSG_AREA_TRIGGER_MESSAGE => ServerPacket::AreaTriggerMessage {
+            text: area_trigger::read_area_trigger_message(&mut r)?,
         },
         opcode::SMSG_PLAYED_TIME => {
             let (total, level) = chat::read_played_time(&mut r)?;

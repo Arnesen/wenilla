@@ -18,6 +18,7 @@
 //! the camera with Space up / C down, Ctrl boost).
 
 mod area;
+mod area_trigger;
 mod assets;
 mod billboard;
 mod blob_shadow;
@@ -69,6 +70,7 @@ mod perf;
 mod player;
 mod portrait;
 mod preflight;
+mod probe_shield;
 mod quest_markers;
 mod raid_marks;
 mod ribbons;
@@ -463,6 +465,10 @@ fn main() {
     // into, and loud warnings for the states — dead/ghost, GM mode, server-blocked movement — that
     // silently invalidate a session's readings. Never env-gated; a warning nobody switches on isn't one.
     .add_plugins(preflight::PreflightPlugin)
+    // The probe shield (decision 0677): a body on a probe account is put into vmangos's `.cheat
+    // god` on every world entry — damage clamps at 1 hp instead of killing — and GM mode is turned
+    // OFF, because the shield replaces the only reason it was ever on. Inert on any other account.
+    .add_plugins(probe_shield::ProbeShieldPlugin)
     // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).
     .add_plugins(SoundPlugin)
     // Targeting: left-click a unit to select it (→ CMSG_SET_SELECTION) + draw its ground ring.
@@ -480,6 +486,10 @@ fn main() {
     // The shared AreaTable catalog + the ZONE_CHANGED event family / zone-text host globals
     // behind GetZoneText & co. (the zone-entry splash arc, decision 0287).
     .add_plugins(area::AreaPlugin)
+    // The `AreaTrigger.dbc` volumes + the per-frame containment check that reports walking into
+    // one (`CMSG_AREATRIGGER`) — the client's whole part in portals, instance entrances and
+    // explore objectives; the server owns what each trigger means.
+    .add_plugins(area_trigger::AreaTriggerPlugin)
     .add_plugins(ui_world_map::WorldMapUiPlugin)
     // The glyph atlas (client TTFs -> baked bitmap) `ui_script`'s extraction draws `FontString`
     // regions through. Loads at Startup, after the asset chain opens (decision 0068 §2).

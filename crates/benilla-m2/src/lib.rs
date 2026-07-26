@@ -82,7 +82,11 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     p += 8;
     let _anim = arr(p)?;
     p += 8;
-    let _anim_lookup = arr(p)?;
+    // AnimationLookup (header `+0x24`/`+0x28`): `AnimationData.dbc` id → this model's first sequence
+    // slot for it, `0xffff` where the model doesn't author it. The reference's "does this model own
+    // animation id X" predicate (`0x711960`) is exactly a bounds-checked read of this table, so it is
+    // parsed rather than inferred from the sequence list — see [`M2Model::owns_animation`].
+    let animation_lookup_arr = arr(p)?;
     p += 8;
     // PlayableAnimationLookup (decision 0082, header `+0x2c`/`+0x30`, pre-Wrath only — dropped past
     // version 263, which `parse_m2`'s own top guard already excludes, so this is unconditional on any
@@ -311,6 +315,18 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
         });
     }
 
+    // AnimationLookup: one u16 each — the id → sequence-slot table `owns_animation` reads.
+    let al_avail = b.len().saturating_sub(animation_lookup_arr.1 as usize);
+    let mut animation_lookup =
+        Vec::with_capacity(capped(animation_lookup_arr.0 as usize, 2, al_avail));
+    for i in 0..animation_lookup_arr.0 as usize {
+        animation_lookup.push(
+            get(animation_lookup_arr.1 as usize + i * 2, 2)?
+                .u16_at(0)
+                .ok_or(Error::Truncated)?,
+        );
+    }
+
     // PlayableAnimationLookup (decision 0082): one dword each, low16 resolved id / high16 dir flags.
     let pal_avail = b
         .len()
@@ -457,6 +473,7 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             pivot_attach_z,
             attachments: attachment_list,
             event_markers,
+            animation_lookup,
             playable_animation_lookup,
             views,
             version,

@@ -180,6 +180,17 @@ enum Command {
         /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every model named by **GameObjectDisplayInfo.dbc** and resolve what the reference's
+    /// GameObject animation arm plays in each reachable `GAMEOBJECT_STATE` × `GAMEOBJECT_ANIMPROGRESS`
+    /// substate (wow-re `gameobject-anim-arm.md` §2b/§2c: the substate table, the `0x8607e4` LUT, the
+    /// four-way missing-sequence remap) — beside the generic loader seed the same model gets at build
+    /// (§1, animation id 0 through `playableAnimationLookup`). The population instrument for "which
+    /// GameObjects can the wire state actually be SEEN on": a model whose every substate lands on the
+    /// seed's own sequence is state-blind, so skipping the arm on its GO type costs nothing, while a
+    /// STATE-SENSITIVE model renders in the wrong pose the moment its type is left off the machine.
+    /// Also counts the models whose pose depends on the §2c remap (benilla plays nothing there today,
+    /// i.e. bind pose) and the ones reaching a rate-0 freeze leg.
+    Goanimscan,
     /// Sweep every `.m2` (optionally under a path prefix) and census the models whose batch
     /// visibility is PER SEQUENCE — geometry the reference draws in one animation and skips in
     /// another (the verified `A <= 0` alpha cull). The population instrument for "a single-sequence
@@ -240,6 +251,36 @@ enum Command {
     /// time of day — the band-semantics instrument (which row holds which colour at which hour;
     /// the celestial-diffuse band question, decision 0485).
     Lightbands {
+        /// Map id (0 = Eastern Kingdoms, 1 = Kalimdor).
+        map: u32,
+        /// World-space X (raw WoW yards; may be negative).
+        #[arg(allow_hyphen_values = true)]
+        x: f32,
+        /// World-space Y.
+        #[arg(allow_hyphen_values = true)]
+        y: f32,
+        /// World-space Z.
+        #[arg(allow_hyphen_values = true)]
+        z: f32,
+        /// Game minute-of-day (0..1440; 720 = noon).
+        minute: u32,
+    },
+    /// Dump every `LightIntBand`/`LightFloatBand` row of an explicitly named `LightParams` id — the
+    /// instrument for rows **no position can reach**, because nothing in `Light.dbc` references them:
+    /// magma submersion reads the fixed global row 7 and slime row 6 (VERIFIED `0x6d2371`), not the
+    /// zone's underwater slot.
+    Lightparam {
+        /// `LightParams.dbc` id (1-based).
+        id: u32,
+        /// Game minute-of-day (0..1440; 720 = noon).
+        minute: u32,
+    },
+    /// Dump the **per-weather-slot** light resolve at a world position: which `LightParams` id each
+    /// of the five `Light.dbc` slots names (clear / clear-underwater / storm / storm-underwater /
+    /// death), which of them are UNSET (and so fall back to clear), and the fog/ambient/diffuse the
+    /// blend resolves for each. `lightbands` only ever shows the clear slot, so an underwater or
+    /// ghost atmosphere that reads wrong could not be told from data that simply has no such record.
+    Lightslots {
         /// Map id (0 = Eastern Kingdoms, 1 = Kalimdor).
         map: u32,
         /// World-space X (raw WoW yards; may be negative).
@@ -405,6 +446,7 @@ fn main() -> Result<()> {
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
+        Command::Goanimscan => scan::goanimscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
@@ -423,6 +465,20 @@ fn main() -> Result<()> {
             let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
             // `debug_bands` takes the client's half-minute clock (0..2880).
             catalog.debug_bands(map, [x, y, z], minute * 2);
+        }
+        Command::Lightparam { id, minute } => {
+            let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
+            catalog.debug_param(id, minute * 2);
+        }
+        Command::Lightslots {
+            map,
+            x,
+            y,
+            z,
+            minute,
+        } => {
+            let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
+            catalog.debug_slots(map, [x, y, z], minute * 2);
         }
         Command::Placescan {
             map,

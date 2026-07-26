@@ -96,6 +96,12 @@ pub struct ModelAnimations {
     /// `AnimationData.dbc` id `i`. Empty for a model whose header carries no table (a boneless
     /// doodad-shaped cube fallback, a malformed M2) — [`Self::resolve`] then degrades to identity.
     pub playable_animation_lookup: Vec<PlayableAnim>,
+    /// The model's **AnimationLookup** (M2 header `+0x24`/`+0x28`): `AnimationData.dbc` id → the
+    /// model's first sequence slot for it, `0xffff` where it authors none. Kept beside the playable
+    /// table because it is a *different question* — "does this model own id X at all", the
+    /// reference's `0x711960` — and the GameObject arm's missing-sequence remap branches on it four
+    /// times (wow-re `gameobject-anim-arm.md` §2c). See [`Self::owns`].
+    pub animation_lookup: Vec<u16>,
     /// The model's **global-sequence bone channels** baked to Bevy space (the eye-blink eyelid scale and
     /// kin): free-clock loops the runtime samples independently of the playing animation and composes
     /// over the sequence pose (see [`super::GlobalBone`]). Empty for a model with no global-sequence
@@ -137,6 +143,17 @@ impl ModelAnimations {
     /// alternate variations goes through [`Self::pick_variation`] instead.
     pub fn find(&self, anim_id: u16) -> Option<&AnimClip> {
         self.clips.iter().find(|c| c.anim_id == anim_id)
+    }
+
+    /// **Does the model author `anim_id`?** — the reference's `0x711960`: a bounds-checked read of
+    /// [`Self::animation_lookup`] against the `0xffff` sentinel. Deliberately NOT `find(..).is_some()`:
+    /// `clips` drops sequences we can't build (zero-duration ones among them), so a clip scan can
+    /// answer "no" where the reference answers "yes" and takes a different branch. Use this to decide
+    /// what the reference would *request*; use [`Self::find`] to get something we can actually play.
+    pub fn owns(&self, anim_id: u16) -> bool {
+        self.animation_lookup
+            .get(anim_id as usize)
+            .is_some_and(|&slot| slot != 0xffff)
     }
 
     /// The clip a free/effect model instance runs: the caller's `preferred` id when the model has
@@ -265,6 +282,7 @@ mod tests {
             graph: Handle::default(),
             clips: has_clips.iter().map(|&id| test_clip(id)).collect(),
             playable_animation_lookup: table,
+            animation_lookup: Vec::new(),
             hand_close: [None, None],
             global_bones: Vec::new(),
             first_seq: None,

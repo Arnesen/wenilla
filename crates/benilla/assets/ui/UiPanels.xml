@@ -89,6 +89,12 @@
         -- every non-center panel (`CanOpenPanels` below). That is the rule behind "you can't open
         -- anything with the ESC menu up". whileDead: dying is exactly when you want to log out.
         UIPanelWindows["GameMenuFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)
+        -- and the first **full** row. It was a plain toplevel until now, showing itself with a bare
+        -- `WorldMapFrame:Show()` and so bypassing this manager entirely: with the game menu up it
+        -- was the ONE window that still opened (director-reported). Routing its toggle through
+        -- ShowUIPanel is what subjects it to the same rules as everything else.
+        UIPanelWindows["WorldMapFrame"] = { area = "full", pushable = 0, whileDead = 1 }
 
         -- The real client stores `.left`/`.center`/`.doublewide`/`.fullscreen` as fields directly on
         -- the `UIParent` frame table (UIParent.lua l.789-885). benilla has no `UIParent` frame object
@@ -96,7 +102,7 @@
         -- table instead of squatting the `UIParent` global name; a future `CreateFrame("Frame",
         -- "UIParent")` then lands cleanly on an empty global rather than silently coexisting with our
         -- state. Every function below is defined in this same chunk, so they all close over it.
-        local slots = { left = nil, center = nil }
+        local slots = { left = nil, center = nil, fullscreen = nil }
 
         -- SetLeftFrame(frame) — UIParent.lua l.809-824. Hides the old left occupant, SetPoints +
         -- Shows the new one at the left slot's screen anchor (verified: TOPLEFT UIParent, 0, -104).
@@ -167,6 +173,26 @@
             return slots.center
         end
 
+        -- SetFullScreenFrame(frame) — UIParent.lua l.852-866. ONE line dropped: the reference also
+        -- does `UIParent:Hide()`/`:Show()` around the swap, hiding the whole game UI behind the
+        -- fullscreen frame. benilla has no UIParent frame (the note on `slots` above), and the only
+        -- full frame we ship — the world map — already paints its own full-screen blackout
+        -- (WorldMapFrame.xml), which is what that Hide buys the reference.
+        function SetFullScreenFrame(frame)
+            local oldFrame = slots.fullscreen
+            slots.fullscreen = frame
+            if oldFrame then
+                oldFrame:Hide()
+            end
+            if frame then
+                frame:Show()
+            end
+        end
+
+        function GetFullScreenFrame()
+            return slots.fullscreen
+        end
+
         -- CanOpenPanels() — UIParent.lua l.887-910. Its dead-player arms are commented out in the
         -- reference itself (both of them, with the note that the fear/out-of-control gate was
         -- "previously"); what survives is one rule: **a native-center frame open ⇒ nothing else
@@ -209,6 +235,17 @@
                 return
             end
 
+            -- l.668-675: a full-screen frame open ignores every non-full open request (`force`
+            -- evicts it instead). The world map is the only `full` row, so this reads: nothing opens
+            -- behind the map.
+            if GetFullScreenFrame() and info.area ~= "full" then
+                if force then
+                    SetFullScreenFrame(nil)
+                else
+                    return
+                end
+            end
+
             -- l.677-689: with a native-center frame open, only another center request gets through
             -- — `force` evicts it instead of refusing. Redundant with the CanOpenPanels gate above
             -- for every caller that doesn't force (the reference double-checks it too); kept because
@@ -224,6 +261,14 @@
                         return
                     end
                 end
+            end
+
+            -- l.692-696: full-screen frames just replace each other, and they take everything with
+            -- them on the way in.
+            if info.area == "full" then
+                CloseAllWindows()
+                SetFullScreenFrame(frame)
+                return
             end
 
             -- l.697-702: native-center frames just replace each other and take the screen —
@@ -284,6 +329,12 @@
                 return
             end
 
+            -- l.759-763.
+            if frame == GetFullScreenFrame() then
+                SetFullScreenFrame(nil)
+                return
+            end
+
             if frame == GetCenterFrame() then
                 SetCenterFrame(nil)
                 return
@@ -311,9 +362,11 @@
         function CloseWindows(ignoreCenter)
             local leftFrame = GetLeftFrame()
             local centerFrame = GetCenterFrame()
-            local found = leftFrame or centerFrame
+            local fullScreenFrame = GetFullScreenFrame()
+            local found = leftFrame or centerFrame or fullScreenFrame
 
             HideUIPanel(leftFrame)
+            HideUIPanel(fullScreenFrame)
             if centerFrame then
                 local info = UIPanelWindows[centerFrame:GetName()]
                 if not info or info.area ~= "center" or not ignoreCenter then
@@ -497,7 +550,10 @@
             -- l.628; ours routes through this chain since frames get no raw key events).
             local worldmap = getglobal("WorldMapFrame")
             if worldmap and worldmap:IsVisible() then
-                worldmap:Hide()
+                -- HideUIPanel, not a bare Hide: the map holds the full-screen slot (decision 0203's
+                -- `full` row, wired 0674), and hiding it behind the manager's back would leave the
+                -- slot pointing at an invisible frame — which then refuses every future panel.
+                HideUIPanel(worldmap)
                 return
             end
             -- The open-letter toplevel (decision 0544): the ref registers OpenMailFrame in

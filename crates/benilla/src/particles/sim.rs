@@ -165,6 +165,8 @@ fn drive_child(
 pub(super) fn simulate_particles(
     time: Res<Time>,
     tuning: Res<ParticleTuning>,
+    // The far-clip wall — the emitter draw-set gate's depth bound (see the gate below).
+    view: Res<crate::view::ViewDistance>,
     mut commands: Commands,
     cam: Query<(&GlobalTransform, &Frustum), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
@@ -228,6 +230,9 @@ pub(super) fn simulate_particles(
     let cam_right = cam_rot * Vec3::X;
     let cam_up = cam_rot * Vec3::Y;
     let face_normal = cam_up.cross(cam_right).normalize_or_zero(); // toward the camera
+                                                                   // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
+                                                                   // doodad's own cull along, so an emitter and its owner cross the wall together.
+    let cam_fwd = Vec3::from(cam_tf.forward());
 
     for (entity, mut emitter, mut entity_tf, mut entity_global, fade, mut vis, layers) in
         &mut emitters
@@ -236,10 +241,11 @@ pub(super) fn simulate_particles(
         // emitter uses its booth's camera (decision 0539 §5 — the glue scenes' braziers, which the
         // WORLD camera would billboard sideways and LOD from a nonsense distance); everything else
         // the world camera.
-        let (e_cam_pos, e_right, e_up, e_normal) = match layers
+        let booth = layers
             .filter(|l| !l.intersects(&RenderLayers::default()))
-            .and_then(|l| booth_cams.iter().find(|(_, cl)| cl.intersects(l)))
-        {
+            .and_then(|l| booth_cams.iter().find(|(_, cl)| cl.intersects(l)));
+        let is_booth = booth.is_some();
+        let (e_cam_pos, e_right, e_up, e_normal) = match booth {
             Some((tf, _)) => {
                 let (_, rot, _) = tf.to_scale_rotation_translation();
                 let right = rot * Vec3::X;
@@ -254,24 +260,39 @@ pub(super) fn simulate_particles(
             None => (cam_pos, cam_right, cam_up, face_normal),
         };
         // Draw-set gate (byte-verified, decision 0171): the reference ticks an emitter only when
-        // its owner doodad is in the frame's scene worklist — admission = the 6-plane frustum
-        // sphere test + the radius-tiered distance-fade cutoff (`FUN_00683f80`; alpha ≤ 0 is never
-        // inserted). A culled owner's emitter neither simulates nor draws: pool + age FROZEN
+        // its owner doodad is in the frame's scene worklist — admission = the frustum sphere test
+        // + the radius-tiered distance-fade cutoff (`FUN_00683f80`; alpha ≤ 0 is never inserted).
+        // A culled owner's emitter neither simulates nor draws: pool + age FROZEN
         // (`[obj+0x88]` accumulates nothing while absent), and on re-entry it resumes from frozen
-        // state with one frame's dt — no catch-up, no refill. Both tests use the owner's fade
+        // state with one frame's dt — no catch-up, no refill. All three tests use the owner's fade
         // sphere, matching the reference's `[rec+0x68]`.
+        //
+        // The **far-clip** term is the third test and it is load-bearing (decision 0678, bug B39):
+        // the reference's frustum is bounded by its projection far plane at `farclip`, ours is not
+        // — our projection far is ~3000 yd so the WDL horizon can draw behind the wall, and
+        // `intersects_sphere`'s far-plane term would therefore bound at 3000, not 777. Worse, the
+        // fade cutoff alone bounds NOTHING for a big owner: `doodad_fade_alpha` returns a flat 1.0
+        // above `NEVER_FADE_RADIUS` (7 yd) — trees, buildings, the large fire props. So every
+        // big-doodad emitter used to simulate and draw at ANY distance out to the streaming
+        // residency, long past the wall its own owner's mesh had already been culled by. That is
+        // "all effects render at unlimited distance", and it is why the terrain under them was
+        // already gone. `within_farclip` is the same rule the owner mesh uses in
+        // `debug_panel::visibility` — shared, so the two can no longer drift apart.
         if let Some(f) = fade {
-            let dx = f.center.x - cam_pos.x;
-            let dz = f.center.z - cam_pos.z;
-            let horiz = (dx * dx + dz * dz).sqrt();
-            let in_set = crate::model_fade::doodad_fade_alpha(f.radius, horiz) > 0.0
-                && frustum.intersects_sphere(
+            let in_set = f.in_draw_set(
+                cam_pos,
+                cam_fwd,
+                view.farclip,
+                // Lateral planes only (`intersect_far = false`) — the depth bound is the farclip
+                // term inside `in_draw_set`, deliberately; see `view::within_farclip`.
+                frustum.intersects_sphere(
                     &CullSphere {
                         center: f.center.into(),
                         radius: f.radius,
                     },
                     false,
-                );
+                ),
+            );
             if !in_set {
                 if *vis != Visibility::Hidden {
                     *vis = Visibility::Hidden;
@@ -294,6 +315,57 @@ pub(super) fn simulate_particles(
             }
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
+            }
+        } else if !is_booth && !emitter.draining {
+            // ENTITY-owned emitters (creatures, GameObjects, spell kits, WMO-prop deck lanterns)
+            // carry no `EmitterFade`, and the premise that excused them — "the population is
+            // bounded by server visibility instead" (`entities::wmo_props`) — is FALSE for
+            // transports, which vmangos streams map-wide. Measured (decision 0678): parked in
+            // Durotar, **56 emitters** were ticking and drawing at 4853–7080 yd — the deck
+            // lanterns of the Teldrassil↔Auberdine boat (`transports` 176244 "Moonspray") and its
+            // Menethil↔Auberdine neighbour, five to seven kilometres away. So the wall is applied
+            // to EVERY world-lane emitter, not just the faded ones. That is also the faithful
+            // shape: the reference ticks particles inside the owning model's animate step, which
+            // runs only for models the frame actually draws — and past `farclip` nothing is drawn.
+            //
+            // Three deliberate exclusions, each of which would be a bug the other way:
+            // - **booth-layered** emitters (glue/portrait scenes) — parked thousands of yards away
+            //   and drawn by their OWN camera, so the world wall says nothing about them;
+            //   `glue_booth` states the contract outright ("a glue scene always ticks").
+            // - **draining** emitters — freezing one strands it: it can never empty its pool, so it
+            //   never reaches the self-despawn below and leaks for the session.
+            // - an emitter whose **owner has vanished** — `subject` is `None`, so it falls through
+            //   to the drain path below rather than freezing before that can be noticed.
+            //
+            // The subject is read LIVE from the owner's transform, never from the stored anchor: a
+            // frozen emitter stops refreshing its anchor, so gating on the stored one would latch a
+            // moving owner out of existence the first time it crossed the wall.
+            let subject = match emitter.owner {
+                Some(o) => transforms.get(o).ok().map(|gt| gt.translation()),
+                None => Some(emitter.anchor_pos),
+            };
+            if let Some(at) = subject {
+                if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, at, 0.0) {
+                    if *vis != Visibility::Hidden {
+                        *vis = Visibility::Hidden;
+                        for c in &emitter.children {
+                            if let Ok((_, _, mut cv)) = child_draws.get_mut(c.entity) {
+                                *cv = Visibility::Hidden;
+                            }
+                        }
+                        for slot in &emitter.model_instances {
+                            for (e, _) in &slot.meshes {
+                                if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
+                                    *cv = Visibility::Hidden;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if *vis != Visibility::Inherited {
+                    *vis = Visibility::Inherited;
+                }
             }
         }
         let ParticleEmitter {

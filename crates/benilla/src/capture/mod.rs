@@ -141,6 +141,11 @@ pub(crate) struct FxViewState {
 /// the ground scenario's streamed tiles, high enough that terrain never intersects the model.
 pub(crate) const FXVIEW_POS: [f32; 3] = [-8960.0, -145.0, 90.0];
 
+/// How far the `vista` fixture seats its eye above the position it is given (yd) — a standing human's
+/// camera pivot, so pasting a `.go xyz` straight off the debug panel frames what the director saw
+/// rather than a worm's-eye view from inside the ground.
+const VISTA_EYE_HEIGHT: f32 = 2.0;
+
 /// Print the BASELINE scenario names, one per line — the single source of truth
 /// `scripts/visual.sh` reads so the driver never drifts from the code. Invoked by `main` for
 /// `WOW_CAPTURE=list`. On-demand fixtures (the UI look-pass windows, sun/moon/sky, house-compass)
@@ -296,6 +301,51 @@ impl Plugin for CapturePlugin {
                 eye,
                 look: center,
                 minute: 720,
+                ui: None,
+            }
+        } else if name == "vista" {
+            // The **arbitrary-viewpoint** instrument: stand anywhere on the map, face any heading,
+            // at any clock — the world half of what `fxview` is for effects. A director report that
+            // arrives as "look at this horizon, here" (position, facing and time are all on the debug
+            // panel, and `copy .go xyz` puts the position on the clipboard) becomes a reproducible
+            // headless capture instead of a round-trip. Pair it with `WOW_FARCLIP` to match their
+            // slider — horizon and fog artifacts live and die by the far-clip wall. Not a golden
+            // scenario (its output depends on the knobs, not the name).
+            //
+            //   WOW_CAPTURE=vista WOW_VISTA_AT=-5841.9,-3802.4,-59.7 WOW_VISTA_FACE=24 \
+            //     WOW_VISTA_MIN=1052 WOW_FARCLIP=320 WOW_CAPTURE_OUT=/tmp/v.png cargo run -q -p benilla
+            //
+            // Knobs: `WOW_VISTA_AT` (required, raw WoW `x,y,z` — the PLAYER position; the eye seats
+            // `VISTA_EYE_HEIGHT` above it), `WOW_VISTA_FACE` (heading in degrees — the panel's
+            // "facing" in its `(24°)` form; 0 = +X, counter-clockwise), `WOW_VISTA_PITCH` (degrees,
+            // + = up, default 0 = level), `WOW_VISTA_MIN` (game minute of day, default 720 = noon).
+            let knob = |k: &str, d: f32| {
+                std::env::var(k)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d)
+            };
+            let Some(at) = std::env::var("WOW_VISTA_AT").ok().and_then(|v| {
+                let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                (c.len() == 3).then(|| [c[0], c[1], c[2]])
+            }) else {
+                eprintln!("WOW_CAPTURE=vista needs WOW_VISTA_AT=<x,y,z> (raw WoW coords)");
+                std::process::exit(2);
+            };
+            let face = knob("WOW_VISTA_FACE", 0.0).to_radians();
+            let pitch = knob("WOW_VISTA_PITCH", 0.0).to_radians();
+            let eye = [at[0], at[1], at[2] + VISTA_EYE_HEIGHT];
+            // A look point far enough out that the framing is the heading, not the distance.
+            let d = 500.0_f32;
+            Scenario {
+                name: "vista",
+                eye,
+                look: [
+                    eye[0] + d * pitch.cos() * face.cos(),
+                    eye[1] + d * pitch.cos() * face.sin(),
+                    eye[2] + d * pitch.sin(),
+                ],
+                minute: knob("WOW_VISTA_MIN", 720.0) as u32,
                 ui: None,
             }
         // By name, EITHER table: the blessed six or an on-demand fixture. Only the sweep is

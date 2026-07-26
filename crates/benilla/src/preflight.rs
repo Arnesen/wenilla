@@ -8,13 +8,15 @@
 //!    interacted with, attacked, looted or talked to; the world renders through the death filter;
 //!    movement is rooted (unreleased) or ghost-speed (released). Every symptom reads like a client
 //!    bug, and the client is fine.
-//! 2. **GM mode is on** — which every probe character carries by default (method.md's guard against
-//!    unattended aggro killing it). vmangos's `Player::SetGameMaster` re-templates the player to
-//!    **faction template 35** and freezes the mirror timers, so nothing is hostile, nothing aggros,
-//!    fall/environmental damage is skipped and breath/fatigue never tick. FactionTemplate.dbc row 35
-//!    (VERIFIED from the extracted DBC): faction 31 "Friendly", own group mask 0, enemy mask 0 — it
-//!    is hostile to nothing and nothing is hostile to it. Any hostility, reaction-colour, nameplate,
-//!    aggro, threat, damage or drowning measurement taken with GM on is simply wrong, quietly.
+//! 2. **GM mode is on** — which every probe character used to carry by default, as the only guard
+//!    against unattended aggro killing it. vmangos's `Player::SetGameMaster` re-templates the player
+//!    to **faction template 35** and freezes the mirror timers, so nothing is hostile, nothing
+//!    aggros, fall/environmental damage is skipped and breath/fatigue never tick.
+//!    FactionTemplate.dbc row 35 (VERIFIED from the extracted DBC): faction 31 "Friendly", own group
+//!    mask 0, enemy mask 0 — it is hostile to nothing and nothing is hostile to it. Any hostility,
+//!    reaction-colour, nameplate, aggro, threat, damage or drowning measurement taken with GM on is
+//!    simply wrong, quietly. It is now **off** by default: [`crate::probe_shield`] keeps the body
+//!    alive without poisoning any of that (decision 0677), and this banner reports which it is.
 //! 3. **Movement is server-blocked** — rooted, stunned, confused, fleeing, or mid-taxi-flight. The
 //!    controller ignores input and the honest report is "the mover is broken".
 //!
@@ -34,6 +36,7 @@ use bevy::prelude::*;
 use crate::area::AreaTableRes;
 use crate::names::NameCache;
 use crate::net::{EnteredWorldMessage, ObjectStore, SelfGuid, SelfPlayer};
+use crate::probe_shield::{ProbeShield, ShieldReport};
 use crate::terrain_stream::CurrentArea;
 use crate::world_map::CurrentMap;
 
@@ -107,6 +110,7 @@ fn report_session(
     map: Option<Res<CurrentMap>>,
     area: Option<Res<CurrentArea>>,
     area_table: Option<Res<AreaTableRes>>,
+    shield: Res<ProbeShield>,
 ) {
     if entered.read().next().is_some() {
         state.armed_at = Some(time.elapsed_secs());
@@ -166,22 +170,34 @@ fn report_session(
     // point of putting the position in the banner is that it can be pasted back.
     let [wx, wy, wz] = benilla_assets::coords::bevy_to_wow(transform.translation);
     info!(
-        "preflight: {name} — level {lvl} {race} {class}, {hp}/{maxhp} hp, map {map}{zone} @ [{wx:.1}, {wy:.1}, {wz:.1}], faction template {faction}",
+        "preflight: {name} — level {lvl} {race} {class}, {hp}/{maxhp} hp, map {map}{zone} @ [{wx:.1}, {wy:.1}, {wz:.1}], faction template {faction}{shielded}",
         lvl = store.0.unit_level().unwrap_or(0),
         hp = store.0.unit_health().unwrap_or(0),
         maxhp = store.0.unit_max_health().unwrap_or(0),
         map = map.map_or(-1, |m| m.0 as i64),
         faction = store.0.unit_faction_template().unwrap_or(0),
+        // A shielded body is good news, so it rides the banner rather than the warning ladder —
+        // but it is still *stated*, because "can this thing die?" is the first question an
+        // unattended run needs answered (decision 0677).
+        shielded = match shield.report() {
+            ShieldReport::Armed => ", SHIELDED (cannot die)",
+            ShieldReport::Arming => ", shield arming",
+            _ => "",
+        },
     );
 
-    for line in findings(&store.0) {
+    for line in findings(&store.0, shield.report()) {
         warn!("preflight: {line}");
     }
 }
 
 /// Everything about this avatar that will quietly invalidate a session's work, worst first. Pure
-/// over the descriptor so the whole ladder is unit-testable.
-fn findings(fields: &benilla_protocol::messages::ObjectFields) -> Vec<String> {
+/// over the descriptor (plus the one piece of state that rides no descriptor field — the probe
+/// shield, decision 0677) so the whole ladder is unit-testable.
+fn findings(
+    fields: &benilla_protocol::messages::ObjectFields,
+    shield: ShieldReport,
+) -> Vec<String> {
     let mut out = Vec::new();
     let unit_flags = fields.unit_flags();
 
@@ -203,14 +219,40 @@ fn findings(fields: &benilla_protocol::messages::ObjectFields) -> Vec<String> {
         );
     }
 
+    // The shield's bad states are findings; being armed is good news and rides the banner line.
+    match shield {
+        ShieldReport::Disabled => out.push(
+            "THE PROBE SHIELD IS OFF (WOW_GOD=off) — this character CAN die, so an unattended run \
+             can leave a corpse for the next session. Deliberate for a death-arc test; unset \
+             WOW_GOD for anything else (decision 0677)."
+                .into(),
+        ),
+        ShieldReport::Unconfirmed => out.push(
+            "THE PROBE SHIELD DID NOT CONFIRM — `.cheat god on` went out and the server never \
+             answered. Treat this character as mortal and do not leave it parked anywhere hostile."
+                .into(),
+        ),
+        ShieldReport::NotOurs | ShieldReport::Arming | ShieldReport::Armed => {}
+    }
+
     if fields.player_flags() & PLAYER_FLAGS_GM != 0 {
         out.push(format!(
             "GM MODE IS ON — vmangos re-templates the player to faction {GM_FACTION_TEMPLATE} \
              (\"Friendly\", enemy mask 0) and freezes the mirror timers, so NOTHING is hostile, \
              nothing aggros, fall/environmental damage is skipped and breath/fatigue never tick. \
              Any hostility, reaction-colour, nameplate, threat, aggro, damage or drowning reading \
-             taken now is wrong. Send WOW_PROBE_CHAT=\".gm off\" first — and put it back on when \
-             you are done, so an unwatched probe can't be killed."
+             taken now is wrong. {}",
+            match shield {
+                // GM mode is the DEFAULT (0679) — it is what stops a parked body being mobbed, and
+                // the shield is what makes dropping it safe. So this warning is expected on most
+                // runs, and its job is to make sure nobody measures hostility through faction 35.
+                ShieldReport::Arming | ShieldReport::Armed =>
+                    "This is the default. Re-run with WOW_GM=off for those readings — safe, \
+                     because the probe shield (decision 0677) keeps the body alive without it.",
+                _ =>
+                    "Re-run with WOW_GM=off for those readings. Note the probe shield is NOT up on \
+                     this run, so an unshielded body with GM mode off can be killed.",
+            }
         ));
     }
 
@@ -341,21 +383,20 @@ mod tests {
     #[test]
     fn a_healthy_avatar_reports_nothing() {
         let f = player(&[(HEALTH, 60), (MAXHEALTH, 60)]);
-        assert!(findings(&f).is_empty());
+        assert!(findings(&f, ShieldReport::Armed).is_empty());
     }
 
     #[test]
     fn dead_and_ghost_never_report_together() {
         // Dead: health 0 with a real MAXHEALTH.
-        let dead = findings(&player(&[(MAXHEALTH, 60)]));
+        let dead = findings(&player(&[(MAXHEALTH, 60)]), ShieldReport::Armed);
         assert_eq!(dead.len(), 1);
         assert!(dead[0].contains("IS DEAD"));
         // Ghost: health 1 and PLAYER_FLAGS_GHOST — the wire never shows both (decision 0308 §1).
-        let ghost = findings(&player(&[
-            (HEALTH, 1),
-            (MAXHEALTH, 60),
-            (PLAYER_FLAGS, 0x10),
-        ]));
+        let ghost = findings(
+            &player(&[(HEALTH, 1), (MAXHEALTH, 60), (PLAYER_FLAGS, 0x10)]),
+            ShieldReport::Armed,
+        );
         assert_eq!(ghost.len(), 1);
         assert!(ghost[0].contains("IS A GHOST"));
     }
@@ -367,9 +408,54 @@ mod tests {
             (MAXHEALTH, 60),
             (PLAYER_FLAGS, PLAYER_FLAGS_GM),
         ]);
-        let out = findings(&f);
+        let out = findings(&f, ShieldReport::Armed);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("GM MODE IS ON"));
+    }
+
+    #[test]
+    fn a_shielded_body_says_nothing_but_an_unshielded_one_does() {
+        let healthy = player(&[(HEALTH, 60), (MAXHEALTH, 60)]);
+        // Armed is good news: it rides the banner line, never the warning ladder. Neither does a
+        // body the shield has no opinion about (the director's own account).
+        for quiet in [
+            ShieldReport::Armed,
+            ShieldReport::Arming,
+            ShieldReport::NotOurs,
+        ] {
+            assert!(findings(&healthy, quiet).is_empty(), "{quiet:?}");
+        }
+        // Both failure shapes are findings, because both mean "this body can die".
+        let off = findings(&healthy, ShieldReport::Disabled);
+        assert_eq!(off.len(), 1);
+        assert!(off[0].contains("SHIELD IS OFF") && off[0].contains("WOW_GOD"));
+        let unconfirmed = findings(&healthy, ShieldReport::Unconfirmed);
+        assert_eq!(unconfirmed.len(), 1);
+        assert!(unconfirmed[0].contains("DID NOT CONFIRM"));
+    }
+
+    #[test]
+    fn the_gm_warning_always_names_the_way_out() {
+        // GM mode is the default (0679), so this warning fires on nearly every probe run. Its whole
+        // job is that nobody measures hostility through faction 35 without being told how to stop —
+        // and the old advice ("put it back on when you are done") must not come back, because a
+        // session that complies re-poisons every faction reading (0657).
+        let gm = player(&[
+            (HEALTH, 60),
+            (MAXHEALTH, 60),
+            (PLAYER_FLAGS, PLAYER_FLAGS_GM),
+        ]);
+        for report in [
+            ShieldReport::Armed,
+            ShieldReport::Arming,
+            ShieldReport::Disabled,
+            ShieldReport::NotOurs,
+        ] {
+            let out = findings(&gm, report);
+            let line = out.iter().find(|l| l.contains("GM MODE IS ON")).unwrap();
+            assert!(line.contains("WOW_GM=off"), "{report:?}: {line}");
+            assert!(!line.contains("put it back on"), "{report:?}: {line}");
+        }
     }
 
     #[test]
@@ -379,7 +465,7 @@ mod tests {
             (MAXHEALTH, 60),
             (UNIT_FLAGS, 0x0004_0000 | 0x0010_0000), // stunned + taxi
         ]);
-        let out = findings(&f);
+        let out = findings(&f, ShieldReport::Armed);
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("STUNNED") && out[0].contains("TAXI FLIGHT"));
     }

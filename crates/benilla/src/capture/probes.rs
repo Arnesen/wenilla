@@ -661,6 +661,12 @@ fn drive_live_fps(
 /// login whirlpool investigation: the real client draws 793 particle quads across 23 draws in
 /// one `UI_MainMenu` frame). Works at any state — the glue screens included, unlike the
 /// in-world-gated FPS probe.
+///
+/// It also measures **draw distance** (decision 0678): each emitter's planar depth along
+/// camera-forward — the coordinate the far-clip wall uses — and the draw-set gate's verdict, with
+/// `drawn_beyond_wall` on the summary line. That is the numeric form of "effects render at
+/// unlimited distance" (bug B39): emitters still ticking and drawing past the wall that has already
+/// discarded the terrain beneath them. **It must read 0**; a non-zero value is the bug, live.
 pub(crate) struct ParticleCensusPlugin;
 
 impl Plugin for ParticleCensusPlugin {
@@ -684,7 +690,14 @@ struct ParticleCensus {
 fn fire_particle_census(
     mut probe: ResMut<ParticleCensus>,
     time: Res<Time>,
-    emitters: Query<&crate::particles::ParticleEmitter>,
+    view: Res<crate::view::ViewDistance>,
+    cam: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
+    emitters: Query<(
+        &crate::particles::ParticleEmitter,
+        Option<&crate::particles::EmitterFade>,
+        &Visibility,
+        Option<&bevy::camera::visibility::RenderLayers>,
+    )>,
 ) {
     if probe.fired || time.elapsed_secs() < probe.at {
         return;
@@ -692,7 +705,71 @@ fn fire_particle_census(
     probe.fired = true;
     let mut total = 0usize;
     let mut n = 0usize;
-    for e in &emitters {
+    // The B39 columns (decision 0678). Per emitter: its planar depth along camera-forward (the
+    // coordinate the far-clip wall is measured in) and the draw-set gate's live verdict.
+    //
+    // **`drawn_beyond_wall` is the number that names the bug.** It counts emitters the gate is
+    // still ticking and drawing at a depth where the detailed world — the terrain under them
+    // included — has already been discarded by the wall. Before 0678 it was routinely non-zero,
+    // because `doodad_fade_alpha` admits any owner over `NEVER_FADE_RADIUS` at *every* distance
+    // and nothing else bounded depth; that is precisely "all effects render at unlimited
+    // distance", and precisely the reporter's "the terrain is not even rendered that far".
+    // It must now be **0**: past the wall the gate hides the emitter and freezes its pool.
+    //
+    // `beyond_wall` (verdict ignored) stays as the denominator — emitters *exist* out there and
+    // should, they are simply frozen. A fix that despawned them would be the wrong fix.
+    //
+    // **Booth-layered emitters are excluded from the distance accounting** — the same layer filter
+    // `simulate_particles` uses to pick a booth's camera. The portrait/glue scenes are parked
+    // thousands of yards from the world and drawn by their OWN camera, so the world camera's wall
+    // says nothing about them; counting them read as 28 phantom "effects past the wall" (all of
+    // them Karazahn braziers and night-elf glows at ~7080 yd) on a build where the world was
+    // already clean. Measuring the right subject is the instrument's job, not the reader's.
+    let cam_tf = cam.iter().next();
+    let mut beyond_wall = 0usize;
+    let mut drawn_beyond_wall = 0usize;
+    let mut drawn_beyond_wall_live = 0usize;
+    let mut booth = 0usize;
+    let mut max_drawn_depth = f32::NEG_INFINITY;
+    for (e, fade, vis, layers) in &emitters {
+        let world_layer =
+            layers.is_none_or(|l| l.intersects(&bevy::camera::visibility::RenderLayers::default()));
+        // Depth to the OWNER's fade sphere where there is one (the gate's own subject), else the
+        // emitter's live anchor — so the number always names what the gate actually tests.
+        let depth = cam_tf.map(|t| {
+            let center = fade.map_or_else(|| e.anchor_world(), |f| f.center);
+            let radius = fade.map_or(0.0, |f| f.radius);
+            (center - t.translation()).dot(Vec3::from(t.forward())) - radius
+        });
+        let drawn = *vis != Visibility::Hidden;
+        if !world_layer {
+            booth += 1;
+        }
+        if let Some(d) = depth.filter(|_| world_layer) {
+            if drawn {
+                max_drawn_depth = max_drawn_depth.max(d);
+            }
+            if d > view.farclip {
+                beyond_wall += 1;
+                if drawn {
+                    drawn_beyond_wall += 1;
+                    drawn_beyond_wall_live += e.live();
+                }
+            }
+        }
+        let dist = depth
+            .map(|d| {
+                let lane = if world_layer { "world" } else { "booth" };
+                let c = fade.map_or_else(|| e.anchor_world(), |f| f.center);
+                format!(
+                    " depth={d:.1} drawn={drawn} lane={lane} gated={} at=({:.0},{:.0},{:.0})",
+                    fade.is_some(),
+                    c.x,
+                    c.y,
+                    c.z
+                )
+            })
+            .unwrap_or_default();
         let d = e.def();
         let rate_keys: Vec<String> = d
             .emission_rate
@@ -713,7 +790,7 @@ fn fire_particle_census(
             })
             .unwrap_or_default();
         println!(
-            "PARTICLE_CENSUS_EMITTER blend={:?} flags={:#06x} rate=[{}] life={:.2} tex={} live={}{plane}",
+            "PARTICLE_CENSUS_EMITTER blend={:?} flags={:#06x} rate=[{}] life={:.2} tex={} live={}{dist}{plane}",
             d.blend,
             d.flags,
             rate_keys.join(","),
@@ -724,7 +801,26 @@ fn fire_particle_census(
         total += e.live();
         n += 1;
     }
-    println!("PARTICLE_CENSUS emitters={n} live_total={total}");
+    let max_drawn_depth = if max_drawn_depth.is_finite() {
+        max_drawn_depth
+    } else {
+        0.0
+    };
+    // The camera pose goes on the line so a census is self-describing: every distance number here
+    // is measured from it, and a probe whose `.go` silently failed otherwise reports crisp numbers
+    // about the wrong place.
+    let where_ = cam_tf
+        .map(|t| {
+            let p = t.translation();
+            format!(" cam=({:.1},{:.1},{:.1})", p.x, p.y, p.z)
+        })
+        .unwrap_or_else(|| " cam=none".into());
+    println!(
+        "PARTICLE_CENSUS emitters={n} booth={booth} live_total={total} farclip={:.0} \
+         beyond_wall={beyond_wall} drawn_beyond_wall={drawn_beyond_wall} \
+         drawn_beyond_wall_live={drawn_beyond_wall_live} max_drawn_depth={max_drawn_depth:.1}{where_}",
+        view.farclip,
+    );
 }
 
 /// The bevy_ui node census (`WOW_NODE_PROBE=<secs>`): once, `t` seconds in, print one line per

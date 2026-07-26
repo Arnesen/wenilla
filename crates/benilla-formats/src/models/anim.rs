@@ -200,6 +200,16 @@ pub fn parse_m2_playable_animation_lookup(bytes: &[u8]) -> Result<Vec<PlayableAn
         .collect())
 }
 
+/// Parse the M2's **AnimationLookup** table (header `count@+0x24`/`ofs@+0x28`) — `AnimationData.dbc`
+/// id → this model's first sequence slot for it, `0xffff` where it authors none. The table behind the
+/// reference's ownership predicate `0x711960`; see [`benilla_m2::M2Model::owns_animation`], which is
+/// what callers should normally use rather than indexing this by hand.
+pub fn parse_m2_animation_lookup(bytes: &[u8]) -> Result<Vec<u16>> {
+    let format =
+        parse_m2(&mut Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("parsing M2: {e}"))?;
+    Ok(format.model().animation_lookup.clone())
+}
+
 /// One bone's keyframe tracks for an animation sequence (decision 0019), in **raw WoW model space**:
 /// translation/scale are `[f32;3]`, rotation is an uncompressed quaternion `[x,y,z,w]` (vanilla v256).
 /// Times are **seconds**, rebased to the sequence start so each clip runs `0..duration`. Only the

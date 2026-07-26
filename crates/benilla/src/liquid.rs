@@ -70,13 +70,20 @@ impl Plugin for LiquidPlugin {
     }
 }
 
-/// Whether the camera eye is currently below a water surface. Set by [`detect_submersion`]; read by
-/// `lighting::update_time_lighting`, which (when true) samples the **underwater** Light param so the
-/// whole scene gets the dense teal fog + cool tint + teal clear colour (VERIFIED apitrace WoW.18 —
-/// the murk is fog + light-tint, no overlay quad). Two clocks aside, this is the one cross-feed from
-/// the water subsystem into lighting.
+/// What the camera eye is currently submerged in — **which liquid, not merely whether**. Set by
+/// [`detect_submersion`]; read by `lighting::update_time_lighting`, which selects the atmosphere from
+/// it so the whole scene (fog colour + distances, ambient, diffuse, clear colour) becomes the
+/// submerged one (VERIFIED apitrace WoW.18 — the murk is fog + light-tint, no overlay quad). Two
+/// clocks aside, this is the one cross-feed from the liquid subsystem into lighting.
+///
+/// **The kind is load-bearing, not decoration.** Water and ocean read the *zone's* underwater
+/// `LightParams` slot; magma and slime read fixed global rows instead, zone-independent
+/// (byte-VERIFIED `0x6d2371` — see `benilla_formats::Submersion`). Carrying a bare `bool` here is
+/// what left lava and slime with no submerged view at all: they were excluded from the flag outright,
+/// because one bool could only mean "the water murk", and turning the Great Forge teal was worse than
+/// showing nothing.
 #[derive(Resource, Default)]
-pub(crate) struct Underwater(pub(crate) bool);
+pub(crate) struct Underwater(pub(crate) benilla_formats::Submersion);
 
 /// Which file the liquid came from — the **delegation key** for [`liquid_at`].
 ///
@@ -102,8 +109,10 @@ pub(crate) enum LiquidSource {
 ///
 /// Named `Water*` from when only water carried one. It now rides **every** kind — magma and slime
 /// included, which is what makes Blackrock's lava and Undercity's slime swimmable at all (decision
-/// 0634). Consumers that are specifically about *water* (the teal murk, foam, the splash) filter on
-/// [`Self::kind`]; the swim mode does not, because you swim in lava too.
+/// 0634). Consumers that are specifically about *water* (the surface swatch, foam, the wade splash and
+/// footstep depth) filter on [`Self::kind`]; the swim mode does not, because you swim in lava too —
+/// and neither does the **submerged atmosphere**, which is per-kind rather than water-only
+/// ([`Underwater`]).
 ///
 /// **A liquid is a grid — not a plane, not a triangle soup.** Both of its questions, *is this XY
 /// wet* and *how high is the surface here*, are answered by locating the containing cell
@@ -484,8 +493,13 @@ pub(crate) fn describe_at<'a>(
 }
 
 /// [`liquid_at`] restricted to **water** kinds — the query for the consumers that are about water
-/// specifically (the teal murk, foam, the wade splash), which must not fire in the Great Forge's
-/// lava or Undercity's slime. Swim mode deliberately does NOT use this one.
+/// specifically (the wade splash, footstep depth, the remote-motion spline's depth), which must not
+/// fire in the Great Forge's lava or Undercity's slime. Swim mode deliberately does NOT use this one.
+///
+/// The **submerged atmosphere no longer routes through here either**: it is per-kind (magma and slime
+/// have their own fixed `LightParams` rows), so it reads [`Underwater`] instead. This wrapper's docs
+/// used to name "the teal murk" as its headline consumer, and that was exactly the assumption that
+/// left lava and slime with no submerged view at all.
 pub(crate) fn water_surface_at<'a>(
     water: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
@@ -501,29 +515,92 @@ pub(crate) fn water_surface_at<'a>(
 // swimming*, one number, and its one spelling is `player::swim_enter_depth(h)`. A human's line
 // moved 2.0 → 1.52 yd, a murloc's far shallower.
 
-/// Eye-submersion accept margin (VERIFIED `FUN_0069b6d0`: `eye.z < surface + 0.01`).
+/// Eye-submersion accept margin for the **water** kinds (VERIFIED `FUN_0069b6d0`: `eye.z < surface +
+/// 0.01`, the f32 `0x3c23d70a` at `0x8029d0`, strict `<`). The WMO magma/slime compare carries no
+/// epsilon at all, so [`detect_submersion`] applies this per kind.
 const SUBMERSION_EPS: f32 = 0.01;
 
-/// Set [`Underwater`] from the camera vs the water surfaces: the eye is submerged if it's over a wet
+/// Which submerged atmosphere a liquid kind selects. Water/ocean/rapids take the zone's own
+/// underwater `LightParams` slot; magma and slime take fixed global rows instead, zone-independent
+/// (see [`benilla_formats::Submersion`]).
+fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
+    use benilla_formats::Submersion;
+    match kind {
+        LiquidKind::Still | LiquidKind::Rapids | LiquidKind::Ocean => Submersion::Water,
+        LiquidKind::Magma => Submersion::Magma,
+        LiquidKind::Slime => Submersion::Slime,
+    }
+}
+
+/// Set [`Underwater`] from the camera vs the liquid surfaces: the eye is submerged if it's over a wet
 /// cell and below that cell's surface (`FUN_0069b6d0` — its 9×9 bilinear sample is now what
 /// [`WaterChunkInfo::surface_z_at`] does, so this is the binary's own rule and no longer a per-chunk
-/// flat approximation of it). One pass over the loaded water surfaces (a few hundred, cheap).
+/// flat approximation of it). One pass over the loaded surfaces (a few hundred, cheap).
+///
+/// **Every** liquid counts, including magma and slime — they are not the water murk, they are their
+/// own atmospheres (see [`Underwater`]). The eye's own **`+0.01` accept margin is water's alone**:
+/// byte-VERIFIED (`0x8029d0` = `0x3c23d70a` = 0.01, strict `<`, at `0x69ba23`) that the WMO
+/// magma/slime compare is a bare `z < h` with **no epsilon**, so the margin is applied per kind
+/// rather than uniformly.
+///
+/// Where surfaces stack, the **deepest submerging** one wins: standing in the Great Forge's lava
+/// under an unrelated water footprint should read as lava, and a `.any()` over an unordered query
+/// would otherwise answer with whichever entity the ECS happened to yield first.
 fn detect_submersion(
     mut underwater: ResMut<Underwater>,
     camera: Query<&Transform, With<WorldCamera>>,
     water: Query<&WaterChunkInfo>,
+    time: Res<Time>,
+    mut last_dump: Local<Option<u32>>,
 ) {
     let Ok(cam) = camera.single() else {
         return;
     };
     let eye = bevy_to_wow(cam.translation); // [x, y, z] WoW yards
-                                            // WATER only: the murk this drives is the teal underwater fog/tint. Magma and slime now carry a
-                                            // footprint too (they became swimmable in 0634), and dunking the camera in the Great Forge would
-                                            // otherwise turn the lava teal.
-    underwater.0 = water.iter().filter(|w| !w.kind.is_fullbright()).any(|w| {
-        w.surface_z_at(eye[0], eye[1])
-            .is_some_and(|z| eye[2] < z + SUBMERSION_EPS)
-    });
+    underwater.0 = water
+        .iter()
+        .filter_map(|w| {
+            let z = w.surface_z_at(eye[0], eye[1])?;
+            let eps = if w.kind.is_fullbright() {
+                0.0
+            } else {
+                SUBMERSION_EPS
+            };
+            (eye[2] < z + eps).then_some((z, submersion_of(w.kind)))
+        })
+        // Lowest surface first: `total_cmp` on the surface z, so a tie is still deterministic.
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, s)| s)
+        .unwrap_or_default();
+    // `WOW_FOG_DUMP` also explains *this* decision (`frame` drops the 1 Hz throttle, as there). The
+    // committed fog is whichever submerged atmosphere the verdict names, so a fog line alone cannot
+    // say whether an atmosphere that reads wrong is the wrong record or the right record never
+    // selected. Reports the eye, the verdict, and every candidate surface over the eye's XY.
+    if std::env::var_os("WOW_FOG_DUMP").is_some() {
+        let sec = time.elapsed_secs() as u32;
+        if last_dump.replace(sec) != Some(sec) {
+            let mut cands: Vec<String> = water
+                .iter()
+                .filter_map(|w| {
+                    w.surface_z_at(eye[0], eye[1])
+                        .map(|z| format!("{:?} z {z:.2}", w.kind))
+                })
+                .collect();
+            cands.sort();
+            eprintln!(
+                "[submerged] {:?} eye [{:.1} {:.1} {:.2}] over-xy {}",
+                underwater.0,
+                eye[0],
+                eye[1],
+                eye[2],
+                if cands.is_empty() {
+                    "(no surface covers the eye's XY)".to_string()
+                } else {
+                    cands.join(", ")
+                }
+            );
+        }
+    }
 }
 
 /// The shared liquid materials, one per [`LiquidKind`], plus each one's animated frame count (for
@@ -1095,8 +1172,9 @@ mod tests {
     }
 
     /// Lava and slime ARE swimmable (`liquid_at`) but must never drive the water-flavoured
-    /// consumers (`water_surface_at` → the teal murk, foam, the splash). B24/B25 vs the teal-lava
-    /// regression the old fullbright exclusion was guarding against — both, at once.
+    /// consumers (`water_surface_at` → the wade splash, footstep depth, the spline depth). B24/B25 vs
+    /// the teal-lava regression the old fullbright exclusion was guarding against — both, at once.
+    /// The submerged atmosphere is deliberately NOT in that list any more: it is per-kind.
     #[test]
     fn fullbright_kinds_swim_but_are_not_water() {
         let lava = flat_info(LiquidSource::WmoGroup, LiquidKind::Magma, 6.0);

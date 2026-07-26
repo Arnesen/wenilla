@@ -41,10 +41,16 @@
 //! [`ModelAnimations::clips`], exactly as `creature_anim` does. A one-shot motion held at its end frame
 //! *is* the destination rest pose, so playing the motion and holding needs no explicit settle step.
 //!
-//! Deferred (noted, not this slice): the §243 **fallback chain** for a model that authors only the motion
-//! clips (rest pose = the neighbour motion frozen at frame 0) — folded once a real door M2 dump shows it's
-//! needed; the **ANIMPROGRESS one-time seek** (resync a door streamed in mid-swing — we play from frame 0);
-//! and the mid-flight **reverse blend** (interrupting a half-open door). None change the common case.
+//! The §243 **missing-sequence fallback** is no longer deferred: [`remap_missing`] implements the
+//! four-way remap, including the two legs that freeze a *motion* clip at frame 0 to stand in for an
+//! absent rest pose. It is not a corner case — the Ahn'Qiraj gate's roots (`AHN_QIRAJ_DOORROOTS`,
+//! Stand + Open only) took the "play nothing" path and rendered its 42-bone tangle at bind pose.
+//!
+//! Still deferred (noted, not this slice): the **ANIMPROGRESS** half — the field selects the *motion*
+//! substate rather than the rest one at spawn, and seeks the clip to `duration × progress / 100`
+//! (wow-re `gameobject-anim-arm.md` §2b, `go-anim-state-machine.md`'s seek section); benilla reads
+//! only `GAMEOBJECT_STATE` and always plays from frame 0. And the mid-flight **reverse blend**
+//! (interrupting a half-open door).
 
 use avian3d::prelude::{Collider, ColliderDisabled};
 use benilla_assets::ModelAnimations;
@@ -82,14 +88,40 @@ pub(crate) struct GoAnim {
     last_wire: Option<u32>,
 }
 
-/// Which GameObject types get the state-driven **animated** instance (skinned lid/door + §243 sequences):
-/// the door/button state machine (**DOOR(0) / BUTTON(1)**, server-driven over the wire) plus the
-/// **CHEST(3)**, whose lid runs the identical machine but fed by loot events (decision 0250). A model that
-/// doesn't author a skeleton/sequences still falls back to a static mesh (the attach gate also checks the
-/// joints/animations exist), so a lid-less chest simply stays static. A **GOOBER(10)** flips state too but
-/// also fires custom-anim + spells, so its path is unverified and left out until checked.
+/// Which GameObject types get the state-driven **animated** instance (skinned lid/door + §243
+/// sequences) — **the byte-verified type census**, not a guess (wow-re `gameobject-anim-arm.md` §2f).
+///
+/// `CGGameObject::LoadBaseObject` dispatches on the wire TYPE_ID through the 31-entry jump table at
+/// `0x5f76cc` (`cmp ecx,0x1e` + *unsigned* `ja`, so 0..30) and allocates a per-type strategy handler
+/// into `[GO+0x210]`. The handlers fall into exactly two families, and the split is legible in the
+/// **allocation size**: every type whose handler is `0x1c` bytes gets a 36-slot vtable carrying the
+/// real `0x5f3c30`/`0x5f3b50` arm; every other size gets a 34-slot vtable whose corresponding slots
+/// are the abstract base's do-nothing bodies — and whose `+0x88` doesn't even exist (reading it walks
+/// into the next vtable, which is what made an earlier census report plausible nonsense).
+///
+/// So the machine is **20 of the 31 types**, not the three we had:
+///
+/// | on the machine | off it |
+/// |----------------|--------|
+/// | 0 DOOR · 1 BUTTON · 2 QUESTGIVER · 3 CHEST · 6 TRAP · 8 SPELL_FOCUS · 9 TEXT · 10 GOOBER · 12 AREADAMAGE · 16 DUELFLAG · 17 FISHINGNODE · 18 SUMMONING_RITUAL · 19 MAILBOX · 23 MEETINGSTONE · 24 FLAGSTAND · 26 FLAGDROP · 27 MINI_GAME · 28 LOTTERY_KIOSK · 29 CAPTURE_POINT · 30 | 4 BINDER · 5 GENERIC · 7 CHAIR · 11 TRANSPORT · 13 CAMERA · 14 MAP_OBJECT · 15 MO_TRANSPORT · 20 AUCTIONHOUSE · 21 GUARDPOST · 22 SPELLCASTER · 25 FISHINGHOLE |
+///
+/// Type **30** is past vmangos's enum but has a real family-A arm in the table, so it is included for
+/// completeness; type **21 GUARDPOST** has no `case` in the source at all and shares the out-of-range
+/// default, which points `[GO+0x210]` at a static placeholder and logs `"BADBASEGAMEOBJECT|%d"`.
+///
+/// The old `0 | 1 | 3` was wrong in both directions — far too narrow, and its stated reason for
+/// excluding GOOBER(10) ("also fires custom-anim + spells, so its path is unverified") was not a
+/// reason the binary recognises: the custom-anim opcode drives a *disjoint* substate family (8..11),
+/// never the lid. Measured against live world data, the narrowing left **1427 spawns** — books,
+/// traps, goobers, questgivers — rendering the loader seed's pose instead of their state's.
+///
+/// A model that doesn't author a skeleton/sequences still falls back to a static mesh (the attach
+/// gate also checks the joints/animations exist), so a lid-less chest simply stays static.
 pub(crate) fn go_animates(type_id: i32) -> bool {
-    matches!(type_id, 0 | 1 | 3)
+    matches!(
+        type_id,
+        0 | 1 | 2 | 3 | 6 | 8 | 9 | 10 | 12 | 16 | 17 | 18 | 19 | 23 | 24 | 26 | 27 | 28 | 29 | 30
+    )
 }
 
 /// Which types drop their collision when open (decision 0249): **DOOR(0) / BUTTON(1)** only. A door's
@@ -128,6 +160,56 @@ impl Play {
     }
 }
 
+/// The §2c **missing-sequence remap** — what the arm actually requests when the model doesn't author
+/// the state's animation id. Byte-verified twice over (wow-re `gameobject-anim-arm.md` §2c's
+/// `0x5f3972` jump table `0x5f3b40`, and `go-anim-state-machine.md`'s independent read of the same
+/// switch), it is a four-way table keyed on the id, consulted only after the ownership test
+/// [`ModelAnimations::owns`] (the reference's `0x711960`) says no:
+///
+/// | missing    | condition         | requests instead           |
+/// |------------|-------------------|----------------------------|
+/// | 146 Close  | owns Open         | 146 (op4 resolves onward)  |
+/// |            | else              | 147 Closed                 |
+/// | 147 Closed | owns Close        | 147 (op4 resolves onward)  |
+/// |            | else owns Open    | **148 Open, frozen**       |
+/// |            | else              | 0 Stand                    |
+/// | 148 Open   | owns Close        | 148 (op4 resolves onward)  |
+/// |            | else owns Destroy | 150 Destroy                |
+/// |            | else              | 149 Opened                 |
+/// | 149 Opened | owns Open         | 149 (op4 resolves onward)  |
+/// |            | else owns Close   | **146 Close, frozen**      |
+/// |            | else              | 151 Destroyed              |
+///
+/// The returned flag marks the two **frozen** legs, where the reference stands a *motion* clip in for
+/// a missing *rest* pose by arming it at playback rate `0`. That reads correctly because a motion's
+/// frame 0 IS the pose it departs from: Open's first frame is closed, Close's first frame is open —
+/// confirmed in the asset, `G_BookOpenMediumBrown`'s bone-0 rotation being identity at Open's first
+/// key and the full open angle at Close's. Ids outside the door group get no remap at all
+/// (`lea eax,[esi-0x92]; cmp eax,3; ja`).
+///
+/// Before this existed an unowned id simply played **nothing**: the `AnimationPlayer` was never armed
+/// and the skinned mesh sat at bind pose. `AHN_QIRAJ_DOORROOTS` (the Ahn'Qiraj gate's roots, GO type
+/// 1 BUTTON) authors only Stand and Open — no Closed — so it took exactly that path.
+fn remap_missing(anims: &ModelAnimations, id: u16) -> (u16, bool) {
+    if anims.owns(id) {
+        return (id, false);
+    }
+    match id {
+        146 if anims.owns(148) => (146, false),
+        146 => (147, false),
+        147 if anims.owns(146) => (147, false),
+        147 if anims.owns(148) => (148, true),
+        147 => (0, false),
+        148 if anims.owns(146) => (148, false),
+        148 if anims.owns(150) => (150, false),
+        148 => (149, false),
+        149 if anims.owns(148) => (149, false),
+        149 if anims.owns(146) => (146, true),
+        149 => (151, false),
+        other => (other, false),
+    }
+}
+
 /// The held rest-pose animation-id for a wire `GAMEOBJECT_STATE` (§243). `None` for an unmapped state.
 fn rest_anim(state: u32) -> Option<u16> {
     match state {
@@ -138,14 +220,25 @@ fn rest_anim(state: u32) -> Option<u16> {
     }
 }
 
-/// The transition-motion animation-id for a `prev → cur` state change (§243), i.e. the swing. `None` when
-/// the pair has no distinct motion (falls back to snapping the rest pose).
+/// The transition-motion animation-id for a `prev → cur` state change (§243), i.e. the swing. `None`
+/// when the pair has no distinct motion (falls back to snapping the rest pose).
+///
+/// The reference (`0x5f3cb0`, byte-verified in wow-re `go-anim-state-machine.md`) dispatches on the
+/// **NEW** state and lets OLD pick transient-vs-rest: NEW 0 takes the Open motion from OLD 1 (else
+/// rests Opened), NEW 1 takes Close from OLD 0 / Rebuild from OLD 2 (else rests Closed), NEW 2 takes
+/// Destroy from OLD 1 (else rests Destroyed). Our `(_, 2)` wildcard got that last row wrong: an
+/// **open** object going destructible (`0 → 2`) rests straight on Destroyed rather than playing the
+/// Destroy swing, because the reference's condition is `OLD == 1`, not "any OLD".
+///
+/// (The reference's conditions are each `OLD == x` **or** `ANIMPROGRESS < 100`. benilla does not read
+/// ANIMPROGRESS yet — see the module doc's deferral — so this is the settled column only, which is
+/// what every state-change we can observe today resolves to.)
 fn motion_anim(prev: u32, cur: u32) -> Option<u16> {
     match (prev, cur) {
-        (1, 0) => Some(0x94), // closed → open  : Open  motion
-        (0, 1) => Some(0x92), // open   → closed: Close motion
-        (_, 2) => Some(0x96), // → destroyed    : Destroy
-        (2, 1) => Some(0x98), // rebuild
+        (1, 0) => Some(0x94), // closed → open      : Open motion  (else NEW 0 rests Opened)
+        (0, 1) => Some(0x92), // open   → closed    : Close motion
+        (2, 1) => Some(0x98), // rebuilt → closed   : Rebuild
+        (1, 2) => Some(0x96), // closed → destroyed : Destroy      (else NEW 2 rests Destroyed)
         _ => None,
     }
 }
@@ -262,11 +355,12 @@ fn drive_go_anim(
         let Some(play) = resolve(prev, state) else {
             continue;
         };
-        // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as `creature_anim` does). A
-        // model that doesn't author the resolved id plays nothing (the §243 freeze-fallback is a follow-on)
-        // — it holds its current pose rather than snapping to bind.
-        let Some(clip) = anims.clips.iter().find(|c| c.anim_id == play.anim_id()) else {
-            continue;
+        // Resolve the id to this model's clip (keyed by AnimationData.dbc id, as `creature_anim` does),
+        // through the §2c remap for a model that doesn't author it — that is what keeps a lidless
+        // model on a real pose instead of bind.
+        let (want, frozen) = remap_missing(anims, play.anim_id());
+        let Some(clip) = anims.find(want) else {
+            continue; // nothing playable even after the remap: hold whatever the loader seed armed
         };
         // Snap a rest pose (blend 0 — a stream-in must not swing); ease a motion over its authored blend.
         let blend = match play {
@@ -274,11 +368,23 @@ fn drive_go_anim(
             Play::Motion(_) => clip.blend_time.max(0.0),
         };
         let active = tr.play(&mut player, clip.node, Duration::from_secs_f32(blend));
-        active.set_repeat(if clip.looping {
-            RepeatAnimation::Forever
+        if frozen {
+            // A motion standing in for a missing rest pose: the reference arms it at playback rate 0,
+            // so it holds frame 0 forever — the pose that motion departs from.
+            active.seek_to(0.0);
+            active.set_speed(0.0);
+            active.set_repeat(RepeatAnimation::Never);
         } else {
-            RepeatAnimation::Never
-        });
+            // Explicit, not defaulted: `AnimationTransitions::play` → `AnimationPlayer::start` only
+            // `replay()`s the node, which rewinds the clock but keeps `speed` — so re-arming a node a
+            // frozen leg previously parked at rate 0 (the same Open clip serves both) would stay stuck.
+            active.set_speed(1.0);
+            active.set_repeat(if clip.looping {
+                RepeatAnimation::Forever
+            } else {
+                RepeatAnimation::Never
+            });
+        }
     }
 }
 
@@ -351,6 +457,84 @@ mod tests {
         assert!(matches!(resolve(None, 1), Some(Play::Rest(0x93))));
         // A change with no distinct motion snaps the destination rest pose.
         assert!(matches!(resolve(Some(2), 0), Some(Play::Rest(0x95))));
+        // The destructible row dispatches on OLD too: only a CLOSED object swings Destroy; an open
+        // one rests straight on Destroyed (`0x5f3cb0`'s condition is `OLD == 1`, not any OLD).
+        assert!(matches!(resolve(Some(1), 2), Some(Play::Motion(0x96))));
+        assert!(matches!(resolve(Some(0), 2), Some(Play::Rest(0x97))));
+        // …and the rebuild leg stays the motion it always was.
+        assert!(matches!(resolve(Some(2), 1), Some(Play::Motion(0x98))));
+    }
+
+    /// A `ModelAnimations` that owns exactly `ids` — only the lookup table matters to the remap.
+    fn owning(ids: &[u16]) -> ModelAnimations {
+        let hi = ids.iter().copied().max().unwrap_or(0) as usize;
+        let mut lookup = vec![0xffffu16; hi + 1];
+        for (slot, &id) in ids.iter().enumerate() {
+            lookup[id as usize] = slot as u16;
+        }
+        ModelAnimations {
+            graph: Handle::default(),
+            clips: Vec::new(),
+            hand_close: [None, None],
+            playable_animation_lookup: Vec::new(),
+            animation_lookup: lookup,
+            global_bones: Vec::new(),
+            first_seq: None,
+        }
+    }
+
+    #[test]
+    fn an_owned_id_is_never_remapped() {
+        let full = owning(&[146, 147, 148, 149]);
+        for id in [146, 147, 148, 149] {
+            assert_eq!(remap_missing(&full, id), (id, false));
+        }
+    }
+
+    #[test]
+    fn a_missing_rest_pose_freezes_the_neighbouring_motion() {
+        // The Ahn'Qiraj gate roots: Stand + Open only, no Closed. The reference stands the Open
+        // motion in at rate 0 — its frame 0 IS the closed pose. Before this, benilla played nothing
+        // and the 42-bone root tangle rendered at bind pose.
+        let roots = owning(&[0, 148]);
+        assert_eq!(remap_missing(&roots, 147), (148, true));
+        // The mirror leg: no Opened, no Open, but a Close motion → freeze Close at frame 0 (open).
+        let no_open = owning(&[146]);
+        assert_eq!(remap_missing(&no_open, 149), (146, true));
+    }
+
+    #[test]
+    fn the_remap_falls_through_the_door_family_in_the_verified_order() {
+        // 146 Close missing: kept when Open exists (op4 resolves onward), else Closed.
+        assert_eq!(remap_missing(&owning(&[148]), 146), (146, false));
+        assert_eq!(remap_missing(&owning(&[147]), 146), (147, false));
+        // 147 Closed missing: kept when Close exists; else the frozen leg; else Stand.
+        assert_eq!(remap_missing(&owning(&[146]), 147), (147, false));
+        assert_eq!(remap_missing(&owning(&[0]), 147), (0, false));
+        // 148 Open missing: kept when Close exists; else Destroy if present; else Opened.
+        assert_eq!(remap_missing(&owning(&[146]), 148), (148, false));
+        assert_eq!(remap_missing(&owning(&[150]), 148), (150, false));
+        assert_eq!(remap_missing(&owning(&[0]), 148), (149, false));
+        // 149 Opened missing with neither motion: Destroyed.
+        assert_eq!(remap_missing(&owning(&[0]), 149), (151, false));
+    }
+
+    #[test]
+    fn ids_outside_the_door_group_get_no_remap() {
+        // `lea eax,[esi-0x92]; cmp eax,3; ja` — only 146..149 index the jump table.
+        let none = owning(&[0]);
+        for id in [145, 150, 151, 152, 157] {
+            assert_eq!(remap_missing(&none, id), (id, false));
+        }
+    }
+
+    #[test]
+    fn ownership_reads_the_lookup_table_not_the_clip_list() {
+        // The table is short — a model's `nAnimationLookup` stops just past its highest id, so an id
+        // beyond the end is the out-of-bounds sentinel. `clips` is deliberately empty here: a clip
+        // scan would answer "owns nothing" and take every remap's last leg.
+        let book = owning(&[146, 147, 148, 149]);
+        assert!(book.owns(147) && !book.owns(0) && !book.owns(150));
     }
 
     #[test]
@@ -362,5 +546,26 @@ mod tests {
         // Doors/buttons are on both.
         assert!(go_animates(0) && collision_follows_state(0));
         assert!(go_animates(1) && collision_follows_state(1));
+    }
+
+    #[test]
+    fn the_type_gate_is_the_verified_census() {
+        // The 20 family-A types (0x1c-byte handler, 36-slot vtable with the real arm).
+        for t in [
+            0, 1, 2, 3, 6, 8, 9, 10, 12, 16, 17, 18, 19, 23, 24, 26, 27, 28, 29, 30,
+        ] {
+            assert!(go_animates(t), "type {t} runs the machine");
+        }
+        // The 11 family-B types, whose vtable slots are the abstract base's do-nothing bodies.
+        for t in [4, 5, 7, 11, 13, 14, 15, 20, 21, 22, 25] {
+            assert!(!go_animates(t), "type {t} keeps the loader seed");
+        }
+        // Past the table: the unsigned `ja` default, no handler.
+        assert!(!go_animates(31) && !go_animates(99));
+        // The three that used to be the whole gate are still on it; the ones it wrongly excluded —
+        // TEXT (every book) and GOOBER — are the reported regressions this widening closes.
+        assert!(go_animates(9) && go_animates(10));
+        // Type 0 is also what an ABSENT type id reads as (decision 0248), so the default animates.
+        assert!(go_animates(0));
     }
 }

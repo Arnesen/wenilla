@@ -56,6 +56,7 @@ fn caster_model() -> ModelAnimations {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     }
@@ -251,6 +252,7 @@ fn fidget_model() -> ModelAnimations {
         clips: vec![head, look, clip(11, 7, true) /* ShuffleLeft */],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     }
@@ -359,6 +361,7 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
         clips: vec![clip(0, 1, true), clip(26, 2, true)],
         hand_close: [None, None],
         playable_animation_lookup: lookup,
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -425,6 +428,7 @@ fn spell_impact_wound_rides_the_secondary_slot() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -477,6 +481,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -561,6 +566,7 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -655,6 +661,7 @@ fn deferred_combat_clip_plays_once_the_body_frees() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -710,6 +717,7 @@ fn a_movement_flag_change_cuts_a_full_body_oneshot_immediately() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -863,6 +871,7 @@ fn the_swim_relatch_holds_the_kick_but_a_ground_cut_freezes_it() {
         ],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -955,6 +964,7 @@ fn unit_flag_looting_kneels_stationary_units_only() {
         clips: vec![clip(0, 1, true), clip(50, 2, false), clip(5, 3, true)],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -1010,6 +1020,7 @@ fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
         clips: vec![clip(0, 1, true), clip(50, 2, false), clip(5, 3, true)],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };
@@ -1097,6 +1108,7 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
         clips: vec![variation(nodes[0]), variation(nodes[1])],
         hand_close: [None, None],
         playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
     };

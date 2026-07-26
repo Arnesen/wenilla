@@ -82,6 +82,7 @@ impl Plugin for NetPlugin {
             .add_message::<CharListMessage>()
             .add_message::<CharActionResultMessage>()
             .add_message::<EnteredWorldMessage>()
+            .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
             .add_message::<LoginStageMessage>()
             .add_message::<LoginFailedMessage>()
@@ -754,6 +755,12 @@ pub(crate) enum ClientCommand {
     /// it out by GO type — a chest answers with `SMSG_LOOT_RESPONSE` (the loot window), a questgiver
     /// GO with the gossip/quest packets, a door with a `GAMEOBJECT_STATE` flip — or refuses silently.
     GameObjUse { guid: u64 },
+    /// Report walking into an `AreaTrigger.dbc` volume (`CMSG_AREATRIGGER`): the trigger's id.
+    /// Sent by [`crate::area_trigger`]'s per-frame containment check — the client's whole part in
+    /// the system. The server answers a teleport trigger with the ordinary
+    /// `SMSG_TRANSFER_PENDING`/`SMSG_NEW_WORLD` pair (or a same-map `MSG_MOVE_TELEPORT_ACK`), a
+    /// refused one with `SMSG_AREA_TRIGGER_MESSAGE`, and most with nothing at all.
+    AreaTrigger { trigger_id: u32 },
     /// Ask a GameObject's template (`CMSG_GAMEOBJECT_QUERY`, decision 0239): `entry` + the asking
     /// `guid`. Sent ask-once when a GameObject streams in ([`crate::go_templates`]); the answer's
     /// `lockId` decides whether a right-click uses it or casts an OPEN_LOCK spell.
@@ -1073,6 +1080,17 @@ pub(crate) struct CharActionResultMessage {
 /// [`crate::char_select::ClientState`] to `InWorld`.
 #[derive(Message)]
 pub(crate) struct EnteredWorldMessage;
+
+/// One `CHAT_MSG_SYSTEM` line — the server's own answer to a GM dot-command ("You set god mode to
+/// on for …", "There is no such command", "Player not found!"). It has always been *logged*
+/// (`net: server says — …`, decision 0651); this makes it *readable*, which is what lets a sender
+/// know whether its command landed. That matters most for server state the descriptor does not
+/// carry: vmangos's god mode is a runtime-only `Unit::m_invincibilityHpThreshold` with no field and
+/// no flag on the wire, so this line is the only ground truth there is (decision 0677).
+#[derive(Message, Clone)]
+pub(crate) struct ServerSaidMessage {
+    pub(crate) text: String,
+}
 
 /// The server confirmed our logout (`SMSG_LOGOUT_COMPLETE`): back to character select. The Net
 /// drain does the self-teardown (the part 0065's disconnect teardown deliberately keeps); this

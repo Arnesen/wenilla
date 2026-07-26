@@ -55,7 +55,16 @@ fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>
         Ok(c) => {
             info!("Map.dbc: {} maps catalogued", c.len());
             commands.insert_resource(MapCatalogRes(c));
-            commands.insert_resource(CurrentMap(DEFAULT_MAP_ID));
+            // `$WOW_MAP` seeds a different continent for a SERVER-LESS run (a `WOW_CAPTURE=vista`
+            // shot in Kalimdor, say — a `Map.dbc` id; 1 = Kalimdor). Live sessions are unaffected:
+            // `player::wire_in` overwrites this from the server's world-verify the moment it says
+            // where we are. Without it every headless capture is stuck in Eastern Kingdoms, and a
+            // horizon report from anywhere else cannot be reproduced.
+            let map = std::env::var("WOW_MAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_MAP_ID);
+            commands.insert_resource(CurrentMap(map));
         }
         Err(e) => error!("failed to load Map.dbc, cross-map teleport disabled: {e:#}"),
     }

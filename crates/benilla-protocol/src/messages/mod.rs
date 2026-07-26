@@ -16,6 +16,7 @@
 //! `tests/common`).
 
 mod action_bar;
+mod area_trigger;
 mod attack;
 mod bank;
 mod channel;
@@ -53,6 +54,7 @@ mod world_state;
 pub use action_bar::{
     set_action_button, ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
 };
+pub use area_trigger::area_trigger;
 pub use attack::{attack_swing, AttackerState};
 pub use bank::{
     autobank_item, autostore_bank_item, bank_slot_result, banker_activate, buy_bank_slot,

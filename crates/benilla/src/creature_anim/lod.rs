@@ -217,6 +217,7 @@ mod tests {
             }],
             hand_close: [None, None],
             playable_animation_lookup: Vec::new(),
+            animation_lookup: Vec::new(),
             global_bones: Vec::new(),
             first_seq: None,
         };

@@ -33,11 +33,16 @@
         NUM_WORLDMAP_DETAIL_TILES = 12;
         NUM_WORLDMAP_OVERLAYS = 0;
 
+        -- ref WorldMapFrame.lua l.509-515, verbatim. Through the PANEL MANAGER, not a bare
+        -- Show/Hide: the map is registered `area = "full"` (UiPanels.xml), which is what makes it
+        -- take the screen from the other windows on the way in and — the reason this changed —
+        -- what stops it opening from behind the game menu, the one window that still could
+        -- (director-reported, decision 0674).
         function ToggleWorldMap()
             if ( WorldMapFrame:IsVisible() ) then
-                WorldMapFrame:Hide();
+                HideUIPanel(WorldMapFrame);
             else
-                WorldMapFrame:Show();
+                ShowUIPanel(WorldMapFrame);
             end
         end
 
@@ -454,7 +459,7 @@
                 <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
                 <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
                 <Scripts>
-                    <OnClick>WorldMapFrame:Hide();</OnClick>
+                    <OnClick>HideUIPanel(WorldMapFrame);</OnClick>
                 </Scripts>
             </Button>
             <Frame name="WorldMapDetailFrame">

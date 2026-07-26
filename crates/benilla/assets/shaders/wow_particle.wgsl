@@ -58,6 +58,24 @@ const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    // HARD FAR-CLIP WALL (faithful `farclip` ~777 yd) — see terrain.wgsl for the law. The reference
+    // has ONE projection far plane and it clips the whole detailed world: terrain, models, liquid AND
+    // the effect family, which is drawn by the same scene pass through the same matrix. benilla
+    // emulates that plane per-pixel (our projection far sits at ~3000 yd so the coarse WDL horizon can
+    // draw behind the wall) — and every world shader took the emulation except this one. That gap IS
+    // bug B39: campfires, braziers and portal effects kept drawing at any distance, over a horizon
+    // where the terrain beneath them had already been discarded by the very same wall.
+    //
+    // Ribbons ride this shader too (`ribbons.rs` shares `WowParticleMaterial`), so trails are walled
+    // by the same discard. `fog_params.w` = farclip (0 ⇒ disabled). No pop: the scene fog end is
+    // `min(fog_end, farclip)`, so a quad reaching the wall has already faded to the fog colour —
+    // toward BLACK for an Add-blend emitter (`wow_ext_params.x`), i.e. to nothing under `One` blend.
+    if (wow_light.fog_params.w > 0.0) {
+        let clip_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
+        if (clip_z > wow_light.fog_params.w) {
+            discard;
+        }
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     // base_color = white base × tex (gamma bytes, Unorm) × vertex colour (raw authored track
     // values) — the gamma-space product, exactly what the reference multiplies.

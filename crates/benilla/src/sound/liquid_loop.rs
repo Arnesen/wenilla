@@ -113,7 +113,7 @@ fn drive_liquid_loops(
     };
 
     // The submerge HARD stop (no fade) + the resurface instant-restart edge.
-    if underwater.0 {
+    if underwater.0.is_water() {
         for slot in &mut state.classes {
             if let Some(cl) = slot.take() {
                 stop_source_kit(&mut out, cl.emitter, cl.kit);

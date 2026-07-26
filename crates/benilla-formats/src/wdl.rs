@@ -88,24 +88,26 @@ impl WdlFile {
         (0..4096u32).filter_map(move |i| self.tiles[i as usize].as_ref().map(|_| (i % 64, i / 64)))
     }
 
-    /// Present WDL tiles forming a Chebyshev **ring** around a world `(x, y)`: every present tile
-    /// within `radius` tiles, **excluding** those within `skip_inner` tiles (the detailed-ADT ring the
-    /// renderer already draws — WDL must not double-draw under it; see terrain.md WDL "depth/blend").
-    pub fn tiles_in_ring(
-        &self,
-        world_x: f32,
-        world_y: f32,
-        radius: u32,
-        skip_inner: u32,
-    ) -> Vec<(u32, u32)> {
+    /// Present WDL tiles forming a Chebyshev **window** around a world `(x, y)`: every present tile
+    /// within `radius` tiles, **the centre one included** — the reference's far walk (`0x683040`)
+    /// visits a camera-centred ±3-tile window of the distant grid with no exclusion, and so must ours.
+    ///
+    /// There used to be a `skip_inner` parameter, and the renderer passed 0 — dropping the camera's
+    /// OWN tile, on the reasoning that a 533 yd tile sits entirely inside the far-clip wall and would
+    /// be discarded anyway. That holds only near the default `farclip` of 777. **Drop the view
+    /// distance below a tile — the vanilla range reaches down to 177 — and most of the camera's own
+    /// tile lies BEYOND the wall, where it is the only thing that can draw the near horizon.** Its
+    /// absence is then a gap between the detailed terrain and the distant hills, right above the
+    /// horizon line, through which the sky pours (decision 0684 — the director's Weazel's Crater
+    /// report at view distance 320). The parameter is gone rather than defaulted so the hole cannot
+    /// come back: what bounds the band on the near side is the far band's near plane in `wdl.wgsl`,
+    /// and nothing else.
+    pub fn tiles_in_ring(&self, world_x: f32, world_y: f32, radius: u32) -> Vec<(u32, u32)> {
         let (cx, cy) = benilla_wdt::world_to_tile(world_x, world_y);
-        let (r, inner) = (radius as i32, skip_inner as i32);
+        let r = radius as i32;
         let mut out = Vec::new();
         for dy in -r..=r {
             for dx in -r..=r {
-                if dx.abs() <= inner && dy.abs() <= inner {
-                    continue; // the detailed ring — drawn at full detail, so skip WDL here
-                }
                 let (tx, ty) = (cx as i32 + dx, cy as i32 + dy);
                 if (0..64).contains(&tx)
                     && (0..64).contains(&ty)

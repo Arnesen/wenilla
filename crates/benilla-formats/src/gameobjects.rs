@@ -37,6 +37,12 @@ impl GameObjectCatalog {
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
     }
+
+    /// Every `(displayId, model path)` pair, unordered — the corpus-sweep entry point for "which
+    /// models can a GameObject ever be, and which display ids reach each one".
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.models.iter().map(|(&id, p)| (id, p.as_str()))
+    }
 }
 
 /// GameObjectDisplayInfo.dbc — 12 fields in build 5875: ID, modelName, then 10 sound refs.

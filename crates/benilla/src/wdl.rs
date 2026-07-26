@@ -4,6 +4,8 @@
 //! is just the Bevy streaming + render glue (one shared [`WdlMaterial`], one mesh per ring tile).
 //!
 //! Mechanism + RE (geometry/shading/fog/depth all VERIFIED from apitrace WoW.8 + the real `.wdl`).
+//! How it partitions against the detailed world — the reference's far-band **backdrop** law, and why a
+//! shared clip plane could not work — is `wdl.wgsl`'s header (decision 0684).
 
 use std::collections::HashMap;
 
@@ -25,8 +27,9 @@ use benilla_formats::WdlFile;
 /// Chebyshev tile radius the WDL ring covers around the view. Past ~`fog_end` (~481 yd ≈ <1 tile) WDL
 /// is pure haze, but hills 2–4 tiles out still rise above the horizon as fogged silhouettes, so we
 /// extend toward the reference's `horizonfarclip` (~2112 yd ≈ 4 tiles). Drawn as a full ring; the
-/// shader near-clips it to beyond the far-clip wall so it never overlaps the detailed terrain (which
-/// is clipped *at* the wall) — the two partition cleanly at the wall plane.
+/// shader makes it a **backdrop** — near plane at `farclip − 33`, depth clamped behind everything the
+/// detailed world can draw (`wdl.wgsl`'s header, decision 0684) — so it fills whatever the detailed
+/// world leaves empty and can never overlap it. (The reference's own far walk is a ±3-tile window.)
 const WDL_RADIUS: u32 = 5;
 
 /// New WDL tiles built per frame — coarse meshes are cheap (545 verts), but a whole ring at once
@@ -175,14 +178,11 @@ fn stream_wdl(
     } else {
         [SPAWN_XY.0, SPAWN_XY.1, 0.0]
     };
-    // Draw the WDL as a FULL ring (skip only the player's own tile, which is entirely inside the wall
-    // and so fully discarded by the shader's far-clip partition anyway). The shader near-clips WDL to
-    // beyond the far-clip wall, so it never overlaps the detailed terrain and never toggles with the
-    // detailed streaming radius — it's a constant backdrop. (Previously skipped `config.tile_radius`,
-    // which left a gap between the wall and where WDL started → the horizon popped in/out.)
-    let desired = streamer
-        .wdl
-        .tiles_in_ring(center[0], center[1], WDL_RADIUS, 0);
+    // The FULL window, the camera's own tile INCLUDED (`tiles_in_ring`'s doc is the why — at a
+    // lowered view distance the own tile *is* the near horizon, and dropping it leaves a gap the sky
+    // pours through). What bounds the band on the near side is the shader's near plane, never the
+    // streamed set, so this cannot toggle against the detailed streaming radius — a constant backdrop.
+    let desired = streamer.wdl.tiles_in_ring(center[0], center[1], WDL_RADIUS);
 
     // Unload ring tiles no longer wanted.
     let stale: Vec<(u32, u32)> = streamer
@@ -233,4 +233,23 @@ fn stream_wdl(
             .id();
         streamer.loaded.insert(coords, e);
     }
+}
+
+/// The backdrop law (`wdl.wgsl`'s header, decision 0684) is a property of the **shader**, so it is
+/// checked there — the same shape as `sky_order.rs`'s depth-law test, and for the same reason: the
+/// failure it guards is invisible except at a ridge crest on a fogged horizon, and the obvious "tidy-up"
+/// (go back to one shared clip plane, drop the frag-depth write) silently reintroduces it.
+#[test]
+fn the_far_band_stays_a_depth_pushed_backdrop() {
+    let src = include_str!("../assets/shaders/wdl.wgsl");
+    assert!(
+        src.contains("const WDL_OVERLAP: f32 = 33.0;"),
+        "wdl.wgsl: the far band's 33 yd overlap into the wall is gone — the coarse-vs-fine seam \
+         reopens as a hole at the horizon (the reference's far-band near plane, [0x8101b0])"
+    );
+    assert!(
+        src.contains("out.depth = depth;") && src.contains("view_z_to_depth_ndc(-farclip)"),
+        "wdl.wgsl: the far band no longer clamps its depth behind the far-clip wall — its overlap \
+         now pokes THROUGH the detailed terrain (the reference's compressed far-band depth range)"
+    );
 }

@@ -424,15 +424,22 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
             //                   warm pane seen from inside — MM_ELWYNN_WND_INT, MM_STAINED_01).
             let flags = material.map_or(0, |m| m.flags);
             let emissive = !interior && flags & 0x01 != 0;
-            // WMO: keep two-sided for now (the MOMT two-sided bit is ambiguous between sources, and
-            // single-siding a wall wrong makes it vanish). Buildings aren't the canopy issue.
+            // UNCULLED (0x04): the real client backface-culls every WMO batch unless this MOMT
+            // flag is set — byte-verified at the render-state write (wow-re models.md: bit 0x04
+            // inverted → EGxRs 0x14 GL_CULL_FACE; default cull ON, GL_BACK/CCW) — the same law the
+            // M2 path already honours. This used to be hardcoded two-sided ("buildings aren't the
+            // canopy issue"), and a building IS the canopy issue: 1.12 authors both-sides-visible
+            // cloth as the SAME faces twice with reversed winding (one copy per side — B38's tent
+            // awning, `wmo_doubled`), each meant to be culled from its wrong side. Drawing them
+            // two-sided rasterises both copies into an ulp-level depth tie, and the per-pixel
+            // winner is floating-point noise — the B38 flicker/latch (decision 0677).
             // WMO has no skeleton, so the per-vertex skin (`_globals`) is unused.
             let (mut submesh, _globals) = remap_submesh(
                 global_indices.into_iter(),
                 vertex,
                 texture,
                 blend,
-                true,
+                flags & 0x04 != 0,
                 interior,
                 emissive,
             );
