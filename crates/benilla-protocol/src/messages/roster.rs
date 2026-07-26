@@ -9,6 +9,11 @@ use crate::wire::{read_cstring, read_u32_le, read_u64_le, read_u8, Vector3d};
 /// `WorldResult::CharCreateSuccess` / `CharCreateNameInUse` (`SMSG_CHAR_CREATE`).
 pub const CHAR_CREATE_SUCCESS: u8 = 0x2E;
 pub const CHAR_CREATE_NAME_IN_USE: u8 = 0x31;
+/// `WorldResult::CharCreateServerLimit` — the account already holds `CharactersPerRealm` characters
+/// (vmangos `HandleCharCreateOpcode`, checked against the last char-enum's count). Counted from the
+/// `CHAR_CREATE_SUCCESS = 0x2E` anchor through the `SharedDefines.h` ResponseCodes order
+/// (SUCCESS, ERROR, FAILED, NAME_IN_USE, DISABLED, PVP_TEAMS_VIOLATION, SERVER_LIMIT).
+pub const CHAR_CREATE_SERVER_LIMIT: u8 = 0x34;
 /// `WorldResult::CharDeleteSuccess` (`SMSG_CHAR_DELETE`; vmangos `SharedDefines.h` ResponseCodes,
 /// counted from the verified `CHAR_CREATE_SUCCESS = 0x2E` anchor).
 pub const CHAR_DELETE_SUCCESS: u8 = 0x39;

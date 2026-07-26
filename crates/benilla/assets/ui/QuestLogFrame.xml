@@ -1660,9 +1660,11 @@
                  kit names below are `igQuestLog*`, the shipped waves are `iQuestLogOpenA`/
                  `iQuestLogCloseA` (no "g") — PlaySound takes the KIT name, so this is correct as
                  written, flagged only so a future filename-based lookup doesn't "fix" it wrongly.
-                 Never fires at load (hidden="true"). -->
-            <OnShow>PlaySound("igQuestLogOpen") BenillaQuestLogFrame_Update()</OnShow>
-            <OnHide>PlaySound("igQuestLogClose")</OnHide>
+                 Never fires at load (hidden="true"). UpdateMicroButtons leads both, as in the ref
+                 (QuestLogFrame.lua:85-95's own first line) — live since the micro-menu slice
+                 (MicroMenu.xml). -->
+            <OnShow>if UpdateMicroButtons then UpdateMicroButtons() end PlaySound("igQuestLogOpen") BenillaQuestLogFrame_Update()</OnShow>
+            <OnHide>if UpdateMicroButtons then UpdateMicroButtons() end PlaySound("igQuestLogClose")</OnHide>
         </Scripts>
     </Frame>
 

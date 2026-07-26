@@ -85,10 +85,9 @@ impl UiScript {
         let scroll_sources = scroll_clip_sources(&model);
         let hit = order::hit_test(&sorted, |fh| {
             model.arena.is_mouse_enabled(fh)
-                && model
-                    .resolved
-                    .get(&fh)
-                    .is_some_and(|r| point_in_rect(*r, x, y))
+                && model.resolved.get(&fh).is_some_and(|r| {
+                    point_in_rect(inset_rect(*r, model.arena.hit_rect_insets(fh)), x, y)
+                })
                 && effective_clip(&model, &scroll_sources, fh)
                     .is_none_or(|c| point_in_rect(c, x, y))
         });
@@ -434,4 +433,18 @@ impl UiScript {
 /// 0x76b020` primitive (`propagation.md`), modeled on our [`Rect`] convention.
 pub(super) fn point_in_rect(r: Rect, x: f32, y: f32) -> bool {
     x >= r.left && x <= r.right && y >= r.bottom && y <= r.top
+}
+
+/// A frame's **mouse** rect: its resolved rect shrunk by `[left, right, top, bottom]`
+/// ([`crate::widget::Frame::hit_rect_insets`]). y-up, so a `top` inset lowers `top` and a `bottom`
+/// inset raises `bottom`. Insets that over-shrink collapse the rect rather than inverting it — an
+/// empty rect simply captures nothing, which is what the API's own "inset past the far edge" case
+/// means.
+fn inset_rect(r: Rect, [left, right, top, bottom]: [f32; 4]) -> Rect {
+    Rect {
+        left: r.left + left,
+        right: (r.right - right).max(r.left + left),
+        top: r.top - top,
+        bottom: (r.bottom + bottom).min(r.top - top),
+    }
 }

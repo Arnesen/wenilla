@@ -49,7 +49,7 @@ mod markup;
 pub(crate) use atlas::{UiFontAtlas, UiTextPlugin};
 pub(crate) use layout::{
     digit_advances, ellipsize_to_fit, layout_text_quads, layout_text_quads_links, line_advances,
-    line_origin, line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify,
+    line_origin, line_rows, measure_text, measure_wrapped_rows, FontSpec, Justify, UI_SEAT_NUDGE,
 };
 
 /// The default body text size (logical px) — WoW's own `GameFontNormal`. A `FontString` with no

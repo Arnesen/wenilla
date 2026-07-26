@@ -98,10 +98,13 @@ pub(crate) fn route(
         // The tell chime, throttled to one per 5 minutes (CHAT_TELL_ALERT_TIME), and the tab
         // flash when the receiving window (1) isn't the selected dock tab.
         if windows.tell_alert_left <= 0.0 {
-            let _ = script.run("PlaySound(\"TellMessage\")");
+            crate::ui_script::run_or_warn(script, "PlaySound(\"TellMessage\")");
         }
         windows.tell_alert_left = TELL_ALERT_SECS;
-        let _ = script.run("if BenillaFCF.selected ~= 1 then BenillaFCF_FlashTab(1) end");
+        crate::ui_script::run_or_warn(
+            script,
+            "if BenillaFCF.selected ~= 1 then BenillaFCF_FlashTab(1) end",
+        );
     }
 }
 

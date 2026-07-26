@@ -13,8 +13,11 @@
 //! - **Reaction-colored** (the A/B falsified the earlier "constant white"): the render `0x6c6e90`
 //!   fetches `unit->vtable[0x2c]` = `CGUnit::GetSelectionCircleColor 0x605960` — the SAME selector
 //!   as the ground selection ring. NPC: dead gray, else reaction red/orange/yellow/green; player:
-//!   hostile red else the pale blue. benilla reuses the ring's byte-verified rank resolution
-//!   ([`ring_reaction`]) and palette. The selector's **first-priority branch** — the combat-flash
+//!   hostile red, else the `¬X∧¬Y` split — PvP-flagged green (party pale-green), unflagged the
+//!   soft blue (party pale-blue). benilla does not re-derive any of that: it calls the ring's own
+//!   [`ring_variant`] and paints what it answers, because "the SAME selector" above is the literal
+//!   claim (decision 0659 — a hand-copied mirror had drifted and a flagged player wore a green
+//!   ring under a blue name). The selector's **first-priority branch** — the combat-flash
 //!   red↔orange pulse — is live too: [`CombatFlash`] (recomputed per frame from the selection +
 //!   our server-echoed attack bracket, exactly the client's per-frame `[unit+0xc58]` bit 0x10)
 //!   overrides the whole palette while we melee this unit.
@@ -62,7 +65,7 @@ use crate::entities::{overhead_anchor, BoneAttach, OverheadFallback};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
 use crate::player::WorldCamera;
-use crate::target::{ring_reaction, CombatFlash, Factions, Selection};
+use crate::target::{ring_reaction, ring_variant, CombatFlash, Factions, RingVariant, Selection};
 use crate::ui_text::{layout_text_quads, FontSpec, Justify, UiFontAtlas};
 
 /// The height-scale law (`0x6c6e90`): `d > KNEE ? d/KNEE · RATE · FLOOR : FLOOR`, `d` the anchor's
@@ -121,54 +124,31 @@ pub(crate) fn height_scale(d: f32) -> f32 {
     }
 }
 
-/// The `GetSelectionCircleColor` palette (`0x605960` — shared with the selection ring, the single
-/// byte-verified source; the full color-law notes live in `target/ring.rs`).
+/// What a name line is painted with. The classification is **not** ours: the per-frame name render
+/// fetches `unit->vtable[0x2c]` = `CGUnit::GetSelectionCircleColor 0x605960` — literally the same
+/// selector as the ground ring (decision 0156) — so [`ring_variant`] IS the law and this only adds
+/// the flash seat that lives outside the palette.
+///
+/// It used to be a hand-copied mirror of that selector, and the copy went stale: decision 0453
+/// taught the ring the player path's `¬X∧¬Y` legs (PvP-flagged → green, party → pale) and the
+/// mirror kept answering plain blue, so a flagged player drew a green ring under a blue name
+/// (decision 0659). Deleting the mirror is the fix; there is one selector now.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum NameColor {
-    Hostile,
-    Unfriendly,
-    Neutral,
-    Friendly,
-    Player,
-    Dead,
-    /// The combat-flash pulse — the selector's first-priority branch. Its material tint is
-    /// rewritten each frame from [`CombatFlash::color`]; the variant here is the seed.
+enum NamePaint {
+    /// The selector's own answer — the whole palette.
+    Variant(RingVariant),
+    /// The combat-flash pulse — the selector's first-priority branch, which outranks the palette.
+    /// Its material tint is rewritten each frame from [`CombatFlash::color`]; this is the seed.
     Flash,
 }
 
-impl NameColor {
-    /// The selector, mirroring the ring's pick: players branch first and never gray on death;
-    /// NPCs gray when dead, else the reaction-rank palette.
-    fn of(rank: u8, is_player: bool, is_dead: bool) -> Self {
-        if is_player {
-            return if rank <= 1 {
-                Self::Hostile
-            } else {
-                Self::Player
-            };
-        }
-        if is_dead {
-            return Self::Dead;
-        }
-        match rank {
-            0..=1 => Self::Hostile,
-            2 => Self::Unfriendly,
-            3 => Self::Neutral,
-            _ => Self::Friendly,
-        }
-    }
-
+impl NamePaint {
     // GAMMA LANE (0161): `linear_rgb` passes the authored byte values RAW into the gamma
     // framebuffer (stock-PBR unlit writes base_color as-is; the frame decodes once at FFXGlow).
     fn color(self) -> Color {
         match self {
-            Self::Hostile => Color::linear_rgb(1.0, 0.0, 0.0), // 0xFFFF0000
-            Self::Unfriendly => Color::linear_rgb(1.0, 0.502, 0.0), // 0xFFFF8000
-            Self::Neutral => Color::linear_rgb(1.0, 1.0, 0.0), // 0xFFFFFF00
-            Self::Friendly => Color::linear_rgb(0.0, 1.0, 0.0), // 0xFF00FF00
-            Self::Player => Color::linear_rgb(0.376, 0.376, 1.0), // 0xFF6060FF
-            Self::Dead => Color::linear_rgb(0.498, 0.498, 0.498), // 0xFF7F7F7F
-            Self::Flash => Color::linear_rgb(1.0, 0.0, 0.0),   // seed: the wave's G=0 endpoint
+            Self::Variant(v) => v.color(),
+            Self::Flash => Color::linear_rgb(1.0, 0.0, 0.0), // seed: the wave's G=0 endpoint
         }
     }
 }
@@ -178,10 +158,10 @@ impl NameColor {
 /// live per-unit plate entities.
 #[derive(Resource, Default)]
 pub(crate) struct Nameplates {
-    materials: HashMap<NameColor, Handle<StandardMaterial>>,
+    materials: HashMap<NamePaint, Handle<StandardMaterial>>,
     meshes: HashMap<Vec<String>, Handle<Mesh>>,
     /// unit → (plate entity, the (lines, color) it was built with).
-    live: bevy::ecs::entity::EntityHashMap<(Entity, Vec<String>, NameColor)>,
+    live: bevy::ecs::entity::EntityHashMap<(Entity, Vec<String>, NamePaint)>,
 }
 
 impl Nameplates {
@@ -322,6 +302,8 @@ pub(crate) fn drive_nameplates(
         Option<Res<crate::player::CameraControl>>,
         Res<crate::vplates::VPlates>,
         Res<crate::chat_bubble::BubblesActive>,
+        // The selector's party roster (`0xbc6f48`) — the `¬X∧¬Y` leg's pale variants.
+        Res<crate::ui_party::GroupState>,
     ),
     mut names: ResMut<NameCache>,
     net_commands: Res<NetCommands>,
@@ -340,22 +322,18 @@ pub(crate) fn drive_nameplates(
         Query<(), With<crate::entities::mount::MountChild>>,
     ),
 ) {
-    let (selection, flash, rig, vplates, bubbles) = gates;
+    let (selection, flash, rig, vplates, bubbles, group) = gates;
     let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
         return;
     };
     // The palette materials, once (they need the atlas image).
     if plates.materials.is_empty() {
         let image = atlas.image();
-        for kind in [
-            NameColor::Hostile,
-            NameColor::Unfriendly,
-            NameColor::Neutral,
-            NameColor::Friendly,
-            NameColor::Player,
-            NameColor::Dead,
-            NameColor::Flash,
-        ] {
+        for kind in RingVariant::ALL
+            .map(NamePaint::Variant)
+            .into_iter()
+            .chain([NamePaint::Flash])
+        {
             plates.materials.insert(
                 kind,
                 materials.add(StandardMaterial {
@@ -388,7 +366,7 @@ pub(crate) fn drive_nameplates(
     if flash.unit.is_some() {
         if let Some(mat) = plates
             .materials
-            .get(&NameColor::Flash)
+            .get(&NamePaint::Flash)
             .and_then(|h| materials.get_mut(h))
         {
             mat.base_color = flash.color;
@@ -472,12 +450,23 @@ pub(crate) fn drive_nameplates(
             self_store.single().ok(),
         );
         let is_dead = store.is_some_and(|s| s.0.unit_is_dead());
+        // The player path's `¬X∧¬Y` split inputs, exactly as the ring reads them: the unit's own
+        // PvP flag (`UNIT_FIELD_FLAGS` 0x1000) and roster membership by guid — here keyed on THIS
+        // unit's guid, where the ring (which only ever draws the selection) uses the selected one.
+        let pvp = store.is_some_and(|s| s.0.unit_flags() & 0x1000 != 0);
+        let in_party = group.members.iter().any(|m| m.guid == guid.0);
         // The selector's first-priority branch (shared with the ring): the combat flash
         // overrides the whole palette while we melee this unit.
         let color = if flash.unit == Some(entity) {
-            NameColor::Flash
+            NamePaint::Flash
         } else {
-            NameColor::of(rank, net.kind == EntityKind::Player, is_dead)
+            NamePaint::Variant(ring_variant(
+                rank,
+                net.kind == EntityKind::Player,
+                is_dead,
+                pvp,
+                in_party,
+            ))
         };
 
         // (Re)build the plate entity when its content changed. The seat below is only the
@@ -683,20 +672,49 @@ mod tests {
         );
     }
 
-    /// The color selector against the byte-verified `GetSelectionCircleColor` law: players branch
-    /// first and never gray on death; NPCs gray dead, else red/orange/yellow/green by rank.
+    /// The name paints itself from the ring's own selector — one law, not a copy of one (decision
+    /// 0659). The regression this locks: a **PvP-flagged** friendly player is GREEN, the same
+    /// green the ring under their feet draws. The name used to keep a private mirror of the
+    /// selector that predated the `¬X∧¬Y` legs (0453), so a flagged player wore a green ring under
+    /// a blue name — which is exactly what the director saw.
     #[test]
-    fn name_color_matches_the_ring_selector() {
-        assert_eq!(NameColor::of(0, false, false), NameColor::Hostile);
-        assert_eq!(NameColor::of(2, false, false), NameColor::Unfriendly);
-        assert_eq!(NameColor::of(3, false, false), NameColor::Neutral);
-        assert_eq!(NameColor::of(6, false, false), NameColor::Friendly);
-        assert_eq!(NameColor::of(6, false, true), NameColor::Dead);
+    fn name_color_is_the_ring_selector_itself() {
+        let paint = |rank, is_player, is_dead, pvp, in_party| {
+            NamePaint::Variant(ring_variant(rank, is_player, is_dead, pvp, in_party))
+        };
+        // The regression: flagged ⇒ green, unflagged ⇒ the soft blue, and the two really differ.
+        let flagged = paint(6, true, false, true, false);
+        let unflagged = paint(6, true, false, false, false);
+        assert_eq!(flagged, NamePaint::Variant(RingVariant::Friendly));
+        assert_eq!(unflagged, NamePaint::Variant(RingVariant::Player));
+        assert_ne!(flagged.color(), unflagged.color());
         assert_eq!(
-            NameColor::of(6, true, true),
-            NameColor::Player,
+            flagged.color(),
+            Color::linear_rgb(0.0, 1.0, 0.0),
+            "0xFF00FF00 — the ring's own green, byte for byte"
+        );
+        // The party legs come along for free now.
+        assert_eq!(
+            paint(6, true, false, true, true),
+            NamePaint::Variant(RingVariant::PartyPvp)
+        );
+        assert_eq!(
+            paint(6, true, false, false, true),
+            NamePaint::Variant(RingVariant::Party)
+        );
+        // And the rest of the law still holds through the shared selector.
+        assert_eq!(paint(0, false, false, false, false).color(), RED);
+        assert_eq!(
+            paint(6, true, true, false, false),
+            NamePaint::Variant(RingVariant::Player),
             "dead player never grays"
         );
-        assert_eq!(NameColor::of(1, true, false), NameColor::Hostile);
+        assert_eq!(paint(1, true, false, true, false).color(), RED, "hostile");
+        assert_eq!(
+            paint(6, false, true, false, false),
+            NamePaint::Variant(RingVariant::Dead)
+        );
     }
+
+    const RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);
 }

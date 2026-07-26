@@ -65,9 +65,11 @@ mod merchant;
 mod messageframe;
 mod minimap;
 mod model;
+mod net_stats;
 mod object;
 mod party;
 mod pointer;
+mod pvp;
 mod quest;
 mod quest_log;
 mod region;
@@ -248,6 +250,7 @@ impl UiScript {
         unit::install(&lua)?;
         party::install(&lua)?;
         duel::install(&lua)?;
+        pvp::install(&lua)?;
         death::install(&lua)?;
         aura::install(&lua)?;
         sound::install(&lua)?;
@@ -283,6 +286,7 @@ impl UiScript {
         cooldown::install(&lua)?;
         tooltip::install(&lua)?;
         worldmap::install(&lua)?;
+        net_stats::install(&lua)?;
 
         Ok(UiScript {
             lua,
@@ -402,6 +406,15 @@ impl UiScript {
     /// `SubmitChatInput` Lua binding queued them). The app parses each into an outbound chat command.
     pub fn take_chat_input(&mut self) -> Vec<String> {
         std::mem::take(&mut self.model_mut().chat_input)
+    }
+
+    /// Queue a line as if it had been typed into the chat EditBox and submitted — the headless
+    /// twin of `SubmitChatInput`, for scripted probes (`WOW_PROBE_CHAT`). Going through this seam
+    /// rather than straight to the wire is what lets a probe drive **client-side** slash commands
+    /// (`/duel`, `/reaction`); a plain line or a `.gm`-style server command still reaches the wire
+    /// exactly as before, because that is what the chat drain does with anything it doesn't own.
+    pub fn push_chat_input(&mut self, line: String) {
+        self.model_mut().chat_input.push(line);
     }
 
     /// Whether Tab was pressed in the chat edit box since the last call (`BenillaChatTabPressed`)

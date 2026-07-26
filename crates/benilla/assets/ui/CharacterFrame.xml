@@ -99,16 +99,17 @@
             970-978`): no Lua in this session's extraction ever populates it (likely an ammo-picker-
             addon-only overlay outside this pull) — dropped rather than guessed at.
 
-        Engine-gap notes (transcribed anyway per this file's own instructions, or worked around):
+        Engine-gap notes (transcribed anyway per this file's own instructions, or worked around) —
+        the first two are CLOSED, kept only because the workarounds below still read as if they held:
           - `HitRectInsets` (both `BenillaCharacterFrame` and `BenillaPaperDollFrame`, ref's identical
-            0/30/0/45 on both) has no loader wiring yet (grepped `benilla-ui/src/loader` — no
-            `HitRectInsets` handling exists) — included anyway (harmless no-op, documents the ref's
-            intent for whenever hit-rect insets land).
-          - `enableMouse`/`setAllPoints` (frame-level) are also no-ops on `<Frame>` (only the
-            region-level `setAllPoints` shorthand is wired, `loader/regions.rs:130`) — `
-            BenillaPaperDollFrame` therefore gets an explicit `Size`+`TOPLEFT` anchor instead of the
-            ref's `setAllPoints="true"` (the same effect, since it's sized to exactly fill its
-            parent).
+            0/30/0/45 on both) was a loader no-op when this file was written; it landed with the
+            micro menu (decision 0655) and now really insets the mouse rect.
+          - `enableMouse`/`setAllPoints` (frame-level) were no-ops on `<Frame>` too; both are wired
+            now (`loader/geometry.rs`'s `apply_attrs`/`apply_anchors`, and
+            `loader/tests.rs::frame_set_all_points_pins_to_parent`). `BenillaPaperDollFrame` still
+            carries an explicit `Size`+`TOPLEFT` anchor rather than the ref's `setAllPoints="true"`
+            — exactly equivalent for a child sized to fill its parent, so it is left alone rather
+            than churned.
           - A plain `<Frame>` isn't mouse-enabled by construction in this engine (only Button/
             CheckButton/EditBox/ScrollingMessageFrame are — `widget/mod.rs`'s ctor comment, already
             the reason `UnitFrames.xml` calls `EnableMouse(true)` on its own root frame) — every
@@ -291,18 +292,21 @@
             PanelTemplates_SetTab(frame, 1)
         end
 
-        -- ref CharacterFrame_OnShow (l.82-93): UpdateMicroButtons/Show*TextStatusBarText/
-        -- ShowWatchedReputationBarText all OMITTED — no micro-button bar, unit-frame bar-text-mode
-        -- toggle, or reputation-bar-text mechanism exists in this engine. UnitPVPName -> plain
-        -- UnitName (this file's header comment: PVP rank is a named deferral).
+        -- ref CharacterFrame_OnShow (l.82-93): Show*TextStatusBarText/ShowWatchedReputationBarText
+        -- OMITTED — no unit-frame bar-text-mode toggle or reputation-bar-text mechanism exists in
+        -- this engine. UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml); it was
+        -- omitted only for want of a micro bar. UnitPVPName -> plain UnitName (this file's header
+        -- comment: PVP rank is a named deferral).
         function BenillaCharacterFrame_OnShow()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoOpen")
             SetPortraitTexture(getglobal("BenillaCharacterFramePortrait"), "player")
             getglobal("BenillaCharacterNameText"):SetText(UnitName("player"))
         end
 
         -- ref CharacterFrame_OnHide (l.95-104): everything past the PlaySound is the OnShow list's
-        -- Hide-twin, OMITTED for the same reason. The subframe hide-loop is OUR OWN addition
+        -- Hide-twin — UpdateMicroButtons live (MicroMenu.xml), the bar-text pair still OMITTED for
+        -- the same reason as above. The subframe hide-loop is OUR OWN addition
         -- (decision 0437 phase 4): BenillaPaperDollFrame is a true engine child of this frame (its
         -- own header comment) so it hides for free on the parent's Hide-cascade, but
         -- BenillaSkillFrame is a SEPARATE top-level file — this engine has no cross-file `parent=`
@@ -313,6 +317,7 @@
         -- UIPanel exclusivity). Looping every BENILLA_CHARACTERFRAME_SUBFRAMES entry here, once,
         -- keeps this correct as more non-nested tabs (Pet/Reputation/Honor) land the same way.
         function BenillaCharacterFrame_OnHide()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igCharacterInfoClose")
             for _, name in ipairs(BENILLA_CHARACTERFRAME_SUBFRAMES) do
                 local subFrame = getglobal(name)
@@ -1282,9 +1287,10 @@
                 <Scripts><OnClick>BenillaCharacterFrameTab_OnClick(2)</OnClick></Scripts>
             </Button>
 
-            <!-- The paper-doll page (ref PaperDollFrame, ref-PaperDollFrame.xml:124-1059). No
-                 setAllPoints="true" (frame-level setAllPoints is a no-op in this engine, this file's
-                 header comment) — sized to exactly fill the parent instead, the same effect. -->
+            <!-- The paper-doll page (ref PaperDollFrame, ref-PaperDollFrame.xml:124-1059). Sized to
+                 exactly fill the parent instead of the ref's setAllPoints="true" — the same effect
+                 (see this file's header: frame-level setAllPoints was a no-op when this was written
+                 and is wired now; the explicit size is equivalent, so it stays). -->
             <Frame name="BenillaPaperDollFrame">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>

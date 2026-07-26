@@ -7,7 +7,7 @@
         like the template pairs reference Lua addresses by name). This file declares the INSTANCE:
         the plate (backdrop art + colors QUOTED from ref-GameTooltip.xml/.lua, line cites inline),
         the money coin trio, and the Lua that is genuinely FrameXML's in the real client
-        (GameTooltip_SetDefaultAnchor, SetTooltipMoney) — plus the P0 item-stat renderer, which
+        (GameTooltip_SetDefaultAnchor, GameTooltip_AddNewbieTip, SetTooltipMoney) — plus the P0 item-stat renderer, which
         moves engine-side in 0274 P1 with the full template feed.
 
         The frame's global name is the real one — GameTooltip — so transcribed reference code
@@ -27,6 +27,15 @@
         -- The shopping-compare pair count (ref GameTooltip.lua l.7; PaperDollFrame's listener
         -- bounds arg2 by it).
         NUM_SHOPPING_TOOLTIPS = 2
+
+        -- "Show Detailed Tooltips" — ref UIOptionsFrame.lua l.100-101, inside UIOptionsFrame_Init:
+        --     SHOW_NEWBIE_TIPS = "1"; RegisterForSave("SHOW_NEWBIE_TIPS");
+        -- It is a FrameXML *uvar*, not a CVar, and 1.12 ships it ON — so the detailed second line
+        -- IS the default reference tooltip, not an opt-in. (An earlier note in this corpus had this
+        -- backwards; decision 0661.) We ship no UIOptionsFrame and no saved variables, so the ref's
+        -- initial value is the whole story; the options panel takes ownership of this line the day
+        -- it lands.
+        SHOW_NEWBIE_TIPS = "1"
 
         -- The bracketed name out of an item hyperlink "|cff…|Hitem:117|h[Tough Jerky]|h|r"; if the
         -- string has no bracket it is already a plain name (the merchant/loot rows hand plain names).
@@ -69,6 +78,35 @@
             tooltip:SetPoint("BOTTOMRIGHT", "UIParent", "BOTTOMRIGHT",
                 -CONTAINER_OFFSET_X + DEFAULT_TOOLTIP_POSITION, CONTAINER_OFFSET_Y)
             tooltip.default = 1
+        end
+
+        -- The two-line UI-element tooltip (ref-GameTooltip.lua l.107-123, quoted): a white label,
+        -- then the long explanation wrapped underneath in NORMAL_FONT_COLOR — the whole reason a
+        -- 1.12 hover over the ping meter or a micro button is a paragraph and not four words.
+        -- With detailed tips on it seats at the DEFAULT corner, not beside the owner; with them off
+        -- it collapses to the bare label at the owner's right. `noNormalText` says "the explanation
+        -- is the whole tooltip" (the XP bar) — with tips off such a hover shows nothing at all.
+        --
+        -- Signature note: the ref reads the firing frame from the `this` global; the corpus
+        -- convention is to keep the ref NAME and take that frame as a leading parameter
+        -- (GameTooltip_OnHide(self), GameTooltip_ClearMoney(frame) — same shift). Reference code
+        -- pasted in verbatim must therefore have the owner threaded in as arg 1.
+        function GameTooltip_AddNewbieTip(owner, normalText, r, g, b, newbieText, noNormalText)
+            if SHOW_NEWBIE_TIPS == "1" then
+                GameTooltip_SetDefaultAnchor(GameTooltip, owner)
+                if normalText then
+                    GameTooltip:SetText(normalText, r, g, b)
+                    GameTooltip:AddLine(newbieText, NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b, 1)
+                else
+                    GameTooltip:SetText(newbieText, r, g, b, 1, 1)
+                end
+                GameTooltip:Show()
+            else
+                if not noNormalText then
+                    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(normalText, r, g, b)
+                end
+            end
         end
 
         -- ref GameTooltip_OnHide (ref-GameTooltip.lua l.100-104, quoted): the plate colours

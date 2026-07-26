@@ -44,6 +44,7 @@ use crate::schedule::WorldStage;
 // probe instruments (`probes`) each live in their own file — the server-less harness (settle,
 // screenshot, perf probe) is this one's concern.
 mod fixtures;
+mod pick_probe;
 mod probe_bank;
 mod probe_castcancel;
 mod probe_charcreate;
@@ -51,10 +52,12 @@ mod probe_crossing;
 mod probe_mail;
 mod probe_melee;
 mod probe_partner;
+mod probe_rig;
 mod probe_taxi;
 mod probes;
 mod scenarios;
 use fixtures::seed_ui_fixture;
+pub(crate) use pick_probe::PickProbePlugin;
 pub(crate) use probe_bank::ProbeBankPlugin;
 pub(crate) use probe_castcancel::ProbeCastCancelPlugin;
 pub(crate) use probe_charcreate::ProbeCharCreatePlugin;
@@ -62,6 +65,7 @@ pub(crate) use probe_crossing::ProbeCrossingPlugin;
 pub(crate) use probe_mail::ProbeMailPlugin;
 pub(crate) use probe_melee::ProbeMeleePlugin;
 pub(crate) use probe_partner::ProbePartnerPlugin;
+pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     LiveFpsPlugin, LiveShotPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,

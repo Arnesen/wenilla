@@ -1,0 +1,339 @@
+<Ui>
+    <!--
+        The MICRO MENU — the row of eight small arched buttons in the main bar's right-hand recess
+        (character, spellbook, talents, quest log, socials, world map, main menu, help). It was the
+        last hole in the bar: ActionBar.xml's SCOPE note named "the bag/keyring/micro cluster on the
+        bar's right" as the visible remaining gap, and with the bag bar landed (decision 0216 slice
+        2) the micro row was the empty dark panel between the page arrows and the bags.
+
+        Transcribed from the real 1.12 FrameXML — ref-MainMenuBarMicroButtons.xml (the template +
+        the eight buttons' geometry) and ref-MainMenuBarMicroButtons.lua (LoadMicroButtonTextures,
+        UpdateMicroButtons, the CharacterMicroButton portrait, UpdateTalentButton), both extracted
+        from patch.MPQ. Geometry QUOTED: each button 29x58 with `HitRectInsets top=18`; the first at
+        MainMenuBarArtFrame BOTTOMLEFT +(552,2); the rest chained BOTTOMLEFT to the previous
+        BOTTOMRIGHT +(-3,0) — a 26 px stride, so the row runs x 552..757 inside the 1024-wide bar.
+
+        NAMES are the reference's, not Benilla*-prefixed (unlike the multibars/stance bar, which are
+        benilla-shaped divergences). These are straight transcriptions, and `UpdateMicroButtons` is
+        the ref global that CharacterFrame/SpellBookFrame/TalentFrame already cite by name in their
+        own OnShow/OnHide comments — those calls are now live instead of OMITTED, in all five
+        panels the ref calls it from (+ QuestLogFrame, WorldMapFrame). They are nil-GUARDED at the
+        call sites (`if UpdateMicroButtons then … end`) — not because the load order is in doubt
+        (this file always precedes them), but because a dozen test harnesses load one panel without
+        the action bar behind it, and an unguarded call would abort the rest of that OnShow. Same
+        posture as UiPanels.xml's `CloseMenus and CloseMenus()` and the `if GameTooltip` guards.
+
+        Structure: the buttons are TOP-LEVEL frames anchored by name into BenillaActionBarArtFrame
+        (this engine has no cross-file `parent=` attachment — SkillFrame.xml's header comment), then
+        seated one frame level above the art by BenillaActionBarArt_SeatAbove (ActionBar.xml) so the
+        bar plate doesn't paint over them. Same shape the bag bar next door already uses.
+
+        SCOPE / real-client divergences (noted, not bugs):
+        - THREE buttons have no panel to open yet: Socials (no FriendsFrame), Main Menu (no
+          GameMenuFrame — ESC runs BenillaOnEscape's close chain instead, UiPanels.xml) and Help (no
+          HelpFrame). They are drawn, hover, and highlight like the rest, but their click is a no-op
+          — the same "art only, wired the day the panel lands" call the page up/down arrows on this
+          same bar already make. Deliberately NOT greyed with the ref's `-Disabled` art: three dead
+          grey buttons mid-row read as a broken bar, and the point of this slice is that the bar
+          reads whole. Each is one OnClick line away from live.
+        - No GetBindingKey in this engine, so MicroButtonTooltipText's "(key)" suffix comes from a
+          static table of the bindings we actually ship (ui_script/input.rs `bare_key_binding`:
+          C/P/N/L/M) rather than from a live binding lookup — the same call ActionBar.xml makes for
+          its HotKey corners. The three unbound buttons show a bare label.
+        - The hover is the ref's real two-line GameTooltip_AddNewbieTip (GameTooltip.xml): the label,
+          then the button's NEWBIE_TOOLTIP_* explanation, at the default screen corner. An earlier
+          note here claimed detailed tips were OFF in 1.12 and open-coded the else branch — the ref
+          ships them ON (UIOptionsFrame.lua l.100), so that was a one-line tooltip where the real
+          client shows a paragraph. Corrected by decision 0661.
+        - TalentMicroButton registers UNIT_LEVEL + PLAYER_ENTERING_WORLD but NOT the ref's
+          PLAYER_LEVEL_UP (this client never fires it) — and PLAYER_LEVEL_UP's only other job there
+          is SetButtonPulse, which decision 0304 already scoped out ("no microbutton pulse").
+        - UpdateTalentButton's re-anchor uses -3 both ways; the ref writes -3 in the XML but -2 in
+          the Lua, so a real client nudges the whole row 1 px left the first time it re-anchors at
+          level 10. That's a ref typo, not a mechanism — not reproduced.
+        - SetButtonState is called without the ref's second "lock" argument (this engine has no
+          state lock; the pushed texture already draws from pushed-state OR a live mouse hold, so
+          the rendered result is identical for a button nothing else pushes).
+        - The keyring button (ref KeyRingButton, `hidden="true"` by default) stays out with the
+          keyring container itself.
+    -->
+    <Script><![CDATA[
+        -- ref GlobalStrings.lua — the eight labels (enUS), in the `X = X or` FALLBACK form: the
+        -- app runs the real localized GlobalStrings.lua off the patch chain BEFORE this file
+        -- (ui_script/mod.rs load_global_strings), so the installed locale wins and these copies
+        -- only fill in for the test harnesses, which load no patch chain. CombatText.xml's shape.
+        CHARACTER_BUTTON = CHARACTER_BUTTON or "Character Info"
+        SPELLBOOK_ABILITIES_BUTTON = SPELLBOOK_ABILITIES_BUTTON or "Spellbook & Abilities"
+        TALENTS_BUTTON = TALENTS_BUTTON or "Talents"
+        QUESTLOG_BUTTON = QUESTLOG_BUTTON or "Quest Log"
+        SOCIAL_BUTTON = SOCIAL_BUTTON or "Social"
+        WORLDMAP_BUTTON = WORLDMAP_BUTTON or "World Map"
+        MAINMENU_BUTTON = MAINMENU_BUTTON or "Main Menu"
+        HELP_BUTTON = HELP_BUTTON or "Help Request"
+
+        -- ...and their second lines, ref GlobalStrings.lua l.2722/2766/2768/2758/2765/2788/2747/2739,
+        -- verbatim (enUS). 1.12 ships detailed tooltips ON (decision 0661), so every one of these is
+        -- part of the default hover, not an opt-in extra.
+        NEWBIE_TOOLTIP_CHARACTER = NEWBIE_TOOLTIP_CHARACTER or "Information about your character, including equipment, statistics, skills, and reputation."
+        NEWBIE_TOOLTIP_SPELLBOOK = NEWBIE_TOOLTIP_SPELLBOOK or "All of your spells and abilities. To move a spell or ability to your Action Bar, open the Spellbook & Abilities window, left-click that spell or ability, and drag it down to your Action Bar."
+        NEWBIE_TOOLTIP_TALENTS = NEWBIE_TOOLTIP_TALENTS or "The array of talents available to enhance and specialize your character."
+        NEWBIE_TOOLTIP_QUESTLOG = NEWBIE_TOOLTIP_QUESTLOG or "A list of all the active quests you currently have. You can have up to 20 active quests at one time."
+        NEWBIE_TOOLTIP_SOCIAL = NEWBIE_TOOLTIP_SOCIAL or "Information about other people in the game. You can use the Social window to manage your friends list and ignore list, as well as see who is online."
+        NEWBIE_TOOLTIP_WORLDMAP = NEWBIE_TOOLTIP_WORLDMAP or "As you explore a zone, more areas of interest will become visible on the world map. You can use left-click to zoom in, or right-click to zoom out."
+        NEWBIE_TOOLTIP_MAINMENU = NEWBIE_TOOLTIP_MAINMENU or "Here you can modify your video, sound, and interface settings, or create custom hotkeys. You can also choose to log out or exit the program altogether."
+        NEWBIE_TOOLTIP_HELP = NEWBIE_TOOLTIP_HELP or "Through this menu, you can report a bug. You can also use the Help Request menu to talk to one of our Game Masters (GMs) in the game if you have questions or need assistance."
+
+        -- ref LoadMicroButtonTextures (MainMenuBarMicroButtons.lua l.1-9): the Up/Down/Disabled trio
+        -- under one art name plus the shared highlight. `art` is nil for CharacterMicroButton, whose
+        -- textures don't follow the pattern (UI-MicroButtonCharacter-*, and no Disabled variant
+        -- exists in the archives) — it sets its own.
+        -- `newbie` is the ref's per-button `this.newbieText` (set in each button's own OnLoad there —
+        -- MainMenuBarMicroButtons.lua l.95 and .xml l.101/127/149/174/193/215); Spellbook is the one
+        -- the ref hands to the call site instead, because its label swaps with GetSpellBookState.
+        function BenillaMicroButton_OnLoad(button, art, label, binding, newbie)
+            button.label = label
+            button.binding = binding
+            button.newbieText = newbie
+            -- Seat over the bar plate (ActionBar.xml's helper, which carries the why). Called
+            -- nil-guarded for the same reason BagFrame.xml's two calls are: the shipped load order
+            -- always has the bar first, but a test harness may load this file alone — and with no
+            -- bar there is nothing to seat above.
+            if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(button) end
+            if art then
+                local prefix = "Interface\\Buttons\\UI-MicroButton-" .. art
+                button:SetNormalTexture(prefix .. "-Up")
+                button:SetPushedTexture(prefix .. "-Down")
+                button:SetDisabledTexture(prefix .. "-Disabled")
+            end
+            button:SetHighlightTexture("Interface\\Buttons\\UI-MicroButton-Hilight")
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        end
+
+        -- ref MicroButtonTooltipText (l.11-18) with a static binding label — see the SCOPE note.
+        -- Benilla-named, not the ref global: the ref's takes (text, bindingAction) and looks the key
+        -- up live, so reusing that name for a different contract would be a trap for the next
+        -- ref-quoted transcription that calls it.
+        function BenillaMicroButton_TooltipText(button)
+            if button.binding then
+                return button.label .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. button.binding .. ")" .. FONT_COLOR_CODE_CLOSE
+            end
+            return button.label
+        end
+
+        -- ref MainMenuBarMicroButton's OnEnter (l.13), verbatim bar the owner shift:
+        --     GameTooltip_AddNewbieTip(this.tooltipText, 1.0, 1.0, 1.0, this.newbieText)
+        function BenillaMicroButton_OnEnter(button)
+            if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
+            GameTooltip_AddNewbieTip(button, BenillaMicroButton_TooltipText(button), 1.0, 1.0, 1.0,
+                button.newbieText)
+        end
+
+        -- Is a panel up? `getglobal` because every panel this asks about loads AFTER this file —
+        -- the first UpdateMicroButtons can land before most of them exist.
+        function BenillaMicro_PanelShown(name)
+            local frame = getglobal(name)
+            return frame ~= nil and frame:IsVisible()
+        end
+
+        function BenillaMicroButton_SetPushed(button, isPushed)
+            if not button then return end
+            if isPushed then
+                button:SetButtonState("PUSHED")
+            else
+                button:SetButtonState("NORMAL")
+            end
+        end
+
+        -- ref UpdateMicroButtons (l.20-84): each button reflects whether its panel is up. The ref's
+        -- OptionsFrame/SoundOptionsFrame/UIOptionsFrame/KeyBindingFrame/MacroFrame arms of the
+        -- MainMenu test, and its keyring arm, have no frames here; the three unwired buttons
+        -- (Socials/MainMenu/Help) simply never push.
+        function UpdateMicroButtons()
+            BenillaMicroButton_SetPushed(CharacterMicroButton, BenillaMicro_PanelShown("BenillaCharacterFrame"))
+            BenillaMicroButton_SetPushed(SpellbookMicroButton, BenillaMicro_PanelShown("BenillaSpellBookFrame"))
+            BenillaMicroButton_SetPushed(TalentMicroButton, BenillaMicro_PanelShown("BenillaTalentFrame"))
+            BenillaMicroButton_SetPushed(QuestLogMicroButton, BenillaMicro_PanelShown("BenillaQuestLogFrame"))
+            BenillaMicroButton_SetPushed(WorldMapMicroButton, BenillaMicro_PanelShown("WorldMapFrame"))
+        end
+
+        -- ref CharacterMicroButton_SetPushed/_SetNormal (l.109-117): the portrait shifts its window
+        -- and dims while the button is down. The window is a TexCoord crop of the SAME "player"
+        -- portrait bake the unit frame samples (SetPortraitTexture below) — the round stencil lives
+        -- in the bake's own UV space, so cropping it yields the ref's rectangular slice of a masked
+        -- face rather than an ellipse fitted to this 18x25 region.
+        function CharacterMicroButton_SetPushed()
+            MicroButtonPortrait:SetTexCoord(0.2666, 0.8666, 0, 0.8333)
+            MicroButtonPortrait:SetAlpha(0.5)
+        end
+
+        function CharacterMicroButton_SetNormal()
+            MicroButtonPortrait:SetTexCoord(0.2, 0.8, 0.0666, 0.9)
+            MicroButtonPortrait:SetAlpha(1.0)
+        end
+
+        -- ref CharacterMicroButton's OnUpdate (its XML l.55-61) drives the portrait off the live
+        -- button state — which is what makes the face dim mid-mouse-hold, a thing UpdateMicroButtons
+        -- can't see. Transcribed, but EDGE-TRIGGERED: the ref re-applies both setters every frame;
+        -- there is no reason to re-push identical TexCoord/alpha 60x a second.
+        function CharacterMicroButton_OnUpdate(button)
+            local pushed = (button:GetButtonState() == "PUSHED")
+            if pushed ~= button.portraitPushed then
+                button.portraitPushed = pushed
+                if pushed then
+                    CharacterMicroButton_SetPushed()
+                else
+                    CharacterMicroButton_SetNormal()
+                end
+            end
+        end
+
+        function CharacterMicroButton_OnLoad(button)
+            -- The player's face, from the same portrait slot the unit frame binds (portrait/mod.rs
+            -- keeps the "player" entry live across re-bakes, so unlike the ref there is no
+            -- UNIT_PORTRAIT_UPDATE re-bind to register — the binding is by token, not by handle).
+            SetPortraitTexture(MicroButtonPortrait, "player")
+            button:SetNormalTexture("Interface\\Buttons\\UI-MicroButtonCharacter-Up")
+            button:SetPushedTexture("Interface\\Buttons\\UI-MicroButtonCharacter-Down")
+            BenillaMicroButton_OnLoad(button, nil, CHARACTER_BUTTON, "C", NEWBIE_TOOLTIP_CHARACTER)
+        end
+
+        -- ref UpdateTalentButton (l.133-141): no talents before level 10, so the button goes away
+        -- and the row closes up behind it. Guarded on BOTH frames: it re-anchors the quest-log
+        -- button, which is created after the talent one, so the very first call has to be able to
+        -- land before the row is fully built. (`UnitLevel` answers 0, never nil, for a unit the
+        -- client hasn't got yet — so pre-login the button is simply hidden until the level lands.)
+        function UpdateTalentButton()
+            if not TalentMicroButton or not QuestLogMicroButton then return end
+            if UnitLevel("player") < 10 then
+                TalentMicroButton:Hide()
+                QuestLogMicroButton:SetPoint("BOTTOMLEFT", "TalentMicroButton", "BOTTOMLEFT", 0, 0)
+            else
+                TalentMicroButton:Show()
+                QuestLogMicroButton:SetPoint("BOTTOMLEFT", "TalentMicroButton", "BOTTOMRIGHT", -3, 0)
+            end
+        end
+
+        function TalentMicroButton_OnLoad(button)
+            BenillaMicroButton_OnLoad(button, "Talents", TALENTS_BUTTON, "N", NEWBIE_TOOLTIP_TALENTS)
+            button:RegisterEvent("UNIT_LEVEL")
+            button:RegisterEvent("PLAYER_ENTERING_WORLD")
+        end
+
+        function TalentMicroButton_OnEvent()
+            -- UNIT_LEVEL names its unit in arg1; every other unit's ding is none of our business.
+            if event == "UNIT_LEVEL" and arg1 ~= "player" then return end
+            UpdateTalentButton()
+        end
+    ]]></Script>
+
+    <!-- ref MainMenuBarMicroButton (l.4-19): 29x58, with the top 18 inset out of the HIT rect — the
+         art only fills the lower ~40 px (verified against the 32x64 BLPs: the top ~22/64 rows are
+         fully transparent), and without the inset that empty header would eat hover and clicks
+         aimed at the bar's XP strip and the sliver of world above it. -->
+    <Button name="BenillaMicroButtonTemplate" virtual="true">
+        <Size><AbsDimension x="29" y="58"/></Size>
+        <HitRectInsets><AbsInset left="0" right="0" top="18" bottom="0"/></HitRectInsets>
+        <Scripts>
+            <OnEnter>BenillaMicroButton_OnEnter(self)</OnEnter>
+            <OnLeave>if GameTooltip then GameTooltip:Hide() end</OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- ref CharacterMicroButton (l.20-63): the row's head, at the art frame's BOTTOMLEFT +(552,2).
+         MicroButtonPortrait is the ref's own global name (not $parent-prefixed), 18x25 hung from the
+         button's TOP -28. -->
+    <Button name="CharacterMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="BenillaActionBarArtFrame" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="552" y="2"/></Offset></Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="OVERLAY">
+                <Texture name="MicroButtonPortrait">
+                    <Size><AbsDimension x="18" y="25"/></Size>
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-28"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0.2" right="0.8" top="0.0666" bottom="0.9"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>CharacterMicroButton_OnLoad(self)</OnLoad>
+            <OnClick>ToggleCharacter("BenillaPaperDollFrame")</OnClick>
+            <OnUpdate>CharacterMicroButton_OnUpdate(self)</OnUpdate>
+        </Scripts>
+    </Button>
+
+    <Button name="SpellbookMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="CharacterMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Spellbook", SPELLBOOK_ABILITIES_BUTTON, "P", NEWBIE_TOOLTIP_SPELLBOOK)</OnLoad>
+            <OnClick>ToggleSpellBook(BOOKTYPE_SPELL)</OnClick>
+        </Scripts>
+    </Button>
+
+    <Button name="TalentMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="SpellbookMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>TalentMicroButton_OnLoad(self)</OnLoad>
+            <OnEvent>TalentMicroButton_OnEvent()</OnEvent>
+            <OnClick>ToggleTalentFrame()</OnClick>
+        </Scripts>
+    </Button>
+
+    <Button name="QuestLogMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="TalentMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <!-- The row's initial talent-gate pass runs here, not in TalentMicroButton_OnLoad: this
+                 is the button UpdateTalentButton re-anchors, so it must already exist. (The ref gets
+                 its first pass from PLAYER_ENTERING_WORLD, which we register too — this just means
+                 the row is right before any event lands, e.g. under the capture harness.) -->
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Quest", QUESTLOG_BUTTON, "L", NEWBIE_TOOLTIP_QUESTLOG); UpdateTalentButton()</OnLoad>
+            <OnClick>ToggleQuestLog()</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- No FriendsFrame in this client yet — drawn and hovering, click inert (SCOPE note). -->
+    <Button name="SocialsMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="QuestLogMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Socials", SOCIAL_BUTTON, nil, NEWBIE_TOOLTIP_SOCIAL)</OnLoad>
+        </Scripts>
+    </Button>
+
+    <Button name="WorldMapMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="SocialsMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "World", WORLDMAP_BUTTON, "M", NEWBIE_TOOLTIP_WORLDMAP)</OnLoad>
+            <OnClick>ToggleWorldMap()</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- No GameMenuFrame yet — ESC runs BenillaOnEscape's close chain instead (SCOPE note). -->
+    <Button name="MainMenuMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="WorldMapMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "MainMenu", MAINMENU_BUTTON, nil, NEWBIE_TOOLTIP_MAINMENU)</OnLoad>
+        </Scripts>
+    </Button>
+
+    <!-- No HelpFrame yet (SCOPE note). -->
+    <Button name="HelpMicroButton" inherits="BenillaMicroButtonTemplate">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="MainMenuMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
+        </Anchors>
+        <Scripts>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Help", HELP_BUTTON, nil, NEWBIE_TOOLTIP_HELP)</OnLoad>
+        </Scripts>
+    </Button>
+</Ui>

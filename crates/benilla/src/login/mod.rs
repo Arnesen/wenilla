@@ -204,9 +204,26 @@ fn drive_policy(
         if any_set && std::env::var_os("WOW_LOGIN_SMOKE").is_none() {
             let user = std::env::var("WOW_USER").unwrap_or_else(|_| "one".into());
             let pass = std::env::var("WOW_PASS").unwrap_or_else(|_| "pone".into());
-            info!("login: env fast path — auto-submitting as {user}");
-            intent.creds = Some((user, pass));
-            intent.retry_at = Some(now);
+            // The account guard (decision 0649): a vmangos login KICKS whoever holds the account,
+            // so an unattended run from a pool slot must not authenticate as the director's `one`
+            // or a neighbouring slot's probe. Only the *automated* path is gated — a typed login
+            // is the director's own and is never second-guessed.
+            match crate::preflight::account_guard(&user) {
+                Ok(()) => {
+                    info!("login: env fast path — auto-submitting as {user}");
+                    intent.creds = Some((user, pass));
+                    intent.retry_at = Some(now);
+                }
+                Err(why) if std::env::var_os("WOW_ALLOW_ACCOUNT").is_some() => {
+                    warn!("login: {why} — WOW_ALLOW_ACCOUNT is set, going ahead anyway");
+                    intent.creds = Some((user, pass));
+                    intent.retry_at = Some(now);
+                }
+                Err(why) => {
+                    error!("login: REFUSING the env fast path — {why} Set WOW_ALLOW_ACCOUNT=1 if the cross-account login is deliberate.");
+                    dialog.open_error(&why);
+                }
+            }
         }
     }
 

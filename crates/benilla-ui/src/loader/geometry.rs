@@ -42,6 +42,23 @@ impl Loader<'_> {
         if el.attr_bool("enableMouse") {
             self.call(wrapper, "EnableMouse", true, dbg);
         }
+        // `<HitRectInsets><AbsInset left= right= top= bottom=/></HitRectInsets>` (also accepted
+        // inline on the element) → SetHitRectInsets: the frame's MOUSE rect, inset from its
+        // resolved rect. Absent sides read 0, so a partial element insets only what it names.
+        if let Some(ins) = children_named(el, "HitRectInsets").next() {
+            let src = children_named(ins, "AbsInset").next().unwrap_or(ins);
+            let side = |k: &str| {
+                src.attr(k)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0)
+            };
+            self.call(
+                wrapper,
+                "SetHitRectInsets",
+                (side("left"), side("right"), side("top"), side("bottom")),
+                dbg,
+            );
+        }
         // Still genuine gaps — the window-behaviour surface (input arbitration, decision 0068).
         // Flag them rather than silently dropping or faking them.
         for (attr, api) in [

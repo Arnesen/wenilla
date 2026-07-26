@@ -373,6 +373,10 @@ fn action_commands_parse() {
     );
     assert_eq!(parse_line("/played", stub_emotes), ParsedChat::Played);
     assert_eq!(parse_line("/help", stub_emotes), ParsedChat::Help);
+    // /pvp takes no argument (decision 0646 §3): the binding has no state form, so a trailing
+    // word is ignored rather than read as a target.
+    assert_eq!(parse_line("/pvp", stub_emotes), ParsedChat::Pvp);
+    assert_eq!(parse_line("/pvp on", stub_emotes), ParsedChat::Pvp);
     // /r rides its own arm (the reply state lives on ChatEditState).
     assert_eq!(
         parse_line("/r hey", stub_emotes),

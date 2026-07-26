@@ -131,8 +131,9 @@ pub(super) fn disconnected(
     pending_transfer.0 = None;
     status.connected = false;
     // A dead socket's last RTT is stale; the write thread resets the shared ping clock itself
-    // when the reconnect hands it a fresh writer.
-    status.latency_ms = None;
+    // when the reconnect hands it a fresh writer. The averaged ring goes with it — the next
+    // connection's latency is its own, so `GetNetStats` reads unmeasured until its first pong.
+    status.clear_rtt();
     // Teardown (decision 0065): despawn every streamed entity except the self avatar —
     // it stays the local puppet (controller + camera keep working); the reconnect's
     // re-create refreshes it in place. Immediate despawn, not `DespawnFade`: a
@@ -310,8 +311,8 @@ pub(super) fn reputation_delta(standings: Vec<(u32, i32)>, reputations: &mut Rep
 
 /// The keepalive echo (`SMSG_PONG`): match it against the shared ping clock to measure the
 /// round trip. Stored back on the clock (the next ping's lastRtt field — what the real client
-/// reports) and surfaced as the panel's latency readout. A stale or mismatched sequence (a pong
-/// straddling a reconnect) is dropped.
+/// reports), pushed into the RTT ring the UI's `GetNetStats` averages, and surfaced as the panel's
+/// latency readout. A stale or mismatched sequence (a pong straddling a reconnect) is dropped.
 pub(super) fn pong(sequence: u32, ping: &PingShared, status: &mut NetStatus) {
     let mut clock = ping.0.lock().expect("ping clock");
     if let Some(sent) = clock.sent_at.filter(|_| clock.sequence == sequence) {
@@ -320,7 +321,7 @@ pub(super) fn pong(sequence: u32, ping: &PingShared, status: &mut NetStatus) {
             info!("net: pong seq={sequence} rtt={rtt}ms (keepalive live)");
         }
         clock.last_rtt_ms = Some(rtt);
-        status.latency_ms = Some(rtt);
+        status.record_rtt(rtt);
     }
 }
 

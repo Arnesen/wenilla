@@ -68,6 +68,7 @@ mod pending_item_ops;
 mod perf;
 mod player;
 mod portrait;
+mod preflight;
 mod quest_markers;
 mod raid_marks;
 mod ribbons;
@@ -99,6 +100,7 @@ mod ui_loot;
 mod ui_loot_roll;
 mod ui_mail;
 mod ui_merchant;
+mod ui_net;
 mod ui_party;
 mod ui_pass;
 mod ui_quest;
@@ -174,6 +176,7 @@ use ui_loot::UiLootPlugin;
 use ui_loot_roll::UiLootRollPlugin;
 use ui_mail::UiMailPlugin;
 use ui_merchant::UiMerchantPlugin;
+use ui_net::UiNetPlugin;
 use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
 use ui_quest::UiQuestPlugin;
@@ -442,6 +445,10 @@ fn main() {
     .add_plugins(login::LoginPlugin)
     // The character-creation screen + its live preview booth (decision 0423).
     .add_plugins(char_create::CharCreatePlugin)
+    // The session preflight (decision 0649): one banner per world entry naming the body we logged
+    // into, and loud warnings for the states — dead/ghost, GM mode, server-blocked movement — that
+    // silently invalidate a session's readings. Never env-gated; a warning nobody switches on isn't one.
+    .add_plugins(preflight::PreflightPlugin)
     // Audio: the delegated mixer + WoW's owned selection layer (decision 0070).
     .add_plugins(SoundPlugin)
     // Targeting: left-click a unit to select it (→ CMSG_SET_SELECTION) + draw its ground ring.
@@ -502,6 +509,9 @@ fn main() {
     // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
     // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
     .add_plugins(UiShapeshiftPlugin)
+    // The connection-telemetry feed: the averaged ping RTT behind `GetNetStats()`, which the main
+    // bar's performance meter polls (decision 0658).
+    .add_plugins(UiNetPlugin)
     .add_plugins(UiCastPlugin)
     // Floating combat text (decision 0137 phase 2): the WORLDTEXTSTRING law — world-anchored
     // damage numbers/outcome words projected into the UI quad pass each frame.
@@ -577,6 +587,13 @@ fn main() {
     if std::env::var("WOW_LIVE_SHOT").is_ok() {
         app.add_plugins(capture::LiveShotPlugin);
     }
+    // The probe RIG (decision 0651): `WOW_RIG="tauren druid 60 gear:heal-preraid-bis"` finds-or-
+    // creates that body on this slot's probe account, logs in as it, and applies level/spells/gear/
+    // spec/place — the one verb that replaces the hand-assembled GM recipe every session used to
+    // re-derive (see `capture::ProbeRigPlugin`).
+    if std::env::var("WOW_RIG").is_ok() {
+        app.add_plugins(capture::ProbeRigPlugin);
+    }
     // The probe-chat one-shot: `WOW_PROBE_CHAT=".go xyz …"` sends GM/chat lines once in-world —
     // the "park the probe character anywhere" instrument (see `capture::ProbeChatPlugin`).
     if std::env::var("WOW_PROBE_CHAT").is_ok() {
@@ -596,6 +613,12 @@ fn main() {
     // lifetime — its own knob, not a rider on the Lua probe (see `capture::ProbeExitPlugin`).
     if std::env::var("WOW_PROBE_EXIT_AT").is_ok() {
         app.add_plugins(capture::ProbeExitPlugin);
+    }
+    // The ray pick: `WOW_PICK="<x>,<y>"` names every surface along the ray through a screenshot
+    // pixel, nearest first — "what is at the spot `benilla-visual hotspot` flagged, and what is
+    // right behind it" (see `capture::PickProbePlugin`).
+    if std::env::var("WOW_PICK").is_ok() {
+        app.add_plugins(capture::PickProbePlugin);
     }
     // The bevy_ui node census — "who owns this rectangle" for UI outside the FrameXML quad pass
     // (see `capture::NodeProbePlugin`).

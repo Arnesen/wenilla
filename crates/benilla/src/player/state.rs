@@ -46,10 +46,25 @@ pub(super) const STATIONARY_CHASE_RATE: f32 = 8.0;
 
 /// Player capsule radius (yd) — the vanilla box's ±1/3 half-width.
 pub(super) const CAPSULE_RADIUS: f32 = 1.0 / 3.0;
-/// Player capsule total height (yd) — matches the vanilla 2.028-yd box (`CMovement+0xb4`'s ctor
-/// default collision height). `pub(crate)`: the water-splash depth line (`sound::water`) scales it
-/// per unit as the collision-height stand-in.
+/// Player capsule total height (yd) — the **movement** capsule avian sweeps, deliberately a
+/// constant. Numerically the vanilla ctor-default collision height it was derived from
+/// ([`DEFAULT_COLLISION_HEIGHT`]), but it is not the same quantity and no longer stands in for one:
+/// a unit's real collision height is per-model and lives on [`crate::entities::CollisionHeight`]
+/// (decision 0645). This one is a *feel knob* per the block header above — it feeds the swept box,
+/// the step-vs-fall election's reach and the head/feet offsets, where going per-race would change
+/// where every short race can walk, step and fit. That is a movement-fidelity question of its own
+/// (our kinematic capsule vs the reference's k-DOP), not the depth-line question 0645 settled, so
+/// the two are kept apart on purpose rather than by oversight.
 pub(crate) const CAPSULE_HEIGHT: f32 = 2.027_777_7;
+
+/// The client's own **empty-world collision height** (yd) — the `CMovement` ctor's immediate
+/// `0x4001c71c` at `0x616fd8` (VERIFIED, wow-re `collision.md` "the collision volume"), which the
+/// per-unit param setter `0x6174b0` overwrites from the unit's model. This is the fallback every
+/// depth line takes for a unit whose display id doesn't resolve to a `CreatureModelData` row — the
+/// same role it plays in the reference, and what vmangos falls back to as well (its `2.f`).
+///
+/// It is **not** a stand-in for a real unit's height: see [`crate::entities::CollisionHeight`].
+pub(crate) const DEFAULT_COLLISION_HEIGHT: f32 = 2.027_777_7;
 /// Downward gravity (yd/s²) — binary-VERIFIED vanilla value (set on avian's `Gravity` too; matches
 /// vmangos `Movement::gravity` exactly). Shared with the remote dead-reckoner ([`crate::net`]), which
 /// integrates a relayed jump's arc under the same gravity so an observer's view matches the mover's.
@@ -265,6 +280,14 @@ pub(crate) struct Player {
     /// swim gait and streaming it), and pitches its body to the swim heading. Hysteresis-latched
     /// (see [`super::swim::update_swimming`]) so wading the boundary doesn't flicker.
     pub(crate) swimming: bool,
+    /// **Our own collision height** — the avatar's copy of [`crate::entities::CollisionHeight`],
+    /// mirrored onto this resource because the swim arm runs off it and never touches the ECS
+    /// entity. Every swim depth line is a fraction of it, which is why a gnome floats with her head
+    /// out and a night elf sits 0.3 yd deeper (decision 0645). Kept as the component's own type
+    /// rather than a bare `f32` precisely so `Player::default()` cannot seed it to **zero** — at
+    /// zero every depth line collapses to 0 and the avatar swims on dry land. It defaults to
+    /// [`DEFAULT_COLLISION_HEIGHT`] and is replaced once our body's display id resolves.
+    pub(crate) collision_height: crate::entities::CollisionHeight,
     /// The **swim pitch** (radians, +up) — the client's persistent per-unit pitch (`CMovement+0x20`,
     /// the swim §5's TU-B): **held** when unsteered (an idle floater keeps its pitch — never
     /// auto-leveled; the only zeroing writer `0x7c6e80` fires from stop-swim/teleport, not mouse

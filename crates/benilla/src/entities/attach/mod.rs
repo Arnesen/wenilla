@@ -12,6 +12,8 @@ use benilla_assets::{bone_target_id, ModelSkeleton};
 use benilla_formats::CharSkinSlot;
 use benilla_protocol::EntityKind;
 use bevy::animation::AnimatedBy;
+use bevy::camera::primitives::MeshAabb;
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
@@ -51,11 +53,17 @@ pub(super) use glue_preview::build_glue_preview;
 ///   * a **state GameObject** (door/button/chest — `go_state_machine`) — the open/close state machine
 ///     (`GoAnim`), which cross-fades transitions through `AnimationTransitions`;
 ///   * **any other animated GameObject** (a mailbox's wind-swung flags, a banner) — *no* controller:
-///     the reference arms the model's FIRST sequence and loops it forever, the universal "loader-idle
-///     seed" (wow-re `system/animation/scratch/doodad-anim-host.md` §1 — a non-transport CGGameObject
-///     animates identically to a placed doodad; "the animation HOST does not differ"). We arm it here
-///     and let the kernel's modulo-wrap run it, ungated like the creature path (GOs are few — the
-///     doodad host's draw-gate isn't warranted for them).
+///     the reference arms the model's **Stand** sequence (animation id 0, resolved through the
+///     model's own `playableAnimationLookup`) as the universal "loader-idle seed", and loops it iff
+///     `M2Sequence.flags & 1 == 0` (wow-re `gameobject-anim-arm.md` §1/§2, byte-verified `0x71019b`
+///     / `0x714585` — decision 0637, which corrected the earlier "arms the FIRST sequence" reading
+///     this comment used to carry). We arm it here and let the kernel's modulo-wrap run it, ungated
+///     like the creature path (GOs are few — the doodad host's draw-gate isn't warranted for them).
+///
+///     The reference *also* runs a second, GameObject-specific arm off `GAMEOBJECT_STATE` +
+///     `GAMEOBJECT_ANIMPROGRESS` (same note, §1). Not modelled here: for every GO benilla renders
+///     today it resolves to the same Stand this seed already arms — a named deferral, not a claim
+///     that the overlay doesn't exist.
 ///
 /// Global-sequence channels ride along regardless of flavour. Returns the joints + inverse-bindposes
 /// for the caller to bind each submesh's skinned twin, or `None` when the model has no inverse
@@ -85,7 +93,14 @@ fn setup_skinned_instance(
         let mut player = AnimationPlayer::default();
         if idle_loop {
             if let Some(clip) = anims.first_seq.and_then(|i| anims.clips.get(i)) {
-                player.play(clip.node).repeat();
+                // Loop iff the sequence says so (`M2Sequence.flags & 1 == 0`) — the kernel's own
+                // end-of-band law (wow-re `gameobject-anim-arm.md` §2, byte-verified at
+                // `0x714585`): bit0 clear loops on the modulo wrap, bit0 set plays the window and
+                // then FREEZES at `end_ms`. An unconditional repeat replayed one-shot idles.
+                let active = player.play(clip.node);
+                if clip.looping {
+                    active.repeat();
+                }
             }
         }
         commands.entity(entity).insert((
@@ -549,6 +564,21 @@ pub(super) fn attach_entity_visuals(
             // Billboard batches (the brazier/lantern glow card) collected for the world-root card
             // spawn below — inside the loop we only plant their anchor child.
             let mut billboard_parts = Vec::new();
+            // The armed idle's **authored** CAaBox (decision 0637) — the mouseover picker's
+            // volume for a skinned part, NOT a culling volume (skinned entity parts are never
+            // frustum-culled; see the `NoFrustumCulling` note at the insert below). The bind-pose
+            // box the mesh would otherwise get is only a fair stand-in while the animation keeps
+            // the model near rest — the duel flag breaks it: `DuelingFlag.m2` is modelled 9 yards
+            // in the air and its Stand translates the root `−9.124` to plant it, so the bind box
+            // sits a whole model-height above the drawn geometry. The M2 authors a per-sequence
+            // CAaBox for exactly this; for the flag's Stand it is ground-to-tip, which is also
+            // what makes the planted flag hoverable where it is actually seen.
+            let idle_aabb = dm.and_then(|m| m.animations.as_ref()).and_then(|a| {
+                let clip = a.first_seq.and_then(|i| a.clips.get(i))?;
+                (clip.bounds_max.cmpgt(clip.bounds_min).all()).then(|| {
+                    bevy::camera::primitives::Aabb::from_min_max(clip.bounds_min, clip.bounds_max)
+                })
+            });
             commands.entity(entity).with_children(|parent| {
                 for part in parts {
                     // Skip a geoset this character doesn't show (an unselected hair/facial/body variant).
@@ -663,16 +693,32 @@ pub(super) fn attach_entity_visuals(
                         },
                         object.clone(),
                     ));
-                    // Bind this part to the instance's skeleton — all parts share the one joint set. We
-                    // *don't* add `NoFrustumCulling`: it suppresses the `Aabb` (`calculate_bounds` skips
-                    // those entities), and the mouseover picker requires an `Aabb` — so it would make
-                    // creatures unpickable. The bind-pose `Aabb` bounds idle/walk/run fine; a generous
-                    // authored-bounds AABB is the fix if an extreme animation ever pops at a screen edge.
+                    // Bind this part to the instance's skeleton — all parts share the one joint set.
                     if let (Some((joints, ibp)), Some(_)) = (&skin, &part.skinned_mesh) {
                         child.insert(SkinnedMesh {
                             inverse_bindposes: ibp.clone(),
                             joints: joints.clone(),
                         });
+                        // A streamed entity's M2 is **never view-culled** — the reference registers
+                        // entity render records with effectively-infinite bounds (≈1e7) and the one
+                        // frustum cull in its machinery is map-doodad-only (wow-re
+                        // `unit-anim-visibility-gate.md` §2/§4: "doodads get the faithful
+                        // frustum/occlusion/distance cull; units do not"). Bevy's bind-pose `Aabb`
+                        // is the wrong stand-in — an armed idle can leave the bind box entirely
+                        // (the duel flag plants itself 9 yd below it, so it culled away at every
+                        // ground-level camera) — and a better box inserted here is stomped anyway:
+                        // `calculate_bounds`' update query rewrites the `Aabb` of any entity whose
+                        // `Mesh3d` changed (spawn tick, async mesh load) back to the bind pose.
+                        // So the renderer gets the faithful `NoFrustumCulling`, and the `Aabb` we
+                        // insert beside it serves ONE master: the mouseover picker
+                        // (`target/hover.rs`) — the armed idle's authored CAaBox when it has one
+                        // (it tracks the drawn pose), else the bind box. Both `calculate_bounds`
+                        // queries skip `NoFrustumCulling` entities, so this box survives.
+                        let picker_aabb = idle_aabb
+                            .or_else(|| meshes.get(&part.mesh).and_then(MeshAabb::compute_aabb));
+                        if let Some(aabb) = picker_aabb {
+                            child.insert((aabb, NoFrustumCulling));
+                        }
                     }
                     // M2 parts can light off a WMO room they stand in: a `MeshTag` + the classifier
                     // pick the law by location (0354: the day/night state rides the intensity byte

@@ -288,7 +288,18 @@ pub(super) fn drive_script(
                         rect,
                         z_key: eq.z,
                         texture: Some(handle),
-                        uv: UvRect::FULL,
+                        // A portrait binding honours `<TexCoords>`/`SetTexCoord` like any other
+                        // texture region — the bake is just the sampled image. The ref crops one
+                        // this way: the character micro button samples the same portrait slot as
+                        // the unit frame through a narrow (0.2..0.8, 0.0666..0.9) window, and
+                        // swaps that window when the button is pushed. This branch used to pin
+                        // UvRect::FULL, which silently squashed the whole square bake into
+                        // whatever rect the region had.
+                        uv: match tex_coords {
+                            Some(TexCoords::Rect(edges)) => UvRect::from_tex_coords(edges),
+                            Some(TexCoords::Corners(corners)) => UvRect::from_corners(corners),
+                            None => UvRect::FULL,
+                        },
                         color: [1.0, 1.0, 1.0, eq.alpha],
                         // The binding's mask flag: `SetPortraitTexture` regions cut the inscribed
                         // circle (the ref stamps the same shape into its 64² bake's alpha — and

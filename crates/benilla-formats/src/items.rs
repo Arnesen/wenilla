@@ -83,6 +83,12 @@ pub struct ItemDisplayCatalog {
 }
 
 impl ItemDisplayCatalog {
+    /// Build a catalog from an explicit row map — for tests and synthetic fixtures, the twin of
+    /// `SpellCatalog::from_displays`. The live path is [`load_item_display_catalog`].
+    pub fn from_displays(displays: HashMap<u32, ItemDisplay>) -> Self {
+        ItemDisplayCatalog { displays }
+    }
+
     /// Look up a display id, or `None` if unknown.
     pub fn get(&self, display_id: u32) -> Option<&ItemDisplay> {
         self.displays.get(&display_id)

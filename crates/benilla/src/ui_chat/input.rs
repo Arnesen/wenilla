@@ -90,6 +90,9 @@ fn target_player_name(
 /// - `liquids`/`interior` feed **`/liquid`**, the swim diagnostic (decision 0634 follow-up): the
 ///   interior claim is what decides which liquid surfaces the swim query is allowed to see, so the
 ///   two only mean anything together.
+/// - `stores`/`self_store`/`factions`/`reputations` feed **`/reaction`**, the attackability
+///   diagnostic (decision 0637): the exact inputs [`crate::target::ring_reaction`] judges on, so
+///   "why is this unit not attackable" is one command instead of a guess.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct ChatProbes<'w, 's> {
     camera: Query<
@@ -101,6 +104,13 @@ pub(super) struct ChatProbes<'w, 's> {
     clock: Option<Res<'w, crate::lighting::GameClock>>,
     liquids: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
     interior: Res<'w, crate::wmo_portal::CurrentWmoInterior>,
+    stores: Query<'w, 's, &'static crate::net::ObjectStore>,
+    self_store: Query<'w, 's, &'static crate::net::ObjectStore, With<SelfPlayer>>,
+    factions: Option<Res<'w, crate::target::Factions>>,
+    reputations: Res<'w, crate::net::Reputations>,
+    /// `/reaction <name>`'s resolve — so a scripted probe can ask about a player it has not
+    /// clicked (the two-client duel run has no way to select the other side).
+    guids: Res<'w, crate::net::GuidIndex>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -131,6 +141,11 @@ pub(super) fn drain_chat_input(
         clock,
         liquids,
         interior,
+        stores,
+        self_store,
+        factions,
+        reputations,
+        guids,
     } = &probes;
     let Some(mut script) = script else {
         return;
@@ -298,6 +313,74 @@ pub(super) fn drain_chat_input(
                     ));
                 }
             }
+            ParsedChat::Reaction { name } => {
+                // Everything the reaction ladder judges the subject on, in the order it judges:
+                // the PvP rung's three duel gates first (naming the one that refused), then the
+                // faction work, then the `can_attack` verdict the cast/attack paths use.
+                let subject_guid = match &name {
+                    Some(n) => crate::ui_duel::streamed_player_named(n, guids, &names),
+                    None => selection.guid,
+                };
+                let target_store = subject_guid
+                    .and_then(|g| guids.0.get(&g).copied())
+                    .and_then(|e| stores.get(e).ok());
+                let own_store = self_store.iter().next();
+                let mut lines = Vec::new();
+                let describe = |label: &str, s: Option<&crate::net::ObjectStore>| match s {
+                    Some(s) => format!(
+                        "reaction: {label} flags 0x{:08x} (player-controlled {}) faction_tpl {:?} \
+                         duel_team {} duel_arbiter 0x{:016x}",
+                        s.0.unit_flags(),
+                        s.0.unit_flags() & (1 << 3) != 0,
+                        s.0.unit_faction_template(),
+                        s.0.player_duel_team(),
+                        s.0.player_duel_arbiter(),
+                    ),
+                    None => format!("reaction: {label} — no ObjectStore"),
+                };
+                lines.push(format!(
+                    "reaction: subject {} guid {} · self store present {}",
+                    name.as_deref().unwrap_or("<current target>"),
+                    subject_guid.map_or("none".to_string(), |g| format!("0x{g:016x}")),
+                    own_store.is_some(),
+                ));
+                lines.push(describe("target", target_store));
+                lines.push(describe("self  ", own_store));
+                match (target_store, own_store) {
+                    (Some(t), Some(o)) => {
+                        lines.push(format!(
+                            "reaction: duel rung {:?}",
+                            crate::target::duel_rung(&t.0, &o.0)
+                        ));
+                    }
+                    _ => {
+                        lines.push("reaction: duel rung not evaluated (a store is missing)".into())
+                    }
+                }
+                let rank = crate::target::ring_reaction(
+                    factions.as_deref(),
+                    reputations,
+                    target_store,
+                    own_store,
+                );
+                lines.push(format!(
+                    "reaction: RANK {rank} → can_attack {}",
+                    crate::target::can_attack(
+                        target_store,
+                        factions.as_deref(),
+                        reputations,
+                        own_store
+                    )
+                ));
+                for line in lines {
+                    // Also to the log: a scripted two-client run reads stdout, not the feed.
+                    info!("{line}");
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        line,
+                    ));
+                }
+            }
             ParsedChat::PartyTest { arg } => match arg.as_str() {
                 "off" => group.clear_session(),
                 "invite" => group.pending_invite = Some("Partner".to_string()),
@@ -383,6 +466,10 @@ pub(super) fn drain_chat_input(
             ParsedChat::Forfeit => {
                 script.queue_duel_request(benilla_ui::script::DuelRequest::Cancel);
             }
+            // The ref's handler is `SlashCmdList["PVP"] = function() TogglePVP() end` — one line
+            // over the same binding the popup row calls, so it enters the same intent queue
+            // (decision 0646 §3; the `/duel` reasoning above, verbatim).
+            ParsedChat::Pvp => script.queue_pvp_toggle(),
             ParsedChat::Help => {
                 // An honest benilla summary (the ref's HELP_TEXT_LINE pages are a settings-era
                 // nicety; this stays useful and never stale-quotes them).
@@ -514,6 +601,10 @@ pub(super) enum ParsedChat {
     /// no wire traffic. Built when the canal-tunnel "swim in air" survived the first fix — the
     /// question "which surface is claiming this spot, and from which file" had no instrument.
     Liquid,
+    /// `/reaction [name]` — the attackability diagnostic: every input the reaction ladder judges
+    /// the subject on, the rung that decided, and the resulting `can_attack` verdict. Bare uses
+    /// the current target; a name resolves a streamed player (what a scripted probe can reach).
+    Reaction { name: Option<String> },
     /// `/help` (aliases /h /?) — the command summary.
     Help,
     /// A `/name` line that resolved in `EmotesText` (`/wave` → text id 101) — sent as
@@ -555,6 +646,9 @@ pub(super) enum ParsedChat {
     /// `/forfeit` `/concede` `/yield` — `CancelDuel()`. Takes no argument and needs no state
     /// check: one opcode covers decline/cancel/forfeit and the server reads the intent.
     Forfeit,
+    /// `/pvp` — `TogglePVP()` (decision 0646 §3). Takes no argument: the binding has no state
+    /// form, and the server reads the toggle from our current preference.
+    Pvp,
     /// `/partytest [lead|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
     /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
     /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
@@ -675,6 +769,9 @@ pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>
         "played" => ParsedChat::Played,
         "shot" => ParsedChat::Shot,
         "liquid" => ParsedChat::Liquid,
+        "reaction" | "react" => ParsedChat::Reaction {
+            name: slash_target_name(args),
+        },
         // The party membership commands (decision 0434; aliases quoted from GlobalStrings'
         // SLASH_INVITE/UNINVITE/PROMOTE 1-8, lines 3660-3780).
         "i" | "inv" | "invite" => ParsedChat::Invite {
@@ -692,6 +789,9 @@ pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>
             name: slash_target_name(args),
         },
         "forfeit" | "concede" | "yield" => ParsedChat::Forfeit,
+        // The PvP flag (decision 0646; GlobalStrings' SLASH_PVP 1-2, lines 3718-3719 — both
+        // aliases are literally "/pvp").
+        "pvp" => ParsedChat::Pvp,
         "h" | "help" | "?" => ParsedChat::Help,
         // Not a recognized command — the EmotesText lookup against the whole slash-line
         // (`/wave`, `/lol`, …), exactly as before.

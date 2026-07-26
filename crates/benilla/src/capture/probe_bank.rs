@@ -69,6 +69,9 @@ const SLOT_BANK_FIRST: u8 = SLOT_PACK_FIRST + 16;
 /// The client-side purchase ladder (`BankBagSlotPrices.dbc`, decision 0604) — the fallback used
 /// only if [`BankPrices`] failed to load; index = slots already purchased (0-based).
 const PRICE_LADDER: [u32; 6] = [1_000, 10_000, 100_000, 250_000, 500_000, 1_000_000];
+/// Slack added on top of the exact shortfall when the buy-slot step funds itself — the purse can
+/// move under it (a repair, a vendor sale) between the read and the purchase.
+const FUND_MARGIN_COPPER: u32 = 10_000;
 /// The purchasable-slot ceiling (decision 0604: `GetNumBankSlots()` reports full at 6).
 const MAX_BANK_BAGS: u8 = 6;
 /// How far past the banker's service range the refusal step teleports (yd, WoW space) — well
@@ -151,6 +154,9 @@ enum Phase {
     BuySlot {
         since: f64,
         sent: bool,
+        /// Whether this step has already granted itself the fare with `.modify money`. One shot:
+        /// if the purse is still short after a grant, that is a real defect, not a permission wall.
+        funded: bool,
     },
     /// Step 6 (bonus): teleport out of range, then `BuyBankSlot` the now-stale guid, expecting
     /// `SMSG_BUY_BANK_SLOT_RESULT` NOTBANKER. `teleported`/`bought` gate the two sends in order;
@@ -378,6 +384,7 @@ fn bank_probe(
                 probe.phase = Phase::BuySlot {
                     since: now,
                     sent: false,
+                    funded: false,
                 };
             } else if now - since > ACTION_TIMEOUT_SECS {
                 error!(
@@ -389,10 +396,15 @@ fn bank_probe(
                 probe.phase = Phase::BuySlot {
                     since: now,
                     sent: false,
+                    funded: false,
                 };
             }
         }
-        Phase::BuySlot { since, sent } => {
+        Phase::BuySlot {
+            since,
+            sent,
+            funded,
+        } => {
             let Some(banker) = probe.banker else {
                 probe.phase = Phase::Done;
                 return;
@@ -425,17 +437,34 @@ fn bank_probe(
                     "PROBE_BANK: (5 buy_slot) baseline purchased={purchased} money={money}c next \
                      rung costs {cost}c"
                 );
+                if money < cost && !funded {
+                    // Fund the rung and come back next tick. `.modify money <n>` ADDS `n` copper
+                    // (vmangos `HandleModifyMoneyCommand`: the arg is `addmoney`, not a set) and
+                    // needs SEC_BASIC_ADMIN(4) — which probe accounts have had since they were
+                    // actually raised to 6 (0651). This step used to SKIP here, because the
+                    // accounts were gmlevel 3 and the grant would have been refused; the whole
+                    // buy-slot leg was therefore unverified whenever the purse ran dry.
+                    let grant = cost - money + FUND_MARGIN_COPPER;
+                    info!("PROBE_BANK: (5 buy_slot) purse {money}c < {cost}c — granting {grant}c with `.modify money`");
+                    let _ = net.0.send(ClientCommand::Chat {
+                        kind: ChatKind::Say,
+                        text: format!(".modify money {grant}"),
+                        target: None,
+                    });
+                    probe.phase = Phase::BuySlot {
+                        since: now,
+                        sent: false,
+                        funded: true,
+                    };
+                    return;
+                }
                 if money < cost {
-                    // `.modify money` needs SEC_BASIC_ADMIN(4); probe accounts are gmlevel 3
-                    // (SEC_GAMEMASTER) — verified this session, module doc — so it would be
-                    // refused. Nothing this probe can do about it live; SKIP rather than send a
-                    // command known to fail.
-                    warn!(
-                        "PROBE_BANK: SKIP (5 buy_slot) — {money}c < {cost}c needed and \
-                         `.modify money` is SEC_BASIC_ADMIN(4), above a probe account's \
-                         gmlevel 3 (verified vmangos Chat.cpp; see module doc) — cannot fund \
-                         from here"
+                    error!(
+                        "PROBE_BANK: FAIL (5 buy_slot) — purse is still {money}c against a \
+                         {cost}c rung after `.modify money` — the grant did not land (check the \
+                         `net: server says` lines)"
                     );
+                    probe.fails += 1;
                     probe.phase = Phase::Refusal {
                         since: now,
                         teleported: false,
@@ -449,6 +478,7 @@ fn bank_probe(
                 probe.phase = Phase::BuySlot {
                     since: now,
                     sent: true,
+                    funded,
                 };
                 return;
             }

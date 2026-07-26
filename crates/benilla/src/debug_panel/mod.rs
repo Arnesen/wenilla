@@ -350,8 +350,10 @@ fn debug_panel_ui(
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                // Leave room under the scroll for the pinned hotkey footer below.
-                .max_height(panel_h - 24.0)
+                // Leave room under the scroll for the pinned hotkey footer below. Two lines' worth:
+                // the footer keeps the panel's default wrapping, so a font whose metrics run wider
+                // than ours reflows it instead of having its second line clipped away.
+                .max_height(panel_h - 40.0)
                 .show(ui, |ui| {
                     // Disjoint borrows of the sections so each can drive its own widgets.
                     let DebugState {
@@ -552,7 +554,7 @@ fn debug_panel_ui(
                             }
                         });
 
-                    // The object inspector is its own I-toggled surface (see `interact.rs`), not a
+                    // The object inspector is its own Ctrl+Cmd+I surface (see `interact.rs`), not a
                     // section here — identifying a thing shouldn't need the whole panel open.
                     egui::CollapsingHeader::new("Particles")
                         .default_open(true)
@@ -573,7 +575,7 @@ fn debug_panel_ui(
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.checkbox(&mut sound_cfg.enabled, "enabled");
-                            ui.checkbox(&mut sound_cfg.muted, "muted (⌃⌘M)");
+                            ui.checkbox(&mut sound_cfg.muted, "muted (Ctrl+Cmd+M)");
                             ui.add(
                                 egui::Slider::new(&mut sound_cfg.master, 0.0..=1.0).text("master"),
                             );
@@ -644,7 +646,7 @@ fn debug_panel_ui(
             // discoverable from the one surface people find first.
             ui.separator();
             ui.label(
-                egui::RichText::new("`  panel   ·   P  perf   ·   I  inspect")
+                egui::RichText::new("`  panel   ·   Ctrl+Cmd:  P perf · I inspect · M mute")
                     .small()
                     .color(OVERLAY_TEXT_DIM),
             );

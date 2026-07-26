@@ -393,7 +393,8 @@ fn left_clicking_the_player_frame_targets_self() {
         s.take_target_requests().is_empty(),
         "right-click queues no target"
     );
-    // Solo, every SELF row is gated off (only CANCEL survives) — the ref opens no menu.
+    // Solo, every SELF row is gated off (only CANCEL survives) — the ref opens no menu. 1.12 has
+    // no PvP row here and neither do we (decision 0652 took 0646's added row back out).
     assert!(
         s.eval::<bool>("return not DropDownList1:IsVisible()")
             .unwrap(),
@@ -757,5 +758,172 @@ fn shipped_target_frame_runs_the_level_law() {
         )
         .unwrap();
     assert!(ok, "green range boundary at level 30 ({:?})", s.errors());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The PvP flag icon on the player and target frames (decision 0646 §4): the reference's
+/// three-branch law, driven through the real shipped XML. FFA outranks the faction flag; the
+/// faction leg needs BOTH a side and the flag; and the player's `igPVPUpdate` sounds on the
+/// UNIT_FACTION edge, not on every repaint.
+#[test]
+fn pvp_icon_follows_the_three_branch_law() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    let _ = s.take_sounds(); // the frames' own load-time kits (target hide) aren't ours
+
+    let icon_shown = |s: &UiScript, frame: &str| -> bool {
+        s.eval(&format!(
+            "return {frame}TextureFramePVPIcon:IsVisible() and true or false"
+        ))
+        .unwrap()
+    };
+    // The extracted quad path for a shown icon (nil while hidden).
+    let icon_path = |s: &mut UiScript, needle: &str| -> bool {
+        s.resolve();
+        s.extract().into_iter().any(
+            |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle)),
+        )
+    };
+
+    let alliance_player = |pvp: bool, ffa: bool| UnitState {
+        exists: true,
+        name: Some("Benilla".into()),
+        health: 50,
+        max_health: 50,
+        level: 10,
+        is_player: true,
+        faction_group: Some("Alliance".into()),
+        pvp,
+        is_pvp_ffa: ffa,
+        ..UnitState::default()
+    };
+
+    // Unflagged: no icon, no sound.
+    s.set_unit("player", Some(alliance_player(false, false)));
+    s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("player".into())]);
+    assert!(
+        !icon_shown(&s, "BenillaPlayerFrame"),
+        "unflagged shows none"
+    );
+    assert!(s.take_sounds().is_empty(), "no sound while unflagged");
+
+    // Flagged: the Alliance icon, and one igPVPUpdate for the flag change.
+    s.set_unit("player", Some(alliance_player(true, false)));
+    s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("player".into())]);
+    assert!(icon_shown(&s, "BenillaPlayerFrame"));
+    assert!(icon_path(&mut s, "UI-PVP-Alliance"), "faction leg art");
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("igPVPUpdate".into())],
+        "the flag change sounds once"
+    );
+
+    // A repaint that is NOT a flag change (a health tick) must not re-sound.
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
+    assert!(s.take_sounds().is_empty(), "repaints don't re-sound");
+
+    // FFA outranks the faction flag even when both are set — the reference's branch order.
+    s.set_unit("player", Some(alliance_player(true, true)));
+    s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("player".into())]);
+    assert!(icon_path(&mut s, "UI-PVP-FFA"), "FFA wins the branch");
+    let _ = s.take_sounds();
+
+    // No resolvable side (a Monster/neutral template) hides the icon however flagged it is —
+    // the `factionGroup and UnitIsPVP` gate. A guard the app can't name a side for draws nothing
+    // rather than reaching for a texture that doesn't ship.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Kobold Vermin".into()),
+            health: 40,
+            max_health: 40,
+            level: 8,
+            reaction: 2,
+            pvp: true,
+            faction_group: None,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    assert!(
+        !icon_shown(&s, "BenillaTargetFrame"),
+        "flagged but sideless draws no icon"
+    );
+
+    // A Horde target that IS flagged takes its own faction's art on the target frame.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Orgrimmar Grunt".into()),
+            health: 40,
+            max_health: 40,
+            level: 8,
+            reaction: 2,
+            pvp: true,
+            faction_group: Some("Horde".into()),
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    assert!(icon_shown(&s, "BenillaTargetFrame"));
+    assert!(icon_path(&mut s, "UI-PVP-Horde"), "the target's own side");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The target name plate's two middle legs, unblocked by the PvP wire (decision 0646 §4): a
+/// friendly player who is PvP-flagged reads GREEN, an unflagged one stays blue. Before the wire
+/// both collapsed into blue.
+#[test]
+fn flagged_friendly_player_plate_is_green() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    let plate_color = |s: &mut UiScript| -> [f32; 4] {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .find_map(|q| match q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color: Some(c),
+                    ..
+                } if p.contains("LevelBackground") => Some(c),
+                _ => None,
+            })
+            .expect("target name-plate quad present")
+    };
+    let friendly_player = |pvp: bool| UnitState {
+        exists: true,
+        name: Some("Guildmate".into()),
+        health: 50,
+        max_health: 50,
+        level: 20,
+        is_player: true,
+        reaction: 5,
+        can_attack: false,
+        faction_group: Some("Alliance".into()),
+        pvp,
+        ..UnitState::default()
+    };
+
+    s.set_unit("target", Some(friendly_player(false)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    let blue = plate_color(&mut s);
+    assert!(
+        blue[0].abs() < 1e-6 && blue[1].abs() < 1e-6 && (blue[2] - 1.0).abs() < 1e-6,
+        "an unflagged friendly player is blue, got {blue:?}"
+    );
+
+    s.set_unit("target", Some(friendly_player(true)));
+    s.fire_event("UNIT_FACTION", vec![ScriptValue::Str("target".into())]);
+    let green = plate_color(&mut s);
+    assert!(
+        green[0].abs() < 1e-6 && (green[1] - 1.0).abs() < 1e-6 && green[2].abs() < 1e-6,
+        "a PvP-flagged friendly player is green (UnitReactionColor[6]), got {green:?}"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -40,13 +40,20 @@ pub(super) fn feed_party(
     group: Res<GroupState>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
-    self_q: Query<&Guid, With<SelfPlayer>>,
+    self_q: Query<(&Guid, &ObjectStore), With<SelfPlayer>>,
+    factions: Option<Res<crate::target::Factions>>,
     mut fed: Local<FedParty>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let self_guid = self_q.iter().next().map(|g| g.0);
+    let self_pair = self_q.iter().next();
+    let self_guid = self_pair.map(|(g, _)| g.0);
+    // The party's PvP faction group (decision 0646 §1): our own. A 1.12 party is always one
+    // faction, and a member out of streaming range has no descriptor to resolve one from — so
+    // reading it off ourselves is exact for every member, present or not.
+    let own_group =
+        self_pair.and_then(|(_, store)| crate::ui_unit::faction_group(store, factions.as_deref()));
 
     // The party1..4 slot view: own-subgroup members, packet order (`GroupState::party_slots`,
     // the 0440 byte law) — in a plain party this is simply the roster.
@@ -108,9 +115,16 @@ pub(super) fn feed_party(
 
     // party1..party4 unit snapshots + their per-field UNIT_* transitions.
     for (i, token) in PARTY_TOKENS.iter().enumerate() {
-        let snap = slots
-            .get(i)
-            .map(|m| member_unit_state(m, group.stats.get(&m.guid), &group, &index, &stores));
+        let snap = slots.get(i).map(|m| {
+            member_unit_state(
+                m,
+                group.stats.get(&m.guid),
+                &group,
+                &index,
+                &stores,
+                own_group.clone(),
+            )
+        });
         script.set_unit(token, snap.clone());
         if let Some(cur) = &snap {
             crate::ui_unit::fire_transitions(&mut script, token, fed.units[i].as_ref(), cur);
@@ -153,6 +167,7 @@ fn member_unit_state(
     group: &GroupState,
     index: &GuidIndex,
     stores: &Query<&ObjectStore>,
+    own_group: Option<String>,
 ) -> UnitState {
     let mut s = match index.0.get(&m.guid).and_then(|e| stores.get(*e).ok()) {
         // In visibility range: the live descriptor is the truth (the server keeps it current).
@@ -178,6 +193,8 @@ fn member_unit_state(
     s.guid = m.guid;
     s.raid_target = group.raid_target_index(m.guid);
     s.reaction = 5;
+    // The group PvP icon's faction (decision 0646 §1 — closes 0434's named party-icon deferral).
+    s.faction_group = own_group;
     // The roster status byte overlays BOTH paths (GetGroupMemberStatus's Lua-predicate bits).
     s.is_connected = m.status & member_status::ONLINE != 0;
     s.is_afk = m.status & member_status::AFK != 0;

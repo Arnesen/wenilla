@@ -26,7 +26,7 @@ fn load_xml(s: &UiScript, file: &str) -> usize {
 /// relocated onto `BenillaActionBarArtFrame` but are top-level frames, so they default to a lower
 /// frame level than the bar's own child-hierarchy art (the ExpBar dwarf notches + metal/well art) —
 /// which would then paint over the centered icons, leaving the ring but no bag icon. The OnLoad
-/// `BenillaBagBar_SeatAboveActionBar` seats them one level above the art (the action buttons' level).
+/// `BenillaActionBarArt_SeatAbove` seats them one level above the art (the action buttons' level).
 /// This locks that: no bag-slot icon quad may be covered by a higher-z art texture at its center.
 #[test]
 fn bag_bar_icons_draw_above_the_action_bar_art() {
@@ -1132,5 +1132,92 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
     s.set_container(0, Some(backpack(None)));
     s.fire_event("BAG_UPDATE_COOLDOWN", vec![]);
     assert_eq!(sweep(&s), None, "cold again after the refresh");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The bar's five bag buttons had NO hover at all — the director's "the bags are missing their
+/// simple tooltips". These are the ref's plain `SetText` plates (ref-MainMenuBarBagButtons.xml
+/// l.91-99 for the backpack, ref-MainMenuBarBagButtons.lua l.86-96 for the four slots), NOT the
+/// two-line newbie kind the micro buttons next to them use — so what's pinned here is the label,
+/// the empty-slot fallback, and that they seat BESIDE the button rather than at the screen corner.
+#[test]
+fn the_bar_bag_buttons_name_themselves_on_hover() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for file in [
+        "Fonts.xml",
+        "UIParent.xml",
+        "GameTooltip.xml",
+        "UiPanels.xml",
+        "MerchantFrame.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "BagFrame.xml",
+    ] {
+        load_xml(&s, file);
+    }
+    s.resolve();
+
+    // The backpack: its label plus the one bare-key binding benilla actually ships ('B').
+    s.run("BenillaBagToggle_OnEnter(BenillaBagToggle)").unwrap();
+    let line = s
+        .eval::<String>("return GameTooltipTextLeft1:GetText()")
+        .unwrap();
+    assert!(
+        line.starts_with("Backpack") && line.contains("(B)"),
+        "the backpack names itself and its key: {line:?}"
+    );
+    // Beside the button, not the default corner — the ref's ANCHOR_LEFT.
+    assert!(
+        s.eval::<bool>("return GameTooltip.default == nil").unwrap(),
+        "a bag button's plate is owner-anchored, never the default corner"
+    );
+    assert!(
+        s.eval::<bool>("return GameTooltip:IsOwned(BenillaBagToggle)")
+            .unwrap(),
+        "…owned by the button it opened from"
+    );
+
+    // An empty bag slot falls back to the ref's EQUIP_CONTAINER rather than showing nothing.
+    s.run("BenillaBagBarSlot_OnEnter(BenillaBagBarSlot1)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Equip Container",
+        "an empty slot says what belongs in it"
+    );
+
+    // With a bag actually equipped there, the ref shows that BAG's own item tooltip instead — the
+    // SetInventoryItem arm. Bar slot 1 is inventory slot 20 (Bag0Slot).
+    let mut inv: benilla_ui::script::InventorySlots = Default::default();
+    inv[20] = Some(benilla_ui::script::InvSlotView {
+        durability: None,
+        flags: 0,
+        item_id: 4496,
+        icon: Some("Interface\\Icons\\INV_Misc_Bag_08".into()),
+        count: 1,
+        quality: 1,
+        name: Some("Small Brown Pouch".into()),
+        link: Some("|cffffffff|Hitem:4496:0:0:0|h[Small Brown Pouch]|h|r".into()),
+        locked: false,
+        equip_slots: vec![20],
+        creator: None,
+    });
+    s.set_inventory_slots(inv);
+    s.run("BenillaBagBarSlot_OnEnter(BenillaBagBarSlot1)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Small Brown Pouch",
+        "an equipped slot shows that bag, not the empty-slot fallback"
+    );
+
+    s.run("BenillaBagBarButton_OnLeave()").unwrap();
+    assert!(
+        !s.eval::<bool>("return GameTooltip:IsVisible()").unwrap(),
+        "leaving hides the plate"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

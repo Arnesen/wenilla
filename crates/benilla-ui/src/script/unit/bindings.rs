@@ -341,6 +341,22 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             })
         })?,
     )?;
+    // UnitFactionGroup(unit) → (englishGroup, localizedName), the pair the PvP icon law reads:
+    // the first names the `UI-PVP-<group>` texture, the second titles the player frame's hit-area
+    // tooltip. nil, nil for a unit with no side (Monster/neutral templates) or no snapshot — the
+    // ref's icon branches gate on exactly that (decision 0646 §1/§3).
+    g.set(
+        "UnitFactionGroup",
+        lua.create_function(|lua, token: Option<String>| {
+            match with_unit(lua, &token, None, |u| u.faction_group.clone()) {
+                Some(group) => {
+                    let s = Value::String(lua.create_string(&group)?);
+                    Ok((s.clone(), s))
+                }
+                None => Ok((Value::Nil, Value::Nil)),
+            }
+        })?,
+    )?;
 
     // UnitRace(unit) → (localized, raceFile) or nil, nil; UnitClass(unit) → (localized,
     // classFileName) — the paper doll's "Level %d %s %s" line + the CLASSFILENAME-keyed

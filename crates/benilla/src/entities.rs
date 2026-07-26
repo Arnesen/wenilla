@@ -69,6 +69,12 @@ use mount::refresh_mounts;
 /// node its root bones parent under.
 mod conform;
 
+/// The per-unit collision height (decision 0645): the display id's `CreatureModelData` column,
+/// scaled — the `h` the swim/wade/splash/foam depth lines are each a verified fraction of.
+mod collision_height;
+use collision_height::stamp_collision_heights;
+pub(crate) use collision_height::CollisionHeight;
+
 /// Spell-visual effect models (decision 0099 phase 3): a casting unit's attach-point `.mdx` glows,
 /// spawned under the same attach-point joints as held items, lifetime per the kit stage.
 mod missile;
@@ -161,6 +167,12 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// A display's collision height in **raw model units** — see [`CollisionHeight`] for the world
+    /// value and everything that reads it. `None` for an unknown display.
+    pub(crate) fn collision_height(&self, display_id: u32) -> Option<f32> {
+        self.catalog.collision_height(display_id)
+    }
+
     /// A display's resolved blood id (decision 0137 phase 3 — see [`CreatureModel::blood`]):
     /// the UnitBloodLevels key the melee spurt chain starts from; `None` = unknown display.
     pub(crate) fn blood(&self, display_id: u32) -> Option<i32> {
@@ -293,6 +305,11 @@ impl Plugin for EntitiesPlugin {
             // The projectile flight-loop edges (`crate::sound::missile` consumes them).
             .add_message::<MissileSound>()
             .add_systems(Startup, setup_entities.after(AssetSet::Open))
+            // Every streamed unit's collision height, the frame after `apply_net_updates` spawns it
+            // (that stage's Commands are what create the entity, so this cannot be earlier). Its
+            // consumers all read `Option<&CollisionHeight>` against the ctor default, so a unit's
+            // first frame simply uses that — see `CollisionHeight`.
+            .add_systems(Update, stamp_collision_heights.after(WorldStage::Net))
             // Resolve/build display models before attaching, so a model is ready the frame attach wants it.
             // **After `WorldStage::Net`**: `apply_net_updates` spawns the entities (via Commands), so
             // these must run *after* that stage — with the sync point it forces — or they'd attach an

@@ -344,6 +344,32 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             Ok(model.arena.is_clamped_to_screen(h))
         })?,
     )?;
+    // Hit-rect insets — the MOUSE rect only (widget::Frame::hit_rect_insets): the hit test shrinks
+    // the resolved rect by these four before testing the cursor, and nothing else reads them, so a
+    // frame's geometry/draw/anchor answers are unchanged. The ref sets them wherever a button's
+    // frame is larger than its art (the micro buttons' 18 px empty header).
+    m.set(
+        "SetHitRectInsets",
+        lua.create_function(
+            |lua, (this, left, right, top, bottom): (Table, f32, f32, f32, f32)| {
+                let h = frame_handle_of(lua, &this)?;
+                lua.app_data_mut::<Model>()
+                    .expect("model")
+                    .arena
+                    .set_hit_rect_insets(h, [left, right, top, bottom]);
+                Ok(())
+            },
+        )?,
+    )?;
+    m.set(
+        "GetHitRectInsets",
+        lua.create_function(|lua, this: Table| {
+            let h = frame_handle_of(lua, &this)?;
+            let model = lua.app_data_ref::<Model>().expect("model");
+            let i = model.arena.hit_rect_insets(h);
+            Ok((i[0], i[1], i[2], i[3]))
+        })?,
+    )?;
     Ok(())
 }
 

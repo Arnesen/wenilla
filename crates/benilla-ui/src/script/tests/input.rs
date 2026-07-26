@@ -205,3 +205,59 @@ fn mouse_wheel_passes_delta_to_the_captured_frame() {
     assert!((s.eval::<f64>("return wheel").unwrap() + 1.0).abs() < 1e-6);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+#[test]
+fn hit_rect_insets_shrink_the_mouse_rect_only() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    // A 100×100 frame at the origin with the micro-button shape: an 18-unit dead header at the
+    // top, and 5 off each other side.
+    s.run(
+        r#"
+        entered = false
+        local a = CreateFrame("Frame", "A")
+        a:SetPoint("BOTTOMLEFT", 0, 0); a:SetSize(100, 100); a:EnableMouse(true)
+        a:SetScript("OnEnter", function() entered = true end)
+        a:SetHitRectInsets(5, 5, 18, 5)
+        local l, r, t, b = a:GetHitRectInsets()
+        assert(l == 5 and r == 5 and t == 18 and b == 5)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // Geometry is untouched — insets move the MOUSE rect, never the frame.
+    assert_eq!(s.eval::<f64>("return A:GetHeight()").unwrap(), 100.0);
+    assert_eq!(s.eval::<f64>("return A:GetTop()").unwrap(), 100.0);
+
+    // Inside the frame but inside the dead header ⇒ no capture (the case the ref's top=18 buys:
+    // the empty band above a micro button's art must not eat the click).
+    assert!(
+        s.hit_test(50.0, 90.0).is_none(),
+        "a point in the inset header is outside the hit rect"
+    );
+    assert!(s.mouse_move(50.0, 90.0).is_none());
+    assert!(!s.eval::<bool>("return entered").unwrap());
+    // …and each of the other three insets bites too.
+    assert!(s.hit_test(2.0, 50.0).is_none(), "left inset");
+    assert!(s.hit_test(98.0, 50.0).is_none(), "right inset");
+    assert!(s.hit_test(50.0, 2.0).is_none(), "bottom inset");
+
+    // Just below the header, still inside the shrunken rect ⇒ captures.
+    assert!(s.hit_test(50.0, 80.0).is_some());
+    assert!(s.mouse_move(50.0, 80.0).is_some());
+    assert!(s.eval::<bool>("return entered").unwrap());
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+#[test]
+fn hit_rect_insets_default_to_zero() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(r#"local a = CreateFrame("Frame", "Plain")"#).unwrap();
+    let (l, r, t, b) = s
+        .eval::<(f64, f64, f64, f64)>("return Plain:GetHitRectInsets()")
+        .unwrap();
+    assert_eq!((l, r, t, b), (0.0, 0.0, 0.0, 0.0), "no inset by default");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

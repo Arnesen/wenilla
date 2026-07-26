@@ -57,7 +57,9 @@ pub struct EditBoxState {
     /// default; ChatFrame's edit box declares 32).
     pub history_max: usize,
     /// The active recall position while browsing (an index into [`Self::history`]); `None` = live
-    /// editing. Any typed edit or `SetText` ends browsing.
+    /// editing. Typed edits, [`Self::add_history_line`], and focus gain end browsing —
+    /// programmatic `SetText` deliberately does NOT (the chat live parse rewrites the box on
+    /// every recalled slash line; ending the browse there pinned every UP to the newest entry).
     pub history_pos: Option<usize>,
     /// The live line stashed when browsing starts, restored when DOWN walks past the newest entry.
     pub history_draft: Option<String>,
@@ -183,8 +185,9 @@ impl EditBoxState {
         self.history_pos.map(|p| self.history[p].clone())
     }
 
-    /// A typed edit or programmatic `SetText` ends any history browse (the recalled line becomes
-    /// an ordinary draft; the stash is dropped).
+    /// End any history browse (the recalled line becomes an ordinary draft; the stash is
+    /// dropped). Called on typed edits, [`Self::add_history_line`], and focus gain — never on
+    /// programmatic `SetText` (see [`Self::history_pos`]).
     pub fn end_history_browse(&mut self) {
         self.history_pos = None;
         self.history_draft = None;

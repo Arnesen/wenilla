@@ -13,10 +13,10 @@
 //!
 //! What stays INTERIM (same dispatch, still open): the **size class** — the client routes the
 //! play through the unit's own sound emitter (`[CGUnit+0xb18]`) where Small/Medium/Large
-//! resolves; that selector is not pinned, so kit 1096 Medium plays for everyone. And the
-//! per-unit **collision height** — ours is the player capsule scaled by the unit's render scale;
-//! the real per-creature value is `CreatureModelData.collisionHeight × scale` (a follow-up
-//! plumb, decision 0464).
+//! resolves; that selector is not pinned, so kit 1096 Medium plays for everyone. The per-unit
+//! **collision height** the line scales by is no longer interim: 0464's named
+//! `CreatureModelData.collisionHeight` plumb landed in decision 0645, and this reads it off the
+//! unit ([`crate::entities::CollisionHeight`]) instead of scaling the player capsule.
 
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
@@ -24,9 +24,9 @@ use bevy::prelude::*;
 use benilla_assets::coords::bevy_to_wow;
 
 use crate::assets::WorldAssets;
+use crate::entities::CollisionHeight;
 use crate::liquid::{water_surface_at, WaterChunkInfo};
 use crate::net::NetEntity;
-use crate::player::CAPSULE_HEIGHT;
 use crate::schedule::WorldStage;
 
 use super::kit::{play_kit_ext, source_kit_playing, KitRef, SoundCategory, SoundKits};
@@ -42,7 +42,7 @@ const SPLASH_DEPTH_FRAC: f32 = 0.4;
 /// Play the water splash on a unit's `0.4·h` depth-line crossing, either direction (module docs).
 #[allow(clippy::too_many_arguments)] // the sound-play plumbing, one param per concern
 fn water_splashes(
-    units: Query<(Entity, &Transform), With<NetEntity>>,
+    units: Query<(Entity, &Transform, Option<&CollisionHeight>), With<NetEntity>>,
     water: Query<&WaterChunkInfo>,
     mut wet: Local<EntityHashMap<bool>>,
     kits: Option<ResMut<SoundKits>>,
@@ -55,11 +55,11 @@ fn water_splashes(
         return;
     };
     let listener = listener.pos;
-    for (entity, transform) in &units {
+    for (entity, transform, collision) in &units {
         let wow = bevy_to_wow(transform.translation);
-        // The unit's collision height: the player capsule × the baked render scale (INTERIM for
-        // creatures — module docs).
-        let h = CAPSULE_HEIGHT * transform.scale.x.max(0.1);
+        // The unit's own collision height (0645). `None` only on a unit's very first frame, before
+        // the stamp runs — the ctor default covers it, as it does in the reference.
+        let h = collision.copied().unwrap_or_default().0;
         // `None` — every unit, not just the local player; see `liquid_at`'s named gap.
         let submerged = water_surface_at(water.iter(), wow, None)
             .is_some_and(|s| s - wow[2] > SPLASH_DEPTH_FRAC * h);

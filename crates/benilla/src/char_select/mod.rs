@@ -144,7 +144,10 @@ impl Roster {
 }
 
 /// Ask the parked IO thread to log in as `guid` (the pick channel) and remember it as pending.
-fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
+/// `pub(crate)` for the rig ([`crate::capture::ProbeRigPlugin`]), which picks a character it may
+/// have had to *create* first — going through here is what keeps `pending_pick` truthful, so 0065's
+/// reconnect re-answers with the rigged body rather than showing the roster.
+pub(crate) fn send_pick(roster: &mut Roster, pick: &CharPick, guid: u64) {
     roster.pending_pick = Some(guid);
     let _ = pick.0.send(CharRequest::Enter(guid));
 }
@@ -160,7 +163,18 @@ fn apply_roster_policy(
 ) {
     if !roster.env_read {
         roster.env_read = true;
-        roster.env_char = std::env::var("WOW_CHAR").ok();
+        // `WOW_RIG` with a body outranks `WOW_CHAR`: the rig picks its own derived character, and
+        // it may have to CREATE it first, which this fast path (a one-shot `take()` that gives up
+        // on a name it can't find) structurally cannot wait for.
+        roster.env_char = match crate::capture::rig_char_name_from_env() {
+            Some(name) => {
+                if let Ok(ignored) = std::env::var("WOW_CHAR") {
+                    warn!("char select: WOW_RIG names {name} — ignoring WOW_CHAR={ignored}");
+                }
+                None
+            }
+            None => std::env::var("WOW_CHAR").ok(),
+        };
     }
     for msg in msgs.read() {
         roster.chars = msg.characters.clone();

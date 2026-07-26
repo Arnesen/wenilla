@@ -7,7 +7,7 @@
 //! The enter/exit boundary is **VERIFIED** against the real client (wow-re
 //! `collision/scratch/swim-transition.md`, resolving benilla-pins **B7**): the per-frame local decision
 //! `0x6030c0` fires `MOVEFLAG_SWIMMING 0x00200000` off `depth = liquidSurface − feetZ` vs a fraction of
-//! the unit's collision height, with a genuine 1/36-yd hysteresis band (see [`SWIM_ENTER_DEPTH`]).
+//! the unit's collision height, with a genuine 1/36-yd hysteresis band (see [`swim_enter_depth`]).
 //! There is **no** separate wade/water movement flag (`0x40000000` is HOVER — wading is just the
 //! implicit in-liquid-below-threshold state).
 //!
@@ -15,9 +15,14 @@
 //! earlier surface-follow reading): while SWIMMING the mover routes through the client's *floating*
 //! resolver, which **bypasses gravity entirely** — an idle swimmer's depth is **frozen** (no sink, no
 //! rise, no ease), the vertical comes only from the pitched travel velocity, and the one constraint is
-//! a **hard top-cap at `surface − 0.75·collisionHeight`** (`0x632ba0` ×0.75): the feet can never rise
-//! above the resting waterline, so a surfacing swimmer stops ~three-quarters submerged, head out.
-//! There is no spring and no resting *seek* — the old `REST_SUBMERSION`/`BUOYANCY_RATE` ease is gone.
+//! a **hard top-cap at `surface − 0.75·collisionHeight`** (`0x632ba0` ×0.75): the feet can never be
+//! shallower than the resting waterline, so a surfacing swimmer stops ~three-quarters submerged, head
+//! out. That cap constrains the **position, both ways** — wow-re's Q5 states it as "feet cannot come
+//! shallower than `surface − 0.75·collisionHeight`", a hard clamp re-tested each active substep — and
+//! what leaves a *stroking* swimmer above the line is usually not a rise but the surface **descending**
+//! under them, which is why the constraint has to be re-satisfied and not merely guarded against
+//! ([`settle_to_rest`], decision 0644). It is still no spring and no resting *seek* — the old
+//! `REST_SUBMERSION`/`BUOYANCY_RATE` ease is gone, and a swimmer *below* the line is never pulled up.
 //! Reaching the cap does NOT bleed the stroke off: the capped rise redirects **level, at full
 //! speed** — surface swimming — and the presented pitch levels with it ([`cap_redirect`],
 //! decisions 0499+0505). This is a **named divergence**: the §5 (wow-re
@@ -77,20 +82,39 @@ const SWIM_DEPTH_FRAC: f32 = 0.75;
 /// `0.75·h`, leave against `0.75·h − 1/36`, so between them the swim state holds (`0x603100`/`0x6031c0`).
 const SWIM_HYSTERESIS: f32 = 1.0 / 36.0;
 
-/// Submersion depth (yd, water surface above the feet) to **start** swimming — VERIFIED `0.75·h` from the
-/// feet (`h` = the unit's collision height, our [`CAPSULE_HEIGHT`]): ≈1.52 yd for a human, water covering
-/// ~three-quarters of the box (chest/neck deep).
-const SWIM_ENTER_DEPTH: f32 = SWIM_DEPTH_FRAC * CAPSULE_HEIGHT;
-/// Submersion depth (yd) below which swimming **stops** — VERIFIED `0.75·h − 1/36` (the lower edge of the
-/// hysteresis band); also stops the instant there's no liquid over the feet.
-const SWIM_EXIT_DEPTH: f32 = SWIM_ENTER_DEPTH - SWIM_HYSTERESIS;
+/// Submersion depth (yd, water surface above the feet) to **start** swimming — VERIFIED `0.75·h`
+/// from the feet, where `h` is **the unit's own collision height**
+/// ([`crate::entities::CollisionHeight`]): water covering ~three-quarters of its collision box,
+/// chest/neck deep. ≈1.52 yd for a human male, ≈0.86 for a gnome female, ≈1.83 for a night elf male.
+///
+/// It was `0.75 × CAPSULE_HEIGHT` — one constant for every race — until decision 0645. The
+/// *fraction* was right all along; the height it multiplied was a human's, so a gnome's rest line
+/// sat below her own head and she could never surface (B76).
+///
+/// This is also the **wade ceiling**: wading is the implicit in-liquid-but-not-swimming state
+/// (there is no wade movement flag — `0x40000000` is HOVER), so "deepest water you can still wade"
+/// and "shallowest water you swim in" are one number. The consumers with no `Player` of their own —
+/// the creature swim marker and the footstep splash slot — call it through `crate::player`, rather
+/// than keeping the second spelling `liquid::WADE_MAX` was.
+pub(crate) fn swim_enter_depth(h: f32) -> f32 {
+    SWIM_DEPTH_FRAC * h
+}
+/// Submersion depth (yd) below which swimming **stops** — VERIFIED `0.75·h − 1/36` (the lower edge
+/// of the hysteresis band); also stops the instant there's no liquid over the feet. The band itself
+/// is an absolute `1/36` yd, independent of `h` (wow-re: "the band is exactly 1/36 yd … independent
+/// of `h`") — so it is subtracted, never scaled.
+pub(super) fn swim_exit_depth(h: f32) -> f32 {
+    swim_enter_depth(h) - SWIM_HYSTERESIS
+}
 
 /// The hard **top-cap line** (yd below the surface) a rising swimmer stops at — feet at
 /// `surface − 0.75·h`, i.e. ~three-quarters submerged, head out. VERIFIED: the floating resolver's
 /// collision top-cap plane at `surface − 0.75·collisionHeight` (`0x632ba0` ×0.75, the open-bottom
 /// k-DOP's one top plane). The same `0.75·h` as the enter threshold, so a capped swimmer sits above
 /// the leave threshold and can't flicker out of the mode.
-const REST_CAP: f32 = SWIM_ENTER_DEPTH;
+fn rest_cap(h: f32) -> f32 {
+    swim_enter_depth(h)
+}
 
 /// The **Bevy-Y liquid surface** at the avatar's feet, if any liquid covers that XY — the shared
 /// swim/buoyancy query. [`liquid_at`] answers in WoW Z; WoW Z maps straight to Bevy Y, so the
@@ -136,14 +160,15 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
         return false;
     };
     let depth = surface - player.pos.y;
+    let h = player.collision_height.0;
     player.swimming = if player.swimming {
-        depth >= SWIM_EXIT_DEPTH
+        depth >= swim_exit_depth(h)
     } else {
         let hop_blocked = player.vel_y > 0.0
             && player
                 .airborne_since
                 .is_some_and(|t0| now - t0 < player.jump_zspeed / (2.0 * GRAVITY));
-        depth > SWIM_ENTER_DEPTH && !hop_blocked
+        depth > swim_enter_depth(h) && !hop_blocked
     };
     if player.swimming {
         player.settling = false;
@@ -226,13 +251,28 @@ fn cap_redirect(input_vel: Vec3, cap: f32) -> (Vec3, Option<f32>) {
     )
 }
 
+/// How far the feet must sink to satisfy the rest-line constraint — the excess above
+/// `surface − 0.75·h`, or zero when already at or under it. Pure so the law is pinned without a
+/// physics world; the *sweep* that carries it out is [`swim_step`]'s, which is what leaves a rising
+/// lakebed free to hold the feet higher.
+fn settle_to_rest(feet_y: f32, surface_y: f32, h: f32) -> f32 {
+    (feet_y - (surface_y - rest_cap(h))).max(0.0)
+}
+
 /// Advance the avatar one swim frame: the pitched travel velocity through the client's *floating*
 /// physics (VERIFIED, TU-B — gravity bypassed: an idle swimmer's depth is **frozen**, the vertical
 /// comes only from `input_vel`), a collide-and-slide against the lakebed/banks, and the hard
-/// [`REST_CAP`] top line — where a rise doesn't stop dead but **redirects level into full-speed
-/// surface swimming** ([`cap_redirect`], decision 0499). `input_vel` is the desired 3D velocity
-/// from the swim controls (the pitched travel basis + ascent); `surface_y` is the Bevy-Y waterline
-/// over the feet. Writes `player.pos`/`vel_y`/`horiz_vel`.
+/// [`rest_cap`] line — where a rise doesn't stop dead but **redirects level into full-speed
+/// surface swimming** ([`cap_redirect`], decision 0499), and where a stroke that ends up *above*
+/// the line settles back onto it ([`settle_to_rest`], decision 0644).
+///
+/// `input_vel` is the desired 3D velocity from the swim controls (the pitched travel basis +
+/// ascent); `surface_y` is the Bevy-Y waterline over the feet at the START of the frame (the rise
+/// cap is a limit on *this* frame's climb, so it belongs to the position we climb from), and
+/// `surface_at` resamples it at wherever the stroke actually lands (the settle has to satisfy the
+/// constraint where the swimmer ends up — on a river reading the entry waterline instead lags by a
+/// frame's descent, which on a steep enough surface is the whole hysteresis band). Writes
+/// `player.pos`/`vel_y`/`horiz_vel`.
 pub(super) fn swim_step(
     player: &mut Player,
     time: &Time,
@@ -240,6 +280,7 @@ pub(super) fn swim_step(
     capsule: &Collider,
     input_vel: Vec3,
     surface_y: f32,
+    surface_at: impl Fn(Vec3) -> Option<f32>,
 ) -> SwimOutcome {
     let dt = time.delta_secs();
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
@@ -256,7 +297,7 @@ pub(super) fn swim_step(
     // `depth` drops below the leave threshold, so we walk out. dt-based so it can't overshoot the
     // rest line and dip back under the exit depth (a flicker). No other vertical force exists here —
     // no gravity, no surface-seek (the verified floating resolver).
-    let rest_feet_y = surface_y - REST_CAP;
+    let rest_feet_y = surface_y - rest_cap(player.collision_height.0);
     let cap = if dt > 0.0 {
         ((rest_feet_y - player.pos.y) / dt).max(0.0)
     } else {
@@ -274,7 +315,47 @@ pub(super) fn swim_step(
         &filter,
         |_hit| MoveAndSlideHitResponse::Accept,
     );
-    let c = out.position;
+    let mut c = out.position;
+    // **Satisfy the rest line, don't merely guard it.** The cap above only ever refuses to *rise*
+    // through the waterline; that is enough on a lake and wrong on everything else, because the
+    // common way a swimmer ends up above the line is the line coming down to meet them. With the
+    // vertical frozen (no gravity here — verified) a stroke down a river surface that falls ~10%
+    // (measured: Felwood's Felfire Hill channel drops 5.94 yd across 60) loses 0.47 yd/s of depth,
+    // and the whole enter/leave hysteresis band is 1/36 yd — so the latch left swim every ~0.05 s,
+    // the walk mover took over and fell a few centimetres, swim re-latched, forever: the avatar
+    // spent 47% of a downhill swim inside the FALL mover, flipping mode ~10×/s and alternating
+    // SWIMMING/FALLING on the wire (director-reported as bouncing off the surface; live-probe
+    // measured, decision 0644).
+    //
+    // The correction is a **swept** drop, not a position clamp: an earlier attempt clamped
+    // `pos.y` after the slide, which overrode terrain collision, shoved the feet onto the rest
+    // line even where a shallow bottom held them higher, and pinned `depth` at ≥ rest so the
+    // shore exit could never fire. Sweeping it leaves the bottom in charge — wading out of a
+    // lake, the bank holds the feet up, the depth falls under the leave threshold, and we walk
+    // out exactly as before — and unlike folding the sink into `input_vel` it cannot eat the
+    // horizontal stroke that climbs the bank in the first place.
+    //
+    // Gated on a stroke, matching the resolver's own outer gate (`0x634100 test [esi+0x40],0x200f`
+    // — translation or falling, never idle): an idle floater is not resolved at all, so its depth
+    // stays frozen (TU-B(c)).
+    if input_vel != Vec3::ZERO {
+        if let Some(surface_now) = surface_at(c - half_h) {
+            let excess = settle_to_rest(c.y - half_h.y, surface_now, player.collision_height.0);
+            if excess > 0.0 {
+                let drop = ms
+                    .cast_move(
+                        capsule,
+                        c,
+                        Quat::IDENTITY,
+                        Vec3::NEG_Y * excess,
+                        SKIN_WIDTH,
+                        &filter,
+                    )
+                    .map_or(excess, |h| h.distance.min(excess));
+                c.y -= drop;
+            }
+        }
+    }
     player.pos = c - half_h;
     // Swim owns its vertical directly; leave a clean zero so exiting into a fall starts from rest and
     // horiz_vel drives the swim gait's playback rate like every other locomotion clip.
@@ -300,9 +381,22 @@ pub(super) fn swim_step(
 mod tests {
     use super::*;
 
+    /// The shipped `CreatureModelData.collisionHeight × displayScale` for three real bodies —
+    /// the numbers `benilla_formats`' `collision_height_is_the_m2_collision_box` pins against the
+    /// client, restated here so these pure tests need no DBCs. Human male is the one the old
+    /// constant happened to match (2.031 vs 2.0278 — 2 mm apart, which is why B76 hid for so long).
+    const HUMAN_MALE: f32 = 2.031;
+    const GNOME_FEMALE: f32 = 1.150; // 1.000 column × 1.15 display scale
+    const NIGHT_ELF_MALE: f32 = 2.438;
+
     fn player_at(y: f32) -> Player {
+        player_of_height(y, HUMAN_MALE)
+    }
+
+    fn player_of_height(y: f32, h: f32) -> Player {
         Player {
             pos: Vec3::new(0.0, y, 0.0),
+            collision_height: crate::entities::CollisionHeight(h),
             ..Default::default()
         }
     }
@@ -312,15 +406,18 @@ mod tests {
     /// the boundary can't flicker the physics regime frame to frame (wow-re swim-transition `0x6030c0`).
     #[test]
     fn swim_entry_and_exit_hysteresis() {
-        // The band is exactly 1/36 yd, independent of height.
-        assert!((SWIM_ENTER_DEPTH - SWIM_EXIT_DEPTH - 1.0 / 36.0).abs() < 1e-6);
-        // Enter is 0.75·collisionHeight from the feet.
-        assert!((SWIM_ENTER_DEPTH - 0.75 * CAPSULE_HEIGHT).abs() < 1e-6);
+        // The band is exactly 1/36 yd, independent of height — so it holds at every race's line.
+        for h in [HUMAN_MALE, GNOME_FEMALE, NIGHT_ELF_MALE] {
+            assert!((swim_enter_depth(h) - swim_exit_depth(h) - 1.0 / 36.0).abs() < 1e-6);
+            // Enter is 0.75·collisionHeight from the feet.
+            assert!((swim_enter_depth(h) - 0.75 * h).abs() < 1e-6);
+        }
 
+        let (enter, exit) = (swim_enter_depth(HUMAN_MALE), swim_exit_depth(HUMAN_MALE));
         let mut p = player_at(0.0); // feet at y=0, so the surface height *is* the submersion depth
-        let mid_band = (SWIM_ENTER_DEPTH + SWIM_EXIT_DEPTH) * 0.5;
+        let mid_band = (enter + exit) * 0.5;
         assert!(
-            !update_swimming(&mut p, Some(SWIM_ENTER_DEPTH), 0.0),
+            !update_swimming(&mut p, Some(enter), 0.0),
             "exactly at the enter depth does not yet swim (strict >)"
         );
         assert!(
@@ -328,7 +425,7 @@ mod tests {
             "a depth in the band, entered from walking, stays walking"
         );
         assert!(
-            update_swimming(&mut p, Some(SWIM_ENTER_DEPTH + 0.01), 0.0),
+            update_swimming(&mut p, Some(enter + 0.01), 0.0),
             "past the enter depth starts swimming"
         );
         assert!(
@@ -336,11 +433,11 @@ mod tests {
             "the same in-band depth, now entered from swimming, keeps swimming (hysteresis)"
         );
         assert!(
-            !update_swimming(&mut p, Some(SWIM_EXIT_DEPTH - 0.01), 0.0),
+            !update_swimming(&mut p, Some(exit - 0.01), 0.0),
             "dropping below the leave threshold returns to walking"
         );
         // Re-enter, then prove no-liquid stops it regardless of depth.
-        assert!(update_swimming(&mut p, Some(SWIM_ENTER_DEPTH + 0.5), 0.0));
+        assert!(update_swimming(&mut p, Some(enter + 0.5), 0.0));
         assert!(
             !update_swimming(&mut p, None, 0.0),
             "no liquid over the feet stops swimming (the binary's inLiquid == 0 → STOP)"
@@ -356,14 +453,18 @@ mod tests {
     fn latching_swim_ends_the_settle_hold() {
         let mut p = player_at(0.0);
         p.settling = true;
-        assert!(update_swimming(&mut p, Some(SWIM_ENTER_DEPTH + 1.0), 0.0));
+        assert!(update_swimming(
+            &mut p,
+            Some(swim_enter_depth(HUMAN_MALE) + 1.0),
+            0.0
+        ));
         assert!(!p.settling, "the water is the support settling waited for");
 
         let mut wading = player_at(0.0);
         wading.settling = true;
         assert!(!update_swimming(
             &mut wading,
-            Some(SWIM_EXIT_DEPTH - 0.5),
+            Some(swim_exit_depth(HUMAN_MALE) - 0.5),
             0.0
         ));
         assert!(
@@ -386,7 +487,7 @@ mod tests {
     #[test]
     fn the_hop_relatches_at_half_launch_velocity() {
         let half_decay = SWIM_JUMP_SPEED / (2.0 * GRAVITY);
-        let deep = Some(SWIM_ENTER_DEPTH + 1.0);
+        let deep = Some(swim_enter_depth(HUMAN_MALE) + 1.0);
         let mut p = player_at(0.0);
         p.airborne_since = Some(0.0);
         p.jump_zspeed = SWIM_JUMP_SPEED;
@@ -409,6 +510,120 @@ mod tests {
             update_swimming(&mut q, deep, 0.01),
             "descending into depth enters swim — the gate only guards a rising launch"
         );
+    }
+
+    /// The rest line is a **constraint**, not a one-way cap (decision 0644): a stroking swimmer
+    /// left above it settles back onto it, while one below it is never pulled up — the verified
+    /// floating resolver has no upward force but your own stroke, and no downward one at all.
+    #[test]
+    fn the_rest_line_is_satisfied_from_above_and_never_pulls_up() {
+        // The law is the same shape at every body height; run it at all three.
+        for h in [HUMAN_MALE, GNOME_FEMALE, NIGHT_ELF_MALE] {
+            let cap = rest_cap(h);
+            // Exactly on the line: nothing to do.
+            assert_eq!(settle_to_rest(10.0 - cap, 10.0, h), 0.0);
+            // Below it — a dive, or a river swum upstream: no pull up at any depth.
+            assert_eq!(settle_to_rest(10.0 - cap - 0.01, 10.0, h), 0.0);
+            assert_eq!(settle_to_rest(10.0 - cap - 30.0, 10.0, h), 0.0);
+            // Above it, which on a river is the surface having come down to meet the feet: the
+            // sink is exactly the excess, so one satisfied frame lands on the line, not past it.
+            let excess = 0.25;
+            assert!((settle_to_rest(10.0 - cap + excess, 10.0, h) - excess).abs() < 1e-6);
+        }
+    }
+
+    /// **B76, pinned.** The bug the director reported: a gnome could not swim up to the surface,
+    /// her head stayed well under. The rest line is `0.75·h` below the waterline, so the head
+    /// clears it iff `0.75·h < h` — trivially true *for the unit's own h*, and false the moment
+    /// one body's h is used for another's. With the old constant a gnome female (1.15 yd tall)
+    /// was held 1.52 yd down: 0.37 yd of water **above her head**, no stroke able to reach it,
+    /// because the cap is a hard collision plane and the resolver has no upward force but the cap.
+    ///
+    /// Asserted as "every race floats with its head out", which is the property that actually
+    /// matters and which no single constant can satisfy for all of them.
+    #[test]
+    fn every_race_floats_with_its_head_out_of_the_water() {
+        for (label, h) in [
+            ("human male", HUMAN_MALE),
+            ("gnome female", GNOME_FEMALE),
+            ("night elf male", NIGHT_ELF_MALE),
+        ] {
+            let submerged = rest_cap(h);
+            assert!(
+                submerged < h,
+                "{label}: rest line {submerged} is at or below the top of a {h}-yd body"
+            );
+            // A quarter of the body clears the water — the verified 1−0.75.
+            assert!(((h - submerged) / h - 0.25).abs() < 1e-6, "{label}");
+        }
+
+        // And the shape of the defect itself, as the loop above would have run it pre-0645: the
+        // one constant applied to a gnome puts the rest line ABOVE her head, so `submerged < h`
+        // fails and she is held under with water to spare. This is what the fix removes.
+        let pre_0645 = rest_cap(crate::player::DEFAULT_COLLISION_HEIGHT);
+        assert!(
+            pre_0645 > GNOME_FEMALE,
+            "the old constant rest line ({pre_0645}) must sit above a {GNOME_FEMALE}-yd gnome — \
+             that was the bug, and if this ever fails the test below is no longer testing it"
+        );
+        assert!(
+            pre_0645 - GNOME_FEMALE > 0.3,
+            "…by a third of a yard of water over her head, not a rounding error"
+        );
+    }
+
+    /// **The director's downhill-river jitter** (decision 0644), as the frame loop that produces
+    /// it. `SLOPE` is Felwood's Felfire Hill channel, measured off the shipped ADT and pinned by
+    /// `liquid::real_data::the_felfire_channel_falls_about_a_tenth_of_a_yard_per_yard`.
+    ///
+    /// The two halves are the two vertical laws over the same river. Frozen feet cannot hold the
+    /// latch for a tenth of a second — the surface descends through the whole 1/36-yd hysteresis
+    /// band almost at once, and every crossing hands the avatar to the fall mover and back
+    /// (live-probe measured at ~10 mode flips/s, 47% of the swim spent falling). Satisfying the
+    /// constraint instead pins the depth on the rest line for a run longer than any river.
+    #[test]
+    fn a_descending_surface_does_not_flap_the_swim_latch() {
+        const SLOPE: f32 = 0.099;
+        const DT: f32 = 1.0 / 60.0;
+        const H: f32 = HUMAN_MALE;
+        let cap = rest_cap(H);
+        let surface_after = |secs: f32| 100.0 - SLOPE * SWIM_SPEED * secs;
+
+        // (a) The pre-0644 law — the feet keep their Y while the water leaves them behind.
+        let mut frozen = player_of_height(surface_after(0.0) - cap, H);
+        frozen.swimming = true;
+        let mut left_at = None;
+        for i in 0..600 {
+            let t = i as f32 * DT;
+            if !update_swimming(&mut frozen, Some(surface_after(t)), t) {
+                left_at = Some(t);
+                break;
+            }
+        }
+        let left_at = left_at.expect("frozen feet cannot hold the latch on a slope");
+        assert!(
+            left_at < 0.1,
+            "the whole 1/36-yd band is spent in {left_at:.3}s of downhill swimming"
+        );
+
+        // (b) The shipped law. The settle runs where `swim_step` runs it — after the stroke, on
+        // the surface at the position the stroke reached.
+        let mut held = player_of_height(surface_after(0.0) - cap, H);
+        held.swimming = true;
+        for i in 0..600 {
+            let t = i as f32 * DT;
+            let surface = surface_after(t);
+            held.pos.y -= settle_to_rest(held.pos.y, surface, H);
+            assert!(
+                update_swimming(&mut held, Some(surface), t),
+                "left swim at frame {i} ({t:.2}s)"
+            );
+            assert!(
+                (surface - held.pos.y - cap).abs() < 1e-4,
+                "frame {i}: depth {} is off the rest line",
+                surface - held.pos.y
+            );
+        }
     }
 
     /// The surface redirect (decision 0499): a pitched-up stroke reaching the rest line keeps its

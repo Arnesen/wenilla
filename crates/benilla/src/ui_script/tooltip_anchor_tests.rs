@@ -97,10 +97,13 @@ fn world_hover_seats_the_default_corner() {
 }
 
 /// Unit-frame hovers take the SAME default corner (ref UnitFrame_OnEnter l.56 calls
-/// GameTooltip_SetDefaultAnchor, not an owner anchor), and the plate FADES on leave
-/// (ref UnitFrame_OnLeave l.88-93: FadeOut, not Hide).
+/// GameTooltip_SetDefaultAnchor, not an owner anchor).
+///
+/// Leave drops the plate AT ONCE, not on the fade ramp: `UnitFrame_OnLeave` l.84-88 branches on
+/// `SHOW_NEWBIE_TIPS`, and 1.12's default is on (0661/0663) — `FadeOut` is the tips-off arm. The
+/// world mouseover keeps the ramp; this is the unit *frame*.
 #[test]
-fn unit_frame_hover_takes_the_default_corner_and_fades_on_leave() {
+fn unit_frame_hover_takes_the_default_corner_and_drops_on_leave() {
     // The kit + popups precede the unit frames (their DropDown children's OnLoad), app order.
     let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
     s.set_unit("target", Some(wolf()));
@@ -119,12 +122,75 @@ fn unit_frame_hover_takes_the_default_corner_and_fades_on_leave() {
         ok,
         "unit-frame tooltip sits at the default corner, owned by the frame"
     );
-    // Leave: the fade ramp (TOOLTIP_FADE_SECS), then hidden.
+    // A wolf is no player, so the hover is the ordinary unit readout — the fork below never fires.
+    assert!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap()
+            .contains("Wolf"),
+        "a non-player target still gets the unit lines"
+    );
+    // Leave: gone on the spot, no ramp to wait out.
     s.run("BenillaUnitFrame_OnLeave(BenillaTargetFrame)")
         .unwrap();
-    s.tick(0.6);
     let hidden: bool = s.eval("return not GameTooltip:IsShown()").unwrap();
-    assert!(hidden, "unit-frame tooltip fades out on leave");
+    assert!(
+        hidden,
+        "unit-frame tooltip hides on leave, it does not fade"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// The detailed-tooltip fork (ref UnitFrame_OnEnter l.58-67, director-approved 0663): with tips on
+/// — the 1.12 default — the frame explains its RIGHT-CLICK MENU and returns BEFORE `SetUnit`, so
+/// the unit lines never render. Your own portrait always; another player's whenever they're your
+/// target.
+///
+/// This is the most behaviour-changing thing in the newbie-tip arc, so it is pinned from both
+/// sides: the explanation replaces the readout, and a non-player target still gets the readout
+/// (the sibling test above).
+#[test]
+fn your_own_portrait_explains_the_menu_instead_of_showing_your_health() {
+    let mut s = harness(&["UIDropDownMenu.xml", "UnitPopup.xml", "UnitFrames.xml"]);
+    s.set_unit("player", Some(wolf()));
+
+    s.run("BenillaUnitFrame_OnEnter(BenillaPlayerFrame)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Party Options",
+        "your own frame explains the party menu"
+    );
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft2:GetText()")
+            .unwrap(),
+        s.eval::<String>("return NEWBIE_TOOLTIP_PARTYOPTIONS")
+            .unwrap()
+    );
+    assert_eq!(
+        s.eval::<i64>("return GameTooltip:NumLines()").unwrap(),
+        2,
+        "it RETURNS before SetUnit — no health/level lines underneath"
+    );
+
+    // A player target takes the other arm. `player` stays a wolf here on purpose: the ref reads
+    // UnitIsPlayer on the "target" token alone, never on the hovered frame's own unit.
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            is_player: true,
+            name: Some("Someone".into()),
+            ..wolf()
+        }),
+    );
+    s.run("BenillaUnitFrame_OnEnter(BenillaTargetFrame)")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return GameTooltipTextLeft1:GetText()")
+            .unwrap(),
+        "Player Options",
+        "another player's frame explains the player menu"
+    );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
 

@@ -32,9 +32,11 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         "SetText",
         lua.create_function(|lua, (this, s): (Table, Option<String>)| {
             let h = frame_handle_of(lua, &this)?;
-            // Programmatic SetText ends a history browse (the engine-internal recall path calls
-            // `set_text` directly and keeps its browse position).
-            with_eb(lua, h, EditBoxState::end_history_browse);
+            // Programmatic SetText KEEPS a history browse in progress: the chat live parse
+            // rewrites the box on every recalled slash line ("/s hi" → Say + "hi"), and ending
+            // the browse there reset every UP to the newest entry — "history only goes back 1"
+            // (director's report, 2026-07-26). The browse ends on typed edits, AddHistoryLine,
+            // and focus gain (`set_focus_handle`) — the fresh-session reset.
             set_text(lua, h, &s.unwrap_or_default());
             Ok(())
         })?,
@@ -141,6 +143,27 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
     m.set(
         "GetBlinkSpeed",
         lua.create_function(|lua, this: Table| with_editbox(lua, &this, |eb| eb.blink_period))?,
+    )?;
+    // SetTextColor(r, g, b [, a]) — the FontInstance half an EditBox inherits in the client
+    // (`ChatEdit_UpdateHeader` colors the typed text this way): tint the box's text region,
+    // creating it lazily like every text-touching path.
+    m.set(
+        "SetTextColor",
+        lua.create_function(
+            |lua, (this, r, g, b, a): (Table, f32, f32, f32, Option<f32>)| {
+                let h = frame_handle_of(lua, &this)?;
+                let Some(rh) = super::ensure_text_region(lua, h) else {
+                    return Err(mlua::Error::runtime("not an EditBox"));
+                };
+                lua.app_data_mut::<Model>()
+                    .expect("model app_data")
+                    .region_data
+                    .entry(rh)
+                    .or_default()
+                    .color = Some([r, g, b, a.unwrap_or(1.0)]);
+                Ok(())
+            },
+        )?,
     )?;
     m.set(
         "SetTextInsets",

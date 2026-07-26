@@ -215,6 +215,31 @@ impl ZKey {
         ZKey(bits)
     }
 
+    /// The key a frame's own **content** draws at: its bare [`ZKey::frame`] slot promoted into its
+    /// region band at `layer` — behind that layer's textures, ahead of its declared font strings.
+    ///
+    /// Content is what a widget kind draws *itself*, with no region to hang it on — today only a
+    /// ScrollingMessageFrame's ring lines, which the client materializes as the frame's own font
+    /// strings (its `<FontString>` child is their font instance, and a font string with no
+    /// `<Layer>` is `ARTWORK`). At the bare frame slot they sorted before **all** of the frame's
+    /// regions, so the chat window's own `$parentBackground` — a `BACKGROUND` texture, faded in
+    /// on hover — painted over the messages and dimmed them (director, 2026-07-26; the white
+    /// text measured 192, exactly `255 × (1 − 0.25)`, the box's own alpha). The frame slot stays
+    /// what it was — the backdrop/scissor setup that must precede everything the frame owns.
+    #[inline]
+    #[must_use]
+    pub const fn content(self, layer: DrawLayer) -> ZKey {
+        ZKey(
+            self.0
+                | (1u64 << IS_REGION_SHIFT)
+                | ((layer.index() as u64) << LAYER_SHIFT)
+                // Sub-level 0 in the same +128 bias `region` uses, and the font-string bit: content
+                // is text, so it takes the same textures-draw-first slot a font string would.
+                | (128u64 << SUBLEVEL_SHIFT)
+                | (1u64 << FONTSTRING_SHIFT),
+        )
+    }
+
     /// The raw packed value (the sort key).
     #[inline]
     pub const fn raw(self) -> u64 {

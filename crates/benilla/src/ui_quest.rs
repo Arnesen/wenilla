@@ -57,6 +57,8 @@ pub(crate) struct QuestGiver {
     /// Per-guid dialog status (`SMSG_QUESTGIVER_STATUS`) — the `!`/`?` marker's value, stored for a
     /// later world-marker slice.
     statuses: HashMap<u64, u32>,
+    /// The re-ask epoch — see [`Self::bump_reask`].
+    reask: u32,
 }
 
 impl QuestGiver {
@@ -94,6 +96,37 @@ impl QuestGiver {
     /// ([`crate::quest_markers`]).
     pub(crate) fn statuses(&self) -> &HashMap<u64, u32> {
         &self.statuses
+    }
+
+    /// Drop the cached status of every guid `live` rejects. The reference caches its answer on the
+    /// unit object itself (`unit+0xcb8`), so the cache dies with the object; ours is a map keyed by
+    /// guid and needs the explicit prune, or a unit re-entering view renders its stale marker until
+    /// the fresh answer lands (decision 0647).
+    pub(crate) fn retain_statuses(&mut self, live: impl Fn(u64) -> bool) {
+        self.statuses.retain(|&npc, _| live(npc));
+    }
+
+    /// Drop one guid's cached status — the NPC stopped being a questgiver, so its marker goes with
+    /// it (the reference's own teardown branch; decision 0647).
+    pub(crate) fn clear_status(&mut self, npc: u64) {
+        self.statuses.remove(&npc);
+    }
+
+    /// Re-ask every visible questgiver's status: a packet landed that can change the server's
+    /// answer for everyone. The reference sweeps from four such handlers — reputation
+    /// (`SMSG_SET_FACTION_STANDING`), the party/raid roster (`SMSG_GROUP_LIST`), the
+    /// `SMSG_QUESTGIVER_*` demux (turn-ins) and `SMSG_QUESTUPDATE_*` — the packet half of the
+    /// refresh law whose descriptor half is `quest_markers::self_generation` (decision 0654).
+    ///
+    /// A counter, not a flag: `quest_markers::query_statuses` folds it into its generation, so a
+    /// bump can't be lost to system ordering or to a frame that coalesced two packets.
+    pub(crate) fn bump_reask(&mut self) {
+        self.reask = self.reask.wrapping_add(1);
+    }
+
+    /// The current re-ask epoch — see [`Self::bump_reask`].
+    pub(crate) fn reask_epoch(&self) -> u32 {
+        self.reask
     }
 
     /// The stored dialog status for `npc`, if any. The store-now half of DIALOG_STATUS

@@ -10,7 +10,9 @@ use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use crate::collision::player_query_filter;
-use crate::liquid::{water_surface_at, WaterChunkInfo, WADE_MAX};
+use crate::entities::CollisionHeight;
+use crate::liquid::{water_surface_at, WaterChunkInfo};
+use crate::player::swim_enter_depth;
 
 use super::super::NetEntity;
 
@@ -319,19 +321,31 @@ pub(in crate::net) fn ground_clamp_creatures(
     }
 }
 
-/// The interim exit band (yd) below [`WADE_MAX`] where a marked swimmer stays marked — mirrors the
-/// player boundary's verified 1/36-yd hysteresis (decision 0226) so the regime can't flicker at the
-/// threshold. Both numbers are the INTERIM creature stand-in (see [`CreatureSwimming`]).
+/// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
+/// (`None` only on a unit's first frame, before the stamp), and whether it is already marked.
+type SwimMarkQuery = (
+    Entity,
+    &'static NetEntity,
+    &'static Transform,
+    Option<&'static CollisionHeight>,
+    Has<CreatureSwimming>,
+);
+
+/// The exit band (yd) below the swim boundary where a marked swimmer stays marked — the player
+/// boundary's **VERIFIED** 1/36-yd hysteresis (`0x7ff9d0`), an absolute distance independent of
+/// collision height, so it is subtracted from the boundary rather than scaled with it.
 const CREATURE_SWIM_EXIT_BAND: f32 = 1.0 / 36.0;
 
 /// A **creature** currently past the swim boundary — the client-side derivation of the swim state
 /// the wire never carries for creatures: vmangos sets `MOVEFLAG_SWIMMING` only from player packets,
 /// and a water creature's create block + splines carry no swim marker at all (verified
 /// `vmangos-src`, 2026-07-17). The real client derives every unit's swim mode locally per frame
-/// (the `0x6030c0` boundary family — decision 0226 pinned it for the player); how exactly it does so
-/// for a *creature* (reference point, per-unit collision height) is in the dispatched swim §5 —
-/// until that verdict, this marks a `Unit` whose feet sit deeper than [`WADE_MAX`], with a small
-/// exit band ([`CREATURE_SWIM_EXIT_BAND`]) so the state can't flicker. **INTERIM.**
+/// (the `0x6030c0` boundary family — decision 0226 pinned it for the player). This derives it the
+/// same way, on the creature's **own** collision height: marked once its feet sit deeper than
+/// `0.75·h` ([`swim_enter_depth`]), unmarked once they rise a [`CREATURE_SWIM_EXIT_BAND`] above it
+/// so the state can't flicker. The flat 2.0-yd stand-in it used before decision 0645 is retired
+/// (0464's `collisionHeight` plumb was what it was waiting on); what stays open is the *reference
+/// point* the real client measures a creature's depth from.
 ///
 /// Consumers: the swim-gait leg of the animation selector (`creature_anim::select::unify`), the
 /// [`ground_clamp_creatures`] exemption above, and the enter-water splash (`sound::water`).
@@ -343,10 +357,10 @@ pub(crate) struct CreatureSwimming;
 /// clamp the same frame (Bevy inserts the deferred-command sync point for the chain).
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
-    units: Query<(Entity, &NetEntity, &Transform, Has<CreatureSwimming>)>,
+    units: Query<SwimMarkQuery>,
     water: Query<&WaterChunkInfo>,
 ) {
-    for (e, net, t, marked) in &units {
+    for (e, net, t, collision, marked) in &units {
         if net.kind != EntityKind::Unit {
             continue; // players carry the real flag on the wire; GameObjects don't swim
         }
@@ -354,10 +368,11 @@ pub(in crate::net) fn mark_swimming_creatures(
         // `None`: no per-unit interior claim exists (CurrentWmoInterior is the local player's
         // down-ray), so both sources answer here — the pre-0634 behaviour, named in `liquid_at`.
         let depth = water_surface_at(water.iter(), wow, None).map_or(f32::MIN, |s| s - wow[2]);
+        let boundary = swim_enter_depth(collision.copied().unwrap_or_default().0);
         let swimming = if marked {
-            depth >= WADE_MAX - CREATURE_SWIM_EXIT_BAND
+            depth >= boundary - CREATURE_SWIM_EXIT_BAND
         } else {
-            depth > WADE_MAX
+            depth > boundary
         };
         if swimming != marked {
             if swimming {

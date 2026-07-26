@@ -3,10 +3,12 @@
 //! light-blue `?` per the status map.
 //!
 //! The data plane is the era wire: every visible creature flagged `UNIT_NPC_FLAG_QUESTGIVER`
-//! gets one `CMSG_QUESTGIVER_STATUS_QUERY`, re-asked for everyone whenever OUR quest log changes
-//! (accepting/completing/abandoning a quest changes other NPCs' answers — the server only ever
-//! answers queries, vmangos `QuestHandler.cpp:36-77`, never pushes). Answers land in
-//! [`QuestGiver`]'s per-guid status map (`net/apply`); this module renders them.
+//! gets one `CMSG_QUESTGIVER_STATUS_QUERY` — the server only ever *answers* queries (vmangos
+//! `QuestHandler.cpp:36-77`), never pushes, so every refresh point is the client's own to trigger,
+//! and a status that is never re-asked for is a marker frozen at first sight. The re-ask law —
+//! the reference's self-player descriptor **field watch**, and which of it we implement — is its
+//! own concern and lives in [`query`] (decisions 0650/0654). Answers land in [`QuestGiver`]'s
+//! per-guid status map (`net/apply`); THIS module is the render half: attach, scale, animate.
 //!
 //! The render law is byte-verified (wow-re object-layer `questgiver-marker.md`):
 //! - **Attach** (`0x6074c0`): the marker is a CHILD of the unit's own body M2 at attachment slot
@@ -39,7 +41,11 @@
 //! the plate leg is a director-pinned deviation, rationale on [`pose_markers`], 0408/0409):
 //! cards re-arm the matching loop, hosts switch the playing clip.
 
-use std::collections::{HashMap, HashSet};
+mod query;
+
+use query::query_statuses;
+
+use std::collections::HashMap;
 
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
@@ -54,13 +60,10 @@ use crate::lighting::SharedLightBuffer;
 use crate::mesh_tag::alpha_bits;
 use crate::model_render::{m2_url, model_material, MaterialCache, ShadeSel};
 use crate::nameplates::Nameplates;
-use crate::net::{ClientCommand, GuidIndex, NetCommands, NetEntity, ObjectStore, SelfPlayer};
+use crate::net::GuidIndex;
 use crate::terrain::WowModelMaterial;
 use crate::ui_quest::QuestGiver;
 use bevy::mesh::MeshTag;
-
-/// `UNIT_NPC_FLAGS` questgiver service bit (vanilla; `update_object.rs`'s accessor doc).
-const NPC_FLAG_QUESTGIVER: u32 = 0x2;
 
 use crate::entities::{ATTACH_OVERHEAD, ATTACH_OVERHEAD_MOUNTED};
 
@@ -136,42 +139,6 @@ struct MarkerSeat {
 /// each frame.
 #[derive(Component)]
 struct MarkerCardPivot(Vec3);
-
-/// Ask the dialog status of every questgiver-flagged creature once — and everyone again whenever
-/// our own quest log changes (the "generation": the occupied `PLAYER_QUEST_LOG` ids+state bytes).
-#[allow(clippy::type_complexity)] // a Bevy system: each param is one resource, the app's convention
-fn query_statuses(
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    units: Query<(&crate::net::Guid, &ObjectStore), (With<NetEntity>, Without<SelfPlayer>)>,
-    commands: Res<NetCommands>,
-    mut state: Local<(u64, HashSet<u64>)>,
-) {
-    let Some(store) = self_q.iter().next() else {
-        return;
-    };
-    // The quest-log generation: fold every occupied slot's quest id + state byte.
-    let mut generation = 0xcbf2_9ce4_8422_2325u64; // FNV offset
-    for slot in 0..benilla_protocol::messages::PLAYER_QUEST_LOG_SLOTS {
-        if let Some(s) = store.0.player_quest_log(slot) {
-            if s.quest_id != 0 {
-                generation ^= u64::from(s.quest_id) ^ (u64::from(s.state) << 32);
-                generation = generation.wrapping_mul(0x0000_0100_0000_01B3);
-            }
-        }
-    }
-    let (last_gen, asked) = &mut *state;
-    if *last_gen != generation {
-        *last_gen = generation;
-        asked.clear();
-    }
-    for (guid, obj) in &units {
-        if obj.0.unit_npc_flags() & NPC_FLAG_QUESTGIVER != 0 && asked.insert(guid.0) {
-            let _ = commands
-                .0
-                .send(ClientCommand::QuestgiverStatusQuery { npc: guid.0 });
-        }
-    }
-}
 
 /// Despawn one marker instance: the root (cards cascade) and its seat — which lives under the
 /// UNIT's joint, so it needs the explicit, guarded kill (a despawned unit already cascaded it).
@@ -541,7 +508,8 @@ fn bake_seat_scale(
 
 /// Re-seat every billboard card from its seat's world placement (cards write absolute world
 /// transforms, so they can't be parented under the moving seat). Runs in PostUpdate after
-/// transform propagation and before [`BillboardPlace`] writes the card transforms — the card
+/// transform propagation and before [`crate::billboard::BillboardPlace`] writes the card
+/// transforms — the card
 /// rides the SAME-frame posed seat, no trailing frame.
 fn re_seat_cards(
     seats: Query<&GlobalTransform, With<MarkerSeat>>,

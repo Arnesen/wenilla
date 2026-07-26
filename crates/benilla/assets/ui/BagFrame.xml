@@ -568,20 +568,14 @@
         -- DEFERRAL: no drag-to-equip a bag onto the bar yet (that's the paper-doll drag arc, slice
         -- 3's scope, not this one).
         -- The bag bar (and the backpack toggle) are RELOCATED onto the action bar — anchored into
-        -- BenillaActionBarArtFrame's bottom-right. But they are top-level frames, so they default to
-        -- a LOWER frame level than the bar's own art (which is a child hierarchy: the ExpBar's dwarf
-        -- notches + the metal/well art sit at the bar's child level). Frame level dominates the flat
-        -- painter's order, so the bar art would paint OVER these buttons' icons — the icon draws, the
-        -- ring shows around it, but the centered icon is fully covered (the "empty rings, no bag
-        -- icons" bug). The action bar's OWN 12 buttons avoid this because they're CHILDREN of the art
-        -- frame (child-over-parent). Seat the bag-bar frames one level above the art — the same level
-        -- the action buttons get — so their icons draw above the bar art. (SetParent onto the art
-        -- frame would be the structural twin, but the engine keys draw order at creation and does not
-        -- re-key on a runtime reparent, so the explicit level is the reliable lever.)
-        function BenillaBagBar_SeatAboveActionBar(frame)
-            local art = getglobal("BenillaActionBarArtFrame")
-            if art then frame:SetFrameLevel(art:GetFrameLevel() + 1) end
-        end
+        -- BenillaActionBarArtFrame's bottom-right — which means they need seating one frame level
+        -- above the bar art or it paints over their icons. That lever lives with the frame it's
+        -- about: BenillaActionBarArt_SeatAbove (ActionBar.xml, loaded before this file), which
+        -- carries the full explanation; the micro-button row is its second caller. Called
+        -- nil-GUARDED here: the shipped load order always has the bar first, but ~25 bag/bank/
+        -- escape/merchant test harnesses load THIS file alone — and with no bar loaded there is by
+        -- definition no bar art to seat above, so the guard's no-op is the right answer, not a
+        -- swallowed failure.
 
         -- Bag0Slot..Bag3Slot = live inv ids 20..23 (char_stats.rs SLOT_INFO, DBC-verified); OUR bag
         -- ids 1..4 map the same way (bagId N ⇒ inv slot 19+N), the id PickupInventoryItem/
@@ -591,7 +585,7 @@
         function BenillaBagBarSlot_OnLoad(button, bagId)
             button.bagId = bagId
             button.icon = getglobal(button:GetName() .. "Icon")
-            BenillaBagBar_SeatAboveActionBar(button)
+            if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(button) end
             button:RegisterForClicks("LeftButtonUp")
             -- Drag-to-equip (decision 0208 phase 1b's deferred bag-icon arm, now landed): the bar
             -- slot is a paper-doll equipment slot for bags. LEFT drag picks the equipped bag up;
@@ -640,6 +634,49 @@
             -- fires per-bag-CONTENTS change, not per-icon change (the icon is the bag ITEM's own
             -- texture) — repainting on it too covers the freshly-equipped-bag-template-in-flight frame.
             BenillaBagBarSlot_Update(button)
+        end
+
+        -- ── The bar buttons' hovers ───────────────────────────────────────────────────────────
+        -- ref GlobalStrings.lua l.132 / l.1458 (enUS), fallback form: the real localized
+        -- GlobalStrings.lua runs before this file at runtime (ui_script/mod.rs), so these only
+        -- fill in for the harnesses that load no patch chain.
+        BACKPACK_TOOLTIP = BACKPACK_TOOLTIP or "Backpack"
+        EQUIP_CONTAINER = EQUIP_CONTAINER or "Equip Container"
+
+        -- Both are PLAIN tooltips — the reference calls GameTooltip:SetText here, not
+        -- GameTooltip_AddNewbieTip, so unlike the micro buttons next door (0661) there is no second
+        -- explanation line to be missing. They also anchor beside the button (ANCHOR_LEFT, so the
+        -- plate opens toward screen center off a bottom-right button), NOT at the default corner.
+        --
+        -- ref MainMenuBarBackpackButton OnEnter (ref-MainMenuBarBagButtons.xml l.91-99). The ref
+        -- appends the live TOGGLEBACKPACK key with GameTooltip:AppendText; this engine has neither
+        -- GetBindingKey nor AppendText, so the suffix is concatenated from the one bare-key binding
+        -- we actually ship (ui_script/input.rs `bare_key_binding`: KeyB) — MicroMenu.xml's own shape
+        -- for the same problem, and the rendered line is identical.
+        function BenillaBagToggle_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+            GameTooltip:SetText(
+                BACKPACK_TOOLTIP .. " " .. NORMAL_FONT_COLOR_CODE .. "(B)" .. FONT_COLOR_CODE_CLOSE,
+                1.0, 1.0, 1.0)
+        end
+
+        -- ref BagSlotButton_OnEnter (ref-MainMenuBarBagButtons.lua l.86-96): the equipped bag's own
+        -- item tooltip, or "Equip Container" for an empty slot. The ref's "(F1)".."(F4)" suffix
+        -- needs GetBindingKey AND the TOGGLEBAG1..4 bindings — benilla ships neither, so no slot
+        -- carries one; the day those bind, this is where the suffix goes.
+        function BenillaBagBarSlot_OnEnter(button)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+            if not GameTooltip:SetInventoryItem("player", BenillaBagBarSlot_InvSlot(button)) then
+                GameTooltip:SetText(EQUIP_CONTAINER, 1.0, 1.0, 1.0)
+            end
+        end
+
+        -- ref OnLeave for both (l.100-102 / the template's own): a plain Hide, no fade — the item
+        -- half of the split BenillaUnitFrame_OnLeave's comment describes.
+        function BenillaBagBarButton_OnLeave()
+            if GameTooltip then GameTooltip:Hide() end
         end
 
         function BenillaBagBarSlot_Update(button)
@@ -1164,9 +1201,11 @@
         <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
         <Scripts>
             <!-- Seat the backpack icon above the bar art too (same reason as the bag-bar slots —
-                 BenillaBagBar_SeatAboveActionBar's comment). -->
-            <OnLoad>BenillaBagBar_SeatAboveActionBar(self)</OnLoad>
+                 BenillaActionBarArt_SeatAbove's comment). -->
+            <OnLoad>if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(self) end</OnLoad>
             <OnClick>BenillaBagToggle_OnClick()</OnClick>
+            <OnEnter>BenillaBagToggle_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
         </Scripts>
     </CheckButton>
 
@@ -1196,6 +1235,8 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 1)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
+            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
                  bag places), mirroring the paper-doll/bag-slot drag routing. -->
@@ -1219,6 +1260,8 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 2)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
+            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
                  bag places), mirroring the paper-doll/bag-slot drag routing. -->
@@ -1242,6 +1285,8 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 3)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
+            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
                  bag places), mirroring the paper-doll/bag-slot drag routing. -->
@@ -1265,6 +1310,8 @@
             <OnLoad>BenillaBagBarSlot_OnLoad(self, 4)</OnLoad>
             <OnClick>BenillaBagBarSlot_OnClick(self)</OnClick>
             <OnEvent>BenillaBagBarSlot_OnEvent(self)</OnEvent>
+            <OnEnter>BenillaBagBarSlot_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
             <!-- The drag trio: OnDragStart picks the equipped bag up, OnReceiveDrag drops a carried
                  bag in — both the same PickupInventoryItem transition (empty cursor picks up, a held
                  bag places), mirroring the paper-doll/bag-slot drag routing. -->

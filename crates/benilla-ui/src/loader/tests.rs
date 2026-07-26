@@ -813,6 +813,40 @@ mod loader_tests {
             "the text region is anchored by the insets"
         );
     }
+
+    /// `<HitRectInsets>` reaches SetHitRectInsets, and the inset band stops capturing the mouse
+    /// while the frame's own geometry is untouched — the ref micro-button shape (a 29x58 frame whose
+    /// art fills only the lower ~40, `top="18"`).
+    #[test]
+    fn hit_rect_insets_element_shrinks_the_mouse_rect() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        let doc = parse(
+            r#"<Ui>
+                <Button name="Micro">
+                    <Size><AbsDimension x="29" y="58"/></Size>
+                    <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"/></Anchors>
+                    <HitRectInsets><AbsInset left="0" right="0" top="18" bottom="0"/></HitRectInsets>
+                </Button>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        s.resolve();
+
+        let (l, r, t, b) = s
+            .eval::<(f64, f64, f64, f64)>("return Micro:GetHitRectInsets()")
+            .unwrap();
+        assert_eq!((l, r, t, b), (0.0, 0.0, 18.0, 0.0));
+        // Geometry untouched: still a 58-tall button.
+        assert_eq!(s.eval::<f64>("return Micro:GetHeight()").unwrap(), 58.0);
+        // A button is mouse-enabled by construction, so the hit test is live.
+        assert!(
+            s.hit_test(14.0, 50.0).is_none(),
+            "the dead 18-unit header must not capture"
+        );
+        assert!(s.hit_test(14.0, 20.0).is_some(), "the art band still hits");
+    }
 }
 
 mod layer_blend_tests {

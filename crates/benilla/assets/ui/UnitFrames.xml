@@ -41,12 +41,13 @@
           unless the statusText CVar is set; we match the default look.
         - TargetFrameNameBackground (the level plate) is faction-tinted (TargetFrame_CheckFaction,
           ref-TargetFrame.lua l.144-191). A PLAYER-controlled target takes the player branch (red when
-          mutually hostile, else blue — a friendly player is BLUE, never the reaction green); an NPC
+          mutually hostile, yellow attackable-not-hostile, green when we can assist them but they are
+          PvP-flagged, else blue — a player never reads the *reaction* green); an NPC
           takes the reaction swatch, resolved from the same faction-template / reputation decode the
-          selection ring uses (ui_unit.rs → UnitState.reaction → UnitReaction). DEFERRED (no PvP/tap
-          wire): the player branch's two middle legs — yellow "attackable but not hostile" (l.158) and
-          green "assist + PvP-flagged" (l.163) — and the tapped-by-other grey (l.176); they collapse
-          into red/blue, correct for every same-/opposite-faction player. The ref gates the player
+          selection ring uses (ui_unit.rs → UnitState.reaction → UnitReaction). The player branch's
+          two middle legs — yellow "attackable but not hostile" (l.158) and green "assist +
+          PvP-flagged" (l.163) — landed with the PvP wire (decision 0646); only the tapped-by-other
+          grey (l.176) is still deferred, on the tap wire. The ref gates the player
           branch on UnitPlayerControlled (which also covers pets); we resolve its player half via
           UnitIsPlayer, so a player-controlled PET takes the NPC reaction branch until that flag lands.
         - The classification border swap (elite/rare art, ref-TargetFrame.lua l.205-218) is a named
@@ -56,7 +57,16 @@
         - The level slot runs the full CheckLevel law (ref-TargetFrame.lua l.119-142, transcribed in
           Update below): corpse or "can't tell" (UnitLevel ≤ 0) → the HighLevelTexture skull;
           otherwise the number, GetDifficultyColor-tinted when attackable, gold when not.
-        - OUT (no wire / future arcs): PVP/leader/master/rest/attack icons, group indicator, dropdowns,
+        - The PVP icon landed with decision 0646 (the three-branch law in BenillaUnitFrame_UpdatePvP).
+          Its `PlayerPVPIconHitArea` did NOT, deliberately: the ref's hit area draws nothing at the
+          default settings — GameTooltip_AddNewbieTip with SHOW_NEWBIE_TIPS off and noNormalText=1
+          (which is exactly how it is called) shows no tooltip at all — while an enableMouse frame
+          over the portrait would eat the player frame's own hover and right-click. Zero pixels for a
+          real regression is not a trade; it comes back with the newbie-tip cvar if that ever ships.
+          RE-VERIFIED in 0652, both legs: ref-GameTooltip.lua l.107-123 takes the `not noNormalText`
+          branch when tips are off (so `noNormalText=1` → nothing), and "newbie" does not appear
+          anywhere in WoW.exe's strings, so SHOW_NEWBIE_TIPS has no cvar producer to be on.
+        - OUT (no wire / future arcs): leader/master/rest/attack icons, group indicator,
           hit indicators, raid target icon, playtime, target-of-target.
 
         TARGET AURA ROWS (0255's deferred slice): 5 buffs / 16 debuffs under the frame, geometry +
@@ -71,6 +81,15 @@
         branches take the not-shown leg (wrap 6, buffs under Debuff7) until a ToT frame exists.
     -->
     <Script><![CDATA[
+        -- The right-click-menu explanations the detailed-tooltip fork shows in place of the unit
+        -- lines (BenillaUnitFrame_OnEnter below) — ref GlobalStrings.lua l.2993/3081/2754/2755
+        -- (enUS), fallback form: the real localized GlobalStrings.lua runs before this file at
+        -- runtime (ui_script/mod.rs), so these only fill in for the tests. CombatText.xml's shape.
+        PARTY_OPTIONS_LABEL = PARTY_OPTIONS_LABEL or "Party Options"
+        PLAYER_OPTIONS_LABEL = PLAYER_OPTIONS_LABEL or "Player Options"
+        NEWBIE_TOOLTIP_PARTYOPTIONS = NEWBIE_TOOLTIP_PARTYOPTIONS or "If you belong to a party, you can right-click your portrait to bring up the Party Options menu. This menu will allow you to quit the party or see what looting rules the party is using. A party leader can add or remove party members, as well as change the party's looting rules."
+        NEWBIE_TOOLTIP_PLAYEROPTIONS = NEWBIE_TOOLTIP_PLAYEROPTIONS or "Right-click to bring up special commands for interacting with another player. You can inspect their equipment, issue a party invite, initiate a trade, or challenge a player to a duel. A group leader can promote or remove that player from the group."
+
         -- The client's PowerBarColor values, keyed by the UnitPowerType token.
         BENILLA_POWER_COLORS = {
             MANA      = { r = 0.0, g = 0.0, b = 1.0 },
@@ -122,6 +141,9 @@
             -- still loading) the circle is simply empty.
             frame.portrait = getglobal(name .. "Portrait")
             SetPortraitTexture(frame.portrait, unit)
+            -- The PvP flag icon (decision 0646), under the TextureFrame like the ring art it
+            -- draws over — see BenillaUnitFrame_UpdatePvP.
+            frame.pvpIcon = getglobal(tf .. "PVPIcon")
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
             frame:RegisterEvent("UNIT_HEALTH")
             frame:RegisterEvent("UNIT_MAXHEALTH")
@@ -130,6 +152,10 @@
             frame:RegisterEvent("UNIT_MAXPOWER")
             frame:RegisterEvent("UNIT_DISPLAYPOWER")
             frame:RegisterEvent("UNIT_NAME_UPDATE")
+            -- The PvP icon's repaint wire (decision 0646 §2) — in the reference exactly the three
+            -- frames that draw the icon register it (PlayerFrame, TargetFrame, PartyMemberFrame)
+            -- and nothing else does.
+            frame:RegisterEvent("UNIT_FACTION")
             frame:RegisterEvent("PLAYER_TARGET_CHANGED")
             -- The aura rows are target-only (ref TargetFrame_OnLoad registers UNIT_AURA).
             if unit == "target" then
@@ -154,22 +180,53 @@
         -- recolor of line 1 (ref UnitFrame_OnEnter l.68-76: the FrameXML half of the split).
         -- The plate goes to the DEFAULT corner, not beside the frame — ref UnitFrame_OnEnter
         -- l.56 is GameTooltip_SetDefaultAnchor(GameTooltip, this): unit-frame tooltips live at
-        -- the screen's bottom-right like world hovers. (The ref's newbie-tip fork and the
-        -- TOOLTIP_UPDATE_TIME re-poll are not ours: no newbie-tip option; the engine's health
-        -- watcher is the live half of the re-poll, and name/level don't drift mid-hover yet.)
+        -- the screen's bottom-right like world hovers. (The TOOLTIP_UPDATE_TIME re-poll is not
+        -- ours: the engine's health watcher is the live half of it, and name/level don't drift
+        -- mid-hover yet.)
+        --
+        -- The DETAILED-TOOLTIP FORK (ref UnitFrame_OnEnter l.58-67, director-approved 0663) is the
+        -- surprising half: with tips on — 1.12's default, decision 0661 — the frame explains its
+        -- RIGHT-CLICK MENU instead of the unit, and returns BEFORE SetUnit, so the health/level
+        -- lines never render at all. Your own portrait always takes it; another player's takes it
+        -- whenever they're your target. The ref excepts PartyMemberFrame1-4 by name; ours are a
+        -- separate file with their own OnEnter (PartyFrame.xml), so there is nothing to except here.
+        --
+        -- One divergence, named: the ref gates the second branch on UnitPlayerControlled("target"),
+        -- which is true for a player OR a player's pet/charm. This engine has no such binding and no
+        -- flag to build one from — UnitIsPlayer is the nearest honest read, so a charmed mob or
+        -- another player's pet falls through to the unit tooltip where the reference would explain
+        -- the menu. The player case, which is the one anybody hovers, is exact.
         function BenillaUnitFrame_OnEnter(frame)
             local unit = frame.unit
             if not UnitExists(unit) then return end
             GameTooltip_SetDefaultAnchor(GameTooltip, frame)
+            if SHOW_NEWBIE_TIPS == "1" then
+                if frame:GetName() == "BenillaPlayerFrame" then
+                    GameTooltip_AddNewbieTip(frame, PARTY_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                        NEWBIE_TOOLTIP_PARTYOPTIONS)
+                    return
+                elseif UnitIsPlayer("target") and not UnitIsUnit("target", "player")
+                    and not UnitIsUnit("target", "pet") then
+                    GameTooltip_AddNewbieTip(frame, PLAYER_OPTIONS_LABEL, 1.0, 1.0, 1.0,
+                        NEWBIE_TOOLTIP_PLAYEROPTIONS)
+                    return
+                end
+            end
             if GameTooltip:SetUnit(unit) then
                 getglobal("GameTooltipTextLeft1"):SetTextColor(GameTooltip_UnitColor(unit))
             end
         end
 
-        -- ref UnitFrame_OnLeave l.88-93: the unit-frame tooltip FADES on leave (items Hide;
-        -- units fade — the same ramp the world mouseover uses).
+        -- ref UnitFrame_OnLeave l.84-88: the fade is the tips-OFF branch. With detailed tips on the
+        -- plate HIDES outright — the ref's own pairing, and the right one: an explanation that
+        -- lingers on a ramp reads as a stuck tooltip, where a unit readout fading is the client's
+        -- signature. (Items Hide, units fade — that split still holds for the world mouseover.)
         function BenillaUnitFrame_OnLeave(frame)
-            GameTooltip:FadeOut()
+            if SHOW_NEWBIE_TIPS == "1" then
+                GameTooltip:Hide()
+            else
+                GameTooltip:FadeOut()
+            end
         end
 
         function BenillaUnitFrame_OnEvent(frame)
@@ -184,28 +241,68 @@
                 return
             end
             BenillaUnitFrame_Update(frame)
+            -- The player's flag-change sound (decision 0646 §2/§4). The reference plays
+            -- igPVPUpdate inside PlayerFrame_UpdatePvPStatus's two show branches, which it only
+            -- ever reaches from UNIT_FACTION; our repaint runs from the shared Update on every
+            -- event, so the sound rides the (edge-fired) event instead of the repaint — one
+            -- sound per real flag change, which is what the reference audibly does.
+            if event == "UNIT_FACTION" and frame.unit == "player" and frame.pvpShown then
+                PlaySound("igPVPUpdate")
+            end
+        end
+
+        -- The PvP flag icon (decision 0646 §4). The reference writes this law twice with
+        -- identical branches — PlayerFrame_UpdatePvPStatus (ref-PlayerFrame.lua l.55-79) and the
+        -- tail of TargetFrame_CheckFaction (ref-TargetFrame.lua l.193-202) — so it lives once
+        -- here. Branch ORDER is the reference's and it is load-bearing: free-for-all wins
+        -- outright (an FFA-flagged player shows the FFA skull even while ordinarily flagged), and
+        -- the faction leg needs BOTH a resolvable side and the flag. `frame.pvpShown` is what the
+        -- caller sounds off.
+        function BenillaUnitFrame_UpdatePvP(frame)
+            local icon = frame.pvpIcon
+            if not icon then return end
+            local unit = frame.unit
+            local texture
+            if UnitIsPVPFreeForAll(unit) then
+                texture = "Interface\\TargetingFrame\\UI-PVP-FFA"
+            else
+                local factionGroup = UnitFactionGroup(unit)
+                if factionGroup and UnitIsPVP(unit) then
+                    texture = "Interface\\TargetingFrame\\UI-PVP-" .. factionGroup
+                end
+            end
+            frame.pvpShown = texture ~= nil
+            if texture then
+                icon:SetTexture(texture)
+                icon:Show()
+            else
+                icon:Hide()
+            end
         end
 
         -- ── Combat feedback: the portrait hit indicator (decision 0576) ──────────────────────
         -- Ref CombatFeedback.lua, transcribed onto frame-param style (the ref reads `this`).
-        -- Timings/colors/size factors verbatim; the word strings are the shipped enUS
-        -- GlobalStrings values, hardcoded like the rest of our enUS-only data.
+        -- Timings/colors/size factors verbatim. The words come from the GLOBALS, exactly as the ref
+        -- builds this table (CombatFeedback.lua l.6-17: CombatFeedbackText["MISS"] = TEXT(MISS)),
+        -- so a localized install shows its own — the app runs the real GlobalStrings.lua off the
+        -- patch chain before this file (ui_script/mod.rs). The enUS literals are the fallback for
+        -- the test harnesses, which load no patch chain.
         COMBATFEEDBACK_FADEINTIME = 0.2
         COMBATFEEDBACK_HOLDTIME = 0.7
         COMBATFEEDBACK_FADEOUTTIME = 0.3
 
         CombatFeedbackText = {
-            INTERRUPT = "Interrupt",
-            MISS = "Miss",
-            RESIST = "Resist",
-            DODGE = "Dodge",
-            PARRY = "Parry",
-            BLOCK = "Block",
-            EVADE = "Evade",
-            IMMUNE = "Immune",
-            DEFLECT = "Deflect",
-            ABSORB = "Absorb",
-            REFLECT = "Reflect",
+            INTERRUPT = INTERRUPT or "Interrupt",
+            MISS = MISS or "Miss",
+            RESIST = RESIST or "Resist",
+            DODGE = DODGE or "Dodge",
+            PARRY = PARRY or "Parry",
+            BLOCK = BLOCK or "Block",
+            EVADE = EVADE or "Evade",
+            IMMUNE = IMMUNE or "Immune",
+            DEFLECT = DEFLECT or "Deflect",
+            ABSORB = ABSORB or "Absorb",
+            REFLECT = REFLECT or "Reflect",
         }
 
         function CombatFeedback_OnCombatEvent(frame, event, flags, amount, type)
@@ -347,20 +444,30 @@
             end
 
             -- Tint the name/level plate (target only; TargetFrame_CheckFaction, ref-TargetFrame.lua
-            -- l.144-191). A PLAYER-CONTROLLED target takes the player branch (l.145-174): its plate is
-            -- RED when we're mutually hostile (UnitReactionColor[2]) and BLUE otherwise — a friendly,
-            -- non-attackable player is blue, NOT the reaction green. Only an NPC takes the reaction
-            -- swatch (l.179-190): the resolved UnitReactionColor (neutral → yellow), or blue when the
-            -- reaction can't be told (nil). The ref's two middle player legs — yellow "attackable but
-            -- not hostile" (l.158) and green "assist + PvP-flagged" (l.163) — plus the tapped-by-other
-            -- grey (l.176) need the PvP/tap wire we don't carry; until it lands they collapse into
-            -- red/blue, which is the right answer for every same-/opposite-faction player we can
-            -- resolve. (The ref gates on UnitPlayerControlled, which also covers pets; UnitIsPlayer is
-            -- the player half we can resolve — see the header deviation.)
+            -- l.144-191). A PLAYER-CONTROLLED target takes the player branch (l.145-174); only an NPC
+            -- takes the reaction swatch (l.179-190): the resolved UnitReactionColor (neutral →
+            -- yellow), or blue when the reaction can't be told (nil) — a player never reads the
+            -- reaction green, which is why the two paths differ at all.
+            -- The player branch runs the ref's full ladder now that the
+            -- PvP wire carries it (decision 0646 §4): hostile red, else attackable-but-not-hostile
+            -- yellow (l.158), else "we can assist them but they're PvP-flagged" green (l.163), else
+            -- blue. Only the tapped-by-other grey (l.176) is still deferred — it needs the tap wire.
+            -- The ref's first leg tests mutual attackability (UnitCanAttack both ways); our
+            -- UnitCanAttack carries only the player→unit direction, so UnitIsEnemy (reaction ≤ 2)
+            -- stands in for it — the same substitution this branch has always made. (The ref gates on
+            -- UnitPlayerControlled, which also covers pets; UnitIsPlayer is the player half we can
+            -- resolve — see the header deviation.)
             if frame.nameBackground then
                 if UnitIsPlayer(unit) then
+                    local c
                     if UnitIsEnemy(unit, "player") then
-                        local c = BENILLA_REACTION_COLORS[2]
+                        c = BENILLA_REACTION_COLORS[2]
+                    elseif UnitCanAttack("player", unit) then
+                        c = BENILLA_REACTION_COLORS[4]
+                    elseif UnitIsPVP(unit) then
+                        c = BENILLA_REACTION_COLORS[6]
+                    end
+                    if c then
                         frame.nameBackground:SetVertexColor(c.r, c.g, c.b)
                     else
                         frame.nameBackground:SetVertexColor(0.0, 0.0, 1.0)
@@ -386,6 +493,9 @@
                     frame.deadText:SetText("")
                 end
             end
+
+            -- The PvP flag icon, on both frames (decision 0646 §4).
+            BenillaUnitFrame_UpdatePvP(frame)
 
             -- The aura rows (target only) — the ref's TargetFrame_Update →
             -- TargetDebuffButton_Update: repainted on PLAYER_TARGET_CHANGED and UNIT_AURA alike.
@@ -649,6 +759,18 @@
                             <TexCoords left="1.0" right="0.09375" top="0" bottom="0.78125"/>
                         </Texture>
                     </Layer>
+                    <Layer level="ARTWORK">
+                        <!-- The PvP flag icon, 64×64 TOPLEFT (18,-20) (ref PlayerPVPIcon,
+                             ref-PlayerFrame.xml l.124-135) — ARTWORK over the BACKGROUND ring art,
+                             like the ref's. Texture chosen at runtime (decision 0646 §4); the ref's
+                             PlayerPVPIconHitArea is deliberately OUT (see the header). -->
+                        <Texture name="$parentPVPIcon" hidden="true">
+                            <Size><AbsDimension x="64" y="64"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="18" y="-20"/></Offset></Anchor>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
                     <Layer level="OVERLAY">
                         <!-- Name 100×10 CENTER (50,19) (ref l.58-69). -->
                         <FontString name="$parentNameText" inherits="GameFontNormalSmall" text="Unknown">
@@ -817,6 +939,17 @@
                                 <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                             </Anchors>
                             <TexCoords left="0.09375" right="1.0" top="0" bottom="0.78125"/>
+                        </Texture>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <!-- The PvP flag icon, 64×64 TOPRIGHT (3,-20) (ref TargetPVPIcon,
+                             ref-TargetFrame.xml l.208-219) — the player's icon mirrored to the
+                             frame's other edge, same law (decision 0646 §4). -->
+                        <Texture name="$parentPVPIcon" hidden="true">
+                            <Size><AbsDimension x="64" y="64"/></Size>
+                            <Anchors>
+                                <Anchor point="TOPRIGHT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="3" y="-20"/></Offset></Anchor>
+                            </Anchors>
                         </Texture>
                     </Layer>
                     <Layer level="OVERLAY">

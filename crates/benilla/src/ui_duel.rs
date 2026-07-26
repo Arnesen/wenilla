@@ -109,6 +109,14 @@ impl DuelState {
         ours
     }
 
+    /// Take the challenger owed a response, if any — the partner probe's accept hook
+    /// ([`crate::capture::ProbePartnerPlugin`], decision 0637). Taking it discharges the popup
+    /// debt exactly as the feed's `DUEL_REQUESTED` edge does, so the probe never leaves a dialog
+    /// owed to a UI it isn't driving.
+    pub(crate) fn take_challenger(&mut self) -> Option<u64> {
+        self.challenger.take()
+    }
+
     /// `SMSG_DUEL_COMPLETE`. Returns whether the "Duel cancelled." line is owed (the duel never
     /// started). Gated on holding an arbiter, exactly like `0x4d4b20` — a stray completion with
     /// no duel in flight is silent. Cancels any countdown unconditionally, which the reference
@@ -344,7 +352,11 @@ fn drain_duel(
 
 /// Find a streamed player by name — the reference's object-manager name lookup. Case-insensitive:
 /// the caller is a `/duel` argument the player typed.
-fn streamed_player_named(name: &str, index: &GuidIndex, names: &NameCache) -> Option<u64> {
+pub(crate) fn streamed_player_named(
+    name: &str,
+    index: &GuidIndex,
+    names: &NameCache,
+) -> Option<u64> {
     index
         .0
         .keys()

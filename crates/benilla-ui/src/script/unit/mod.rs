@@ -125,6 +125,16 @@ pub struct UnitState {
     /// bit) — distinct from [`Self::pvp`]'s ordinary faction PvP flag; a unit can carry either, both,
     /// or neither independently (an FFA zone flags this without the ordinary flag ever setting).
     pub is_pvp_ffa: bool,
+    /// The unit's PvP faction group — `"Alliance"` or `"Horde"`, else `None` (`UnitFactionGroup`;
+    /// decision 0646 §1). App-resolved from `UNIT_FIELD_FACTIONTEMPLATE` → `FactionTemplate.dbc`'s
+    /// group mask, with the Player bit skipped: every playable race's template carries
+    /// Player|<side> (mask 3 or 5), and so do the PvP-flagged city guards, so the side bit is the
+    /// only one that can name a shipped `UI-PVP-<group>` texture. `None` for Monster/neutral
+    /// templates is a state the icon callers explicitly handle (`if ( factionGroup and … )`).
+    ///
+    /// The Era binding returns it twice — English token first, localized name second; enUS ships
+    /// the same word for both (FactionGroup.dbc's `InternalName` and `Name0`).
+    pub faction_group: Option<String>,
     /// The unit's GUID (`OBJECT_FIELD_GUID`) — the identity the cross-token predicates compare
     /// (`UnitIsUnit`, `UnitInParty`; decision 0434 §5's popup gating). `0` = the app's feed didn't
     /// resolve one; two zero guids never compare equal.

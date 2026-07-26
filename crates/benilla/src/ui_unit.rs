@@ -29,6 +29,7 @@ use benilla_ui::script::{power_token, ScriptValue, UiScript, UnitState};
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{ring_reaction, Factions, Selection};
+use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::UiInput;
 
 /// The feed pass — runs before [`UiInput`] so the snapshot + events it produces are in place when the
@@ -96,6 +97,13 @@ struct UnitFeedState {
     /// (`None` until first seen — first sight fires only when already IN combat, so logging in
     /// at peace never announces "Leaving Combat").
     in_combat: Option<bool>,
+    /// The self unit's last `PLAYER_FLAGS_PVP_DESIRED` bit, for the toggle announcement
+    /// (decision 0652). `None` until first seen: the reference reacts to a *changed*-bits mask, so
+    /// the descriptor that first carries the flag at login announces nothing.
+    pvp_desired: Option<bool>,
+    /// Whether we have already warned that our own faction template names no side (decision 0657).
+    /// Re-arms when a side resolves again, so a `.gm on` / `.gm off` cycle logs once each way.
+    warned_sideless: bool,
 }
 
 /// Adds the per-frame unit feed. The `Unit*` bindings themselves live in `benilla-ui`; this only
@@ -118,7 +126,8 @@ impl Plugin for UiUnitPlugin {
                     .chain()
                     .in_set(UnitFeed)
                     .before(UiInput),
-            );
+            )
+            .add_systems(Update, drain_pvp_toggles.after(UiInput));
     }
 }
 
@@ -339,6 +348,11 @@ pub(crate) fn snapshot(store: &ObjectStore, name: Option<String>, reaction: u8) 
         // UNIT_FIELD_FLAGS (vmangos UnitDefines.h: 0x1000 / 0x04000000, VERIFIED).
         pvp: store.0.unit_flags() & 0x1000 != 0,
         skinnable: store.0.unit_flags() & 0x0400_0000 != 0,
+        // Free-for-all PvP (decision 0646 §1): `PLAYER_FLAGS` bit 7, the same field the ghost
+        // predicate above reads (vmangos `Player.h:322` `PLAYER_FLAGS_FFA_PVP`, cross-read against
+        // 0633's byte-level `[+0xe68]+8` bit-7). Zero on creatures, which have no PLAYER_FLAGS —
+        // and `UnitIsPVPFreeForAll` is false for them in the reference too.
+        is_pvp_ffa: store.0.player_flags() & 0x80 != 0,
         // is_player + the creature-record extras (subtitle/type/rank/civilian) are the caller's
         // guid-keyed enrichment — [`enrich_unit`].
         ..Default::default()
@@ -395,6 +409,69 @@ pub(crate) fn enrich_unit(
     }
 }
 
+/// Drain the `TogglePVP` intents into `CMSG_TOGGLE_PVP` (decision 0646 §3) — `/pvp` is the only
+/// caller the reference has (`SlashCmdList["PVP"]`), and the only one we have.
+///
+/// This rides the unit feed's plugin rather than a `ui_pvp` of its own: the family's whole client
+/// state is one remembered bit ([`UnitFeedState::pvp_desired`]), which lives with the feed's other
+/// self-flag edge (`in_combat`) rather than in a plugin of its own.
+fn drain_pvp_toggles(script: Option<NonSendMut<UiScript>>, commands: Res<NetCommands>) {
+    let Some(mut script) = script else {
+        return;
+    };
+    for _ in 0..script.take_pvp_toggles() {
+        let _ = commands.0.send(crate::net::ClientCommand::TogglePvp);
+    }
+}
+
+/// `PLAYER_FLAGS_PVP_DESIRED` — the PvP *preference* bit (vmangos `PlayerDefines.h`), which is what
+/// `CMSG_TOGGLE_PVP` flips. Not to be confused with `UNIT_FIELD_FLAGS`' `PVP` bit `0x1000`, the flag
+/// the icon draws: the preference clears instantly, the flag lingers for the server's timer.
+const PLAYER_FLAGS_PVP_DESIRED: u32 = 0x200;
+
+/// The PvP-preference announcement rule (decision 0652): `(toast, verbose)` on a real change of the
+/// bit, `None` otherwise.
+///
+/// `was: None` is first sight and stays silent — the reference's handler is driven by a
+/// *changed-bits* mask (`new ^ old`), so the descriptor that first carries the flag at login says
+/// nothing. The two texts are verbatim 1.12 `GlobalStrings.lua`: the `ERR_PVP_TOGGLE_*` toast
+/// (l.1788-1789) and the `PVP_TOGGLE_*_VERBOSE` chat sentence (l.3221-3222). Both are
+/// argument-free, so there is no format step.
+fn pvp_announcement(was: Option<bool>, now: bool) -> Option<(&'static str, &'static str)> {
+    if was? == now {
+        return None;
+    }
+    Some(if now {
+        (
+            "PvP combat toggled on",
+            "You are now flagged for PvP combat and will remain so until toggled off.",
+        )
+    } else {
+        (
+            "PvP combat toggled off",
+            "You will be unflagged for PvP combat after five minutes of non-PvP action in friendly territory.",
+        )
+    })
+}
+
+/// A unit's PvP faction group — `UnitFactionGroup`'s pair, as the icon law reads it (decision
+/// 0646 §1/§3): `UNIT_FIELD_FACTIONTEMPLATE` → `FactionTemplate.dbc`'s group mask → the
+/// `FactionGroup.dbc` name of its **side** bit.
+///
+/// The `& 6` is the whole rule and it is load-bearing, not a tidy-up: every playable race's
+/// template carries `Player|<side>` (mask 3 Alliance, 5 Horde) and so do the PvP-flagged city
+/// guards, while `FactionGroup.dbc`'s Player and Monster rows have EMPTY localized names and no
+/// `UI-PVP-Player`/`UI-PVP-Monster` texture ships. Masking to the two side bits before the lookup
+/// is therefore the only reading the shipped art admits — a lowest-bit walk would answer "Player"
+/// for every player in the game.
+pub(crate) fn faction_group(store: &ObjectStore, factions: Option<&Factions>) -> Option<String> {
+    let catalog = factions?.catalog();
+    let template = catalog.template(store.0.unit_faction_template()?)?;
+    catalog
+        .faction_group_name(template.group_mask & 6)
+        .map(str::to_string)
+}
+
 /// `CreatureType.dbc` id → the enUS display word (the level line's class slot for creatures).
 fn creature_type_word(t: u32) -> Option<&'static str> {
     Some(match t {
@@ -444,6 +521,15 @@ pub(crate) fn fire_transitions(
     if prev.is_none_or(|p| p.name != cur.name) {
         script.fire_event("UNIT_NAME_UPDATE", vec![tok()]);
     }
+    // UNIT_FACTION (decision 0646 §2) — the PvP-icon repaint wire, fired on the three fields the
+    // icon law reads. Exactly the three frames that draw the icon register it in the reference
+    // (player, target, party member) and nothing else does. Edge-fired, so the player frame's
+    // `igPVPUpdate` sounds once per flag change rather than once per repaint.
+    if prev.is_none_or(|p| {
+        (p.pvp, p.is_pvp_ffa, &p.faction_group) != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group)
+    }) {
+        script.fire_event("UNIT_FACTION", vec![tok()]);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -458,6 +544,7 @@ fn feed_units(
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
     group: Res<crate::ui_party::GroupState>,
+    mut chat: ResMut<ChatLog>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -474,8 +561,27 @@ fn feed_units(
         // Identity + the raid-target board mark (decision 0434 §5's popup gating; §6's board).
         s.guid = guid.0;
         s.raid_target = group.raid_target_index(guid.0);
+        s.faction_group = faction_group(store, factions.as_deref());
         s
     });
+    // The GM-mode confound, made audible (decision 0657). A self player whose faction template
+    // names no side is almost always GM mode: vmangos swaps a GM to faction template 35, whose
+    // `FactionTemplate.dbc` group mask is 0, and every faction-derived surface then has no side to
+    // draw — the PvP flag icon most visibly, which simply hides. That is faithful (the only side
+    // art that ships is Alliance/Horde/FFA), and it is indistinguishable on screen from the icon
+    // being broken, which has now cost two separate sessions an investigation. So it is a BENCH
+    // diagnostic, not UI: nothing appears on screen, exactly as in the reference.
+    if let Some(p) = &player {
+        let sideless = p.faction_group.is_none();
+        if sideless && !feed.warned_sideless {
+            warn!(
+                "faction: our own template names no side (usually GM mode — vmangos forces \
+                 template 35, group mask 0). Faction-derived UI cannot resolve a side while this \
+                 holds: the PvP flag icon stays hidden however flagged you are. `.gm off` restores it."
+            );
+        }
+        feed.warned_sideless = sideless;
+    }
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.get(e).ok()?;
         let name = names.resolve(guid, &commands).map(str::to_string);
@@ -492,6 +598,7 @@ fn feed_units(
         let mut s = snapshot(store, name, reaction);
         s.guid = guid;
         s.raid_target = group.raid_target_index(guid);
+        s.faction_group = faction_group(store, factions.as_deref());
         // The byte-confirmed CanAttack 0x606980 (decision 0172) — the same predicate TAB and the
         // combat flash run; `UnitCanAttack("player","target")` gates the target frame's
         // difficulty-colored level (ref TargetFrame_CheckLevel).
@@ -566,6 +673,25 @@ fn feed_units(
         }
     }
 
+    // The PvP toggle's own feedback (decision 0652). The reference's local-player PLAYER_FLAGS
+    // change handler reacts to the PVP_DESIRED bit — and to nothing else about PvP — with two
+    // lines: a yellow UI_INFO_MESSAGE toast, then the verbose sentence as a system chat line. It is
+    // keyed on the *preference*, not on the flag the icon draws, which is exactly why it matters:
+    // toggling OFF changes no visible flag for five minutes, so without these two lines the key
+    // reads as dead. The reference only announces its own player (the whole branch sits behind a
+    // guid == localPlayer gate) and only on a change, never on the descriptor that first carries it.
+    if let Some((store, _)) = self_pair {
+        let desired = store.0.player_flags() & PLAYER_FLAGS_PVP_DESIRED != 0;
+        if let Some((toast, verbose)) = pvp_announcement(feed.pvp_desired, desired) {
+            script.fire_event("UI_INFO_MESSAGE", vec![ScriptValue::Str(toast.to_string())]);
+            chat.push_event(ChatEvent::text_only(
+                ChatEventKind::System,
+                verbose.to_string(),
+            ));
+        }
+        feed.pvp_desired = Some(desired);
+    }
+
     // The XP bar's feed: push our own avatar's PLAYER_XP / PLAYER_NEXT_LEVEL_XP (both PRIVATE, only
     // ever streamed for self) and fire PLAYER_XP_UPDATE when either changes — the coinage feed's
     // shape. Absent fields read 0 (a fresh descriptor's zero default; the bar shows empty until XP
@@ -578,5 +704,39 @@ fn feed_units(
             script.set_player_xp(xp, next);
             script.fire_event("PLAYER_XP_UPDATE", vec![]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The PvP-preference announcement law (decision 0652), as the reference's changed-bits handler
+    /// runs it: silent on first sight, one pair per real edge, and the OFF text is the one that
+    /// explains the five-minute wait — the whole reason the toggle doesn't read as dead.
+    #[test]
+    fn pvp_announcement_speaks_only_on_an_edge() {
+        assert_eq!(
+            pvp_announcement(None, false),
+            None,
+            "first sight, unflagged"
+        );
+        assert_eq!(pvp_announcement(None, true), None, "first sight, flagged");
+        assert_eq!(pvp_announcement(Some(true), true), None, "no change");
+        assert_eq!(pvp_announcement(Some(false), false), None, "no change");
+
+        let (toast, verbose) = pvp_announcement(Some(false), true).expect("turning it on speaks");
+        assert_eq!(toast, "PvP combat toggled on"); // GlobalStrings ERR_PVP_TOGGLE_ON
+        assert_eq!(
+            verbose,
+            "You are now flagged for PvP combat and will remain so until toggled off."
+        );
+
+        let (toast, verbose) = pvp_announcement(Some(true), false).expect("turning it off speaks");
+        assert_eq!(toast, "PvP combat toggled off"); // GlobalStrings ERR_PVP_TOGGLE_OFF
+        assert!(
+            verbose.contains("five minutes"),
+            "the OFF sentence is what tells the player the flag lingers: {verbose}"
+        );
     }
 }

@@ -514,6 +514,14 @@ pub const CMSG_LEARN_TALENT: u16 = 0x0251; // 593
 /// field update.
 pub const CMSG_UNLEARN_SKILL: u16 = 0x0202; // 514
 
+/// Ask to flip our own PvP flag (decision 0646). A **two-way** opcode: vmangos reads a `bool`
+/// target state iff the body is exactly one byte (`Server/Packets/Misc.cpp`
+/// `TogglePvP::ReadFromWorldPacket`) and otherwise *toggles* `PLAYER_FLAGS_PVP_DESIRED`
+/// (`Handlers/MiscHandler.cpp` `HandleTogglePvP`). benilla sends the **empty** body — the verb is
+/// a toggle. No ack: the answer arrives as the `UNIT_FIELD_FLAGS` PvP bit in a descriptor update,
+/// and turning the preference *off* changes nothing until the server's 300 s drop timer expires.
+pub const CMSG_TOGGLE_PVP: u16 = 0x0253; // 595
+
 // The solo-loot wire family (VERIFIED vmangos `Opcodes_1_12_1.h`: 264, 349-355, 357-358).
 // Bodies in [`super::loot`].
 pub const CMSG_AUTOSTORE_LOOT_ITEM: u16 = 0x0108; // 264

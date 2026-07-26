@@ -518,3 +518,49 @@ fn unit_race_class_sex_report_the_snapshot_or_the_absent_shape() {
         .eval::<bool>(r#"return UnitSex("target") == nil"#)
         .unwrap());
 }
+
+/// `UnitFactionGroup` returns the (english, localized) pair the PvP-icon law reads, and `nil, nil`
+/// for a unit with no side — the state the reference's `if ( factionGroup and … )` gate exists
+/// for (decision 0646 §1). `TogglePVP` queues one toggle per call.
+#[test]
+fn faction_group_pair_and_the_pvp_toggle() {
+    let mut s = UiScript::new().unwrap();
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            faction_group: Some("Horde".into()),
+            ..Default::default()
+        }),
+    );
+    let (english, localized) = s
+        .eval::<(String, String)>(r#"return UnitFactionGroup("target")"#)
+        .unwrap();
+    assert_eq!((english.as_str(), localized.as_str()), ("Horde", "Horde"));
+
+    // No side (a Monster/neutral template, or a unit whose template hasn't streamed).
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            faction_group: None,
+            ..Default::default()
+        }),
+    );
+    assert!(s
+        .eval::<bool>(r#"local a, b = UnitFactionGroup("target") return a == nil and b == nil"#)
+        .unwrap());
+    // An absent unit answers the same way.
+    assert!(s
+        .eval::<bool>(r#"local a = UnitFactionGroup("focus") return a == nil"#)
+        .unwrap());
+
+    assert_eq!(s.take_pvp_toggles(), 0, "nothing queued yet");
+    s.run("TogglePVP() TogglePVP()").unwrap();
+    assert_eq!(
+        s.take_pvp_toggles(),
+        2,
+        "one send per call, never collapsed"
+    );
+    assert_eq!(s.take_pvp_toggles(), 0, "the drain empties the queue");
+}

@@ -3,20 +3,53 @@
 //! Usage:
 //!   benilla-visual diff     <a.png> <b.png>   [--out <diff.png>] [--fail <mae>] [--amplify <n>]
 //!   benilla-visual diff-dir <dir_a> <dir_b>   [--out <diff_dir>] [--fail <mae>] [--amplify <n>]
+//!   benilla-visual flicker  <burst_dir>       [--out <envelope.png>] [--fail <mae>] [--amplify <n>]
 //!
 //! `diff` compares two images; `diff-dir` compares every `*.png` present in *both* directories by name.
 //! Prints the metrics; writes amplified heatmap(s) when `--out` is given; exits non-zero if any image's
 //! MAE exceeds `--fail` (when given). Typical loop: capture baselines, change the renderer, re-capture,
 //! `diff-dir baseline candidate --out diff --fail 1.5`.
+//!
+//! `flicker` is the same arithmetic over *time*: point it at a `WOW_LIVE_SHOT_COUNT` burst (adjacent
+//! frames, parked camera) and it prints the frame-to-frame table and the whole-stack envelope, and
+//! writes the envelope heatmap — the picture of which pixels would not hold still.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use benilla_visual::{compare, compose_side_by_side, diff_image, Metrics, OVER_THRESHOLD};
+use benilla_visual::{
+    compare, compose_side_by_side, contact_strip, crop, diff_image, envelope, shape, toggles,
+    Metrics, OVER_THRESHOLD,
+};
+
+/// A frame-to-frame step must move a channel by this much to count as a direction change (override
+/// with `--toggle-delta`). Above PNG/dither noise, below any real surface swap.
+///
+/// **The pan rate matters more than this number.** A moving camera sweeps texture detail across
+/// every pixel, and detail is not monotone — at 8°/s (≈15 px/frame at 3200 px) the map saturates at
+/// 93% and says nothing. Keep the sweep **sub-pixel per frame** (≈0.2°/s) so ordinary surfaces
+/// barely move while a depth-comparison flip still swaps whole surfaces at full amplitude.
+const TOGGLE_MIN_DELTA: u8 = 4;
+
+/// Reversal counts are small integers, so the toggle map needs its own (much larger) gain than the
+/// 0..255 swings the envelope amplifies: at 60, three reversals saturate.
+const TOGGLE_AMPLIFY: u32 = 60;
 
 /// Gap (px) between the two halves of a side-by-side compose.
 const COMPOSE_GAP: u32 = 6;
+
+/// Tiles per row on a `hotspot` contact sheet — wide enough that a 24-frame burst reads as a few
+/// rows of adjacent frames rather than one unscannable ribbon.
+const STRIP_COLS: u32 = 6;
+
+/// Pixels of context kept around a hotspot crop (override with `--pad`). Enough to see what the
+/// toggling region borders — which is usually the whole point.
+const DEFAULT_PAD: u32 = 24;
+
+/// How many runs `hotspot` reports a time series for. Enough to see whether the top runs flip on the
+/// same frames (one cause) or independently (several), narrow enough to stay one screen.
+const SERIES_RUNS: usize = 4;
 
 /// Default amplification for the heatmap output (per-channel abs-diff ×N, clamped).
 const DEFAULT_AMPLIFY: u32 = 8;
@@ -25,6 +58,8 @@ struct Opts {
     out: Option<PathBuf>,
     fail: Option<f64>,
     amplify: u32,
+    toggle_delta: u8,
+    pad: u32,
 }
 
 fn main() -> Result<()> {
@@ -34,6 +69,8 @@ fn main() -> Result<()> {
         out: None,
         fail: None,
         amplify: DEFAULT_AMPLIFY,
+        toggle_delta: TOGGLE_MIN_DELTA,
+        pad: DEFAULT_PAD,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -46,10 +83,20 @@ fn main() -> Result<()> {
                         .context("--fail not a number")?,
                 )
             }
+            "--toggle-delta" => {
+                opts.toggle_delta = next(&mut it, "--toggle-delta")?
+                    .parse()
+                    .context("--toggle-delta not a 0..255 integer")?
+            }
             "--amplify" => {
                 opts.amplify = next(&mut it, "--amplify")?
                     .parse()
                     .context("--amplify not an integer")?
+            }
+            "--pad" => {
+                opts.pad = next(&mut it, "--pad")?
+                    .parse()
+                    .context("--pad not an integer")?
             }
             "-h" | "--help" => {
                 print_usage();
@@ -96,6 +143,30 @@ fn main() -> Result<()> {
                 }
             }
         }
+        "flicker" => {
+            let [dir] = one(rest, "flicker")?;
+            let worst = flicker(
+                Path::new(dir),
+                opts.out.as_deref(),
+                opts.amplify,
+                opts.toggle_delta,
+            )?;
+            if over_fail(&worst, opts.fail) {
+                bail!(
+                    "frame-to-frame MAE {:.3} exceeds --fail {:.3}",
+                    worst.mae,
+                    opts.fail.unwrap()
+                );
+            }
+        }
+        "hotspot" => {
+            let [dir] = one(rest, "hotspot")?;
+            let out = opts
+                .out
+                .as_deref()
+                .context("hotspot needs --out <strip.png>")?;
+            hotspot(Path::new(dir), out, opts.toggle_delta, opts.pad)?;
+        }
         "compose-dir" => {
             let [da, db] = two(rest, "compose-dir")?;
             let out = opts
@@ -135,6 +206,200 @@ fn compose_dir(da: &Path, db: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Report how far a burst of adjacent frames moved: the frame-to-frame table, then the whole-stack
+/// envelope. Returns the worst consecutive-pair metrics (the `--fail` subject) — the envelope is a
+/// *stack* number and can exceed any single pair, so failing on the pair is the conservative gate.
+fn flicker(dir: &Path, out: Option<&Path>, amplify: u32, toggle_delta: u8) -> Result<Metrics> {
+    let names: Vec<String> = pngs(dir)?.into_iter().collect(); // BTreeSet — already shot order
+    if names.len() < 2 {
+        bail!(
+            "{} holds {} *.png — a flicker burst needs at least 2 (WOW_LIVE_SHOT_COUNT=<n>)",
+            dir.display(),
+            names.len()
+        );
+    }
+    let frames: Vec<image::RgbImage> = names
+        .iter()
+        .map(|n| load(&dir.join(n)))
+        .collect::<Result<_>>()?;
+
+    let mut worst = Metrics {
+        mae: 0.0,
+        rmse: 0.0,
+        max_delta: 0,
+        pct_over: 0.0,
+    };
+    for (pair, window) in frames.windows(2).enumerate() {
+        let m = compare(&window[0], &window[1])?;
+        println!(
+            "{:<24} {}",
+            format!("{} -> {}", names[pair], names[pair + 1]),
+            fmt_metrics(&m)
+        );
+        if m.mae > worst.mae {
+            worst = m;
+        }
+    }
+
+    let e = envelope(&frames, amplify)?;
+    println!(
+        "envelope of {} frames: max swing {:>3}  mean {:>6.3}  unstable pixels {:>6.2}%",
+        frames.len(),
+        e.max_swing,
+        e.mean_swing,
+        e.pct_unstable * 100.0
+    );
+    // The moving-camera reading. Printed always, because which of the two numbers is meaningful
+    // depends on whether the camera was parked — and a burst does not carry that fact.
+    let t = toggles(&frames, toggle_delta, TOGGLE_AMPLIFY)?;
+    println!(
+        "toggles  of {} frames (delta {toggle_delta}): max reversals {:>3}  toggling pixels {:>6.2}%  \
+         (the moving-camera reading — a monotone sweep scores 0)",
+        frames.len(),
+        t.max_reversals,
+        t.pct_toggling * 100.0
+    );
+    if let Some(out) = out {
+        if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).ok();
+        }
+        e.image
+            .save(out)
+            .with_context(|| format!("writing envelope {}", out.display()))?;
+        println!("envelope -> {}", out.display());
+        let toggle_out = sibling(out, "-toggle");
+        t.image
+            .save(&toggle_out)
+            .with_context(|| format!("writing toggle map {}", toggle_out.display()))?;
+        println!("toggles  -> {}", toggle_out.display());
+    }
+    Ok(worst)
+}
+
+/// Follow the toggle map to the thing it found: measure the toggling pixels' **shape**, then crop
+/// the largest run out of every frame into one contact sheet.
+///
+/// The map says *where*; this says *what kind*, and shows the frames that prove it. A run that fills
+/// its box and holds together is one surface blinking (visibility/culling); many thin runs are
+/// z-fighting resolving per fragment. Both read identically on the toggle percentage.
+fn hotspot(dir: &Path, out: &Path, toggle_delta: u8, pad: u32) -> Result<()> {
+    let names: Vec<String> = pngs(dir)?.into_iter().collect();
+    let frames: Vec<image::RgbImage> = names
+        .iter()
+        .map(|n| load(&dir.join(n)))
+        .collect::<Result<_>>()?;
+    let t = toggles(&frames, toggle_delta, TOGGLE_AMPLIFY)?;
+    let s = shape(&t);
+    let (w, h) = t.image.dimensions();
+    println!(
+        "toggling {:.2}%  coherence {:.3}  {} runs >= {} px  ({} px scattered)",
+        t.pct_toggling * 100.0,
+        s.coherence,
+        s.regions.len(),
+        benilla_visual::MIN_REGION_PIXELS,
+        s.scattered,
+    );
+    for (i, r) in s.regions.iter().take(5).enumerate() {
+        println!(
+            "  #{i}  {:>8} px  fill {:.2}  box {}x{} at ({}, {})",
+            r.pixels,
+            r.fill(),
+            r.bounds.width(),
+            r.bounds.height(),
+            r.bounds.x0,
+            r.bounds.y0,
+        );
+        // Pasteable straight into the in-game ray pick, which is the next question every time:
+        // WOW_PICK="<this>" names the surfaces at these exact pixels, front to back.
+        let pick = r
+            .samples()
+            .iter()
+            .map(|(x, y)| format!("{x},{y}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        println!("      WOW_PICK=\"{pick}\"");
+    }
+    let Some(biggest) = s.regions.first() else {
+        bail!(
+            "no toggling run of {} px or more — nothing to crop",
+            benilla_visual::MIN_REGION_PIXELS
+        );
+    };
+    // What the top runs are actually *doing*, frame by frame: re-shaded together, or edges moving.
+    // Side by side, because whether they flip on the SAME steps is the difference between one global
+    // cause and several local ones — and that is invisible in any single run's series.
+    let series: Vec<Vec<benilla_visual::Step>> = s
+        .regions
+        .iter()
+        .take(SERIES_RUNS)
+        .map(|r| r.steps(&frames))
+        .collect();
+    println!("  step-by-step per run — mean luma, its delta, and how much of the run agreed:");
+    for (i, _) in frames.windows(2).enumerate() {
+        let cols: Vec<String> = series
+            .iter()
+            .map(|s| {
+                format!(
+                    "{:6.2}{:+7.2} @{:.2}",
+                    s[i].mean_from, s[i].mean_delta, s[i].agreement
+                )
+            })
+            .collect();
+        println!("    {:>2} -> {:<2}  {}", i, i + 1, cols.join("  "));
+    }
+    // The two extremes of run #0, per channel. If a two-state flip is one light term switching, the
+    // channel ratios come out equal; if the surface swapped to a different (differently-coloured)
+    // lighting lane, they do not — and that is the whole difference between the two diagnoses.
+    let s0 = &series[0];
+    let lo = s0
+        .iter()
+        .min_by(|a, b| a.mean_from.total_cmp(&b.mean_from))
+        .expect("a burst has at least one step");
+    let hi = s0
+        .iter()
+        .max_by(|a, b| a.mean_from.total_cmp(&b.mean_from))
+        .expect("a burst has at least one step");
+    let ratio: Vec<String> = (0..3)
+        .map(|c| format!("{:.3}", hi.mean_rgb_from[c] / lo.mean_rgb_from[c].max(1e-9)))
+        .collect();
+    println!(
+        "  #0 extremes: dim rgb ({:.1}, {:.1}, {:.1})  bright rgb ({:.1}, {:.1}, {:.1})  per-channel ratio {}",
+        lo.mean_rgb_from[0], lo.mean_rgb_from[1], lo.mean_rgb_from[2],
+        hi.mean_rgb_from[0], hi.mean_rgb_from[1], hi.mean_rgb_from[2],
+        ratio.join(" / "),
+    );
+    let rect = biggest.bounds.padded(pad, w, h);
+    // The toggle map goes in as the first tile, so the sheet carries its own legend: this is the
+    // region, and here is what the frames did inside it.
+    let mut tiles = vec![crop(&t.image, rect)];
+    tiles.extend(frames.iter().map(|f| crop(f, rect)));
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).ok();
+    }
+    contact_strip(&tiles, STRIP_COLS, COMPOSE_GAP)
+        .save(out)
+        .with_context(|| format!("writing hotspot strip {}", out.display()))?;
+    println!(
+        "crop {}x{} at ({}, {}) x {} tiles -> {}",
+        rect.width(),
+        rect.height(),
+        rect.x0,
+        rect.y0,
+        tiles.len(),
+        out.display()
+    );
+    Ok(())
+}
+
+/// `foo.png` + `-toggle` → `foo-toggle.png`. The two maps answer the same question under opposite
+/// camera conditions, so they are written as a pair rather than behind a second flag nobody would
+/// remember to pass.
+fn sibling(out: &Path, suffix: &str) -> PathBuf {
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+    out.with_file_name(format!("{stem}{suffix}.{ext}"))
+}
+
 fn next(it: &mut std::slice::Iter<String>, flag: &str) -> Result<String> {
     it.next()
         .cloned()
@@ -145,6 +410,13 @@ fn two<'a>(rest: &'a [String], cmd: &str) -> Result<[&'a str; 2]> {
     match rest {
         [a, b] => Ok([a, b]),
         _ => bail!("{cmd} needs exactly two paths, got {}", rest.len()),
+    }
+}
+
+fn one<'a>(rest: &'a [String], cmd: &str) -> Result<[&'a str; 1]> {
+    match rest {
+        [a] => Ok([a]),
+        _ => bail!("{cmd} needs exactly one path, got {}", rest.len()),
     }
 }
 
@@ -240,8 +512,14 @@ fn print_usage() {
          USAGE:\n  \
            benilla-visual diff        <a.png> <b.png> [--out <diff.png>] [--fail <mae>] [--amplify <n>]\n  \
            benilla-visual diff-dir    <dir_a> <dir_b> [--out <diff_dir>] [--fail <mae>] [--amplify <n>]\n  \
+           benilla-visual flicker     <burst_dir>     [--out <envelope.png>] [--fail <mae>] [--amplify <n>] [--toggle-delta <n>]\n  \
+           benilla-visual hotspot     <burst_dir>     --out <strip.png> [--toggle-delta <n>] [--pad <n>]\n  \
            benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n\
          \n\
+         flicker reads a WOW_LIVE_SHOT_COUNT burst (adjacent frames) in shot order and reports both\n\
+         the parked reading (envelope) and the moving-camera one (toggles).\n\
+         hotspot follows the toggle map: it measures the toggling pixels' shape — one solid run is a\n\
+         surface blinking, many thin ones are z-fighting — and crops the largest into a contact sheet.\n\
          Exits non-zero if any image's MAE exceeds --fail."
     );
 }

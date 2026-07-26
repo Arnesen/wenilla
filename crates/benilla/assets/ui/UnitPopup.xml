@@ -10,6 +10,11 @@
     the ref's load split.
 
     DEVIATIONS, deliberate (each waits for its arc):
+    - NO ADDED ROWS. A "PVP" row briefly sat at the head of SELF (decision 0646 §3); decision 0652
+      took it back out. 1.12.1 has no PvP toggle in any menu — `TogglePVP()`'s single caller in the
+      whole shipped UI is `SlashCmdList["PVP"]`, and `UnitPopup.lua` contains the string "PVP"
+      exactly zero times — so the row was a deviation that made this menu read wrong against the
+      reference. `/pvp` is the toggle the client has.
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
       BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: FOLLOW (its CMSG
       family is its own slice), TARGET (the friends list), GUILD_PROMOTE/GUILD_LEAVE (the guild

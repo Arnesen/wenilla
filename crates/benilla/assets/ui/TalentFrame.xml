@@ -89,11 +89,13 @@
         are reused as-is: both read only a Slider's own value/range/step, nothing faux-specific.
 
         Named deferrals/OMITs (each re-cited at its own site below):
-          - `SetButtonPulse`/`UpdateMicroButtons` (ref `TalentFrame_OnShow`/`_OnHide`/`TalentFrameTab_
-            OnClick`'s pulse-clear loop, and `TalentTabTemplate`'s own `PLAYER_LEVEL_UP` level-9
-            flash-hint OnLoad/OnEvent): decision 0304's own Scope-calls section, "No microbutton
-            pulse — the reference pulses TalentMicroButton on point gain; benilla has no microbar
-            yet." All four sites drop cleanly (none gate anything else).
+          - `SetButtonPulse` (ref `TalentFrame_OnShow`/`_OnHide`/`TalentFrameTab_OnClick`'s
+            pulse-clear loop, and `TalentTabTemplate`'s own `PLAYER_LEVEL_UP` level-9 flash-hint
+            OnLoad/OnEvent): decision 0304's own Scope-calls section, "No microbutton pulse — the
+            reference pulses TalentMicroButton on point gain". The microbar itself has since landed
+            (`MicroMenu.xml`) and `UpdateMicroButtons()` is live in OnShow/OnHide below — but the
+            PULSE stays out: it rides `PLAYER_LEVEL_UP`, which this client never fires. All four
+            pulse sites drop cleanly (none gate anything else).
           - `message(...)` (5 sites: the `numTalents > MAX_NUM_TALENTS` reminder, `_GetArrowTexture`/
             `_GetBranchTexture`'s pool-exhaustion notices, and 3 sites in `_DrawLines`'s own layout-
             blocked guards): no engine `message()` global exists (grepped `crates/benilla-ui/src`;
@@ -281,15 +283,18 @@
             end
         end
 
-        -- ref TalentFrame_OnShow (l.95-103): SetButtonPulse/UpdateMicroButtons OMITTED — this
-        -- file's header comment (decision 0304's own "No microbutton pulse" scope call).
+        -- ref TalentFrame_OnShow (l.95-103): SetButtonPulse still OMITTED (decision 0304's own "No
+        -- microbutton pulse" scope call — the pulse rides PLAYER_LEVEL_UP, which this client never
+        -- fires). UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml).
         function BenillaTalentFrame_OnShow()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("TalentScreenOpen")
             BenillaTalentFrame_Update()
         end
 
-        -- ref TalentFrame_OnHide (l.105-108): UpdateMicroButtons OMITTED, same citation.
+        -- ref TalentFrame_OnHide (l.105-108).
         function BenillaTalentFrame_OnHide()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("TalentScreenClose")
         end
 
@@ -1126,8 +1131,8 @@
                             <Button name="BenillaTalentFrameTalent20" inherits="BenillaTalentButtonTemplate" id="20"/>
 
                             <!-- The arrow-art pool (ref l.380-415: TalentFrameArrowFrame,
-                                 setAllPoints="true" — a frame-level no-op here (CharacterFrame.xml's
-                                 own precedent), an explicit Size matching the scroll child instead. -->
+                                 setAllPoints="true") — an explicit Size matching the scroll child
+                                 instead, the equivalent shape CharacterFrame.xml's paper doll takes. -->
                             <Frame name="BenillaTalentFrameArrowFrame">
                                 <Size><AbsDimension x="320" y="504"/></Size>
                                 <Anchors><Anchor point="TOPLEFT"/></Anchors>

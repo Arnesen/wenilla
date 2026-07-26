@@ -406,7 +406,7 @@ fn inspect_ui(
 }
 
 /// Registers the mouseover foundation (the [`MouseoverTarget`] + [`InspectMode`] resources and the
-/// per-frame pick), the standalone I-toggled inspector surface, and the cast journal (recording
+/// per-frame pick), the standalone Ctrl+Cmd+I inspector surface, and the cast journal (recording
 /// always, drawing under the same toggle).
 pub struct InteractPlugin;
 

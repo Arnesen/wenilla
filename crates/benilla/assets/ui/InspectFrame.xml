@@ -423,8 +423,8 @@
             </Button>
 
             <!-- The paper-doll page (ref InspectPaperDollFrame, l.47-371). The ref uses
-                 setAllPoints="true"; frame-level setAllPoints is a no-op in this engine
-                 (CharacterFrame.xml's header), so it is sized to fill the parent instead. -->
+                 setAllPoints="true"; this is sized to fill the parent instead — equivalent, and the
+                 shape CharacterFrame.xml's own paper doll takes (its header has the history). -->
             <Frame name="BenillaInspectPaperDollFrame">
                 <Size><AbsDimension x="384" y="512"/></Size>
                 <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>

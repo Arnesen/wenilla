@@ -38,6 +38,7 @@
 //! | [`trade`] | the player-trade dance |
 //! | [`duel`] | accept and cancel |
 //! | [`mail`] | the mailbox |
+//! | [`pvp`] | the one PvP-flag toggle |
 
 use std::net::TcpStream;
 
@@ -63,6 +64,7 @@ mod mail;
 mod names;
 mod pose;
 mod progression;
+mod pvp;
 mod quest;
 mod selection;
 mod self_movement;

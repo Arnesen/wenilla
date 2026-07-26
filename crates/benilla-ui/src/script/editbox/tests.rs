@@ -527,6 +527,33 @@ fn typing_ends_the_history_browse() {
 }
 
 #[test]
+fn programmatic_set_text_keeps_the_browse_and_focus_gain_resets_it() {
+    let mut s = script();
+    s.run(
+        r#"
+        E = CreateFrame("EditBox", "E")
+        E:SetHistoryLines(32)
+        E:AddHistoryLine("/say one")
+        E:AddHistoryLine("/g two")
+        E:SetFocus()
+    "#,
+    )
+    .unwrap();
+    // Recall the newest, then rewrite the box the way the chat live parse does on a slash
+    // recall ("/g two" → Guild + "two"). The browse walk must survive: the next UP lands on
+    // the OLDER entry, not back on the newest (the "history only goes back 1" bug).
+    s.editbox_action(EditAction::HistoryPrev);
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "/g two");
+    s.run(r#"E:SetText("two")"#).unwrap();
+    s.editbox_action(EditAction::HistoryPrev);
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "/say one");
+    // Refocusing starts a fresh session: the stale walk drops, UP recalls the newest again.
+    s.run(r#"E:ClearFocus() E:SetFocus()"#).unwrap();
+    s.editbox_action(EditAction::HistoryPrev);
+    assert_eq!(s.eval::<String>("return E:GetText()").unwrap(), "/g two");
+}
+
+#[test]
 fn history_caps_at_history_lines_drop_oldest() {
     let mut s = script();
     s.run(
@@ -605,6 +632,40 @@ fn text_insets_shrink_the_text_region_rect() {
         .eval::<(f32, f32, f32, f32)>("return E:GetTextInsets()")
         .unwrap();
     assert_eq!((l, r_, t, b), (15.0, 13.0, 2.0, 3.0));
+}
+
+// The FontInstance half an EditBox inherits in the client: SetTextColor tints the box's text
+// region (`ChatEdit_UpdateHeader` colors the typed text this way — its absence killed the chat
+// header chunk mid-run and left the /w insets stale, the caret-in-the-header bug).
+#[test]
+fn set_text_color_tints_the_text_region() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        E = CreateFrame("EditBox", "E")
+        E:SetPoint("BOTTOMLEFT", 100, 50)
+        E:SetWidth(400)
+        E:SetHeight(32)
+        E:SetText("hello")
+        E:SetTextColor(1.0, 0.5, 0.25)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let color = s
+        .extract()
+        .iter()
+        .find_map(|q| match &q.content {
+            crate::script::QuadContent::Text {
+                text: Some(t),
+                color,
+                ..
+            } if t == "hello" => Some(*color),
+            _ => None,
+        })
+        .expect("the edit box text renders");
+    assert_eq!(color, Some([1.0, 0.5, 0.25, 1.0]));
 }
 
 // ── the host text-UI seam: advances, caret/selection geometry, mouse, clipboard ─────────────

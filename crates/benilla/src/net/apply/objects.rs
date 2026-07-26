@@ -102,6 +102,18 @@ pub(super) fn object_create(
     // carries it.
     if matches!(kind, EntityKind::GameObject) {
         go_templates.request(guid, net_commands);
+        // Where and how big, the moment it streams in — the readout that answers "is this prop in
+        // the wrong place, or the wrong size, or just drawn wrong" without a guess (decision 0637:
+        // the duel flag read as huge and mislocated, and nothing in the client could say which).
+        // `RUST_LOG=benilla::net::apply::objects=debug`.
+        debug!(
+            "gameobject spawn: entry {:?} display {display_id:?} type {go_type:?} \
+             pos [{:.2}, {:.2}, {:.2}] scale {scale}",
+            fields.object_entry(),
+            position[0],
+            position[1],
+            position[2],
+        );
     }
     if let Some(&e) = index.0.get(&guid) {
         // Re-create of a tracked guid: refresh identity + pose, drop any stale path. A create

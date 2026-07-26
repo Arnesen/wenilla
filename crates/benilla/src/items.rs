@@ -49,6 +49,16 @@ pub(crate) struct Items {
     /// the tooltip store (every landed template goes to the UI unprompted, so the first hover of
     /// an item whose name is already on screen never misses).
     fresh: Vec<u32>,
+    /// Bumped by every landed answer ([`Self::insert_template`]), positive or negative. The
+    /// **broadcast** twin of [`Self::fresh`]: `fresh` is a DRAIN (exactly one consumer can take
+    /// it — the tooltip feed does), so a second consumer that caches a template-derived view
+    /// needs its own signal. A consumer keeps the epoch it last resolved at and re-resolves when
+    /// it advances — the modern stand-in for the ref's `DBCACHECALLBACK` redisplay (`0x6e29b0`),
+    /// which is how the real client repaints a view that was drawn while the item cache was still
+    /// answering. Any cache that gates a template read behind a change-flag needs this: the read
+    /// itself is what ISSUES the ask-once query, so the first resolve of a cold entry ALWAYS
+    /// misses (decision 0660).
+    template_epoch: u64,
 }
 
 impl Items {
@@ -133,6 +143,17 @@ impl Items {
             self.fresh.push(entry);
         }
         self.templates.insert(entry, info);
+        // A NEGATIVE answer bumps too: it flips the entry from "still asking" to "answered
+        // unknown", which is a real display transition for anything that waits on the ask (the
+        // cast-fail redisplay's `"UNKNOWN"` literal, [`Self::template_answered_unknown`]).
+        self.template_epoch = self.template_epoch.wrapping_add(1);
+    }
+
+    /// The landed-template broadcast counter — see the [`Self::template_epoch`] field. Advances on
+    /// every answer; a consumer that caches a template-derived view compares it against the value
+    /// it last resolved at and re-resolves when they differ.
+    pub(crate) fn template_epoch(&self) -> u64 {
+        self.template_epoch
     }
 
     /// Drain the entries whose template landed since the last drain (see the `fresh` field).

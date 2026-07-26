@@ -1,6 +1,6 @@
 //! The sea-crossing live probe (`WOW_PROBE=crossing`) — decision 0455's instrument, inert
 //! without the env: once in-world, wait for a cross-continent transport docked on our map,
-//! GM-drop onto its deck (`.go xyz`, account `three` is gmlevel 3), then just stand there and
+//! GM-drop onto its deck (`.go xyz`; probe accounts are gmlevel 6), then just stand there and
 //! report the seam: aboard → map flip (TRANSFER_PENDING / NEW_WORLD riding branch, logged by
 //! the net layer) → still riding → arrived docked on the far continent. Every phase edge prints
 //! a `PROBE crossing:` line, so an outer `timeout`d run + grep is the whole harness. Non-combat.

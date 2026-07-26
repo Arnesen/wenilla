@@ -650,7 +650,10 @@ fn snap_block_top_law(y: f32) -> f32 {
 /// one seat every UI FontString shares ([`snap_block_top`] — world text's degenerate rects skip
 /// it, keeping nameplates/combat text on their own approved seats). Rendering only — measures,
 /// wrap, and the Lua metric echoes are untouched.
-const UI_SEAT_NUDGE: f32 = 1.0;
+///
+/// Public to the crate because a scissor that means to admit a block's ink has to know the seat
+/// pushed it down — see the message-band clip in [`crate::ui_script`]'s text arm.
+pub(crate) const UI_SEAT_NUDGE: f32 = 1.0;
 
 /// The `SetAlphaGradient` ramp at one character position: opaque before `start`, a linear 1→0
 /// fade across the next `length` characters, invisible beyond (hard edge when `length` ≤ 0).

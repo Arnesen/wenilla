@@ -608,16 +608,20 @@
                 WorldMapFrameAreaLabel:SetFont("Fonts\\FRIZQT__.TTF", 33);
                 WorldMapFrame_Update();
             </OnLoad>
+            <!-- UpdateMicroButtons leads both, as in the ref (WorldMapFrame.xml l.599/606) — live
+                 since the micro-menu slice (MicroMenu.xml). -->
             <OnShow>
                 WorldMapBlackout:Show();
                 SetupFullscreenScale();
                 SetMapToCurrentZone();
                 WorldMapFrame_Update();
+                if UpdateMicroButtons then UpdateMicroButtons() end;
                 PlaySound("igQuestLogOpen");
                 CloseDropDownMenus();
             </OnShow>
             <OnHide>
                 WorldMapBlackout:Hide();
+                if UpdateMicroButtons then UpdateMicroButtons() end;
                 PlaySound("igQuestLogClose");
             </OnHide>
             <OnEvent>

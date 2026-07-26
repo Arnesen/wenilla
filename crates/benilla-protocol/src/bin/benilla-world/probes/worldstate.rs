@@ -10,7 +10,7 @@
 //!
 //! **The update leg needs a temporary grant.** `.debug send worldstate` sits in
 //! `debugSendCommandTable` at **SEC_DEVELOPER = 5** (vmangos `Chat.cpp:323`) — one above the
-//! gmlevel 3 the slot-keyed probe accounts carry (decision 0450). Without it the server answers
+//! gmlevel 6 the slot-keyed probe accounts carry (decisions 0450/0651). Without it the server answers
 //! *"This command is not available to you."* in chat and sends no packet, and the probe fails on
 //! the update leg while the init leg still passes.
 //!

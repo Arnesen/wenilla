@@ -65,7 +65,7 @@ struct Cli {
     /// Live-verify the melee-swing wire (decision 0073): GM-teleport (`.go xyz`) onto a Northshire
     /// Kobold Vermin spawn, `CMSG_ATTACKSWING` the nearest streamed creature, and require ≥1
     /// `SMSG_ATTACKERSTATEUPDATE` to arrive and decode (attacker/victim/hitInfo/damage). Needs a GM
-    /// account (the deploy's are gmlevel 3).
+    /// account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     attack: bool,
     /// Live-verify `CMSG_USE_ITEM`: use the item in this 1-based backpack slot (the wire's bag
@@ -105,7 +105,7 @@ struct Cli {
     /// require `SMSG_LOOT_RESPONSE` to arrive and parse, `CMSG_AUTOSTORE_LOOT_ITEM` every row,
     /// `CMSG_LOOT_MONEY` if it carried gold, and `CMSG_LOOT_RELEASE` — requiring
     /// `SMSG_LOOT_RELEASE_RESPONSE` to close it. Prints every loot-related packet decoded. Needs a
-    /// GM account (the deploy's `three` is gmlevel 4).
+    /// GM account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     loot: bool,
     /// Skip the nearest-creature search for `--loot` and loot this guid directly (decimal or
@@ -119,7 +119,7 @@ struct Cli {
     /// (`.quest complete`), then `CMSG_QUESTGIVER_COMPLETE_QUEST` → `_REQUEST_REWARD` → `_CHOOSE_REWARD`
     /// requiring `SMSG_QUESTGIVER_QUEST_COMPLETE` (XP/money) + a `PLAYER_FIELD_COINAGE` delta. Uses
     /// quest 7 "Kobold Camp Cleanup" (McBride gives + takes it; XP 170, money 25c). Needs a GM
-    /// account (the deploy's `three` is gmlevel 4).
+    /// account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     quest: bool,
     /// Live-verify the quest-LOG wire (decision 0109 — the questgiver wire's deferred second
@@ -134,7 +134,7 @@ struct Cli {
     /// (`.quest complete 7`) and require the slot's count-state field to gain the `COMPLETE` state
     /// byte, then `CMSG_QUESTLOG_REMOVE_QUEST` that slot and require its id field to clear to `0`
     /// (no ack SMSG on this wire — the field clear *is* the confirmation). Needs a GM account (the
-    /// deploy's `three` is gmlevel 4).
+    /// deploy's probes are gmlevel 6).
     #[arg(long)]
     questlog: bool,
     /// Live-verify the force-speed-change wire: GM `.modify speed 1.5` (self-targeted), require
@@ -143,7 +143,7 @@ struct Cli {
     /// then `.modify speed 1` and require a SECOND change (counter incremented, speed 7.0) on a
     /// still-live stream. A malformed ack body throws in the server's parser and drops the session
     /// (the `--charge` precedent), so survival through both round trips is the wire proof. Needs a
-    /// GM account (the deploy's `three` is gmlevel 4).
+    /// GM account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     speed: bool,
 
@@ -156,7 +156,7 @@ struct Cli {
     /// requires an `SMSG_UPDATE_AURA_DURATION` for each aura's own slot carrying the duration we
     /// asked for, and asserts it arrived **before** the descriptor delta that names the slot (the
     /// ordering the aura model depends on). Leaves the character as found (`.unaura` both). Needs a
-    /// GM account (the deploy's `three` is gmlevel 4).
+    /// GM account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     aura: bool,
 
@@ -171,7 +171,7 @@ struct Cli {
     /// `SMSG_UPDATE_WORLD_STATE` — what the NPC-text `$<n>w`/`$<n>e` tokens read): teleport to
     /// Elwynn, hop to Stormwind to force a zone-change init, and `.debug send worldstate` one
     /// synthetic pair to require back. Prints every state received. Needs a **SEC_DEVELOPER**
-    /// account: `.debug send worldstate` is gmlevel 5, one above the 3 the slot-keyed probe
+    /// account: `.debug send worldstate` is gmlevel 5, under the 6 the slot-keyed probe
     /// accounts carry (decision 0450), so the update leg needs a temporary grant.
     #[arg(long)]
     worldstate: bool,
@@ -183,7 +183,7 @@ struct Cli {
     /// the same server spline machinery as any creature (not a teleport / not a knockback). Prints
     /// the self spline in full (facing kind, duration, waypoints, flying bit) so the ride + the
     /// `CMSG_MOVE_SPLINE_DONE` ack it obliges can be built from the real numbers. Needs a GM warrior
-    /// (the deploy's `three`/Tri, gmlevel 4).
+    /// (any slot-keyed probe account, gmlevel 6).
     #[arg(long)]
     charge: bool,
 
@@ -195,7 +195,7 @@ struct Cli {
     /// leave the character alive. Recommend `--seconds 45`: the `.die`→repop→revive round trip
     /// itself completes in ~10s, but the reclaim delay is only ever observed as a packet value
     /// (never awaited), and the slack keeps a slow local server from truncating the ghost phase.
-    /// Needs a GM account (the deploy's `three` is gmlevel 4).
+    /// Needs a GM account (the deploy's probes are gmlevel 6).
     #[arg(long)]
     death: bool,
 

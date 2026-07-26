@@ -40,6 +40,17 @@ impl Lerp for [f32; 3] {
     }
 }
 
+impl Lerp for [f32; 4] {
+    fn lerp(a: Self, b: Self, f: f32) -> Self {
+        [
+            f32::lerp(a[0], b[0], f),
+            f32::lerp(a[1], b[1], f),
+            f32::lerp(a[2], b[2], f),
+            f32::lerp(a[3], b[3], f),
+        ]
+    }
+}
+
 /// The sequence a sequence-timeline track bakes against: the model's **file** sequence slot (which
 /// is what indexes the track's [`M2Track::ranges`] — NOT an index into a filtered animation list)
 /// and that sequence's absolute `(start_ms, end_ms)` band.
@@ -112,7 +123,7 @@ impl<V: Lerp> KeyAnim<V> {
 /// the band, and an extrapolated *fix16 factor* lands outside `[0, 1]` — where a negative value
 /// would cull the batch (`A <= 0`) on a data quirk rather than on authoring. We clamp the fraction
 /// to `[0, 1]`, i.e. hold at the bracket instead of running past it.
-fn sample_window<V: Lerp>(
+pub(super) fn sample_window<V: Lerp>(
     keys: &[(u32, V)],
     step: bool,
     lo: usize,

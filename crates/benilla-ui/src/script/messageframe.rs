@@ -462,6 +462,62 @@ mod tests {
         assert!((clip.top - 124.0).abs() < 0.01 && (clip.bottom - 90.0).abs() < 0.01);
     }
 
+    /// The ring lines are the frame's ARTWORK content, not its bare draw slot: a BACKGROUND
+    /// texture of the same frame draws BEHIND them, an OVERLAY one in front. The chat window's
+    /// hover box is that background texture — at the bare slot it painted over the messages and
+    /// dimmed them (director, 2026-07-26).
+    #[test]
+    fn ring_lines_draw_above_the_frames_background_and_below_its_overlay() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.run(
+            "local f = CreateFrame('ScrollingMessageFrame', 'CF')\n\
+             f:SetPoint('BOTTOMLEFT', 32, 90)\n\
+             f:SetWidth(430)\n\
+             f:SetHeight(60)\n\
+             local bg = f:CreateTexture('CFBg', 'BACKGROUND')\n\
+             bg:SetTexture('Interface\\\\Bg')\n\
+             bg:SetAllPoints(f)\n\
+             local over = f:CreateTexture('CFOver', 'OVERLAY')\n\
+             over:SetTexture('Interface\\\\Over')\n\
+             over:SetAllPoints(f)\n\
+             f:AddMessage('hello', 1, 1, 1)",
+        )
+        .unwrap();
+        s.resolve();
+        let quads = s.extract();
+        let z_of = |path: &str| {
+            quads
+                .iter()
+                .find_map(|q| match &q.content {
+                    crate::script::QuadContent::Texture { path: Some(p), .. } if p == path => {
+                        Some(q.z)
+                    }
+                    _ => None,
+                })
+                .expect("texture drew")
+        };
+        let line_z = quads
+            .iter()
+            .find_map(|q| match &q.content {
+                crate::script::QuadContent::Text { text: Some(t), .. } if t == "hello" => Some(q.z),
+                _ => None,
+            })
+            .expect("the ring line drew");
+        let slot_z = quads
+            .iter()
+            .find(|q| matches!(q.content, crate::script::QuadContent::Frame))
+            .map(|q| q.z)
+            .expect("the frame slot drew");
+        let (bg_z, over_z) = (z_of("Interface\\Bg"), z_of("Interface\\Over"));
+        assert!(slot_z < bg_z, "the frame's own slot still leads");
+        assert!(
+            bg_z < line_z,
+            "a BACKGROUND texture draws behind the messages"
+        );
+        assert!(line_z < over_z, "an OVERLAY texture draws in front of them");
+    }
+
     #[test]
     fn width_change_invalidates_row_measures() {
         let mut s = UiScript::new().unwrap();

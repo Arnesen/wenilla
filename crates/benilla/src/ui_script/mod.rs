@@ -78,6 +78,17 @@ pub(crate) struct CursorPayloadHeld(pub(crate) bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
 
+/// Run a Lua chunk, logging (never discarding) a failure. App systems drive the VM with fire-and-
+/// forget chunks; `let _ = script.run(…)` swallows the error — the chat header machine died
+/// mid-chunk on a missing `EditBox:SetTextColor` every single frame and nothing ever said so
+/// (the /w caret bug). A chunk failure is always an app or engine defect; this is the mandatory
+/// form for any run whose `Result` isn't otherwise consumed.
+pub(crate) fn run_or_warn(script: &benilla_ui::script::UiScript, chunk: &str) {
+    if let Err(e) = script.run(chunk) {
+        warn!("ui_script: chunk failed: {e}");
+    }
+}
+
 /// The reference's `uiScale` cvar — the user dial on TOP of the 768-virtual base (decision 0584):
 /// px-per-UI-unit multiplies by it, so the VM's virtual screen is `768/uiScale` units tall — the
 /// same law that makes the reference's `uiScale = 768/screenH` its known pixel-perfect setting.
@@ -324,6 +335,13 @@ fn load_default_ui(script: &UiScript) {
         // (CooldownFrame_SetTimer) + ActionBar.xml (BENILLA_FALLBACK_ICON, the BenillaActionBar
         // anchor target).
         "StanceBar.xml",
+        // The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
+        // loads MainMenuBarMicroButtons right after MainMenuBar). After ActionBar.xml: it anchors
+        // into BenillaActionBarArtFrame by name and seats itself with that file's
+        // BenillaActionBarArt_SeatAbove. It must come BEFORE the panels it toggles, because each of
+        // their OnShow/OnHide calls the `UpdateMicroButtons` this file defines (the panel frames
+        // themselves are read back through getglobal, so the reverse dependency is call-time).
+        "MicroMenu.xml",
         // The HUD minimap cluster (decision 0203 phase 1): the chrome around the engine-rendered
         // <Minimap> widget hole (`crate::minimap` fills it). After GameTooltip (its zone-text
         // hover uses the shared tooltip).
@@ -671,6 +689,12 @@ mod action_bar_tests;
 
 #[cfg(test)]
 mod multibar_stance_tests;
+
+#[cfg(test)]
+mod micro_menu_tests;
+
+#[cfg(test)]
+mod perf_bar_tests;
 
 #[cfg(test)]
 mod panel_tests;

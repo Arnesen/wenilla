@@ -16,7 +16,7 @@
 //!
 //! Layouts verified against build 5875 (field counts from the file header, cross-checked with
 //! wowdev.wiki + vmangos `DBCStructure.h`): CreatureModelData = 16 fields (ID@0, ModelName@2,
-//! ModelScale@4); CreatureDisplayInfo = 12 fields (ID@0, ModelID@1, ExtendedDisplayInfoID@3, Scale@4,
+//! ModelScale@4, CollisionHeight@15); CreatureDisplayInfo = 12 fields (ID@0, ModelID@1, ExtendedDisplayInfoID@3, Scale@4,
 //! TextureVariation@6/7/8); CreatureDisplayInfoExtra = 19 fields (ID@0, Race@1, Sex@2, Skin@3, Face@4,
 //! HairStyle@5, HairColor@6, FacialHair@7, Equipment@8..17, BakeName@18).
 
@@ -55,6 +55,10 @@ pub struct CreatureModel {
     /// `CreatureModelData.BloodID`; `≤ 0` = a bloodless model (elementals, ghosts — the client's
     /// negative-id skip). Consumed via [`crate::BloodCatalog::effect_id`].
     pub blood: i32,
+    /// `CreatureModelData.collisionHeight` — the unit's collision box height in **raw model units**
+    /// (multiply by the unit's render scale for world yards; see
+    /// [`CreatureCatalog::collision_height`], which is the accessor every consumer should use).
+    pub collision_height: f32,
 }
 
 /// A character-model NPC's appearance, from **CreatureDisplayInfoExtra.dbc**. A humanoid NPC wears a
@@ -98,12 +102,23 @@ struct DisplayRow {
     blood_level: u32,
 }
 
+/// One CreatureModelData row (the parts we use).
+#[derive(Debug, Clone)]
+struct ModelRow {
+    path: String,
+    scale: f32,
+    /// `BloodID` — see [`CreatureModel::blood`]. Reads signed: `−1` marks a bloodless model.
+    blood: i32,
+    /// `collisionHeight` (field 15), raw model units — see [`CreatureCatalog::collision_height`].
+    collision_height: f32,
+}
+
 /// Display/model tables loaded from the DBCs, resolving `displayId` → [`CreatureModel`].
 pub struct CreatureCatalog {
     /// CreatureDisplayInfo: displayId → row.
     display: HashMap<u32, DisplayRow>,
-    /// CreatureModelData: modelId → (model path, model scale, BloodID — see [`CreatureModel::blood`]).
-    models: HashMap<u32, (String, f32, i32)>,
+    /// CreatureModelData: modelId → row.
+    models: HashMap<u32, ModelRow>,
     /// CreatureDisplayInfoExtra: extendedDisplayInfoId → character-model NPC appearance.
     extra: HashMap<u32, NpcAppearance>,
 }
@@ -118,24 +133,41 @@ impl CreatureCatalog {
         self.display.get(&display_id).map(|r| r.scale)
     }
 
+    /// A display's **collision height** in raw model units — `CreatureModelData.collisionHeight`,
+    /// the per-unit `h` every depth line in the client is a fraction of (swim at `0.75·h`, splash at
+    /// `0.4·h`, the foam gate at `2·h`; wow-re has each byte-pinned against `CMovement+0xb4`). World
+    /// yards = this × the unit's render scale (`OBJECT_FIELD_SCALE_X`, which the server has already
+    /// folded the DBC scales into) — the caller multiplies, because only it knows the live scale.
+    ///
+    /// The column is **exactly the model's own MD20 collision-box Z extent**, verified against the
+    /// shipped client for all thirteen character models (`tests::collision_height_is_the_m2_box`) —
+    /// which is what settles the space: it is authored pre-scale, like the geometry it bounds.
+    /// `None` when either DBC lookup misses; callers fall back to the client's own ctor default
+    /// (`2.0277777`, `0x616fd8`).
+    pub fn collision_height(&self, display_id: u32) -> Option<f32> {
+        let row = self.display.get(&display_id)?;
+        Some(self.models.get(&row.model_id)?.collision_height)
+    }
+
     /// Resolve an NPC display id to its model, or `None` if either DBC lookup misses.
     pub fn model(&self, display_id: u32) -> Option<CreatureModel> {
         let row = self.display.get(&display_id)?;
-        let (model_path, model_scale, model_blood) = self.models.get(&row.model_id)?;
+        let model = self.models.get(&row.model_id)?;
         // A non-zero ExtendedDisplayInfoID that resolves to an extra row ⇒ a character-model NPC.
         let npc_appearance = (row.extended_id != 0)
             .then(|| self.extra.get(&row.extended_id).cloned())
             .flatten();
         Some(CreatureModel {
-            model_path: model_path.clone(),
-            scale: model_scale * row.scale,
+            model_path: model.path.clone(),
+            scale: model.scale * row.scale,
             textures: row.textures.clone(),
             npc_appearance,
             blood: if row.blood_level != 0 {
                 row.blood_level as i32
             } else {
-                *model_blood
+                model.blood
             },
+            collision_height: model.collision_height,
         })
     }
 
@@ -241,9 +273,16 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
         let mut m = HashMap::with_capacity(rs.records().len());
         for r in rs.records() {
             if let (Some(id), Some(name)) = (u32_at(r, 0), str_at(&rs, r, 2)) {
-                // BloodID (field 5) reads signed: −1 marks a bloodless model in the real data.
-                let blood = u32_at(r, 5).map_or(0, |v| v as i32);
-                m.insert(id, (name, f32_at(r, 4).unwrap_or(1.0), blood));
+                m.insert(
+                    id,
+                    ModelRow {
+                        path: name,
+                        scale: f32_at(r, 4).unwrap_or(1.0),
+                        // BloodID (field 5) reads signed: −1 marks a bloodless model in the real data.
+                        blood: u32_at(r, 5).map_or(0, |v| v as i32),
+                        collision_height: f32_at(r, 15).unwrap_or(0.0),
+                    },
+                );
             }
         }
         m
@@ -410,6 +449,80 @@ mod tests {
             npc.equipment,
             [14964, 7541, 7223, 0, 7224, 7225, 7255, 0, 7698, 6255],
             "SW Guard worn-equipment ids in bodyslot order"
+        );
+    }
+
+    /// **The column's space, pinned.** `CreatureModelData.collisionHeight` is not a derived or
+    /// hand-authored number: it is a verbatim copy of the model's own MD20 **collision-box** Z
+    /// extent, in raw model units. Asserted for all thirteen player-race body models against the
+    /// shipped client — which is what licenses [`CreatureCatalog::collision_height`]'s contract
+    /// that world yards = column × render scale (it is pre-scale, exactly like the geometry it
+    /// bounds), and pins field index 15 so a schema shift can't silently return garbage.
+    ///
+    /// Tauren Female is the load-bearing row: `modelScale` 1.25 with a 2.111 column. If the column
+    /// were authored post-`modelScale` the box would read 2.111/1.25 = 1.689, so this row alone
+    /// refutes the "divide the model scale out" reading (which is what vmangos's server-side
+    /// `Unit::UpdateModelData` does).
+    #[test]
+    fn collision_height_is_the_m2_collision_box() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_creature_catalog(&mut chain).expect("load creature catalog");
+
+        // (display id, label, the column's expected value). Display ids are the ChrRaces
+        // Male/FemaleDisplayId columns; Goblin shares one display across both sexes.
+        let races: &[(u32, &str, f32)] = &[
+            (49, "HumanMale", 2.031),
+            (50, "HumanFemale", 1.913),
+            (51, "OrcMale", 2.361),
+            (52, "OrcFemale", 2.051),
+            (53, "DwarfMale", 1.667),
+            (54, "DwarfFemale", 1.528),
+            (55, "NightElfMale", 2.438),
+            (56, "NightElfFemale", 2.250),
+            (57, "ScourgeMale", 1.861),
+            (58, "ScourgeFemale", 1.844),
+            (59, "TaurenMale", 1.653),
+            (60, "TaurenFemale", 2.111),
+            (1563, "GnomeMale", 1.056),
+            (1564, "GnomeFemale", 1.000),
+            (1478, "TrollMale", 2.083),
+            (1479, "TrollFemale", 1.839),
+        ];
+        for &(display_id, label, expect) in races {
+            let m = cat
+                .model(display_id)
+                .unwrap_or_else(|| panic!("{label}: display {display_id} resolves"));
+            let h = cat.collision_height(display_id).expect("collision height");
+            assert!(
+                (h - expect).abs() < 5e-4,
+                "{label}: column is {h}, expected {expect}"
+            );
+            assert_eq!(h, m.collision_height, "{label}: accessor vs CreatureModel");
+
+            let bytes = chain
+                .read_file(&crate::models::model_path(&m.model_path))
+                .unwrap_or_else(|e| panic!("{label}: read {}: {e:#}", m.model_path));
+            let fmt = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes[..]))
+                .unwrap_or_else(|e| panic!("{label}: parse M2: {e:#}"));
+            let hdr = &fmt.model().header;
+            let box_z = (hdr.collision_box_max[2] - hdr.collision_box_min[2]).abs();
+            assert!(
+                (box_z - h).abs() < 5e-4,
+                "{label}: MD20 collision box Z extent {box_z} != column {h}"
+            );
+        }
+
+        // Not vacuous: the races must actually differ, or "one constant for everyone" would pass.
+        let gnome = cat.collision_height(1564).unwrap();
+        let nelf = cat.collision_height(55).unwrap();
+        assert!(
+            nelf > gnome * 2.0,
+            "a night elf is over twice a gnome ({nelf} vs {gnome}) — the whole point of the plumb"
         );
     }
 }

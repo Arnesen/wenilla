@@ -264,6 +264,22 @@ impl WidgetArena {
         self.frame(h).map(|f| f.clamped_to_screen).unwrap_or(false)
     }
 
+    // ── Hit-rect insets (the mouse rect, not the draw rect) ──────────────────────────────────────
+
+    /// Set a frame's hit-rect insets, `[left, right, top, bottom]` (`SetHitRectInsets`; see
+    /// [`Frame::hit_rect_insets`]). A stale handle is a no-op.
+    pub fn set_hit_rect_insets(&mut self, h: FrameHandle, insets: [f32; 4]) {
+        if let Some(f) = self.frame_mut(h) {
+            f.hit_rect_insets = insets;
+        }
+    }
+
+    /// A frame's hit-rect insets, `[left, right, top, bottom]` (`GetHitRectInsets`). A stale handle
+    /// reads as all-zero — the same "no inset" answer an untouched frame gives.
+    pub fn hit_rect_insets(&self, h: FrameHandle) -> [f32; 4] {
+        self.frame(h).map(|f| f.hit_rect_insets).unwrap_or([0.0; 4])
+    }
+
     // ── Small helpers ────────────────────────────────────────────────────────────────────────────
 
     /// Is `maybe_ancestor` on the parent chain of `node` (walking up, loop-guarded)?

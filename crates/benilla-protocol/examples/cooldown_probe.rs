@@ -12,7 +12,7 @@
 //! slot-keyed probe account (method.md "The local vmangos server"; NEVER `one`, the director's
 //! account — a probe login there kicks their live session). Two caveats: this is a COMBAT probe,
 //! so it runs director-supervised (method.md: no unattended combat probes), and `.learn` is
-//! SEC_DEVELOPER (5) while probe accounts are gmlevel 3 — raise the slot account via the vmangos
+//! SEC_DEVELOPER (5); probe accounts are gmlevel 6 (SEC_ADMINISTRATOR), so it lands. The vmangos
 //! console for the run and restore it after.
 
 use std::time::{Duration, Instant};

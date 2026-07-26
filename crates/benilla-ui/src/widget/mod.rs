@@ -232,6 +232,14 @@ pub struct Frame {
     /// instead of leaving the window) though its XML never sets the attribute — the class supplies
     /// the flag — and the rule here is absolute: no tooltip ever leaves the window (decision 0352).
     pub clamped_to_screen: bool,
+    /// `SetHitRectInsets` / XML `<HitRectInsets>` — how far the frame's **mouse** rect is inset
+    /// from its resolved rect, as `[left, right, top, bottom]` (default all 0, i.e. the hit rect
+    /// IS the frame rect). Only [`crate::order::hit_test`] reads it: drawing, anchoring, and
+    /// `GetLeft`/`GetWidth` all stay on the un-inset rect. The reference uses it wherever a
+    /// button's art fills less than its frame — the micro buttons are 29×58 frames whose art
+    /// occupies only the lower ~40 px, and a `top="18"` inset is what stops that empty header
+    /// from swallowing hover and clicks aimed past the bar.
+    pub hit_rect_insets: [f32; 4],
     /// This frame's own scale (`ownScale +0xb8`, default 1.0).
     pub scale: f32,
     /// `layoutScale` = `parentEffective * ownScale`, ε-gated (`effective_scale 0x76ac90`).
@@ -452,6 +460,9 @@ impl WidgetArena {
             // yet the reference plate observably never leaves the window — the class supplies
             // geometry flags bit4; decision 0352's law: no tooltip off-screen, ever).
             clamped_to_screen: matches!(kind, FrameKind::GameTooltip),
+            // No frame is born with an inset hit rect — `<HitRectInsets>`/SetHitRectInsets is the
+            // only source (the client's ctor zeroes the four floats too).
+            hit_rect_insets: [0.0; 4],
             scale,
             effective_scale: parent_scale * scale,
             ignore_parent_scale: false,

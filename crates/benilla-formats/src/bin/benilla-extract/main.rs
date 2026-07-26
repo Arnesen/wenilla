@@ -188,6 +188,17 @@ enum Command {
         /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and measure how far our SKELETAL parse
+    /// sits from the reference's sampler, per bone track per sequence band: empty bands (our
+    /// nearest-key clamp vs the file's own `interpolation_ranges` window), held band edges (our
+    /// hold vs the reference's ongoing lerp toward the next key), and STEP tracks (`interp == 0`,
+    /// which the reference copies and we interpolate). The population instrument behind decision
+    /// 0133's named residual — and the safety check that a band's keys never fall outside the
+    /// window the reference searches.
+    Bonescan {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and census every particle-emitter
     /// FEATURE the corpus authors — shapes, head/tail, blend modes (incl. the folded Mod/Mod2x),
     /// every file-flag bit, spin signs, twinkle gates, atlas tiling, spline emitters, and the
@@ -394,6 +405,7 @@ fn main() -> Result<()> {
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
+        Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)

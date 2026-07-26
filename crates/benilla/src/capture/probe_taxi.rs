@@ -167,12 +167,14 @@ fn taxi_probe(
         Phase::Wait => {
             let [x, y, z] = FLIGHTMASTER_AT;
             info!("PROBE taxi: hopping to the Stormwind flight master at ({x}, {y}, {z})");
-            // The fare cannot be granted from here: `.modify money` is SEC_BASIC_ADMIN (4) and
-            // the probe accounts are gmlevel 3 (two probe runs bounced on NOT_ENOUGH_MONEY
-            // before this was traced). Every probe character's fare is seeded offline in
-            // `characters.money` (100000 copper; a flight spends ~110) — re-seed via
-            // `UPDATE characters SET money=100000 WHERE name LIKE 'Probe%' AND online=0;` if a
-            // NOT_ENOUGH_MONEY reply ever shows up again.
+            // The fare is seeded offline in `characters.money` (100000 copper; a flight spends
+            // ~110) — re-seed via `UPDATE characters SET money=100000 WHERE name LIKE 'Probe%'
+            // AND online=0;` if a NOT_ENOUGH_MONEY reply ever shows up. The seed used to be the
+            // *only* option: `.modify money` is SEC_BASIC_ADMIN(4) and the probe accounts were
+            // gmlevel 3 (two runs bounced on NOT_ENOUGH_MONEY before that was traced). Since they
+            // were actually raised to 6 (0651) this probe could grant its own fare in-band the way
+            // `probe_bank` now does — left alone because the offline seed works and is one fewer
+            // command inside the flight window.
             let _ = net
                 .0
                 .send(ClientCommand::SetSelection { guid: self_guid.0 });

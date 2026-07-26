@@ -16,6 +16,18 @@ use super::PROBE_WARMUP_FRAMES;
 /// server-less harness deliberately excludes). The app keeps running after the save; pair with
 /// `WOW_USER`/`WOW_CHAR` and an outer `timeout` for unattended probes. Unlike
 /// [`super::CapturePlugin`], nothing is pinned — the shot shows the scene as a player would see it.
+///
+/// **`WOW_LIVE_SHOT_COUNT=<n>` makes it a burst** — `n` shots written as `<stem>-000.png`,
+/// `<stem>-001.png`, … , spaced by `WOW_LIVE_SHOT_EVERY` seconds (**default 0 = one per frame**,
+/// i.e. *adjacent* frames). One shot still writes the bare path, so every existing invocation is
+/// unchanged.
+///
+/// The burst exists because **a flicker is a temporal artefact and a single frame cannot show one**
+/// (decision 0653). "This object's textures flicker" was un-diagnosable with the instruments we had:
+/// the reporter's stills prove nothing, and grading a live run by eye is exactly the loop rule 7
+/// forbids. Adjacent frames from a *parked* camera ([`crate::player`]'s `WOW_PROBE_CAM`) turn it
+/// into arithmetic: `benilla-visual flicker <dir>` collapses the burst to the envelope of what
+/// would not hold still, and the lit pixels are the defect.
 pub(crate) struct LiveShotPlugin;
 
 impl Plugin for LiveShotPlugin {
@@ -25,38 +37,72 @@ impl Plugin for LiveShotPlugin {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12.0);
+        let count = std::env::var("WOW_LIVE_SHOT_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1u32)
+            .max(1);
+        let every = std::env::var("WOW_LIVE_SHOT_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
         app.insert_resource(LiveShot {
             out,
-            at,
-            fired: false,
+            count,
+            every,
+            taken: 0,
+            next_at: at,
         })
         .add_systems(Update, fire_live_shot);
     }
 }
 
-/// [`LiveShotPlugin`] state: the output path, the fire time, and the once-latch.
+/// [`LiveShotPlugin`] state: the output path, how many shots the burst wants, their spacing
+/// (`0` = one per frame), how many have gone out, and when the next one may — seeded to
+/// `WOW_LIVE_SHOT_AT`, so the first-fire delay and the burst spacing are the same clock.
 #[derive(Resource)]
 struct LiveShot {
     out: String,
-    at: f32,
-    fired: bool,
+    count: u32,
+    every: f32,
+    taken: u32,
+    next_at: f32,
 }
 
-/// Fire the one live screenshot once the startup delay has elapsed.
+/// `stem-007.png` for shot 7 of a burst — the bare path when the burst is one shot, so the
+/// single-shot filename (which existing probes and docs name literally) never moves.
+fn burst_path(out: &str, index: u32, count: u32) -> String {
+    if count <= 1 {
+        return out.to_string();
+    }
+    match out.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}-{index:03}.{ext}"),
+        None => format!("{out}-{index:03}"),
+    }
+}
+
+/// Fire the live screenshot(s) once the startup delay has elapsed — one per frame by default, so a
+/// burst samples *adjacent* frames and a per-frame instability has nowhere to hide.
 fn fire_live_shot(mut shot: ResMut<LiveShot>, time: Res<Time>, mut commands: Commands) {
-    if shot.fired || time.elapsed_secs() < shot.at {
+    if shot.taken >= shot.count || time.elapsed_secs() < shot.next_at {
         return;
     }
-    shot.fired = true;
+    let path = burst_path(&shot.out, shot.taken, shot.count);
     commands
         .spawn(Screenshot::primary_window())
-        .observe(save_to_disk(shot.out.clone()));
-    info!("live-shot: writing {}", shot.out);
+        .observe(save_to_disk(path.clone()));
+    shot.taken += 1;
+    shot.next_at = time.elapsed_secs() + shot.every;
+    if shot.count > 1 {
+        info!("live-shot: writing {path} ({}/{})", shot.taken, shot.count);
+    } else {
+        info!("live-shot: writing {path}");
+    }
 }
 
 /// The PROBE CHAT one-shot (`WOW_PROBE_CHAT="<line>[;<line>…]"`, delay via `WOW_PROBE_CHAT_AT`
 /// seconds, default 8): send each `;`-separated line as Say once we are in-world — the "park the
-/// probe character anywhere" instrument. The probe account (gmlevel 4) makes `.go xyz …`, `.gm on`,
+/// probe character anywhere" instrument. The probe account (gmlevel 6) makes `.go xyz …`, `.gm on`,
 /// `.additem` etc. work headlessly, which a direct `characters` DB edit does NOT (the live world
 /// server's logout save overwrites it, and the row is only re-read at login). Pair with
 /// [`LiveShotPlugin`] at a later `WOW_LIVE_SHOT_AT` so the destination has streamed in.
@@ -97,11 +143,19 @@ struct ProbeChat {
     sent: usize,
 }
 
-/// The PROBE KEY one-shots (`WOW_PROBE_KEY="<key>@<secs>[;<key>@<secs>…]"`): synthesize a key
-/// TAP — press one frame, release [`PROBE_KEY_TAP_SECS`] later — at each given time once
-/// in-world. The "press space headlessly" instrument for input-gated behavior (the mounted
-/// flourish, a jump, the X/Z toggles), which neither a chat command nor a Lua chunk can reach
-/// (1.12 has no jump Lua API; the gate lives in the controller's key read). Runs in `PreUpdate`
+/// The PROBE KEY one-shots (`WOW_PROBE_KEY="<key>@<secs>[:<hold>][;…]"`): synthesize a key press
+/// at each given time once in-world, released `<hold>` seconds later ([`PROBE_KEY_TAP_SECS`] when
+/// omitted — the tap this instrument shipped with). The "press space headlessly" instrument for
+/// input-gated behavior (the mounted flourish, a jump, the X/Z toggles), which neither a chat
+/// command nor a Lua chunk can reach (1.12 has no jump Lua API; the gate lives in the
+/// controller's key read).
+///
+/// The optional hold is what makes *sustained* locomotion reachable headlessly: a 0.25 s W tap
+/// travels ~1.2 yd, far too little to cross a liquid surface's own slope, so a swim defect that
+/// only appears while moving over water could not be reproduced without asking the director to
+/// drive (decision 0644 — the gap `WOW_PROBE_LOOK` closed for mouse-turns, on the key side).
+///
+/// Runs in `PreUpdate`
 /// after winit's input processing ([`bevy::input::InputSystems`]) so the synthetic
 /// `just_pressed` is visible to every `Update` reader that same frame — a press from inside
 /// `Update` would be cleared at the next frame's input pass before an earlier-ordered
@@ -116,16 +170,21 @@ impl Plugin for ProbeKeyPlugin {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .filter_map(|s| {
-                let (key, at) = s.split_once('@')?;
+                let (key, rest) = s.split_once('@')?;
+                let (at, hold) = match rest.split_once(':') {
+                    Some((at, hold)) => (at, hold.trim().parse::<f32>().ok()?),
+                    None => (rest, PROBE_KEY_TAP_SECS),
+                };
                 match (probe_key_by_name(key.trim()), at.trim().parse::<f32>()) {
                     (Some(key), Ok(at)) => Some(ProbeKeyTap {
                         key,
                         at,
+                        hold,
                         pressed: false,
                         released: false,
                     }),
                     _ => {
-                        warn!("probe-key: unparseable tap {s:?} (want e.g. Space@14) — skipped");
+                        warn!("probe-key: unparseable tap {s:?} (want e.g. Space@14 or W@20:6) — skipped");
                         None
                     }
                 }
@@ -138,8 +197,8 @@ impl Plugin for ProbeKeyPlugin {
     }
 }
 
-/// How long a probe tap stays held. Long enough that a `pressed`-reader (a held-key gate)
-/// sees it across several frames; short enough to stay a tap, not a hold.
+/// How long a probe press stays held when the spec gives no `:<hold>`. Long enough that a
+/// `pressed`-reader (a held-key gate) sees it across several frames; short enough to stay a tap.
 const PROBE_KEY_TAP_SECS: f32 = 0.25;
 
 /// The key names [`ProbeKeyPlugin`] accepts — the controller-read set; extend as probes need.
@@ -168,11 +227,13 @@ struct ProbeKeys {
 struct ProbeKeyTap {
     key: KeyCode,
     at: f32,
+    /// Seconds the key stays down — the spec's `:<hold>`, else [`PROBE_KEY_TAP_SECS`].
+    hold: f32,
     pressed: bool,
     released: bool,
 }
 
-/// Press each due tap (in-world gated, like the chat probe) and release it after the tap window.
+/// Press each due tap (in-world gated, like the chat probe) and release it after its hold window.
 fn fire_probe_key(
     mut probe: ResMut<ProbeKeys>,
     time: Res<Time>,
@@ -185,10 +246,13 @@ fn fire_probe_key(
     let now = time.elapsed_secs();
     for tap in &mut probe.taps {
         if !tap.pressed && now >= tap.at {
-            info!("probe-key: {:?} down ({now:.1}s)", tap.key);
+            info!(
+                "probe-key: {:?} down ({now:.1}s, hold {:.2}s)",
+                tap.key, tap.hold
+            );
             keys.press(tap.key);
             tap.pressed = true;
-        } else if tap.pressed && !tap.released && now >= tap.at + PROBE_KEY_TAP_SECS {
+        } else if tap.pressed && !tap.released && now >= tap.at + tap.hold {
             keys.release(tap.key);
             tap.released = true;
         }
@@ -367,12 +431,18 @@ fn fire_probe_lua(
     }
 }
 
-/// Send the probe lines once the delay has elapsed AND the session is in-world (the self player
+/// Submit the probe lines once the delay has elapsed AND the session is in-world (the self player
 /// exists) — a `.go` sent before world-enter would be dropped server-side.
+///
+/// Lines go in through the **chat EditBox seam**, not straight to the wire: a probe line is "what
+/// the director would type", so a client-side slash command (`/duel`, `/reaction`) is parsed by
+/// the same drain that serves the real chat box, while plain text and `.gm`/`.go` server commands
+/// still leave as Say exactly as before. Sending them as Say instead — the original shape — meant
+/// every client-side command silently went out as public chat and did nothing (decision 0637).
 fn fire_probe_chat(
     mut probe: ResMut<ProbeChat>,
     time: Res<Time>,
-    net: Option<Res<crate::net::NetCommands>>,
+    script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
 ) {
     if probe.lines.is_empty() {
@@ -381,7 +451,7 @@ fn fire_probe_chat(
     if self_player.is_empty() {
         return; // not in-world yet — keep waiting past the delay
     }
-    let Some(net) = net else {
+    let Some(mut script) = script else {
         return;
     };
     // With no spacing every line goes in the first eligible frame (the original burst); with
@@ -401,11 +471,7 @@ fn fire_probe_chat(
             return;
         }
         info!("probe-chat: sending {line:?}");
-        let _ = net.0.send(crate::net::ClientCommand::Chat {
-            kind: crate::net::ChatKind::Say,
-            target: None,
-            text: line.to_string(),
-        });
+        script.push_chat_input(line.to_string());
         probe.sent += 1;
     }
 }

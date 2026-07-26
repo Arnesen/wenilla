@@ -210,6 +210,170 @@
                 end
             end
         end
+
+        -- ── BenillaUIMenu: the 1.12 UIMenu kit, transcribed (ref UIMenu.lua — the chat menu's
+        -- row engine: fixed 16px rows in a tooltip-backdrop box, a 2 s no-hover timeout that
+        -- walks up parentMenu chains, nested submenus opened on row hover). Constants quoted.
+        -- Scoped here because the chat menu is its only consumer; a second consumer graduates
+        -- it to its own file.
+        BENILLA_UIMENU_BUTTON_HEIGHT = 16
+        BENILLA_UIMENU_BUTTON_WIDTH = 104
+        BENILLA_UIMENU_BORDER_HEIGHT = 12
+        BENILLA_UIMENU_BORDER_WIDTH = 12
+        BENILLA_UIMENU_NUMBUTTONS = 32
+        BENILLA_UIMENU_TIMEOUT = 2.0
+
+        function BenillaUIMenu_Initialize(menu)
+            menu.numButtons = 0
+            menu.subMenu = ""
+            local name = menu:GetName()
+            for i = 1, BENILLA_UIMENU_NUMBUTTONS do
+                local button = getglobal(name .. "Button" .. i)
+                button:SetWidth(BENILLA_UIMENU_BUTTON_WIDTH)
+                button:SetHeight(BENILLA_UIMENU_BUTTON_HEIGHT)
+                button:Hide()
+                getglobal(button:GetName() .. "ShortcutText"):Hide()
+            end
+            menu:SetWidth(BENILLA_UIMENU_BUTTON_WIDTH + BENILLA_UIMENU_BORDER_WIDTH * 2)
+            menu:SetHeight(BENILLA_UIMENU_BORDER_HEIGHT * 2)
+        end
+
+        -- Rows past the button pool are dropped (the ref message()s; nothing we author overflows).
+        function BenillaUIMenu_AddButton(menu, text, shortcut, func, nested)
+            local id = menu.numButtons + 1
+            if id > BENILLA_UIMENU_NUMBUTTONS then return end
+            menu.numButtons = id
+            local button = getglobal(menu:GetName() .. "Button" .. id)
+            if text then button:SetText(text) end
+            button.func = func
+            button.nested = nested
+            button:Show()
+            if shortcut then
+                local s = getglobal(button:GetName() .. "ShortcutText")
+                s:SetText(shortcut)
+                s:Show()
+            end
+            menu:SetHeight(id * BENILLA_UIMENU_BUTTON_HEIGHT + BENILLA_UIMENU_BORDER_HEIGHT * 2)
+        end
+
+        function BenillaUIMenu_OnShow()
+            this.timeleft = BENILLA_UIMENU_TIMEOUT
+            this.counting = 1
+        end
+
+        function BenillaUIMenu_OnUpdate(elapsed)
+            if this.counting == 1 then
+                local timeleft = (this.timeleft or BENILLA_UIMENU_TIMEOUT) - elapsed
+                if timeleft <= 0 then
+                    this:Hide()
+                    return
+                end
+                this.timeleft = timeleft
+            end
+        end
+
+        function BenillaUIMenu_StartCounting(menu)
+            menu.counting = 1
+            if menu.parentMenu then BenillaUIMenu_StartCounting(getglobal(menu.parentMenu)) end
+        end
+
+        function BenillaUIMenu_StopCounting(menu)
+            menu.counting = 0
+            menu.timeleft = BENILLA_UIMENU_TIMEOUT
+            if menu.parentMenu then BenillaUIMenu_StopCounting(getglobal(menu.parentMenu)) end
+        end
+
+        function BenillaUIMenuButton_OnLoad()
+            this:SetPoint("TOP", this:GetParent():GetName(), "TOP", 0,
+                -((this:GetID() - 1) * BENILLA_UIMENU_BUTTON_HEIGHT) - BENILLA_UIMENU_BORDER_HEIGHT)
+        end
+
+        function BenillaUIMenuButton_OnClick()
+            if this.func then this.func() end
+            this:GetParent():Hide()
+            PlaySound("UChatScrollButton")
+        end
+
+        function BenillaUIMenuButton_OnEnter()
+            local nested = this.nested
+            if nested then
+                local menu = getglobal(nested)
+                if not menu:IsVisible() then
+                    local oldMenu = getglobal(this:GetParent().subMenu or "")
+                    if oldMenu then oldMenu:Hide() end
+                    this:GetParent().subMenu = nested
+                    menu:SetPoint("BOTTOMLEFT", this:GetName(), "BOTTOMRIGHT", 10, -12)
+                    menu:Show()
+                end
+                BenillaUIMenu_StopCounting(menu)
+            else
+                BenillaUIMenu_StopCounting(this:GetParent())
+            end
+        end
+
+        function BenillaUIMenuButton_OnLeave()
+            BenillaUIMenu_StartCounting(this:GetParent())
+            if this.nested then BenillaUIMenu_StartCounting(getglobal(this.nested)) end
+        end
+
+        -- ── The chat menu rows (ref ChatMenu_* in ChatFrame.lua, adapted): every type row
+        -- prefixes the box with the type's slash and lets the LIVE PARSE convert — the ref's
+        -- own Whisper row does literally `SetText("/w "..GetText())`, and routing all rows the
+        -- same way means the menu can never drift from the slash grammar the edit machine
+        -- owns. Labels/shortcuts quoted from GlobalStrings. Language (benilla has no language
+        -- model yet) and Macro (no macro frame) are deliberately out; this OnLoad is their
+        -- return path.
+        function BenillaChatMenu_Type(prefix)
+            local eb = ChatFrameEditBox
+            eb:Show()
+            eb:SetFocus()
+            eb:SetText(prefix .. (eb:GetText() or ""))
+        end
+
+        function BenillaChatMenu_OnLoad()
+            BenillaUIMenu_Initialize(this)
+            BenillaUIMenu_AddButton(this, "Say", "/s", function() BenillaChatMenu_Type("/s ") end)
+            BenillaUIMenu_AddButton(this, "Party Chat", "/p", function() BenillaChatMenu_Type("/p ") end)
+            BenillaUIMenu_AddButton(this, "Guild Chat", "/g", function() BenillaChatMenu_Type("/g ") end)
+            BenillaUIMenu_AddButton(this, "Yell", "/y", function() BenillaChatMenu_Type("/y ") end)
+            BenillaUIMenu_AddButton(this, "Whisper", "/w", function() BenillaChatMenu_Type("/w ") end)
+            BenillaUIMenu_AddButton(this, "Emote", "/e", function() BenillaChatMenu_Type("/e ") end, "EmoteMenu")
+            BenillaUIMenu_AddButton(this, "Reply", "/r", function() BenillaChatMenu_Type("/r ") end)
+            BenillaUIMenu_AddButton(this, "Voice Emote", nil, nil, "VoiceMacroMenu")
+        end
+
+        -- An emote row submits its /command through the REAL chat pipeline (SubmitChatInput →
+        -- the router's EmotesText resolve + the send-side posture gate) — the ref's DoEmote by
+        -- token, reached through our one grammar. The lists are the ref's EmoteList /
+        -- TextEmoteSpeechList tokens as OUR canonical /commands (the EmotesText names the typed
+        -- grammar resolves), CMD1-sorted like the ref menu. Three ref labels differ
+        -- (/attacktarget /followme /silly are GlobalStrings CMD aliases the typed grammar
+        -- doesn't carry yet) — each row shows the command it actually runs.
+        BenillaEmoteMenuList = {
+            "/applaud", "/beg", "/bow", "/chicken", "/cry", "/dance", "/eat", "/flex",
+            "/kiss", "/kneel", "/laugh", "/point", "/roar", "/rude", "/salute", "/shy",
+            "/sit", "/sleep", "/stand", "/talk", "/wave",
+        }
+        BenillaVoiceMacroList = {
+            "/attackmytarget", "/bye", "/charge", "/cheer", "/congratulate", "/flee",
+            "/flirt", "/follow", "/healme", "/hello", "/helpme", "/incoming", "/joke",
+            "/no", "/nod", "/oom", "/openfire", "/rasp", "/thank", "/train", "/wait",
+            "/welcome",
+        }
+
+        function BenillaEmoteMenu_Click(cmd)
+            SubmitChatInput(cmd)
+            ChatMenu:Hide()
+        end
+
+        function BenillaOnEmoteMenuLoad(list)
+            BenillaUIMenu_Initialize(this)
+            this.parentMenu = "ChatMenu"
+            for _, cmd in ipairs(list) do
+                local c = cmd
+                BenillaUIMenu_AddButton(this, cmd, nil, function() BenillaEmoteMenu_Click(c) end)
+            end
+        end
     ]]></Script>
 
     <!-- ── The dock: ChatFrame1 (General) + ChatFrame2 (Combat Log) sharing its rect ─────── -->
@@ -466,13 +630,166 @@
             </Anchors>
         </ButtonText>
         <NormalFont inherits="GameFontNormalSmall"/>
+        <!-- The ref leaves this texture unsized and leans on the BLP's NATURAL height (32) to
+             seat the glow at the anchors' y −7 — centered on the tab's visible body, which sits
+             in the BOTTOM 22 rows of the ChatFrameTab canvas. benilla's v1 region model has no
+             natural-size law (an unpinned axis inherits the owner's edges, decision 0068), which
+             parked the glow 7 units high; the explicit height states what the ref reads from the
+             file. -->
         <HighlightTexture file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
+            <Size><AbsDimension x="0" y="32"/></Size>
             <Anchors>
                 <Anchor point="LEFT" relativeTo="$parentLeft"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
                 <Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="0" y="-7"/></Offset></Anchor>
             </Anchors>
         </HighlightTexture>
     </Button>
+
+    <!-- ── The UIMenu kit (ref UIMenu.xml, names kept for the addon surface): a row button
+         with a right-aligned shortcut string, and the tooltip-backdrop menu holding the ref's
+         fixed pool of 32 rows (hidden until AddButton). The label is authored LEFT-anchored:
+         the ref leans on the 1.12 ButtonText default rect spanning the button, which our lazy
+         label slot doesn't reproduce. ─────────────────────────────────────────────────── -->
+    <Button name="UIMenuButtonTemplate" virtual="true">
+        <Size><AbsDimension x="128" y="16"/></Size>
+        <Scripts>
+            <OnLoad>
+                BenillaUIMenuButton_OnLoad()
+            </OnLoad>
+            <OnClick>
+                BenillaUIMenuButton_OnClick()
+            </OnClick>
+            <OnEnter>
+                BenillaUIMenuButton_OnEnter()
+            </OnEnter>
+            <OnLeave>
+                BenillaUIMenuButton_OnLeave()
+            </OnLeave>
+        </Scripts>
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="$parentShortcutText" inherits="GameFontHighlight" hidden="true">
+                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <ButtonText name="$parentText">
+            <Anchors><Anchor point="LEFT"/></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlight" justifyH="LEFT"/>
+        <DisabledFont inherits="GameFontDisable" justifyH="LEFT"/>
+    </Button>
+    <Frame name="UIMenuTemplate" frameStrata="DIALOG" virtual="true">
+        <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+            <BackgroundInsets><AbsInset left="4" right="4" top="4" bottom="4"/></BackgroundInsets>
+            <TileSize><AbsValue val="32"/></TileSize>
+            <EdgeSize><AbsValue val="13"/></EdgeSize>
+        </Backdrop>
+        <Frames>
+            <Button name="$parentButton1" inherits="UIMenuButtonTemplate" id="1"/>
+            <Button name="$parentButton2" inherits="UIMenuButtonTemplate" id="2"/>
+            <Button name="$parentButton3" inherits="UIMenuButtonTemplate" id="3"/>
+            <Button name="$parentButton4" inherits="UIMenuButtonTemplate" id="4"/>
+            <Button name="$parentButton5" inherits="UIMenuButtonTemplate" id="5"/>
+            <Button name="$parentButton6" inherits="UIMenuButtonTemplate" id="6"/>
+            <Button name="$parentButton7" inherits="UIMenuButtonTemplate" id="7"/>
+            <Button name="$parentButton8" inherits="UIMenuButtonTemplate" id="8"/>
+            <Button name="$parentButton9" inherits="UIMenuButtonTemplate" id="9"/>
+            <Button name="$parentButton10" inherits="UIMenuButtonTemplate" id="10"/>
+            <Button name="$parentButton11" inherits="UIMenuButtonTemplate" id="11"/>
+            <Button name="$parentButton12" inherits="UIMenuButtonTemplate" id="12"/>
+            <Button name="$parentButton13" inherits="UIMenuButtonTemplate" id="13"/>
+            <Button name="$parentButton14" inherits="UIMenuButtonTemplate" id="14"/>
+            <Button name="$parentButton15" inherits="UIMenuButtonTemplate" id="15"/>
+            <Button name="$parentButton16" inherits="UIMenuButtonTemplate" id="16"/>
+            <Button name="$parentButton17" inherits="UIMenuButtonTemplate" id="17"/>
+            <Button name="$parentButton18" inherits="UIMenuButtonTemplate" id="18"/>
+            <Button name="$parentButton19" inherits="UIMenuButtonTemplate" id="19"/>
+            <Button name="$parentButton20" inherits="UIMenuButtonTemplate" id="20"/>
+            <Button name="$parentButton21" inherits="UIMenuButtonTemplate" id="21"/>
+            <Button name="$parentButton22" inherits="UIMenuButtonTemplate" id="22"/>
+            <Button name="$parentButton23" inherits="UIMenuButtonTemplate" id="23"/>
+            <Button name="$parentButton24" inherits="UIMenuButtonTemplate" id="24"/>
+            <Button name="$parentButton25" inherits="UIMenuButtonTemplate" id="25"/>
+            <Button name="$parentButton26" inherits="UIMenuButtonTemplate" id="26"/>
+            <Button name="$parentButton27" inherits="UIMenuButtonTemplate" id="27"/>
+            <Button name="$parentButton28" inherits="UIMenuButtonTemplate" id="28"/>
+            <Button name="$parentButton29" inherits="UIMenuButtonTemplate" id="29"/>
+            <Button name="$parentButton30" inherits="UIMenuButtonTemplate" id="30"/>
+            <Button name="$parentButton31" inherits="UIMenuButtonTemplate" id="31"/>
+            <Button name="$parentButton32" inherits="UIMenuButtonTemplate" id="32"/>
+        </Frames>
+        <Scripts>
+            <OnShow>
+                BenillaUIMenu_OnShow()
+                PlaySound("UChatScrollButton")
+                this:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
+                this:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
+            </OnShow>
+            <OnUpdate>
+                BenillaUIMenu_OnUpdate(arg1)
+            </OnUpdate>
+        </Scripts>
+    </Frame>
+
+    <!-- ── The chat menu button (ref ChatFrameMenuButton): the bubble icon atop the scroll
+         column; click opens ChatMenu (ref ChatFrame_OpenMenu). ──────────────────────────── -->
+    <Button name="ChatFrameMenuButton" frameStrata="LOW">
+        <Size><AbsDimension x="32" y="32"/></Size>
+        <Anchors>
+            <Anchor point="BOTTOM" relativeTo="ChatFrame1UpButton" relativePoint="TOP"/>
+        </Anchors>
+        <Scripts>
+            <OnClick>
+                PlaySound("igChatEmoteButton")
+                ChatMenu:Show()
+            </OnClick>
+        </Scripts>
+        <NormalTexture file="Interface\ChatFrame\UI-ChatIcon-Chat-Up"/>
+        <PushedTexture file="Interface\ChatFrame\UI-ChatIcon-Chat-Down"/>
+        <DisabledTexture file="Interface\ChatFrame\UI-ChatIcon-Chat-Disabled"/>
+        <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+    </Button>
+
+    <!-- ChatMenu + its two nested menus (ref FloatingChatFrame.xml; the ref's own OnShow
+         hides only EmoteMenu — hiding both submenus is the same intent without the ref's
+         Voice-menu-left-open corner). The submenus are authored as children (the ref's
+         parent="ChatMenu" attr — this engine attaches by nesting, CharacterFrame.xml's note),
+         so hiding ChatMenu hides them with it. -->
+    <Frame name="ChatMenu" inherits="UIMenuTemplate" hidden="true">
+        <Anchors>
+            <Anchor point="BOTTOMLEFT" relativeTo="ChatFrameMenuButton" relativePoint="TOPRIGHT"/>
+        </Anchors>
+        <Frames>
+            <Frame name="EmoteMenu" inherits="UIMenuTemplate" hidden="true">
+                <Scripts>
+                    <OnLoad>
+                        BenillaOnEmoteMenuLoad(BenillaEmoteMenuList)
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+            <Frame name="VoiceMacroMenu" inherits="UIMenuTemplate" hidden="true">
+                <Scripts>
+                    <OnLoad>
+                        BenillaOnEmoteMenuLoad(BenillaVoiceMacroList)
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                BenillaChatMenu_OnLoad()
+            </OnLoad>
+            <OnShow>
+                BenillaUIMenu_OnShow()
+                EmoteMenu:Hide()
+                VoiceMacroMenu:Hide()
+                this:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b)
+                this:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b)
+            </OnShow>
+        </Scripts>
+    </Frame>
 
     <!-- ── The edit box (ref ChatFrameEditBox): below ChatFrame1, -5/+5 wide, 32 tall, DIALOG
          strata, hidden until ENTER opens it (ui_chat::input). The three-piece
@@ -484,7 +801,9 @@
          the keys dead; the director's call is the modern law — plain arrows move the caret,
          Up/Down recall history (decision 0301). The engine still honors the attr faithfully
          for any box that sets it. -->
-    <EditBox name="ChatFrameEditBox" frameStrata="DIALOG" hidden="true" historyLines="32" letters="255">
+    <!-- historyLines: the ref template ships 32; 64 at the director's call ("at least 50",
+         2026-07-26) — the recall walk is the modern law already (decision 0301). -->
+    <EditBox name="ChatFrameEditBox" frameStrata="DIALOG" hidden="true" historyLines="64" letters="255">
         <Size><AbsDimension x="0" y="32"/></Size>
         <Anchors>
             <Anchor point="TOPLEFT" relativeTo="ChatFrame1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-5" y="-2"/></Offset></Anchor>

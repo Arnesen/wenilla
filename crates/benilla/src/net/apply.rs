@@ -521,7 +521,10 @@ pub(super) fn apply_net_updates(
                 session::reputations(standings, &mut reputations)
             }
             SessionEvent::ReputationDelta { standings } => {
-                session::reputation_delta(standings, &mut reputations)
+                // A standing change is a questgiver-status input (`SatisfyQuestReputation`, and
+                // the reaction gate): the reference sweeps from this handler too (0654).
+                session::reputation_delta(standings, &mut reputations);
+                quest.bump_reask();
             }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
             SessionEvent::Proficiency {
@@ -671,8 +674,19 @@ pub(super) fn apply_net_updates(
             SessionEvent::Chat(m) => {
                 // The chat window (decision 0084): the feed ([`crate::ui_chat`]) formats + colors
                 // per type, resolves the sender name ask-once, and AddMessages it into ChatFrame1.
-                // System lines (type 0x0A) are GM dot-command feedback — now visible, not silent.
-                debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
+                // System lines (`CHAT_MSG_SYSTEM` 0x0A, vmangos `SharedDefines.h`) are the SERVER'S
+                // ANSWER to a GM dot-command — "Premade gear template N applied", "No matching
+                // premade player template found", "There is no such command". For a headless probe
+                // that is the only channel the server has to say *why* something did not happen, so
+                // it rides at `info!`: at `debug!` it was in the log but invisible at the default
+                // level, and a refused command read exactly like an applied one (decision 0651 —
+                // the rig's whole batch silently no-op'd on a too-low GM level and nothing said so).
+                // Ordinary chat stays at `debug!`: conversation, not diagnosis, and high volume.
+                if m.chat_type == 0x0A {
+                    info!("net: server says — {}", m.text);
+                } else {
+                    debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
+                }
                 // …and on the trace clock too (decision 0624). A GM dot-command is the only way to
                 // ask the SERVER what it believes — `.gps` reads back the server-side position of a
                 // mover whose packets may or may not be reaching it — and its answer is only usable
@@ -748,6 +762,8 @@ pub(super) fn apply_net_updates(
             } => {
                 let lines = group.apply_list(group_type, own_flags, members, leader, loot);
                 push_group_lines(&mut chat_log, lines);
+                // Roster changes move shared-quest availability — the reference sweeps here (0654).
+                quest.bump_reask();
             }
             SessionEvent::PartyCommandResult {
                 operation,
@@ -1172,7 +1188,12 @@ pub(super) fn apply_net_updates(
             SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest),
             SessionEvent::QuestProgress(p) => quest_progress(p, &mut quest),
             SessionEvent::QuestOffer(o) => quest_offer(o, &mut quest),
-            SessionEvent::QuestComplete(c) => quest_complete(c, &mut quest),
+            SessionEvent::QuestComplete(c) => {
+                // The turn-in result — the `SMSG_QUESTGIVER_*` demux the reference sweeps from
+                // (0654): every other giver's `!`/`?` can move the moment a quest is handed in.
+                quest_complete(c, &mut quest);
+                quest.bump_reask();
+            }
             // Quest log (decision 0088's deferred second slice): the full template feeds the log
             // window's ask-once detail cache; the `SMSG_QUESTUPDATE_*` toasts have no dedicated
             // window of their own on this server (no ErrorsFrame-style transient panel yet), so they
@@ -1185,20 +1206,30 @@ pub(super) fn apply_net_updates(
                 entry,
                 count,
                 required,
-            } => quest_objective_kill(entry, count, required),
+            } => {
+                quest_objective_kill(entry, count, required);
+                quest.bump_reask();
+            }
             SessionEvent::QuestObjectiveItem { item_id, count } => {
-                quest_objective_item(item_id, count)
+                quest_objective_item(item_id, count);
+                quest.bump_reask();
             }
             SessionEvent::QuestObjectivesComplete { quest_id } => {
-                quest_objectives_complete(quest_id)
+                // The `SMSG_QUESTUPDATE_*` family: the turn-in `?` can go gold with no quest-log
+                // field change of its own, so the reference sweeps from these handlers (0654).
+                quest_objectives_complete(quest_id);
+                quest.bump_reask();
             }
-            SessionEvent::QuestFailed { quest_id, timed } => quest_failed(
-                quest_id,
-                timed,
-                &mut quest_log,
-                &net_commands,
-                &mut chat_log,
-            ),
+            SessionEvent::QuestFailed { quest_id, timed } => {
+                quest_failed(
+                    quest_id,
+                    timed,
+                    &mut quest_log,
+                    &net_commands,
+                    &mut chat_log,
+                );
+                quest.bump_reask();
+            }
             SessionEvent::QuestLogFull => quest_log_full(&mut chat_log),
             SessionEvent::QuestGiverRefused { quest_id, reason } => {
                 quest_giver_refused(quest_id, reason, &mut chat_log)

@@ -150,6 +150,38 @@ pub struct ModelEmitter {
     pub geometry: Option<Handle<M2Model>>,
 }
 
+/// Whether looping `anim` would look like anything other than the **static mesh** — the doodad
+/// content gate (decision 0130, premise corrected by 0637).
+///
+/// The original gate asked "does some track have >1 key", reasoning that a constant pose renders
+/// identically to the un-rigged mesh. That premise is false: the static mesh is the **bind** pose,
+/// and a constant clip only equals it when the constant *is* rest. `DuelingFlag.m2` is the
+/// counter-example that cost us the bug — its Stand band brackets to a constant bone-0 translation
+/// of `−9.124` (the flag planted in the ground) while its bind pose is 9 yards up in the air, so a
+/// "constant ⇒ skip the rig" gate renders it floating.
+///
+/// So: a track that MOVES qualifies, and so does a constant sitting away from rest — translation
+/// ≠ 0 (the M2 translation track is a delta on the pivot offset), rotation ≠ identity, scale ≠ 1.
+/// Genuinely rest-posed idles — the ~90% of placed doodads decision 0130 measured — still take the
+/// static path, so that optimization survives intact.
+fn idle_pose_differs(anim: &benilla_formats::ModelAnimation) -> bool {
+    const EPS: f32 = 1e-4;
+    anim.bones.iter().any(|b| {
+        b.translation.len() > 1
+            || b.rotation.len() > 1
+            || b.scale.len() > 1
+            || b.translation
+                .iter()
+                .any(|(_, v)| v.iter().any(|c| c.abs() > EPS))
+            || b.rotation
+                .iter()
+                .any(|(_, q)| (q[3].abs() - 1.0).abs() > EPS)
+            || b.scale
+                .iter()
+                .any(|(_, s)| s.iter().any(|c| (c - 1.0).abs() > EPS))
+    })
+}
+
 /// A model reference inside an M2 record (`.mdx`/`.mdl`, mixed case, backslashes) → its
 /// `mpq://…m2` load URL — the same extension remap the client's loader does (the physical
 /// archive file is `.m2`).
@@ -421,19 +453,28 @@ impl AssetLoader for M2ModelLoader {
                     graph.add_target_to_mask_group(target, 4);
                 }
             }
+            // The model's baked PlayableAnimationLookup (decision 0082): parsed straight off the M2
+            // header alongside the sequences above, so a model lacking a requested clip can resolve
+            // to its own baked substitute at play time (`ModelAnimations::resolve`) instead of the
+            // creature driver silently doing nothing. Read BEFORE the clip walk because the
+            // loader-idle seed below resolves through it.
+            let playable_animation_lookup =
+                parse_m2_playable_animation_lookup(&bytes).unwrap_or_default();
             let mut clips = Vec::new();
-            // The doodad-animation content gate (decision 0130, `ModelAnimations::first_seq`): the
-            // file-order-first sequence's clip index, kept only when that sequence really MOVES a bone
-            // (>1 key on some track). A constant 1-key pose still builds a clip below, but looping it
-            // is visually the static mesh — the spawn site must not pay a skin + player for it.
+            // The loader-idle seed (decision 0637, wow-re `gameobject-anim-arm.md` §1 — the
+            // corrected `0x71019b` read): the loader arms **animation id 0 ("Stand")** resolved
+            // through the model's own `playableAnimationLookup`, NOT the file-order-first
+            // sequence. For the overwhelming majority of models those coincide, which is why the
+            // old file-order read survived; they diverge exactly on models whose first sequence is
+            // a Spawn — `DuelingFlag.m2` is Spawn(145)/Stand(0)/Despawn(157), and looping its
+            // Spawn band left the flag hanging 9 yards in the air on a 3.3 s cycle.
+            let idle_id = playable_animation_lookup
+                .first()
+                .map_or(0, |p: &benilla_formats::PlayableAnim| p.resolved_id);
             let mut first_seq = None;
             for (i, anim) in sequences.iter().enumerate() {
                 if let Some(clip) = build_animation_clip(anim, &skeleton) {
-                    if i == 0
-                        && anim.bones.iter().any(|b| {
-                            b.translation.len() > 1 || b.rotation.len() > 1 || b.scale.len() > 1
-                        })
-                    {
+                    if first_seq.is_none() && anim.anim_id == idle_id && idle_pose_differs(anim) {
                         first_seq = Some(clips.len());
                     }
                     let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
@@ -504,12 +545,6 @@ impl AssetLoader for M2ModelLoader {
                     hand_close[1] = Some(graph.add_clip_with_mask(grip.clone(), 1 << 4, 1.0, root));
                 }
             }
-            // The model's baked PlayableAnimationLookup (decision 0082): parsed straight off the M2
-            // header alongside the sequences above, so a model lacking a requested clip can resolve
-            // to its own baked substitute at play time (`ModelAnimations::resolve`) instead of the
-            // creature driver silently doing nothing.
-            let playable_animation_lookup =
-                parse_m2_playable_animation_lookup(&bytes).unwrap_or_default();
             // Global-sequence channels alone are enough to carry `ModelAnimations`: a model whose
             // sequences produced no clips can still pulse/flicker on its free-running loops (the
             // doodad `GlobalSeqOnly` tier, decision 0130) — dropping them because `clips` came up

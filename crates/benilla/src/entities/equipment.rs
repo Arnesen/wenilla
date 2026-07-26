@@ -101,6 +101,19 @@ pub(crate) struct ItemDisplays {
     pub(super) models: HashMap<(u32, ItemModelKind), DisplayModel>,
 }
 
+#[cfg(test)]
+impl ItemDisplays {
+    /// The icon-only test seam: a synthetic catalog with an empty model cache — for the UI feeds
+    /// that read nothing off this resource but the icon column (the action bar, the bags). They
+    /// live outside this module, so `models` is not theirs to build.
+    pub(crate) fn icons_for_tests(catalog: ItemDisplayCatalog) -> Self {
+        ItemDisplays {
+            catalog,
+            models: HashMap::new(),
+        }
+    }
+}
+
 /// A player's worn-equipment display ids by **bodyslot − 2** (shirt, chest, belt, pants, boots,
 /// wrist, gloves, tabard — the armor-composite slots, decision 0074), `0` = empty. `settled` means
 /// every non-empty visible-item entry has resolved through the template cache (hit or recorded

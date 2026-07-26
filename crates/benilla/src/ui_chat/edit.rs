@@ -17,7 +17,7 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ChatKind, NetCommands, SelfGuid};
-use crate::ui_script::UiKeyboardCapture;
+use crate::ui_script::{run_or_warn, UiKeyboardCapture};
 
 use super::event::{default_color, ChatEventKind};
 
@@ -279,7 +279,10 @@ pub(super) fn chat_edit_live(
             state.header_dirty = true;
             state.last_text = remainder.clone();
             let lua_text = remainder.replace('\\', "\\\\").replace('"', "\\\"");
-            let _ = script.run(&format!("ChatFrameEditBox:SetText(\"{lua_text}\")"));
+            run_or_warn(
+                &script,
+                &format!("ChatFrameEditBox:SetText(\"{lua_text}\")"),
+            );
         }
     }
     if state.header_dirty {
@@ -304,16 +307,19 @@ pub(super) fn chat_edit_live(
         // text (region.rs key-checks it): after a type switch (Say → "Tell Alice:") the old
         // header's width reads 0, not stale — the settle below waits for the RIGHT measure
         // instead of latching the previous header's insets (the /w cursor-in-the-header bug).
-        let _ = script.run(&format!(
-            "ChatFrameEditBoxHeader:SetText(\"{lua_header}\")\n\
-             ChatFrameEditBoxHeader:SetTextColor({rf:.4}, {gf:.4}, {bf:.4})\n\
-             ChatFrameEditBox:SetTextColor({rf:.4}, {gf:.4}, {bf:.4})\n\
-             local w = ChatFrameEditBoxHeader:GetWidth()\n\
-             if w and w > 1 then\n\
-                 ChatFrameEditBox:SetTextInsets(15 + w, 13, 0, 0)\n\
-                 BenillaChatHeaderSettled = true\n\
-             end"
-        ));
+        run_or_warn(
+            &script,
+            &format!(
+                "ChatFrameEditBoxHeader:SetText(\"{lua_header}\")\n\
+                 ChatFrameEditBoxHeader:SetTextColor({rf:.4}, {gf:.4}, {bf:.4})\n\
+                 ChatFrameEditBox:SetTextColor({rf:.4}, {gf:.4}, {bf:.4})\n\
+                 local w = ChatFrameEditBoxHeader:GetWidth()\n\
+                 if w and w > 1 then\n\
+                     ChatFrameEditBox:SetTextInsets(15 + w, 13, 0, 0)\n\
+                     BenillaChatHeaderSettled = true\n\
+                 end"
+            ),
+        );
         // Stay dirty until the measured width landed (the round-trip is a frame late on a fresh
         // header string).
         if script
@@ -467,7 +473,7 @@ pub(super) fn open_chat_keys(
     state.last_text.clear();
     script.focus_editbox("ChatFrameEditBox");
     if open_slash {
-        let _ = script.run("ChatFrameEditBox:SetText(\"/\")");
+        run_or_warn(&script, "ChatFrameEditBox:SetText(\"/\")");
         state.last_text = "/".into();
     }
 }

@@ -494,17 +494,12 @@ pub(crate) fn water_surface_at<'a>(
     liquid_at(water.filter(|w| !w.kind.is_fullbright()), wow, indoors).map(|h| h.surface_z)
 }
 
-/// Deepest water (yd) that still counts as **wading** — feet below the surface but not yet swimming.
-/// Beyond it the unit swims: footfalls go silent and the wading effects (splash sound, surface
-/// ripple) stop. Shared by every wading consumer ([`crate::sound::footsteps`], the enter-water
-/// splash, and [`crate::water_fx`]). B7 folded in (decision 0226: the real boundary is
-/// `0.75·collisionHeight` off feet-to-surface depth, not a flat constant) and the local player now
-/// runs a real WALKING↔SWIMMING mode on it (`player::swim`) — but this 2-yard proxy was never
-/// retired: it remains the only signal for units with no swim mode of their own (creatures, which
-/// still carry no wire swim flag — the `CreatureModelData.collisionHeight` plumb 0464 leaves
-/// open), AND these consumers still read it for the local player too instead of `Player::swimming`
-/// — a named follow-up in decision 0530.
-pub(crate) const WADE_MAX: f32 = 2.0;
+// The **wade ceiling** used to live here, as `WADE_MAX = 2.0` — a flat proxy for a boundary B7
+// (decision 0226) had already shown to be `0.75·collisionHeight`, kept because the per-unit height
+// it needed was 0464's un-plumbed `CreatureModelData.collisionHeight`. Decision 0645 plumbed it, so
+// the proxy is gone and there is no wade constant to re-import: wading is *the complement of
+// swimming*, one number, and its one spelling is `player::swim_enter_depth(h)`. A human's line
+// moved 2.0 → 1.52 yd, a murloc's far shallower.
 
 /// Eye-submersion accept margin (VERIFIED `FUN_0069b6d0`: `eye.z < surface + 0.01`).
 const SUBMERSION_EPS: f32 = 0.01;
@@ -1333,6 +1328,31 @@ mod real_data {
         assert!(
             (feet[2] - surface) < 1.0,
             "…but only just: the water is at the player's soles (got {surface})"
+        );
+    }
+
+    /// **The gradient the swim law is sized against** (decision 0644): Felwood's Felfire Hill
+    /// channel, along the run the live probe swam. A liquid surface is a heightfield, and *how far
+    /// from flat* is exactly what decides whether the swim latch's 1/36-yd hysteresis band can
+    /// absorb travelling along it — so the slope `player::swim`'s regression test drives is pinned
+    /// here against the shipped ADT instead of living as a constant someone can only take on faith.
+    #[test]
+    fn the_felfire_channel_falls_about_a_tenth_of_a_yard_per_yard() {
+        let (downstream, upstream) = ([1953.97_f32, -2866.84, 0.0], [2013.97_f32, -2866.84, 0.0]);
+        let all = surfaces_near("Kalimdor", downstream);
+        if all.is_empty() {
+            eprintln!("skipping: no WoW client data");
+            return;
+        }
+        let z = |at: [f32; 3]| {
+            liquid_at(all.iter(), at, Some(false))
+                .unwrap_or_else(|| panic!("no river at {at:?}"))
+                .surface_z
+        };
+        let slope = (z(upstream) - z(downstream)) / (upstream[0] - downstream[0]);
+        assert!(
+            (slope - 0.099).abs() < 0.005,
+            "the channel's gradient over 60 yd (got {slope})"
         );
     }
 }

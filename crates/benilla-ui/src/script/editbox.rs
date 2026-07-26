@@ -226,6 +226,12 @@ fn set_focus_handle(lua: &Lua, h: FrameHandle) {
         }
         let old = model.focused_editbox;
         model.focused_editbox = Some(h);
+        // A fresh focus starts a fresh history session: the browse position must not leak from
+        // the box's previous open (programmatic SetText deliberately preserves it — the chat
+        // live parse's recall rewrite — so this is where a stale walk gets dropped).
+        if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
+            eb.end_history_browse();
+        }
         (old.map(|o| model.frame_id(o)), model.frame_id(h))
     };
     if let Some(oid) = old_id {
@@ -375,8 +381,8 @@ fn delete_dir(lua: &Lua, h: FrameHandle, forward: bool) {
 
 /// One UP/DOWN history-recall step: ask the state for the line to show and route it through the
 /// internal `set_text` path (region sync + `OnTextSet`/`OnTextChanged` — a recall resets FrameXML
-/// tab-complete state exactly like any other text change). `set_text` itself leaves the browse
-/// position intact; only typed edits and Lua `SetText` end browsing.
+/// tab-complete state exactly like any other text change). `set_text` (internal AND Lua) leaves
+/// the browse position intact; typed edits, `AddHistoryLine`, and focus gain end browsing.
 fn history_step_key(lua: &Lua, h: FrameHandle, older: bool) {
     let recalled = with_eb(lua, h, |eb| eb.history_step(older)).flatten();
     if let Some(text) = recalled {

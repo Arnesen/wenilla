@@ -1,9 +1,12 @@
 //! The partner live probe (`WOW_PROBE=partner`) — the party arc's instrument (decision 0434):
 //! a second client that says YES. Once in-world it auto-accepts every group invite, so the
 //! director can exercise the whole party surface — invite, roster lines, member frames,
-//! leader/loot management, pings — solo, with the probe account as the other member. Non-combat
-//! (the unattended-combat ban, `method.md` "The local vmangos server", stands untouched: this
-//! probe never swings). Pair with the slot-keyed probe identity (`WOW_USER=probeN …`, method.md).
+//! leader/loot management, pings — solo, with the probe account as the other member. It also
+//! accepts **duel** challenges (decision 0637), which is what makes the duel arc's two-client
+//! questions answerable at all: whether the opponent turns hostile, whether the arbiter flag
+//! plants. Non-combat (the unattended-combat ban, `method.md` "The local vmangos server", stands
+//! untouched: this probe answers a challenge but never swings, and a duel nobody strikes in
+//! simply times out). Pair with the slot-keyed probe identity (`WOW_USER=probeN …`, method.md).
 
 use bevy::prelude::*;
 
@@ -25,6 +28,7 @@ impl Plugin for ProbePartnerPlugin {
 fn partner_probe(
     self_player: Query<(), With<SelfPlayer>>,
     mut group: ResMut<GroupState>,
+    mut duel: ResMut<crate::ui_duel::DuelState>,
     net: Res<crate::net::NetCommands>,
 ) {
     if self_player.is_empty() {
@@ -33,5 +37,15 @@ fn partner_probe(
     if let Some(inviter) = group.pending_invite.take() {
         info!("partner probe: accepting {inviter}'s group invite");
         let _ = net.0.send(crate::net::ClientCommand::GroupAccept);
+    }
+    // A pending challenge is answered with `CMSG_DUEL_ACCEPTED` the frame it lands. Taking the
+    // challenger discharges the popup debt the same way the UI feed's DUEL_REQUESTED edge would,
+    // so no dialog is left owed on the probe.
+    let arbiter = duel.arbiter;
+    if let Some(challenger) = duel.take_challenger() {
+        info!("partner probe: accepting duel from {challenger:#018x} (arbiter {arbiter:#018x})");
+        let _ = net
+            .0
+            .send(crate::net::ClientCommand::DuelAccepted { arbiter });
     }
 }

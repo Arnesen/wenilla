@@ -17,8 +17,7 @@
         DEVIATIONS / DEFERRED (phase 4+, decision 0434):
         - Pet frames, the 4 debuff buttons (48,-32 +2px chain), the 16/8 buff hover panel, and the
           dispellable-debuff Status ring: they need the party aura/pet feed (phase 4).
-        - The PVP icon (UI-Group-PVP-<faction>, 32x32 at -9,-15): needs UnitFactionGroup, absent
-          from the engine today (a party member always shares our faction in 1.12 — low loss).
+        (The PVP icon landed with decision 0646 — UnitFactionGroup exists now.)
         - HIDE_PARTY_INTERFACE (hide-in-raid uvar): waits for the raid UI slice.
         - Portrait: our high-res model bake (decision 0105), same as every unit frame.
         - The ref's low-health portrait pulse flips alpha 127/255<->255/255 on 0.5 s half-cycles
@@ -72,6 +71,7 @@
             frame.leaderIcon = getglobal(tf .. "LeaderIcon")
             frame.masterIcon = getglobal(tf .. "MasterIcon")
             frame.disconnect = getglobal(tf .. "Disconnect")
+            frame.pvpIcon    = getglobal(tf .. "PVPIcon")
             frame.flashTimer = 0
             SetPortraitTexture(frame.portrait, frame.unit)
             frame:RegisterEvent("PLAYER_ENTERING_WORLD")
@@ -84,6 +84,7 @@
             frame:RegisterEvent("UNIT_MAXPOWER")
             frame:RegisterEvent("UNIT_DISPLAYPOWER")
             frame:RegisterEvent("UNIT_NAME_UPDATE")
+            frame:RegisterEvent("UNIT_FACTION")
             frame:EnableMouse(true)
             BenillaPartyFrame_Update(frame)
         end
@@ -163,6 +164,26 @@
             end
 
             BenillaPartyFrame_HealthCheck(frame)
+            BenillaPartyFrame_UpdatePvP(frame)
+        end
+
+        -- ref PartyMemberFrame_UpdatePvPStatus (PartyMemberFrame.lua l.116-130), verbatim: the
+        -- same three branches the unit frames run, but the faction leg draws the GroupFrame art
+        -- (UI-Group-PVP-<group>) — only the FFA skull is shared with the big frames, because no
+        -- UI-Group-PVP-FFA ships. Decision 0646 §4; closes 0434's named deferral (the icon waited
+        -- on UnitFactionGroup, which the app now feeds).
+        function BenillaPartyFrame_UpdatePvP(frame)
+            local unit = frame.unit
+            local factionGroup = UnitFactionGroup(unit)
+            if UnitIsPVPFreeForAll(unit) then
+                frame.pvpIcon:SetTexture("Interface\\TargetingFrame\\UI-PVP-FFA")
+                frame.pvpIcon:Show()
+            elseif factionGroup and UnitIsPVP(unit) then
+                frame.pvpIcon:SetTexture("Interface\\GroupFrame\\UI-Group-PVP-" .. factionGroup)
+                frame.pvpIcon:Show()
+            else
+                frame.pvpIcon:Hide()
+            end
         end
 
         -- The ref's <=20% portrait alpha pulse: a 0.5 s-per-leg triangle between 127/255 and 1.
@@ -304,6 +325,12 @@
                         <Texture name="$parentMasterIcon" file="Interface\GroupFrame\UI-Group-MasterLooter" hidden="true">
                             <Size><AbsDimension x="16" y="16"/></Size>
                             <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="32" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <!-- The group PvP icon, 32x32 TOPLEFT (-9,-15) (ref PartyFrameTemplates.xml
+                             l.298-309). Texture chosen at runtime — decision 0646 §4. -->
+                        <Texture name="$parentPVPIcon" hidden="true">
+                            <Size><AbsDimension x="32" y="32"/></Size>
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="-9" y="-15"/></Offset></Anchor></Anchors>
                         </Texture>
                         <Texture name="$parentDisconnect" file="Interface\CharacterFrame\Disconnect-Icon" hidden="true">
                             <Size><AbsDimension x="64" y="64"/></Size>

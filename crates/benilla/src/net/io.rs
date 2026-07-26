@@ -857,6 +857,7 @@ fn writer_loop(
                     ClientCommand::SetRaidTarget { icon, guid } => w.raid_target_set(icon, guid),
                     ClientCommand::DuelAccepted { arbiter } => w.duel_accepted(arbiter),
                     ClientCommand::DuelCancelled { arbiter } => w.duel_cancelled(arbiter),
+                    ClientCommand::TogglePvp => w.toggle_pvp(),
                     ClientCommand::TaxiNodeStatusQuery { guid } => w.taxi_node_status_query(guid),
                     ClientCommand::TaxiQueryNodes { guid } => w.taxi_query_available_nodes(guid),
                     ClientCommand::ActivateTaxi {

@@ -324,103 +324,176 @@ pub struct ModelAnimation {
     pub events: Vec<AnimEvent>,
 }
 
-/// Read one bone `M2Track`'s keyframes for the sequence spanning `[seq_start_ms, seq_end_ms]` (absolute
-/// ms), rebased to seconds from the start. `read_value` decodes one value at a byte offset; `stride` is
-/// its size. The v256 `M2Track` (0x1c): `interp_type`@0, `global_seq`@2, then three `M2Array`s —
-/// interpolation_ranges@0x04, **timestamps@0x0c**, **values@0x14** (each `{count u32, offset u32}`).
-///
-/// Keys are selected by **absolute timestamp within the sequence's time band**, NOT via
-/// `interpolation_ranges`: the flat timestamp/value arrays concatenate every sequence's keys
-/// (timestamps absolute, VERIFIED), the sequences occupy disjoint bands, and this is exactly what the
-/// real client's kernel does (rebase playback time into `[seqStart, seqEnd]`, then search the
-/// timestamps). The `interpolation_ranges` window proved unreliable in real vanilla art — its end index
-/// can point past the sequence into a later one (Chicken/Bear/Kobold/…: a key 14–64 s away), which froze
-/// those creatures at a garbage pose: the range's far key is a clamp *endpoint*, never a playable
-/// in-clip key. A **global-sequence** track (`global_seq != 0xffff`) loops on its own clock and is
-/// skipped here (the global-sequence post-pass is deferred).
-///
-/// A band with **no keys at all** still has an authored pose: the real sampler clamps/lerps between
-/// the keys bracketing the band (that is what the per-sequence `interpolation_ranges` pairs encode —
-/// HumanMale bone 27 rot has 4 keys and `ranges[Run] = (2, 3)`, both outside Run's band), so a keyed
-/// bone is **never** left unsampled. Dropping the track instead froze the bone at whatever the
-/// *previous* clip left (the task-#14 tilt: a Stand-variation waist twist rode through the entire
-/// run, exposed the day the 0123 variation roll first armed non-head Stands). We emit one constant
-/// key holding the **nearest** authored key's value — the value the real clamp lands on whenever the
-/// band sits close to one bracket (vanilla bands are 0.3–4 s; bracket gaps are minutes), a named
-/// approximation of the mid-gap lerp otherwise.
-fn read_bone_track<T>(
+/// One bone-channel `M2Track`, read **once per model** rather than once per sequence: the v256 track
+/// (0x1c) is `interp_type`@0, `global_seq`@2, then three `M2Array`s — interpolation_ranges@0x04,
+/// **timestamps@0x0c**, **values@0x14** (each `{count u32, offset u32}`). Every sequence carves its
+/// own band out of this one shared key list ([`ChannelTrack::band`]), so re-reading the arrays per
+/// sequence was pure waste — HumanMale walked 143 sequences × 119 bones × 3 channels of headers to
+/// build 357 tracks' worth of keys.
+struct ChannelTrack<T> {
+    /// `interp_type == 0`: hold each key until the next, no interpolation (the samplers' shared
+    /// `cmp word[track],0` dispatch — wow-re `eval.md` FN2/FN6).
+    step: bool,
+    /// Global-sequence id, `0xffff` for an ordinary sequence-timeline track.
+    gseq: u16,
+    /// The per-sequence **key-index window** `(lo, hi)`, indexed by the sequence's FILE slot — the
+    /// array the reference's key search selects before it looks at a single timestamp (VERIFIED
+    /// wow-re `eval.md` FN1 `0x713d50` §1). Empty ⇒ the reference's own `[track+4]==0` fallback,
+    /// "search the whole key list".
+    ranges: Vec<(u32, u32)>,
+    /// `(absolute ms, value)` keys, file order — every sequence's keys concatenated on one
+    /// timeline (timestamps absolute, VERIFIED).
+    keys: Vec<(u32, T)>,
+}
+
+/// One bone's three channel tracks, in the bone record's own order: translation `+0x0c`, rotation
+/// `+0x28`, scale `+0x44`.
+type BoneChannels = (
+    ChannelTrack<[f32; 3]>,
+    ChannelTrack<[f32; 4]>,
+    ChannelTrack<[f32; 3]>,
+);
+
+/// Read one bone channel's `M2Track` whole (see [`ChannelTrack`]). `read_value` decodes one value at
+/// a byte offset; `stride` is its size. Out-of-range reads truncate the key list — real vanilla art
+/// relies on that tolerance.
+fn read_channel_track<T>(
     b: &[u8],
     track: usize,
-    seq_start_ms: u32,
-    seq_end_ms: u32,
     stride: usize,
     read_value: impl Fn(&[u8], usize) -> T,
-) -> Vec<(f32, T)> {
+) -> ChannelTrack<T> {
     if track + 0x1c > b.len() {
-        return Vec::new();
+        return ChannelTrack {
+            step: false,
+            gseq: 0xffff,
+            ranges: Vec::new(),
+            keys: Vec::new(),
+        };
     }
-    let (times_n, times_o) = (
+    let (rn, ro) = (
+        le_u32(b, track + 0x04) as usize,
+        le_u32(b, track + 0x08) as usize,
+    );
+    let (tn, to) = (
         le_u32(b, track + 0x0c) as usize,
         le_u32(b, track + 0x10) as usize,
     );
-    let vals_o = le_u32(b, track + 0x18) as usize;
-    if le_u16(b, track + 0x02) != 0xffff {
-        // A **global-sequence** track: driven by its own looping clock, independent of the playing
-        // sequence. The single-key case is a pure CONSTANT channel — this is how vanilla art authors
-        // the stowed-weapon attach-bone orientations (HumanMale bones 29/30/58–62: one rotation key
-        // at t=0 on global-seq 0, itself 0 ms long — the blade-down / shield-on-back quaternions;
-        // dumped 2026-07-03, the floating-stowed-sword bug). Emit the constant into every sequence's
-        // window (`keyframe_curve` holds a lone key across the clip). A *time-varying* multi-key
-        // global track (a fidget glow on its own clock) still needs the global clock — deferred.
-        if times_n == 1 && vals_o + stride <= b.len() {
-            return vec![(0.0, read_value(b, vals_o))];
-        }
-        return Vec::new();
+    let vo = le_u32(b, track + 0x18) as usize;
+    let ranges = (0..rn)
+        .map_while(|i| {
+            let e = ro + i * 8;
+            (e + 8 <= b.len()).then(|| (le_u32(b, e), le_u32(b, e + 4)))
+        })
+        .collect();
+    let keys = (0..tn)
+        .map_while(|k| {
+            let (t_off, v_off) = (to + k * 4, vo + k * stride);
+            (t_off + 4 <= b.len() && v_off + stride <= b.len())
+                .then(|| (le_u32(b, t_off), read_value(b, v_off)))
+        })
+        .collect();
+    ChannelTrack {
+        step: le_u16(b, track) == 0,
+        gseq: le_u16(b, track + 0x02),
+        ranges,
+        keys,
     }
-    let mut out = Vec::new();
-    // The closest out-of-band key, by distance to the band — the clamp value if the band is empty.
-    let mut nearest: Option<(u32, usize)> = None;
-    for k in 0..times_n {
-        let (t_off, v_off) = (times_o + k * 4, vals_o + k * stride);
-        if t_off + 4 > b.len() || v_off + stride > b.len() {
-            break;
-        }
-        let ts = le_u32(b, t_off);
-        if ts < seq_start_ms || ts > seq_end_ms {
-            // A key in another sequence's band — not playable here, but remembered as the
-            // clamp candidate (see the module doc: an empty band still has an authored pose).
-            let d = if ts < seq_start_ms {
-                seq_start_ms - ts
-            } else {
-                ts - seq_end_ms
-            };
-            if nearest.is_none_or(|(best, _)| d < best) {
-                nearest = Some((d, k));
-            }
-            continue;
-        }
-        out.push(((ts - seq_start_ms) as f32 / 1000.0, read_value(b, v_off)));
-    }
-    if out.is_empty() {
-        if let Some((_, k)) = nearest {
-            let v_off = vals_o + k * stride;
-            if v_off + stride <= b.len() {
-                out.push((0.0, read_value(b, v_off)));
-            }
-        }
-    }
-    out
 }
 
-/// The weapon-grip finger poses: each requested `bone`'s rotation at the **HandsClosed** (`AnimationData`
-/// id 15) frame, **clamped** to the nearest key at-or-before that frame. Scoped to the grip on purpose —
-/// a weapon-hand finger bone is keyed in *adjacent* global-timeline bands but NOT the HandsClosed frame
-/// itself (on HumanMale bone 102 is keyed at 43333/70000 ms, both curled, not the 60000 ms frame), so the
-/// general per-sequence in-band read ([`read_bone_track`]) correctly drops it — yet the real client
-/// evaluates the global track there and gets the curled pose (wow-re `hand-grip-mechanism.md`). Doing the
-/// clamp *only* for these few finger bones is what makes the weapon hand close without re-introducing the
-/// distant-key bleed the in-band read deliberately guards against. Returns `(bone, quat[x,y,z,w])` for the
-/// bones that carry a plain rotation track; empty if the model has no HandsClosed sequence.
+impl<T: super::key_anim::Lerp + PartialEq> ChannelTrack<T> {
+    /// This channel's keyframes for the sequence at file slot `slot`, spanning
+    /// `[start, end]` (absolute ms), rebased to seconds from the band start.
+    ///
+    /// In-band keys are selected by **absolute timestamp**, which is what the reference's search
+    /// resolves to: its window is `ranges[slot]`, and that window brackets the band's own keys in
+    /// every model of the 1.12.1 corpus (`benilla-extract bonescan`: 0 violations in 516 633 keyed
+    /// band-slots — the check that makes reading the window safe at all). Selecting *the window's
+    /// keys* as in-clip keys is the thing that never worked: `hi` routinely points at a key in a
+    /// later band 14–64 s away, which froze Chicken/Bear/Kobold at a garbage pose. It is a
+    /// **bracket**, not a key set.
+    ///
+    /// Its load-bearing use is the band **edges**, where the reference keeps sampling and a
+    /// truncated key list does not (wow-re `eval.md` FN1 `0x713d50`):
+    ///
+    /// - a band with **no keys of its own** still has an authored pose — the window resolves it,
+    ///   either outright (`lo >= hi` ⇒ `keys[lo]`, the degenerate `{lo, lo, 0}` result) or as the
+    ///   lerp across the bracketing pair. Leaving the track empty instead froze the bone at
+    ///   whatever the *previous* clip left it (decision 0133's tilt: a Stand-variation waist twist
+    ///   rode through the entire run);
+    /// - past the band's last key the reference keeps ramping toward `k1 = k0 + 1`, which is
+    ///   bounded by the TOTAL key count and not by the window — so a key belonging to a later
+    ///   sequence is a live lerp endpoint.
+    ///
+    /// A head/tail sample is emitted only when it differs from the edge key it would otherwise
+    /// hold, so the clips are unchanged wherever the reference and a plain hold agree — which,
+    /// measured, is everywhere but `Creature\Zombie`'s root translation (decision 0643).
+    ///
+    /// A **global-sequence** channel (`gseq != 0xffff`) runs on its own clock, not this band: a
+    /// lone key is a pure CONSTANT folded into every clip (how vanilla authors the stowed-weapon
+    /// attach-bone orientations — HumanMale bones 29/30/58–62), and a multi-key one belongs to
+    /// [`parse_m2_global_sequence_bones`] and the `GlobalSeqDrive` lane, so it is left out here.
+    fn band(&self, slot: usize, start: u32, end: u32) -> Vec<(f32, T)> {
+        if self.keys.is_empty() {
+            return Vec::new();
+        }
+        if self.gseq != 0xffff {
+            return match self.keys.len() {
+                1 => vec![(0.0, self.keys[0].1)],
+                _ => Vec::new(),
+            };
+        }
+        let last = self.keys.len() - 1;
+        let (lo, hi) = self
+            .ranges
+            .get(slot)
+            .map_or((0, last), |&(lo, hi)| (lo as usize, hi as usize));
+        let at = |t| super::key_anim::sample_window(&self.keys, self.step, lo, hi, t);
+        let rebase = |ts: u32| (ts.saturating_sub(start)) as f32 / 1000.0;
+        let in_band: Vec<(u32, T)> = self
+            .keys
+            .iter()
+            .copied()
+            .filter(|&(ts, _)| ts >= start && ts <= end)
+            .collect();
+        let Some(&(first_ms, first_v)) = in_band.first() else {
+            // An empty band: the window's value, held across it — two keys only when the bracket
+            // lerp actually moves within the band.
+            let head = match at(start) {
+                Some(v) => v,
+                None => return Vec::new(),
+            };
+            return match at(end) {
+                Some(tail) if tail != head => vec![(0.0, head), (rebase(end), tail)],
+                _ => vec![(0.0, head)],
+            };
+        };
+        let (last_ms, last_v) = in_band[in_band.len() - 1];
+        let mut out = Vec::with_capacity(in_band.len() + 2);
+        if first_ms > start && at(start).is_some_and(|h| h != first_v) {
+            out.push((0.0, at(start).unwrap()));
+        }
+        out.extend(in_band.iter().map(|&(ts, v)| (rebase(ts), v)));
+        if last_ms < end && at(end).is_some_and(|t| t != last_v) {
+            out.push((rebase(end), at(end).unwrap()));
+        }
+        out
+    }
+}
+
+/// The weapon-grip finger poses: each requested `bone`'s rotation **as the reference samples it at
+/// the HandsClosed frame** (`AnimationData` id 15), through the same window kernel every other
+/// channel uses ([`ChannelTrack::band`]).
+///
+/// This exists as its own entry point because the grip is not a *clip* — it is a pose lifted out of
+/// one frame and worn as a masked overlay over whatever animation is playing, so the weapon hand
+/// stays closed while the body runs (wow-re `hand-grip-mechanism.md`). HandsClosed is a 33 ms band
+/// that keys nothing of its own on the finger bones (HumanMale bone 102 is keyed at 43333/70000 ms,
+/// both curled, not the 60000 ms frame) — its `interpolation_ranges` pair brackets it, which is
+/// exactly the case the window rule resolves.
+///
+/// Returns `(bone, quat[x,y,z,w])` for the bones that carry a plain rotation track; empty if the
+/// model has no HandsClosed sequence.
 pub fn hand_grip_finger_poses(bytes: &[u8], bones: &[u16]) -> Vec<(u16, [f32; 4])> {
     let b = bytes;
     if b.len() < 0x40 || &b[0..4] != b"MD20" {
@@ -428,65 +501,49 @@ pub fn hand_grip_finger_poses(bytes: &[u8], bones: &[u16]) -> Vec<(u16, [f32; 4]
     }
     let (seq_count, seq_ofs) = (le_u32(b, 0x1c) as usize, le_u32(b, 0x20) as usize);
     let (bone_count, bone_ofs) = (le_u32(b, 0x34) as usize, le_u32(b, 0x38) as usize);
-    // HandsClosed (anim id 15) → its frame's absolute start ms.
-    let mut frame = None;
+    // HandsClosed (anim id 15) → its FILE slot (what indexes the key windows) and frame start ms.
+    let mut hands_closed = None;
     for s in 0..seq_count {
         let rec = seq_ofs + s * 0x44;
         if rec + 0x44 > b.len() {
             break;
         }
         if le_u16(b, rec) == 15 {
-            frame = Some(le_u32(b, rec + 0x04));
+            hands_closed = Some((s, le_u32(b, rec + 0x04)));
             break;
         }
     }
-    let Some(frame) = frame else {
+    let Some((slot, frame)) = hands_closed else {
         return Vec::new();
+    };
+    let quat = |b: &[u8], o: usize| {
+        [
+            le_f32(b, o),
+            le_f32(b, o + 4),
+            le_f32(b, o + 8),
+            le_f32(b, o + 12),
+        ]
     };
     let mut out = Vec::new();
     for &bone in bones {
         let bi = bone as usize;
-        if bi >= bone_count {
+        if bi >= bone_count || bone_ofs + bi * 0x6c + 0x6c > b.len() {
             continue;
         }
-        let track = bone_ofs + bi * 0x6c + 0x28; // the bone's rotation M2Track (+0x28 in the 0x6c record)
-        if track + 0x1c > b.len() || le_u16(b, track + 0x02) != 0xffff {
-            continue; // out of range, or a global-sequence track (own clock — not this)
+        // The bone's rotation M2Track (+0x28 in the 0x6c record), stride 16 (a 4×f32 quaternion).
+        let tr = read_channel_track(b, bone_ofs + bi * 0x6c + 0x28, 16, quat);
+        if tr.gseq != 0xffff || tr.keys.is_empty() {
+            continue; // a global-sequence track runs on its own clock — not this
         }
-        let (nts, ots) = (
-            le_u32(b, track + 0x0c) as usize,
-            le_u32(b, track + 0x10) as usize,
-        );
-        let vals_o = le_u32(b, track + 0x18) as usize;
-        if nts == 0 {
+        let last = tr.keys.len() - 1;
+        let (lo, hi) = tr
+            .ranges
+            .get(slot)
+            .map_or((0, last), |&(lo, hi)| (lo as usize, hi as usize));
+        let Some(v) = super::key_anim::sample_window(&tr.keys, tr.step, lo, hi, frame) else {
             continue;
-        }
-        // Clamp: the last key with timestamp <= the frame (keys are time-ascending); else the first.
-        let mut k = 0usize;
-        for i in 0..nts {
-            let t_off = ots + i * 4;
-            if t_off + 4 > b.len() {
-                break;
-            }
-            if le_u32(b, t_off) <= frame {
-                k = i;
-            } else {
-                break;
-            }
-        }
-        let v = vals_o + k * 16; // rotation stride 16 (a 4×f32 quaternion)
-        if v + 16 > b.len() {
-            continue;
-        }
-        out.push((
-            bone,
-            [
-                le_f32(b, v),
-                le_f32(b, v + 4),
-                le_f32(b, v + 8),
-                le_f32(b, v + 12),
-            ],
-        ));
+        };
+        out.push((bone, v));
     }
     out
 }
@@ -544,6 +601,21 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
         model_events.push((ident, data, times));
     }
 
+    // Every bone's three channel tracks, read ONCE: the key arrays are shared by every sequence,
+    // which only slices its own band out of them (`ChannelTrack::band`).
+    let bone_tracks: Vec<BoneChannels> = (0..bone_count)
+        .map_while(|i| {
+            let brec = bone_ofs + i * 0x6c;
+            (brec + 0x60 <= b.len()).then(|| {
+                (
+                    read_channel_track(b, brec + 0x0c, 12, vec3),
+                    read_channel_track(b, brec + 0x28, 16, quat),
+                    read_channel_track(b, brec + 0x44, 12, vec3),
+                )
+            })
+        })
+        .collect();
+
     let mut out = Vec::new();
     for s in 0..seq_count {
         let rec = seq_ofs + s * 0x44;
@@ -582,14 +654,11 @@ pub fn parse_m2_animations(b: &[u8]) -> Vec<ModelAnimation> {
         }
         let looping = flags & 1 == 0; // VERIFIED polarity: bit0 clear loops, set clamps
         let mut bones = Vec::new();
-        for i in 0..bone_count {
-            let brec = bone_ofs + i * 0x6c;
-            if brec + 0x60 > b.len() {
-                break;
-            }
-            let translation = read_bone_track(b, brec + 0x0c, start, end, 12, vec3);
-            let rotation = read_bone_track(b, brec + 0x28, start, end, 16, quat);
-            let scale = read_bone_track(b, brec + 0x44, start, end, 12, vec3);
+        for (i, tracks) in bone_tracks.iter().enumerate() {
+            let (tr, rot, sc) = tracks;
+            let translation = tr.band(seq_index, start, end);
+            let rotation = rot.band(seq_index, start, end);
+            let scale = sc.band(seq_index, start, end);
             if !(translation.is_empty() && rotation.is_empty() && scale.is_empty()) {
                 bones.push(BoneKeys {
                     bone: i as u16,
@@ -788,13 +857,13 @@ mod tests {
         );
     }
 
-    /// An empty band clamps to the nearest authored key instead of dropping the track (the task-#14
-    /// tilt): HumanMale bone 27 (waist) rot has 4 keys, all outside Run's band — the real sampler
-    /// pins it via `interpolation_ranges` (Run's pair is `(2, 3)`, both out-of-band), ours must emit
-    /// the constant so a Stand-variation twist can't ride through the run. And the guarantee that
-    /// makes the fix total: on every sequence of the model, any bone keyed *anywhere* stays keyed.
+    /// An empty band still poses the bone instead of dropping the track (decision 0133's tilt):
+    /// HumanMale bone 27 (waist) rot has 4 keys, all outside Run's band, and `ranges[Run] = (2, 3)`
+    /// brackets it — so the clip must carry the bracketed value as a constant, or a Stand-variation
+    /// twist rides through the entire run. And the guarantee that makes it total: on every sequence
+    /// of the model, any bone keyed *anywhere* stays keyed.
     #[test]
-    fn empty_band_clamps_to_nearest_key_never_drops_the_bone() {
+    fn empty_band_poses_the_bone_and_never_drops_it() {
         let data = vanilla_data_dir();
         if !data.is_dir() {
             eprintln!("skipping: vanilla client not present at {}", data.display());
@@ -854,6 +923,124 @@ mod tests {
                         "seq idx anim {} drops bone {bone}'s {name} — a stale-pose freeze",
                         s.anim_id
                     );
+                }
+            }
+        }
+    }
+
+    /// The one place in the whole 1.12.1 corpus where the file's key window and decision 0133's
+    /// nearest-key approximation disagree (`benilla-extract bonescan`: 9 of 210 368 empty band-slots,
+    /// all three `Creature\Zombie` models) — and it disagrees for a reason worth pinning.
+    ///
+    /// `Zombie.m2` bone 0 (the root) translation is a **step** track (`interp == 0`) with two keys:
+    /// `3333 = (0,0,0)` and `30000 = (0.0047, 0, 0)`. Walk's band `[26667, 27333]` keys nothing and
+    /// sits nearer the *second* key in time, so "nearest authored key" hands back a value the
+    /// reference has not stepped to yet — a key from the future. The reference searches `ranges[slot]
+    /// = (0, 1)`, takes `k0` = the last key at or before the time (key 0), and — being a step track —
+    /// copies it. Small in yards, wrong in direction, and only the file's own window gets it right.
+    #[test]
+    fn empty_band_takes_the_window_key_not_a_later_one() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Creature\\Zombie\\Zombie.m2")
+            .expect("read Zombie.m2");
+        let seqs = parse_m2_animations(&bytes);
+        for anim in [4, 5] {
+            let s = seqs
+                .iter()
+                .find(|s| s.anim_id == anim)
+                .unwrap_or_else(|| panic!("Zombie has anim {anim}"));
+            let root = s
+                .bones
+                .iter()
+                .find(|b| b.bone == 0)
+                .expect("the root is carried into the clip");
+            assert_eq!(
+                root.translation.len(),
+                1,
+                "a step track's empty band holds one value across the band"
+            );
+            assert_eq!(
+                root.translation[0].1,
+                [0.0, 0.0, 0.0],
+                "anim {anim} must hold key 0, not step early to the 0.0047 key at 30000 ms"
+            );
+        }
+    }
+
+    /// The weapon grip, which now reads through the shared window kernel rather than its own key
+    /// scan: HandsClosed on `HumanMale.m2` is the 33 ms band `[60000, 60033]`, which keys nothing on
+    /// finger bone 102 — its window brackets it with the keys at 43333/70000 ms, both the same
+    /// curled quaternion, so the pose the overlay wears is that curl and not the rest pose. The
+    /// substitution is a measured no-op: across the eight playable-race models with a HandsClosed
+    /// sequence, all 460 finger-capable rotation tracks give the same quaternion under the old
+    /// at-or-before clamp and under the window (decision 0643).
+    #[test]
+    fn hand_grip_reads_the_curled_pose_through_the_window() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Character\\Human\\Male\\HumanMale.m2")
+            .expect("read HumanMale.m2");
+        let poses = hand_grip_finger_poses(&bytes, &[102]);
+        let (bone, q) = *poses.first().expect("bone 102 carries a grip pose");
+        assert_eq!(bone, 102);
+        let want = [0.2536, -0.016, 0.0577, 0.9654];
+        for (i, (&got, &w)) in q.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (got - w).abs() < 1e-3,
+                "grip quat component {i}: got {got}, want ~{w} (the 43333/70000 ms curl)"
+            );
+        }
+    }
+
+    /// The invariant that makes reading `interpolation_ranges` safe at all, pinned on the model
+    /// decision 0133 named as the counter-example (`Bear`, which froze at a garbage pose when an
+    /// earlier parse treated the window's far bracket as a *playable in-clip key* — it is a
+    /// bracket, 14–64 s away). Two halves: no emitted keyframe may fall outside its own clip, and a
+    /// sequence that keys a bone must carry every one of that band's own keys. Corpus-wide the
+    /// first half is `bonescan`'s "band keys OUTSIDE their own ranges window: 0".
+    #[test]
+    fn no_clip_carries_a_key_from_another_sequences_band() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        for model in [
+            "Creature\\Bear\\Bear.m2",
+            "Creature\\Chicken\\Chicken.m2",
+            "Character\\Human\\Male\\HumanMale.m2",
+        ] {
+            let bytes = chain.read_file(model).expect("read model");
+            for s in parse_m2_animations(&bytes) {
+                for b in &s.bones {
+                    let times = b
+                        .translation
+                        .iter()
+                        .map(|&(t, _)| ("translation", t))
+                        .chain(b.rotation.iter().map(|&(t, _)| ("rotation", t)))
+                        .chain(b.scale.iter().map(|&(t, _)| ("scale", t)));
+                    for (ch, t) in times {
+                        assert!(
+                            (0.0..=s.duration + 1e-3).contains(&t),
+                            "{model} anim {} bone {} {ch}: key at {t}s is outside the \
+                             {}s clip — a bracket key leaked in as a playable key",
+                            s.anim_id,
+                            b.bone,
+                            s.duration
+                        );
+                    }
                 }
             }
         }

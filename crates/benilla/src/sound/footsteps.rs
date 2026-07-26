@@ -14,13 +14,12 @@
 //! `benilla-pins.md` B11, byte-confirmed); the lookup's class-0 rows are the Ancient
 //! Protector's stomps (kit 661), reached only by that model's own nonzero class.
 //!
-//! Wading (feet below a water surface, up to [`WADE_MAX`] deep) picks the lookup's **splash**
-//! slot instead of dry (falling back to dry when the class has no splash kit); deeper the unit
-//! swims and footfalls go silent. B7 folded in (decision 0226) and the local player now runs a
-//! real WALKING↔SWIMMING mode (`player::swim`), but this depth proxy was never retired: it is
-//! still the only signal for units with no swim mode of their own (creatures — 0464's open
-//! `collisionHeight` plumb), and this system still reads it for the local player too rather than
-//! the real mode flag — a named follow-up in decision 0530.
+//! Wading (feet below a water surface, down to the unit's own swim boundary `0.75·h`) picks the
+//! lookup's **splash** slot instead of dry (falling back to dry when the class has no splash kit);
+//! deeper the unit swims and footfalls go silent. The flat 2.0-yd stand-in that boundary used to be
+//! is retired now 0464's `collisionHeight` plumb has landed (decision 0645) — a murloc's footfalls
+//! now go quiet in water that only reaches a human's knees. Still open: this reads a *depth* even
+//! for the local player rather than its real mode flag — the named follow-up in decision 0530.
 
 use bevy::prelude::*;
 
@@ -30,8 +29,10 @@ use benilla_formats::FootstepCatalog;
 
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::{is_footstep, AnimSoundEvent};
-use crate::liquid::{water_surface_at, WaterChunkInfo, WADE_MAX};
+use crate::entities::CollisionHeight;
+use crate::liquid::{water_surface_at, WaterChunkInfo};
 use crate::net::NetEntity;
+use crate::player::swim_enter_depth;
 use crate::schedule::WorldStage;
 use crate::terrain_stream::{ground_effect_under, TerrainStreamer};
 
@@ -63,7 +64,7 @@ fn footstep_sounds(
     // GlobalTransform: a mounted unit's steps are the MOUNT model's own tags, fired by the
     // mount CHILD entity — whose local Transform is the seat-relative ~origin. World position
     // is the only correct read for both parented and top-level sources (0441 fold-back).
-    units: Query<(&NetEntity, &GlobalTransform)>,
+    units: Query<(&NetEntity, &GlobalTransform, Option<&CollisionHeight>)>,
     footsteps: Option<Res<Footsteps>>,
     voices: Option<Res<CreatureVoices>>,
     streamer: Res<TerrainStreamer>,
@@ -88,7 +89,7 @@ fn footstep_sounds(
         if !is_footstep(&ev.ident) {
             continue;
         }
-        let Ok((net, transform)) = units.get(ev.entity) else {
+        let Ok((net, transform, collision)) = units.get(ev.entity) else {
             continue;
         };
         // The unit's footstep class (module docs): the voice row's class verbatim; zero or no
@@ -104,7 +105,8 @@ fn footstep_sounds(
         let depth = water_surface_at(water.iter(), wow, None)
             .map(|s| s - wow[2])
             .filter(|d| *d > 0.0);
-        if depth.is_some_and(|d| d > WADE_MAX) {
+        let wade_max = swim_enter_depth(collision.copied().unwrap_or_default().0);
+        if depth.is_some_and(|d| d > wade_max) {
             continue;
         }
         let effect = ground_effect_under(&streamer, &adt_tiles, transform.translation());

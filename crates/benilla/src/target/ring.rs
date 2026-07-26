@@ -129,11 +129,17 @@ pub(super) struct RingMaterials {
     flash: Handle<StandardMaterial>,
 }
 
-/// The ring colour the selector resolves — the pure classification half of [`RingMaterials::pick`],
-/// split out so the branch logic (players vs NPCs, the `¬X∧¬Y` party split) is unit-testable
-/// without material handles.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RingVariant {
+/// The colour `GetSelectionCircleColor` resolves — the pure classification half of
+/// [`RingMaterials::pick`], split out so the branch logic (players vs NPCs, the `¬X∧¬Y` party
+/// split) is unit-testable without material handles.
+///
+/// **This is the single source for BOTH surfaces the selector feeds** — the ground ring here and
+/// the overhead name (`nameplates.rs` fetches the same `vtable+0x2c`, decision 0156). It was a
+/// duplicated mirror until decision 0659: the ring gained the PvP/party legs with 0453 and the
+/// name's copy did not, so a flagged player drew a green ring under a blue name. One law, one
+/// function; the name maps this to its own material cache.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum RingVariant {
     Hostile,
     Unfriendly,
     Neutral,
@@ -144,13 +150,43 @@ enum RingVariant {
     PartyPvp,
 }
 
+impl RingVariant {
+    /// Every variant, for a consumer that pre-builds one material per colour.
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Hostile,
+        Self::Unfriendly,
+        Self::Neutral,
+        Self::Friendly,
+        Self::Player,
+        Self::Dead,
+        Self::Party,
+        Self::PartyPvp,
+    ];
+
+    /// The selector's dword for this variant (see the palette constants above).
+    pub(crate) fn color(self) -> Color {
+        match self {
+            Self::Hostile => RING_HOSTILE,
+            Self::Unfriendly => RING_UNFRIENDLY,
+            Self::Neutral => RING_NEUTRAL,
+            Self::Friendly => RING_FRIENDLY,
+            Self::Player => RING_PLAYER,
+            Self::Dead => RING_DEAD,
+            Self::Party => RING_PARTY,
+            Self::PartyPvp => RING_PARTY_PVP,
+        }
+    }
+}
+
 /// The ring's own colour selector (`0x605960`) on the raw reaction rank (`0..=7`): **players**
 /// branch first and never check health (a dead player doesn't gray) — hostile red on rank ≤ 1
 /// (the X/Y matrix approximation), else the `¬X∧¬Y` split: PvP-flagged → green / party
 /// pale-green, unflagged → soft blue / party pale-blue (the 4-slot party table `0xbc6f48`, our
 /// roster — self is never in it, and self reads blue/green exactly like the law's own-guid legs);
 /// **NPCs** — dead → gray, else the rank palette (0–1 red, 2 orange, 3 yellow, 4–7 green).
-fn ring_variant(
+///
+/// Shared with the overhead name (decision 0659) — see [`RingVariant`].
+pub(crate) fn ring_variant(
     rank: u8,
     is_player: bool,
     is_dead: bool,
@@ -571,6 +607,9 @@ pub(crate) fn ring_reaction(
         if let Some(rank) = duel_reaction(&target.0, &own.0) {
             return rank;
         }
+        if ffa_reaction(&target.0, &own.0) {
+            return Reaction::Hostile as u8;
+        }
     }
     let resolved = (|| {
         let catalog = &factions?.0;
@@ -613,25 +652,94 @@ fn duel_reaction(
     target: &benilla_protocol::ObjectFields,
     own: &benilla_protocol::ObjectFields,
 ) -> Option<u8> {
-    if own.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE == 0
-        || target.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE == 0
-    {
-        return None;
+    match duel_rung(target, own) {
+        DuelRung::Engaged { rank, .. } => Some(rank),
+        _ => None,
+    }
+}
+
+/// The **both-FFA** rung of `UnitReaction` (`0x60632c`, the ladder 0633 §5 read in full; decision
+/// 0646 §5): two player-controlled units that are BOTH free-for-all flagged are hostile to each
+/// other, whatever their factions say. This is the only rung an ordinary PvP flag does *not* have
+/// — a same-faction player who flags for PvP stays friendly, which is why there is no `pvp` arm
+/// beside this one.
+///
+/// The flag is `PLAYER_FLAGS` bit 7 (`PLAYER_FLAGS_FFA_PVP`, vmangos `Player.h:322`), the same
+/// field and bit the unit snapshot feeds `UnitIsPVPFreeForAll` from.
+fn ffa_reaction(
+    target: &benilla_protocol::ObjectFields,
+    own: &benilla_protocol::ObjectFields,
+) -> bool {
+    const PLAYER_FLAGS_FFA_PVP: u32 = 0x80;
+    let player_controlled =
+        |u: &benilla_protocol::ObjectFields| u.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE != 0;
+    player_controlled(target)
+        && player_controlled(own)
+        && target.player_flags() & PLAYER_FLAGS_FFA_PVP != 0
+        && own.player_flags() & PLAYER_FLAGS_FFA_PVP != 0
+}
+
+/// Why [`duel_reaction`]'s rung did or did not fire, with the values it judged on. This is the
+/// diagnostic face of the same walk — `/reaction` prints it, so a duel that fails to turn the
+/// opponent red names the gate that refused instead of silently reporting "neutral". Keeping one
+/// walk with a richer return (rather than a second copy in the probe) is what stops the
+/// instrument and the law from drifting apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DuelRung {
+    /// One or both sides lack `UNIT_FIELD_FLAGS` bit 3, so no player-vs-player rung runs at all.
+    NotPlayerControlled { own: bool, target: bool },
+    /// No duel under way yet: `PLAYER_DUEL_TEAM` is still `0` on one or both sides (it is set
+    /// only when `Player::UpdateDuelFlag` fires at the end of the countdown).
+    NoTeam { own: u32, target: u32 },
+    /// Both carry a team, but they are not duelling **each other** — or the arbiter guid has not
+    /// streamed to us.
+    ArbiterMismatch { own: u64, target: u64 },
+    /// The rung fires: `1` (hostile) on opposing teams, `4` (friendly) on the same one.
+    Engaged {
+        rank: u8,
+        own_team: u32,
+        target_team: u32,
+    },
+}
+
+/// The duel rung's walk, reporting the gate that decided (see [`DuelRung`]).
+pub(crate) fn duel_rung(
+    target: &benilla_protocol::ObjectFields,
+    own: &benilla_protocol::ObjectFields,
+) -> DuelRung {
+    let own_pc = own.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE != 0;
+    let target_pc = target.unit_flags() & UNIT_FLAG_PVP_ATTACKABLE != 0;
+    if !own_pc || !target_pc {
+        return DuelRung::NotPlayerControlled {
+            own: own_pc,
+            target: target_pc,
+        };
     }
     let own_team = own.player_duel_team();
     let target_team = target.player_duel_team();
     if own_team == 0 || target_team == 0 {
-        return None;
+        return DuelRung::NoTeam {
+            own: own_team,
+            target: target_team,
+        };
     }
     let arbiter = own.player_duel_arbiter();
-    if arbiter == 0 || arbiter != target.player_duel_arbiter() {
-        return None;
+    let target_arbiter = target.player_duel_arbiter();
+    if arbiter == 0 || arbiter != target_arbiter {
+        return DuelRung::ArbiterMismatch {
+            own: arbiter,
+            target: target_arbiter,
+        };
     }
-    Some(if own_team == target_team {
-        Reaction::Friendly as u8
-    } else {
-        Reaction::Hostile as u8
-    })
+    DuelRung::Engaged {
+        rank: if own_team == target_team {
+            Reaction::Friendly as u8
+        } else {
+            Reaction::Hostile as u8
+        },
+        own_team,
+        target_team,
+    }
 }
 
 #[cfg(test)]

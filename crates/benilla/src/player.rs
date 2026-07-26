@@ -39,6 +39,7 @@ mod movement_net;
 // step through the very same code, the way the reference runs every mover through one controller
 // (decision 0059's byte trail).
 pub(crate) mod mover;
+mod probe_cam;
 mod probe_look;
 mod server_ride;
 mod setup;
@@ -64,7 +65,13 @@ use state::{
     STEP_SNAP_SLACK, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
     WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
-pub(crate) use state::{Player, PlayerCapsule, CAPSULE_HEIGHT, GRAVITY, TERMINAL_VELOCITY};
+pub(crate) use state::{
+    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, GRAVITY, TERMINAL_VELOCITY,
+};
+/// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
+/// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
+/// swim marker and the footstep splash slot, which have no `Player` of their own.
+pub(crate) use swim::swim_enter_depth;
 
 /// The player/camera subsystem: spawns the camera + move/avatar resources at startup, drives the
 /// third-person/free-fly controller each frame. (The cursor is the [`crate::cursor`] subsystem.)
@@ -74,6 +81,9 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         if let Some(look) = probe_look::from_env() {
             app.insert_resource(look);
+        }
+        if let Some(cam) = probe_cam::from_env() {
+            app.insert_resource(cam);
         }
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,
@@ -103,6 +113,17 @@ impl Plugin for PlayerPlugin {
                     .run_if(resource_exists::<probe_look::ProbeLook>)
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
+            // The scripted camera park (`WOW_PROBE_CAM`, decision 0653): holds yaw/pitch/zoom so an
+            // unattended burst can frame a subject that isn't on the ground. Same slot as the turn
+            // above — `control` reads the rig right after — and equally inert without the env var.
+            .add_systems(
+                Update,
+                probe_cam::drive_probe_cam
+                    .in_set(WorldStage::Input)
+                    .before(control)
+                    .run_if(resource_exists::<probe_cam::ProbeCam>)
+                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+            )
             // A server-authored spline (Charge/knockback/taxi) driving our own player is mirrored into
             // `Player` here, *before* `control` reads `pos` to seat the camera and skip input. Same
             // gates as `control` (not while capturing; in-world only).
@@ -118,6 +139,17 @@ impl Plugin for PlayerPlugin {
             // net drain, and dropping `active` re-arms the take-control latch for the next login
             // (possibly a different character). Ungated — the message lands as the state flips.
             .add_systems(Update, wire_in::release_on_logout.in_set(WorldStage::Input))
+            // Mirror our body's collision height onto `Player` for the swim arm (decision 0645).
+            // A *continuous* sync rather than a one-shot at take-control, for the reason the
+            // take-control branch itself records: a cross-map worldport re-streams the `SelfPlayer`
+            // entity, so anything latched on that edge is lost on transfer. Before `control`, which
+            // is where the swim depth lines are evaluated.
+            .add_systems(
+                Update,
+                mirror_self_collision_height
+                    .in_set(WorldStage::Input)
+                    .before(control),
+            )
             // The self-avatar zoom-in fade rides the same `MeshTag`/material channel as the interior
             // classifier + the appear/despawn fades, so it must run *after* both to win the frame while
             // fading (and yield to them otherwise). It also writes `Visibility` (the first-person
@@ -135,6 +167,21 @@ impl Plugin for PlayerPlugin {
                     .after(crate::debug_panel::ModelVisSet)
                     .run_if(not(resource_exists::<crate::capture::CaptureMode>)),
             );
+    }
+}
+
+/// Mirror the streamed `SelfPlayer`'s [`crate::entities::CollisionHeight`] onto [`Player`] — the
+/// avatar's swim depth lines are fractions of it (decision 0645), and the swim arm runs off the
+/// resource, not the entity. One entity, one copy: no work until our body streams in, and it
+/// re-syncs itself after a worldport re-streams that entity under a new one.
+fn mirror_self_collision_height(
+    mut player: ResMut<Player>,
+    self_player: Query<&crate::entities::CollisionHeight, With<SelfPlayer>>,
+) {
+    if let Ok(&h) = self_player.single() {
+        if player.collision_height != h {
+            player.collision_height = h;
+        }
     }
 }
 
@@ -670,6 +717,9 @@ fn control(
         // doesn't flicker between the two physics regimes.
         let surface_y = swim::surface_over_feet(water, player.pos, indoors);
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
+        if let Some(surface) = surface_y {
+            move_trace::swim(player.pos.y, surface, swimming, player.collision_height.0);
+        }
         // Space while swimming = the ref's Jump routing (decision 0487, superseding 0479),
         // fired on the PRESS EDGE only — one hop per press, a held key does not re-fire
         // (decision 0498, director-verified on the ref; 0487's held-chaining was our
@@ -826,6 +876,7 @@ fn control(
                 capsule,
                 dir3 * dir_speed,
                 surface,
+                |feet| swim::surface_over_feet(water, feet, indoors),
             );
             // The surface redirect (decisions 0499+0505 — a NAMED DIVERGENCE, see
             // `swim::cap_redirect`): when the rise capped at the rest line, the stroke went

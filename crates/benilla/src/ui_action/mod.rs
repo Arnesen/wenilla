@@ -8,8 +8,11 @@
 //!   slot's icon (spell: Spell.dbc × SpellIcon.dbc; item: the item template chain, same ask-once
 //!   store the bags use) and count (item: the bag walk, `ui_items::count_of`) and pushes the
 //!   120-slot snapshot into the VM, firing `ACTIONBAR_SLOT_CHANGED` per changed slot. The identity
-//!   resolve (icon/kind/action) is gated on `dirty` (a real, if occasional, event: login or a
-//!   local pickup/place); the ITEM-kind count refresh AND the auto-attack's weapon icon run every
+//!   resolve (icon/kind/action) is gated on its two inputs having changed — `dirty` (a real, if
+//!   occasional, event: login or a local pickup/place) OR a landed item template
+//!   ([`Items::template_epoch`], decision 0660: an ITEM icon's template is fetched ask-once, so
+//!   the first resolve of a cold entry is the one that ISSUES the query and reads back nothing);
+//!   the ITEM-kind count refresh AND the auto-attack's weapon icon run every
 //!   frame regardless — a bag count drifts (eating a stack down) and the auto-attack icon tracks the
 //!   equipped main-hand weapon (decision 0230), both without ever touching the action table itself,
 //!   so gating them on the SAME flag would let the Count fontstring / the Attack icon go stale.
@@ -48,6 +51,8 @@ use crate::ui_unit::UnitFeed;
 mod cast_fail;
 pub(crate) mod cast_target;
 mod errors;
+#[cfg(test)]
+mod feed_tests;
 mod state;
 
 pub(crate) use errors::{
@@ -175,9 +180,11 @@ pub(crate) struct PlayerActions {
     /// The spell book (`SMSG_INITIAL_SPELLS`), for gating/consumers to come.
     pub spells: HashSet<u32>,
     /// Set on every book/bar arrival AND every local `action_sets` drain; cleared by the feed
-    /// after re-resolving each slot's identity (icon/kind/action) and pushing. Gates ONLY the
-    /// identity resolve — an ITEM slot's bag COUNT is refreshed unconditionally every frame
-    /// instead (see the module doc): it drifts independently of this flag.
+    /// after re-resolving each slot's identity (icon/kind/action) and pushing. It is only ONE of
+    /// the identity resolve's two triggers — a landed item template is the other (decision 0660,
+    /// [`Items::template_epoch`]) — and it gates ONLY that resolve: an ITEM slot's bag COUNT is
+    /// refreshed unconditionally every frame instead (see the module doc), since it drifts
+    /// independently of both.
     pub dirty: bool,
 }
 
@@ -233,6 +240,9 @@ impl Spells {
 struct FeedMemory {
     pushed: HashMap<u32, ActionSlot>,
     bonus_offset: u8,
+    /// The [`Items::template_epoch`] the last identity resolve ran at — the feed's half of the
+    /// landed-template redisplay (decision 0660). An advance re-resolves, exactly like a bar edit.
+    template_epoch: u64,
 }
 
 pub(crate) struct UiActionPlugin;
@@ -478,14 +488,25 @@ fn feed_actions(
         script.fire_event("UPDATE_BONUS_ACTIONBAR", vec![]);
     }
 
-    if actions.dirty {
+    // The identity resolve has TWO inputs, not one. `dirty` covers the action table; the item
+    // TEMPLATE cache is the other, and it fills asynchronously — an ITEM slot's icon needs a
+    // template that `Items::template` fetches **ask-once**, so the very first resolve of a cold
+    // entry is the call that ISSUES the query and it necessarily reads back `None`. Gating on
+    // `dirty` alone left that slot on the fallback question mark until some unrelated bar edit
+    // happened to re-dirty it — the login race that put a question mark on every fresh
+    // character's food/water button (decision 0660; verified live 2026-07-26: the Tough Jerky
+    // ask and the one and only feed landed 0.5 ms apart, in that order, and nothing re-fed).
+    // The epoch is the second input, so a landed answer redisplays like the ref's DBCACHECALLBACK.
+    let template_epoch = items.template_epoch();
+    if actions.dirty || template_epoch != memory.template_epoch {
         actions.dirty = false;
+        memory.template_epoch = template_epoch;
 
         // Resolve every occupied wire slot to its display, diff against what the VM holds, push +
         // fire ACTIONBAR_SLOT_CHANGED (arg1 = the Lua action id) per transition. Item icons/counts
         // resolve via the same ask-once template chain + bag walk the bags use
-        // (`ui_items::count_of`) — an in-flight template shows the fallback (no texture) and
-        // re-feeds once the answer lands, same as a bag slot.
+        // (`ui_items::count_of`) — an in-flight template shows the fallback (no texture), and the
+        // epoch gate above re-runs this whole resolve the frame the answer lands.
         let mut fresh: HashMap<u32, ActionSlot> = HashMap::new();
         for (slot, button) in &actions.buttons {
             let (texture, count) = match button.kind {

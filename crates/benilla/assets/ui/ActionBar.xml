@@ -39,9 +39,12 @@
           ref (which HIDES an empty, non-grid slot entirely), our bar always shows all 12 wells; the
           grid only swaps an EMPTY slot's ring art between the occupied and empty Quickslot textures
           — the default (nothing held) look is unchanged from before this slice, no capture regression.
-        - Exhaustion tick + rest fill, XP text (hover/cvar-gated), MaxLevelBar, the performance bar,
-          the four bag slots / keyring / micro buttons: OUT. The bag/keyring/micro cluster on the
-          bar's right is the visible remaining gap (only the backpack toggle is relocated there).
+        - Exhaustion tick + rest fill, XP text (hover/cvar-gated), MaxLevelBar: OUT. The bar's
+          right-hand cluster is otherwise complete — the backpack toggle + four bag slots live in
+          BagFrame.xml and the eight micro buttons in MicroMenu.xml (both anchored into
+          BenillaActionBarArtFrame and seated over the art by BenillaActionBarArt_SeatAbove below),
+          and the performance meter is at the foot of this file. Only the KEYRING is still out, with
+          the keyring container itself (the ref hides that button by default anyway).
     -->
     <Script><![CDATA[
         BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -66,6 +69,24 @@
         -- at OnLoad). The fan-out roster for the bar-level events below: the ref registers the
         -- feedback events per-button; our bar-level fan needs the full set in one place.
         BENILLA_ACTION_BUTTONS = {}
+
+        -- Seat a TOP-LEVEL frame that anchors INTO the bar art (the bag bar + backpack toggle,
+        -- BagFrame.xml; the micro-button row, MicroMenu.xml) one frame level above the art, so its
+        -- icons draw over the bar plate instead of under it.
+        --
+        -- Why it's needed: those frames are top-level, so they default to a LOWER frame level than
+        -- the bar's own art (a child hierarchy — the ExpBar's dwarf notches + the metal/well art sit
+        -- at the bar's child level). Frame level dominates the flat painter's order, so the bar art
+        -- would paint OVER them — the ring shows but the centered icon is fully covered (the "empty
+        -- rings, no bag icons" bug). The bar's OWN 12 buttons avoid this by being CHILDREN of the art
+        -- frame (child-over-parent). (SetParent onto the art frame would be the structural twin, but
+        -- the engine keys draw order at creation and does not re-key on a runtime reparent, so the
+        -- explicit level is the reliable lever.) Lives here, with the frame it's about, because two
+        -- files now need it — it began as BagFrame.xml's private BenillaBagBar_SeatAboveActionBar.
+        function BenillaActionBarArt_SeatAbove(frame)
+            local art = getglobal("BenillaActionBarArtFrame")
+            if art then frame:SetFrameLevel(art:GetFrameLevel() + 1) end
+        end
 
         -- The wire/API action id the MAIN bar's button i displays (the vanilla page formula).
         -- INTERNAL to BenillaActionButton_Action below — the ONLY caller. A button path that
@@ -463,6 +484,101 @@
         function BenillaExpBar_OnEvent(bar)
             BenillaExpBar_Update(bar)
         end
+
+        -- The XP bar's hover (ref-MainMenuBar.xml l.136-147, MainMenuExpBar's own OnEnter/OnLeave).
+        -- ref GlobalStrings.lua l.5461 / l.2789 (enUS), in the `X = X or` FALLBACK form: the app
+        -- runs the real localized GlobalStrings.lua off the patch chain BEFORE this file
+        -- (ui_script/mod.rs load_global_strings), so the installed locale wins and these copies
+        -- only fill in for the test harnesses, which load no patch chain. CombatText.xml's shape.
+        XPBAR_LABEL = XPBAR_LABEL or "XP Bar"
+        NEWBIE_TOOLTIP_XPBAR = NEWBIE_TOOLTIP_XPBAR or "The amount of experience (XP) you have earned. The color of the XP bar indicates your rest state: light blue for Rested, and purple for Normal. Rested players earn twice the experience they would normally gain from slaying a monster. Characters become less rested when they kill monsters, and more rested by spending time at or logging out at an inn or city."
+
+        -- The ref's OnEnter does three more things, all of them machinery we don't have yet, and
+        -- each one its own slice rather than a gap in this one:
+        --   TextStatusBar_UpdateTextString() + ShowTextStatusBarText(this) — the "1234/5678" numerals
+        --     that appear ON the bar while hovered. No TextStatusBar text layer exists here at all.
+        --   ExhaustionTick.timer = 1 and GameTooltip.canAddRestStateLine = 1 — the rest-state line
+        --     ("You should rest at an Inn", EXHAUST_TOOLTIP1-4) the exhaustion tick appends. There is
+        --     no rest-state feed, so there is nothing to append.
+        -- The trailing 1 is the ref's noNormalText: with detailed tips OFF this hover shows NOTHING
+        -- rather than a bare "XP Bar". Transcribed, though 1.12's default (0661) never takes it.
+        function BenillaExpBar_OnEnter(bar)
+            if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
+            GameTooltip_AddNewbieTip(bar, XPBAR_LABEL, 1.0, 1.0, 1.0, NEWBIE_TOOLTIP_XPBAR, 1)
+        end
+
+        function BenillaExpBar_OnLeave()
+            if GameTooltip then GameTooltip:Hide() end
+        end
+
+        -- ── The performance ("ping") meter ────────────────────────────────────────────────────
+        -- ref-MainMenuBar.xml l.344-407: a 16x64 frame in the bar's own right-hand recess whose
+        -- 20x66 bar texture is TINTED green/yellow/red by the connection's latency, plus an
+        -- all-points button on top for the hover tooltip. The thresholds, the 10 s poll and the
+        -- inline handlers below are the ref's, transcribed out of its XML into named functions.
+        -- The meter shows LATENCY ONLY: 1.12 never scales the bar's height, only its color.
+        PERFORMANCEBAR_LOW_LATENCY = 300
+        PERFORMANCEBAR_MEDIUM_LATENCY = 600
+        PERFORMANCEBAR_UPDATE_INTERVAL = 10
+
+        -- ref-GlobalStrings.lua l.2659 / l.2689 / l.2746 (enUS), fallback form — see the XP bar's
+        -- note above for why these never override a real localized install.
+        MAINMENUBAR_LATENCY_LABEL = MAINMENUBAR_LATENCY_LABEL or "Latency:"
+        MILLISECONDS_ABBR = MILLISECONDS_ABBR or "ms"
+        NEWBIE_TOOLTIP_LATENCY = NEWBIE_TOOLTIP_LATENCY or "The average time it takes to talk with the game server. A low latency will display as a green bar, higher latencies will be yellow or even red. Consistently high latencies may indicate a problem with your Internet connection."
+
+        function BenillaPerformanceBar_OnLoad(frame)
+            frame.hover = nil
+            -- 0, not the interval: the ref's first OnUpdate tick runs the poll immediately, so the
+            -- bar is never briefly untinted (its texture is grey until the first SetVertexColor).
+            frame.updateInterval = 0
+        end
+
+        function BenillaPerformanceBar_TooltipText()
+            local _, _, latency = GetNetStats()
+            return MAINMENUBAR_LATENCY_LABEL .. " " .. latency .. MILLISECONDS_ABBR
+        end
+
+        -- ref l.389 (the held-open refresh) and l.400 (OnEnter), both the same call:
+        --     GameTooltip_AddNewbieTip(MAINMENUBAR_LATENCY_LABEL.." "..latency..MILLISECONDS_ABBR,
+        --                              1.0, 1.0, 1.0, NEWBIE_TOOLTIP_LATENCY)
+        -- So the reference hover is TWO lines — the number, then the wrapped explanation — seated
+        -- at the default screen corner, not beside the meter (GameTooltip.xml, decision 0661).
+        function BenillaPerformanceBar_ShowTooltip(owner)
+            if not GameTooltip_AddNewbieTip then return end -- engine tests load file subsets
+            GameTooltip_AddNewbieTip(owner, BenillaPerformanceBar_TooltipText(), 1.0, 1.0, 1.0,
+                NEWBIE_TOOLTIP_LATENCY)
+        end
+
+        function BenillaPerformanceBar_OnUpdate(frame, elapsed)
+            if frame.updateInterval > 0 then
+                frame.updateInterval = frame.updateInterval - elapsed
+                return
+            end
+            frame.updateInterval = PERFORMANCEBAR_UPDATE_INTERVAL
+            local _, _, latency = GetNetStats()
+            if latency > PERFORMANCEBAR_MEDIUM_LATENCY then
+                BenillaPerformanceBar:SetVertexColor(1, 0, 0)
+            elseif latency > PERFORMANCEBAR_LOW_LATENCY then
+                BenillaPerformanceBar:SetVertexColor(1, 1, 0)
+            else
+                BenillaPerformanceBar:SetVertexColor(0, 1, 0)
+            end
+            -- Held-open tooltips re-read the number on the same 10 s beat (the ref's own refresh).
+            if frame.hover then
+                BenillaPerformanceBar_ShowTooltip(frame)
+            end
+        end
+
+        function BenillaPerformanceBar_OnEnter(button)
+            BenillaPerformanceBarFrame.hover = 1
+            BenillaPerformanceBar_ShowTooltip(button)
+        end
+
+        function BenillaPerformanceBar_OnLeave()
+            BenillaPerformanceBarFrame.hover = nil
+            if GameTooltip then GameTooltip:Hide() end
+        end
     ]]></Script>
 
     <!--
@@ -548,7 +664,9 @@
                 Drawn first among the bar's children ⇒ lowest, so the dwarf art overlaps it (the
                 real RaiseFrameLevel(art) order).
             -->
-            <StatusBar name="BenillaExpBar">
+            <!-- enableMouse: the ref's MainMenuExpBar takes the mouse for its own hover (l.136-147).
+                 The strip is the bar's top 13 px, clear of every button on it. -->
+            <StatusBar name="BenillaExpBar" enableMouse="true">
                 <Size><AbsDimension x="1024" y="13"/></Size>
                 <Anchors>
                     <Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
@@ -587,6 +705,8 @@
                 <Scripts>
                     <OnLoad>BenillaExpBar_OnLoad(self)</OnLoad>
                     <OnEvent>BenillaExpBar_OnEvent(self)</OnEvent>
+                    <OnEnter>BenillaExpBar_OnEnter(self)</OnEnter>
+                    <OnLeave>BenillaExpBar_OnLeave()</OnLeave>
                 </Scripts>
             </StatusBar>
 
@@ -722,6 +842,53 @@
                         <HighlightTexture file="Interface\MainMenuBar\UI-MainMenu-ScrollDownButton-Highlight" alphaMode="ADD"/>
                     </Button>
                 </Frames>
+            </Frame>
+
+            <!-- The performance ("ping") meter (ref-MainMenuBar.xml l.344-407). 16x64 pinned to the
+                 bar's BOTTOMRIGHT +(-227,-10) — the empty recess between the last micro button and
+                 the bag slots, which the bar art leaves TRANSPARENT for exactly this. The 20x66
+                 texture hangs off the frame's TOPRIGHT (so it overspills 4 left and 2 below), and
+                 the frame itself hangs 10 below the bar, putting the bar's grey column in the slot.
+
+                 frameStrata="LOW" is load-bearing, not decoration: the meter draws UNDER the bar art
+                 and shows through its transparent window. At the default MEDIUM it would paint over
+                 the metal surround, since the texture is wider than the slot. (The ref gets the same
+                 order via strata too — MainMenuBar's OnLoad RaiseFrameLevel can't reach across it.)
+
+                 The hover button is the ref's own split: a HIGH-strata all-points button, because the
+                 LOW frame beneath the art can't take the mouse itself. The ref declares it as a
+                 sibling with parent="MainMenuBarPerformanceBarFrame"; nesting it is the same frame
+                 tree, and its explicit strata survives the parent's LOW subtree-force (attributes
+                 apply before nested <Frames> are built).
+
+                 SCOPE: the ref's MainMenuBar_UpdateKeyRing shifts this frame to -235 when the keyring
+                 is shown. No keyring here (see the header's OUT list), so the un-shifted -227 is the
+                 only position. -->
+            <Frame name="BenillaPerformanceBarFrame" frameStrata="LOW">
+                <Size><AbsDimension x="16" y="64"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="BenillaActionBar" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-227" y="-10"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="BenillaPerformanceBar" file="Interface\MainMenuBar\UI-MainMenuBar-PerformanceBar">
+                            <Size><AbsDimension x="20" y="66"/></Size>
+                            <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Button name="BenillaPerformanceBarButton" setAllPoints="true" frameStrata="HIGH">
+                        <Scripts>
+                            <OnEnter>BenillaPerformanceBar_OnEnter(self)</OnEnter>
+                            <OnLeave>BenillaPerformanceBar_OnLeave()</OnLeave>
+                        </Scripts>
+                    </Button>
+                </Frames>
+                <Scripts>
+                    <OnLoad>BenillaPerformanceBar_OnLoad(self)</OnLoad>
+                    <OnUpdate>BenillaPerformanceBar_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
             </Frame>
         </Frames>
         <Scripts>

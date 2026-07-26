@@ -12,10 +12,14 @@
 //! `SEC_MODERATOR` (1); `.send items <name> "subject" "text" item[:count]…` and
 //! `.send money <name> "subject" "text" <copper>` are both `SEC_ADMINISTRATOR` (6)
 //! (`AccountTypes`, `shared/Common.h` l.138-145: `SEC_MODERATOR=1`, `SEC_GAMEMASTER=3`,
-//! `SEC_ADMINISTRATOR=6`). **method.md pins every probe account at gmlevel 3
-//! (`SEC_GAMEMASTER`)** — so `.send mail` succeeds (3 ≥ 1) but `.send items`/`.send money` are
-//! REFUSED server-side (3 < 6): this is a verified permission floor, not a guess, and step (c)/(d)
-//! below degrade to SKIP for exactly that reason on an unelevated probe account. All three GM
+//! `SEC_ADMINISTRATOR=6`). **Probe accounts are gmlevel 6**, so all three land. They did *not*
+//! until 2026-07-26 — 0645 recorded the raise but never applied it, and the accounts sat at 3
+//! (0651). While they did, steps (c)/(d) below degraded to SKIP against a permission floor that
+//! was real, and that SKIP hid a defect in the probe itself: it re-found the money/item row by
+//! predicate each tick, so a *successful* take — which zeroes the money and clears the attachment
+//! — made the row stop matching and read as "no row ever appeared". Both steps now remember the
+//! id they took from, and a missing row is a FAIL, because at gmlevel 6 there is no longer an
+//! innocent reason for one. All three GM
 //! sends build their `MailDraft` and call `MailDraft::SendMailTo` DIRECTLY
 //! (`HandleSendMailCommand`/`HandleSendItemsCommand`/`HandleSendMoneyCommand`, `MiscCommands.cpp`
 //! ~l.1012-1145) — never through `WorldSession::HandleSendMail` (`MailHandler.cpp`), whose
@@ -76,8 +80,8 @@ const SETTLE_SECS: f64 = 3.0;
 const SCAN_TIMEOUT_SECS: f64 = 15.0;
 const LIST_TIMEOUT_SECS: f64 = 15.0;
 const BODY_TIMEOUT_SECS: f64 = 10.0;
-/// How long a permission/delay-blocked row (money/item mail under an unelevated probe account)
-/// is given to show up before the dependent step SKIPs — generous, but bounded (never hangs).
+/// How long a GM-sent row is given to show up before the dependent step FAILs — generous, but
+/// bounded (never hangs).
 const ROW_GRACE_SECS: f64 = 5.0;
 const ACTION_TIMEOUT_SECS: f64 = 8.0;
 
@@ -147,15 +151,21 @@ enum Phase {
         /// The letter's `(lua bag, 1-based slot)` once found and clicked.
         slot: Option<(i64, i64)>,
     },
-    /// `TakeInboxMoney` on the money row, if the GM `.send money` actually landed one (step c).
+    /// `TakeInboxMoney` on the money row (step c).
     TakeMoney {
         since: f64,
-        sent: bool,
+        /// The message id we sent the take for, once sent. It is remembered rather than re-found
+        /// each tick because **taking is what makes the row stop matching**: a successful
+        /// `TakeInboxMoney` zeroes `money` (or drops the row), so a predicate re-search returns
+        /// `None` on exactly the ticks that prove success. That bug reported every successful take
+        /// as "no money row appeared" and hid behind the old gmlevel-3 floor, where the row really
+        /// never arrived (0651).
+        taken: Option<u32>,
     },
-    /// `TakeInboxItem` on the item row, if the GM `.send items` actually landed one (step d).
+    /// `TakeInboxItem` on the item row (step d). Same remembered-id reason as [`Self::TakeMoney`].
     TakeItem {
         since: f64,
-        sent: bool,
+        taken: Option<u32>,
     },
     /// `SendMail` to the probe's own name — expects `CANNOT_SEND_TO_SELF` (step e).
     SendSelf {
@@ -305,9 +315,8 @@ fn mail_probe(
             if !mail.mails.is_empty() {
                 info!(
                     "PROBE_MAIL: (a) inbox list landed — {} row(s) (3 GM sends attempted; \
-                     `.send items`/`.send money` need SEC_ADMINISTRATOR(6), probe accounts are \
-                     gmlevel 3 per method.md, so only `.send mail`(SEC_MODERATOR=1) is expected \
-                     to have landed — see the module doc)",
+                     probe accounts are gmlevel 6, so all three — `.send mail`(1), \
+                     `.send money`(6), `.send items`(6) — are expected to have landed)",
                     mail.mails.len()
                 );
                 for e in &mail.mails {
@@ -479,7 +488,7 @@ fn mail_probe(
                             probe.fails += 1;
                             probe.phase = Phase::TakeMoney {
                                 since: now,
-                                sent: false,
+                                taken: None,
                             };
                             return;
                         }
@@ -493,7 +502,7 @@ fn mail_probe(
                         probe.fails += 1;
                         probe.phase = Phase::TakeMoney {
                             since: now,
-                            sent: false,
+                            taken: None,
                         };
                     }
                 }
@@ -508,50 +517,66 @@ fn mail_probe(
                         info!("PROBE_MAIL: PASS (b3) — the reader painted the letter body (title/creator/text via ITEM_TEXT_BEGIN→READY)");
                         probe.passes += 1;
                         // Cleanup: close the reader, destroy the copy (else bags gain one per run).
-                        let _ = script.run("BenillaItemTextCloseButton:Click()");
-                        let _ = script.run(&format!(
-                            "C_Container.PickupContainerItem({bag}, {lslot}) DeleteCursorItem()"
-                        ));
+                        crate::ui_script::run_or_warn(
+                            &script,
+                            "BenillaItemTextCloseButton:Click()",
+                        );
+                        crate::ui_script::run_or_warn(
+                            &script,
+                            &format!(
+                                "C_Container.PickupContainerItem({bag}, {lslot}) DeleteCursorItem()"
+                            ),
+                        );
                         probe.phase = Phase::TakeMoney {
                             since: now,
-                            sent: false,
+                            taken: None,
                         };
                     } else if now - since > ACTION_TIMEOUT_SECS {
                         error!("PROBE_MAIL: FAIL (b3) — the reader never painted the body within {ACTION_TIMEOUT_SECS}s of the click");
                         probe.fails += 1;
                         probe.phase = Phase::TakeMoney {
                             since: now,
-                            sent: false,
+                            taken: None,
                         };
                     }
                 }
             }
         }
-        Phase::TakeMoney { since, sent } => {
-            // A tuple match (not pattern guards) — guarded `Some(_) if …` arms can't be proven
-            // exhaustive by rustc even when the guards themselves are (`sent`/`!sent`), forcing a
-            // dead catch-all; matching `(row, sent)` as a pair is exhaustive on its own shape.
-            match (find_by(&mail, |e| e.money > 0), sent) {
-                (Some(money_id), false) => {
-                    let Some(idx) = index_of(&mail, money_id) else {
-                        return;
-                    };
-                    if let Err(e) = script.run(&format!("TakeInboxMoney({idx})")) {
-                        error!("PROBE_MAIL: FAIL (c) — TakeInboxMoney({idx}) errored: {e}");
-                        probe.fails += 1;
-                        probe.phase = Phase::TakeItem {
-                            since: now,
-                            sent: false,
+        Phase::TakeMoney { since, taken } => {
+            // The id is REMEMBERED across ticks, never re-found: a successful take is exactly what
+            // makes the row stop matching `money > 0`, so re-searching would read success as
+            // absence (0651). Matched as a pair rather than with guards — guarded `Some(_) if …`
+            // arms can't be proven exhaustive by rustc, forcing a dead catch-all.
+            let next = Phase::TakeItem {
+                since: now,
+                taken: None,
+            };
+            match taken {
+                None => match find_by(&mail, |e| e.money > 0) {
+                    Some(money_id) => {
+                        let Some(idx) = index_of(&mail, money_id) else {
+                            return;
                         };
-                        return;
+                        if let Err(e) = script.run(&format!("TakeInboxMoney({idx})")) {
+                            error!("PROBE_MAIL: FAIL (c) — TakeInboxMoney({idx}) errored: {e}");
+                            probe.fails += 1;
+                            probe.phase = next;
+                            return;
+                        }
+                        info!("PROBE_MAIL: (c) money row found (message {money_id}) — TakeInboxMoney({idx}) sent");
+                        probe.phase = Phase::TakeMoney {
+                            since: now,
+                            taken: Some(money_id),
+                        };
                     }
-                    info!("PROBE_MAIL: (c) money row found (message {money_id}) — TakeInboxMoney({idx}) sent");
-                    probe.phase = Phase::TakeMoney {
-                        since: now,
-                        sent: true,
-                    };
-                }
-                (Some(money_id), true) => {
+                    None if now - since > ROW_GRACE_SECS => {
+                        error!("PROBE_MAIL: FAIL (c) — no money row within {ROW_GRACE_SECS}s. Probe accounts are gmlevel 6, so `.send money` (SEC_ADMINISTRATOR 6) should have landed one — check the `net: server says` lines for the GM send's own answer");
+                        probe.fails += 1;
+                        probe.phase = next;
+                    }
+                    None => {}
+                },
+                Some(money_id) => {
                     let money_now = entry_of(&mail, money_id).map(|e| e.money);
                     if matches!(money_now, Some(0) | None) {
                         info!(
@@ -563,80 +588,58 @@ fn mail_probe(
                             }
                         );
                         probe.passes += 1;
-                        probe.phase = Phase::TakeItem {
-                            since: now,
-                            sent: false,
-                        };
+                        probe.phase = next;
                     } else if now - since > ACTION_TIMEOUT_SECS {
                         error!("PROBE_MAIL: FAIL (c) — money row {money_id} never re-synced to 0 within {ACTION_TIMEOUT_SECS}s");
                         probe.fails += 1;
-                        probe.phase = Phase::TakeItem {
-                            since: now,
-                            sent: false,
-                        };
+                        probe.phase = next;
                     }
                 }
-                (None, _) if now - since > ROW_GRACE_SECS => {
-                    warn!("PROBE_MAIL: SKIP (c) — no money row appeared ({ROW_GRACE_SECS}s grace elapsed); expected — `.send money` needs SEC_ADMINISTRATOR(6), probe is gmlevel 3 (see module doc)");
-                    probe.phase = Phase::TakeItem {
-                        since: now,
-                        sent: false,
-                    };
-                }
-                (None, _) => {}
             }
         }
-        Phase::TakeItem { since, sent } => {
-            match (find_by(&mail, |e| e.item.is_some()), sent) {
-                (Some(item_id), false) => {
-                    let Some(idx) = index_of(&mail, item_id) else {
-                        return;
-                    };
-                    if let Err(e) = script.run(&format!("TakeInboxItem({idx})")) {
-                        error!("PROBE_MAIL: FAIL (d) — TakeInboxItem({idx}) errored: {e}");
-                        probe.fails += 1;
-                        probe.phase = Phase::SendSelf {
-                            since: now,
-                            sent: false,
-                            baseline: events_len(&script),
+        Phase::TakeItem { since, taken } => {
+            let next = Phase::SendSelf {
+                since: now,
+                sent: false,
+                baseline: events_len(&script),
+            };
+            match taken {
+                None => match find_by(&mail, |e| e.item.is_some()) {
+                    Some(item_id) => {
+                        let Some(idx) = index_of(&mail, item_id) else {
+                            return;
                         };
-                        return;
+                        if let Err(e) = script.run(&format!("TakeInboxItem({idx})")) {
+                            error!("PROBE_MAIL: FAIL (d) — TakeInboxItem({idx}) errored: {e}");
+                            probe.fails += 1;
+                            probe.phase = next;
+                            return;
+                        }
+                        info!("PROBE_MAIL: (d) item row found (message {item_id}) — TakeInboxItem({idx}) sent");
+                        probe.phase = Phase::TakeItem {
+                            since: now,
+                            taken: Some(item_id),
+                        };
                     }
-                    info!("PROBE_MAIL: (d) item row found (message {item_id}) — TakeInboxItem({idx}) sent");
-                    probe.phase = Phase::TakeItem {
-                        since: now,
-                        sent: true,
-                    };
-                }
-                (Some(item_id), true) => {
+                    None if now - since > ROW_GRACE_SECS => {
+                        error!("PROBE_MAIL: FAIL (d) — no item row within {ROW_GRACE_SECS}s. Probe accounts are gmlevel 6, so `.send items` (SEC_ADMINISTRATOR 6) should have landed one — check the `net: server says` lines for the GM send's own answer");
+                        probe.fails += 1;
+                        probe.phase = next;
+                    }
+                    None => {}
+                },
+                Some(item_id) => {
                     let has_item = entry_of(&mail, item_id).map(|e| e.item.is_some());
                     if matches!(has_item, Some(false) | None) {
                         info!("PROBE_MAIL: PASS (d) — item row {item_id} taken (item attachment cleared)");
                         probe.passes += 1;
-                        probe.phase = Phase::SendSelf {
-                            since: now,
-                            sent: false,
-                            baseline: events_len(&script),
-                        };
+                        probe.phase = next;
                     } else if now - since > ACTION_TIMEOUT_SECS {
                         error!("PROBE_MAIL: FAIL (d) — item row {item_id} never re-synced within {ACTION_TIMEOUT_SECS}s");
                         probe.fails += 1;
-                        probe.phase = Phase::SendSelf {
-                            since: now,
-                            sent: false,
-                            baseline: events_len(&script),
-                        };
+                        probe.phase = next;
                     }
                 }
-                (None, _) if now - since > ROW_GRACE_SECS => {
-                    warn!("PROBE_MAIL: SKIP (d) — no item row appeared ({ROW_GRACE_SECS}s grace elapsed); expected — `.send items` needs SEC_ADMINISTRATOR(6), probe is gmlevel 3 (see module doc)");
-                    probe.phase = Phase::SendSelf {
-                        since: now,
-                        sent: false,
-                        baseline: events_len(&script),
-                    };
-                }
-                (None, _) => {}
             }
         }
         Phase::SendSelf {

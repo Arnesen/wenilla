@@ -61,10 +61,12 @@
           - `maxLines="3"` on `$parentSpellName` (word-wrap line cap): no such FontString
             attribute is modeled (grepped `benilla-ui/src/loader/widgets.rs`) — the name just
             wraps unbounded inside its box width, a harmless cosmetic gap on the rare long name.
-          - `UpdateMicroButtons()`/`MultiActionBar_ShowAllGrids/_HideAllGrids()` (ref
-            `SpellBookFrame_OnShow`/`_OnHide`): no micro-button bar or multi-bar grid-show
-            mechanism exists in this engine yet — dropped, the same class of gap CharacterFrame's
-            own OnShow/OnHide already carry.
+          - `MultiActionBar_ShowAllGrids/_HideAllGrids()` (ref `SpellBookFrame_OnShow`/`_OnHide`):
+            no multi-bar grid-show mechanism exists in this engine yet — dropped, the same class of
+            gap CharacterFrame's own OnShow/OnHide already carry. Its neighbour in that pair,
+            `UpdateMicroButtons()`, is LIVE since the micro-menu slice (`MicroMenu.xml`) — nil-
+            guarded at the call sites only because several test harnesses load this window without
+            the action bar behind it.
 
         Sounds (decision 0090): `igSpellBookOpen`/`igSpellBookClose` on show/hide (ref
         `SpellBookFrame_Update`/`_OnHide`, VERIFIED present in the real `SoundEntries.dbc` this
@@ -137,9 +139,11 @@
             end
         end
 
-        -- ref SpellBookFrame_OnShow (l.94-105): UpdateMicroButtons/MultiActionBar_ShowAllGrids
-        -- OMITTED (header comment); the tab-flash UIFrameFlash call goes with LEARNED_SPELL_IN_TAB.
+        -- ref SpellBookFrame_OnShow (l.94-105): MultiActionBar_ShowAllGrids OMITTED (header
+        -- comment); the tab-flash UIFrameFlash call goes with LEARNED_SPELL_IN_TAB.
+        -- UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml).
         function BenillaSpellBookFrame_OnShow()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             BenillaSpellBookFrame_Update(1)
         end
 
@@ -170,10 +174,11 @@
             end
         end
 
-        -- ref SpellBookFrame_OnHide (l.186-204): UpdateMicroButtons/MultiActionBar_HideAllGrids
-        -- and the tab-flash cleanup OMITTED (header comment); always the spell-book close kit
-        -- (no pet book to branch on).
+        -- ref SpellBookFrame_OnHide (l.186-204): MultiActionBar_HideAllGrids and the tab-flash
+        -- cleanup OMITTED (header comment); always the spell-book close kit (no pet book to branch
+        -- on). UpdateMicroButtons is LIVE as of the micro-menu slice (MicroMenu.xml).
         function BenillaSpellBookFrame_OnHide()
+            if UpdateMicroButtons then UpdateMicroButtons() end
             PlaySound("igSpellBookClose")
         end
 

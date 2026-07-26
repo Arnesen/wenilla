@@ -1,9 +1,14 @@
-//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]), two tags:
+//! The mover's side of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]), three tags:
 //!
 //! - **`move`** — one line per *interesting* frame of the player mover ([`frame`]): a step-down snap,
 //!   a grounded flip, an airborne frame, or any sizeable vertical delta — so a movement-feel report
 //!   ("it pops when I step off the fence") can be read back as per-frame numbers instead of
 //!   re-guessed from watching the screen.
+//! - **`swim`** — one line per frame *over liquid* ([`swim`]): the waterline, the feet, the depth
+//!   against the two latch thresholds, and which physics regime ran. A water-feel report ("it
+//!   jitters at the surface") is a question about the depth signal frame by frame, and no other
+//!   tag carries it: `move` is emitted by the walk arm only, so the swim frames of a flapping
+//!   latch are exactly the ones it drops (decision 0644).
 //! - **`snd`** — one line per outbound `MSG_MOVE_*` ([`sent`]), the send-side twin of `net::motion`'s
 //!   `rly`: it makes **our own wire cadence measurable** (decision 0617), which is the only way to
 //!   compare it against the reference's — the 1.12.1 sniff's client stream is a list of exactly these
@@ -45,6 +50,41 @@ pub(super) fn sent(kind: crate::net::MoveKind, flags: u32, facing: f32, pos: [f3
         &format!(
             "{kind:?} flags={flags:#x} o={facing:.4} pos=[{:.2},{:.2},{:.2}]",
             pos[0], pos[1], pos[2]
+        ),
+    );
+}
+
+/// One `swim` line per frame the avatar is over liquid: the waterline, the feet, the submersion
+/// depth and the two latch thresholds it is being compared against, plus the regime that ran. The
+/// `<` / `>` markers flag the frames where the depth crossed a threshold, so a latch that is
+/// flapping reads as a column of them rather than something to be inferred from a Z column.
+///
+/// `h` is the avatar's own collision height, and the thresholds are printed **derived from it**
+/// rather than from a constant (decision 0645) — a trace that quoted a human's 1.52 while a gnome
+/// latched at 0.86 would read as a bug in the latch instead of the height, which is precisely the
+/// misdirection that let the constant survive this long. It is echoed on the line so a capture says
+/// which body it was taken on.
+pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
+    if !dbg_trace::enabled() {
+        return;
+    }
+    let (enter, exit) = (
+        super::swim::swim_enter_depth(h),
+        super::swim::swim_exit_depth(h),
+    );
+    let depth = surface_y - feet_y;
+    let band = if depth > enter {
+        '>'
+    } else if depth < exit {
+        '<'
+    } else {
+        '='
+    };
+    dbg_trace::line(
+        "swim",
+        &format!(
+            "y {feet_y:9.3} surf {surface_y:9.3} depth {depth:6.3} {band} [{exit:.3}..{enter:.3}] h {h:.3} mode={}",
+            if swimming { "swim" } else { "walk" }
         ),
     );
 }

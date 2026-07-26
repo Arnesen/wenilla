@@ -152,6 +152,10 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_duel_requests`] drain — the outbound seam ([`duel`]). There is no
     /// duel *snapshot* beside it: everything the UI reads arrives as event arguments.
     pub(crate) duel_requests: Vec<duel::DuelRequest>,
+    /// PvP-flag toggles (`TogglePVP`) queued since the app's last
+    /// [`super::UiScript::take_pvp_toggles`] drain — the outbound seam ([`pvp`]). A count, not a
+    /// payload: `CMSG_TOGGLE_PVP` carries no body.
+    pub(crate) pvp_toggles: u32,
 
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
@@ -501,6 +505,11 @@ pub(crate) struct Model {
     /// merchant window's coin line read it.
     pub(crate) money: u64,
 
+    /// The reported connection round trip in ms — `GetNetStats`'s third return, pushed by the app's
+    /// net feed ([`UiScript::set_latency_ms`]). The AVERAGE over the app's RTT ring, not the last
+    /// sample; `0` = nothing measured yet. See [`super::net_stats`].
+    pub(crate) net_latency_ms: u32,
+
     /// The player's experience within the current level (`UnitXP("player")`) and the amount required
     /// to level (`UnitXPMax("player")`), pushed each frame they change by the app's `PLAYER_XP` /
     /// `PLAYER_NEXT_LEVEL_XP` feed ([`UiScript::set_player_xp`]). A player-level pair (like `money`),
@@ -625,6 +634,7 @@ impl Model {
             party_requests: Vec::new(),
             tell_requests: Vec::new(),
             duel_requests: Vec::new(),
+            pvp_toggles: 0,
             sound_queue: Vec::new(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
@@ -746,6 +756,7 @@ impl Model {
             cursor_pos: (0.0, 0.0),
             modifiers: (false, false, false),
             money: 0,
+            net_latency_ms: 0,
             player_xp: 0,
             player_next_level_xp: 0,
             player_combat_stats: None,

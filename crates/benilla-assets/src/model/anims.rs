@@ -101,13 +101,19 @@ pub struct ModelAnimations {
     /// over the sequence pose (see [`super::GlobalBone`]). Empty for a model with no global-sequence
     /// tracks.
     pub global_bones: Vec<super::GlobalBone>,
-    /// Index into [`Self::clips`] of the **file-order-first sequence**, when that sequence actually
-    /// moves a bone (some track with >1 key). This is the doodad-animation content gate (decision
-    /// 0130): the client arms every M2 instance once at load with `animations[0].id` and loops it
-    /// forever (wow-re `doodad-anim-host.md`), so a placed doodad plays exactly this clip. `None` for
-    /// a model whose first sequence is a motionless pose (constant 1-key tracks build a clip too, but
-    /// looping it renders identically to the static mesh — the ~90% of placed doodads `doodadscan`
-    /// measured stay on the static path).
+    /// Index into [`Self::clips`] of the model's **loader-idle seed** — the sequence the client's
+    /// M2-instance loader arms once at load and plays forever (wow-re `gameobject-anim-arm.md` §1,
+    /// byte-verified `0x71019b`): **animation id 0 ("Stand")**, resolved through the model's own
+    /// `playableAnimationLookup`. NOT the file-order-first sequence — an earlier reading of
+    /// `doodad-anim-host.md` said `animations[0].id`, and wow-re corrected it in place (0637).
+    /// The two coincide for almost every model and diverge exactly on one whose first sequence is
+    /// a Spawn: `DuelingFlag.m2` is Spawn/Stand/Despawn, and arming file-order-0 looped its Spawn
+    /// band, leaving the duel flag hanging 9 yards in the air on a 3.3 s cycle.
+    ///
+    /// `None` when the resolved idle leaves every bone at **bind pose** — looping that really does
+    /// render identically to the static mesh, so the spawn site skips the skin + player (the
+    /// content gate, decision 0130; the ~90% of placed doodads `doodadscan` measured). A *constant
+    /// but non-rest* pose does NOT qualify for that skip — see `m2::idle_pose_differs`.
     pub first_seq: Option<usize>,
 }
 

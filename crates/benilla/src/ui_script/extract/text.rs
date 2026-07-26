@@ -83,6 +83,28 @@ pub(super) fn emit(
         v: style.justify_v,
     };
     let mut text_clip = host.clip;
+    // The shadow's whole-pixel displacement ([`shadow_offset_px`]), hoisted: the band scissor
+    // below has to admit the ink it puts under the fill.
+    let shadow_delta = style.shadow.map(|sh| {
+        (
+            shadow_offset_px(sh.offset[0] * host.scale),
+            shadow_offset_px(-sh.offset[1] * host.scale),
+        )
+    });
+    // A message-frame ring line's scissor follows the seat, at the bottom edge only.
+    //
+    // The band ladder stacks UP from the frame's bottom edge, so the newest line is flush with it
+    // by construction and can never overflow there — the scissor's real job is the OTHER end, the
+    // half-fitting scrollback line at the frame's top, and that edge is untouched. What the bottom
+    // edge did cut was ink the renderer had deliberately placed below the band: the seat nudge
+    // (0351) lowers every UI text block one px, and the drop shadow sits one further px under the
+    // fill. Two of our own dials against a scissor that predates them — and the newest chat line
+    // lost the tails of its descenders and the feet of its brackets (director, 2026-07-26).
+    if matches!(host.target, ZTarget::Frame(_)) {
+        if let Some(c) = text_clip.as_mut() {
+            c.max.y += band_clip_slack(shadow_delta.map(|(_, dy)| dy));
+        }
+    }
     let mut ebox_geom = None;
     if let Some(ui) = ebox {
         let drawn = &text[ui.display_from.min(text.len())..];
@@ -167,12 +189,15 @@ pub(super) fn emit(
     // never itself outlined (an outlined shadow would be a muddy black blob), so it suppresses
     // the halo PAINT only: it keeps the font's true outline for the step law, laying out
     // identically to its fill (a shadow with different steps would smear under long strings).
-    if let Some(sh) = style.shadow {
+    if let (Some(sh), Some((dx, dy))) = (style.shadow, shadow_delta) {
+        // WHOLE pixels (`shadow_offset_px`, computed above): the shadow is a rigid copy of the
+        // fill, so its displacement must be an integer in the rect's own space — see that fn for
+        // why a fractional one makes the offset itself wobble line to line.
         let srect = Rect::new(
-            draw_rect.min.x + sh.offset[0] * host.scale,
-            draw_rect.min.y - sh.offset[1] * host.scale,
-            draw_rect.max.x + sh.offset[0] * host.scale,
-            draw_rect.max.y - sh.offset[1] * host.scale,
+            draw_rect.min.x + dx,
+            draw_rect.min.y + dy,
+            draw_rect.max.x + dx,
+            draw_rect.max.y + dy,
         );
         let shadow_spec = crate::ui_text::FontSpec {
             paint_halo: false,
@@ -299,5 +324,106 @@ pub(super) fn emit(
                 corners: None,
             });
         }
+    }
+}
+
+/// One axis of the drop shadow's displacement, in the rect's own px space: the font object's
+/// unit offset times the seam scale, **rounded to a whole pixel** (never to zero — a shadow the
+/// scale shrank below half a pixel still draws one, the reference's look at any window size).
+///
+/// It must be a whole pixel because the shadow is laid out as a second, offset copy of the fill,
+/// and each copy independently takes the client's single vertical anchor snap (`snap_block_top`
+/// — `ceil(y − 0.5)`). A snap commutes with an integer translate and *only* with an integer
+/// translate: at a fractional offset `d`, `ceil(y + d − 0.5) − ceil(y − 0.5)` is `⌈d⌉` for some
+/// fractional parts of `y` and `⌊d⌋` for others — so the shadow's distance from its own glyphs
+/// changed with where the string happened to land. The chat window made that visible and
+/// permanent: its newest line's band is pinned to the frame's bottom edge, one fixed fractional
+/// position, which sat inside the wide-by-one window — so the most recent message, and only it,
+/// wore a shadow a pixel further out than every line above it (director, 2026-07-26; measured at
+/// 1600×900 ×0.9 UI scale, seam scale 1.055 → the fill/shadow gap alternated 1 px and 2 px).
+///
+/// The world's floating combat text reached the same conclusion from its own law
+/// (`combat_text::law::shadow_offset_px` rounds `0.002·viewport`); this is the UI's half.
+/// How far below its band a message-frame line's ink can reach, in the rect's own px space — the
+/// slack its scissor's bottom edge has to give back.
+///
+/// Two renderer offsets put ink under the geometric band, and neither existed when the band model
+/// was written: the seat nudge ([`crate::ui_text::UI_SEAT_NUDGE`]) drops every UI text block one
+/// px, and the drop shadow ([`shadow_offset_px`]) draws a copy one further px down. A shadow that
+/// rises (`dy < 0`) adds nothing at the bottom.
+fn band_clip_slack(shadow_dy: Option<f32>) -> f32 {
+    crate::ui_text::UI_SEAT_NUDGE + shadow_dy.map_or(0.0, |dy| dy.max(0.0))
+}
+
+fn shadow_offset_px(scaled: f32) -> f32 {
+    let rounded = scaled.round();
+    if rounded == 0.0 && scaled != 0.0 {
+        scaled.signum()
+    } else {
+        rounded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{band_clip_slack, shadow_offset_px};
+
+    /// The newest chat line's band bottom IS the frame's bottom edge, so every px the renderer
+    /// adds below the band is a px the scissor would otherwise eat — the descender tails and
+    /// bracket feet the director saw sliced off. The slack is the sum of the two offsets that put
+    /// ink there, and nothing else.
+    #[test]
+    fn the_band_scissor_gives_back_exactly_the_seat_and_the_shadow() {
+        // The shipped GameFont case: seat nudge 1 + a 1px drop shadow.
+        assert_eq!(band_clip_slack(Some(1.0)), 2.0);
+        // A font object with no shadow still owes the seat.
+        assert_eq!(band_clip_slack(None), 1.0);
+        // A shadow that rises adds nothing under the line.
+        assert_eq!(band_clip_slack(Some(-1.0)), 1.0);
+        // A bigger window scales the shadow, and the slack with it.
+        assert_eq!(band_clip_slack(Some(2.0)), 3.0);
+    }
+
+    /// The whole-pixel law, at the three scales that matter: the 1:1 seam (offset 1 px), the
+    /// director's 1600×900 ×0.9 (1.055 → 1 px, the fix's own case), and a small capture window
+    /// whose scale would otherwise round the shadow away entirely.
+    #[test]
+    fn a_shadow_offset_is_a_whole_pixel_and_never_vanishes() {
+        assert_eq!(shadow_offset_px(1.0), 1.0);
+        assert_eq!(shadow_offset_px(1.0546875), 1.0);
+        assert_eq!(shadow_offset_px(-1.0546875), -1.0);
+        assert_eq!(shadow_offset_px(2.109375), 2.0);
+        // 377-tall capture window × 0.9: 0.44 px would round to nothing.
+        assert_eq!(shadow_offset_px(0.4418), 1.0);
+        assert_eq!(shadow_offset_px(-0.4418), -1.0);
+        // A font object with no offset on an axis keeps none.
+        assert_eq!(shadow_offset_px(0.0), 0.0);
+    }
+
+    /// The property the fix exists for: an integer translate commutes with the client's single
+    /// vertical snap (`ceil(y − 0.5)`), so the fill→shadow gap is the same at every fractional
+    /// position a string can land on. A fractional offset does not — the sweep below is exactly
+    /// the wobble the chat window's newest line wore.
+    #[test]
+    fn a_whole_pixel_offset_survives_the_anchor_snap_at_every_fraction() {
+        let snap = |y: f32| (y - 0.5).ceil();
+        let d = shadow_offset_px(1.0546875);
+        for step in 0..1000 {
+            let y = 100.0 + step as f32 / 1000.0;
+            assert_eq!(
+                snap(y + d) - snap(y),
+                d,
+                "whole-px offset must translate the snapped block exactly, y={y}"
+            );
+        }
+        // …and the unrounded offset provably does not (both gaps occur over one unit of y).
+        let raw = 1.0546875f32;
+        let gaps: std::collections::BTreeSet<i32> = (0..1000)
+            .map(|step| {
+                let y = 100.0 + step as f32 / 1000.0;
+                (snap(y + raw) - snap(y)) as i32
+            })
+            .collect();
+        assert_eq!(gaps, [1, 2].into_iter().collect());
     }
 }

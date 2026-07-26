@@ -61,7 +61,8 @@ pub(crate) use flash::CombatFlash;
 pub(crate) use scan::{can_attack, AttackNearestRequest};
 // The byte-verified reaction decode + its faction catalog, reused by the unit-frame feed to tint the
 // target's name plate (`TargetFrame_CheckFaction`) the same way the selection ring colours itself.
-pub(crate) use ring::{ring_reaction, Factions};
+// `duel_rung` is the diagnostic face of the same walk, for `/reaction` (decision 0637).
+pub(crate) use ring::{duel_rung, ring_reaction, ring_variant, Factions, RingVariant};
 
 /// Our current target: the selected entity and its server guid, or `None`. Set the instant we click a
 /// unit (client-authoritative for the ring — the real client doesn't wait for the server), cleared on

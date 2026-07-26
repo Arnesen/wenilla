@@ -57,11 +57,12 @@ use benilla_protocol::EntityKind;
 
 use crate::assets::{AssetSet, WorldAssets};
 use crate::creature_anim::move_flags;
+use crate::entities::CollisionHeight;
 use crate::lighting::SharedLightBuffer;
 use crate::liquid::{FoamPatch, WaterChunkInfo};
 use crate::net::{NetEntity, SelfPlayer};
 use crate::particles::{WowParticleExt, WowParticleMaterial};
-use crate::player::{Player, CAPSULE_HEIGHT};
+use crate::player::Player;
 use crate::schedule::WorldStage;
 
 use params::{foam_params, foam_uv, rand01, record_alpha, record_size, WadeState};
@@ -77,20 +78,21 @@ const WAKE_TEXTURE: &str = "xtextures/splash/wake.blp";
 const POOL_SIZE: usize = 128;
 const SELF_SLOTS: usize = 32;
 
-/// Step-in/out one-shot depth threshold, as a fraction of collision height (VERIFIED `0x6030c0`:
-/// feet-Z vs `0.4 × collision height` from CMovement+0xb4, crossing latched either direction).
-/// Human collision height ≈ 2.03 yd → fires ~0.81 yd deep.
-const ONESHOT_DEPTH: f32 = 0.4 * CAPSULE_HEIGHT;
+/// Step-in/out one-shot depth threshold, as a fraction of the unit's collision height (VERIFIED
+/// `0x6030c0`: feet-Z vs `0.4 × collision height` from CMovement+0xb4, crossing latched either
+/// direction). A human's 2.031 yd fires it ~0.81 yd deep, a gnome's 1.15 at ~0.46 — the unit's own
+/// `h` since decision 0645, where it used to be a human's for everybody.
+const ONESHOT_DEPTH_FRAC: f32 = 0.4;
 
-/// The emission depth gate at scale 1: **2 × collision height** (≈4.06 yd for a human; scaled by
-/// the unit's scale, floored at 1.0 like the reference's `max(…, 1.0)`). The gate field
+/// The emission depth gate: **2 × the unit's collision height** (≈4.06 yd for a human, ≈2.3 for a
+/// gnome), floored at 1.0 like the reference's `max(…, 1.0)`. The gate field
 /// `[unit+0x297]` is the dword-indexed `+0xa5c` = CMovement+0xb4 = **collision height** —
 /// Q5(c) of wow-re `water-ripple-decal.md` cross-verifies the field identity; the note's
 /// depth-gate paragraph mislabels the same field "boundingRadius", and transcribing that label
 /// (`2 × UNIT_FIELD_BOUNDINGRADIUS` ≈ 0.78, clamped to a 1-yd gate) is what killed all foam the
 /// moment swim latched: the ~1.52-yd swim rest depth sat past the misread gate (decision 0489 —
 /// the director's ref-check shows surface swimmers foaming, which the true 4-yd gate allows).
-const GATE_DEPTH: f32 = 2.0 * CAPSULE_HEIGHT;
+const GATE_DEPTH_FRAC: f32 = 2.0;
 
 /// Horizontal speed (yd/s) above which a streamed unit counts as translating — the velocity proxy
 /// for the reference's `MOVEMENTFLAGS & 0xf` bit-test (the avatar uses its real flags). A small
@@ -336,10 +338,12 @@ fn drive_unit(
     pos: Vec3,
     state: WadeState,
     scale: f32,
-    gate: f32,
+    // The unit's collision height (yd) — both depth lines below are fractions of it (0645).
+    h: f32,
     chunks: &[(Entity, &WaterChunkInfo, &FoamPatch)],
     now: f32,
 ) {
+    let gate = (GATE_DEPTH_FRAC * h).max(1.0);
     foam_state.active = true;
     let wow = bevy_to_wow(pos);
     // The surface height under the unit, from the wet cell it stands on — not the chunk's box and
@@ -357,7 +361,7 @@ fn drive_unit(
     // Step-in/out one-shot: fires once on crossing the wade depth in EITHER direction
     // (`0x6030c0`, latched at `[+0x269]` — VERIFIED; the driver's mode-0xC9 call also clears the
     // shared cooldown).
-    let wading_now = depth > ONESHOT_DEPTH * scale;
+    let wading_now = depth > ONESHOT_DEPTH_FRAC * h;
     let oneshot = wading_now != foam_state.wading;
     foam_state.wading = wading_now;
 
@@ -411,7 +415,7 @@ fn emit_water_foam(
     mut foam: ResMut<WaterFoam>,
     player: Res<Player>,
     self_store: Query<&NetEntity, With<SelfPlayer>>,
-    units: Query<(Entity, &Transform, &NetEntity), Without<SelfPlayer>>,
+    units: Query<(Entity, &Transform, &NetEntity, Option<&CollisionHeight>), Without<SelfPlayer>>,
     water: Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
 ) {
     if materials.is_none() {
@@ -448,7 +452,7 @@ fn emit_water_foam(
                 WadeState::Standing
             };
             let scale = self_store.single().map(|net| net.scale).unwrap_or(1.0);
-            let gate = (GATE_DEPTH * scale).max(1.0);
+            let h = player.collision_height.0;
             let WaterFoam {
                 pool,
                 self_cursor,
@@ -459,11 +463,11 @@ fn emit_water_foam(
             let mut alloc = |rec: FoamRecord| {
                 pool[alloc_slot(self_cursor, 0, SELF_SLOTS)] = Some(rec);
             };
-            drive_unit(uf, &mut alloc, player.pos, state, scale, gate, &chunks, now);
+            drive_unit(uf, &mut alloc, player.pos, state, scale, h, &chunks, now);
         }
 
         // Streamed units (the avatar's own wire ghost is excluded via `Without<SelfPlayer>`).
-        for (entity, transform, net) in &units {
+        for (entity, transform, net, collision) in &units {
             if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
                 continue;
             }
@@ -499,7 +503,7 @@ fn emit_water_foam(
             } else {
                 WadeState::Standing
             };
-            let gate = (GATE_DEPTH * net.scale).max(1.0);
+            let h = collision.copied().unwrap_or_default().0;
             let WaterFoam {
                 pool,
                 other_cursor,
@@ -510,7 +514,7 @@ fn emit_water_foam(
             let mut alloc = |rec: FoamRecord| {
                 pool[alloc_slot(other_cursor, SELF_SLOTS, POOL_SIZE - SELF_SLOTS)] = Some(rec);
             };
-            drive_unit(uf, &mut alloc, pos, state, net.scale, gate, &chunks, now);
+            drive_unit(uf, &mut alloc, pos, state, net.scale, h, &chunks, now);
         }
     }
 

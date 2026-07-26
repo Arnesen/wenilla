@@ -226,11 +226,23 @@ impl UiScript {
             // its live fade alpha in the text color. The generic region path can't do this (the lines
             // aren't declared FontStrings); the ring lives in the frame's kind state.
             if let (ZTarget::Frame(fh), Some(fr)) = (target, rect) {
-                // The frame's own draw slot also carries its Backdrop (behind its regions, which sort
-                // after the frame slot) and, for a ScrollingMessageFrame, its ring lines — both clip
-                // like the frame's own slot (the frame IS the clipped owner when it's a scroll child).
+                // The frame's own draw slot carries its Backdrop, behind its regions (which sort
+                // after the frame slot). A ScrollingMessageFrame's ring lines do NOT: they take the
+                // slot's ARTWORK *content* key ([`crate::order::ZKey::content`]) — the layer the
+                // client's own message font strings live in — so the frame's BACKGROUND textures
+                // stay behind them. At the bare slot the chat window's hover box painted over its
+                // own messages. Both clip like the frame's own slot (the frame IS the clipped owner
+                // when it's a scroll child).
                 Self::emit_backdrop(&model, fh, fr, zkey.raw(), alpha, clip, &mut out);
-                Self::emit_message_lines(&model, fh, fr, zkey.raw(), alpha, clip, &mut out);
+                Self::emit_message_lines(
+                    &model,
+                    fh,
+                    fr,
+                    zkey.content(order::DrawLayer::Artwork).raw(),
+                    alpha,
+                    clip,
+                    &mut out,
+                );
             }
         }
         out
