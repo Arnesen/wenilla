@@ -433,14 +433,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let n1 = vec4<f32>(n_lit, 1.0);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
-    // Exterior world doodad/entity: the FFP directional matte, scaled by the per-instance
+    // Exterior world doodad/entity: a hard-cutoff directional matte, scaled by the per-instance
     // INTENSITY, the byte-verified `[node+0xa4]`: 2.5 on lit ground / 0.5 on MCSH-shadowed
-    // ground / 1.0 day-night (`0x69e4ad`, `0x69e280`). Decision 0410 moved this lane from the
-    // `Model2.bls` SH lobe (0354/0358 — the mainstream VS-path curve) back to the FFP matte —
-    // both are reference-real (the FFP leg is the fixed-function config, byte-verified in wow-re
-    // unit-light-combine-storm.md); the SH wrap fed warm sun onto the anti-sun side, which the
-    // director rejected: a sunlit character's shadow side must read the SAME as the skin standing
-    // in shade, and under the hard `max(N·L, 0)` cutoff both sit exactly at the ambient level.
+    // ground / 1.0 day-night (`0x69e4ad`, `0x69e280`). Lane history: the `Model2.bls` SH lobe
+    // (0354/0358, the mainstream VS-path curve) → the FFP matte with a hard cutoff (the SH wrap
+    // fed warm sun onto the anti-sun side; director's call: a sunlit character's shadow side
+    // must read the SAME as the skin standing in shade, so both sit exactly at the ambient
+    // level) → the same hard cutoff on an UNCLAMPED source (0706, below).
     //
     // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
     // the lit-ground family (ADT doodads and every entity M2 — intensity 2.5, mixed toward 0.5 by
@@ -453,21 +452,18 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
     let intensity = select(mix(2.5, 0.5, shade_t), 1.0, mid_band);
-    // Decision 0410: the exterior doodad/entity lane lights with the FFP matte — a HARD sun
-    // cutoff, `clamp01(ambient + clamp01(I·D)·max(N·L,0))` (the reference's own fixed-function
-    // config leg, byte-verified in wow-re unit-light-combine-storm.md) — instead of the SH lobe.
-    // The SH curve's authored wrap fed 0.059·C to the anti-sun side and dipped −0.037·C mid-back;
-    // with the strong orange day diffuse at I=2.5 that made a sunlit character's shadow side both
-    // tinted and brighter than the same skin standing in shade. Director's call: the shadow side
-    // must read the SAME as standing in shade — under the hard cutoff both sit exactly at the
-    // ambient level. (The SH rows stay packed; the interior-prop probe lane still uses the fold.)
-    let d_ffp = clamp(
-        wow_light.light_diffuse.rgb * intensity,
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
+    // Hard sun cutoff on an UNCLAMPED source: `clamp01(ambient + I·D·max(N·L,0))` — ONE
+    // saturating clamp, at the sum (decision 0706, which keeps the earlier director ruling:
+    // the anti-sun side sits exactly at ambient, no SH wrap). The old per-channel source
+    // pre-clamp `clamp01(I·D)` was faithful to NEITHER reference leg — the FFP leg
+    // peak-NORMALIZES (`(I·D)/max(1,maxch)`, hue-preserving, glue-model-lighting §4) and the
+    // mainstream Model2.bls SH path consumes the moments unclamped — and it bleached the sun:
+    // the EK dawn diffuse (254,123,51) at I=2.5 pre-clamped to (1,1,.5), which is bug B33/B97
+    // (bone-white fences, pale-olive beams, where the reference renders both dark-warm). The
+    // unclamped sum matches the SH fidelity target's colour response to ≤10% on the sun side
+    // (equal at the pole and at μ≈0.2) while the hard cutoff stands in for the rejected wrap.
     let lit_doodad = clamp(
-        wow_light.light_ambient.rgb + d_ffp * ndotl,
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * intensity * ndotl,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

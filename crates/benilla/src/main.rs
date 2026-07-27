@@ -20,6 +20,7 @@
 mod area;
 mod area_trigger;
 mod assets;
+mod bgwin;
 mod billboard;
 mod blob_shadow;
 mod bowstring;
@@ -83,6 +84,7 @@ mod sun;
 mod target;
 mod terrain;
 mod terrain_stream;
+mod textinput;
 mod thread_qos;
 mod transport;
 mod ui_action;
@@ -95,6 +97,7 @@ mod ui_craft;
 mod ui_duel;
 mod ui_gamma;
 mod ui_gossip;
+mod ui_hide;
 mod ui_inspect;
 mod ui_item_text;
 mod ui_items;
@@ -164,6 +167,7 @@ use sun::SunPlugin;
 use target::TargetPlugin;
 use terrain::{TerrainMaterial, WowModelMaterial};
 use terrain_stream::TerrainPlugin;
+use textinput::TextInputPlugin;
 use transport::TransportPlugin;
 use ui_action::UiActionPlugin;
 use ui_aura::UiAuraPlugin;
@@ -220,6 +224,9 @@ fn main() {
     // Visual A/B harness (decision 0008): with `$WOW_CAPTURE` set, the app runs a deterministic,
     // server-less capture (net off so no NPCs stream in nondeterministically) and exits. See `capture`.
     let capturing = capture::scenario_active();
+    // Any instrumented run — captures AND the live-probe fleet — opens in the background so it
+    // never fights the director's screen (decision 0703; `WOW_BG` overrides). See `bgwin`.
+    let background = bgwin::background_run();
     if capturing {
         // Ground clutter scatters with per-run randomness (the only non-deterministic element in the
         // scene), so disable it for byte-stable baselines — clutter isn't what the lighting rework
@@ -277,14 +284,22 @@ fn main() {
                     } else {
                         bevy::window::PresentMode::default()
                     },
-                    // A capture run must never steal the keyboard. It opens a real window for its
-                    // few seconds of settle time, and a focused one takes over whatever the
-                    // director is typing into — on 2026-07-19 a login-shot run swallowed their
-                    // keystrokes out of another app and typed them into the account box, which is
-                    // also how that capture lost the bare caret it was taken to measure. Any run
-                    // driven by a capture/shot env opens unfocused; an ordinary `cargo run` is
-                    // unaffected and still focuses normally.
-                    focused: !(capturing || std::env::var_os("WOW_LOGIN_SHOT_OUT").is_some()),
+                    // An instrumented run must never fight the director's screen (decision 0703).
+                    // Focused, it steals the keyboard — on 2026-07-19 a login-shot run swallowed
+                    // their keystrokes out of another app and typed them into the account box,
+                    // which is also how that capture lost the bare caret it was taken to measure.
+                    // Merely unfocused, a normal-level window still opens on TOP of their work.
+                    // So every probe/capture/regression run (`bgwin`) opens unfocused at the
+                    // bottom of the window stack — still on screen, so rendering, readback and
+                    // screenshots are untouched. An ordinary `cargo run` is unaffected and
+                    // focuses normally. The app-level half (winit's forced macOS app activation)
+                    // is `BgWinPlugin`'s job below.
+                    focused: !background,
+                    window_level: if background {
+                        bevy::window::WindowLevel::AlwaysOnBottom
+                    } else {
+                        bevy::window::WindowLevel::Normal
+                    },
                     ..default()
                 }),
                 ..default()
@@ -354,6 +369,10 @@ fn main() {
             .disable::<bevy::audio::AudioPlugin>(),
     )
     .add_plugins(thread_qos::ThreadQosPlugin)
+    // The app-side half of background instrumented runs: undo winit's forced macOS app
+    // activation so a probe/capture launch never yanks focus off the director's screen. The
+    // window-side half (unfocused + always-on-bottom) is in the `Window` above. Decision 0703.
+    .add_plugins(bgwin::BgWinPlugin)
     .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
     .add_plugins(MaterialPlugin::<WowModelMaterial>::default())
     // Physics (avian3d): collider storage + broadphase BVH + shape-casts for the character
@@ -497,7 +516,7 @@ fn main() {
     // Unit-frame portraits: the token -> off-screen-baked-face bridge the UI extract samples for a
     // `SetPortraitTexture`-bound region (the modern high-res 2D model bake).
     .add_plugins(PortraitPlugin)
-    .add_plugins(UiScriptPlugin)
+    .add_plugins((TextInputPlugin, UiScriptPlugin))
     // The unit snapshot + event feed (decision 0068 §3): pushes ECS game state into the VM as the
     // plain data the `Unit*` bindings read, and fires the matching WoW events.
     .add_plugins(UiUnitPlugin)
@@ -555,6 +574,9 @@ fn main() {
     // Chat speech bubbles (0598): the over-the-head bubble a say/yell/party line spawns, the
     // plates' 2-D overlay sibling — mutually exclusive with both the plate and the name.
     .add_plugins(chat_bubble::ChatBubblePlugin)
+    // TOGGLEUI (`CTRL-Z`/`Cmd-Z`): the whole quad layer goes dark — frames, minimap, plates,
+    // bubbles, combat text — leaving the world and the cursor.
+    .add_plugins(ui_hide::UiHidePlugin)
     .add_plugins(UiItemsPlugin)
     // The gossip window (decision 0081): fills from the net drain's GossipState and drives
     // GossipFrame.xml over the Era gossip API.

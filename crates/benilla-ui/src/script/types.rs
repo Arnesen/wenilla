@@ -448,45 +448,11 @@ pub struct EditBoxAdvanceRequest {
     pub key: u64,
 }
 
-/// The text span a cursor motion or deletion operates over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditUnit {
-    /// One character (the plain arrow / Backspace / Delete granularity).
-    Char,
-    /// One word run (`EditBoxState::word_boundary` — the Ctrl/Option-arrow granularity).
-    Word,
-    /// The line edge: text start going back, text end going forward (Home/End, Cmd+arrow).
-    Edge,
-}
-
-/// One semantic text-editing operation on the focused EditBox — fed to
-/// [`UiScript::editbox_action`](super::UiScript::editbox_action). The host's per-OS keymap
-/// (which physical chord means which action: Ctrl+Left on Windows, Option+Left on macOS, …)
-/// translates key events into these; the *effect* of each action is the engine's byte-verified
-/// box law (RF-0082: selection anchoring, selection-first deletes, word classes). Clipboard
-/// operations are deliberately absent: they need the OS pasteboard, so they stay host-side
-/// (`editbox_copy`/`editbox_cut`/`paste`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditAction {
-    /// Move the caret one `unit` back/forward; `extend` drags the selection from its fixed
-    /// anchor (the Shift family). `Char` moves honor `ignoreArrows` (consumed but inert — the
-    /// ref guard `0x77b18e`; arrows are the only chord source of `Char` moves).
-    Move {
-        unit: EditUnit,
-        back: bool,
-        extend: bool,
-    },
-    /// Delete one `unit` back/forward from the caret — the selection first when one exists
-    /// (every deletion gesture collapses to "delete the selection"). `Edge` going back is the
-    /// macOS Cmd+Backspace "clear to start".
-    Delete { unit: EditUnit, back: bool },
-    /// Select the whole text, caret to the end (the ref's Ctrl+A, `HighlightText(0, -1)`).
-    SelectAll,
-    /// Recall the previous (older) submitted line into the box (`historyLines`).
-    HistoryPrev,
-    /// Step back toward the newest line; past it, restore the stashed draft.
-    HistoryNext,
-}
+// `EditAction`/`EditUnit` are the *editing law's* vocabulary, so they live beside the state that
+// law mutates ([`crate::widget::EditBoxState`]) rather than here — `script` depends on `widget`,
+// never the other way round, and the glue screens drive the law with no Lua VM in sight
+// (decision 0704). Re-exported here because this is the path the host has always used.
+pub use crate::widget::{EditAction, EditOutcome, EditUnit};
 
 /// The focused EditBox's per-frame text-UI geometry — returned by
 /// [`UiScript::focused_editbox_text_ui`](super::UiScript::focused_editbox_text_ui): everything

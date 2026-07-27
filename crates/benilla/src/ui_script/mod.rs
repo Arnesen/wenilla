@@ -29,7 +29,6 @@ use crate::ui_unit::UnitFeed;
 
 mod extract;
 mod input;
-mod textkeys;
 
 /// Is the pointer over *any* UI this frame — the egui dev overlay OR a mouse-enabled player-UI
 /// frame? The single source of truth for "the mouse is talking to the UI, not the world",

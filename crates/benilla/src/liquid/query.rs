@@ -75,19 +75,78 @@ pub(crate) struct Underwater(pub(crate) benilla_formats::Submersion);
 /// claims every position under its XY in *every other building on the map*, at any depth. That is
 /// decision 0696 — the Uldaman entrance read as submerged under a mushroom cave's pool 186 yd
 /// overhead, in a building the player was 191 yd below and had never entered.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum LiquidSource {
     /// An ADT map-chunk surface (MCLQ) — the outdoor world's lakes, rivers, coast.
     AdtChunk,
     /// A WMO group's embedded surface (MLIQ) — canals, fountains, the Great Forge lava,
-    /// Undercity's slime — tagged with the [`WmoRoom`] that owns it.
+    /// Undercity's slime — tagged with the room that owns it and that room's own floor.
+    WmoGroup(WmoPool),
+}
+
+/// A WMO pool's **scope**: whose room it is, and how far down that room reaches.
+///
+/// Both fields exist to bound a footprint that has none of its own. `owner` bounds it sideways, to
+/// one placement (0696). `floor` bounds it *downwards*, to one storey — the piece 0696 named as
+/// still open and deferred to wow-re, now measured against the shipped files: Undercity's upper
+/// slime channels (groups 7 and 10, world z ≈ 52) were submerging the Rogues'-Quarter-level rooms
+/// **115 yd below them**, in the same placement, so owner scoping alone could not reject them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct WmoPool {
+    /// The room this pool belongs to.
     ///
     /// `None` only for a placement that spawned no [`WmoPortalInstance`](crate::wmo_portal::WmoPortalInstance)
     /// — a portal-less building with no `WMOAreaTable` identity. Nothing can claim to be *inside*
     /// such a placement (the interior trackers skip it), so its pool answers no one. That is the
     /// pre-existing behaviour made explicit rather than a new gap: an unowned pool was already
     /// unreachable, it just used to be unreachable by accident.
-    WmoGroup(Option<WmoRoom>),
+    pub(crate) owner: Option<WmoRoom>,
+    /// World WoW Z of the **owning group's own bounding box floor** — a pool never claims a subject
+    /// below the room it sits in.
+    ///
+    /// The reference's WMO leg picks its group by testing the query point against each group's MOGI
+    /// bounding box (`0x6a4e00`, per-group strict AABB) before sampling any MLIQ, so a pool three
+    /// storeys up is never even a candidate. We take the box's **Z floor only**, not the whole AABB:
+    /// measured over every WMO placed in the shipped world, a pool's wet cells reach up to 25 yd
+    /// *outside* their own group's box in XY (Ahn'Qiraj, Stratholme), so testing XY against the box
+    /// too would newly reject pools that work today — while the Z floor cannot, because anything
+    /// genuinely swimming in a pool is above the floor of the room holding it.
+    ///
+    /// `NEG_INFINITY` when the group's bounds are unknown: no floor, i.e. exactly the pre-0701
+    /// behaviour, so a missing box can only ever fail open.
+    pub(crate) floor: f32,
+}
+
+impl WmoPool {
+    /// The scope of the pool in `bounds`'s group, under a placement `transform`: the owning room,
+    /// and that group's bounding-box floor carried into world WoW Z.
+    ///
+    /// The floor is taken over all **eight** corners rather than off `bbox_min` alone, because a
+    /// placement may be rotated and the lowest corner of a tilted box is not the box's own minimum.
+    /// Absent bounds ⇒ [`NEG_INFINITY`](f32::NEG_INFINITY): a missing box must fail *open* (a pool
+    /// that claims too much — the pre-0701 behaviour) rather than closed (a lake nobody can swim in).
+    pub(crate) fn new(
+        owner: Option<WmoRoom>,
+        transform: &Transform,
+        bounds: Option<&benilla_formats::WmoGroupInfo>,
+    ) -> Self {
+        let Some(g) = bounds else {
+            return Self {
+                owner,
+                floor: f32::NEG_INFINITY,
+            };
+        };
+        let mut floor = f32::INFINITY;
+        for x in [g.bbox_min[0], g.bbox_max[0]] {
+            for y in [g.bbox_min[1], g.bbox_max[1]] {
+                for z in [g.bbox_min[2], g.bbox_max[2]] {
+                    // Bevy's +Y is WoW's +Z, so a transformed corner's `y` IS its world height.
+                    floor = floor.min(transform.transform_point(wow_to_bevy([x, y, z])).y);
+                }
+            }
+        }
+        Self { owner, floor }
+    }
 }
 
 /// Whose liquid answers for one subject at one position — the query's context, and the whole of the
@@ -375,14 +434,19 @@ impl WaterChunkInfo {
     /// else: not the ADT liquid overhead (the 0634 delegation), and not another building's pool
     /// (the 0696 owner scoping). An [`Outdoors`](LiquidClaim::Outdoors) subject reads only the ADT.
     /// [`Unknown`](LiquidClaim::Unknown) is the un-classified first frame and admits both.
-    fn answers(&self, claim: LiquidClaim) -> bool {
+    ///
+    /// `z` is the subject's own WoW height, and it is what bounds a WMO pool **downwards** to its
+    /// own storey ([`WmoPool::floor`], decision 0701) — a test on the pool rather than on the
+    /// delegation, so it holds under every claim including `Unknown`.
+    fn answers(&self, claim: LiquidClaim, z: f32) -> bool {
         match (claim, self.source) {
+            (_, LiquidSource::WmoGroup(pool)) if z < pool.floor => false,
             (LiquidClaim::Unknown, _) => true,
             (LiquidClaim::Outdoors, LiquidSource::AdtChunk) => true,
             (LiquidClaim::Outdoors, LiquidSource::WmoGroup(_)) => false,
             (LiquidClaim::Inside(_), LiquidSource::AdtChunk) => false,
-            (LiquidClaim::Inside(room), LiquidSource::WmoGroup(owner)) => {
-                owner.is_some_and(|o| o.instance == room.instance)
+            (LiquidClaim::Inside(room), LiquidSource::WmoGroup(pool)) => {
+                pool.owner.is_some_and(|o| o.instance == room.instance)
             }
         }
     }
@@ -393,7 +457,7 @@ impl WaterChunkInfo {
     fn owner(&self) -> Option<WmoRoom> {
         match self.source {
             LiquidSource::AdtChunk => None,
-            LiquidSource::WmoGroup(owner) => owner,
+            LiquidSource::WmoGroup(pool) => pool.owner,
         }
     }
 
@@ -505,18 +569,17 @@ pub(crate) struct LiquidHit {
 /// (`.next()`) — an arbitrary pick that made the answer depend on spawn order. The lowest is the one
 /// whose volume you are actually in when standing between two stacked surfaces.
 ///
-/// **Still open — the bound BELOW a surface within one room.** Owner scoping bounds a pool to its
-/// building; it does not bound it to its *storey*. A multi-floor WMO whose upper room holds water
-/// would still claim the room beneath it, and whether the reference scopes to the containing GROUP
-/// (and whether a WMO hit with no liquid suppresses the ADT leg) is a live wow-re dispatch — 0634's
-/// deferral, re-asked with the group question attached in 0696. Do not invent the rule here.
+/// And a WMO pool is bounded **below** by its own room's floor ([`WmoPool::floor`], decision 0701):
+/// owner scoping bounded a pool to its building but not to its *storey*, which left Undercity's
+/// upper slime channels submerging the rooms 115 yd beneath them — the same defect a third time,
+/// one level further in.
 pub(crate) fn liquid_at<'a>(
     liquids: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
     claim: LiquidClaim,
 ) -> Option<LiquidHit> {
     liquids
-        .filter(|w| w.answers(claim))
+        .filter(|w| w.answers(claim, wow[2]))
         .filter_map(|w| {
             w.surface_z_at(wow[0], wow[1]).map(|surface_z| LiquidHit {
                 surface_z,
@@ -566,18 +629,27 @@ pub(crate) fn describe_at<'a>(
                 ),
                 (None, _) => "box-only (dry here)".to_string(),
             };
-            let owner = match (w.source, w.owner()) {
-                (LiquidSource::AdtChunk, _) => "AdtChunk".to_string(),
-                (LiquidSource::WmoGroup(_), Some(o)) => {
-                    format!("WmoGroup {:?} g{}", o.instance, o.group)
-                }
-                (LiquidSource::WmoGroup(_), None) => "WmoGroup (unowned)".to_string(),
+            // The owner column names the pool's room AND its floor: a candidate rejected for being
+            // a storey up looks identical to one rejected for being another building's without it.
+            let owner = match w.source {
+                LiquidSource::AdtChunk => "AdtChunk".to_string(),
+                LiquidSource::WmoGroup(pool) => match pool.owner {
+                    Some(o) => format!(
+                        "WmoGroup {:?} g{} floor {:.2}",
+                        o.instance, o.group, pool.floor
+                    ),
+                    None => "WmoGroup (unowned)".to_string(),
+                },
             };
             (
                 z.unwrap_or(hi),
                 format!(
                     "{owner} {} {:?} {here}  grid z [{lo:.2}..{hi:.2}]  xy [{:.0}..{:.0}, {:.0}..{:.0}]",
-                    if w.answers(claim) { "◀ YOURS" } else { "· other room" },
+                    if w.answers(claim, wow[2]) {
+                        "◀ YOURS"
+                    } else {
+                        "· other room"
+                    },
                     w.kind,
                     w.min_x,
                     w.max_x,
@@ -660,6 +732,35 @@ fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
 /// Where surfaces stack, the **deepest submerging** one wins: standing in the Great Forge's lava
 /// under an unrelated water footprint should read as lava, and a `.any()` over an unordered query
 /// would otherwise answer with whichever entity the ECS happened to yield first.
+/// Which submerged atmosphere a position is in — the verdict [`detect_submersion`] publishes, as a
+/// plain function of a candidate set so it can be asked of the shipped files in a test.
+///
+/// It lived inline in the system until decision 0701, where the Undercity storey bug turned on it:
+/// the defect was never visible to [`liquid_at`] (which answers "the liquid over this XY", lowest
+/// wins, whether or not you are under it) but only to *this* rule — "every admitted surface the eye
+/// is beneath". A rule no test can call is a rule that drifts from the one being reasoned about.
+pub(super) fn submersion_at<'a>(
+    liquids: impl Iterator<Item = &'a WaterChunkInfo>,
+    wow: [f32; 3],
+    claim: LiquidClaim,
+) -> benilla_formats::Submersion {
+    liquids
+        .filter(|w| w.answers(claim, wow[2]))
+        .filter_map(|w| {
+            let z = w.surface_z_at(wow[0], wow[1])?;
+            let eps = if w.kind.is_fullbright() {
+                0.0
+            } else {
+                SUBMERSION_EPS
+            };
+            (wow[2] < z + eps).then_some((z, submersion_of(w.kind)))
+        })
+        // Lowest surface first: `total_cmp` on the surface z, so a tie is still deterministic.
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, s)| s)
+        .unwrap_or_default()
+}
+
 pub(super) fn detect_submersion(
     mut underwater: ResMut<Underwater>,
     camera: Query<&Transform, With<WorldCamera>>,
@@ -673,22 +774,7 @@ pub(super) fn detect_submersion(
     };
     let claim = camera_claim(&eye_claim);
     let eye = bevy_to_wow(cam.translation); // [x, y, z] WoW yards
-    underwater.0 = water
-        .iter()
-        .filter(|w| w.answers(claim))
-        .filter_map(|w| {
-            let z = w.surface_z_at(eye[0], eye[1])?;
-            let eps = if w.kind.is_fullbright() {
-                0.0
-            } else {
-                SUBMERSION_EPS
-            };
-            (eye[2] < z + eps).then_some((z, submersion_of(w.kind)))
-        })
-        // Lowest surface first: `total_cmp` on the surface z, so a tie is still deterministic.
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, s)| s)
-        .unwrap_or_default();
+    underwater.0 = submersion_at(water.iter(), eye, claim);
     // `WOW_FOG_DUMP` also explains *this* decision (`frame` drops the 1 Hz throttle, as there). The
     // committed fog is whichever submerged atmosphere the verdict names, so a fog line alone cannot
     // say whether an atmosphere that reads wrong is the wrong record or the right record never
@@ -703,10 +789,22 @@ pub(super) fn detect_submersion(
                 .iter()
                 .filter_map(|w| {
                     w.surface_z_at(eye[0], eye[1]).map(|z| {
+                        // Name the owner's GROUP, not just whether the claim admits it: with
+                        // placement scoping a pool in another STOREY of the same building still
+                        // answers, and its group index is the only thing on this line that tells
+                        // it apart from the room's own pool.
                         format!(
-                            "{:?} z {z:.2}{}",
+                            "{:?} z {z:.2} {}{}",
                             w.kind,
-                            if w.answers(claim) { "" } else { " (not yours)" }
+                            match w.owner() {
+                                Some(o) => format!("g{}", o.group),
+                                None => "adt".into(),
+                            },
+                            if w.answers(claim, eye[2]) {
+                                ""
+                            } else {
+                                " (not yours)"
+                            }
                         )
                     })
                 })
@@ -783,16 +881,34 @@ mod tests {
         Entity::from_raw_u32(n).expect("valid entity id")
     }
 
-    /// A WMO pool owned by placement `n`, group 0.
+    /// A WMO pool owned by placement `n`, group 0, whose room has no floor — the fixture for the
+    /// tests that are about the OWNER half of the scope. The floor half gets its own fixture
+    /// ([`wmo_pool`]) so neither can silently stand in for the other.
     fn wmo_info(owner: u32, kind: LiquidKind, z: f32) -> WaterChunkInfo {
         flat_info(
-            LiquidSource::WmoGroup(Some(WmoRoom {
-                instance: placement(owner),
-                group: 0,
-            })),
+            LiquidSource::WmoGroup(wmo_pool(owner, f32::NEG_INFINITY)),
             kind,
             z,
         )
+    }
+
+    /// The scope of a pool in placement `n`'s group 0, whose room's floor is at `floor`.
+    fn wmo_pool(owner: u32, floor: f32) -> WmoPool {
+        WmoPool {
+            owner: Some(WmoRoom {
+                instance: placement(owner),
+                group: 0,
+            }),
+            floor,
+        }
+    }
+
+    /// An unowned, unfloored pool — the portal-less placement's case.
+    fn orphan_pool() -> WmoPool {
+        WmoPool {
+            owner: None,
+            floor: f32::NEG_INFINITY,
+        }
     }
 
     /// The claim of a subject standing inside placement `n`.
@@ -832,7 +948,11 @@ mod tests {
                 rotation: Quat::from_rotation_y(deg.to_radians()), // yaw about vertical
                 scale: Vec3::ONE,
             };
-            let info = wet_footprint(&flat_quad(5.0), &transform, LiquidSource::WmoGroup(None));
+            let info = wet_footprint(
+                &flat_quad(5.0),
+                &transform,
+                LiquidSource::WmoGroup(orphan_pool()),
+            );
             let centre = bevy_to_wow(transform.transform_point(wow_to_bevy([5.0, 5.0, 5.0])));
             let z = info
                 .surface_z_at(centre[0], centre[1])
@@ -949,11 +1069,140 @@ mod tests {
         );
     }
 
+    /// **The Undercity storey bug** (decision 0701): a pool in ANOTHER GROUP of the SAME placement,
+    /// far above, still claimed you — owner scoping bounds a pool sideways to one building but not
+    /// downwards to one room. Live repro at `.go xyz 1732.68 187.01 -65.70`: the eye's own room
+    /// (group 182) held slime at z −64.48, *below* the eye and so not submerging it, while groups 7
+    /// and 10 — the Ruins-of-Lordaeron-level channels at z 51.98, **115 yd overhead** — were what
+    /// turned the screen green.
+    ///
+    /// The floor is the fix, and the second half of this test is the reason it is a floor and not
+    /// the reference's whole per-group AABB: a subject genuinely in a pool is always above the
+    /// floor of the room holding it, so the bound cannot cost a swim.
+    #[test]
+    fn a_pool_upstairs_does_not_claim_the_room_below() {
+        // Undercity's shape, in miniature: one placement, two rooms stacked 115 yd apart.
+        let upstairs = flat_info(
+            LiquidSource::WmoGroup(wmo_pool(1, 48.0)), // the upper channels' room floor
+            LiquidKind::Slime,
+            51.98,
+        );
+        let downstairs = flat_info(
+            LiquidSource::WmoGroup(wmo_pool(1, -70.0)), // the Rogues'-Quarter-level room
+            LiquidKind::Slime,
+            -64.48,
+        );
+        let all = [&upstairs, &downstairs];
+
+        // The eye, standing in the lower room ABOVE its own slime. What turned the screen green was
+        // the SUBMERSION rule — "every surface over the eye that the eye is under" — so that is what
+        // this pins: the upstairs pool must not be a candidate for the eye at all.
+        assert!(
+            !upstairs.answers(inside(1), -63.59),
+            "a pool 115 yd overhead, in another storey of the same building, must not submerge you"
+        );
+        assert!(
+            downstairs.answers(inside(1), -63.59),
+            "…while the eye's OWN room's pool stays a candidate (it is simply below the eye)"
+        );
+        // Step down into the lower room's OWN slime and it still answers — the floor bounds the
+        // pool to its room, it does not cap how deep the room's own liquid reaches.
+        assert_eq!(
+            liquid_at(all.into_iter(), [5.0, 5.0, -66.0], inside(1))
+                .unwrap()
+                .surface_z,
+            -64.48
+        );
+        // …and upstairs, standing in the upper channels, they answer as they always did.
+        assert!(upstairs.answers(inside(1), 50.0));
+    }
+
+    /// The floor is a property of the POOL, not of the delegation, so it holds for a subject whose
+    /// claim has not been computed yet. An `Unknown` claim admits both sources — it must not also
+    /// re-admit the pool three storeys up that every other claim rejects.
+    #[test]
+    fn the_floor_holds_even_for_an_unclassified_subject() {
+        let upstairs = flat_info(
+            LiquidSource::WmoGroup(wmo_pool(1, 48.0)),
+            LiquidKind::Slime,
+            51.98,
+        );
+        assert!(liquid_at(
+            [&upstairs].into_iter(),
+            [5.0, 5.0, -63.59],
+            LiquidClaim::Unknown
+        )
+        .is_none());
+        assert!(liquid_at(
+            [&upstairs].into_iter(),
+            [5.0, 5.0, 50.0],
+            LiquidClaim::Unknown
+        )
+        .is_some());
+    }
+
+    /// A group with no bounds has no floor — a missing box fails OPEN (claims as it used to), never
+    /// closed. Closing would turn "a pool claims too much" into "a lake nobody can swim in", which
+    /// is the worse failure and the harder one to notice.
+    #[test]
+    fn a_pool_with_no_bounds_keeps_its_pre_floor_reach() {
+        let unbounded = WmoPool::new(
+            Some(WmoRoom {
+                instance: placement(1),
+                group: 0,
+            }),
+            &Transform::IDENTITY,
+            None,
+        );
+        assert_eq!(unbounded.floor, f32::NEG_INFINITY);
+        let pool = flat_info(LiquidSource::WmoGroup(unbounded), LiquidKind::Still, 8.0);
+        assert!(liquid_at([&pool].into_iter(), [5.0, 5.0, -9999.0], inside(1)).is_some());
+    }
+
+    /// The floor comes off the group box carried through the PLACEMENT transform, over all eight
+    /// corners — a rotated placement's lowest corner is not the box's own `bbox_min`. Checked
+    /// against a roll that swaps which corner is lowest.
+    #[test]
+    fn the_floor_follows_the_placement_transform() {
+        let bounds = benilla_formats::WmoGroupInfo {
+            interior: true,
+            bbox_min: [-10.0, -10.0, 0.0],
+            bbox_max: [10.0, 10.0, 4.0],
+        };
+        // A pure world lift: WoW z-floor 0 + 100 = 100 (Bevy +Y is the WoW z lift).
+        let lifted = WmoPool::new(
+            None,
+            &Transform::from_translation(Vec3::new(0.0, 100.0, 0.0)),
+            Some(&bounds),
+        );
+        assert!((lifted.floor - 100.0).abs() < 1e-3, "got {}", lifted.floor);
+        // Rolled 90° about the Bevy Z axis (a WoW-X roll): the box's ±10 half-width in one
+        // horizontal axis now reaches DOWN, so the floor is 10 below the placement, not 0.
+        let rolled = WmoPool::new(
+            None,
+            &Transform {
+                translation: Vec3::ZERO,
+                rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                scale: Vec3::ONE,
+            },
+            Some(&bounds),
+        );
+        assert!(
+            rolled.floor < -9.0,
+            "a rolled placement's floor must follow its corners, got {}",
+            rolled.floor
+        );
+    }
+
     /// A pool on a placement that spawned no instance entity is claimable by nobody — the honest
     /// consequence of having no owner, rather than a silent fallback to "everybody".
     #[test]
     fn an_unowned_pool_answers_no_one() {
-        let orphan = flat_info(LiquidSource::WmoGroup(None), LiquidKind::Still, 8.0);
+        let orphan = flat_info(
+            LiquidSource::WmoGroup(orphan_pool()),
+            LiquidKind::Still,
+            8.0,
+        );
         let feet = [5.0, 5.0, 0.0];
         assert!(liquid_at([&orphan].into_iter(), feet, inside(1)).is_none());
         assert!(liquid_at([&orphan].into_iter(), feet, LiquidClaim::Outdoors).is_none());
@@ -1018,10 +1267,7 @@ mod tests {
         // Three cells in a row; the MIDDLE one is a hole, so the box spans dry ground between two
         // wet halves — the canal-either-side-of-a-tunnel shape.
         let info = grid_info(
-            LiquidSource::WmoGroup(Some(WmoRoom {
-                instance: placement(1),
-                group: 0,
-            })),
+            LiquidSource::WmoGroup(wmo_pool(1, f32::NEG_INFINITY)),
             LiquidKind::Still,
             4,
             2,

@@ -488,6 +488,18 @@ pub fn crop(img: &RgbImage, rect: Rect) -> RgbImage {
     })
 }
 
+/// Magnify by an integer factor, nearest-neighbour — every output pixel is a source pixel verbatim.
+/// This is the only scaling the `crop` subcommand offers on purpose: a resampler blends neighbours,
+/// and a blended edge has already minted a false finding once (a `sips` downscale's "magenta
+/// fringe" read as a render defect). Zoom may enlarge, never shrink: measurements happen at source
+/// resolution or not at all.
+pub fn zoom(img: &RgbImage, factor: u32) -> RgbImage {
+    let s = factor.max(1);
+    RgbImage::from_fn(img.width() * s, img.height() * s, |x, y| {
+        *img.get_pixel(x / s, y / s)
+    })
+}
+
 /// Lay tiles out left-to-right, top-to-bottom in a `cols`-wide grid on a mid-grey mat, so a burst's
 /// crops read as one contact sheet. Tiles of different sizes are placed at their own size.
 pub fn contact_strip(tiles: &[RgbImage], cols: u32, gap: u32) -> RgbImage {
@@ -595,6 +607,22 @@ mod tests {
         assert!((m.pct_over - 0.25).abs() < 1e-9);
         // 30 over 12 channels = 2.5
         assert!((m.mae - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_is_pixel_verbatim() {
+        // A 2x1 two-colour image zoomed ×3: every output pixel must be one of the two source
+        // values, block-aligned — any third colour would mean a resampler blended an edge.
+        let mut img = solid(2, 1, [10, 20, 30]);
+        img.put_pixel(1, 0, Rgb([200, 100, 50]));
+        let z = zoom(&img, 3);
+        assert_eq!(z.dimensions(), (6, 3));
+        for (x, _, p) in z.enumerate_pixels() {
+            let want = if x < 3 { [10, 20, 30] } else { [200, 100, 50] };
+            assert_eq!(p.0, want);
+        }
+        // Factor 0 clamps to 1 (identity), never a panic or an empty image.
+        assert_eq!(zoom(&img, 0).dimensions(), img.dimensions());
     }
 
     #[test]

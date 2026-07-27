@@ -601,13 +601,32 @@ fn retire_batches(pools: &mut BatchPools, commands: &mut Commands) {
 fn rebuild_ui_mesh(
     mut quads: ResMut<UiQuads>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<UiQuadMaterial>>,
+    // The two asset stores the rebuild writes, bundled (clippy's argument ceiling).
+    mut stores: (ResMut<Assets<Mesh>>, ResMut<Assets<UiQuadMaterial>>),
     mut pools: Local<BatchPools>,
     white: Option<Res<UiWhiteTexture>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    hidden: Res<crate::ui_hide::UiHidden>,
 ) {
+    let (meshes, materials) = (&mut stores.0, &mut stores.1);
     let q = quads.as_mut();
+    // TOGGLEUI hides at the *draw*, not at the producers: both lanes keep filling, so the UI comes
+    // back exactly as it was (see [`crate::ui_hide::UiHidden`]). Retire the batches on the toggle's
+    // down edge; on the way back up, force one full rebuild — while dark we swallow each frame's
+    // change flag and keep the append-lane mirror current, so neither lane can hand the rebuild a
+    // stale "nothing changed" the moment the UI returns. The edge is the resource's own change tick
+    // (`UiHidden` is written only by the binding and the world-exit reset), not a `Local` mirror.
+    if hidden.0 {
+        if hidden.is_changed() {
+            retire_batches(&mut pools, &mut commands);
+        }
+        q.dirty = false;
+        q.last_overlays.clone_from(&q.overlays);
+        return;
+    }
+    if hidden.is_changed() {
+        q.dirty = true;
+    }
     if !q.dirty && q.overlays == q.last_overlays {
         return;
     }
@@ -915,6 +934,67 @@ fn seed_demo_quads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rebuild in isolation: real resources, no renderer (the batches are plain entities until
+    /// something draws them).
+    fn rebuild_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<UiQuadMaterial>()
+            .init_resource::<UiQuads>()
+            .init_resource::<crate::ui_hide::UiHidden>()
+            .insert_resource(UiWhiteTexture(Handle::default()))
+            .add_systems(Update, rebuild_ui_mesh);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        // One flat quad in the BASE lane — enough content for exactly one batch.
+        let mut quads = app.world_mut().resource_mut::<UiQuads>();
+        quads.quads.push(UiQuad {
+            rect: Rect::new(0.0, 0.0, 64.0, 64.0),
+            ..default()
+        });
+        quads.dirty = true;
+        app
+    }
+
+    fn batches(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<(), With<UiQuadBatch>>()
+            .iter(app.world())
+            .count()
+    }
+
+    fn set_hidden(app: &mut App, hidden: bool) {
+        app.world_mut().resource_mut::<crate::ui_hide::UiHidden>().0 = hidden;
+    }
+
+    /// TOGGLEUI at the draw: hiding retires the batches, and un-hiding brings the SAME content back
+    /// — the case the two lanes' change protocol would otherwise swallow, since nothing about the
+    /// quads themselves changed while the UI was dark (`dirty` false, the append lane identical),
+    /// so the rebuild would have taken its early-out and left the screen bare.
+    #[test]
+    fn toggleui_retires_the_batches_and_restores_them() {
+        let mut app = rebuild_app();
+        app.update();
+        assert_eq!(batches(&mut app), 1, "one batch drawn to begin with");
+
+        set_hidden(&mut app, true);
+        app.update();
+        assert_eq!(batches(&mut app), 0, "hidden ⇒ nothing drawn");
+        // Still nothing after further frames: the producers keep filling both lanes, and the
+        // rebuild must keep taking its dark path rather than re-spawning on the next flagged frame.
+        app.world_mut().resource_mut::<UiQuads>().dirty = true;
+        app.update();
+        assert_eq!(batches(&mut app), 0, "hidden stays hidden");
+
+        set_hidden(&mut app, false);
+        app.update();
+        assert_eq!(
+            batches(&mut app),
+            1,
+            "the UI comes back on the same content"
+        );
+    }
 
     // The mirror-preservation guarantee, and the reason [`UvRect`] exists instead of
     // `bevy::math::Rect`: PlayerFrameTexture's `<TexCoords left="1.0" right="0.09375">`

@@ -258,12 +258,17 @@ pub(super) fn spawn_loaded_placements(
                             // its pool draws under, so an indoor pool hazes with the room the way
                             // the walls beside it do (decision 0691's open lane).
                             m.group_bounds.get(gi).is_some_and(|g| g.interior),
-                            // …and the ROOM the pool belongs to — the liquid query's scope key
-                            // (0696): only a subject standing in this placement can be in it.
-                            p.portal_instance.map(|instance| WmoRoom {
-                                instance,
-                                group: gi as u16,
-                            }),
+                            // …and the pool's SCOPE: the room it belongs to (0696 — only a subject
+                            // standing in this placement can be in it) plus that room's own floor
+                            // in world Z (0701 — and only one at or above it).
+                            crate::liquid::WmoPool::new(
+                                p.portal_instance.map(|instance| WmoRoom {
+                                    instance,
+                                    group: gi as u16,
+                                }),
+                                &p.transform,
+                                m.group_bounds.get(gi),
+                            ),
                             &mut ents,
                         );
                         if let Some(instance) = p.portal_instance {

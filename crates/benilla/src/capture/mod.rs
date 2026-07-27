@@ -45,6 +45,7 @@ use crate::schedule::WorldStage;
 // screenshot, perf probe) is this one's concern.
 mod depth_probe;
 mod fixtures;
+mod live_shot;
 mod phase_probe;
 mod pick_probe;
 mod probe_bank;
@@ -60,6 +61,7 @@ mod probes;
 mod scenarios;
 pub(crate) use depth_probe::DepthProbePlugin;
 use fixtures::seed_ui_fixture;
+pub(crate) use live_shot::LiveShotPlugin;
 pub(crate) use phase_probe::PhaseProbePlugin;
 pub(crate) use pick_probe::PickProbePlugin;
 pub(crate) use probe_bank::ProbeBankPlugin;
@@ -72,8 +74,8 @@ pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
-    LiveFpsPlugin, LiveShotPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
+    LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin, ProbeExitPlugin,
+    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
 use scenarios::{Scenario, UiFixture, GROUND_EYE, SCENARIOS};
 

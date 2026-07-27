@@ -173,10 +173,11 @@ impl<T> Arena<T> {
 
 mod kinds;
 pub use kinds::{
-    ButtonState, CooldownState, EditBoxState, FrameKind, KindState, MessageLine, MinimapState,
-    RegionKind, ScrollFrameState, ScrollingMessageState, SliderState, StatusBarState, TooltipState,
-    COOLDOWN_FLASH_SECS, MINIMAP_DEFAULT_ZOOM, MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP,
-    TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD, TOOLTIP_WRAP_WIDTH,
+    ButtonState, CooldownState, EditAction, EditBoxState, EditOutcome, EditUnit, FrameKind,
+    KindState, MessageLine, MinimapState, RegionKind, ScrollFrameState, ScrollingMessageState,
+    SliderState, StatusBarState, TooltipState, COOLDOWN_FLASH_SECS, MINIMAP_DEFAULT_ZOOM,
+    MINIMAP_ZOOM_LEVELS, TOOLTIP_DOUBLE_GAP, TOOLTIP_FADE_SECS, TOOLTIP_LINE_GAP, TOOLTIP_PAD,
+    TOOLTIP_WRAP_WIDTH,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

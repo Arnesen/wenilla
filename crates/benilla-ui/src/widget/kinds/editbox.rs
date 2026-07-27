@@ -1,5 +1,43 @@
 use super::RegionHandle;
 
+/// The text span a cursor motion or deletion operates over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditUnit {
+    /// One character (the plain arrow / Backspace / Delete granularity).
+    Char,
+    /// One word run ([`EditBoxState::word_boundary`] — the Ctrl/Option-arrow granularity).
+    Word,
+    /// The line edge: text start going back, text end going forward (Home/End, Cmd+arrow).
+    Edge,
+}
+
+/// One semantic text-editing operation on an edit box — fed to [`EditBoxState::apply`]. The host's
+/// per-OS keymap (which physical chord means which action: Ctrl+Left on Windows, Option+Left on
+/// macOS, …) translates key events into these; the *effect* of each action is the byte-verified box
+/// law (RF-0082: selection anchoring, selection-first deletes, word classes). Clipboard operations
+/// are deliberately absent: they need the OS pasteboard, so they stay host-side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditAction {
+    /// Move the caret one `unit` back/forward; `extend` drags the selection from its fixed
+    /// anchor (the Shift family). `Char` moves honor `ignoreArrows` (consumed but inert — the
+    /// ref guard `0x77b18e`; arrows are the only chord source of `Char` moves).
+    Move {
+        unit: EditUnit,
+        back: bool,
+        extend: bool,
+    },
+    /// Delete one `unit` back/forward from the caret — the selection first when one exists
+    /// (every deletion gesture collapses to "delete the selection"). `Edge` going back is the
+    /// macOS Cmd+Backspace "clear to start".
+    Delete { unit: EditUnit, back: bool },
+    /// Select the whole text, caret to the end (the ref's Ctrl+A, `HighlightText(0, -1)`).
+    SelectAll,
+    /// Recall the previous (older) submitted line into the box (`historyLines`).
+    HistoryPrev,
+    /// Step back toward the newest line; past it, restore the stashed draft.
+    HistoryNext,
+}
+
 /// A `CSimpleEditBox`'s runtime state — the byte-verified text/cursor/selection/flags model of
 /// RF-0082 (`rf82-editbox-runtime.md`). Offsets below are the client's **E-base** (the CScriptObject
 /// `this`), the base the runtime input/text handlers address the object through.
@@ -391,6 +429,363 @@ impl EditBoxState {
             self.scroll_start = next;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The editing law (RF-0082 §3/§4) — pure over the state, no Lua, no widget tree
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// These used to live in `script::editbox` welded to the Lua layer, which meant the *only* way to
+// get the byte-verified box law was to be a FrameXML EditBox. The glue screens (login, character
+// create, the delete dialog) therefore each grew their own three-case imitation of it — append a
+// char, Backspace, Tab — with no caret movement, no selection, and no clipboard (decision 0704).
+// The law lives here now, and `script::editbox` is a thin wrapper that calls these and fires the
+// Lua events an [`EditOutcome`] tells it to. Anything with a `&mut EditBoxState` gets the real
+// law, whether or not there is a Lua VM anywhere near it.
+
+/// What a pure edit changed, so a caller with events to fire knows which to fire. The FrameXML
+/// wrapper turns this into `OnTextChanged`/`OnSpacePressed`; the glue screens ignore it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EditOutcome {
+    /// The text buffer changed — the `OnTextChanged` trigger.
+    pub text_changed: bool,
+    /// Spaces this edit inserted — the `OnSpacePressed` fire count. Only an insert of typed text
+    /// reports these; a paste deliberately does not (a paste is not a typed space).
+    pub spaces: usize,
+}
+
+impl EditOutcome {
+    /// A change that fires `OnTextChanged` and nothing else.
+    fn changed(text_changed: bool) -> Self {
+        EditOutcome {
+            text_changed,
+            spaces: 0,
+        }
+    }
+}
+
+impl EditBoxState {
+    /// Apply one semantic [`EditAction`] — the single entry point the host's per-OS chord table
+    /// feeds (decision 0301: the host owns *which chord*, this owns *what it does*).
+    pub fn apply(&mut self, action: EditAction) -> EditOutcome {
+        match action {
+            EditAction::Move { unit, back, extend } => {
+                match unit {
+                    // `ignoreArrows`: consumed but inert (guard `0x77b18e`). Arrows are the only
+                    // chord source of a Char move, and the ref's Ctrl bypass maps to Word.
+                    EditUnit::Char => {
+                        if !self.ignore_arrows {
+                            self.move_by_char(!back, extend);
+                        }
+                    }
+                    EditUnit::Word => self.move_by_word(!back, extend),
+                    EditUnit::Edge => self.move_to_edge(!back, extend),
+                }
+                EditOutcome::default()
+            }
+            EditAction::Delete { unit, back } => EditOutcome::changed(match unit {
+                EditUnit::Char => self.delete_dir(!back),
+                EditUnit::Word => {
+                    let t = self.word_boundary(!back);
+                    self.delete_to(t)
+                }
+                EditUnit::Edge => {
+                    let t = if back { 0 } else { self.text.len() };
+                    self.delete_to(t)
+                }
+            }),
+            EditAction::SelectAll => {
+                self.highlight_text(0, -1);
+                EditOutcome::default()
+            }
+            // History recall is the caller's: it routes through the SetText path so the FrameXML
+            // box also fires `OnTextSet`. `history_step` is the state half.
+            EditAction::HistoryPrev | EditAction::HistoryNext => EditOutcome::default(),
+        }
+    }
+
+    /// Insert `ins` at the cursor (`0x77bee0`): replace any selection first; `numeric` aborts the
+    /// insert **wholesale** on any non-digit (not per-char filtering — RF-0082 §3); splice, advance
+    /// the caret, enforce the caps.
+    pub fn insert(&mut self, ins: &str) -> EditOutcome {
+        if self.numeric && !ins.chars().all(|c| c.is_ascii_digit()) {
+            return EditOutcome::default();
+        }
+        self.end_history_browse(); // a typed edit turns a recalled line into an ordinary draft
+        self.delete_selection();
+        self.text.insert_str(self.cursor, ins);
+        self.cursor += ins.len();
+        self.collapse();
+        self.enforce_caps();
+        self.reset_blink();
+        EditOutcome {
+            text_changed: true,
+            spaces: ins.matches(' ').count(),
+        }
+    }
+
+    /// Insert OS-clipboard text: [`insert`](Self::insert) with the paste sanitation — every control
+    /// character is dropped, except `\n` into a multiline box. Reports no spaces: a paste is not a
+    /// typed space, so it fires no `OnSpacePressed`.
+    pub fn paste(&mut self, text: &str) -> EditOutcome {
+        let cleaned: String = text
+            .chars()
+            .filter(|&c| c as u32 >= 0x20 || (self.multi_line && c == '\n'))
+            .collect();
+        if cleaned.is_empty() {
+            return EditOutcome::default();
+        }
+        EditOutcome::changed(self.insert(&cleaned).text_changed)
+    }
+
+    /// `SetText` (`0x77be00`): short-circuits when unchanged (the caller then fires nothing); else
+    /// replaces, caret to the end, caps enforced.
+    pub fn set_text(&mut self, s: &str) -> bool {
+        if self.text == s {
+            return false;
+        }
+        self.text = s.to_string();
+        self.cursor = self.text.len();
+        self.collapse();
+        self.enforce_caps();
+        self.reset_blink();
+        true
+    }
+
+    /// The selected substring, or `None` with no selection (Ctrl+C, `0x77e1d0`). A password box
+    /// yields its **mask run**, never the real text — the client copies a placeholder.
+    pub fn selected_text(&self) -> Option<String> {
+        if self.sel_start == self.sel_end {
+            return None;
+        }
+        let (a, b) = (
+            self.sel_start.min(self.sel_end),
+            self.sel_start.max(self.sel_end),
+        );
+        Some(if self.password {
+            "*".repeat(self.text[a..b].chars().count())
+        } else {
+            self.text[a..b].to_string()
+        })
+    }
+
+    /// Ctrl+X: [`selected_text`](Self::selected_text), then delete the selection.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let taken = self.selected_text()?;
+        self.end_history_browse();
+        self.delete_selection();
+        self.reset_blink();
+        Some(taken)
+    }
+
+    /// `HighlightText` (`0x77cca0`), the client's exact clamp: `start = clamp(start, 0..=len)`;
+    /// `end = (end < 0 || end > len) ? len : end`; then `if end < start { end = len }` — so
+    /// `(0, -1)` selects all. Byte offsets, snapped to char boundaries.
+    pub fn highlight_text(&mut self, start: i64, end: i64) {
+        let len = self.text.len() as i64;
+        let s = start.clamp(0, len);
+        let mut e = if end < 0 || end > len { len } else { end };
+        if e < s {
+            e = len;
+        }
+        self.sel_start = snap_down(&self.text, s as usize);
+        self.sel_end = snap_down(&self.text, e as usize);
+        self.cursor = self.sel_end;
+        self.reset_blink();
+    }
+
+    /// BACKSPACE / DELETE: the selection when there is one, else the char before (`forward=false`)
+    /// or after the caret. `true` when anything was removed.
+    pub fn delete_dir(&mut self, forward: bool) -> bool {
+        self.end_history_browse();
+        let did = 'del: {
+            if self.sel_start != self.sel_end {
+                self.delete_selection();
+                break 'del true;
+            }
+            if forward {
+                if self.cursor < self.text.len() {
+                    let end = next_boundary(&self.text, self.cursor);
+                    self.text.replace_range(self.cursor..end, "");
+                    break 'del true;
+                }
+            } else if self.cursor > 0 {
+                let start = prev_boundary(&self.text, self.cursor);
+                self.text.replace_range(start..self.cursor, "");
+                self.cursor = start;
+                self.collapse();
+                break 'del true;
+            }
+            false
+        };
+        if did {
+            self.reset_blink();
+        }
+        did
+    }
+
+    /// Word/edge delete: the selection first when one exists, else the span between the caret and
+    /// `target`. `true` when anything was removed.
+    pub fn delete_to(&mut self, target: usize) -> bool {
+        self.end_history_browse();
+        let did = if self.sel_start != self.sel_end {
+            self.delete_selection();
+            true
+        } else {
+            let (a, b) = (target.min(self.cursor), target.max(self.cursor));
+            if a == b {
+                false
+            } else {
+                self.text.replace_range(a..b, "");
+                self.cursor = a;
+                self.collapse();
+                true
+            }
+        };
+        if did {
+            self.reset_blink();
+        }
+        did
+    }
+
+    /// LEFT/RIGHT one char: `extend` drags the selection from its fixed anchor; otherwise the caret
+    /// collapses onto the selection edge (when there is one) or steps one char.
+    pub fn move_by_char(&mut self, right: bool, extend: bool) {
+        let step = |s: &str, i: usize| {
+            if right {
+                next_boundary(s, i)
+            } else {
+                prev_boundary(s, i)
+            }
+        };
+        if extend {
+            let anchor = self.selection_anchor();
+            self.cursor = step(&self.text, self.cursor);
+            self.set_span(anchor, self.cursor);
+        } else if self.sel_start != self.sel_end {
+            self.cursor = if right { self.sel_end } else { self.sel_start };
+            self.collapse();
+        } else {
+            self.cursor = step(&self.text, self.cursor);
+            self.collapse();
+        }
+        self.reset_blink();
+    }
+
+    /// Ctrl/Option+arrow: the caret to the next [`word_boundary`](Self::word_boundary).
+    pub fn move_by_word(&mut self, right: bool, extend: bool) {
+        let target = self.word_boundary(right);
+        self.move_caret_to(target, extend);
+    }
+
+    /// HOME/END (and Cmd+arrow): the caret to `0` / `len`.
+    pub fn move_to_edge(&mut self, end: bool, extend: bool) {
+        let target = if end { self.text.len() } else { 0 };
+        self.move_caret_to(target, extend);
+    }
+
+    /// Place the caret at `target`, extending the selection from its fixed anchor when `extend`.
+    /// The shared tail of every non-char move (and of a mouse click/drag).
+    pub fn move_caret_to(&mut self, target: usize, extend: bool) {
+        let target = snap_down(&self.text, target.min(self.text.len()));
+        if extend {
+            let anchor = self.selection_anchor();
+            self.cursor = target;
+            self.set_span(anchor, target);
+        } else {
+            self.cursor = target;
+            self.collapse();
+        }
+        self.reset_blink();
+    }
+
+    /// Delete the current selection: remove `[min, max)` and collapse the caret to its left edge.
+    fn delete_selection(&mut self) {
+        if self.sel_start == self.sel_end {
+            return;
+        }
+        let (a, b) = (
+            self.sel_start.min(self.sel_end),
+            self.sel_start.max(self.sel_end),
+        );
+        self.text.replace_range(a..b, "");
+        self.cursor = a;
+        self.collapse();
+    }
+
+    /// Collapse the selection onto the caret.
+    fn collapse(&mut self) {
+        self.sel_start = self.cursor;
+        self.sel_end = self.cursor;
+    }
+
+    /// The fixed end of the selection while extending — the endpoint that is *not* the caret (the
+    /// caret itself when nothing is selected).
+    fn selection_anchor(&self) -> usize {
+        if self.sel_start == self.cursor {
+            self.sel_end
+        } else {
+            self.sel_start
+        }
+    }
+
+    /// Set the selection to `[min(a,b), max(a,b)]`.
+    fn set_span(&mut self, a: usize, b: usize) {
+        self.sel_start = a.min(b);
+        self.sel_end = a.max(b);
+    }
+
+    /// Enforce the length caps after an edit (`0x77c02d`): trim whole chars from the end while over
+    /// `maxBytes`, then while over `maxLetters`; clamp caret/selection back into the buffer.
+    fn enforce_caps(&mut self) {
+        if let Some(mb) = self.max_bytes {
+            while self.text.len() > mb {
+                self.text.pop();
+            }
+        }
+        if self.max_letters > 0 {
+            while self.text.chars().count() > self.max_letters {
+                self.text.pop();
+            }
+        }
+        let len = self.text.len();
+        self.cursor = snap_down(&self.text, self.cursor.min(len));
+        self.sel_start = snap_down(&self.text, self.sel_start.min(len));
+        self.sel_end = snap_down(&self.text, self.sel_end.min(len));
+    }
+}
+
+/// The byte offset of the char boundary at or below `i` (identity if `i` is already on one).
+fn snap_down(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// The next char boundary strictly after `i` (clamped to `len`).
+fn next_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut j = i + 1;
+    while j < s.len() && !s.is_char_boundary(j) {
+        j += 1;
+    }
+    j
+}
+
+/// The char boundary strictly before `i` (clamped to `0`).
+fn prev_boundary(s: &str, i: usize) -> usize {
+    if i == 0 {
+        return 0;
+    }
+    let mut j = i - 1;
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
 }
 
 #[cfg(test)]

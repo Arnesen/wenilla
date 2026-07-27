@@ -7,10 +7,12 @@
 
 use bevy::prelude::*;
 
-use super::query::{liquid_at, wet_footprint, LiquidClaim, LiquidSource, WaterChunkInfo};
+use super::query::{
+    liquid_at, submersion_at, wet_footprint, LiquidClaim, LiquidSource, WaterChunkInfo, WmoPool,
+};
 use crate::wmo_portal::WmoRoom;
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
-use benilla_formats::{parse_wmo_root, wmo_group_liquid_mesh, LiquidMesh};
+use benilla_formats::{parse_wmo_root, wmo_group_liquid_mesh, LiquidMesh, Submersion};
 
 /// Every loaded liquid surface covering a position's tile neighbourhood, world-placed and
 /// **owner-tagged** — the ADT's own MCLQ chunks and every WMO placement's MLIQ groups, i.e. the same
@@ -139,10 +141,16 @@ fn liquid_scene(map: &str, wow: [f32; 3]) -> Option<LiquidScene> {
                         scene.surfaces.push(wet_footprint(
                             lq_ref(&lq),
                             &transform,
-                            LiquidSource::WmoGroup(Some(WmoRoom {
-                                instance,
-                                group: gi as u16,
-                            })),
+                            // Built through the APP's own constructor, not a copy of the rule —
+                            // a test that re-derived the floor would pin its own version of 0701.
+                            LiquidSource::WmoGroup(WmoPool::new(
+                                Some(WmoRoom {
+                                    instance,
+                                    group: gi as u16,
+                                }),
+                                &transform,
+                                root.group_infos().get(gi as usize),
+                            )),
                         ));
                     }
                 }
@@ -245,16 +253,29 @@ fn uldaman_is_not_submerged_in_a_mushroom_caves_pool() {
         eprintln!("skipping: no WoW client data");
         return;
     };
-    // The bug, on the shipped files: with no owner scoping, a pool 185.91 yd up claims the player.
-    // (There is no ADT liquid over this XY, so `Unknown` here is exactly the pre-0696 "indoors".)
-    let unscoped = liquid_at(scene.surfaces.iter(), feet, LiquidClaim::Unknown)
+    // The bug, on the shipped files: the pool B85 reported really is over this XY and really is
+    // 185.91 yd up. Read off the surfaces with NO delegation at all — the reported number is a
+    // property of the files, so the control must not run through any rule this test also judges.
+    let reported = scene
+        .surfaces
+        .iter()
+        .filter_map(|w| w.surface_z_at(feet[0], feet[1]))
+        .filter(|z| *z > feet[2])
+        .min_by(f32::total_cmp)
         .expect("the mushroom cave's pool is what B85 reported");
     assert!(
-        (unscoped.surface_z - 399.64).abs() < 0.05,
-        "the surface B85 reported (got {})",
-        unscoped.surface_z
+        (reported - 399.64).abs() < 0.05,
+        "the surface B85 reported (got {reported})"
     );
-    assert!(unscoped.surface_z - feet[2] > 185.0, "…and 186 yd overhead");
+    assert!(reported - feet[2] > 185.0, "…and 186 yd overhead");
+
+    // Since 0701 that pool is rejected TWICE over, and the second bound is independent of the
+    // first: even a subject with no interior claim at all is out of the cave's room, 186 yd under
+    // its floor. B85 would not have needed the owner half.
+    assert!(
+        liquid_at(scene.surfaces.iter(), feet, LiquidClaim::Unknown).is_none(),
+        "the cave's pool is below-the-floor rejected even for an unclassified subject"
+    );
 
     // The fix: the player's room is Uldaman's own placement, and Uldaman has no pool here.
     let room = scene
@@ -268,6 +289,83 @@ fn uldaman_is_not_submerged_in_a_mushroom_caves_pool() {
     assert!(
         liquid_at(scene.surfaces.iter(), feet, LiquidClaim::Inside(room)).is_none(),
         "in Uldaman, no liquid — the cave's pool belongs to a building the player is not in"
+    );
+}
+
+/// **The Undercity STOREY bug** (decision 0701) — the same wrong-underwater-filter as B60, one
+/// storey further in, and the half owner scoping could not reach. Live repro at
+/// `.go xyz 1732.68 187.01 -65.70`, where `WOW_FOG_DUMP` read:
+///
+/// ```text
+/// [submerged] Slime claim Inside(WmoRoom { instance: …, group: 182 }) eye [1731.9 187.0 -63.59]
+///             over-xy  Slime z -64.48 g182,  Slime z 51.98 g10,  Slime z 51.98 g7
+/// ```
+///
+/// The eye's own room (group 182) holds slime at −64.48, *below* the eye and so not submerging it.
+/// What turned the screen green were groups 7 and 10 — Undercity's upper channels at z 51.98,
+/// **115 yd overhead** — which owner scoping admits because they are the same placement.
+///
+/// The server agrees the eye is dry there: `.gps` reports `Liquid level: -64.478561`, i.e. 0.9 yd
+/// *under* the eye.
+#[test]
+fn undercitys_upper_channels_do_not_submerge_the_rooms_below() {
+    let eye = [1732.68_f32, 187.01, -63.59];
+    let Some(scene) = liquid_scene("Azeroth", eye) else {
+        eprintln!("skipping: no WoW client data");
+        return;
+    };
+    // The control, straight off the files with no delegation: the pools that were claiming the eye
+    // really are up at 51.98, and really are over this XY.
+    let overhead: Vec<f32> = scene
+        .surfaces
+        .iter()
+        .filter_map(|w| w.surface_z_at(eye[0], eye[1]))
+        .filter(|z| *z > eye[2])
+        .collect();
+    assert!(
+        !overhead.is_empty() && overhead.iter().all(|z| (z - 51.98).abs() < 0.05),
+        "the surfaces over the eye are Undercity's upper channels at 51.98 (got {overhead:?})"
+    );
+
+    // …and they belong to the eye's OWN placement, which is why 0696's owner scoping let them
+    // through: this is a storey bug, not a building bug.
+    let room = scene
+        .containing_room(eye)
+        .expect("the eye stands inside a placement");
+    assert!(
+        scene.model_of(room).contains("undercity"),
+        "the containing placement is Undercity (got {})",
+        scene.model_of(room)
+    );
+
+    // The fix, asked of the rule the SCREEN runs: a pool never claims below its own room's floor,
+    // so nothing over the eye submerges it and the filter stays off.
+    assert_eq!(
+        submersion_at(scene.surfaces.iter(), eye, LiquidClaim::Inside(room)),
+        Submersion::Dry,
+        "a pool 115 yd overhead, in another storey of the same building, must not submerge the eye"
+    );
+    // And the room's OWN slime is untouched — step down into it and the screen goes green properly.
+    let inside_the_slime = [eye[0], eye[1], -66.0];
+    assert_eq!(
+        submersion_at(
+            scene.surfaces.iter(),
+            inside_the_slime,
+            LiquidClaim::Inside(room)
+        ),
+        Submersion::Slime,
+        "the floor bounds the pool to its room; it does not cost the room its own swim"
+    );
+    let hit = liquid_at(
+        scene.surfaces.iter(),
+        inside_the_slime,
+        LiquidClaim::Inside(room),
+    )
+    .expect("…and the surface itself still answers");
+    assert!(
+        (hit.surface_z - -64.48).abs() < 0.05,
+        "…at the height the server reports (got {})",
+        hit.surface_z
     );
 }
 

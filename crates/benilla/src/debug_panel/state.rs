@@ -78,9 +78,17 @@ pub struct LightingDebug {
 
 impl Default for LightingDebug {
     fn default() -> Self {
+        // `WOW_CLOCK=<minute 0..1439>` arms the manual scrub from the environment — the
+        // matched-hour capture instrument (a headless probe can't reach the panel slider, and a
+        // time-of-day A/B against a reference screenshot is meaningless at the wrong hour —
+        // bug B33's whole diagnosis hinged on one). Unset = follow the server clock, as before.
+        let clock = std::env::var("WOW_CLOCK")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .map(|m| m % 1440);
         Self {
-            follow_server_time: true,
-            manual_minute: 720, // noon, only used when not following the server
+            follow_server_time: clock.is_none(),
+            manual_minute: clock.unwrap_or(720), // noon, only used when not following the server
             disable_fog: false,
             disable_sky_dome: false,
         }

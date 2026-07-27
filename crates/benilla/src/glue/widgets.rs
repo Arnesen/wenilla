@@ -4,6 +4,7 @@
 //! component (`CreateAction`, `SelectAction`, …); each degrades to a plain-fill + text face
 //! without client art.
 
+use benilla_ui::widget::EditBoxState;
 use bevy::prelude::*;
 use bevy::text::LineHeight;
 use bevy::ui_render::ui_material::MaterialNode;
@@ -411,26 +412,92 @@ pub(crate) fn caret_bar<C: Bundle>(
     ));
 }
 
+/// Which flex item of a glue edit box's text row an entity is.
+///
+/// The row is `[before][caret][selected][caret][after]` — five items, so the caret lands **at the
+/// cursor** and a selection shows its highlight with **no text measuring anywhere**: flex layout
+/// does the positioning, exactly as the single caret sibling used to. `Selected` carries the
+/// highlight background permanently; with nothing selected its text is empty, so it has zero width
+/// and paints nothing. Which of the two caret slots is visible follows the cursor, which the box
+/// law keeps at one end of the selection or the other.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GlueFieldPart {
+    /// `display[..sel_start]`
+    Before,
+    /// The caret when it sits at the selection's start (and whenever nothing is selected).
+    CaretAtStart,
+    /// `display[sel_start..sel_end]` — the highlighted run.
+    Selected,
+    /// The caret when it sits at the selection's end.
+    CaretAtEnd,
+    /// `display[sel_end..]`
+    After,
+}
+
+/// Paint one glue edit box from its [`EditBoxState`] — the segments, the selection, and the caret.
+/// Shared so the login boxes, the create-name box and the delete dialog can never fork (decision
+/// 0704); everything it draws comes off the same state the shared law edits.
+pub(crate) fn paint_glue_field<'a>(
+    field: &EditBoxState,
+    focused: bool,
+    parts: impl Iterator<
+        Item = (
+            &'a GlueFieldPart,
+            Option<Mut<'a, Text>>,
+            Mut<'a, Visibility>,
+        ),
+    >,
+) {
+    let display = field.display();
+    let lo = field.sel_start.min(field.sel_end);
+    let hi = field.sel_start.max(field.sel_end);
+    let (d_lo, d_hi) = (field.text_to_display(lo), field.text_to_display(hi));
+    let d_cursor = field.text_to_display(field.cursor);
+    // Only a focused box blinks; `caret_shown` is the box's own blink phase, ticked by
+    // `textinput::tick_caret`, so a glue caret and the chat caret share one clock.
+    let caret_on = focused && field.caret_shown;
+    for (part, text, mut vis) in parts {
+        let (want_text, want_vis) = match part {
+            GlueFieldPart::Before => (Some(&display[..d_lo]), true),
+            GlueFieldPart::Selected => (Some(&display[d_lo..d_hi]), true),
+            GlueFieldPart::After => (Some(&display[d_hi..]), true),
+            GlueFieldPart::CaretAtStart => (None, caret_on && d_cursor <= d_lo),
+            GlueFieldPart::CaretAtEnd => (None, caret_on && d_cursor > d_lo),
+        };
+        if let (Some(want), Some(mut t)) = (want_text, text) {
+            if t.0 != want {
+                t.0 = want.to_string();
+            }
+        }
+        let want = if want_vis {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
 /// A glue edit box's CHROME — the shape every glue EditBox authors (`AccountLoginAccountEdit`/
 /// `PasswordEdit`, `CharacterCreateNameEdit`): the `UI-Tooltip-Background` fill tiled at 16 inside
 /// the (10,5,4,9) insets, the `Glue-Tooltip-Border` 16-edge over it (both caller-tinted — the
-/// login boxes take `DEFAULT_TOOLTIP_COLOR`, the create name box the Alliance row), the text
-/// line at the ref's TextInsets (left 15, vertically centered) in `GlueEditBoxFont` (ARIALN 18,
-/// white), and the caret bar seated immediately after it (a flex sibling, so it lands at the cursor
-/// without anyone measuring the text). `extras` rides the box node (the screen's click-to-focus
-/// action + `Button`); `marker` rides the text entity (the screen's refresh writes the content —
-/// typed text or password mask); `caret` rides the caret bar (the screen's refresh drives its
-/// `Visibility` from focus + blink phase — it spawns hidden).
-/// Plain-fill fallback without art. Focus, typing, and the blink clock are the owning screen's
-/// systems — this is chrome only, so the two screens' boxes can never fork.
+/// login boxes take `DEFAULT_TOOLTIP_COLOR`, the create name box the Alliance row), and the text
+/// row at the ref's TextInsets (left 15, vertically centered) in `GlueEditBoxFont` (ARIALN 18,
+/// white).
+///
+/// `extras` rides the box node (the screen's click-to-focus action + `Button`); `marker` is cloned
+/// onto all five row items ([`GlueFieldPart`]) so the screen's refresh can query them as a set and
+/// hand them to [`paint_glue_field`]. Plain-fill fallback without art. Focus and typing are the
+/// owning screen's systems — this is chrome only, so the screens' boxes can never fork.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn glue_edit_box<E: Bundle, T: Bundle, C: Bundle>(
+pub(crate) fn glue_edit_box<E: Bundle, T: Bundle + Clone>(
     parent: &mut ChildSpawnerCommands,
     art: &GlueArt,
     edit_font: &Handle<Font>,
     extras: E,
     marker: T,
-    caret: C,
     (w, h): (f32, f32),
     (border, fill): (Color, Color),
     text_insets: (f32, f32, f32, f32),
@@ -464,9 +531,6 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle, C: Bundle>(
             ));
             backdrop_border(b, art.name_border.as_ref().unwrap(), NAME_EDGE, border);
         }
-        // The typed line and its caret share one row (default `FlexDirection::Row`), so the caret
-        // is simply the next flex item — it seats at the end of the text with no measuring, and at
-        // the left inset when the box is empty.
         // The ref's `<TextInsets>` (left, right, top, bottom): the EditBox's FontString rect is
         // the box inset by them, and the typed line is centred in THAT — not in the whole box. The
         // login boxes inset the bottom by 5, which lifts the line, and the caret beside it, off the
@@ -482,23 +546,49 @@ pub(crate) fn glue_edit_box<E: Bundle, T: Bundle, C: Bundle>(
             ..default()
         },))
             .with_children(|f| {
-                f.spawn((
-                    marker,
-                    Text::new(""),
-                    TextFont {
-                        font: edit_font.clone(),
-                        font_size: EDIT_FONT_SIZE * s, // GlueEditBoxFont
-                        ..default()
-                    },
-                    // Its own component in Bevy 0.18, not a `TextFont` field.
-                    LineHeight::RelativeToFont(EDIT_LINE_HEIGHT),
-                    TextColor(EDIT_TEXT_COLOR),
-                    TextLayout {
-                        linebreak: LineBreak::NoWrap,
-                        ..default()
-                    },
-                ));
-                caret_bar(f, caret, EDIT_FONT_SIZE, s);
+                let segment = |f: &mut ChildSpawnerCommands, part: GlueFieldPart| {
+                    let mut e = f.spawn((
+                        marker.clone(),
+                        part,
+                        Text::new(""),
+                        TextFont {
+                            font: edit_font.clone(),
+                            font_size: EDIT_FONT_SIZE * s, // GlueEditBoxFont
+                            ..default()
+                        },
+                        // Its own component in Bevy 0.18, not a `TextFont` field.
+                        LineHeight::RelativeToFont(EDIT_LINE_HEIGHT),
+                        TextColor(EDIT_TEXT_COLOR),
+                        TextLayout {
+                            linebreak: LineBreak::NoWrap,
+                            ..default()
+                        },
+                    ));
+                    if part == GlueFieldPart::Selected {
+                        // The box law's own highlight tint (`SetHighlightColor`'s ctor default,
+                        // opaque medium grey) — the same colour the chat box selects with.
+                        e.insert(BackgroundColor(Color::srgb(
+                            96.0 / 255.0,
+                            96.0 / 255.0,
+                            96.0 / 255.0,
+                        )));
+                    }
+                };
+                segment(f, GlueFieldPart::Before);
+                caret_bar(
+                    f,
+                    (marker.clone(), GlueFieldPart::CaretAtStart),
+                    EDIT_FONT_SIZE,
+                    s,
+                );
+                segment(f, GlueFieldPart::Selected);
+                caret_bar(
+                    f,
+                    (marker.clone(), GlueFieldPart::CaretAtEnd),
+                    EDIT_FONT_SIZE,
+                    s,
+                );
+                segment(f, GlueFieldPart::After);
             });
     });
 }

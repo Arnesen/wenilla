@@ -23,7 +23,7 @@ use crate::entities::CharCreate;
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{GlueLook, GluePreview, PortraitImages, PortraitSource, GLUE_SLOT};
 
-use super::parts::{CharCreateUi, DialRow, DynIcon, DynText, DynTint, NameCaret, StatusLine};
+use super::parts::{CharCreateUi, DialRow, DynIcon, DynText, DynTint, StatusLine};
 use super::{CreateAction, CreateSelection, ALLIANCE, HORDE, INITIAL_FACING};
 use crate::glue::art::{
     tc_rect, GlueArt, ALLIANCE_BORDER, ALLIANCE_FILL, BACKDROP, BTN_BG, DIM, GOLD, INFO_TEXT,
@@ -535,7 +535,6 @@ fn name_cluster(
                 edit_font,
                 (),
                 DynText::Name,
-                NameCaret,
                 (156.0, 40.0),
                 (ALLIANCE_BORDER, ALLIANCE_FILL),
                 (15.0, 0.0, 0.0, 0.0), // CharacterCreate.xml: TextInsets left 15 only

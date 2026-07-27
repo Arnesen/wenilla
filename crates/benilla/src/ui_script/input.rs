@@ -1,8 +1,8 @@
 //! The player-UI input pass: [`feed_ui_input`] hit-tests the cursor and dispatches mouse/keyboard
 //! events into the UI engine (after [`super::extract::drive_script`] has resolved the frame's
-//! rects), plus the action-bar key map and the OS clipboard read for paste. Split out of [`super`]
-//! purely for size — the plugin wiring and the extraction pass live there and in
-//! [`super::extract`] respectively.
+//! rects), plus the action-bar key map. The OS pasteboard itself lives in [`crate::textinput`].
+//! Split out of [`super`] purely for size — the plugin wiring and the extraction pass live there
+//! and in [`super::extract`] respectively.
 
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::AccumulatedMouseScroll;
@@ -12,7 +12,8 @@ use bevy::window::PrimaryWindow;
 
 use benilla_ui::script::UiScript;
 
-use super::{textkeys, CursorPayloadHeld, PlayerUiClickConsumed, PlayerUiHover, UiKeyboardCapture};
+use super::{CursorPayloadHeld, PlayerUiClickConsumed, PlayerUiHover, UiKeyboardCapture};
+use crate::textinput::{self, keymap, HostClipboard};
 
 /// The pointer-side state [`feed_ui_input`] reads and writes, as one
 /// [`bevy::ecs::system::SystemParam`] (the argument ceiling): the UI hover + click-consumed
@@ -28,6 +29,9 @@ pub(super) struct PointerFeed<'w> {
     hovered_object: Res<'w, crate::target::HoveredObject>,
     occlusion: Res<'w, crate::target::PickOcclusion>,
     payload_held: ResMut<'w, CursorPayloadHeld>,
+    /// TOGGLEUI ([`crate::ui_hide::UiHidden`]): a hidden UI takes no mouse at all — it rides here
+    /// because that is precisely the pointer half of this pass.
+    hidden: Res<'w, crate::ui_hide::UiHidden>,
 }
 
 impl PointerFeed<'_> {
@@ -57,7 +61,10 @@ impl PointerFeed<'_> {
 /// box consumes must never also reach the world in the same frame.
 pub(super) fn feed_ui_input(
     script: Option<NonSendMut<UiScript>>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    // The window's raw handle rides along with it: on Wayland it carries the `wl_display` the
+    // clipboard backend is built from (decision 0702). `Option`, because it only appears once
+    // winit has actually created the surface.
+    window: Query<(&Window, Option<&bevy::window::RawHandleWrapper>), With<PrimaryWindow>>,
     buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     // One [`PointerFeed`] (clippy's argument ceiling): the hover + click-consumed outputs this
@@ -65,17 +72,20 @@ pub(super) fn feed_ui_input(
     // the payload-held mirror written for the Send-side world-click consumers.
     mut pointer: PointerFeed,
     // Bundled into one param (clippy's argument ceiling): this frame's key messages, the modifier
-    // mirror, and the capture gate the keyboard feed writes.
+    // mirror, the capture gate the keyboard feed writes, and the held OS pasteboard the three
+    // clipboard chords resolve against (decision 0702).
     mut kbd: (
         MessageReader<KeyboardInput>,
         Res<ButtonInput<KeyCode>>,
         ResMut<UiKeyboardCapture>,
+        NonSendMut<HostClipboard>,
     ),
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
 ) {
-    let (keyboard, keys, capture) = (&mut kbd.0, &kbd.1, &mut kbd.2);
+    let (keyboard, keys, capture, clipboard) = (&mut kbd.0, &kbd.1, &mut kbd.2, &mut kbd.3);
     let world_pick = pointer.world_pick();
+    let ui_hidden = pointer.hidden.0;
     let (hover, click_consumed, payload_held) = (
         &mut pointer.hover,
         &mut pointer.click_consumed,
@@ -87,11 +97,13 @@ pub(super) fn feed_ui_input(
         payload_held.0 = false;
         return;
     };
-    let Ok(window) = window.single() else {
+    let Ok((window, raw_handle)) = window.single() else {
         capture.0 = false;
         payload_held.0 = false;
         return;
     };
+    // `Some` only on a Wayland session — the signal the clipboard backend picks itself by.
+    let wl_display = textinput::wayland_display(raw_handle);
     // The engine's world-drop routing (decisions 0571 + 0574): an object pick keeps every
     // payload (the reference's object leg dispatches SELECT with the item still held), terrain
     // drops items only, nothing drops any arm.
@@ -104,7 +116,11 @@ pub(super) fn feed_ui_input(
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     script.set_modifiers(shift, ctrl, alt);
     // ── Mouse ── (cursor-off-window only skips the mouse feed; keyboard still flows to a focused box)
-    if let Some(cursor) = window.cursor_position() {
+    // A UI hidden by TOGGLEUI takes the same route as a cursor outside the window: an action bar
+    // nobody can see must not eat the click or arm a tooltip, and the else-arm below is exactly the
+    // "no pointer here" bookkeeping (leave the hovered frame once, disarm any press/drag every
+    // frame) that keeps a stale gesture from firing when the UI comes back.
+    if let Some(cursor) = window.cursor_position().filter(|_| !ui_hidden) {
         // Window cursor is logical px, y-down from top-left; the UI is y-up 768-virtual units
         // (decisions 0582 + 0584's uiScale dial) — flip through the window height, then ÷s into
         // the VM's space (the inverse of the extract seam's ×s).
@@ -164,14 +180,14 @@ pub(super) fn feed_ui_input(
 
     // ── Keyboard → VM ── the three box-event keys route to `key_input` by name (and never also
     // as text, so Enter isn't a stray newline); every *editing* key goes through the per-OS
-    // chord table ([`textkeys::chord`]) and reaches the box as a semantic `EditAction` — or as
+    // chord table ([`keymap::chord`]) and reaches the box as a semantic `EditAction` — or as
     // one of the clipboard operations, handled here (this is a NonSend, main-thread system —
     // required for the macOS NSPasteboard). What's left goes to `char_input`, minus
     // command-modified chars (Cmd/Ctrl+letter must never type the letter — except Ctrl+Alt, the
     // AltGr plane European layouts type real characters with). Repeats carry `state == Pressed`,
     // so held keys repeat. Modifiers reuse the mirror read above (the message carries none).
     let sup = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
-    let mods = textkeys::Mods {
+    let mods = keymap::Mods {
         shift,
         ctrl,
         alt,
@@ -222,7 +238,7 @@ pub(super) fn feed_ui_input(
         // The editing keys/chords — dispatched unconditionally like the named keys (the engine's
         // route law decides; unfocused they return unconsumed, and the camera/turn keys that
         // read arrows after UiInput see them exactly as before).
-        let chord = textkeys::chord(ev.key_code, mods, mac);
+        let chord = keymap::chord(ev.key_code, mods, mac);
         if let Some(name) = named {
             let consumed = script.key_input(name);
             // ESCAPE with no EditBox focused runs the escape binding: the reference's own
@@ -238,24 +254,25 @@ pub(super) fn feed_ui_input(
             }
         } else if let Some(chord) = chord {
             match chord {
-                textkeys::Chord::Edit(action) => {
+                keymap::Chord::Edit(action) => {
                     script.editbox_action(action);
                 }
-                // The clipboard trio needs the OS pasteboard, so it resolves here: copy/cut pull
-                // the selection out of the box (RF-0082 §4 `0x77e1d0` — selection required; a
-                // password box yields its mask run, never the real text), paste sanitizes+inserts.
-                textkeys::Chord::Copy => {
+                // The clipboard trio needs the OS pasteboard, so it resolves here against the held
+                // [`HostClipboard`]: copy/cut pull the selection out of the box (RF-0082 §4
+                // `0x77e1d0` — selection required; a password box yields its mask run, never the
+                // real text), paste sanitizes+inserts.
+                keymap::Chord::Copy => {
                     if let Some(text) = script.editbox_copy() {
-                        write_clipboard(&text);
+                        clipboard.write(wl_display, &text);
                     }
                 }
-                textkeys::Chord::Cut => {
+                keymap::Chord::Cut => {
                     if let Some(text) = script.editbox_cut() {
-                        write_clipboard(&text);
+                        clipboard.write(wl_display, &text);
                     }
                 }
-                textkeys::Chord::Paste => {
-                    if let Some(text) = read_clipboard() {
+                keymap::Chord::Paste => {
+                    if let Some(text) = clipboard.read(wl_display) {
                         script.paste(&text);
                     }
                 }
@@ -342,27 +359,4 @@ fn bare_key_binding(key: KeyCode) -> Option<(&'static str, &'static str)> {
         KeyCode::KeyO => ("ToggleFriendsFrame(1)", "togglesocial"),
         _ => return None,
     })
-}
-
-/// Read the OS clipboard's text, or `None` if it's empty/non-text or the clipboard is unavailable. A
-/// fresh `arboard::Clipboard` per paste (paste is rare, so the handle isn't worth caching in a
-/// resource — and `Clipboard` isn't `Send + Sync`, so it couldn't be a Bevy resource anyway). Must be
-/// called on the main thread (the caller is a NonSend system), which macOS's NSPasteboard requires.
-fn read_clipboard() -> Option<String> {
-    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
-        Ok(text) if !text.is_empty() => Some(text),
-        Ok(_) => None,
-        Err(e) => {
-            warn!("ui_script(paste): clipboard read failed: {e}");
-            None
-        }
-    }
-}
-
-/// Write `text` to the OS clipboard (the copy/cut half of the seam; same main-thread
-/// NSPasteboard constraint as [`read_clipboard`]).
-fn write_clipboard(text: &str) {
-    if let Err(e) = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())) {
-        warn!("ui_script(copy): clipboard write failed: {e}");
-    }
 }

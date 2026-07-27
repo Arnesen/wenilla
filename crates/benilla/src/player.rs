@@ -305,6 +305,24 @@ fn control(
     let typing = ui_capture.0;
     let keys_pressed = |k: KeyCode| !typing && keys.pressed(k);
     let keys_just_pressed = |k: KeyCode| !typing && keys.just_pressed(k);
+    // Decision 0585's bare-binding rule, for this module's discrete letter bindings (F/X/Z): the
+    // reference names a binding `[ALT-][CTRL-][SHIFT-]<key>` and matches it by string equality, so a
+    // modified press is a *different* entry and must never fall through to the unmodified one —
+    // `CTRL-Z` is TOGGLEUI ([`crate::ui_hide`]), not the sheath toggle. Same definition of "modified"
+    // as the key feed's (`ui_script::input`, which adds our Cmd plane to the reference's three).
+    // Held-state reads (WASD, Space, the Ctrl sprint) stay outside the rule deliberately: they read
+    // keys as *state*, not as binding edges, and must keep working with a modifier down.
+    let modified = keys.any_pressed([
+        KeyCode::ShiftLeft,
+        KeyCode::ShiftRight,
+        KeyCode::ControlLeft,
+        KeyCode::ControlRight,
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
+    let bare_binding = |k: KeyCode| keys_just_pressed(k) && !modified;
 
     // Both mouse buttons held together = vanilla's "both-button run": the avatar runs forward while
     // the character steers with the mouse (turns like a right-drag), regardless of which button went
@@ -356,7 +374,7 @@ fn control(
         apply_zoom_scroll(mouse_scroll, dt, &mut rig);
     }
 
-    if keys_just_pressed(KeyCode::KeyF) {
+    if bare_binding(KeyCode::KeyF) {
         player.detached = !player.detached;
     }
 
@@ -604,7 +622,7 @@ fn control(
         }
         let stand_state = player.stand_pending.unwrap_or(stand_byte);
         let mut request_stand = None;
-        if keys_just_pressed(KeyCode::KeyX) {
+        if bare_binding(KeyCode::KeyX) {
             request_stand = Some(u8::from(stand_state == 0));
         }
         // Any movement input stands the avatar back up (the client volunteers the stand — the
@@ -652,7 +670,7 @@ fn control(
         // in the whole client that plays it (`bInstant = 0` at the 4 ToggleSheath sites — wow-re
         // `sheath-policy.md`). No body model yet (no driver) drops the toggle, the client's own
         // refusal.
-        if keys_just_pressed(KeyCode::KeyZ) {
+        if bare_binding(KeyCode::KeyZ) {
             if let Ok((e, _, _, _, Some(drv), store, engaged, _, _)) = self_player.single() {
                 // The manual toggle's guard chain (decision 0080d) — the guards of the client's
                 // 12-deep silent-refusal chain (`ToggleSheath` `0x5eb480`) whose states exist

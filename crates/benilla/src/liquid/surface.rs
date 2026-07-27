@@ -16,12 +16,11 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
-use super::query::{wet_footprint, FoamPatch, LiquidSource};
+use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
 use crate::assets::LockRecover;
 use crate::assets::{liquid_frame_array, RenderConfig, WorldAssets};
 use crate::lighting::WATER_SHININESS;
 use crate::terrain::{LiquidExt, LiquidMaterial};
-use crate::wmo_portal::WmoRoom;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::{read_texture_mip_chain, BlpMipChain, LiquidKind, LiquidMesh};
 
@@ -209,11 +208,11 @@ fn liquid_bevy_mesh(lq: &LiquidMesh) -> Mesh {
 /// surface draws under — the Great Forge's lava hazes with the forge's own fog, Stormwind's open
 /// canals with the sky's (see [`LiquidKey`]).
 ///
-/// `owner` is the [`WmoRoom`] the pool belongs to — the query's **scope key** (decision 0696). A
-/// liquid footprint has no floor, so a pool with no owner claims every position under its XY
-/// anywhere on the map: the Uldaman entrance read as submerged under a mushroom cave's water 186 yd
-/// overhead. `None` only for a placement that spawned no instance entity (see [`LiquidSource`]).
-#[allow(clippy::too_many_arguments)] // one param per concern: assets, placement, fog block, owner
+/// `pool` is the surface's **scope** (see [`WmoPool`]): the room it belongs to, and that room's own
+/// floor. A liquid footprint has no floor of its own, so an unscoped pool claims every position
+/// under its XY forever — the Uldaman entrance read as submerged under a mushroom cave's water
+/// 186 yd overhead (0696), and Undercity's upper slime submerged the rooms 115 yd below it (0701).
+#[allow(clippy::too_many_arguments)] // one param per concern: assets, placement, fog block, scope
 pub(crate) fn spawn_wmo_liquids<'a>(
     commands: &mut Commands,
     liquids: impl Iterator<Item = &'a LiquidMesh>,
@@ -221,7 +220,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
     meshes: &mut Assets<Mesh>,
     transform: Transform,
     interior: bool,
-    owner: Option<WmoRoom>,
+    pool: WmoPool,
     entities: &mut Vec<Entity>,
 ) {
     let Some(liquid) = liquid_assets else {
@@ -260,7 +259,7 @@ pub(crate) fn spawn_wmo_liquids<'a>(
         commands.entity(surface).insert(wet_footprint(
             lq,
             &transform,
-            LiquidSource::WmoGroup(owner),
+            LiquidSource::WmoGroup(pool),
         ));
         // Foam stays water-only: it is white surf, and there is no such thing on magma.
         if !lq.kind.is_fullbright() {

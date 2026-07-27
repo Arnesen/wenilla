@@ -33,14 +33,8 @@ pub(super) enum DynIcon {
     Info(InfoKind),
 }
 
-/// The name box's caret bar (the shared `glue_edit_box` chrome spawns it; `refresh_name_caret`
-/// blinks it). The create screen has one editable field and no focus model, so its box is always
-/// the focused one — unlike login, where the caret follows Tab.
-#[derive(Component)]
-pub(super) struct NameCaret;
-
 /// A text whose content follows the selection.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub(super) enum DynText {
     DialLabel(u8),
     Name,

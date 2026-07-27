@@ -66,7 +66,7 @@ mod surface; // the against-real-client-files tests — they span both halves
 // spawned, never named from outside; add them here the day something needs to.
 pub(crate) use query::{
     camera_claim, describe_at, liquid_at, player_claim, unit_claim, water_surface_at, FoamPatch,
-    LiquidClaim, LiquidSource, Underwater, WaterChunkInfo,
+    LiquidClaim, LiquidSource, Underwater, WaterChunkInfo, WmoPool,
 };
 pub(crate) use surface::{spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource};
 

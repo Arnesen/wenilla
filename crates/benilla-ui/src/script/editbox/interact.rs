@@ -18,10 +18,7 @@
 
 use mlua::Lua;
 
-use super::{
-    collapse, delete_selection, fire_script, frame_id_of, selection_anchor, set_focus_handle,
-    set_span, sync_text_region, with_eb,
-};
+use super::{fire_script, frame_id_of, set_focus_handle, sync_text_region, with_eb};
 use crate::script::Model;
 use crate::widget::{FrameHandle, FrameKind, KindState};
 
@@ -62,9 +59,7 @@ pub(in crate::script) fn click(lua: &Lua, id: u32, x: f32, y: f32) {
     let Some(h) = editbox_of(lua, id) else { return };
     let idx = index_at_screen_pos(lua, h, x, y);
     with_eb(lua, h, |eb| {
-        eb.reset_blink();
-        eb.cursor = idx;
-        collapse(eb);
+        eb.move_caret_to(idx, false);
         eb.drag_active = true;
     });
     set_focus_handle(lua, h);
@@ -80,10 +75,7 @@ pub(in crate::script) fn drag_update(lua: &Lua, x: f32, y: f32) {
     let idx = index_at_screen_pos(lua, h, x, y);
     with_eb(lua, h, |eb| {
         if idx != eb.cursor {
-            let anchor = selection_anchor(eb);
-            eb.cursor = idx;
-            set_span(eb, anchor, idx);
-            eb.reset_blink();
+            eb.move_caret_to(idx, true);
         }
     });
 }
@@ -100,47 +92,21 @@ pub(in crate::script) fn drag_end(lua: &Lua) {
 /// per-byte class array, benilla's alnum-run approximation is INFERRED): `shift` extends the
 /// selection from the fixed anchor like the char move; else the caret collapses there.
 pub(in crate::script) fn move_word(lua: &Lua, h: FrameHandle, right: bool, shift: bool) {
-    with_eb(lua, h, |eb| {
-        let target = eb.word_boundary(right);
-        if shift {
-            let anchor = selection_anchor(eb);
-            eb.cursor = target;
-            set_span(eb, anchor, target);
-        } else {
-            eb.cursor = target;
-            collapse(eb);
-        }
-        eb.reset_blink();
-    });
+    with_eb(lua, h, |eb| eb.move_by_word(right, shift));
 }
 
 /// Ctrl+C (`0x77e1d0`): the focused box's selected substring, `None` with no selection. A
 /// password box yields the mask run — the client copies a fixed placeholder, NEVER the text.
 pub(in crate::script) fn copy_selection(lua: &Lua) -> Option<String> {
     let h = focused(lua)?;
-    with_eb(lua, h, |eb| {
-        if eb.sel_start == eb.sel_end {
-            return None;
-        }
-        let (a, b) = (eb.sel_start.min(eb.sel_end), eb.sel_start.max(eb.sel_end));
-        Some(if eb.password {
-            "*".repeat(eb.text[a..b].chars().count())
-        } else {
-            eb.text[a..b].to_string()
-        })
-    })
-    .flatten()
+    with_eb(lua, h, |eb| eb.selected_text()).flatten()
 }
 
 /// Ctrl+X: copy, then delete the selection (an ordinary edit — the region syncs and
 /// `OnTextChanged` fires).
 pub(in crate::script) fn cut_selection(lua: &Lua) -> Option<String> {
-    let copied = copy_selection(lua)?;
     let h = focused(lua)?;
-    with_eb(lua, h, |eb| {
-        delete_selection(eb);
-        eb.reset_blink();
-    });
+    let copied = with_eb(lua, h, |eb| eb.cut_selection()).flatten()?;
     sync_text_region(lua, h);
     fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
     Some(copied)

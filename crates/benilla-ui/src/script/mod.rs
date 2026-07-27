@@ -138,8 +138,9 @@ pub use trainer::{
     TrainerState,
 };
 pub use types::{
-    EditAction, EditBoxTextUi, EditUnit, ExtractedQuad, FontObject, FontShadow, JustifyH, JustifyV,
-    LineMeasureRequest, MeasureRequest, Outline, QuadContent, ScriptValue, TexCoords,
+    EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,
+    JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent, ScriptValue,
+    TexCoords,
 };
 pub(crate) use types::{MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};

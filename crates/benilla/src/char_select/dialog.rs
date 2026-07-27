@@ -11,14 +11,17 @@
 //! `GlueFontHighlight` (FRIZQT 15 white — outlined like every glue font), no TextInsets, and the
 //! standard drawn caret bar ([`caret_bar`]) blinking on the ref's 0.5 s clock, solid while typing.
 
-use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::ButtonState;
+use benilla_ui::widget::EditBoxState;
+use bevy::input::keyboard::KeyboardInput;
+
+use crate::textinput::{self, HostClipboard};
 use bevy::prelude::*;
 
 use crate::glue::art::{tc_rect, GlueArt, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    caret_bar, glue_button, outlined_text, overlay, GlueBtnKind, GlueDisabled, GlueText,
+    caret_bar, glue_button, outlined_text, overlay, paint_glue_field, GlueBtnKind, GlueDisabled,
+    GlueFieldPart, GlueText,
 };
 use crate::glue_strings::GlueStrings;
 use crate::net::{CharPick, CharRequest};
@@ -33,8 +36,10 @@ pub(super) struct DeleteDialog {
     pub(super) open: bool,
     /// The snapshotted delete target (guid) + its display line pieces (name, level, class name).
     target: Option<(u64, String, u8, &'static str)>,
-    /// What's been typed into the confirm box (`pub(super)` for the shot instrument's pre-type).
-    pub(super) typed: String,
+    /// What's been typed into the confirm box — a real [`EditBoxState`] (decision 0704), so it
+    /// has the caret, selection, Ctrl+A and clipboard every other field has. The ref's
+    /// `letters="32"` cap is the box's own `max_letters`. (`pub(super)` for the shot instrument.)
+    pub(super) typed: EditBoxState,
     /// The spawned dialog root, while up.
     root: Option<Entity>,
     /// The glue scale the spawned tree was built at — a resize rebuilds it.
@@ -46,18 +51,18 @@ impl DeleteDialog {
     pub(super) fn open_for(&mut self, guid: u64, name: String, level: u8, class: &'static str) {
         self.open = true;
         self.target = Some((guid, name, level, class));
-        self.typed.clear();
+        self.typed.set_text("");
     }
 
     pub(super) fn close(&mut self) {
         self.open = false;
         self.target = None;
-        self.typed.clear();
+        self.typed.set_text("");
     }
 
     /// The typed text matches `DELETE_CONFIRM_STRING` (case-insensitive, the ref's `strupper`).
     fn armed(&self, confirm: &str) -> bool {
-        self.typed.eq_ignore_ascii_case(confirm)
+        self.typed.text.eq_ignore_ascii_case(confirm)
     }
 }
 
@@ -96,14 +101,21 @@ pub(super) fn drive_delete_dialog(
     mut sounds: MessageWriter<GlueSound>,
     presses: Query<(&DialogAction, &Interaction), Changed<Interaction>>,
     mut okay: Query<(&DialogAction, &mut GlueDisabled)>,
-    mut typed_line: Query<&mut Text, With<TypedText>>,
-    mut carets: Query<&mut Visibility, With<DeleteCaret>>,
-    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    // The five row items of the confirm box (segments + carets), painted by the shared
+    // `paint_glue_field`; plus the host pasteboard and the window handle its Wayland backend needs.
+    mut parts: Query<(
+        &crate::glue::widgets::GlueFieldPart,
+        Option<&mut Text>,
+        &mut Visibility,
+    )>,
+    mut clipboard: NonSendMut<HostClipboard>,
+    // One query: the window drives the glue scale, and its raw handle carries the `wl_display` the
+    // Wayland clipboard backend is built from (decision 0702).
+    window: Query<
+        (&Window, Option<&bevy::window::RawHandleWrapper>),
+        With<bevy::window::PrimaryWindow>,
+    >,
     time: Res<Time>,
-    // The caret blink clock (the ref's `blinkSpeed` 0.5 s), reset on open and on every keystroke
-    // so the caret is solid while you type — a `Local`, not a `DeleteDialog` field, so ticking it
-    // never trips the resource's change detection.
-    mut blink: Local<f32>,
 ) {
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
@@ -120,7 +132,7 @@ pub(super) fn drive_delete_dialog(
 
     // Spawn on the open edge — and respawn when a window resize has changed the glue scale the
     // tree was baked at (the typed text lives in the resource, so it survives the rebuild).
-    let s = crate::glue::screen_scale(window.single().ok());
+    let s = crate::glue::screen_scale(window.single().ok().map(|(w, _)| w));
     if dialog.root.is_some() && dialog.spawned_s != s {
         if let Some(root) = dialog.root.take() {
             commands.entity(root).despawn();
@@ -136,48 +148,26 @@ pub(super) fn drive_delete_dialog(
             s,
         ));
         dialog.spawned_s = s;
-        *blink = 0.0;
     }
 
-    // Typing: printable characters append (the ref's `letters="32"` cap — any typed character
-    // counts; the box only ever *matches* on "DELETE"), Backspace pops.
+    // Typing: the shared law (decision 0704) — editing, caret, selection and the clipboard trio.
+    // ENTER/ESCAPE come back unclaimed and are handled by the button/key block above.
+    let mods = textinput::mods_now(&keys);
+    let wl = textinput::wayland_display(window.iter().next().and_then(|(_, h)| h));
     for ev in keyboard.read() {
-        if ev.state != ButtonState::Pressed {
-            continue;
-        }
-        match &ev.logical_key {
-            Key::Character(chs) => {
-                for ch in chs.chars() {
-                    if !ch.is_control() && dialog.typed.chars().count() < 32 {
-                        dialog.typed.push(ch);
-                    }
-                }
-                *blink = 0.0;
-            }
-            Key::Backspace => {
-                dialog.typed.pop();
-                *blink = 0.0;
-            }
-            _ => {}
-        }
+        textinput::feed_key(
+            &mut dialog.typed,
+            ev,
+            mods,
+            &mut clipboard,
+            wl,
+            textinput::CharFilter::Any,
+        );
     }
-    if let Ok(mut t) = typed_line.single_mut() {
-        if t.0 != dialog.typed {
-            t.0.clone_from(&dialog.typed);
-        }
-    }
-    // The caret: 0.5 s on / 0.5 s off (solid right after a keystroke — the reset above).
-    *blink += time.delta_secs();
-    let want = if *blink % 1.0 < 0.5 {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut carets {
-        if *vis != want {
-            *vis = want;
-        }
-    }
+    // The dialog's box is always the focused one while it is up.
+    textinput::tick_caret(&mut dialog.typed, true, time.delta_secs());
+    paint_glue_field(&dialog.typed, true, parts.iter_mut());
+
     let armed = dialog.armed(confirm);
     for (action, mut disabled) in &mut okay {
         if *action == DialogAction::Okay && disabled.0 == armed {
@@ -424,21 +414,37 @@ fn spawn_dialog(
                                 ..default()
                             },))
                                 .with_children(|f| {
-                                    outlined_text(
+                                    // The same five-item row every other field uses
+                                    // (`GlueFieldPart`): segments either side of the selection,
+                                    // with a caret slot at each selection edge. Each segment is
+                                    // its own `outlined_text`, and the outline copies follow
+                                    // automatically (`glue::sync_outline_text`).
+                                    let segment = |f: &mut ChildSpawnerCommands, part| {
+                                        outlined_text(
+                                            f,
+                                            Node::default(),
+                                            (),
+                                            (TypedText, part),
+                                            GlueText {
+                                                text: "",
+                                                size: 15.0, // GlueFontHighlight
+                                                color: Color::WHITE,
+                                                wrap: false,
+                                            },
+                                            &font,
+                                            s,
+                                        );
+                                    };
+                                    segment(f, GlueFieldPart::Before);
+                                    caret_bar(
                                         f,
-                                        Node::default(),
-                                        (),
-                                        TypedText,
-                                        GlueText {
-                                            text: &dialog.typed,
-                                            size: 15.0, // GlueFontHighlight
-                                            color: Color::WHITE,
-                                            wrap: false,
-                                        },
-                                        &font,
+                                        (DeleteCaret, GlueFieldPart::CaretAtStart),
+                                        15.0,
                                         s,
                                     );
-                                    caret_bar(f, DeleteCaret, 15.0, s);
+                                    segment(f, GlueFieldPart::Selected);
+                                    caret_bar(f, (DeleteCaret, GlueFieldPart::CaretAtEnd), 15.0, s);
+                                    segment(f, GlueFieldPart::After);
                                 });
                         });
                     });

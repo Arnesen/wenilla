@@ -255,7 +255,9 @@ enum Command {
     },
     /// Dump all 18 `LightIntBand` rows of the `Light.dbc` entry covering a world position at a
     /// time of day — the band-semantics instrument (which row holds which colour at which hour;
-    /// the celestial-diffuse band question, decision 0485).
+    /// the celestial-diffuse band question, decision 0485). ⚠ This is ONE params record RAW —
+    /// near a sphere's falloff edge the LIVE light is mostly the continent global and looks
+    /// nothing like these rows; `lightblend` shows what actually wins at the position (0706).
     Lightbands {
         /// Map id (0 = Eastern Kingdoms, 1 = Kalimdor).
         map: u32,
@@ -287,6 +289,26 @@ enum Command {
     /// blend resolves for each. `lightbands` only ever shows the clear slot, so an underwater or
     /// ghost atmosphere that reads wrong could not be told from data that simply has no such record.
     Lightslots {
+        /// Map id (0 = Eastern Kingdoms, 1 = Kalimdor).
+        map: u32,
+        /// World-space X (raw WoW yards; may be negative).
+        #[arg(allow_hyphen_values = true)]
+        x: f32,
+        /// World-space Y.
+        #[arg(allow_hyphen_values = true)]
+        y: f32,
+        /// World-space Z.
+        #[arg(allow_hyphen_values = true)]
+        z: f32,
+        /// Game minute-of-day (0..1440; 720 = noon).
+        minute: u32,
+    },
+    /// Dump every light SPHERE covering a world position — distance, falloff, blend alpha, each
+    /// sphere's clear ambient/sun — then the faithful area-blend result vs the single `pick_light`
+    /// sample. The instrument for "which palette actually wins HERE": a position near a zone
+    /// sphere's falloff edge resolves mostly the continent global, and the raw per-params band dump
+    /// (`lightbands`) cannot show that.
+    Lightblend {
         /// Map id (0 = Eastern Kingdoms, 1 = Kalimdor).
         map: u32,
         /// World-space X (raw WoW yards; may be negative).
@@ -498,6 +520,16 @@ fn main() -> Result<()> {
         } => {
             let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
             catalog.debug_slots(map, [x, y, z], minute * 2);
+        }
+        Command::Lightblend {
+            map,
+            x,
+            y,
+            z,
+            minute,
+        } => {
+            let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
+            catalog.debug_blend(map, [x, y, z], minute * 2);
         }
         Command::Wmodoodads {
             internal_path,

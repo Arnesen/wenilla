@@ -117,9 +117,9 @@ pub(super) fn refresh_dynamic(
                     .text(&format!("FACIAL_HAIR_{facial_tok}"), "Facial Hair")
                     .to_string(),
             },
-            // The typed name alone — the caret is its own blinking bar now (`NameCaret`), not the
-            // trailing `_` this used to fake.
-            DynText::Name => sel.name.clone(),
+            // The name box is five flex items (segments + carets), painted from its
+            // `EditBoxState` by `refresh_name_box` — never a single string here (decision 0704).
+            DynText::Name => continue,
             DynText::InfoTitle(InfoKind::Faction) => strings
                 .text(
                     if alliance { "ALLIANCE" } else { "HORDE" },

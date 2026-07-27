@@ -79,13 +79,11 @@ pub(super) fn paste(lua: &Lua, text: &str) -> bool {
     let Some(h) = route(lua) else {
         return false;
     };
-    let multi_line = with_eb(lua, h, |eb| eb.multi_line).unwrap_or(false);
-    let cleaned: String = text
-        .chars()
-        .filter(|&c| c as u32 >= 0x20 || (multi_line && c == '\n'))
-        .collect();
-    if !cleaned.is_empty() {
-        insert(lua, h, &cleaned, false);
+    // The sanitation + insert is the shared law ([`EditBoxState::paste`]); only the event fire is
+    // this layer's.
+    if with_eb(lua, h, |eb| eb.paste(text)).is_some_and(|o| o.text_changed) {
+        sync_text_region(lua, h);
+        fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
     }
     true
 }
@@ -261,29 +259,17 @@ fn clear_focus_handle(lua: &Lua, h: FrameHandle) {
 /// a non-digit; splice + advance; enforce caps; fire `OnTextChanged`, and (when `fire_space`) one
 /// `OnSpacePressed` per space in `ins`.
 fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
-    let spaces = with_eb(lua, h, |eb| {
-        if eb.numeric && !ins.chars().all(|c| c.is_ascii_digit()) {
-            return None; // numeric: any non-digit aborts the whole insert
-        }
-        eb.end_history_browse(); // a typed edit turns the recalled line into an ordinary draft
-        delete_selection(eb);
-        eb.text.insert_str(eb.cursor, ins);
-        eb.cursor += ins.len();
-        collapse(eb);
-        enforce_caps(eb);
-        eb.reset_blink();
-        Some(if fire_space {
-            ins.matches(' ').count()
-        } else {
-            0
-        })
-    });
-    // Some(Some(n)) inserted (n spaces); Some(None) numeric-aborted; None not an EditBox.
-    if let Some(Some(spaces)) = spaces {
-        sync_text_region(lua, h);
-        let id = frame_id_of(lua, h);
-        fire_script(lua, id, "OnTextChanged");
-        for _ in 0..spaces {
+    let Some(out) = with_eb(lua, h, |eb| eb.insert(ins)) else {
+        return; // not an EditBox
+    };
+    if !out.text_changed {
+        return; // numeric-aborted
+    }
+    sync_text_region(lua, h);
+    let id = frame_id_of(lua, h);
+    fire_script(lua, id, "OnTextChanged");
+    if fire_space {
+        for _ in 0..out.spaces {
             fire_script(lua, id, "OnSpacePressed");
         }
     }
@@ -292,17 +278,7 @@ fn insert(lua: &Lua, h: FrameHandle, ins: &str, fire_space: bool) {
 /// `SetText` (`0x77be00`): short-circuit when unchanged (no events); else clear selection, replace,
 /// cursor to end, enforce caps, fire `OnTextSet` then `OnTextChanged`.
 fn set_text(lua: &Lua, h: FrameHandle, s: &str) {
-    let changed = with_eb(lua, h, |eb| {
-        if eb.text == s {
-            return false;
-        }
-        eb.text = s.to_string();
-        eb.cursor = eb.text.len();
-        collapse(eb);
-        enforce_caps(eb);
-        eb.reset_blink();
-        true
-    });
+    let changed = with_eb(lua, h, |eb| eb.set_text(s));
     if changed == Some(true) {
         sync_text_region(lua, h);
         let id = frame_id_of(lua, h);
@@ -316,26 +292,8 @@ fn set_text(lua: &Lua, h: FrameHandle, s: &str) {
 /// `OnTextChanged` when anything was removed.
 fn delete_span(lua: &Lua, h: FrameHandle, target_of: impl FnOnce(&EditBoxState) -> usize) {
     let changed = with_eb(lua, h, |eb| {
-        eb.end_history_browse(); // an edit ends any recall browse
-        let did = if eb.sel_start != eb.sel_end {
-            delete_selection(eb);
-            true
-        } else {
-            let t = target_of(eb);
-            let (a, b) = (t.min(eb.cursor), t.max(eb.cursor));
-            if a == b {
-                false
-            } else {
-                eb.text.replace_range(a..b, "");
-                eb.cursor = a;
-                collapse(eb);
-                true
-            }
-        };
-        if did {
-            eb.reset_blink();
-        }
-        did
+        let t = target_of(eb);
+        eb.delete_to(t)
     });
     if changed == Some(true) {
         sync_text_region(lua, h);
@@ -346,33 +304,7 @@ fn delete_span(lua: &Lua, h: FrameHandle, target_of: impl FnOnce(&EditBoxState) 
 /// BACKSPACE / DELETE: delete the selection if non-empty, else the char before (`forward=false`) or
 /// after (`forward=true`) the cursor; fire `OnTextChanged` if anything was removed.
 fn delete_dir(lua: &Lua, h: FrameHandle, forward: bool) {
-    let changed = with_eb(lua, h, |eb| {
-        eb.end_history_browse(); // a typed edit ends any recall browse
-        let did = 'del: {
-            if eb.sel_start != eb.sel_end {
-                delete_selection(eb);
-                break 'del true;
-            }
-            if forward {
-                if eb.cursor < eb.text.len() {
-                    let end = next_boundary(&eb.text, eb.cursor);
-                    eb.text.replace_range(eb.cursor..end, "");
-                    break 'del true;
-                }
-            } else if eb.cursor > 0 {
-                let start = prev_boundary(&eb.text, eb.cursor);
-                eb.text.replace_range(start..eb.cursor, "");
-                eb.cursor = start;
-                collapse(eb);
-                break 'del true;
-            }
-            false
-        };
-        if did {
-            eb.reset_blink();
-        }
-        did
-    });
+    let changed = with_eb(lua, h, |eb| eb.delete_dir(forward));
     if changed == Some(true) {
         sync_text_region(lua, h);
         fire_script(lua, frame_id_of(lua, h), "OnTextChanged");
@@ -394,151 +326,19 @@ fn history_step_key(lua: &Lua, h: FrameHandle, older: bool) {
 /// collapses to the selection edge (if any) or moves one char. Fires no script (a cursor/selection
 /// move; `OnCursorChanged` geometry is out of scope).
 fn move_horizontal(lua: &Lua, h: FrameHandle, right: bool, shift: bool) {
-    with_eb(lua, h, |eb| {
-        if shift {
-            let anchor = selection_anchor(eb);
-            eb.cursor = if right {
-                next_boundary(&eb.text, eb.cursor)
-            } else {
-                prev_boundary(&eb.text, eb.cursor)
-            };
-            set_span(eb, anchor, eb.cursor);
-        } else if eb.sel_start != eb.sel_end {
-            eb.cursor = if right { eb.sel_end } else { eb.sel_start };
-            collapse(eb);
-        } else {
-            eb.cursor = if right {
-                next_boundary(&eb.text, eb.cursor)
-            } else {
-                prev_boundary(&eb.text, eb.cursor)
-            };
-            collapse(eb);
-        }
-        eb.reset_blink();
-    });
+    with_eb(lua, h, |eb| eb.move_by_char(right, shift));
 }
 
 /// HOME/END: move the caret to 0 / `len`; `shift` extends from the fixed anchor.
 fn move_to_edge(lua: &Lua, h: FrameHandle, end: bool, shift: bool) {
-    with_eb(lua, h, |eb| {
-        let target = if end { eb.text.len() } else { 0 };
-        if shift {
-            let anchor = selection_anchor(eb);
-            eb.cursor = target;
-            set_span(eb, anchor, target);
-        } else {
-            eb.cursor = target;
-            collapse(eb);
-        }
-        eb.reset_blink();
-    });
+    with_eb(lua, h, |eb| eb.move_to_edge(end, shift));
 }
 
 /// `HighlightText` (`0x77cca0`), the client's exact clamp: `start = clamp(start, 0..=len)`;
 /// `end = (end < 0 || end > len) ? len : end`; then `if end < start { end = len }` — so `(0, -1)`
 /// selects all. Offsets are bytes, snapped to char boundaries.
 fn highlight_text(lua: &Lua, h: FrameHandle, start: i64, end: i64) {
-    with_eb(lua, h, |eb| {
-        let len = eb.text.len() as i64;
-        let s = start.clamp(0, len);
-        let mut e = if end < 0 || end > len { len } else { end };
-        if e < s {
-            e = len;
-        }
-        let s = snap_down(&eb.text, s as usize);
-        let e = snap_down(&eb.text, e as usize);
-        eb.sel_start = s;
-        eb.sel_end = e;
-        eb.cursor = e;
-        eb.reset_blink();
-    });
-}
-
-// ── state helpers (pure over EditBoxState) ───────────────────────────────────────────────────
-
-/// Delete the current selection (if any): remove `[min, max)`, collapse the caret to the left edge.
-fn delete_selection(eb: &mut EditBoxState) {
-    if eb.sel_start == eb.sel_end {
-        return;
-    }
-    let (a, b) = (eb.sel_start.min(eb.sel_end), eb.sel_start.max(eb.sel_end));
-    eb.text.replace_range(a..b, "");
-    eb.cursor = a;
-    collapse(eb);
-}
-
-/// Collapse the selection onto the caret (no selection).
-fn collapse(eb: &mut EditBoxState) {
-    eb.sel_start = eb.cursor;
-    eb.sel_end = eb.cursor;
-}
-
-/// The fixed end of the current selection while extending (the endpoint that is *not* the caret; the
-/// caret itself when there is no selection).
-fn selection_anchor(eb: &EditBoxState) -> usize {
-    if eb.sel_start == eb.cursor {
-        eb.sel_end
-    } else {
-        eb.sel_start
-    }
-}
-
-/// Set the selection to span `[min(a,b), max(a,b)]`.
-fn set_span(eb: &mut EditBoxState, a: usize, b: usize) {
-    eb.sel_start = a.min(b);
-    eb.sel_end = a.max(b);
-}
-
-/// Enforce the length caps after an edit (`0x77c02d`): trim whole chars from the end while over
-/// `maxBytes`, then while over `maxLetters` (char count); clamp the caret/selection into the buffer.
-fn enforce_caps(eb: &mut EditBoxState) {
-    if let Some(mb) = eb.max_bytes {
-        while eb.text.len() > mb {
-            eb.text.pop();
-        }
-    }
-    if eb.max_letters > 0 {
-        while eb.text.chars().count() > eb.max_letters {
-            eb.text.pop();
-        }
-    }
-    let len = eb.text.len();
-    eb.cursor = snap_down(&eb.text, eb.cursor.min(len));
-    eb.sel_start = snap_down(&eb.text, eb.sel_start.min(len));
-    eb.sel_end = snap_down(&eb.text, eb.sel_end.min(len));
-}
-
-/// The byte offset of the char boundary at or below `i` (identity if `i` already sits on one).
-fn snap_down(s: &str, i: usize) -> usize {
-    let mut i = i.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// The next char boundary strictly after `i` (clamped to `len`).
-fn next_boundary(s: &str, i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    let mut j = i + 1;
-    while j < s.len() && !s.is_char_boundary(j) {
-        j += 1;
-    }
-    j
-}
-
-/// The char boundary strictly before `i` (clamped to `0`).
-fn prev_boundary(s: &str, i: usize) -> usize {
-    if i == 0 {
-        return 0;
-    }
-    let mut j = i - 1;
-    while j > 0 && !s.is_char_boundary(j) {
-        j -= 1;
-    }
-    j
+    with_eb(lua, h, |eb| eb.highlight_text(start, end));
 }
 
 // ── text-region sync (the '*' mask lives here, RF-0082 §3) ───────────────────────────────────

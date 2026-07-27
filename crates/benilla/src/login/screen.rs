@@ -23,8 +23,8 @@ use crate::char_select::wow_font;
 use crate::glue::art::{GlueArt, BACKDROP, GOLD};
 use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
 use crate::glue::widgets::{
-    abs, glue_button, glue_edit_box, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText,
-    Hilight,
+    abs, glue_button, glue_edit_box, outlined_text, overlay, paint_glue_field, ArtSwap,
+    GlueBtnKind, GlueFieldPart, GlueText, Hilight,
 };
 use crate::glue_strings::GlueStrings;
 use crate::portrait::{PortraitImages, PortraitSource, GLUE_SLOT};
@@ -56,18 +56,13 @@ pub(super) struct LoginUi {
     with_art: bool,
     s: f32,
 }
-/// The account box's text line (typed content, [`refresh_boxes`]).
-#[derive(Component)]
+/// The account box's row items (segments + carets — [`refresh_boxes`] paints them through
+/// [`paint_glue_field`]).
+#[derive(Component, Clone)]
 pub(super) struct AccountText;
-/// The password box's text line (the `*` mask).
-#[derive(Component)]
+/// The password box's row items (its display is the `*` mask — the box law's own `password` flag).
+#[derive(Component, Clone)]
 pub(super) struct PasswordText;
-/// Each box's caret bar — shown while that box holds the focus and the blink is on
-/// ([`refresh_boxes`]).
-#[derive(Component)]
-pub(super) struct AccountCaret;
-#[derive(Component)]
-pub(super) struct PasswordCaret;
 /// The checkbox's checked overlay (visibility = the form's save flag).
 #[derive(Component)]
 pub(super) struct CheckMark;
@@ -331,7 +326,6 @@ fn spawn_screen(
                                 &edit_font,
                                 (action, Button),
                                 AccountText,
-                                AccountCaret,
                                 (160.0, 37.0),
                                 (BOX_BORDER, BOX_FILL),
                                 (15.0, 0.0, 0.0, 5.0), // AccountLogin.xml TextInsets
@@ -344,7 +338,6 @@ fn spawn_screen(
                                 &edit_font,
                                 (action, Button),
                                 PasswordText,
-                                PasswordCaret,
                                 (160.0, 37.0),
                                 (BOX_BORDER, BOX_FILL),
                                 (15.0, 0.0, 0.0, 5.0), // AccountLogin.xml TextInsets
@@ -499,44 +492,27 @@ fn spawn_screen(
     });
 }
 
-/// Write each box's display line (the typed content, masked for the password) and show the caret
-/// bar of whichever box holds the focus, blinking 0.5 s on / 0.5 s off. The clock resets on every
-/// keystroke ([`super::drive_input`]), so the caret is solid while you type — the ref's own
-/// blink-accumulator reset.
+/// Paint both boxes from their [`EditBoxState`]s — segments, selection highlight, and the caret at
+/// the cursor — through the shared [`paint_glue_field`] (decision 0704).
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_boxes(
     form: Res<LoginForm>,
-    mut account: Query<&mut Text, (With<AccountText>, Without<PasswordText>)>,
-    mut password: Query<&mut Text, With<PasswordText>>,
-    mut account_caret: Query<&mut Visibility, (With<AccountCaret>, Without<PasswordCaret>)>,
-    mut password_caret: Query<&mut Visibility, With<PasswordCaret>>,
+    mut account: Query<
+        (&GlueFieldPart, Option<&mut Text>, &mut Visibility),
+        (With<AccountText>, Without<PasswordText>),
+    >,
+    mut password: Query<(&GlueFieldPart, Option<&mut Text>, &mut Visibility), With<PasswordText>>,
 ) {
-    if let Ok(mut t) = account.single_mut() {
-        if t.0 != form.account {
-            t.0.clone_from(&form.account);
-        }
-    }
-    if let Ok(mut t) = password.single_mut() {
-        let line = "*".repeat(form.password.len());
-        if t.0 != line {
-            t.0 = line;
-        }
-    }
-    let caret_on = form.caret_t % 1.0 < 0.5;
-    let show = |vis: Option<Mut<Visibility>>, field: Field| {
-        if let Some(mut vis) = vis {
-            let want = if form.focus == field && caret_on {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
-            if *vis != want {
-                *vis = want;
-            }
-        }
-    };
-    show(account_caret.single_mut().ok(), Field::Account);
-    show(password_caret.single_mut().ok(), Field::Password);
+    paint_glue_field(
+        &form.account,
+        form.focus == Field::Account,
+        account.iter_mut(),
+    );
+    paint_glue_field(
+        &form.password,
+        form.focus == Field::Password,
+        password.iter_mut(),
+    );
 }
 
 /// The checkbox's visuals: the checked overlay tracks the form's save flag; the ADD hover ring

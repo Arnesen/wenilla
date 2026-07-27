@@ -18,7 +18,10 @@ mod screen;
 
 use std::sync::atomic::Ordering;
 
-use bevy::input::keyboard::{Key, KeyboardInput};
+use benilla_ui::widget::EditBoxState;
+use bevy::input::keyboard::KeyboardInput;
+
+use crate::textinput::{self, HostClipboard};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
@@ -332,14 +335,39 @@ pub(super) enum Field {
     Password,
 }
 
-/// The typed form: both boxes' contents, the focus, the Remember checkbox, and the caret clock.
-#[derive(Resource, Default)]
+/// The typed form: both boxes, the focus, and the Remember checkbox. Each box is a real
+/// [`EditBoxState`] — the same byte-verified model the chat box uses — so the login fields get
+/// caret movement, selection, Ctrl+A and the clipboard from the shared law rather than the
+/// three-case imitation they used to carry (decision 0704). The caret clock lives in the box too
+/// (`blink_accum`/`caret_shown`), so it blinks on the client's own 0.5 s period.
+#[derive(Resource)]
 pub(crate) struct LoginForm {
-    pub(super) account: String,
-    pub(super) password: String,
+    pub(super) account: EditBoxState,
+    pub(super) password: EditBoxState,
     pub(super) focus: Field,
     pub(super) save: bool,
-    pub(super) caret_t: f32,
+}
+
+impl Default for LoginForm {
+    fn default() -> Self {
+        LoginForm {
+            account: textinput::field(MAX_LETTERS, false),
+            // `password` masks the *display* only; the real text is never rendered or copied.
+            password: textinput::field(MAX_LETTERS, true),
+            focus: Field::default(),
+            save: false,
+        }
+    }
+}
+
+impl LoginForm {
+    /// The box that currently owns the keyboard.
+    fn focused(&mut self) -> &mut EditBoxState {
+        match self.focus {
+            Field::Account => &mut self.account,
+            Field::Password => &mut self.password,
+        }
+    }
 }
 
 /// The armed quit (`gsTitleQuit` needs [`QUIT_GRACE_SECS`] to be audible before `AppExit`).
@@ -357,9 +385,8 @@ fn enter_login(mut form: ResMut<LoginForm>, mut preview: ResMut<GluePreview>) {
     } else {
         Field::Password
     };
-    form.account = saved;
-    form.password.clear();
-    form.caret_t = 0.0;
+    form.account.set_text(&saved);
+    form.password.set_text("");
     preview.scene = Some(GlueScene::MainMenu);
     preview.look = None;
     preview.yaw = 0.0;
@@ -373,6 +400,9 @@ fn login_input(
     presses: Query<(&LoginAction, &Interaction), Changed<Interaction>>,
     mut keyboard: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    // The host pasteboard + the window handle the Wayland backend needs (decision 0702).
+    mut clipboard: NonSendMut<HostClipboard>,
+    raw_handle: Query<&bevy::window::RawHandleWrapper, With<bevy::window::PrimaryWindow>>,
     mut form: ResMut<LoginForm>,
     mut intent: ResMut<LoginIntent>,
     mut dialog: ResMut<LoginDialog>,
@@ -386,7 +416,6 @@ fn login_input(
 ) {
     let empty = GlueStrings::default();
     let strings = strings.as_deref().unwrap_or(&empty);
-    form.caret_t += time.delta_secs();
 
     let mut do_login = false;
     let mut do_quit = false;
@@ -420,50 +449,38 @@ fn login_input(
         }
     }
 
+    let mods = textinput::mods_now(&keys);
+    let wl = textinput::wayland_display(raw_handle.iter().next());
     for ev in keyboard.read() {
-        if ev.state != ButtonState::Pressed || dialog_open {
+        if dialog_open {
             continue;
         }
-        match &ev.logical_key {
-            Key::Character(chs) => {
-                for ch in chs.chars() {
-                    if ch.is_ascii_graphic() {
-                        let field = match form.focus {
-                            Field::Account => &mut form.account,
-                            Field::Password => &mut form.password,
-                        };
-                        if field.len() < MAX_LETTERS {
-                            field.push(ch);
-                        }
-                        if form.focus == Field::Account {
-                            on_account_edited(&mut form);
-                        }
-                    }
-                }
-                form.caret_t = 0.0;
+        // The shared law first (editing, caret, selection, the clipboard trio); only what it
+        // hands back unclaimed is the screen's own — TAB cycles the two boxes, ENTER/ESCAPE are
+        // handled below off `just_pressed`.
+        if textinput::feed_key(
+            form.focused(),
+            ev,
+            mods,
+            &mut clipboard,
+            wl,
+            textinput::CharFilter::Any,
+        ) == textinput::FieldKey::Consumed
+        {
+            if form.focus == Field::Account {
+                on_account_edited(&mut form);
             }
-            Key::Backspace => {
-                match form.focus {
-                    Field::Account => {
-                        form.account.pop();
-                        on_account_edited(&mut form);
-                    }
-                    Field::Password => {
-                        form.password.pop();
-                    }
-                }
-                form.caret_t = 0.0;
-            }
-            Key::Tab => {
-                form.focus = match form.focus {
-                    Field::Account => Field::Password,
-                    Field::Password => Field::Account,
-                };
-                form.caret_t = 0.0;
-            }
-            _ => {}
+            continue;
+        }
+        if ev.state == ButtonState::Pressed && ev.key_code == KeyCode::Tab {
+            form.focus = match form.focus {
+                Field::Account => Field::Password,
+                Field::Password => Field::Account,
+            };
+            form.focused().reset_blink();
         }
     }
+
     if !dialog_open
         && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
     {
@@ -475,21 +492,21 @@ fn login_input(
 
     if do_login && !intent.in_flight {
         // The ref's own guards: empty account / empty password get their dialog, no wire.
-        if form.account.is_empty() {
+        if form.account.text.is_empty() {
             dialog.open_error(strings.text("LOGIN_ENTER_NAME", "Please enter your account name."));
-        } else if form.password.is_empty() {
+        } else if form.password.text.is_empty() {
             dialog.open_error(strings.text("LOGIN_ENTER_PASSWORD", "Please enter your password."));
         } else {
             sounds.write(GlueSound("gsLogin"));
             // `AccountLogin_Login`: save or clear the account name per the checkbox, clear the
             // password box after grabbing it.
             if form.save {
-                save_account(&form.account);
+                save_account(&form.account.text);
             } else {
                 save_account("");
             }
-            let (user, pass) = (form.account.clone(), form.password.clone());
-            form.password.clear();
+            let (user, pass) = (form.account.text.clone(), form.password.text.clone());
+            form.password.set_text("");
             dialog.open_status(strings.text("LOGIN_STATE_CONNECTING", "Connecting"));
             send_login(&mut intent, &submit, &abandon, &user, &pass, true);
         }
@@ -506,7 +523,7 @@ fn login_input(
 fn on_account_edited(form: &mut LoginForm) {
     if form.save {
         let saved = load_saved_account();
-        if !saved.is_empty() && saved != form.account {
+        if !saved.is_empty() && saved != form.account.text {
             save_account("");
             form.save = false;
         }

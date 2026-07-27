@@ -23,7 +23,10 @@ mod refresh;
 mod screen;
 
 use benilla_protocol::{CharAction, CharCreateReq};
-use bevy::input::keyboard::{Key, KeyboardInput};
+use benilla_ui::widget::EditBoxState;
+use bevy::input::keyboard::KeyboardInput;
+
+use crate::textinput::{self, HostClipboard};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
@@ -54,7 +57,6 @@ pub(crate) struct CharCreatePlugin;
 impl Plugin for CharCreatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CreateSelection>()
-            .init_resource::<NameCaretBlink>()
             .add_systems(OnEnter(ClientState::CharCreate), screen::enter_create)
             .add_systems(OnExit(ClientState::CharCreate), screen::exit_create)
             .add_systems(Update, debug_enter)
@@ -63,12 +65,12 @@ impl Plugin for CharCreatePlugin {
                 (
                     screen::rescale_screen,
                     create_input,
-                    refresh_name_caret,
                     debug_auto_create,
                     debug_pick,
                     debug_shot,
                     rotate_model,
                     refresh::refresh_dynamic,
+                    refresh_name_box,
                     refresh::refresh_hover,
                     crate::glue::art_swaps,
                     crate::glue::glue_button_visuals,
@@ -108,11 +110,11 @@ fn debug_auto_create(
     if now - start < 6.0 {
         return; // let the model settle + the socket park
     }
-    sel.name = name;
+    sel.name.set_text(&name);
     sel.creating = true;
     let _ = pick.0.send(CharRequest::Create(sel.request()));
     *fired = true;
-    info!("char create: auto-create fired for {:?}", sel.name);
+    info!("char create: auto-create fired for {:?}", sel.name.text);
 }
 
 /// The screen-shot instrument (`WOW_CHARCREATE_SHOT=1`, decision 0423): jump to the create screen a
@@ -242,7 +244,10 @@ pub(crate) struct CreateSelection {
     sex: u8,
     class: u8,
     dials: [u8; 5],
-    name: String,
+    /// The typed name — a real [`EditBoxState`] (decision 0704), so it has the caret, selection,
+    /// Ctrl+A and clipboard the chat box has. Letters-only and the 12-cap are enforced by the
+    /// shared feed, on pasted text as well as typed.
+    name: EditBoxState,
     /// A create is in flight (waiting on `SMSG_CHAR_CREATE`) — the Create button is disarmed and the
     /// status shows progress.
     creating: bool,
@@ -266,7 +271,7 @@ impl CreateSelection {
             .and_then(|c| c.0.classes_for_race(1).first().copied())
             .unwrap_or(1);
         self.dials = [0; 5];
-        self.name.clear();
+        self.name.set_text("");
         self.creating = false;
     }
 
@@ -305,7 +310,7 @@ impl CreateSelection {
     /// The wire request for the current selection.
     fn request(&self) -> CharCreateReq {
         CharCreateReq {
-            name: self.name.clone(),
+            name: self.name.text.clone(),
             race: self.race,
             class: self.class,
             gender: self.sex,
@@ -372,27 +377,6 @@ fn class_file(class: u8) -> &'static str {
 /// Its own resource rather than a [`CreateSelection`] field on purpose: ticking it there would trip
 /// that resource's change detection every frame and defeat `refresh_dynamic`'s `is_changed` gate,
 /// re-running the whole dial/panel/icon refresh 60× a second.
-#[derive(Resource, Default)]
-struct NameCaretBlink(f32);
-
-/// Blink the name box's caret (0.5 s on / 0.5 s off). The create screen has one editable field and
-/// no focus model, so its caret shows whenever the screen is up.
-fn refresh_name_caret(
-    blink: Res<NameCaretBlink>,
-    mut carets: Query<&mut Visibility, With<parts::NameCaret>>,
-) {
-    let want = if blink.0 % 1.0 < 0.5 {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut carets {
-        if *vis != want {
-            *vis = want;
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn create_input(
     presses: Query<(&CreateAction, &Interaction), Changed<Interaction>>,
@@ -400,7 +384,9 @@ fn create_input(
     keys: Res<ButtonInput<KeyCode>>,
     catalog: Option<Res<CharCreate>>,
     mut sel: ResMut<CreateSelection>,
-    mut blink: ResMut<NameCaretBlink>,
+    // The host pasteboard + the window handle its Wayland backend needs (decision 0702).
+    mut clipboard: NonSendMut<HostClipboard>,
+    raw_handle: Query<&bevy::window::RawHandleWrapper, With<bevy::window::PrimaryWindow>>,
     time: Res<Time>,
     mut preview: ResMut<GluePreview>,
     pick: Res<CharPick>,
@@ -408,7 +394,10 @@ fn create_input(
     mut sounds: MessageWriter<GlueSound>,
     mut rng: Local<u64>,
 ) {
-    blink.0 += time.delta_secs();
+    let mods = textinput::mods_now(&keys);
+    let wl = textinput::wayland_display(raw_handle.iter().next());
+    // The create screen has one field and no focus model, so it is always focused while up.
+    textinput::tick_caret(&mut sel.name, true, time.delta_secs());
     let cat = catalog.as_deref();
     let mut changed_look = false;
     let mut do_create = false;
@@ -474,20 +463,16 @@ fn create_input(
         if ev.state != ButtonState::Pressed {
             continue;
         }
-        match &ev.logical_key {
-            Key::Character(s) => {
-                for ch in s.chars() {
-                    if ch.is_ascii_alphabetic() && sel.name.len() < 12 {
-                        sel.name.push(ch);
-                        blink.0 = 0.0;
-                    }
-                }
-            }
-            Key::Backspace => {
-                sel.name.pop();
-                blink.0 = 0.0;
-            }
-            _ => {}
+        if textinput::feed_key(
+            &mut sel.name,
+            ev,
+            mods,
+            &mut clipboard,
+            wl,
+            textinput::CharFilter::Letters,
+        ) == textinput::FieldKey::Consumed
+        {
+            continue;
         }
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
@@ -527,6 +512,22 @@ fn randomize(sel: &mut CreateSelection, catalog: Option<&CharCreate>, rng: &mut 
         *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
         *d = if n == 0 { 0 } else { (*rng % n as u64) as u8 };
     }
+}
+
+/// Paint the name box from its [`EditBoxState`] — the display segments, the selection highlight and
+/// the caret at the cursor — through the shared [`crate::glue::widgets::paint_glue_field`], so it
+/// draws exactly like the login boxes (decision 0704). Only the five name-box row items carry a
+/// `GlueFieldPart`, so requiring it is enough to pick them out of every other `DynText`.
+fn refresh_name_box(
+    sel: Res<CreateSelection>,
+    mut parts: Query<(
+        &crate::glue::widgets::GlueFieldPart,
+        Option<&mut Text>,
+        &mut Visibility,
+    )>,
+) {
+    // One field, no focus model: it is focused whenever the screen is up.
+    crate::glue::widgets::paint_glue_field(&sel.name, true, parts.iter_mut());
 }
 
 /// Rotate the preview: drag on the model pane (the ref's full-frame mouse rotation: `facing +=
@@ -577,7 +578,7 @@ fn create_result(
         if msg.code == benilla_protocol::messages::CHAR_CREATE_SUCCESS {
             // The fresh roster already arrived (phase 1 emits it before the result); arm the new row
             // and return to select.
-            roster.note_created(sel.name.clone());
+            roster.note_created(sel.name.text.clone());
             next.set(ClientState::CharSelect);
         } else if let Ok(mut text) = status.single_mut() {
             text.0 = char_result_text(msg.code).to_string();

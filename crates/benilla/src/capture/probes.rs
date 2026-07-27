@@ -1,140 +1,14 @@
 //! The LIVE-run probe instruments — every plugin here rides a NORMAL connected session (unlike
-//! the parent's server-less [`super::CapturePlugin`] harness): one screenshot of the live scene
-//! ([`LiveShotPlugin`]), scripted chat sends ([`ProbeChatPlugin`]), synthetic key taps
-//! ([`ProbeKeyPlugin`]), a Lua chunk in the live UI VM ([`ProbeLuaPlugin`]), the bounded-lifetime
-//! self-exit ([`ProbeExitPlugin`]), and the live frame-time sampler ([`LiveFpsPlugin`]). Each is
-//! env-gated and registered by `main`; compose them for unattended "park, act, observe" probes.
+//! the parent's server-less [`super::CapturePlugin`] harness): scripted chat sends
+//! ([`ProbeChatPlugin`]), synthetic key taps ([`ProbeKeyPlugin`]), a Lua chunk in the live UI VM
+//! ([`ProbeLuaPlugin`]), the bounded-lifetime self-exit ([`ProbeExitPlugin`]), and the live
+//! frame-time sampler ([`LiveFpsPlugin`]). The live screenshot and its validity gates live in the
+//! sibling [`super::live_shot`]. Each is env-gated and registered by `main`; compose them for
+//! unattended "park, act, observe" probes.
 
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use super::PROBE_WARMUP_FRAMES;
-use crate::net::{ObjectStore, SelfPlayer};
-
-/// The LIVE probe shot (`WOW_LIVE_SHOT=<png>`, delay via `WOW_LIVE_SHOT_AT` seconds, default 12):
-/// one screenshot of the primary window on a NORMAL connected run — the "what does the live scene
-/// actually look like" instrument (server GameObjects, event spawns, NPCs — everything the
-/// server-less harness deliberately excludes). The app keeps running after the save; pair with
-/// `WOW_USER`/`WOW_CHAR` and an outer `timeout` for unattended probes. Unlike
-/// [`super::CapturePlugin`], nothing is pinned — the shot shows the scene as a player would see it.
-///
-/// **`WOW_LIVE_SHOT_COUNT=<n>` makes it a burst** — `n` shots written as `<stem>-000.png`,
-/// `<stem>-001.png`, … , spaced by `WOW_LIVE_SHOT_EVERY` seconds (**default 0 = one per frame**,
-/// i.e. *adjacent* frames). One shot still writes the bare path, so every existing invocation is
-/// unchanged.
-///
-/// The burst exists because **a flicker is a temporal artefact and a single frame cannot show one**
-/// (decision 0653). "This object's textures flicker" was un-diagnosable with the instruments we had:
-/// the reporter's stills prove nothing, and grading a live run by eye is exactly the loop rule 7
-/// forbids. Adjacent frames from a *parked* camera ([`crate::player`]'s `WOW_PROBE_CAM`) turn it
-/// into arithmetic: `benilla-visual flicker <dir>` collapses the burst to the envelope of what
-/// would not hold still, and the lit pixels are the defect.
-pub(crate) struct LiveShotPlugin;
-
-impl Plugin for LiveShotPlugin {
-    fn build(&self, app: &mut App) {
-        let out = std::env::var("WOW_LIVE_SHOT").unwrap_or_default();
-        let at = std::env::var("WOW_LIVE_SHOT_AT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(12.0);
-        let count = std::env::var("WOW_LIVE_SHOT_COUNT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1u32)
-            .max(1);
-        let every = std::env::var("WOW_LIVE_SHOT_EVERY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
-        app.insert_resource(LiveShot {
-            out,
-            count,
-            every,
-            taken: 0,
-            next_at: at,
-        })
-        .add_systems(Update, fire_live_shot);
-    }
-}
-
-/// [`LiveShotPlugin`] state: the output path, how many shots the burst wants, their spacing
-/// (`0` = one per frame), how many have gone out, and when the next one may — seeded to
-/// `WOW_LIVE_SHOT_AT`, so the first-fire delay and the burst spacing are the same clock.
-#[derive(Resource)]
-struct LiveShot {
-    out: String,
-    count: u32,
-    every: f32,
-    taken: u32,
-    next_at: f32,
-}
-
-/// `stem-007.png` for shot 7 of a burst — the bare path when the burst is one shot, so the
-/// single-shot filename (which existing probes and docs name literally) never moves.
-fn burst_path(out: &str, index: u32, count: u32) -> String {
-    if count <= 1 {
-        return out.to_string();
-    }
-    match out.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}-{index:03}.{ext}"),
-        None => format!("{out}-{index:03}"),
-    }
-}
-
-/// Fire the live screenshot(s) once the startup delay has elapsed — one per frame by default, so a
-/// burst samples *adjacent* frames and a per-frame instability has nowhere to hide.
-///
-/// **Refuses to fire while the avatar is dead or a ghost.** `preflight` already reports it, but a
-/// single WARN in a four-hundred-line log is not a gate: a ghost renders the whole world through the
-/// death filter, so every image in the burst is a desaturated wash and *every* measurement correlated
-/// against it — pixel series, hotspot runs, depth readback, the phase census — silently describes the
-/// filter instead of the scene. That cost a whole B38 session: eight bursts and three retracted
-/// mechanisms measured on a corpse, because the images still looked like a plausible frame. A loud
-/// no-op is worth far more than a burst that has to be recognised as garbage after the fact.
-fn fire_live_shot(
-    mut shot: ResMut<LiveShot>,
-    time: Res<Time>,
-    mut commands: Commands,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut refused: Local<bool>,
-) {
-    if shot.taken >= shot.count || time.elapsed_secs() < shot.next_at {
-        return;
-    }
-    if let Ok(store) = self_q.single() {
-        let what = if store.0.unit_is_dead() {
-            Some("DEAD")
-        } else if store.0.player_is_ghost() {
-            Some("A GHOST")
-        } else {
-            None
-        };
-        if let Some(what) = what {
-            if !*refused {
-                *refused = true;
-                error!(
-                    "live-shot: REFUSING to capture — the character is {what}, so the world renders \
-                     through the death filter and every pixel of this burst would describe that \
-                     filter, not the scene. Send WOW_PROBE_CHAT=\".revive\" (probe accounts are \
-                     gmlevel 6) and run again."
-                );
-            }
-            return;
-        }
-    }
-    let path = burst_path(&shot.out, shot.taken, shot.count);
-    commands
-        .spawn(Screenshot::primary_window())
-        .observe(save_to_disk(path.clone()));
-    shot.taken += 1;
-    shot.next_at = time.elapsed_secs() + shot.every;
-    if shot.count > 1 {
-        info!("live-shot: writing {path} ({}/{})", shot.taken, shot.count);
-    } else {
-        info!("live-shot: writing {path}");
-    }
-}
 
 /// The PROBE CHAT one-shot (`WOW_PROBE_CHAT="<line>[;<line>…]"`, delay via `WOW_PROBE_CHAT_AT`
 /// seconds, default 8): send each `;`-separated line as Say once we are in-world — the "park the

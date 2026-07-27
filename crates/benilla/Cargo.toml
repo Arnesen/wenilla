@@ -13,9 +13,10 @@ tracy = ["bevy/trace_tracy"]
 
 [dependencies]
 anyhow.workspace = true
-# OS clipboard access for pasting into UI EditBoxes (chat input). Already in the tree via bevy_egui;
-# pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is a NonSend
-# system) — required for the macOS NSPasteboard path.
+# OS clipboard access for the UI EditBox copy/cut/paste chords (chat input). Already in the tree via
+# bevy_egui; pinned to the same 3.x so there's one copy. Read on the main thread (the UI key feed is
+# a NonSend system) — required for the macOS NSPasteboard path. Covers macOS, Windows, and Linux/BSD
+# under X11; the Wayland backend is `smithay-clipboard` below (decision 0702).
 arboard = "3"
 benilla-ui = { path = "../benilla-ui" }
 bevy.workspace = true
@@ -58,6 +59,18 @@ mint = "0.5"
 # source. Pinned to 0.8: the version `benilla-srp` already depends on, so this adds no crate.
 rand = "0.8"
 
+# Linux/BSD: the Wayland clipboard (decision 0702). We build with bevy's `wayland` feature, so on a
+# Wayland session winit gives us a native Wayland window and `arboard` — X11-only without its
+# non-default `wayland-data-control` feature — finds no X11 CLIPBOARD owner and every paste fails.
+# smithay-clipboard is the right crate for a windowed app: it drives the *standard* `wl_data_device`
+# off our own `wl_display`/seat, which every compositor supports. arboard's own Wayland feature would
+# not do: it speaks `wlr-data-control`, a privileged manager protocol GNOME/Mutter deliberately
+# doesn't implement. `raw-window-handle` (pinned to the 0.6 already in the tree via bevy_window, so
+# this adds no crate) is only needed to read the `wl_display` out of bevy's `RawHandleWrapper`.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+raw-window-handle = "0.6"
+smithay-clipboard = "0.7"
+
 # macOS: drive a native NSCursor for a crisp hardware cursor. winit drives the cursor via AppKit
 # cursor-rects, which our continuous Metal render loop doesn't honor on mouse-move (custom cursor /
 # hide revert to the arrow); we bypass it with NSCursor + NSWindow::disableCursorRects. See
@@ -67,6 +80,8 @@ objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = [
     "NSApplication",
     "NSResponder",
+    # NSApplicationActivationPolicy (bgwin's Accessory demotion) is declared in this header.
+    "NSRunningApplication",
     "NSWindow",
     "NSView",
     "NSImage",

@@ -9,6 +9,10 @@
 //! CUA mirrors). Ctrl+Backspace/Delete word deletes are modern-OS additions with no 1.12
 //! counterpart; the whole macOS table is the platform's native law (Cmd/Option families), not
 //! the (Windows) reference's.
+//!
+//! One rule spans both of those platforms and is easy to miss: **AltGr is not Ctrl**. Windows and
+//! Linux both deliver AltGr as Ctrl+Alt, and European layouts type real letters with it, so the
+//! Ctrl letter chords all exclude it (decision 0702) — see [`chord_pc`].
 
 use benilla_ui::script::{EditAction, EditUnit};
 use bevy::input::keyboard::KeyCode;
@@ -16,16 +20,16 @@ use bevy::input::keyboard::KeyCode;
 /// The modifier snapshot a chord is read against. `sup` is the Super family — Cmd on macOS, the
 /// OS key elsewhere.
 #[derive(Clone, Copy, Default)]
-pub(super) struct Mods {
-    pub(super) shift: bool,
-    pub(super) ctrl: bool,
-    pub(super) alt: bool,
-    pub(super) sup: bool,
+pub(crate) struct Mods {
+    pub(crate) shift: bool,
+    pub(crate) ctrl: bool,
+    pub(crate) alt: bool,
+    pub(crate) sup: bool,
 }
 
 /// What a keypress means for the focused box.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Chord {
+pub(crate) enum Chord {
     /// A semantic edit — hand to `UiScript::editbox_action`.
     Edit(EditAction),
     /// Copy the selection to the OS clipboard (`UiScript::editbox_copy` + host write).
@@ -38,7 +42,7 @@ pub(super) enum Chord {
 
 /// The chord table: what `key` under `m` means, `None` when it means nothing (an unbound key —
 /// the caller falls through to plain character input, minus command-modified chars).
-pub(super) fn chord(key: KeyCode, m: Mods, mac: bool) -> Option<Chord> {
+pub(crate) fn chord(key: KeyCode, m: Mods, mac: bool) -> Option<Chord> {
     if mac {
         chord_mac(key, m)
     } else {
@@ -167,10 +171,18 @@ fn chord_pc(key: KeyCode, m: Mods) -> Option<Chord> {
         // The other CUA mirrors the ref honors: Ctrl+Insert = copy, Shift+Insert = paste.
         KeyCode::Insert if m.ctrl => Some(Chord::Copy),
         KeyCode::Insert if m.shift => Some(Chord::Paste),
-        KeyCode::KeyA if m.ctrl => Some(Chord::Edit(EditAction::SelectAll)),
-        KeyCode::KeyC if m.ctrl => Some(Chord::Copy),
-        KeyCode::KeyX if m.ctrl => Some(Chord::Cut),
-        KeyCode::KeyV if m.ctrl => Some(Chord::Paste),
+        // `&& !m.alt` is AltGr, and it is load-bearing on both Windows and Linux. AltGr is
+        // delivered as Ctrl+Alt, and it is how European layouts type real letters: on a Polish
+        // layout AltGr+A is `ą`, AltGr+C `ć`, AltGr+X `ź`. Without the exclusion those four
+        // keystrokes are eaten as Select-All/Copy/Cut/Paste and the letter never reaches the box —
+        // the character is simply untypeable in chat. Both platforms' own edit controls resolve it
+        // this way (Ctrl+Alt+A is not Select All anywhere AltGr exists), and the char-input branch
+        // in `input.rs` already lets the AltGr plane through for exactly this reason; the chord
+        // table has to agree with it or it just intercepts the key first. Decision 0702.
+        KeyCode::KeyA if m.ctrl && !m.alt => Some(Chord::Edit(EditAction::SelectAll)),
+        KeyCode::KeyC if m.ctrl && !m.alt => Some(Chord::Copy),
+        KeyCode::KeyX if m.ctrl && !m.alt => Some(Chord::Cut),
+        KeyCode::KeyV if m.ctrl && !m.alt => Some(Chord::Paste),
         _ => None,
     }
 }
@@ -347,5 +359,32 @@ mod tests {
         assert_eq!(chord(KeyCode::Delete, SHIFT, false), Some(Chord::Cut));
         // Super means nothing on this side.
         assert_eq!(chord(KeyCode::KeyA, SUP, false), None);
+    }
+
+    /// AltGr — delivered as Ctrl+Alt on both Windows and Linux — types real letters on European
+    /// layouts (`ą`/`ć`/`ź` on a Polish one), so it must fall through to character input rather
+    /// than being swallowed as the Ctrl clipboard chord. Regression for decision 0702.
+    #[test]
+    fn altgr_letters_are_not_clipboard_chords() {
+        const ALTGR: Mods = Mods {
+            ctrl: true,
+            alt: true,
+            ..NONE
+        };
+        for key in [KeyCode::KeyA, KeyCode::KeyC, KeyCode::KeyX, KeyCode::KeyV] {
+            assert_eq!(
+                chord(key, ALTGR, false),
+                None,
+                "AltGr+{key:?} must reach character input, not act as a clipboard chord"
+            );
+        }
+        // The exclusion is exactly AltGr: plain Ctrl is still the chord.
+        assert_eq!(
+            edit(chord(KeyCode::KeyA, CTRL, false)),
+            EditAction::SelectAll
+        );
+        assert_eq!(chord(KeyCode::KeyC, CTRL, false), Some(Chord::Copy));
+        assert_eq!(chord(KeyCode::KeyX, CTRL, false), Some(Chord::Cut));
+        assert_eq!(chord(KeyCode::KeyV, CTRL, false), Some(Chord::Paste));
     }
 }

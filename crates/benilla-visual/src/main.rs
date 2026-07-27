@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use benilla_visual::{
-    compare, compose_side_by_side, contact_strip, crop, diff_image, envelope, shape, toggles,
-    Metrics, OVER_THRESHOLD,
+    compare, compose_side_by_side, contact_strip, crop, diff_image, envelope, shape, toggles, zoom,
+    Metrics, Rect, OVER_THRESHOLD,
 };
 
 /// A frame-to-frame step must move a channel by this much to count as a direction change (override
@@ -61,6 +61,8 @@ struct Opts {
     toggle_delta: u8,
     pad: u32,
     at: Option<String>,
+    rect: Option<String>,
+    scale: u32,
 }
 
 fn main() -> Result<()> {
@@ -73,6 +75,8 @@ fn main() -> Result<()> {
         toggle_delta: TOGGLE_MIN_DELTA,
         pad: DEFAULT_PAD,
         at: None,
+        rect: None,
+        scale: 1,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -101,6 +105,12 @@ fn main() -> Result<()> {
                     .context("--pad not an integer")?
             }
             "--at" => opts.at = Some(next(&mut it, "--at")?),
+            "--rect" => opts.rect = Some(next(&mut it, "--rect")?),
+            "--scale" => {
+                opts.scale = next(&mut it, "--scale")?
+                    .parse()
+                    .context("--scale not an integer")?
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Ok(());
@@ -186,6 +196,15 @@ fn main() -> Result<()> {
                 .context("compose-dir needs --out <dir>")?;
             compose_dir(Path::new(da), Path::new(db), out)?;
         }
+        "crop" => {
+            let [img] = one(rest, "crop")?;
+            let rect = opts
+                .rect
+                .as_deref()
+                .context("crop needs --rect <x>,<y>,<w>,<h> (source pixels)")?;
+            let out = opts.out.as_deref().context("crop needs --out <crop.png>")?;
+            crop_cmd(Path::new(img), rect, opts.at.as_deref(), opts.scale, out)?;
+        }
         other => {
             print_usage();
             bail!("unknown subcommand {other:?}");
@@ -236,6 +255,98 @@ fn series(dir: &Path, at: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Cut a window out of a capture, magnify it, and report what was actually cut — the vetted
+/// replacement for the ad-hoc `sips`/`ffmpeg` crop pipelines that kept minting false findings
+/// (`sips --cropOffset` takes (y, x) and silently ignores what it can't parse; a guessed ffmpeg
+/// window read "no eyes" off a frame the model had left). Three honesty rules: a rect that misses
+/// the frame entirely is an ERROR, never an edge-clamped guess; a rect that only partially fits is
+/// clamped *out loud*; and every pixel sample prints in SOURCE coordinates at source resolution, so
+/// nothing downstream does coordinate math on a zoomed image.
+fn crop_cmd(path: &Path, rect: &str, at: Option<&str>, scale: u32, out: &Path) -> Result<()> {
+    let img = load(path)?;
+    let (w, h) = img.dimensions();
+    let want = parse_rect(rect)?;
+    if want.x0 >= w || want.y0 >= h {
+        bail!(
+            "--rect {rect} starts outside the {w}x{h} frame — re-aim; a silently moved window is \
+             exactly the mis-crop trap this tool exists to close"
+        );
+    }
+    let r = Rect {
+        x0: want.x0,
+        y0: want.y0,
+        x1: want.x1.min(w),
+        y1: want.y1.min(h),
+    };
+    let clamped = r != want;
+    let cut = crop(&img, r);
+    let zoomed = zoom(&cut, scale);
+    zoomed
+        .save(out)
+        .with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "{}: {w}x{h} → rect [{}..{}, {}..{}] ({}x{}){}  ×{}  → {} ({}x{})",
+        path.display(),
+        r.x0,
+        r.x1,
+        r.y0,
+        r.y1,
+        r.width(),
+        r.height(),
+        if clamped { "  CLAMPED to frame" } else { "" },
+        scale.max(1),
+        out.display(),
+        zoomed.width(),
+        zoomed.height(),
+    );
+    // Samples: the rect's centre always, plus any --at points — all in source coordinates.
+    let mut samples = vec![((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)];
+    if let Some(at) = at {
+        samples.extend(parse_at(at)?);
+    }
+    for (x, y) in samples {
+        if x >= w || y >= h {
+            println!("  ({x}, {y}): outside the {w}x{h} frame");
+            continue;
+        }
+        let p = img.get_pixel(x, y).0;
+        let luma = 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]);
+        let outside = if x < r.x0 || x >= r.x1 || y < r.y0 || y >= r.y1 {
+            "  (outside the crop)"
+        } else {
+            ""
+        };
+        println!(
+            "  ({x}, {y}): rgb({:3}, {:3}, {:3})  luma {luma:.2}{outside}",
+            p[0], p[1], p[2]
+        );
+    }
+    Ok(())
+}
+
+/// `"x,y,w,h"` → the rect it names. Strict for the same reason as [`parse_at`]: a half-parsed
+/// window silently crops the wrong place, and a wrong crop reads as a finding.
+fn parse_rect(spec: &str) -> Result<Rect> {
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let [x, y, w, h] = parts.as_slice() else {
+        bail!("--rect wants \"<x>,<y>,<w>,<h>\", got {spec:?}");
+    };
+    let parse = |v: &str, name: &str| -> Result<u32> {
+        v.parse().with_context(|| format!("--rect {name} {v:?}"))
+    };
+    let (x, y) = (parse(x, "x")?, parse(y, "y")?);
+    let (w, h) = (parse(w, "w")?, parse(h, "h")?);
+    if w == 0 || h == 0 {
+        bail!("--rect wants a non-empty window, got {w}x{h}");
+    }
+    Ok(Rect {
+        x0: x,
+        y0: y,
+        x1: x + w,
+        y1: y + h,
+    })
 }
 
 /// `"x,y;x,y"` → pixels. Strict: a typo here would silently report the wrong pixel's history.
@@ -637,7 +748,8 @@ fn print_usage() {
            benilla-visual flicker     <burst_dir>     [--out <envelope.png>] [--fail <mae>] [--amplify <n>] [--toggle-delta <n>]\n  \
            benilla-visual hotspot     <burst_dir>     --out <strip.png> [--toggle-delta <n>] [--pad <n>]\n  \
            benilla-visual series      <burst_dir>     --at \"<x>,<y>[;<x>,<y>…]\"\n  \
-           benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n\
+           benilla-visual compose-dir <dir_a> <dir_b> --out <dir>   (side-by-side `a | b` per image)\n  \
+           benilla-visual crop        <img.png>       --rect \"<x>,<y>,<w>,<h>\" --out <crop.png> [--scale <n>] [--at \"<x>,<y>;…\"]\n\
          \n\
          flicker reads a WOW_LIVE_SHOT_COUNT burst (adjacent frames) in shot order and reports both\n\
          the parked reading (envelope) and the moving-camera one (toggles).\n\
@@ -645,6 +757,25 @@ fn print_usage() {
          surface blinking, many thin ones are z-fighting — and crops the largest into a contact sheet.\n\
          series drops the averaging: one named pixel's rgb/luma per frame, to line up against the\n\
          client's WOW_DEPTH log at the same coordinates.\n\
+         crop cuts a window for close reading (nearest-neighbour zoom only, samples printed in\n\
+         SOURCE coordinates) — use it instead of sips/ffmpeg pipelines, which have minted false\n\
+         findings (sips --cropOffset is (y, x) and silently ignores what it can't parse).\n\
          Exits non-zero if any image's MAE exceeds --fail."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_spec_is_strict() {
+        // "x,y,w,h" and nothing else — a half-parsed window crops the wrong place silently.
+        let r = parse_rect("10, 20, 30, 40").unwrap();
+        assert_eq!((r.x0, r.y0, r.x1, r.y1), (10, 20, 40, 60));
+        assert!(parse_rect("10,20,30").is_err());
+        assert!(parse_rect("10,20,30,40,50").is_err());
+        assert!(parse_rect("10,20,0,40").is_err());
+        assert!(parse_rect("a,20,30,40").is_err());
+    }
 }

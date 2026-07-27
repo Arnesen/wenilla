@@ -363,7 +363,7 @@ fn debug_select_dialog(
     };
     let (guid, name, level, class) = (c.guid, c.name.clone(), c.level, class_name(c.class));
     dialog.open_for(guid, name, level, class);
-    dialog.typed = typed;
+    dialog.typed.set_text(&typed);
     info!("char select: dialog instrument opened the delete confirm");
     *done = true;
 }
