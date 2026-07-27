@@ -277,6 +277,28 @@ impl super::UiScript {
     pub fn world_map_selection(&self) -> (u32, u32) {
         self.model_ref().worldmap.selection
     }
+
+    /// The **normalized position within the map art** at UI-space `(x, y)`, or `None` when the
+    /// point isn't over it. Reproduces the reference's own click normalization verbatim —
+    /// `WorldMapFrame.xml`'s `WorldMapButton_OnClick`: `u = (x − left)/width`,
+    /// `v = (top − y)/height` over `WorldMapButton`'s rect — so the UV handed back is the same one
+    /// [`ProcessMapClick`](install) reads and the same one the blips are placed in. The Lua's
+    /// effective-scale division cancels here: point and rect are both already in screen units.
+    ///
+    /// A pure query (fires nothing, mutates nothing). Its consumer is the app-side dev map-jump,
+    /// which needs a click's UV *without* going through the faithful click path — that path drills
+    /// into a zone, and the reference's law for it must not grow a second meaning.
+    pub fn world_map_uv_at(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let id = self.hit_test(x, y)?;
+        let model = self.model_ref();
+        let fh = model.id_to_frame.get(&id).copied()?;
+        if model.arena.frame(fh)?.name.as_deref() != Some("WorldMapButton") {
+            return None;
+        }
+        let r = model.resolved.get(&fh)?;
+        let (w, h) = (r.right - r.left, r.top - r.bottom);
+        (w > 0.0 && h > 0.0).then(|| ((x - r.left) / w, (r.top - y) / h))
+    }
 }
 
 /// Clamp + store a selection and queue the repaint event. The shared tail of

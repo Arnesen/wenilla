@@ -1,10 +1,20 @@
 //! The panel's **World** section — the `.gps` of the client: who you are, which map/zone you're
 //! in (and whether the zone system calls it indoors), the exact WoW-space position + facing, and
-//! the terrain stream's tile residency. Pure readout except one affordance: **copy `.go xyz`** —
-//! a click puts the vmangos teleport line for the current spot on the clipboard
-//! (`.go xyz x y z [mapid]`, verified against vmangos `HandleGoXYZCommand`), so "it looks wrong
-//! *here*" becomes a pasteable coordinate for the headless probes (`WOW_PROBE_CHAT`, live-shot
-//! runs) and the FPS-journal loop closes without hand-copying numbers.
+//! the terrain stream's tile residency. Pure readout except two affordances:
+//!
+//! - **copy `.go xyz`** — a click puts the vmangos teleport line for the current spot on the
+//!   clipboard (`.go xyz x y z [mapid]`, verified against vmangos `HandleGoXYZCommand`), so "it
+//!   looks wrong *here*" becomes a pasteable coordinate for the headless probes
+//!   (`WOW_PROBE_CHAT`, live-shot runs) and the FPS-journal loop closes without hand-copying
+//!   numbers.
+//! - **land here** — the button half of [`crate::player::land`] (whose chord is `Ctrl`+`Cmd`+`G`),
+//!   shown only while free-flying.
+//!
+//! **While free-flying, the spot is the CAMERA's** — the section gains a `camera` line and the
+//! copy button switches to it. The subject here is "where you are", and detached that is where you
+//! flew to; the frozen avatar is not it. Copying the body's coordinates was the old behaviour, and
+//! it was wrong at exactly the moment the button is worth pressing: you fly out to a spot
+//! precisely *because* you want its number.
 
 use benilla_assets::coords::bevy_to_wow;
 use benilla_formats::world_to_tile;
@@ -13,12 +23,14 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use super::OVERLAY_TEXT_DIM;
+use crate::player::land::LandHere;
 
 /// The World section's read side, bundled (the 16-param ceiling of `debug_panel_ui`): where the
 /// player is — map, zone leaf, indoor claim, tile residency — and who they are (guid + the
-/// ask-once name cache the unit frames use).
+/// ask-once name cache the unit frames use). Plus the free-fly pair: the camera's own transform
+/// (the detached spot) and the land-here ask the button writes.
 #[derive(SystemParam)]
-pub(super) struct WorldReadout<'w> {
+pub(super) struct WorldReadout<'w, 's> {
     player: Option<Res<'w, crate::player::Player>>,
     map: Option<Res<'w, crate::world_map::CurrentMap>>,
     catalog: Option<Res<'w, crate::world_map::MapCatalogRes>>,
@@ -29,6 +41,8 @@ pub(super) struct WorldReadout<'w> {
     self_guid: Res<'w, crate::net::SelfGuid>,
     names: ResMut<'w, crate::names::NameCache>,
     net_commands: Res<'w, crate::net::NetCommands>,
+    camera: Query<'w, 's, &'static Transform, With<crate::player::WorldCamera>>,
+    land: MessageWriter<'w, LandHere>,
 }
 
 /// Render the section: readout lines top-down (who → map → zone → position → tiles), the copy
@@ -89,6 +103,7 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
     };
     let [x, y, z] = bevy_to_wow(player.pos);
     let o = player.facing().rem_euclid(std::f32::consts::TAU);
+    let detached = player.detached;
     ui.add_space(4.0);
     ui.label(egui::RichText::new(format!("{x:.1}  {y:.1}  {z:.1}")).monospace());
     ui.label(
@@ -102,13 +117,45 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
             .color(OVERLAY_TEXT_DIM),
     );
 
+    // Free-flying: the camera is the spot (the lines above are the frozen body, kept — knowing
+    // where you left it is exactly what you fly back to). This line, and the copy/land pair below,
+    // all speak the camera's coordinates while detached.
+    let detached_at = detached
+        .then(|| {
+            world
+                .camera
+                .single()
+                .ok()
+                .map(|c| bevy_to_wow(c.translation))
+        })
+        .flatten();
+    if let Some([cx, cy, cz]) = detached_at {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("camera {cx:.1}  {cy:.1}  {cz:.1}"))
+                .monospace()
+                .color(OVERLAY_TEXT_DIM),
+        );
+    }
+
     // The teleport line: `.go xyz x y z [mapid]` (vmangos argument order). Copied, not shown —
     // the readout above already displays every number.
-    if ui.button("copy .go xyz").clicked() {
+    let [gx, gy, gz] = detached_at.unwrap_or([x, y, z]);
+    let copy_label = if detached_at.is_some() {
+        "copy .go xyz (camera)"
+    } else {
+        "copy .go xyz"
+    };
+    if ui.button(copy_label).clicked() {
         let line = match map_id {
-            Some(id) => format!(".go xyz {x:.2} {y:.2} {z:.2} {id}"),
-            None => format!(".go xyz {x:.2} {y:.2} {z:.2}"),
+            Some(id) => format!(".go xyz {gx:.2} {gy:.2} {gz:.2} {id}"),
+            None => format!(".go xyz {gx:.2} {gy:.2} {gz:.2}"),
         };
         ui.ctx().copy_text(line);
+    }
+    // Land here — the button half of the `Ctrl`+`Cmd`+`G` chord. Only while detached, because
+    // attached the camera sits behind the avatar and "land at the camera" means a step backwards.
+    if detached_at.is_some() && ui.button("land here").clicked() {
+        world.land.write(LandHere);
     }
 }

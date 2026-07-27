@@ -725,6 +725,10 @@ pub(super) fn attach_held_items(
         Entity,
         Option<&UnitAppearFade>,
         Option<&crate::interior::BodyBakeCenter>,
+        // The unit root's own transform — its scale is the wire `NetEntity::scale` the streamer
+        // writes (`entities::attach`), and the held effects' draw-order rung is measured in the
+        // world yards that scale produces.
+        Option<&Transform>,
     )>,
     held: Option<Res<ItemDisplays>>,
     time: Res<Time>,
@@ -736,7 +740,7 @@ pub(super) fn attach_held_items(
         return;
     };
     let now = time.elapsed_secs();
-    for (items, bones, attached, entity, unit_fade, body_center) in &mut units {
+    for (items, bones, attached, entity, unit_fade, body_center, unit_tf) in &mut units {
         // A held item / helm / shoulder resolves and spawns asynchronously (a template round trip, a
         // model load) — often *after* the body has already armed its appear-fade (decision 0032 is a
         // per-unit property: the reference fades the whole unit, attachments included, as one). Read
@@ -932,9 +936,16 @@ pub(super) fn attach_held_items(
             // so the rest pose applies and no pivot rebase is needed — the flame burns at its
             // authored spot (the torch tip) and follows the hand through the swing. Free entities:
             // they self-despawn with `root` via the owner contract (gear change, unit despawn).
-            // The spawn transform only seeds the flicker RNG (the owner overwrites it every frame)
-            // — root's entity bits de-sync two torch-bearers standing side by side.
-            let rng_seed = Transform::from_translation(Vec3::splat(root.to_bits() as f32));
+            // The spawn transform does two jobs, and neither is placing the emitter (the owner
+            // overwrites the position every frame): its TRANSLATION seeds the flicker RNG —
+            // root's entity bits de-sync two torch-bearers standing side by side — and its SCALE
+            // is the wearer's, which is what the effects' draw-order rung is measured in
+            // (`particles::owner_last_bias`). An item on a twice-size wielder reaches twice as
+            // far from its own origin, so its rung has to grow with it; reading the scale off a
+            // transform built as a bare RNG seed silently pinned every held effect at 1×.
+            let unit_scale = unit_tf.map_or(1.0, |t| t.scale.max_element());
+            let spawn_tf = Transform::from_translation(Vec3::splat(root.to_bits() as f32))
+                .with_scale(Vec3::splat(unit_scale));
             for em in &dm.emitters {
                 crate::particles::spawn_emitter(
                     &mut commands,
@@ -942,7 +953,7 @@ pub(super) fn attach_held_items(
                     &mut particle_materials,
                     &light,
                     em,
-                    rng_seed,
+                    spawn_tf,
                     Some((root, [0.0; 3])),
                     Some(root), // a held item is an attached model — the flame fans with the swing
                     Some(root), // whole-model owner: anchor == owner, the plain carry
@@ -972,6 +983,7 @@ pub(super) fn attach_held_items(
                     rb,
                     root,
                     false,
+                    unit_scale,
                     Some(0),
                 );
             }

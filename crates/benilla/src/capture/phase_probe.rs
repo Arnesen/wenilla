@@ -44,11 +44,27 @@ impl Plugin for PhaseProbePlugin {
         // mesh instead of one placement's batches (B16: a pool that is emitted, meshed, visible
         // and textured, whose pixels never change — "was its mesh ever SUBMITTED to a phase?" is
         // exactly the gap between the sim-side depth dump and the framebuffer).
-        let particles = raw.as_deref().is_some_and(|v| v.trim() == "particles");
-        let object = raw.as_deref().and_then(|v| v.trim().parse::<u32>().ok());
+        // `WOW_PHASE=particles[:<bone>,…]` — the bone list is the ARMING key, not a filter: the
+        // watch list is collected once and then held, and a world scene is full of other emitters
+        // (torches, braziers) that go live long before a fixture subject spawns. Naming the bones
+        // the question is about (`60,61` = the voidwalker's eyes; `44,45,46` = the wisp's three
+        // streamers) makes the probe wait for THAT effect instead of latching onto the first live
+        // one it sees. Ribbon trails arm and report on the same bone key as emitters.
+        let spec = raw.as_deref().map(str::trim);
+        let particles = spec.is_some_and(|v| v == "particles" || v.starts_with("particles:"));
+        let bones: Vec<u16> = spec
+            .and_then(|v| v.strip_prefix("particles:"))
+            .map(|list| {
+                list.split(',')
+                    .filter_map(|b| b.trim().parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let object = spec.and_then(|v| v.parse::<u32>().ok());
         if !particles && object.is_none() {
             warn!(
-                "phase: WOW_PHASE wants a placement uniqueId (e.g. 235256) or `particles` — inert"
+                "phase: WOW_PHASE wants a placement uniqueId (e.g. 235256) or \
+                 `particles[:<bone>,…]` — inert"
             );
             return;
         }
@@ -65,6 +81,7 @@ impl Plugin for PhaseProbePlugin {
         app.insert_resource(PhaseWatch {
             object,
             particles,
+            bones,
             at,
             count,
             batches: Vec::new(),
@@ -90,6 +107,8 @@ struct PhaseWatch {
     object: u32,
     /// `WOW_PHASE=particles`: follow every live particle emitter's quad mesh instead.
     particles: bool,
+    /// `WOW_PHASE=particles:<bone>,…`: don't arm until every one of these emitter bones is live.
+    bones: Vec<u16>,
     at: f32,
     count: u32,
     /// The watched batches: main-world entity, its WMO batch order, how it draws, and (particles
@@ -159,18 +178,38 @@ fn collect_batches(
     watch.armed = true;
 }
 
-/// The `particles` mode's collector: every LIVE particle emitter's own quad-mesh entity, labeled
-/// by its emitter bone + blend (the same identity the sim-side depth dump prints, so a phase line
-/// and a dump line name the same pool). One-shot at the window like [`collect_batches`].
+/// The `particles` mode's collector: every LIVE **effect** mesh — particle-emitter quad clouds and
+/// ribbon trails alike — labeled by its emitter bone + blend (the same identity the sim-side depth
+/// dump prints, so a phase line and a dump line name the same pool) — **and every model batch in
+/// the scene alongside them**.
+///
+/// Ribbons are here because they are the same kind of thing under the same law: a trail is one of
+/// its owner model's emitters, drawn in that model's own post-batch bracket, and in our renderer it
+/// is another `NoFrustumCulling` mesh in the one distance-sorted transparent list. A probe that saw
+/// only quads could say "the eye glow is ordered right" while a wisp's streamers were still
+/// interleaved with the wisp.
+///
+/// The emitters alone answer "was it submitted?". They cannot answer B16's actual question, which
+/// is *relative*: a particle quad and its own model's blend batches share one `Transparent3d` list
+/// sorted back-to-front, so which of the two draws last is what decides whether the eyes survive.
+/// That is only readable if both sides are in the same report, on the same frame, with the sort
+/// distances that produced the order — so this list holds both, and the batch column says which.
+///
+/// One-shot like [`collect_batches`], but gated on a live emitter rather than the clock alone: in
+/// a fixture capture the subject spawns after streaming settles, so a fixed `WOW_PHASE_AT` either
+/// fires before it exists or after the shot. Retrying until the pool is live pins the window to
+/// the subject instead of to a wall-clock guess.
 fn collect_emitters(
     mut watch: ResMut<PhaseWatch>,
     time: Res<Time>,
     emitters: Query<(Entity, &crate::particles::ParticleEmitter, &Mesh3d)>,
+    trails: Query<(Entity, &crate::ribbons::RibbonTrail, &GlobalTransform)>,
+    parts: Query<(Entity, &crate::debug_panel::ModelPart, &GlobalTransform)>,
 ) {
     if !watch.particles || watch.armed || time.elapsed_secs() < watch.at {
         return;
     }
-    let found: Vec<WatchedBatch> = emitters
+    let mut found: Vec<WatchedBatch> = emitters
         .iter()
         .filter(|(_, e, _)| e.live() > 0)
         .map(|(ent, e, mesh)| {
@@ -178,16 +217,61 @@ fn collect_emitters(
             (
                 ent,
                 i32::from(def.bone),
-                format!("{:?}(pool {})", def.blend, e.live()),
+                format!("EMIT {:?}(pool {})", def.blend, e.live()),
                 Some((mesh.0.id(), e.texture().id())),
             )
         })
         .collect();
+    // A trail with fewer than two edges builds an empty mesh, so it is submitted but draws
+    // nothing — the same "live" bar the emitters use (`live() > 0`).
+    found.extend(trails.iter().filter_map(|(ent, t, _)| {
+        let (blend, edges) = t.shape();
+        (edges > 0).then(|| {
+            (
+                ent,
+                i32::from(t.bone()),
+                format!("RIBB {blend:?}(edges {edges})"),
+                None,
+            )
+        })
+    }));
     if found.is_empty() {
         return;
     }
+    // The arming key (see the plugin's parse): every named bone must be live, or this frame is too
+    // early and the list would freeze around the wrong pool.
+    if !watch
+        .bones
+        .iter()
+        .all(|b| found.iter().any(|&(_, bone, _, _)| bone == i32::from(*b)))
+    {
+        return;
+    }
+    // The model side of the comparison, scoped to the batches that could actually overlap this
+    // pool on screen. A world scene holds tens of thousands of model batches and all of them are
+    // in the same sorted list; the ones that matter are the ones standing where the cloud is, so
+    // the scope is a radius around the watched anchors rather than "every model in the world".
+    const NEAR: f32 = 6.0;
+    let anchors: Vec<Vec3> = emitters
+        .iter()
+        .filter(|(_, e, _)| e.live() > 0)
+        .map(|(_, e, _)| e.anchor_world())
+        // A trail's entity translation IS its sort point (the sim writes the live head node
+        // there), so its `GlobalTransform` is the anchor without an accessor of its own.
+        .chain(trails.iter().map(|(_, _, gt)| gt.translation()))
+        .collect();
+    found.extend(
+        parts
+            .iter()
+            .filter(|(_, _, gt)| {
+                anchors
+                    .iter()
+                    .any(|a| gt.translation().distance(*a) <= NEAR)
+            })
+            .map(|(ent, part, _)| (ent, -1, format!("PART {:?}", part.blend), None)),
+    );
     info!(
-        "phase: watching {} live emitter meshes for {} frames",
+        "phase: watching {} live effect meshes + model batches for {} frames",
         found.len(),
         watch.count
     );
@@ -268,7 +352,14 @@ fn report_phases(
         }
         for phase in transparent.values() {
             if let Some(pos) = phase.items.iter().position(|item| item.entity.1 == main) {
-                found.push(format!("Transparent3d @{pos}"));
+                // The sort key itself, not just the slot: `Transparent3d` orders on view-space z +
+                // the material's depth bias, ascending = farthest first (`crate::sky_order`). Two
+                // slots tell you WHICH drew last; the two distances tell you WHY, and whether the
+                // gap is a real spatial one or a tie the sort broke arbitrarily.
+                found.push(format!(
+                    "Transparent3d @{pos} d {:.3}",
+                    phase.items[pos].distance
+                ));
             }
         }
         // "NOT SUBMITTED" is the whole point of the instrument: a batch that reached no phase was

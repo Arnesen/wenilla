@@ -228,6 +228,18 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and count the two halves of the
+    /// **owner-last draw-order** law per model: the EFFECTS it authors (particle emitters +
+    /// ribbon trails) and the TRANSPARENT-pass batches of its own body those effects must draw
+    /// after (decisions 0719/0721), plus the model's reach and the draw-order rung that reach
+    /// produces. The population instrument for "how much does this fix, besides the one creature
+    /// it was found on": a model with effects AND transparent batches of its own is one whose
+    /// effects our distance sort could interleave with its own body; one without never had the
+    /// defect at all.
+    Fxordercensus {
+        /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and list the models whose PARTICLE
     /// emitters carry any of the given file-flag bits (`M2ParticleEmitter+0x04`) — the
     /// population instrument for particle-flag mechanisms (which content actually authors
@@ -490,6 +502,7 @@ fn main() -> Result<()> {
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
+        Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)
                 .with_context(|| format!("parsing flag mask '{mask}'"))?;

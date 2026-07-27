@@ -12,7 +12,7 @@
 //! distance (clamped to the vanilla `cameraDistanceMax` range; the camera *glides* to the new
 //! distance). A left-drag orbit offset *persists* — the vanilla `cameraSmoothStyle` auto-follow that
 //! swung the camera back behind the character while moving is deliberately removed (director's call).
-//! `F` toggles free-fly.
+//! `F` toggles free-fly; `Ctrl`+`Cmd`+`G` **lands the avatar where the camera is** ([`land`]).
 //!
 //! Movement is a thin kinematic capsule controller over avian's `MoveAndSlide` (decision 0009).
 
@@ -32,6 +32,9 @@ use crate::ui_script::PointerOverUi;
 mod arc;
 mod camera;
 mod gait;
+// The land-here affordance (free-fly's other half). `pub(crate)` for its `LandHere` message, which
+// the debug panel's button writes.
+pub(crate) mod land;
 mod move_trace;
 mod movement_net;
 // The kinematic mover step. `pub(crate)` because the grounded walk resolve is **not** the local
@@ -100,6 +103,17 @@ impl Plugin for PlayerPlugin {
                 control
                     .in_set(WorldStage::Input)
                     .run_if(not(resource_exists::<crate::capture::CaptureMode>))
+                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
+            )
+            // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
+            // Before `control` so the frame that applies the teleport is the frame that takes
+            // third-person control back — `control` reads `detached` after this has cleared it.
+            .add_message::<land::LandHere>()
+            .add_systems(
+                Update,
+                land::land_here
+                    .in_set(WorldStage::Input)
+                    .before(control)
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
             // The scripted mouse-turn (`WOW_PROBE_LOOK`, decision 0621): rotates the aim before

@@ -148,6 +148,11 @@ pub struct ModelEmitter {
     /// particles render as 3-D instances of it instead of billboard quads (wow-re
     /// `part-model-particles.md`). `None` when unauthored.
     pub geometry: Option<Handle<M2Model>>,
+    /// How far the OWNER model's own transparent-pass batches sort from its origin, model-local
+    /// yards — the bound the draw-order rung is sized from (`particles::owner_last_bias`,
+    /// decisions 0719/0721). Computed by [`benilla_formats::m2_owner_reach`], which is where the
+    /// reasoning lives.
+    pub owner_reach: f32,
 }
 
 /// Whether looping `anim` would look like anything other than the **static mesh** — the doodad
@@ -204,6 +209,12 @@ pub struct ModelRibbon {
     pub def: benilla_formats::RibbonEmitterDef,
     pub texture: Option<Handle<Image>>,
     pub bone_pivot: [f32; 3],
+    /// The owner model's reach — same field, same bound, same reason as
+    /// [`ModelEmitter::owner_reach`]. A trail is one of its model's emitters and takes the same
+    /// owner-last draw-order rung: measured on the wisp (14 blend batches, 3 streamers), its
+    /// trails otherwise interleave with its own body, 6 batches deep, and which batches are over
+    /// which streamer *changes frame to frame* as they whip (decision 0721).
+    pub owner_reach: f32,
 }
 
 /// One M2 light block of an [`M2Model`]: the raw [`M2Light`] record plus — like
@@ -240,6 +251,10 @@ impl AssetLoader for M2ModelLoader {
         // skins are applied at the spawn site from CreatureDisplayInfo), so an empty dir is correct.
         let subs = parse_m2_render_submeshes(&bytes, "", &[]).map_err(to_io)?;
         let bounds = parse_m2_bounds(&bytes).ok();
+        // The owner-last draw-order bound, once for the whole model: every effect this model
+        // authors (quad emitters, ribbon trails, model-particle instances) takes the rung it sizes,
+        // because the reference draws them all in the one post-batch bracket.
+        let owner_reach = benilla_formats::m2_owner_reach(&subs);
         // The collision hull (collide-iff-hull): keep only a non-empty mesh so the spawn site can skip
         // hull-less props cheaply.
         let collision = parse_m2_collision_hull(&bytes)
@@ -336,11 +351,13 @@ impl AssetLoader for M2ModelLoader {
                     bone_pivot,
                     recursion,
                     geometry,
+                    owner_reach,
                 }
             })
             .collect();
 
-        // Ribbon emitters (trails): same texture resolution + bone-pivot bake as the particles.
+        // Ribbon emitters (trails): same texture resolution, bone-pivot bake and owner-reach bake
+        // as the particles — a trail is one of the model's emitters and draws under the same law.
         let ribbons = benilla_formats::parse_m2_ribbon_emitters(&bytes)
             .unwrap_or_default()
             .into_iter()
@@ -359,6 +376,7 @@ impl AssetLoader for M2ModelLoader {
                     def,
                     texture,
                     bone_pivot,
+                    owner_reach,
                 }
             })
             .collect();

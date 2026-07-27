@@ -65,6 +65,7 @@ pub(super) fn update_model_particles(
             continue; // still loading — particles simulate meanwhile, nothing draws yet
         };
         // Grow the pool to the live count (bounded).
+        let rung = emitter.owner_rung();
         let want = emitter.particles.len().min(MAX_INSTANCES);
         while emitter.model_instances.len() < want {
             let meshes = model
@@ -98,6 +99,18 @@ pub(super) fn update_model_particles(
                         false,
                         &light.0,
                     );
+                    // The owner-last draw-order rung, stamped on after the fact: a 3-D model
+                    // particle is one of its owner's emitters exactly like the quad cloud beside
+                    // it, and the reference draws them in one bracket after that model's batches
+                    // — so both must sit on the SAME rung or the cloud paints over the shards
+                    // (`ParticleEmitter::owner_rung`). It goes here rather than through
+                    // `model_material`, which is the shared M2-batch recipe: every batch in the
+                    // world would have to carry a particle-only argument and a cache-key field to
+                    // move one number. These instance materials are per-instance throwaways
+                    // (their `tint` is already mutated every frame), so nothing else sees it.
+                    if let Some(m) = materials.get_mut(&material) {
+                        m.base.depth_bias = rung;
+                    }
                     let entity = commands
                         .spawn((
                             Mesh3d(sub.mesh.clone()),

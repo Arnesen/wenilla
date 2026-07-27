@@ -17,3 +17,6 @@ benilla-blp = { path = "../benilla-blp" }
 image = "0.25"
 benilla-wdt = { path = "../benilla-wdt" }
 benilla-wmo = { path = "../benilla-wmo" }
+
+[dev-dependencies]
+glam = "0.31"

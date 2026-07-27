@@ -2378,3 +2378,97 @@ pub fn cellscan(chain: &mut Chain) -> Result<()> {
     );
     Ok(())
 }
+
+/// Sweep every `.m2` (optionally under a path prefix) and count, per model, the two halves of the
+/// **owner-last draw-order** law: the EFFECTS a model authors (particle emitters + ribbon trails)
+/// and the TRANSPARENT-pass batches of its own body those effects must draw after (decisions
+/// 0719/0721). A model with both is one the rung actually changes; a model with effects and no
+/// transparent batch of its own never had the defect and is listed only in the totals.
+///
+/// This is the population instrument the two decisions were argued from. "Does this fix anything
+/// besides the voidwalker's eyes?" is not a question to answer by naming plausible creatures —
+/// it is a count, and the count is what says whether the mechanism closes a class or a case.
+pub fn fxordercensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    // Per top-level content family (Creature / Item / Spells / World / …), so the totals say
+    // WHERE the class lives rather than only how big it is.
+    let mut family: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    let (mut scanned, mut with_fx, mut at_risk) = (0u32, 0u32, 0u32);
+    let mut rungs: BTreeMap<u32, u32> = BTreeMap::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let emitters = benilla_formats::parse_m2_particle_emitters(&bytes)
+            .map(|e| e.len())
+            .unwrap_or(0);
+        let trails = benilla_formats::m2_ribbon_emitter_count(&bytes);
+        if emitters + trails == 0 {
+            continue;
+        }
+        with_fx += 1;
+        // The occluders: batches the renderer puts in the one distance-sorted transparent list.
+        // `additive` forces that pass whatever the authored blend says (`model_material`), so the
+        // test mirrors the renderer's rather than reading the blend word alone.
+        let dir = name.rsplit_once('\\').map_or("", |(d, _)| d);
+        let subs = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]).unwrap_or_default();
+        let occluders: Vec<&benilla_formats::RenderSubmesh> = subs
+            .iter()
+            .filter(|s| {
+                s.additive
+                    || matches!(
+                        s.blend,
+                        benilla_formats::ModelBlend::Blend
+                            | benilla_formats::ModelBlend::Mod
+                            | benilla_formats::ModelBlend::Mod2x
+                    )
+            })
+            .collect();
+        let transparent = occluders.len();
+        // The renderer's own bound and the renderer's own rung — not a re-derivation of them.
+        let reach = benilla_formats::m2_owner_reach(&subs);
+        let fam = name.split('\\').next().unwrap_or("?").to_string();
+        family.entry(fam).or_default().0 += 1;
+        if transparent == 0 {
+            continue; // effects, but nothing of its own that could paint over them
+        }
+        at_risk += 1;
+        family
+            .entry(name.split('\\').next().unwrap_or("?").to_string())
+            .or_default()
+            .1 += 1;
+        // At placement scale 1 — the survey number; a scaled placement multiplies the reach.
+        let rung = benilla_formats::owner_last_rung(reach);
+        *rungs.entry(rung as u32).or_default() += 1;
+        println!(
+            "{transparent:>3} transp {emitters:>2} emit {trails:>2} ribb  reach {reach:>8.2} \
+             rung {rung:>2.0}  {name}"
+        );
+    }
+    eprintln!(
+        "{scanned} models scanned\n  \
+         {with_fx} author effects (emitters and/or ribbons)\n  \
+         {at_risk} of those ALSO author transparent batches of their own — the population the \
+         owner-last rung changes"
+    );
+    eprintln!("  by family (with-effects / at-risk):");
+    for (fam, (n, risk)) in &family {
+        eprintln!("    {fam:<24} {n:>5} / {risk:>5}");
+    }
+    eprintln!("  rung distribution (at-risk models, placement scale 1):");
+    for (rung, n) in &rungs {
+        eprintln!("    rung {rung:>2}  {n:>5}");
+    }
+    Ok(())
+}

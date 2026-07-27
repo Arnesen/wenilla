@@ -70,6 +70,19 @@ pub struct RibbonTrail {
     texture: Handle<Image>,
 }
 
+impl RibbonTrail {
+    /// The emitter bone this trail rides — the identity `WOW_PHASE=particles:<bone>` arms on, and
+    /// the one `emdump`/`m2anim` print, so an instrument line and an asset line name the same trail.
+    pub(crate) fn bone(&self) -> u16 {
+        self.def.bone
+    }
+
+    /// The authored blend, and how many edges are committed right now (0 = nothing drawn yet).
+    pub(crate) fn shape(&self) -> (ParticleBlend, usize) {
+        (self.def.blend, self.edges.len())
+    }
+}
+
 /// Empty a trail mesh (draws nothing).
 fn clear_ribbon_mesh(mesh: &mut Mesh) {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
@@ -83,8 +96,10 @@ fn clear_ribbon_mesh(mesh: &mut Mesh) {
 /// skinned model — pass the joint and the def's baked pivot does the rebase — or the model/item
 /// root). `current_anim` is the `AnimationData.dbc` id the owner's model is running (a static held
 /// item rests in Stand; `None` = the model's first clip / no sequence), which the per-sequence
-/// visibility gate keys off. `None` if the trail has no resolved texture, degenerate emission, or
-/// is dark in that sequence.
+/// visibility gate keys off. `owner_scale` is the owner placement's largest scale component — the
+/// model-local [`ModelRibbon::owner_reach`] takes it to reach world yards, which is what the
+/// draw-order rung is measured in. `None` if the trail has no resolved texture, degenerate
+/// emission, or is dark in that sequence.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_ribbon(
     commands: &mut Commands,
@@ -94,6 +109,7 @@ pub fn spawn_ribbon(
     ribbon: &ModelRibbon,
     owner: Entity,
     use_pivot: bool,
+    owner_scale: f32,
     current_anim: Option<u16>,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES also spawns no ribbons (one switch, whole family).
@@ -148,6 +164,10 @@ pub fn spawn_ribbon(
             alpha_mode,
             cull_mode: None, // a trail is visible from both sides
             double_sided: true,
+            // The reference's "a model's emitters draw after that model's batches" — the same
+            // rung the quad clouds take, from the same authored reach, because a trail is one of
+            // the model's emitters (`crate::particles::owner_last_bias`).
+            depth_bias: crate::particles::owner_last_bias(ribbon.owner_reach * owner_scale),
             ..default()
         },
         extension: WowParticleExt {

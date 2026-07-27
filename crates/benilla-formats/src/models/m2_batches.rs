@@ -592,6 +592,77 @@ fn is_white1_placeholder(bbox_min: [f32; 3], bbox_max: [f32; 3], subs: &[RenderS
         })
 }
 
+/// How far a model's own **transparent-pass batches** sort from its origin, model-local yards —
+/// the bound the renderer's owner-last draw-order rung is sized from (decisions 0719/0721).
+///
+/// The reference draws a model's emitters in their own bracket *after* that model's batches; we put
+/// both in one distance-sorted transparent list, so an effect has to be biased past every batch of
+/// its owner — and no further, or it also jumps other models' transparents. What it must clear is
+/// therefore the farthest point any of those batches SORTS at, and a batch sorts at its own
+/// bind-pose AABB **centre**, not at its farthest vertex.
+///
+/// That distinction is the whole reason this function exists rather than reading
+/// [`super::M2Bounds::vert_max_from_origin`]. Measured over the 1.12.1 corpus's 967 at-risk models,
+/// swapping the vertex bound for this one drops 83 models past the rung ceiling to 46 and moves 144
+/// models down to rung 1 — a waterfall's single long batch drags the vertex bound to hundreds of
+/// yards while every batch centre sits a few yards from the origin.
+///
+/// Only transparent-pass batches count: an opaque or alpha-tested batch is binned in `Opaque3d` /
+/// `AlphaMask3d` and settles against the effect by depth, never by list order. The blend test
+/// mirrors the renderer's own (`benilla::model_render::model_material`), where `additive` forces the
+/// transparent pass whatever the authored blend word says. A model with no transparent batch at all
+/// returns `0.0` — nothing of its own can paint over its effects, and rung 1 still holds the law.
+pub fn m2_owner_reach(subs: &[RenderSubmesh]) -> f32 {
+    subs.iter()
+        .filter(|s| {
+            s.additive
+                || matches!(
+                    s.blend,
+                    ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x
+                )
+        })
+        .filter(|s| !s.positions.is_empty())
+        .map(|s| {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &s.positions {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            // Distance from the origin, so the raw-WoW/Bevy axis question doesn't arise: the two
+            // frames differ by a signed axis permutation, which preserves length.
+            let c: [f32; 3] = std::array::from_fn(|k| 0.5 * (lo[k] + hi[k]));
+            (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+        })
+        .fold(0.0f32, f32::max)
+}
+
+/// The **owner-last** draw-order rung for an effect whose owner reaches `reach_world` world yards:
+/// the `Transparent3d` depth bias that puts it after every transparent batch of its own model and
+/// no further (`benilla::particles::owner_last_bias` is the one caller that applies it; `emdump`
+/// and `benilla-extract fxordercensus` print it).
+///
+/// It lives here, beside [`m2_owner_reach`], because a rung computed three times in three crates
+/// drifts three ways — and this is the number the survey tools have to print to be worth reading.
+///
+/// Snapped to the next whole yard **above** the reach, for two reasons. Bevy folds
+/// `depth_bias as i32` into the material's *pipeline key*, so a free-floating float would specialize
+/// a fresh pipeline per distinct model radius; and `≥` has to become `>`, or a batch centred exactly
+/// at the reach ties with the effect and the order falls back to whatever the queue emitted.
+/// `floor + 1` does both. Over-biasing costs only ordering against OTHER models' transparents within
+/// the rung, so the rounding goes up; under-biasing reinstates the defect.
+pub fn owner_last_rung(reach_world: f32) -> f32 {
+    // The ceiling keeps this rung far below every rung in `benilla::sky_order`'s ladder (the
+    // nearest, the ground-fx one, is four orders of magnitude up). 46 corpus models reach past it
+    // — Maraudon's waterfalls, the Dire Maul vortex, the glue screens, whose transparent batches
+    // spread 30–780 yd from their origin. Those keep the interleave: biasing an effect past a
+    // 200-yard owner would put it in front of every transparent surface in the zone, which is the
+    // worse of the two errors (decision 0721).
+    const MAX_RUNG: f32 = 32.0;
+    (reach_world.max(0.0).floor() + 1.0).min(MAX_RUNG)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

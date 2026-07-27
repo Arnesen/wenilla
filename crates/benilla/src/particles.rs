@@ -94,6 +94,14 @@ struct Particle {
     angvel: Vec3,
 }
 
+impl ParticleEmitter {
+    /// The rig bone this emitter is mounted on — the scope key the depth probes filter by
+    /// (`$WOW_DEPTH_QUADS`, `$WOW_PARTICLE_DEPTHDUMP_BONES`).
+    pub(crate) fn bone(&self) -> u16 {
+        self.def.bone
+    }
+}
+
 /// A spawned particle emitter: its parsed def + the placement that maps its local space to the world,
 /// the live pool, the fractional emission accumulator, a per-emitter RNG, and the handle of the mesh we
 /// rewrite each frame. Despawns with its placement (the entity joins the placement's entity list).
@@ -172,6 +180,12 @@ pub struct ParticleEmitter {
     /// pre-arm frame reads that slot's opening pose). `None` ⇒ slot 0 (the doodad law).
     seq: Option<usize>,
     rng: u32,
+    /// The OWNER model's reach from its origin in **world** yards (the authored
+    /// [`ModelEmitter::owner_reach`] × the placement scale) — the draw-order rung this cloud and
+    /// every CHILD cloud of it is biased by, so both clear the owner's own transparent batches
+    /// (see [`owner_last_bias`]). Children carry the parent's, not their recursion model's: a
+    /// child draws at the parent's anchor, so it is the parent's owner it has to clear.
+    owner_reach: f32,
     mesh: Handle<Mesh>,
     /// The particle texture — also held here (not just on the material) so the sim can withhold drawing
     /// until it's resident: a still-loading or failed-to-decode texture would otherwise flash the engine
@@ -406,6 +420,16 @@ impl ParticleEmitter {
         &self.texture
     }
 
+    /// The owner-last draw-order rung this emitter's effects take (see [`owner_last_bias`]).
+    ///
+    /// Read by the MODEL-particle draw ([`model::update_model_particles`]), whose instances are
+    /// built from the geometry model's own batch materials and would otherwise sit at rung 0 — so
+    /// a 3-D particle would be painted over by its own sibling quad cloud. The reference draws all
+    /// of a model's emitters in the one bracket; sharing this number is what says so.
+    pub(super) fn owner_rung(&self) -> f32 {
+        owner_last_bias(self.owner_reach)
+    }
+
     /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter
     /// with no [`EmitterFade`] (entity-owned: creatures, GameObjects, spell kits). A faded
     /// emitter's distance is measured to its OWNER's sphere instead, because that sphere is what
@@ -572,7 +596,10 @@ pub fn spawn_emitter(
         EmitClock::PinnedSeq(s) => (None, Some(s)),
         EmitClock::Host(h) => (Some(h), None),
     };
-    let material = particle_material(&def, &texture, materials, light);
+    // The owner's reach is model-local; the rung is a view-space distance, so it takes the
+    // placement scale with it (a scaled-up creature's batches spread proportionally).
+    let owner_reach = emitter.owner_reach * placement.scale.max_element();
+    let material = particle_material(&def, &texture, owner_reach, materials, light);
     let mesh = meshes.add(blank_particle_mesh());
     // Seed the RNG from the placement position so two campfires don't flicker in lockstep.
     let t = placement.translation;
@@ -607,6 +634,7 @@ pub fn spawn_emitter(
                     host,
                     seq,
                     rng,
+                    owner_reach,
                     mesh,
                     texture,
                     recursion: emitter.recursion.clone(),
@@ -630,6 +658,7 @@ pub fn spawn_emitter(
 fn particle_material(
     def: &ParticleEmitterDef,
     texture: &Handle<Image>,
+    owner_reach: f32,
     materials: &mut Assets<WowParticleMaterial>,
     light: &SharedLightBuffer,
 ) -> Handle<WowParticleMaterial> {
@@ -651,6 +680,9 @@ fn particle_material(
             unlit: true,
             alpha_mode,
             cull_mode: None, // billboards: never backface-cull
+            // The reference's "a model's particles draw after that model's batches" — see
+            // [`owner_last_bias`].
+            depth_bias: owner_last_bias(owner_reach),
             ..default()
         },
         extension: WowParticleExt {
@@ -659,6 +691,42 @@ fn particle_material(
             mod2x: false,
         },
     })
+}
+
+/// The **owner-last** draw-order rung: how far to bias one of a model's EFFECTS past that model's
+/// own transparent batches (`Transparent3d` sort key = view-space z **+ depth_bias**, ascending, so
+/// a positive bias draws LATER — the sign law lives in [`crate::sky_order`]).
+///
+/// The reference draws a model's emitters in their own push/pop bracket (`0x70d8b0`) *after* that
+/// model's batches, unconditionally — never interleaved with them. Bevy has one distance-sorted
+/// transparent list, and an effect mesh carries `NoFrustumCulling`, which suppresses the `Aabb`
+/// Bevy would otherwise sort by, so it sorts at its entity translation while each body batch sorts
+/// at its own bind-pose AABB centre a yard or two up the model. Both measured shapes of that:
+///
+/// - **Quad clouds** sort at the owner's ORIGIN, so the order flips with camera ELEVATION. On the
+///   voidwalker at 12 yd: at 0° the eye emitters land at transparent slots 324/325 with 5 of the 14
+///   blend batches still behind them; at 35° they drop to slots 7/8 and **all 14** draw over them —
+///   B16, the eye glow visible from below the eye horizon and gone from above (decision 0719).
+/// - **Ribbon trails** sort at the live head node, which sits *inside* the owner, so they interleave
+///   at every angle and the interleave MOVES. On the wisp at 6 yd, elevation 0°: its three streamers
+///   land at slots 310/317/324 among the wisp's own 14 blend batches, 6 batches deep each, and which
+///   batches are over which streamer changes frame to frame as the streamers whip (decision 0721).
+///
+/// `reach` is the owner's authored [`benilla_assets::ModelEmitter::owner_reach`] (or
+/// [`benilla_assets::ModelRibbon::owner_reach`]) in **world** yards — the model-local bound
+/// [`benilla_formats::m2_owner_reach`] measures, times the placement scale. View-space z is
+/// 1-Lipschitz in world position and no owner batch sorts farther than `reach` from its origin, so
+/// `z(origin) + reach ≥ z(any of its batch centres)`.
+///
+/// Every effect of one model must take the SAME rung, or the law is broken from the other side: the
+/// reference draws a model's emitters in file order within the bracket, so a quad cloud on rung 4
+/// beside a model-particle instance on rung 0 would paint over its own sibling.
+///
+/// The rounding, the ceiling and their reasons live with the shared implementation in
+/// [`benilla_formats::owner_last_rung`] — the survey tools (`emdump`, `benilla-extract
+/// fxordercensus`) print the same number this applies, and a rung computed twice drifts twice.
+pub(crate) fn owner_last_bias(reach: f32) -> f32 {
+    benilla_formats::owner_last_rung(reach)
 }
 
 /// Wire pending CHILD emitters (wow-re `part-child-recursion.md`, VERIFIED): once a parent's
@@ -680,6 +748,7 @@ pub(crate) fn wire_child_emitters(
             continue;
         };
         let mut rng_seed = emitter.rng.rotate_left(7) | 1;
+        let parent_reach = emitter.owner_reach;
         let children: Vec<ChildEmitter> = model
             .emitters
             .iter()
@@ -689,7 +758,9 @@ pub(crate) fn wire_child_emitters(
                 if em.def.lifespan <= 0.0 || em.def.timing.peak_rate() <= 0.0 {
                     return None;
                 }
-                let material = particle_material(&em.def, &texture, &mut materials, &light);
+                // The PARENT's rung, not the recursion model's (see `ParticleEmitter::owner_reach`).
+                let material =
+                    particle_material(&em.def, &texture, parent_reach, &mut materials, &light);
                 let mesh = meshes.add(blank_particle_mesh());
                 let entity = commands
                     .spawn((
@@ -825,6 +896,25 @@ pub(crate) mod tests {
             center: Vec3::new(0.0, 0.0, -depth),
         }
         .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true)
+    }
+
+    /// **The owner-last rung, pinned** (decisions 0719/0721), through the wrapper the renderer
+    /// actually calls. The whole point of it is one inequality — the rung must be STRICTLY greater
+    /// than the owner's reach, or a batch centred at the edge of the model ties with the effect and
+    /// the draw order goes back to being whatever the queue emitted. The voidwalker (reach 3.666 yd
+    /// by the old vertex bound, 1.945 by the batch-centre one) is the measured case; the integer
+    /// reach is the one that would tie under a bare `ceil`.
+    #[test]
+    fn the_owner_last_rung_always_clears_the_owner() {
+        for reach in [0.0f32, 0.5, 1.0, 3.666, 4.0, 7.999, 12.0, 31.5] {
+            let rung = owner_last_bias(reach);
+            assert!(rung > reach, "rung {rung} must clear reach {reach}");
+            assert_eq!(rung, rung.trunc(), "rung {rung} must be a whole yard");
+        }
+        // A model too big for the ladder is capped rather than allowed to climb into
+        // `sky_order`'s rungs — it loses its own ordering, not the world's.
+        assert_eq!(owner_last_bias(500.0), 32.0);
+        assert_eq!(owner_last_bias(-1.0), 1.0);
     }
 
     /// **The B39 defect, pinned** (decision 0678). An owner bigger than `NEVER_FADE_RADIUS` never

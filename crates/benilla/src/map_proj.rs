@@ -90,7 +90,10 @@ pub(crate) fn zone_uv(rect: ZoneRect, wx: f32, wy: f32) -> (f32, f32) {
 /// UV → world on a zone/continent rect (`0x4a7100` zone-mode, verbatim — including the binary's
 /// quirk that BOTH axes lerp by the same `t` (its v input goes unused; the real callers consume
 /// one axis per call). Returns (wx, wy).
-#[allow(dead_code)] // transcribed law, held for its first consumer (phase 3's ping placement)
+///
+/// Its first consumer is the dev map-jump ([`crate::ui_world_map`]), which calls it exactly that
+/// way — once for `wy` with the click's `u`, once for `wx` with its `v`. Used per-axis, this IS
+/// the exact inverse of [`zone_uv`] (unlike the world-mode pair below).
 pub(crate) fn zone_world(rect: ZoneRect, t: f32) -> (f32, f32) {
     let wy = rect.left - (rect.left - rect.right) * t;
     let wx = rect.top - (rect.top - rect.bottom) * t;
@@ -206,6 +209,35 @@ mod tests {
     fn zone_world_corners() {
         close(zone_world(ELWYNN, 0.0), (ELWYNN.top, ELWYNN.left));
         close(zone_world(ELWYNN, 1.0), (ELWYNN.bottom, ELWYNN.right));
+    }
+
+    /// Used ONE AXIS PER CALL — the way the reference's callers consume it, and the way the dev
+    /// map-jump inverts a click — `zone_world` is the exact inverse of [`zone_uv`]. This is the
+    /// claim the jump's landing accuracy rests on, so it is pinned rather than reasoned about:
+    /// a world point projects to UV, and that UV comes back to the same point.
+    #[test]
+    fn zone_world_per_axis_inverts_zone_uv() {
+        for (wx, wy) in [
+            (ELWYNN.top - 1.0, ELWYNN.left - 1.0),
+            (-9000.0, 100.0),
+            (-9450.0, 500.0),
+            (
+                (ELWYNN.top + ELWYNN.bottom) * 0.5,
+                (ELWYNN.left + ELWYNN.right) * 0.5,
+            ),
+        ] {
+            let (u, v) = zone_uv(ELWYNN, wx, wy);
+            assert!(u > 0.0 && v > 0.0, "fixture must be on the rect: {u} {v}");
+            // wy rides the u axis, wx the v axis — the axis swap zone_uv makes.
+            let (_, back_wy) = zone_world(ELWYNN, u);
+            let (back_wx, _) = zone_world(ELWYNN, v);
+            // Yards, not `close`'s 1e-4: these coordinates are ~10^4, so f32's ~7 digits leave
+            // millimetre-scale slop. A hundredth of a yard is inverse enough to teleport onto.
+            assert!(
+                (back_wx - wx).abs() < 0.01 && (back_wy - wy).abs() < 0.01,
+                "({back_wx}, {back_wy}) vs ({wx}, {wy})"
+            );
+        }
     }
 
     /// With scale = 1 the world-level pair IS inverse (the anomaly is scale-dependent — see

@@ -344,6 +344,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                         rb,
                         owner,
                         use_pivot,
+                        placement.scale.max_element(),
                         None,
                     )
                     .is_some()

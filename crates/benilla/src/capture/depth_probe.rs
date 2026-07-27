@@ -28,6 +28,24 @@
 //! physical pixels. (`WOW_PICK` has to divide by the window scale factor; its ray cast works in
 //! logical units. Same input space, different reason.)
 //!
+//! ## `WOW_DEPTH_QUADS` — the same reading, taken at a particle quad's OWN pixels
+//!
+//! A hand-written pixel list is the wrong instrument for a *moving* subject. B16's eye glow is two
+//! additive quads a few dozen pixels across, riding an animated bone: name a pixel and by the frame
+//! the readback lands the quad is somewhere else, and a grid coarse enough to catch it samples the
+//! head, the ground and the neighbouring unit instead (that mis-measurement is retracted).
+//!
+//! `WOW_DEPTH_QUADS=<bone>[,<bone>…]` (empty value = every quad emitter) reads the emitter's **live
+//! vertex buffer** — the four corners `expand_quads` actually wrote, the ones the GPU is about to
+//! rasterize — projects them with the frame's own matrices, and samples the depth buffer on a
+//! bilinear grid *inside that quad*. What comes back is the number the offline model predicts and
+//! the reference measures: the **surviving area fraction** of the quad under `GreaterEqual`, plus
+//! how deep the winning surface sits in front of it, in yards. No camera hunting, no pixel guessing,
+//! and no way to accidentally measure a different surface.
+//!
+//! Frames with no live quad are skipped entirely (no copy, no frame counted), so the burst lands on
+//! the frames where the subject exists rather than on a wall clock.
+//!
 //! **MSAA must be off** (`WOW_MSAA=off`). A multisampled depth texture cannot be copied to a buffer
 //! at all, and there is no single "the" depth at a pixel to report if it could — there are four. The
 //! probe refuses rather than reporting one of them, because a number that looks like the measurement
@@ -50,6 +68,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::view::{ExtractedView, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
+use crate::particles::ParticleEmitter;
 use crate::player::WorldCamera;
 
 pub(crate) struct DepthProbePlugin;
@@ -60,14 +79,21 @@ impl Plugin for DepthProbePlugin {
             .ok()
             .map(|s| parse_pixels(&s))
             .unwrap_or_default();
-        if pixels.is_empty() {
-            warn!("depth: WOW_DEPTH wants \"<x>,<y>[;<x>,<y>…]\" screenshot pixels — inert");
+        let quad_bones = parse_bones(std::env::var("WOW_DEPTH_QUADS").ok().as_deref());
+        if pixels.is_empty() && quad_bones.is_none() {
+            warn!(
+                "depth: WOW_DEPTH wants \"<x>,<y>[;<x>,<y>…]\" screenshot pixels (or set \
+                 WOW_DEPTH_QUADS) — inert"
+            );
             return;
         }
+        // Quad mode arms at once: the subject is a particle pool that does not exist until its
+        // model spawns, and the frame gate below (report only frames that HAVE quads) is a
+        // sharper window than any wall clock the caller could guess.
         let at = std::env::var("WOW_DEPTH_AT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(20.0);
+            .unwrap_or(if quad_bones.is_some() { 0.0 } else { 20.0 });
         let count = std::env::var("WOW_DEPTH_COUNT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -79,9 +105,16 @@ impl Plugin for DepthProbePlugin {
             count,
             armed: false,
         })
+        .insert_resource(QuadWatch(quad_bones))
+        .init_resource::<QuadProbes>()
         .add_systems(Update, arm)
+        .add_systems(
+            PostUpdate,
+            collect_quads.after(crate::billboard::BillboardPlace),
+        )
         .add_plugins((
             ExtractResourcePlugin::<DepthWatch>::default(),
+            ExtractResourcePlugin::<QuadProbes>::default(),
             ExtractComponentPlugin::<DepthProbeView>::default(),
         ));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -146,6 +179,125 @@ impl ExtractResource for DepthWatch {
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()
     }
+}
+
+/// `$WOW_DEPTH_QUADS`'s bone scope: `None` = the mode is off, `Some([])` = every quad emitter.
+#[derive(Resource)]
+struct QuadWatch(Option<Vec<u16>>);
+
+/// One live particle quad, carried to the render world in the space the depth buffer is read in.
+#[derive(Clone, Copy)]
+struct QuadProbe {
+    bone: u16,
+    /// Index within the emitter's mesh — quads are written oldest-first, so 0 is the smallest,
+    /// dimmest particle and the last is the one born this frame (the big, bright one that decides
+    /// whether the glow reads at all).
+    index: u32,
+    /// The four corners in physical pixels, in `expand_quads`' own vertex order.
+    corners: [Vec2; 4],
+    /// The NDC depth the corners carry. Read from the projected corners, not assumed constant —
+    /// the *spread* is reported, because a billboard that is not a constant-depth plane is a
+    /// different bug wearing the same symptom (wow-re `part-flush-emitter-depth.md` §4).
+    dquad: f32,
+    dspread: f32,
+    /// The quad centre's distance to the camera plane, yards — the unit the burial is reported in.
+    viewz: f32,
+}
+
+/// This frame's live quads, in `$WOW_DEPTH_QUADS` scope. Empty on every frame in every run that
+/// did not ask for the mode.
+#[derive(Resource, Clone, Default)]
+struct QuadProbes(Vec<QuadProbe>);
+
+impl ExtractResource for QuadProbes {
+    type Source = QuadProbes;
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+/// Project every in-scope emitter's live quads into pixels, once a frame.
+///
+/// Deliberately reads the **mesh asset**, not the simulation: these are the vertices the draw will
+/// consume, so a quad that was mis-built (collapsed, mis-billboarded, left at last frame's anchor)
+/// is measured as itself rather than as what the sim intended. Runs after `BillboardPlace`, the set
+/// that rebuilds the meshes, so the buffer read is this frame's.
+fn collect_quads(
+    watch: Res<QuadWatch>,
+    mut probes: ResMut<QuadProbes>,
+    cam: Query<(&Camera, &GlobalTransform, &Projection), With<WorldCamera>>,
+    emitters: Query<(&ParticleEmitter, &GlobalTransform, &Mesh3d)>,
+    meshes: Res<Assets<Mesh>>,
+) {
+    let Some(bones) = watch.0.as_deref() else {
+        return;
+    };
+    probes.0.clear();
+    let (Ok((camera, cam_tf, projection)),) = (cam.single(),) else {
+        return;
+    };
+    let Some(vp) = camera.physical_viewport_size() else {
+        return;
+    };
+    // The frame's own matrices, the same pair `depthdump` projects with — so a quad's `dquad` here
+    // and its `dquad` there are the same number, and the two logs can be read against each other.
+    let clip_from_world = projection.get_clip_from_view() * cam_tf.to_matrix().inverse();
+    for (emitter, gt, mesh) in &emitters {
+        if !bones.is_empty() && !bones.contains(&emitter.bone()) {
+            continue;
+        }
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) = meshes
+            .get(&mesh.0)
+            .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
+        else {
+            continue;
+        };
+        for (index, quad) in pos.chunks_exact(4).enumerate() {
+            let mut corners = [Vec2::ZERO; 4];
+            let (mut dmin, mut dmax, mut center) = (f32::MAX, f32::MIN, Vec3::ZERO);
+            let mut behind = false;
+            for (i, v) in quad.iter().enumerate() {
+                // Verts are anchor-relative (the transparent-pass sort key); the entity transform
+                // is the anchor.
+                let world = gt.transform_point(Vec3::from(*v));
+                center += world / 4.0;
+                let clip = clip_from_world * world.extend(1.0);
+                if clip.w <= 0.0 {
+                    behind = true;
+                    break;
+                }
+                let ndc = clip.truncate() / clip.w;
+                corners[i] = Vec2::new(
+                    (ndc.x + 1.0) * 0.5 * vp.x as f32,
+                    (1.0 - ndc.y) * 0.5 * vp.y as f32,
+                );
+                dmin = dmin.min(ndc.z);
+                dmax = dmax.max(ndc.z);
+            }
+            if behind {
+                continue;
+            }
+            probes.0.push(QuadProbe {
+                bone: emitter.bone(),
+                index: index as u32,
+                corners,
+                dquad: (dmin + dmax) * 0.5,
+                dspread: dmax - dmin,
+                viewz: -(cam_tf.to_matrix().inverse() * center.extend(1.0)).z,
+            });
+        }
+    }
+}
+
+/// `"60,61"` → the bone scope; an empty or absent value means every quad emitter. `None` when the
+/// variable is unset at all, which is what turns the whole mode off.
+fn parse_bones(spec: Option<&str>) -> Option<Vec<u16>> {
+    Some(
+        spec?
+            .split(',')
+            .filter_map(|b| b.trim().parse().ok())
+            .collect(),
+    )
 }
 
 /// Marks the one view whose depth to read. The depth texture is cached per *render target*, so the
@@ -267,6 +419,15 @@ impl ViewNode for DepthReadbackNode {
         if !watch.armed || world.resource::<DepthFramesRead>().0 >= watch.count {
             return Ok(());
         }
+        // Quad mode with nothing live this frame: no copy, and `read_depth` will not count it —
+        // the burst spends its frames on the ones that have the subject in them.
+        if watch.pixels.is_empty()
+            && world
+                .get_resource::<QuadProbes>()
+                .is_none_or(|q| q.0.is_empty())
+        {
+            return Ok(());
+        }
         let size = depth.texture.size();
         // `COPY_SRC` only lands on the texture allocated *after* `arm` patched the camera, so the
         // first armed frame still has the old one. Skip it rather than trip wgpu validation.
@@ -308,6 +469,7 @@ struct DepthFramesRead(u32);
 /// Map back what the node copied and log the named pixels.
 fn read_depth(
     watch: Option<Res<DepthWatch>>,
+    quads: Option<Res<QuadProbes>>,
     view: Query<&ExtractedView, With<DepthProbeView>>,
     device: Res<RenderDevice>,
     staging: Option<Res<DepthStaging>>,
@@ -318,6 +480,12 @@ fn read_depth(
         return;
     };
     if !watch.armed || read.0 >= watch.count {
+        return;
+    }
+    // Mirrors the node's quad-mode skip: no copy was encoded, so there is nothing to read and this
+    // frame does not spend one of the burst's slots.
+    let quads = quads.map(|q| q.0.clone()).unwrap_or_default();
+    if watch.pixels.is_empty() && quads.is_empty() {
         return;
     }
     let (Ok(view), Ok(depth)) = (view.single(), depth.single()) else {
@@ -379,8 +547,88 @@ fn read_depth(
                 None => info!("depth#{frame} ({x}, {y}): {d:.9}  =  nothing drew (cleared)"),
             }
         }
+        for q in &quads {
+            report_quad(frame, q, &data, &staging, size.width, size.height);
+        }
     }
     staging.buffer.unmap();
+}
+
+/// Samples in each direction across a quad's own area — 16×16 = 256 tests, fine enough that the
+/// fraction is stable to well under a percent against the offline model's 48×48 and 64×64 grids,
+/// cheap enough to run on every quad of a pool.
+const QUAD_GRID: usize = 16;
+
+/// Run one quad's depth contest and log it.
+///
+/// Reverse-Z, `GreaterEqual` (the particle material takes Bevy's default compare): the fragment
+/// survives iff `dquad >= dbuffer`. Sampling walks the quad's own `(u, v)` by bilinear interpolation
+/// of its four projected corners, so every sample is inside the quad by construction — including a
+/// spun quad, whose screen AABB is up to 41 % larger than the quad itself.
+fn report_quad(
+    frame: u32,
+    q: &QuadProbe,
+    data: &[u8],
+    staging: &DepthStaging,
+    width: u32,
+    height: u32,
+) {
+    let (mut passed, mut total) = (0usize, 0usize);
+    // Reverse-Z: the LARGEST buffer value is the NEAREST surface, so `dmax` is the closest thing
+    // standing in the quad's way and `dmin` the furthest.
+    let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
+    let mut cleared = 0usize;
+    for iy in 0..QUAD_GRID {
+        for ix in 0..QUAD_GRID {
+            let u = (ix as f32 + 0.5) / QUAD_GRID as f32;
+            let v = (iy as f32 + 0.5) / QUAD_GRID as f32;
+            let p = q.corners[0]
+                .lerp(q.corners[1], u)
+                .lerp(q.corners[3].lerp(q.corners[2], u), v);
+            let (x, y) = (p.x.floor(), p.y.floor());
+            if x < 0.0 || y < 0.0 || x >= width as f32 || y >= height as f32 {
+                continue;
+            }
+            let at = (y as u32 * staging.bytes_per_row + x as u32 * 4) as usize;
+            let d = f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+            total += 1;
+            if q.dquad >= d {
+                passed += 1;
+            }
+            if d <= 0.0 {
+                cleared += 1;
+            } else {
+                dmin = dmin.min(d);
+                dmax = dmax.max(d);
+            }
+        }
+    }
+    if total == 0 {
+        info!(
+            "depth#{frame} quad bone={} i={}: entirely off screen",
+            q.bone, q.index
+        );
+        return;
+    }
+    // `dquad` and the buffer values live on the same reverse-Z curve, so the ratio converts either
+    // to yards without re-deriving the projection: view z scales as 1/d.
+    let yd = |d: f32| q.viewz * q.dquad / d;
+    let (near, far) = (yd(dmax), yd(dmin));
+    info!(
+        "depth#{frame} quad bone={} i={} px=({:.0},{:.0}) dquad={:.9} spread={:.9} \
+         viewz={:.4} pass={:.1}% ({passed}/{total}) occluder {near:.4}..{far:.4} yd \
+         burial {:.4}..{:.4} yd cleared={cleared}",
+        q.bone,
+        q.index,
+        q.corners[0].lerp(q.corners[2], 0.5).x,
+        q.corners[0].lerp(q.corners[2], 0.5).y,
+        q.dquad,
+        q.dspread,
+        q.viewz,
+        passed as f32 / total as f32 * 100.0,
+        q.viewz - far,
+        q.viewz - near,
+    );
 }
 
 /// A physical pixel's centre in NDC. Framebuffer rows run down, NDC y runs up.

@@ -647,6 +647,7 @@ dependencies = [
  "benilla-wdt",
  "benilla-wmo",
  "clap",
+ "glam 0.31.1",
  "image",
 ]
 

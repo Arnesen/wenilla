@@ -687,7 +687,9 @@ fn main() {
     // per frame, as a distance in yards — the link past submission that decides the pixel. Pair it
     // with `WOW_PICK` at the same pixels to turn "what won" into "whose it was" (see
     // `capture::DepthProbePlugin`).
-    if std::env::var("WOW_DEPTH").is_ok() {
+    // `WOW_DEPTH_QUADS=<bone>…` is the same readback taken at a particle quad's OWN pixels — the
+    // moving-subject form, which no hand-written pixel list can hold (see `capture::depth_probe`).
+    if std::env::var("WOW_DEPTH").is_ok() || std::env::var("WOW_DEPTH_QUADS").is_ok() {
         app.add_plugins(capture::DepthProbePlugin);
     }
     // The bevy_ui node census — "who owns this rectangle" for UI outside the FrameXML quad pass
@@ -704,6 +706,11 @@ fn main() {
     // the trace-comparable coverage number (see `capture::ParticleCensusPlugin`).
     if std::env::var("WOW_PARTICLE_CENSUS").is_ok() {
         app.add_plugins(capture::ParticleCensusPlugin);
+    }
+    // The entity census: `WOW_ENTITY_CENSUS=<secs>` prints per-archetype entity counts once —
+    // what the resident entity count is made of (see `capture::EntityCensusPlugin`).
+    if std::env::var("WOW_ENTITY_CENSUS").is_ok() {
+        app.add_plugins(capture::EntityCensusPlugin);
     }
     // The melee live probe: `WOW_PROBE=melee` auto-fights the nearest enemy so the dbg-trace
     // sink can record the combat-text timeline (see `capture::ProbeMeleePlugin`).

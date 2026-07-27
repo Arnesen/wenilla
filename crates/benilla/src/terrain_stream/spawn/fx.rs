@@ -161,12 +161,14 @@ pub(super) fn spawn_emitters_for(
 /// [`spawn_emitters_for`]); a static placement's trail rides the first spawned submesh entity (its
 /// transform IS the placement). Trails self-despawn when their owner goes, so they don't join
 /// `out` — the placement's despawn cascades within a frame.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ribbons_for(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     particle_materials: &mut Assets<WowParticleMaterial>,
     light: &SharedLightBuffer,
     ribbons: &[benilla_assets::ModelRibbon],
+    transform: Transform,
     joints: Option<&[Entity]>,
     fallback_owner: Option<Entity>,
 ) {
@@ -189,6 +191,7 @@ pub(super) fn spawn_ribbons_for(
             rb,
             owner,
             use_pivot,
+            transform.scale.max_element(),
             None,
         );
     }

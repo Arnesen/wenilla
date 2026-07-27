@@ -18,6 +18,8 @@
 //!   pushes the trio + facing. (The client matches its zone-level area global directly —
 //!   `0x4a6650`; our MCNK `CurrentArea` is the leaf sub-area, so the parent walk lands on the
 //!   same zone.)
+//!
+//! …and one dev affordance beside them, [`dev_map_jump`]: **Alt+click the map to go there.**
 
 use bevy::ecs::system::NonSendMut;
 use bevy::prelude::*;
@@ -325,6 +327,82 @@ fn feed_world_map(
     script.set_world_map_feed(player_zone, uv, player.facing(), corpse_uv);
 }
 
+/// **Alt+click the world map to go there** — the dev jump.
+///
+/// The inverse of the blip projection above: the click's UV inside the map art
+/// ([`UiScript::world_map_uv_at`], the reference's own normalization) run back through the
+/// displayed rect to a world `(x, y)`, sent as vmangos's `.go xy x y <mapid>` — the **no-Z** form,
+/// so the server resolves the ground (`GetWaterOrGroundLevel`) instead of us guessing a height off
+/// a 2-D sheet. A jump to another continent's sheet is a cross-map worldport, handled like any
+/// other ([`crate::player::wire_in`]).
+///
+/// **Zone and continent sheets only.** At the *world* level (both continents on one sheet) the
+/// client's own UV→world law `0x4a7100` is not the inverse of its world→UV law — a confirmed,
+/// reproduced anomaly (wow-re Q2 verdict; see [`map_proj::world_click_world`]) — so a click there
+/// would land somewhere real but wrong by ~1.33× the sheet offset. Rather than invent a corrected
+/// inverse the reference doesn't have, the jump declines and says to zoom in first.
+///
+/// The click is NOT consumed: the faithful path (`WorldMapButton_OnClick` → `ProcessMapClick`)
+/// also runs and drills into the clicked zone, which is what you want anyway — you arrive, and the
+/// map is showing where you arrived. Adding a modifier fork to the reference's click law to
+/// suppress that would be a dev affordance rewriting a faithful one.
+#[allow(clippy::too_many_arguments)]
+fn dev_map_jump(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    ui_scale: Res<crate::ui_script::UiScaleCvar>,
+    script: Option<NonSendMut<UiScript>>,
+    data: Option<Res<WorldMapUiData>>,
+    net: Res<crate::net::NetCommands>,
+) {
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    if !alt || !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let (Some(script), Some(data), Ok(window)) = (script, data, windows.single()) else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    // Window px (y-down) → the VM's y-up 768-virtual units, exactly as the pointer feed converts
+    // them (`ui_script::input`) — `world_map_uv_at` hit-tests in that space.
+    let s = crate::ui_script::seam_scale(window.height(), ui_scale.0);
+    let Some((u, v)) = script.world_map_uv_at(cursor.x / s, (window.height() - cursor.y) / s)
+    else {
+        return;
+    };
+    let (c, z) = script.world_map_selection();
+    let Some(cont) = c
+        .checked_sub(1)
+        .and_then(|i| data.continents.get(i as usize))
+    else {
+        info!(
+            "map-jump: no exact click→world law at the world level — zoom into a continent first"
+        );
+        return;
+    };
+    let rect = match z.checked_sub(1) {
+        None => cont.rect,
+        Some(i) => match cont.zones.get(i as usize) {
+            Some(zone) => zone.rect,
+            None => return,
+        },
+    };
+    // `zone_world` lerps BOTH axes by its single `t` (the binary's own shape) — so it is called
+    // once per axis, which is how the reference's own callers consume it.
+    let (_, wy) = map_proj::zone_world(rect, u);
+    let (wx, _) = map_proj::zone_world(rect, v);
+    let text = format!(".go xy {wx:.2} {wy:.2} {}", cont.map_id);
+    info!("map-jump: {text}");
+    let _ = net.0.send(crate::net::ClientCommand::Chat {
+        kind: crate::net::ChatKind::Say,
+        target: None,
+        text,
+    });
+}
+
 /// The world-map data feed (decision 0203 phase 2) — see the module doc.
 pub(crate) struct WorldMapUiPlugin;
 
@@ -337,6 +415,9 @@ impl Plugin for WorldMapUiPlugin {
                 // After the script tick (UiInput), like the minimap's zone feed: the projection
                 // for a selection changed THIS tick lands next tick — invisible at frame rate.
                 feed_world_map.after(UiInput),
+                // Same slot, and for the same reason from the other side: the jump hit-tests
+                // against the frame rects THIS tick's resolve produced.
+                dev_map_jump.after(UiInput),
             ),
         );
     }

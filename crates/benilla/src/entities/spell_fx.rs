@@ -68,6 +68,10 @@ const ATTACH_FALLBACKS: [u16; 2] = [0xf, 0x13];
 /// fallback and kin) — long enough to read as a flash, short enough never to linger.
 const FALLBACK_SPAN: f32 = 1.0;
 
+/// The `fxview` unit lane's synthetic guid (`WOW_FX_DISPLAY`) — a high-word `0xF130` creature guid
+/// like the wire's, in a serverless capture where nothing else claims one.
+const FXVIEW_UNIT_GUID: u64 = (0xF130u64 << 48) | 0xFC0FEE;
+
 /// How long a self-terminating instance may wait unspawned (model/skeleton never loading — the
 /// cube-fallback caster) before it is dropped instead of pending forever.
 const PENDING_TIMEOUT: f32 = 10.0;
@@ -199,6 +203,43 @@ pub(crate) fn drive_fx_view(
     let Some(light) = light else { return };
     let root = *state.root.get_or_insert_with(|| {
         let mut pos = benilla_assets::coords::wow_to_bevy(crate::capture::FXVIEW_POS);
+        // `WOW_FX_DISPLAY`: the UNIT lane. Spawn the live component set a streamed creature gets
+        // (`net::apply`'s, the same one the `vplates` fixture's wolf uses) and let the ordinary
+        // unit pipeline build the model — so what this shoots is a creature, not a model, and
+        // every unit-only term (tag alpha, the fade gate, anim LOD, the emitters' sequence host)
+        // is in the picture. Always seated on the terrain: a creature stands on the ground.
+        if let Some(display) = req.display {
+            if let Some(hit) = spatial.cast_ray(
+                pos,
+                Dir3::NEG_Y,
+                500.0,
+                true,
+                &crate::collision::player_query_filter(),
+            ) {
+                pos.y -= hit.distance;
+            }
+            return commands
+                .spawn((
+                    crate::net::Guid(FXVIEW_UNIT_GUID),
+                    crate::net::NetEntity {
+                        kind: benilla_protocol::EntityKind::Unit,
+                        display_id: Some(display),
+                        scale: req.scale,
+                    },
+                    crate::net::ObjectStore(benilla_protocol::messages::ObjectFields::from_pairs(
+                        &[
+                            (22, 100), // UNIT_FIELD_HEALTH
+                            (28, 100), // UNIT_FIELD_MAXHEALTH
+                            (34, 60),  // UNIT_FIELD_LEVEL
+                            (35, 35),  // UNIT_FIELD_FACTIONTEMPLATE — friendly, so no combat pose
+                        ],
+                    )),
+                    Transform::from_translation(pos)
+                        .with_rotation(Quat::from_rotation_y(req.yaw_deg.to_radians())),
+                    Visibility::default(),
+                ))
+                .id();
+        }
         // `WOW_FX_GROUND=1`: seat the fixture ON the terrain — a ground-anchored effect's flat
         // quads render as projected surface decals and need ground inside their vertical slab.
         // The scene settled before arming, so the streamed tile's collider is there to hit.
@@ -237,7 +278,8 @@ pub(crate) fn drive_fx_view(
     // instance dies at exactly one pass of sequence 0 and its emitters DRAIN — the fixture
     // mirrors it so a capture past the span shows the truth. `WOW_FX_HOLD=1` previews a
     // persistent hold instead (reaped by its spell edge in game, so no clock here).
-    if !req.hold && !state.expired {
+    // The one-pass reap is an effect-instance rule; a unit stands there.
+    if !req.hold && !state.expired && req.display.is_none() {
         if let Some(at) = state.attached_at {
             let span = fx
                 .models
@@ -251,6 +293,13 @@ pub(crate) fn drive_fx_view(
         }
     }
     if state.attached_at.is_none() {
+        // The unit lane has no attach step — the unit pipeline builds the model on its own. Its
+        // "age" is therefore seconds since the unit appeared, which is what the animation phase is
+        // measured in.
+        if req.display.is_some() {
+            state.attached_at = Some(time.elapsed_secs());
+            return;
+        }
         fx.models
             .entry(req.model_path.clone())
             .or_insert_with(|| DisplayModel {
@@ -484,6 +533,10 @@ pub(super) fn attach_effect_visuals(
             rb,
             owner,
             use_pivot,
+            // An effect-model instance is armed unscaled — its emitters take the same
+            // `Transform::IDENTITY` placement a few lines up, so both of a model's effect
+            // families land on the same draw-order rung, which is the property that matters.
+            1.0,
             played_anim,
         );
     }

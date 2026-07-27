@@ -236,9 +236,15 @@ pub(super) fn simulate_particles(
     let (_, cam_rot, _) = cam_tf.to_scale_rotation_translation();
     let cam_right = cam_rot * Vec3::X;
     let cam_up = cam_rot * Vec3::Y;
-    let face_normal = cam_up.cross(cam_right).normalize_or_zero(); // toward the camera
-                                                                   // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
-                                                                   // doodad's own cull along, so an emitter and its owner cross the wall together.
+    // Toward the camera: a camera-facing billboard's normal is the camera's BACKWARD axis, and
+    // `right × up` = X × Y = +Z local, which is backward in Bevy (a camera looks down −Z). The
+    // reverse product — what this used to be, under a comment claiming "toward the camera" —
+    // points down the view direction instead. Inert either way today (`wow_particle.wgsl` reads no
+    // normal, and the material is unlit + never backface-culled), so this buys honesty in the
+    // vertex data rather than a pixel; a lit particle lane would have inherited the sign error.
+    let face_normal = cam_right.cross(cam_up).normalize_or_zero();
+    // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
+    // doodad's own cull along, so an emitter and its owner cross the wall together.
     let cam_fwd = Vec3::from(cam_tf.forward());
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
@@ -263,7 +269,7 @@ pub(super) fn simulate_particles(
                     tf.translation(),
                     right,
                     up,
-                    up.cross(right).normalize_or_zero(),
+                    right.cross(up).normalize_or_zero(), // toward the booth camera — see above
                 )
             }
             None => (cam_pos, cam_right, cam_up, face_normal),
@@ -396,6 +402,7 @@ pub(super) fn simulate_particles(
             host,
             seq,
             rng,
+            owner_reach: _, // a draw-order rung, baked into the material at spawn
             mesh,
             texture,
             recursion: _,

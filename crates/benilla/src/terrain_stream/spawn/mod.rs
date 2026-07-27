@@ -159,6 +159,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut particle_materials,
                         &shared_light,
                         &m.ribbons,
+                        p.transform,
                         joints.as_deref(),
                         ents.first().copied(),
                     );
@@ -472,6 +473,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut particle_materials,
                 &shared_light,
                 &m.ribbons,
+                d.transform,
                 joints.as_deref(),
                 ents.first().copied(),
             );

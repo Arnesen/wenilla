@@ -949,6 +949,7 @@ pub(super) fn attach_entity_visuals(
                         rb,
                         owner,
                         use_pivot,
+                        placement.scale.max_element(),
                         None,
                     );
                 }

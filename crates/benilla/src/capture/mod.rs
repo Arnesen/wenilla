@@ -74,8 +74,8 @@ pub(crate) use probe_partner::ProbePartnerPlugin;
 pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
-    LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin, ProbeExitPlugin,
-    ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
+    EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
+    ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
 use scenarios::{Scenario, UiFixture, GROUND_EYE, SCENARIOS};
 
@@ -96,6 +96,17 @@ pub(crate) fn scenario_active() -> bool {
 ///   WOW_FX_AGE=1.2 WOW_FX_AZ=60 WOW_FX_EL=15 WOW_CAPTURE_OUT=/tmp/fx.png cargo run -q -p benilla
 /// ```
 ///
+/// **`WOW_FX_DISPLAY=<CreatureDisplayInfo id>` swaps the subject onto the UNIT path** — the same
+/// component set a streamed creature gets, seated on the terrain, with everything that hangs off
+/// being a unit (tag alpha, the distance-fade gate, anim LOD, the emitter's sequence host). Model
+/// lane vs unit lane at one knob is what turns "does this creature look wrong?" into a headless
+/// A/B instead of a director round-trip:
+///
+/// ```text
+/// WOW_DATA=<Data> WOW_CAPTURE=fxview WOW_FX_DISPLAY=1132 WOW_FX_AGE=6 WOW_FX_EL=20 \
+///   WOW_FX_DIST=12 WOW_CAPTURE_OUT=/tmp/vw.png cargo run -q -p benilla
+/// ```
+///
 /// Knobs: `WOW_FX_MODEL` (required, internal path), `WOW_FX_AGE` (seconds after attach, default
 /// 1.0), `WOW_FX_AZ`/`WOW_FX_EL` (camera orbit degrees, default 0/10), `WOW_FX_DIST` (yards,
 /// default 5), `WOW_FX_FLY` (yd/s along the model's facing — a missile only trails in motion;
@@ -109,6 +120,15 @@ pub(crate) fn scenario_active() -> bool {
 #[derive(Resource)]
 pub(crate) struct FxViewRequest {
     pub(crate) model_path: String,
+    /// `WOW_FX_DISPLAY=<CreatureDisplayInfo id>` — spawn the subject as a real **unit** (the live
+    /// `NetEntity` component set, the same path a streamed creature takes) instead of attaching it
+    /// as an effect. The two lanes differ in everything that hangs off being a unit — material tag
+    /// alpha, the distance-fade gate, anim LOD, the emitter's sequence host — so switching this one
+    /// knob is the A/B that says whether a defect belongs to the model or to the unit path.
+    /// `WOW_FX_MODEL` is then optional (the display id names the model).
+    pub(crate) display: Option<u32>,
+    /// `WOW_FX_SCALE` — the unit lane's `NetEntity::scale` (the wire scale a creature carries).
+    pub(crate) scale: f32,
     pub(crate) age: f32,
     pub(crate) az_deg: f32,
     pub(crate) el_deg: f32,
@@ -222,6 +242,25 @@ struct CaptureCtx {
     probe_frames: u32,
     /// Probe samples (frame ms).
     probe_samples: Vec<f32>,
+    /// Process CPU seconds at the first sampled frame — the window baseline for the probe line's
+    /// `cpu_ms`/`cpu_pct` (the load-robust metric, decision 0711; the scenario probe lacked it).
+    probe_cpu_start: Option<f64>,
+}
+
+/// The present mode a perf probe uncaps to (also the live probe's — see `probes.rs`).
+///
+/// `AutoNoVsync`, measured, not assumed: explicit `Immediate` on macOS/Metal is a trap — A/B'd
+/// 2026-07-27 (overlook-noon, release, twice each), it *rails* near 16.6 ms AND takes 1.0–1.5 s
+/// stalls (the `-[CAMetalLayer nextDrawable]` timeout — drawable starvation), while `AutoNoVsync`
+/// genuinely uncaps when macOS grants it (p50 12.7 ms on the same scene). 0362's "AutoNoVsync
+/// doesn't uncap" was the *power state* withholding the grant, not the mode — no present mode
+/// escapes that; `cpu_ms` on the probe line is the rail-proof metric. `WOW_PROBE_UNCAP=immediate`
+/// re-runs the losing arm when macOS/wgpu move.
+pub(crate) fn probe_uncap_mode() -> bevy::window::PresentMode {
+    match std::env::var("WOW_PROBE_UNCAP").as_deref() {
+        Ok("immediate") => bevy::window::PresentMode::Immediate,
+        _ => bevy::window::PresentMode::AutoNoVsync,
+    }
 }
 
 pub(crate) struct CapturePlugin;
@@ -233,9 +272,19 @@ impl Plugin for CapturePlugin {
         // request from env. Not in SCENARIOS — `scripts/visual.sh`'s golden sweep must never
         // run it (its output depends on the model/age/angle knobs, not just the name).
         let scenario = if name == "fxview" {
-            let Ok(model_path) = std::env::var("WOW_FX_MODEL") else {
-                eprintln!("WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path>");
-                std::process::exit(2);
+            let display: Option<u32> = std::env::var("WOW_FX_DISPLAY")
+                .ok()
+                .and_then(|v| v.trim().parse().ok());
+            let model_path = match (std::env::var("WOW_FX_MODEL"), display) {
+                (Ok(p), _) => p,
+                (Err(_), Some(_)) => String::new(), // the unit lane names its model by display id
+                (Err(_), None) => {
+                    eprintln!(
+                        "WOW_CAPTURE=fxview needs WOW_FX_MODEL=<internal .mdx/.m2 path> or \
+                         WOW_FX_DISPLAY=<CreatureDisplayInfo id>"
+                    );
+                    std::process::exit(2);
+                }
             };
             let knob = |k: &str, d: f32| {
                 std::env::var(k)
@@ -245,6 +294,8 @@ impl Plugin for CapturePlugin {
             };
             app.insert_resource(FxViewRequest {
                 model_path,
+                display,
+                scale: knob("WOW_FX_SCALE", 1.0),
                 age: knob("WOW_FX_AGE", 1.0),
                 az_deg: knob("WOW_FX_AZ", 0.0),
                 el_deg: knob("WOW_FX_EL", 10.0),
@@ -391,6 +442,7 @@ impl Plugin for CapturePlugin {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 probe_samples: Vec::new(),
+                probe_cpu_start: None,
             })
             .add_systems(Update, pin_scene.in_set(WorldStage::Present))
             // Before the UnitFeed pass: the seed stands in for wire data that in live play
@@ -540,7 +592,7 @@ fn drive_capture(
                     let keep_vsync = std::env::var("WOW_PROBE_VSYNC").as_deref() == Ok("1");
                     if !keep_vsync {
                         if let Ok(mut w) = windows.single_mut() {
-                            w.present_mode = bevy::window::PresentMode::AutoNoVsync;
+                            w.present_mode = probe_uncap_mode();
                         }
                     }
                     info!(
@@ -564,6 +616,7 @@ fn drive_capture(
         }
         Phase::ProbeWarmup(n) => {
             if n + 1 >= PROBE_WARMUP_FRAMES {
+                ctx.probe_cpu_start = crate::perf::process_cpu_secs();
                 Phase::Probing(0)
             } else {
                 Phase::ProbeWarmup(n + 1)
@@ -572,7 +625,9 @@ fn drive_capture(
         Phase::Probing(n) => {
             let ms = time.delta_secs() * 1000.0;
             ctx.probe_samples.push(ms);
-            if n + 1 >= ctx.probe_frames {
+            // `==`, not `>=`: `AppExit` takes a frame or two to drain, and the re-entered finish
+            // branch used to print a second (301-frame) line in the gap.
+            if n + 1 == ctx.probe_frames {
                 let mut v = ctx.probe_samples.clone();
                 v.sort_by(f32::total_cmp);
                 let at = |q: f32| v[(((v.len() - 1) as f32) * q).round() as usize];
@@ -593,10 +648,28 @@ fn drive_capture(
                     (n + 1, d + usize::from(v.get()))
                 });
                 let entity_count = entities.iter().len();
+                // CPU cost per frame across every thread — the load-robust half of the measurement
+                // (`perf::process_cpu_secs`), same fields as the live probe's line.
+                let cpu = match (ctx.probe_cpu_start, crate::perf::process_cpu_secs()) {
+                    (Some(t0), Some(t1)) => {
+                        let per_frame_ms = (t1 - t0) * 1000.0 / v.len() as f64;
+                        format!(
+                            " cpu_ms={per_frame_ms:.2} cpu_pct={:.0}",
+                            per_frame_ms / mean as f64 * 100.0
+                        )
+                    }
+                    _ => String::new(),
+                };
+                // The present mode the window actually measured under — an uncap that silently
+                // rails (0362) is only diagnosable if the line says what was asked for.
+                let present = windows
+                    .single()
+                    .map(|w| format!(" present={:?}", w.present_mode))
+                    .unwrap_or_default();
                 // Machine-greppable one-liner + a human block. stdout, not the log, so a script can
                 // capture it without log-filter noise.
                 println!(
-                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}",
+                    "FPS_PROBE scenario={} frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} entities={entity_count} px={}x{}{cpu}{present}",
                     ctx.scenario.name,
                     v.len(),
                     at(0.50),
@@ -608,10 +681,8 @@ fn drive_capture(
                     px.1,
                 );
                 exit.write(AppExit::Success);
-                Phase::Probing(n)
-            } else {
-                Phase::Probing(n + 1)
             }
+            Phase::Probing(n + 1)
         }
         Phase::Saving { frames, seen } => {
             let busy = !capturing.is_empty();

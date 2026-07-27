@@ -68,10 +68,13 @@ impl MaterialExtension for WowParticleExt {
         // every particle quad, so "this effect doesn't draw" splits cleanly into *nothing is
         // emitted* (the census's job — `WOW_PARTICLE_CENSUS` counts live particles) and *it is
         // emitted, rasterized, and the depth buffer eats it*. Those two look identical on screen
-        // and want completely different fixes. It found B16: the voidwalker's eye glow is two
-        // emitters mounted flush with the head skin (a ray from the eye bone crosses the body
-        // mesh at 3–6 mm), which our own opaque body pass then depth-rejects — under this switch
-        // both eyes appear exactly where the artist put them.
+        // and want completely different fixes.
+        //
+        // Its most useful reading on B16 was a NEGATIVE one: the voidwalker's eye glow stays gone
+        // from above under this switch, and `WOW_DEPTH_QUADS` then measured 30–48% of each quad
+        // surviving the compare at every elevation. Depth was never what killed it — the owner's
+        // own blend batches were drawing over it (`particles::owner_last_bias`, decision 0719).
+        // An earlier note here read the switch the other way round; that reading is retracted.
         if std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
             if let Some(ds) = descriptor.depth_stencil.as_mut() {
                 ds.depth_compare = bevy::render::render_resource::CompareFunction::Always;
