@@ -406,3 +406,34 @@ fn journal_fps(
         let _ = f.write_all(line.as_bytes());
     }
 }
+
+/// Whole-process CPU seconds consumed so far — **user + system, summed across every thread**
+/// (`getrusage(RUSAGE_SELF)`).
+///
+/// The perf probes report wall-clock frame time, which on this machine is not a usable regression
+/// instrument: parallel session worktrees build on the same 14 cores, and two identical probe runs
+/// of the same pin came back 49.6 ms and 28.6 ms apart purely on machine load. CPU-per-frame moves
+/// with the work we actually do, not with who else is compiling — and it is the metric the Mac
+/// report is written in ("250 % CPU at 59 fps" against 1.12.1's "100 % at 160"), so a probe that
+/// prints it can be compared against a reporter's number directly.
+///
+/// Non-unix returns `None`: the probes print the field only where the platform answers.
+pub(crate) fn process_cpu_secs() -> Option<f64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `getrusage` writes a fully-initialized `rusage` into the out-param and reads
+        // nothing from it; zeroed is a valid starting value for a C struct of plain integers.
+        unsafe {
+            let mut ru: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut ru) != 0 {
+                return None;
+            }
+            let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+            Some(secs(ru.ru_utime) + secs(ru.ru_stime))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}

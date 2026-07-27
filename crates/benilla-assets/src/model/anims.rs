@@ -121,6 +121,11 @@ pub struct ModelAnimations {
     /// content gate, decision 0130; the ~90% of placed doodads `doodadscan` measured). A *constant
     /// but non-rest* pose does NOT qualify for that skip — see `m2::idle_pose_differs`.
     pub first_seq: Option<usize>,
+    /// The direct pose evaluator's baked data (decision 0712): the pose twin of every clip above,
+    /// the node → (clip, mask) table, and the per-bone mask bits — filled by the same code that
+    /// builds [`Self::graph`], so it mirrors the graph by construction. `Arc`: the component is
+    /// cloned per instance; the bake is shared.
+    pub pose: std::sync::Arc<super::PoseSource>,
 }
 
 /// A requested `AnimationData.dbc` id resolved to what a specific model actually plays (decision
@@ -286,6 +291,7 @@ mod tests {
             hand_close: [None, None],
             global_bones: Vec::new(),
             first_seq: None,
+            pose: Default::default(),
         }
     }
 

@@ -415,6 +415,7 @@ impl Plugin for LiveFpsPlugin {
             run: std::env::var("WOW_LIVE_FPS_MOVE").as_deref() == Ok("1"),
             phase: LiveFpsPhase::Waiting,
             samples: Vec::new(),
+            cpu_at_start: None,
         })
         .add_systems(Update, drive_live_fps);
     }
@@ -437,6 +438,9 @@ struct LiveFps {
     run: bool,
     phase: LiveFpsPhase,
     samples: Vec<f32>,
+    /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
+    /// baseline for the window's `cpu_ms`/`cpu_pct`.
+    cpu_at_start: Option<f64>,
 }
 
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
@@ -454,6 +458,11 @@ fn drive_live_fps(
     // streamed rigs sat parked at sample end.
     parked: Query<(), With<crate::creature_anim::AnimParked>>,
     entities: Query<()>,
+    // Where the sample was actually taken (0705's prove-the-run law): a probe number is evidence
+    // only once the body is known to be at the pin, and `WOW_PROBE_CHAT`'s `.go` can silently
+    // fail (a bad map id, a refused command) leaving the run measuring the login spot.
+    map: Option<Res<crate::world_map::CurrentMap>>,
+    body: Option<Res<crate::player::Player>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -485,6 +494,9 @@ fn drive_live_fps(
             };
         }
         LiveFpsPhase::Sampling => {
+            if probe.samples.is_empty() {
+                probe.cpu_at_start = crate::perf::process_cpu_secs();
+            }
             let ms = time.delta_secs() * 1000.0;
             probe.samples.push(ms);
             if probe.samples.len() < probe.frames {
@@ -506,8 +518,29 @@ fn drive_live_fps(
                 .single()
                 .map(|w| (w.physical_width(), w.physical_height()))
                 .unwrap_or((0, 0));
+            // CPU cost per frame across every thread — the load-robust half of the measurement
+            // (`perf::process_cpu_secs`), and directly comparable with a reporter's CPU %.
+            let cpu = match (probe.cpu_at_start, crate::perf::process_cpu_secs()) {
+                (Some(t0), Some(t1)) => {
+                    let per_frame_ms = (t1 - t0) * 1000.0 / v.len() as f64;
+                    format!(
+                        " cpu_ms={per_frame_ms:.2} cpu_pct={:.0}",
+                        per_frame_ms / mean as f64 * 100.0
+                    )
+                }
+                _ => String::new(),
+            };
+            // The pin the number belongs to, in the `.go xyz` order, so a probe line can be
+            // matched against the report's coordinates without a second instrument.
+            let at_pin = match (map.as_ref(), body.as_ref().filter(|b| b.active)) {
+                (Some(m), Some(b)) => {
+                    let [x, y, z] = benilla_assets::coords::bevy_to_wow(b.pos);
+                    format!(" map={} pos={x:.1},{y:.1},{z:.1}", m.0)
+                }
+                _ => String::new(),
+            };
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={} px={}x{}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={} px={}x{}{cpu}{at_pin}",
                 v.len(),
                 at(0.50),
                 at(0.95),

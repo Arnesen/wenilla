@@ -35,6 +35,23 @@ static WINDOW: std::sync::LazyLock<Option<(f32, u32)>> = std::sync::LazyLock::ne
     Some((at.trim().parse().ok()?, n.trim().parse().unwrap_or(8)))
 });
 
+/// Parsed `$WOW_PARTICLE_DEPTHDUMP_BONES` — dump ONLY emitters mounted on these bones (empty = all).
+/// A live world scene has dozens of drawing emitters; unfiltered, the dump floods the log and costs
+/// the framerate of the very session it is measuring. Scoping to the subject's bones (the
+/// voidwalker's eyes are 60/61) makes the dump free when the subject is off screen, so the window
+/// can stay open for a whole director-driven session instead of a timed guess.
+static BONES: std::sync::LazyLock<Vec<u32>> = std::sync::LazyLock::new(|| {
+    std::env::var("WOW_PARTICLE_DEPTHDUMP_BONES")
+        .ok()
+        .map(|v| v.split(',').filter_map(|b| b.trim().parse().ok()).collect())
+        .unwrap_or_default()
+});
+
+/// Is this emitter's bone in the `$WOW_PARTICLE_DEPTHDUMP_BONES` scope (always true when unset)?
+pub(super) fn bone_selected(bone: u32) -> bool {
+    BONES.is_empty() || BONES.contains(&bone)
+}
+
 /// This frame's dump index if the window is open (advances the counter), else `None`. Called once
 /// per `simulate_particles` run.
 pub(super) fn frame(elapsed: f32, count: &mut u32) -> Option<u32> {
@@ -55,6 +72,12 @@ pub(super) fn dump_emitter(
     particles: &[Particle],
     dframe: &DrawFrame,
     placement: &Transform,
+    // The world point births are folded through THIS frame (the sim's own `emitter_world`, passed
+    // rather than recomputed so it cannot drift from the formula births actually use). Tracked
+    // across a dump window it measures our **eye-bone sway** — the number wow-re's rig puts at
+    // 0.128 units (11.7 cm) over the Stand cycle, and the discriminator for "do our births sample
+    // the current animated palette or a rest pose" (`part-anchoring-live-bone.md` §5.2).
+    birth_world: Vec3,
     basis: &CamBasis,
     cam_tf: &GlobalTransform,
     camera: &Camera,
@@ -73,29 +96,38 @@ pub(super) fn dump_emitter(
     };
     // The mesh's OWN first quad, exactly as last expansion wrote it (anchor-relative) — read back
     // from the asset rather than recomputed, so vertex-data corruption is visible as itself.
+    // An EMPTY buffer is a real state, not an impossible one: an emitter's pool goes live one
+    // frame before that pool is first expanded into the mesh, so a live-world dump catches
+    // `pos == []` and indexing `pos[0]` panics the sim (it did, mid-session, on the director's
+    // client). Report the empty mesh as itself — it is exactly the "drawable numbers, nothing in
+    // the vertex buffer" state this dump exists to make visible.
     if let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
         mesh_positions.and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
     {
-        // Per-quad diagonal |v2−v0| over the WHOLE buffer — the young (big) quads live at the
-        // tail, and only reading quad 0 (the oldest, smallest) once mis-called this mesh "sane".
-        let diag = |q: &[[f32; 3]]| (Vec3::from(q[2]) - Vec3::from(q[0])).length();
-        let quads: Vec<f32> = pos.chunks_exact(4).map(diag).collect();
-        let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
-        for &d in &quads {
-            dmin = dmin.min(d);
-            dmax = dmax.max(d);
-        }
-        info!(
-            "PARTICLE_DEPTHDUMP f={fidx} mesh quads={} diag_min={dmin:.4} diag_max={dmax:.4} \
+        if pos.is_empty() {
+            info!("PARTICLE_DEPTHDUMP f={fidx} mesh EMPTY (0 verts — pool live, not yet expanded)");
+        } else {
+            // Per-quad diagonal |v2−v0| over the WHOLE buffer — the young (big) quads live at the
+            // tail, and only reading quad 0 (the oldest, smallest) once mis-called this mesh "sane".
+            let diag = |q: &[[f32; 3]]| (Vec3::from(q[2]) - Vec3::from(q[0])).length();
+            let quads: Vec<f32> = pos.chunks_exact(4).map(diag).collect();
+            let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
+            for &d in &quads {
+                dmin = dmin.min(d);
+                dmax = dmax.max(d);
+            }
+            info!(
+                "PARTICLE_DEPTHDUMP f={fidx} mesh quads={} diag_min={dmin:.4} diag_max={dmax:.4} \
              first=({:.4},{:.4},{:.4}) last=({:.4},{:.4},{:.4})",
-            quads.len(),
-            pos[0][0],
-            pos[0][1],
-            pos[0][2],
-            pos[pos.len() - 1][0],
-            pos[pos.len() - 1][1],
-            pos[pos.len() - 1][2],
-        );
+                quads.len(),
+                pos[0][0],
+                pos[0][1],
+                pos[0][2],
+                pos[pos.len() - 1][0],
+                pos[pos.len() - 1][1],
+                pos[pos.len() - 1][2],
+            );
+        }
     }
     let view_from_world = cam_tf.to_matrix().inverse();
     let clip_from_view = projection.get_clip_from_view();
@@ -114,7 +146,8 @@ pub(super) fn dump_emitter(
     };
     info!(
         "PARTICLE_DEPTHDUMP f={fidx} emitter bone={} pos=({:.3},{:.3},{:.3}) blend={:?} pool={} \
-         tex_resident={texture_resident} mesh_verts={} vis={vis:?}",
+         tex_resident={texture_resident} mesh_verts={} vis={vis:?} \
+         birth=({:.4},{:.4},{:.4}) joint=({:.4},{:.4},{:.4})",
         def.bone,
         def.position[0],
         def.position[1],
@@ -122,6 +155,12 @@ pub(super) fn dump_emitter(
         def.blend,
         particles.len(),
         mesh_positions.map_or(0, Mesh::count_vertices),
+        birth_world.x,
+        birth_world.y,
+        birth_world.z,
+        placement.translation.x,
+        placement.translation.y,
+        placement.translation.z,
     );
     // Sample the pool EVENLY by index (retain order = age order), not the first four: the pool's
     // head is its oldest, near-contemporary particles, and a cap there hides both the young end

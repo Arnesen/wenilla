@@ -20,13 +20,15 @@ use bevy::asset::io::{
 use bevy::asset::AssetApp;
 use bevy::prelude::*;
 
+pub mod column_grid;
 pub mod coords;
 pub mod minimap_grid;
 
 mod model;
 pub use model::{
     bone_target_id, AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations,
-    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh,
+    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
+    PoseNode, PoseSource, PoseTrack,
 };
 mod adt;
 mod terrain;
@@ -40,8 +42,8 @@ pub use m2::{M2Model, M2ModelLoader, ModelEmitter, ModelLight, ModelRibbon, Port
 mod wmo;
 pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};
 pub use wmo::{
-    cap96, collision_tri_bounds, floor168, footprint_tri_bounds, DoodadBase, WmoGroupNav, WmoModel,
-    WmoModelLoader,
+    cap96, collision_tri_bounds, collision_tri_grids, floor168, footprint_tri_bounds,
+    footprint_tri_grids, DoodadBase, WmoGroupNav, WmoModel, WmoModelLoader,
 };
 
 /// The asset-source id for MPQ-backed assets: load paths look like `mpq://World/Azeroth/foo.adt`.

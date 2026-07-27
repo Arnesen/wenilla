@@ -246,7 +246,11 @@ pub(crate) fn classify_entity_interior(
     // One down-ray (and at most one probe fold) per unit per run: parts share their anchor's
     // resolved law, so an 8-part body re-testing after a step costs one ray, not eight.
     let mut verdicts: HashMap<Entity, AppliedLaw> = HashMap::new();
+    let _t0 = std::time::Instant::now();
+    let (mut n_parts, mut n_resolved) = (0usize, 0usize);
+    let mut resolve_us = 0.0f32;
     for (mut lit, mut material, mut tag) in &mut parts {
+        n_parts += 1;
         let Ok(anchor_t) = anchors.get(lit.anchor) else {
             continue; // anchor despawning this frame — the parts go with it
         };
@@ -277,7 +281,9 @@ pub(crate) fn classify_entity_interior(
             }
         }
         let law = *verdicts.entry(lit.anchor).or_insert_with(|| {
-            resolve_anchor_law(
+            n_resolved += 1;
+            let _r = std::time::Instant::now();
+            let out = resolve_anchor_law(
                 &mut commands,
                 &mut probes,
                 &wmos,
@@ -293,7 +299,9 @@ pub(crate) fn classify_entity_interior(
                 lit.applied,
                 seated,
                 moved,
-            )
+            );
+            resolve_us += _r.elapsed().as_secs_f32() * 1e6;
+            out
         });
         if moved {
             lit.last_pos = pos;
@@ -349,6 +357,20 @@ pub(crate) fn classify_entity_interior(
             AppliedLaw::Exterior => alpha_bits(1.0),
         };
         lit.applied = Some(law);
+    }
+    // `WOW_INTERIOR_COST=1`: this lane's per-frame cost, in the terms that diagnose it — how many
+    // PARTS the walk touches vs how many ANCHORS actually re-resolve, and what the resolves cost.
+    // The split is the whole diagnosis: on 2026-07-27 the lane read 11.3 ms/frame at the LBRS pin
+    // and the walk was 0.1 ms of it — 35 moving units paying ~300 us each in `resolve_anchor_law`,
+    // which is what sent the hunt into the WMO column rays (decision 0711) rather than into this
+    // loop. Cheap enough to leave in: two counters and one `Instant` per frame.
+    static COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *COST.get_or_init(|| std::env::var_os("WOW_INTERIOR_COST").is_some()) {
+        eprintln!(
+            "[interior-cost] parts={n_parts} anchors_resolved={n_resolved} resolve_ms={:.2} total_ms={:.2}",
+            resolve_us / 1000.0,
+            _t0.elapsed().as_secs_f32() * 1000.0
+        );
     }
 }
 

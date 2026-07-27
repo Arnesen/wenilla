@@ -66,6 +66,8 @@ pub(crate) use global_seq::GlobalSeqDrive;
 /// `unit-anim-visibility-gate.md`).
 mod lod;
 pub(crate) use lod::AnimParked;
+mod pose;
+pub(crate) use pose::PosedRig;
 
 /// The unit's wielded weapon classes — `(item class, item subclass)` per hand, `None` for an empty
 /// (or non-item) hand. Written by the held-item resolution ([`crate::entities`], decision 0072) from
@@ -662,6 +664,7 @@ impl Plugin for CreatureAnimPlugin {
         twist::plugin(app);
         global_seq::plugin(app);
         lod::plugin(app);
+        pose::plugin(app);
         app.add_message::<AnimSoundEvent>()
             .add_message::<SwingMessage>()
             .add_message::<SwingImpact>()

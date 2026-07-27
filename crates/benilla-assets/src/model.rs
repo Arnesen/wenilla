@@ -18,11 +18,13 @@ use bevy::prelude::*;
 use crate::coords::wow_to_bevy;
 
 mod anims;
+mod pose;
 // `PlayableAnim`/`ResolvedAnim` aren't re-exported further by `lib.rs` (nothing outside this crate
 // names them yet), so rustc can't see this re-export escape — allow silences the resulting
 // unused-import false positive on an otherwise-live facade re-export.
 #[allow(unused_imports)]
 pub use anims::{AnimClip, ModelAnimations, PlayableAnim, ResolvedAnim};
+pub use pose::{PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack};
 
 /// A billboarded submesh's render data (Bevy space): the bone pivot the card rotates about (model-local
 /// — compose with the instance transform), the card's resting plane normal, and the billboard kind.
@@ -463,8 +465,9 @@ fn keyframe_curve<T: Animatable + Clone>(
     }
 }
 
-/// Build one sequence's [`AnimationClip`] from parsed raw-WoW keyframes (decision 0019), transforming
-/// each channel into the joints' Bevy-space `Transform`:
+/// Build one sequence's [`AnimationClip`] — **and its [`PoseClip`] twin** (decision 0712, one walk
+/// so the two cannot drift) — from parsed raw-WoW keyframes (decision 0019), transforming each
+/// channel into the joints' Bevy-space `Transform`:
 /// - **translation** = the bone's rest local (`pivot − pivot_parent`) **plus** `wow_to_bevy(track)` —
 ///   the M2 translation track is a delta on the pivot offset;
 /// - **rotation** = the WoW quat conjugated into Bevy space (`r·q·r⁻¹`);
@@ -474,9 +477,10 @@ fn keyframe_curve<T: Animatable + Clone>(
 pub(crate) fn build_animation_clip(
     anim: &ModelAnimation,
     skeleton: &ModelSkeleton,
-) -> Option<AnimationClip> {
+) -> Option<(AnimationClip, PoseClip)> {
     let r = wow_to_bevy_quat();
     let mut clip = AnimationClip::default();
+    let mut pose = PoseClip::default();
     let mut any = false;
     for bk in &anim.bones {
         let target = bone_target_id(bk.bone);
@@ -489,6 +493,7 @@ pub(crate) fn build_animation_clip(
             .iter()
             .map(|(t, v)| (*t, rest + wow_to_bevy(*v)))
             .collect();
+        let pose_trans = PoseTrack::new(&trans);
         if let Some(c) = keyframe_curve(anim.duration, trans) {
             clip.add_curve_to_target(
                 target,
@@ -506,6 +511,7 @@ pub(crate) fn build_animation_clip(
                 )
             })
             .collect();
+        let pose_rot = PoseTrack::new(&rot);
         if let Some(c) = keyframe_curve(anim.duration, rot) {
             clip.add_curve_to_target(
                 target,
@@ -518,6 +524,7 @@ pub(crate) fn build_animation_clip(
             .iter()
             .map(|(t, s)| (*t, Vec3::new(s[1], s[2], s[0])))
             .collect();
+        let pose_scale = PoseTrack::new(&scale);
         if let Some(c) = keyframe_curve(anim.duration, scale) {
             clip.add_curve_to_target(
                 target,
@@ -525,8 +532,14 @@ pub(crate) fn build_animation_clip(
             );
             any = true;
         }
+        pose.push(PoseBone {
+            bone: bk.bone,
+            translation: pose_trans,
+            rotation: pose_rot,
+            scale: pose_scale,
+        });
     }
-    any.then_some(clip)
+    any.then_some((clip, pose))
 }
 
 /// Build the weapon-grip **overlay clip** from clamped finger poses ([`benilla_formats::hand_grip_finger_poses`]):
@@ -534,9 +547,10 @@ pub(crate) fn build_animation_clip(
 /// as [`build_animation_clip`]. Played masked to one hand's finger subtrees, it holds those fingers curled
 /// over the gait (rotation only — the fingers don't translate). Empty `poses` → an empty clip (the caller
 /// builds no grip node).
-pub(crate) fn build_grip_clip(poses: &[(u16, [f32; 4])]) -> AnimationClip {
+pub(crate) fn build_grip_clip(poses: &[(u16, [f32; 4])]) -> (AnimationClip, PoseClip) {
     let r = wow_to_bevy_quat();
     let mut clip = AnimationClip::default();
+    let mut pose = PoseClip::default();
     for &(bone, q) in poses {
         let rot = r * Quat::from_xyzw(q[0], q[1], q[2], q[3]) * r.inverse();
         if let Some(c) = keyframe_curve(0.033, vec![(0.0, rot)]) {
@@ -544,9 +558,15 @@ pub(crate) fn build_grip_clip(poses: &[(u16, [f32; 4])]) -> AnimationClip {
                 bone_target_id(bone),
                 AnimatableCurve::new(animated_field!(Transform::rotation), c),
             );
+            pose.push(PoseBone {
+                bone,
+                translation: PoseTrack::default(),
+                rotation: PoseTrack::new(&[(0.0, rot)]),
+                scale: PoseTrack::default(),
+            });
         }
     }
-    clip
+    (clip, pose)
 }
 
 /// The [`BillboardInfo`] for a submesh that rides a billboard bone (Bevy space): the pivot to rotate

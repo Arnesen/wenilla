@@ -59,6 +59,7 @@ fn caster_model() -> ModelAnimations {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     }
 }
 
@@ -255,6 +256,7 @@ fn fidget_model() -> ModelAnimations {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     }
 }
 
@@ -364,6 +366,7 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -431,6 +434,7 @@ fn spell_impact_wound_rides_the_secondary_slot() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -484,6 +488,7 @@ fn whiff_slowdown_spares_a_non_swing_oneshot() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let spinner = app
         .world_mut()
@@ -569,6 +574,7 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let mut unit = || {
         app.world_mut()
@@ -664,6 +670,7 @@ fn deferred_combat_clip_plays_once_the_body_frees() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -720,6 +727,7 @@ fn a_movement_flag_change_cuts_a_full_body_oneshot_immediately() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -874,6 +882,7 @@ fn the_swim_relatch_holds_the_kick_but_a_ground_cut_freezes_it() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -967,6 +976,7 @@ fn unit_flag_looting_kneels_stationary_units_only() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()
@@ -1023,6 +1033,7 @@ fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     // A SELF unit whose descriptor carries UNIT_FLAG_LOOTING but whose latch is empty: no kneel —
     // the flag is the REMOTE trigger only.
@@ -1111,6 +1122,7 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
         animation_lookup: Vec::new(),
         global_bones: Vec::new(),
         first_seq: None,
+        pose: Default::default(),
     };
     let unit = app
         .world_mut()

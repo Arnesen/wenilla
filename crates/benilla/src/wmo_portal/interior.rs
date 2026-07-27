@@ -143,6 +143,7 @@ pub(super) fn track_area_interior(
         if let Some(gi) = area_down_ray(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             eye_local,
             terrain_local,
@@ -321,6 +322,7 @@ fn room_at(
         if let Some(gi) = area_down_ray(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             probe_local,
             terrain_local,
@@ -424,6 +426,7 @@ pub(crate) fn indoor_verdict_at<'a>(
         let Some(claim) = down_ray_claim(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             probe_local,
             terrain_local,
@@ -494,35 +497,41 @@ pub(super) fn footprint_sample(
                 continue;
             }
         }
-        for (ti, tri) in fp.indices.chunks_exact(3).enumerate() {
+        // The narrow phase: the group's column index when it has one, else every face. The index
+        // yields a superset in ascending face order (`column_grid`), so the exact-z tie below —
+        // "the LATER face wins" — resolves exactly as the linear scan resolved it.
+        let mut consider = |ti: usize| {
+            let Some(tri) = fp.indices.get(ti * 3..ti * 3 + 3) else {
+                return;
+            };
             let (Some(&a), Some(&b), Some(&c)) = (
                 fp.positions.get(tri[0] as usize),
                 fp.positions.get(tri[1] as usize),
                 fp.positions.get(tri[2] as usize),
             ) else {
-                continue;
+                return;
             };
             // 2D barycentric in the down-ray's projection (x/y), inclusive edges.
             let det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
             if det.abs() < 1e-9 {
-                continue;
+                return;
             }
             let wb = ((px - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (py - a[1])) / det;
             let wc = ((b[0] - a[0]) * (py - a[1]) - (px - a[0]) * (b[1] - a[1])) / det;
             let wa = 1.0 - wb - wc;
             if wa < 0.0 || wb < 0.0 || wc < 0.0 {
-                continue;
+                return;
             }
             let z = wa * a[2] + wb * b[2] + wc * c[2];
             if z > pz || best.is_some_and(|(bz, ..)| z < bz) {
-                continue;
+                return;
             }
             let (Some(ca), Some(cb), Some(cc)) = (
                 fp.mocv.get(tri[0] as usize),
                 fp.mocv.get(tri[1] as usize),
                 fp.mocv.get(tri[2] as usize),
             ) else {
-                continue;
+                return;
             };
             let mocv = [
                 wa * f32::from(ca[0]) + wb * f32::from(cb[0]) + wc * f32::from(cc[0]),
@@ -531,6 +540,10 @@ pub(super) fn footprint_sample(
             ];
             let mopy = fp.mopy_flags.get(ti).is_some_and(|f| f & 0x1 != 0);
             best = Some((z, gi, mocv, mopy));
+        };
+        match model.group_footprint_grids.get(gi).and_then(Option::as_ref) {
+            Some(grid) => grid.candidates(px, py).for_each(&mut consider),
+            None => (0..fp.indices.len() / 3).for_each(&mut consider),
         }
     }
     best.map(|(_, gi, mocv, mopy)| (gi, mocv.map(|v| v.round().clamp(0.0, 255.0) as u8), mopy))
@@ -587,6 +600,7 @@ mod tests {
             group_collision_tris: Vec::new(),
             group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
+            group_collision_grids: Vec::new(),
             collision_bounds: None,
             collision: None,
             collision_camera: None,
@@ -596,6 +610,7 @@ mod tests {
             group_bounds: Vec::new(),
             group_footprints: Vec::new(),
             group_footprint_bounds: Vec::new(),
+            group_footprint_grids: Vec::new(),
             group_light_refs: Vec::new(),
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
@@ -622,6 +637,71 @@ mod tests {
             Some(face([-5.0, -5.0, 0.0])),
             Some(face([100.0, 100.0, 5.0])),
         ]
+    }
+
+    /// A dungeon-scale footprint group: a `n × n` grid of floor quads at a sawtooth height, so a
+    /// column's answer depends on WHICH face wins, not merely on hitting something. Big enough
+    /// (>= 64 faces) that [`ColumnGrid::build`] actually indexes it.
+    fn slab_field(n: usize) -> FootprintTris {
+        let (mut positions, mut indices, mut mocv, mut mopy_flags) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for iy in 0..n {
+            for ix in 0..n {
+                let (x, y) = (ix as f32 * 4.0, iy as f32 * 4.0);
+                // Sawtooth z so neighbouring quads differ — a mis-picked face changes the verdict.
+                let z = ((ix + iy) % 3) as f32 * 0.5;
+                let base = positions.len() as u16;
+                positions.extend_from_slice(&[
+                    [x, y, z],
+                    [x + 4.0, y, z],
+                    [x + 4.0, y + 4.0, z],
+                    [x, y + 4.0, z],
+                ]);
+                let shade = ((ix * 7 + iy * 13) % 200) as u8;
+                mocv.extend_from_slice(&[[shade, shade / 2, shade / 3]; 4]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                mopy_flags.extend_from_slice(&[0, 0]);
+            }
+        }
+        FootprintTris {
+            positions,
+            indices,
+            mocv,
+            mopy_flags,
+        }
+    }
+
+    /// **The column index never changes a verdict.** Same model, same columns, indexed vs not:
+    /// identical `(group, MOCV, MOPY)` every time — including the exact-z ties the sawtooth field
+    /// manufactures, where the answer depends on the "later face wins" rule the index's ascending
+    /// order preserves. This is what lets the index be a pure accelerator for the lighting lane
+    /// (the 0330/0364 exactness contract, one rung deeper: inside the group, not just at it).
+    #[test]
+    fn footprint_column_index_is_exact() {
+        let mut model = bare_model();
+        model.group_footprints = vec![Some(slab_field(12))];
+        model.group_footprint_bounds = footprint_tri_bounds(&model.group_footprints);
+        let grids = benilla_assets::footprint_tri_grids(&model.group_footprints);
+        assert!(grids[0].is_some(), "the field must actually be indexed");
+        let mut probed_hits = 0;
+        for gx in -2..=50 {
+            for gy in -2..=50 {
+                let probe = [gx as f32 * 1.1, gy as f32 * 0.9, 3.0];
+                model.group_footprint_grids = Vec::new();
+                let linear = footprint_sample(&model, probe);
+                model.group_footprint_grids = grids.clone();
+                let indexed = footprint_sample(&model, probe);
+                assert_eq!(
+                    linear, indexed,
+                    "column {probe:?}: the index changed the footprint verdict"
+                );
+                probed_hits += usize::from(linear.is_some());
+            }
+        }
+        assert!(
+            probed_hits > 500,
+            "the sweep must land on the field, got {probed_hits} hits"
+        );
     }
 
     /// The broad phase is a pure skip, never a re-ranking: the verdict with load-derived face

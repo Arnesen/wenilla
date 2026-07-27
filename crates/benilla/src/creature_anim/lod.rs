@@ -15,45 +15,32 @@
 //!   state machine keeps arming clips for parked rigs; `$CSS`/`$CAH`/`$HIT` (0075), footsteps,
 //!   `$BWP`/`$BWR`, and the `$CSL`-keyed missile release (0430) all fire regardless of the camera.
 //!
-//! The park mechanism: repoint each joint's [`AnimatedBy`] from the rig root to [`RigPark`] — a
-//! persistent empty entity with no `AnimationPlayer` — so Bevy's `animate_targets` early-outs per
-//! bone at the failed player lookup (the documented runtime-repoint use of `AnimatedBy`; a plain
-//! component write, no archetype churn). Bone `Transform`s then stop changing, which quiets
-//! transform propagation and `extract_skins`' changed-joint upload by change detection. The pose
-//! post-passes (body twist, global-sequence writes, billboard joint palette) gate on the same
-//! [`AnimParked`] marker. Contrast the DOODAD gate ([`crate::doodad_anim`]), which faithfully
+//! The park mechanism is the [`AnimParked`] marker alone (decision 0712 — the evaluator took over
+//! from `animate_targets`, and the old per-joint `AnimatedBy` repoint died with the targets): the
+//! pose evaluator ([`super::pose`]) skips a parked rig, so its bone `Transform`s stop changing,
+//! which quiets transform propagation and `extract_skins`' changed-joint upload by change
+//! detection. The pose post-passes (body twist, global-sequence writes, billboard joint palette)
+//! gate on the same marker. Contrast the DOODAD gate ([`crate::doodad_anim`]), which faithfully
 //! stops the player and re-arms on the shared clock — correct there (no one consumes a doodad's
 //! events off-screen), the exact 0075 trap here.
 
-use bevy::animation::AnimatedBy;
 use bevy::app::AnimationSystems;
 use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use crate::entities::{mount::MountBody, BoneAttach};
+use crate::entities::mount::MountBody;
 use crate::net::SelfPlayer;
 use crate::player::WorldCamera;
 use crate::target::SelectionRadius;
 
 use super::AnimDriver;
 
-/// This rig's per-bone pose evaluation is parked (decision 0448): its joints' [`AnimatedBy`]
-/// point at [`RigPark`], and the pose post-passes skip it. The sequence clocks, the driver state
-/// machine, and the event scanner all keep running — parking turns *sampling* off, nothing else.
+/// This rig's per-bone pose evaluation is parked (decision 0448): the pose evaluator and the pose
+/// post-passes skip it. The sequence clocks, the driver state machine, and the event scanner all
+/// keep running — parking turns *sampling* off, nothing else.
 #[derive(Component)]
 pub(crate) struct AnimParked;
-
-/// The parking target: a persistent empty entity carrying no [`AnimationPlayer`], so a parked
-/// joint's `animate_targets` lookup fails and the bone is skipped that frame.
-#[derive(Resource)]
-pub(crate) struct RigPark(Entity);
-
-impl FromWorld for RigPark {
-    fn from_world(world: &mut World) -> Self {
-        Self(world.spawn(Name::new("rig park (anim LOD, 0448)")).id())
-    }
-}
 
 /// Park only after the rig has been continuously out of frustum this long — a camera swing
 /// across the pack doesn't churn bone repoints. Waking is always instant.
@@ -69,22 +56,20 @@ const RADIUS_PAD: f32 = 4.0;
 const FALLBACK_RADIUS: f32 = 6.0;
 
 /// Park/wake streamed rigs by the padded sphere-vs-frustum test (decision 0448). PostUpdate,
-/// before [`AnimationSystems`] — a wake repoints the joints in time for the same frame's
-/// `animate_targets`, so the re-appearing unit samples the absolute-clock pose with no stale
+/// before [`AnimationSystems`] — a wake drops the marker in time for the same frame's pose
+/// evaluation, so the re-appearing unit samples the absolute-clock pose with no stale
 /// frame. Exempt: the self-avatar (the camera rides its attachment-17 pivot, and it must keep
 /// animating faded-out in first person) and its mount child. `WOW_NO_ANIM_LOD=1` disables
 /// parking — the live-probe A/B lever.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
-    park: Res<RigPark>,
     cam: Query<&Frustum, With<WorldCamera>>,
     rigs: Query<
         (
             Entity,
             &GlobalTransform,
             Option<&SelectionRadius>,
-            &BoneAttach,
             Has<AnimParked>,
             Has<SelfPlayer>,
             Option<&MountBody>,
@@ -92,42 +77,47 @@ pub(super) fn gate_rig_animation(
         With<AnimDriver>,
     >,
     self_hosts: Query<Has<SelfPlayer>>,
-    mut animated_by: Query<&mut AnimatedBy>,
     mut out_since: Local<EntityHashMap<f32>>,
     mut disabled: Local<Option<bool>>,
+    mut park_all: Local<Option<bool>>,
     mut commands: Commands,
 ) {
     let disabled = *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_ANIM_LOD").is_some());
+    // The measurement twin of `WOW_NO_ANIM_LOD`: park EVERY streamed rig regardless of view. The
+    // two levers bracket the pose-evaluation lane's cost at any pin — "never park" is its ceiling,
+    // "always park" its floor — which is the only way to attribute a frame budget without a
+    // profiler build (the chrome-trace feature costs a 5-minute rebuild and a GB-scale file).
+    // Not a shipping mode: it freezes visible rigs on purpose.
+    let park_all = *park_all.get_or_insert_with(|| std::env::var_os("WOW_ANIM_PARK_ALL").is_some());
     let Ok(frustum) = cam.single() else {
         return;
     };
     let now = time.elapsed_secs();
-    for (entity, tf, radius, bones, parked, is_self, mount) in &rigs {
+    for (entity, tf, radius, parked, is_self, mount) in &rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
-        let visible = exempt || {
-            let scale = tf.to_scale_rotation_translation().0.max_element();
-            let r = radius.map_or(FALLBACK_RADIUS, |r| r.0 * scale * RADIUS_SCALE + RADIUS_PAD);
-            frustum.intersects_sphere(
-                &CullSphere {
-                    center: tf.translation().into(),
-                    radius: r,
-                },
-                false,
-            )
-        };
+        let visible = exempt
+            || !park_all && {
+                let scale = tf.to_scale_rotation_translation().0.max_element();
+                let r = radius.map_or(FALLBACK_RADIUS, |r| r.0 * scale * RADIUS_SCALE + RADIUS_PAD);
+                frustum.intersects_sphere(
+                    &CullSphere {
+                        center: tf.translation().into(),
+                        radius: r,
+                    },
+                    false,
+                )
+            };
         if visible {
             out_since.remove(&entity);
             if parked {
                 commands.entity(entity).remove::<AnimParked>();
-                repoint(&mut animated_by, &bones.joints, entity);
             }
         } else if !parked {
             let since = *out_since.entry(entity).or_insert(now);
             if now - since >= PARK_AFTER_SECS {
                 out_since.remove(&entity);
                 commands.entity(entity).insert(AnimParked);
-                repoint(&mut animated_by, &bones.joints, park.0);
             }
         }
     }
@@ -135,20 +125,9 @@ pub(super) fn gate_rig_animation(
     out_since.retain(|e, _| rigs.contains(*e));
 }
 
-/// Repoint every joint's [`AnimatedBy`] — to the park entity (park) or back to the rig root
-/// (wake). A plain component write per joint, edges only.
-fn repoint(animated_by: &mut Query<&mut AnimatedBy>, joints: &[Entity], target: Entity) {
-    for &j in joints {
-        if let Ok(mut ab) = animated_by.get_mut(j) {
-            ab.0 = target;
-        }
-    }
-}
-
-/// Register the gate: [`RigPark`] + [`gate_rig_animation`] before the frame's pose evaluation.
+/// Register the gate: [`gate_rig_animation`] before the frame's pose evaluation.
 pub(super) fn plugin(app: &mut App) {
-    app.init_resource::<RigPark>()
-        .add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
+    app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
 }
 
 #[cfg(test)]
@@ -157,7 +136,9 @@ mod tests {
     use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
     use bevy::animation::{animated_field, AnimationClip};
 
-    use benilla_assets::{bone_target_id, AnimClip, ModelAnimations};
+    use benilla_assets::{
+        bone_target_id, AnimClip, ModelAnimations, PoseBone, PoseClip, PoseSource, PoseTrack,
+    };
 
     use super::super::{events::fire_anim_events, AnimSoundEvent};
     use super::*;
@@ -169,6 +150,18 @@ mod tests {
     /// `$TST` event keyframe mid-loop: enough to observe all three gate laws — clocks, bones,
     /// events. Returns `(root, joint)`.
     fn spawn_rig(app: &mut App, at: Vec3) -> (Entity, Entity) {
+        let mut pose = PoseSource {
+            bone_masks: vec![0],
+            ..Default::default()
+        };
+        let mut pose_clip = PoseClip::default();
+        pose_clip.push(PoseBone {
+            bone: 0,
+            translation: PoseTrack::new(&[(0.0, Vec3::ZERO), (DUR, Vec3::X)]),
+            rotation: PoseTrack::default(),
+            scale: PoseTrack::default(),
+        });
+        pose.clips.push(pose_clip);
         let mut clip = AnimationClip::default();
         clip.add_curve_to_target(
             bone_target_id(0),
@@ -183,6 +176,7 @@ mod tests {
             .resource_mut::<Assets<AnimationClip>>()
             .add(clip);
         let (graph, node) = AnimationGraph::from_clip(clip_handle);
+        pose.set_node(node, 0, 0);
         let graph_handle = app
             .world_mut()
             .resource_mut::<Assets<AnimationGraph>>()
@@ -220,6 +214,7 @@ mod tests {
             animation_lookup: Vec::new(),
             global_bones: Vec::new(),
             first_seq: None,
+            pose: std::sync::Arc::new(pose),
         };
         // The driver's requested base = the gait slot: point it at the clip so the event
         // scanner's `resolved_anim` finds the advancing timeline (its live writer is
@@ -241,18 +236,14 @@ mod tests {
             .id();
         let joint = app
             .world_mut()
-            .spawn((
-                Transform::default(),
-                ChildOf(root),
-                bone_target_id(0),
-                AnimatedBy(root),
-            ))
+            .spawn((Transform::default(), ChildOf(root)))
             .id();
-        app.world_mut().entity_mut(root).insert(BoneAttach {
-            joints: vec![joint],
-            points: Default::default(),
-            markers: Default::default(),
-        });
+        // The evaluator's rig handle (0712); target ids no longer ride the joints.
+        app.world_mut()
+            .entity_mut(root)
+            .insert(super::super::PosedRig {
+                joints: vec![joint],
+            });
         (root, joint)
     }
 
@@ -271,11 +262,11 @@ mod tests {
             AssetPlugin::default(),
             bevy::animation::AnimationPlugin,
         ));
-        app.init_resource::<RigPark>();
         app.add_message::<AnimSoundEvent>();
-        // The live schedule's shape: the gate ahead of Bevy's pose evaluation; the event scanner
-        // reading the advanced seek after it.
+        // The live schedule's shape: the gate ahead of the frame's pose evaluation; the event
+        // scanner reading the advanced seek after it.
         app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
+        super::super::pose::plugin(&mut app);
         app.add_systems(PostUpdate, fire_anim_events.after(AnimationSystems));
         app
     }
@@ -327,17 +318,6 @@ mod tests {
             !app.world().entity(twin).contains::<AnimParked>(),
             "the in-frame twin stays live"
         );
-        let park = app.world().resource::<RigPark>().0;
-        assert_eq!(
-            app.world()
-                .entity(behind_joint)
-                .get::<AnimatedBy>()
-                .unwrap()
-                .0,
-            park,
-            "parked joints point at the park entity"
-        );
-
         // While parked: the bone holds, the clock runs, the mid-loop event keyframe still fires.
         let frozen = bone(&app, behind_joint);
         let seek_at_park = seek(&app, behind);
@@ -380,15 +360,6 @@ mod tests {
             "in-frustum ⇒ instant wake"
         );
         assert_eq!(
-            app.world()
-                .entity(behind_joint)
-                .get::<AnimatedBy>()
-                .unwrap()
-                .0,
-            behind,
-            "woken joints point back at their rig"
-        );
-        assert_eq!(
             seek(&app, behind),
             seek(&app, twin),
             "the seek clocks never diverged"
@@ -413,14 +384,9 @@ mod tests {
             !app.world().entity(behind).contains::<AnimParked>(),
             "SelfPlayer never parks, wherever the camera points"
         );
-        assert_eq!(
-            app.world()
-                .entity(behind_joint)
-                .get::<AnimatedBy>()
-                .unwrap()
-                .0,
-            behind,
-            "its joints stay live"
-        );
+        // And its bones keep animating — the exemption is live evaluation, not just the marker.
+        let before = bone(&app, behind_joint);
+        advance(&mut app, DUR * 0.35, 2);
+        assert_ne!(before, bone(&app, behind_joint), "its joints stay live");
     }
 }

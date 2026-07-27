@@ -128,6 +128,7 @@ fn forge_floor_lane_map() {
                 let verdict = area_down_ray(
                     &model.group_collision_tris,
                     &model.group_collision_bounds,
+                    &model.group_collision_grids,
                     &model.group_nav,
                     probe,
                     subject.terrain_z(probe),
@@ -230,6 +231,7 @@ fn inn_corridor_light_probe() {
         let verdict = area_down_ray(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             probe,
             terrain,
@@ -289,6 +291,7 @@ fn inn_corridor_light_probe() {
             let verdict = area_down_ray(
                 &model.group_collision_tris,
                 &model.group_collision_bounds,
+                &model.group_collision_grids,
                 &model.group_nav,
                 probe,
                 terrain,
@@ -466,6 +469,7 @@ fn world_point_light_probe() {
         let zone = area_down_ray(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             probe_local,
             terrain_local,
@@ -474,6 +478,7 @@ fn world_point_light_probe() {
         let light = down_ray_claim(
             &model.group_collision_tris,
             &model.group_collision_bounds,
+            &model.group_collision_grids,
             &model.group_nav,
             probe_local,
             terrain_local,

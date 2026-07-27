@@ -557,6 +557,7 @@ mod tests {
                 Vec::new()
             },
             first_seq,
+            pose: Default::default(),
         }
     }
 

@@ -9,6 +9,7 @@
 //! Same app-independent shape as the M2 loader (meshes + texture handles + metadata; materials at
 //! spawn). WMOs don't size-fade, so there are no bounds.
 
+use crate::column_grid::ColumnGrid;
 use std::sync::Arc;
 
 use benilla_formats::{
@@ -90,6 +91,12 @@ pub struct WmoModel {
     /// floats 1.5 yd above its own floor polys — the 2026-07-12 indoor flap), so culling on them
     /// is exact: a group is skipped only when no face of it could own the probe column.
     pub group_collision_bounds: Vec<Option<([f32; 3], [f32; 3])>>,
+    /// Per-group column index over [`Self::group_collision_tris`] (parallel; `None` = a face set
+    /// too small to be worth indexing, and the caller keeps its linear scan). The narrow phase the
+    /// per-group bounds above never had: a dungeon group holds ~11–16k faces, so bounds alone
+    /// still left every down-ray scanning tens of thousands of triangles per unit per frame
+    /// (LBRS, 2026-07-27). See [`crate::column_grid`].
+    pub group_collision_grids: Vec<Option<ColumnGrid>>,
     /// The union of [`Self::group_collision_bounds`] — the whole-building broad phase: a probe
     /// column outside it cannot hit any collision face, so the per-frame indoor trackers skip the
     /// placed instance outright (a camera in open country pays one AABB test per building, not a
@@ -154,6 +161,10 @@ pub struct WmoModel {
     /// entity scanned EVERY interior group of the whole model — at Stormwind (one WMO, all
     /// districts) that was the live-session frame (decision 0364).
     pub group_footprint_bounds: Vec<Option<([f32; 3], [f32; 3])>>,
+    /// Per-group column index over [`Self::group_footprints`] (parallel; `None` = not indexed).
+    /// The footprint sample is the heavier of the two column rays — it walks render faces, not
+    /// collision ones. See [`crate::column_grid`].
+    pub group_footprint_grids: Vec<Option<ColumnGrid>>,
     /// Per-group MOLR light refs (indices into [`Self::lights`]), indexed by absolute group index —
     /// the point lights that fold into an interior GameObject's committed light are gated by the
     /// footprint-hit group's list, same as a MODD prop's by its owning group.
@@ -215,6 +226,53 @@ pub fn footprint_tri_bounds(
                 }
             }
             bounds
+        })
+        .collect()
+}
+
+/// Per-group column indexes over the footprint faces — [`WmoModel::group_footprint_grids`].
+/// Shared with the fixture builders for the same reason the bounds are: a test model and a loaded
+/// one must be indexed by identical code, or an exactness test proves nothing about the real path.
+pub fn footprint_tri_grids(footprints: &[Option<FootprintTris>]) -> Vec<Option<ColumnGrid>> {
+    footprints
+        .iter()
+        .map(|fp| {
+            let fp = fp.as_ref()?;
+            let tris: Vec<&[u16]> = fp.indices.chunks_exact(3).collect();
+            ColumnGrid::build(tris.len(), |i| {
+                let mut lo = [f32::MAX; 2];
+                let mut hi = [f32::MIN; 2];
+                for &vi in tris[i] {
+                    if let Some(v) = fp.positions.get(vi as usize) {
+                        for a in 0..2 {
+                            lo[a] = lo[a].min(v[a]);
+                            hi[a] = hi[a].max(v[a]);
+                        }
+                    }
+                }
+                (lo, hi)
+            })
+        })
+        .collect()
+}
+
+/// Per-group column indexes over a per-group triangle set — [`WmoModel::group_collision_grids`].
+pub fn collision_tri_grids(tris: &[Vec<[[f32; 3]; 3]>]) -> Vec<Option<ColumnGrid>> {
+    tris.iter()
+        .map(|group| {
+            ColumnGrid::build(group.len(), |i| {
+                let t = &group[i];
+                (
+                    [
+                        t[0][0].min(t[1][0]).min(t[2][0]),
+                        t[0][1].min(t[1][1]).min(t[2][1]),
+                    ],
+                    [
+                        t[0][0].max(t[1][0]).max(t[2][0]),
+                        t[0][1].max(t[1][1]).max(t[2][1]),
+                    ],
+                )
+            })
         })
         .collect()
 }
@@ -596,6 +654,8 @@ impl AssetLoader for WmoModelLoader {
         let (group_collision_bounds, collision_bounds) =
             collision_tri_bounds(&group_collision_tris);
         let group_footprint_bounds = footprint_tri_bounds(&group_footprints);
+        let group_collision_grids = collision_tri_grids(&group_collision_tris);
+        let group_footprint_grids = footprint_tri_grids(&group_footprints);
         Ok(WmoModel {
             wmo_id: benilla_formats::wmo_root_id(&bytes),
             submeshes,
@@ -608,6 +668,7 @@ impl AssetLoader for WmoModelLoader {
             group_collision_tris,
             group_camera_only_tris,
             group_collision_bounds,
+            group_collision_grids,
             collision_bounds,
             collision,
             collision_camera,
@@ -620,6 +681,7 @@ impl AssetLoader for WmoModelLoader {
             doodad_groups,
             group_footprints,
             group_footprint_bounds,
+            group_footprint_grids,
             group_light_refs,
             group_liquids,
         })

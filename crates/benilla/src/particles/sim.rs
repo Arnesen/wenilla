@@ -759,13 +759,18 @@ pub(super) fn simulate_particles(
         // Booth emitters are skipped — their pixels belong to a booth camera's target, not the
         // world depth buffer `WOW_DEPTH` reads.
         if let Some(fidx) = dump_frame {
-            if !is_booth && def.geometry_model.is_none() && !particles.is_empty() {
+            if !is_booth
+                && def.geometry_model.is_none()
+                && !particles.is_empty()
+                && super::depthdump::bone_selected(u32::from(def.bone))
+            {
                 super::depthdump::dump_emitter(
                     fidx,
                     def,
                     particles,
                     &frame,
                     placement,
+                    emitter_world,
                     &cam,
                     cam_tf,
                     camera,

@@ -8,10 +8,9 @@
 //! reaches the shared types + caches in the parent via `super::`.
 
 use avian3d::prelude::RigidBody;
-use benilla_assets::{bone_target_id, ModelSkeleton};
+use benilla_assets::ModelSkeleton;
 use benilla_formats::CharSkinSlot;
 use benilla_protocol::EntityKind;
-use bevy::animation::AnimatedBy;
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
@@ -85,7 +84,8 @@ fn setup_skinned_instance(
     let ibp = d.inverse_bindposes.as_ref()?;
     // `joints_root` — where the skeleton's root bones parent — is normally `entity` itself; a
     // MOUNTED rider's joints root under the seat anchor instead (decision 0441), while the
-    // `AnimationPlayer`/driver components stay on `entity` (animation targets bind by entity).
+    // `AnimationPlayer`/driver components stay on `entity` (the pose evaluator binds joints
+    // through the root's `PosedRig`, decision 0712 — parentage never enters it).
     // Skinned parts render purely from joint world transforms, so their own parentage is free.
     let joints = spawn_joints(commands, joints_root, &d.skeleton);
     // Billboard bones (glow riders on billboard children): palette-level camera facing, children inherit.
@@ -147,11 +147,14 @@ fn setup_skinned_instance(
                     .remove::<crate::creature_anim::AnimParked>();
             }
         }
-        for (i, &j) in joints.iter().enumerate() {
-            commands
-                .entity(j)
-                .insert((bone_target_id(i as u16), AnimatedBy(entity)));
-        }
+        // The direct pose evaluator's rig handle (decision 0712) — instead of per-joint
+        // `AnimationTargetId`/`AnimatedBy` pairs: with no targets, Bevy's `animate_targets` never
+        // touches these bones, and `creature_anim::pose` samples the player state itself.
+        commands
+            .entity(entity)
+            .insert(crate::creature_anim::PosedRig {
+                joints: joints.clone(),
+            });
         // Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses; a GO's
         // free-running flicker): free-clock loops the per-sequence reader drops, driven on their own clock.
         if let Some(drive) = crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)

@@ -402,6 +402,13 @@ impl AssetLoader for M2ModelLoader {
         let animations = {
             let mut graph = AnimationGraph::new();
             let root = graph.root;
+            // The direct pose evaluator's bake (decision 0712) — filled beside every graph
+            // mutation below so the table mirrors the graph by construction: `bone_masks` beside
+            // each `add_target_to_mask_group`, `set_node` beside each `add_clip*`.
+            let mut pose = crate::model::PoseSource {
+                bone_masks: vec![0u64; skeleton_raw.bones.len()],
+                ..Default::default()
+            };
             // Per-arm mask groups for the client's per-slot one-shots (the draw/stow plays each
             // hand's ceremony on its own arm subtree, over the gait). Each arm's subtree root is the
             // **shoulder-keybone ancestor of the hand attachment's bone** (attachment id 1 = right
@@ -414,9 +421,11 @@ impl AssetLoader for M2ModelLoader {
                     let target = bone_target_id(i as u16);
                     if !in_subtree(&skeleton_raw, i, right_root) {
                         graph.add_target_to_mask_group(target, 0);
+                        pose.bone_masks[i] |= 1 << 0;
                     }
                     if !in_subtree(&skeleton_raw, i, left_root) {
                         graph.add_target_to_mask_group(target, 1);
+                        pose.bone_masks[i] |= 1 << 1;
                     }
                 }
             }
@@ -428,6 +437,7 @@ impl AssetLoader for M2ModelLoader {
                 for i in 0..skeleton_raw.bones.len() {
                     if !in_subtree(&skeleton_raw, i, upper_root) {
                         graph.add_target_to_mask_group(bone_target_id(i as u16), 2);
+                        pose.bone_masks[i] |= 1 << 2;
                     }
                 }
             }
@@ -444,6 +454,7 @@ impl AssetLoader for M2ModelLoader {
                         .any(|&r| in_subtree(&skeleton_raw, i, r))
                 {
                     graph.add_target_to_mask_group(target, 3);
+                    pose.bone_masks[i] |= 1 << 3;
                 }
                 if !finger_roots[1].is_empty()
                     && !finger_roots[1]
@@ -451,6 +462,7 @@ impl AssetLoader for M2ModelLoader {
                         .any(|&r| in_subtree(&skeleton_raw, i, r))
                 {
                     graph.add_target_to_mask_group(target, 4);
+                    pose.bone_masks[i] |= 1 << 4;
                 }
             }
             // The model's baked PlayableAnimationLookup (decision 0082): parsed straight off the M2
@@ -477,26 +489,35 @@ impl AssetLoader for M2ModelLoader {
                 .map_or(0, |p: &benilla_formats::PlayableAnim| p.resolved_id);
             let mut first_seq = None;
             for (i, anim) in sequences.iter().enumerate() {
-                if let Some(clip) = build_animation_clip(anim, &skeleton) {
+                if let Some((clip, pose_clip)) = build_animation_clip(anim, &skeleton) {
                     if first_seq.is_none() && anim.anim_id == idle_id && idle_pose_differs(anim) {
                         first_seq = Some(clips.len());
                     }
+                    let pose_idx = pose.clips.len() as u32;
+                    pose.clips.push(pose_clip);
                     let clip = ctx.add_labeled_asset(format!("clip{i}"), clip);
                     let node = graph.add_clip(clip.clone(), 1.0, root);
+                    pose.set_node(node, pose_idx, 0);
                     // The sheath family gets per-arm masked variants ([`AnimClip::arm_nodes`]).
                     let arm_nodes =
                         (matches!(anim.anim_id, 89 | 90) && arm_roots.is_some()).then(|| {
-                            (
+                            let nodes = (
                                 graph.add_clip_with_mask(clip.clone(), 1 << 0, 1.0, root),
                                 graph.add_clip_with_mask(clip.clone(), 1 << 1, 1.0, root),
-                            )
+                            );
+                            pose.set_node(nodes.0, pose_idx, 1 << 0);
+                            pose.set_node(nodes.1, pose_idx, 1 << 1);
+                            nodes
                         });
                     // The upper-body masked variant ([`AnimClip::upper_node`]): the masked destination
                     // for a one-shot routed over a live base (swing/emote — the route is chosen per play
                     // in `creature_anim`). Built for every clip when the model has a split key-bone, so
                     // any one-shot id can take the masked route; `None` on the −1-sentinel models.
-                    let upper_node = upper_root
-                        .map(|_| graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root));
+                    let upper_node = upper_root.map(|_| {
+                        let n = graph.add_clip_with_mask(clip.clone(), 1 << 2, 1.0, root);
+                        pose.set_node(n, pose_idx, 1 << 2);
+                        n
+                    });
                     clips.push(AnimClip {
                         anim_id: anim.anim_id,
                         seq_index: anim.seq_index,
@@ -540,13 +561,19 @@ impl AssetLoader for M2ModelLoader {
                 .collect();
             let grip_poses = hand_grip_finger_poses(&bytes, &finger_bones);
             if !grip_poses.is_empty() {
-                let grip =
-                    ctx.add_labeled_asset("grip_clip".to_string(), build_grip_clip(&grip_poses));
+                let (grip_clip, grip_pose) = build_grip_clip(&grip_poses);
+                let grip_idx = pose.clips.len() as u32;
+                pose.clips.push(grip_pose);
+                let grip = ctx.add_labeled_asset("grip_clip".to_string(), grip_clip);
                 if !finger_roots[0].is_empty() {
-                    hand_close[0] = Some(graph.add_clip_with_mask(grip.clone(), 1 << 3, 1.0, root));
+                    let n = graph.add_clip_with_mask(grip.clone(), 1 << 3, 1.0, root);
+                    pose.set_node(n, grip_idx, 1 << 3);
+                    hand_close[0] = Some(n);
                 }
                 if !finger_roots[1].is_empty() {
-                    hand_close[1] = Some(graph.add_clip_with_mask(grip.clone(), 1 << 4, 1.0, root));
+                    let n = graph.add_clip_with_mask(grip.clone(), 1 << 4, 1.0, root);
+                    pose.set_node(n, grip_idx, 1 << 4);
+                    hand_close[1] = Some(n);
                 }
             }
             // Global-sequence channels alone are enough to carry `ModelAnimations`: a model whose
@@ -565,6 +592,7 @@ impl AssetLoader for M2ModelLoader {
                     hand_close,
                     global_bones,
                     first_seq,
+                    pose: std::sync::Arc::new(pose),
                 }
             })
         };

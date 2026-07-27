@@ -168,6 +168,7 @@ pub(super) fn refresh_player_looks(
                 AnimationGraphHandle,
                 benilla_assets::ModelAnimations,
                 crate::creature_anim::AnimDriver,
+                crate::creature_anim::PosedRig,
                 BoneAttach,
                 HeldAttached,
             )>()

@@ -480,6 +480,7 @@ mod tests {
             animation_lookup: lookup,
             global_bones: Vec::new(),
             first_seq: None,
+            pose: Default::default(),
         }
     }
 
