@@ -63,6 +63,13 @@ pub(crate) struct WmoResidency {
 }
 
 impl WmoResidency {
+    /// The change counter — bumped whenever the resident set actually changes. Read by the per-unit
+    /// room claim (`wmo_portal::track_unit_interiors`), whose re-test gate is otherwise movement
+    /// alone: a building streaming in under a STANDING unit must still re-claim it.
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation
+    }
+
     /// Replace the resident set, bumping the generation only when it actually changed
     /// (order-independent, by asset id) — so the per-frame rebuild doesn't defeat the classifier's
     /// movement gate.

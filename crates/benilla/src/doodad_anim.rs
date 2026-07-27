@@ -289,9 +289,10 @@ pub(crate) struct MatAnim {
     frozen: bool,
     /// This instance's sampled value drives the render-alpha `MeshTag` field **by itself** (no
     /// `DoodadFade` on the entity): the spell-effect parts (`entities::spell_fx`), whose alpha
-    /// channel has no other writer. `false` on the doodad lane — there the fade writer owns the
-    /// tag and composes [`Self::current`] in (and a lit interior prop's tag carries a packed
-    /// colour this flag must never overwrite) — and on the unit lane, whose own compose is
+    /// channel has no other writer. `false` on the doodad lane — there the visibility authority
+    /// owns the tag and composes [`Self::current`] in (for a fade holder multiplied with the
+    /// distance fade; for a lit interior prop written alone into the probe payload's alpha field,
+    /// bits 0..=15 since the 0355 re-lane) — and on the unit lane, whose own compose is
     /// [`crate::entities::apply_unit_mat_alpha`].
     pub(crate) drives_tag: bool,
     /// The last sampled combined factor (colour-alpha × weight), read by the visibility authority.

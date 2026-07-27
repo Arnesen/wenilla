@@ -66,17 +66,11 @@ pub(crate) fn collision_height_for(
 /// carrying none at all — is still stamped, at the ctor default, so no consumer has to tell
 /// "not resolved yet" apart from "resolved to nothing".
 ///
-/// **Stamped once, never restamped** — correct today because *neither* input can change on a live
-/// entity. A live `SCALE_X` change is [`NetEntity::scale`]'s own standing deferral, and a live
-/// `UNIT_FIELD_DISPLAYID` change isn't applied either: the wire field is read **only** on the
-/// create path (`benilla_protocol`'s `display_id`, one call site, in the `ObjectCreate` arm), so a
-/// morph or a druid form leaves both the drawn model and this height at the create-time body.
-/// Verified live 2026-07-26 — `.modify morph 1564` on a swimming probe moved neither.
-///
-/// So restamping now would be strictly *worse*: it would give the collision box a body the renderer
-/// isn't drawing, the exact disagreement this component exists to stop. When the live display-id
-/// change lands (the shapeshift/morph gap, ledger F04), the model swap and this restamp are one
-/// change, not two.
+/// This system stamps only the **first** value. A live change to either input — a display-id swap
+/// (druid form, GM morph) or a `SCALE_X` change — restamps through
+/// [`super::live_display::refresh_live_display`] (decision 0695), in the same commit as the model
+/// swap it rides with: the collision box and the drawn body can never disagree, which is exactly
+/// why neither restamped alone before the swap existed (the old F04 deferral).
 pub(super) fn stamp_collision_heights(
     mut commands: Commands,
     creatures: Option<Res<Creatures>>,

@@ -296,16 +296,16 @@ impl MaterialExtension for WowModelExt {
 /// WoW.8 state).
 pub type WdlMaterial = ExtendedMaterial<StandardMaterial, WdlExt>;
 
-/// The two fog uniforms WDL needs — same semantics + values as the terrain/model fog (fed by
-/// `apply_wow_lighting`). Packed on one binding like the others.
+/// WDL reads the scene fog straight off the shared global light — it has no per-material input of
+/// its own (the band is white geometry whose entire colour is the fog).
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 pub struct WdlExt {
-    /// `rgb` = Light.dbc IntBand row 7 fog color (gamma 0..1); `w` = enable (>0.5 ⇒ blend; 0 ⇒ skip).
-    #[uniform(100)]
-    pub fog_color: Vec4,
-    /// `x` = `fog_start` yd, `y` = `fog_end` yd; `zw` reserved. (q6 RE: GL_LINEAR, planar eye-Z.)
-    #[uniform(100)]
-    pub fog_params: Vec4,
+    /// **The shared global light** (`lighting::global_light`), the same buffer terrain and the models
+    /// bind. `wdl.wgsl` reads rows 4/5 only — the SCENE fog (block 1) plus the farclip wall, which is
+    /// right by construction: the band *is* the horizon, so it is never inside a WMO. Set once at
+    /// startup, never mutated (this replaces the per-material `apply_wow_lighting` push).
+    #[storage(90, read_only, buffer)]
+    pub light_buf: Buffer,
 }
 
 impl MaterialExtension for WdlExt {
@@ -325,9 +325,12 @@ impl MaterialExtension for WdlExt {
 /// WoW state). P1 omits the unit-1 detail ripple + specular term.
 pub type LiquidMaterial = ExtendedMaterial<StandardMaterial, LiquidExt>;
 
-/// Liquid material inputs: the animated frame array + the shared WoW light/fog + the current
-/// animation frame index. **All Vec4 uniforms merge onto one binding (102)** (same packing trick as
-/// the other extensions — keeps the buffer count down). WGSL struct order must match the field order.
+/// Liquid material inputs: the animated frame array, the per-material kind lanes, and the current
+/// animation frame index. Everything that is *light* — ambient/diffuse/sun/spec, both water swatches
+/// and both fog blocks — comes off the shared global-light buffer, exactly like terrain and the
+/// models; this material carries only what genuinely varies per material. **The Vec4 uniforms merge
+/// onto one binding (102)** (same packing trick as the other extensions). WGSL struct order must
+/// match the field order.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
 pub struct LiquidExt {
     /// The kind's animated frames (`lake_a`/`fast_a`/`ocean_h`), stacked as `2d_array` layers
@@ -335,41 +338,33 @@ pub struct LiquidExt {
     #[texture(100, dimension = "2d_array", visibility(fragment))]
     #[sampler(101, visibility(fragment))]
     pub frames: Handle<Image>,
-    /// `rgb` = ambient color; `w` unused. Fed by `apply_wow_lighting` (same value as terrain).
+    /// The per-material constants that pick which *lanes* of the shared light this surface reads.
+    /// None of them is a light value; all four are fixed at material creation.
+    ///
+    /// - `x` = **fullbright** (>0.5 ⇒ magma/slime): the animated texture IS the opaque body — skip
+    ///   the depth swatch and the N·L term. Not "skip the fog"; see `liquid.wgsl` and decision 0691.
+    /// - `y` = **ocean** (>0.5): read the ocean water swatch (shared-light rows 15/16, `Light.dbc`
+    ///   IntBand 14/15) instead of the river/lake one (rows 13/14, IntBand 16/17).
+    /// - `z` = **interior fog** (>0.5): this surface is a WMO *interior* group's own liquid, so it
+    ///   fogs with the interior block (rows 18/19) like the walls around it, not the scene fog. The
+    ///   reference gates the WMO liquid pass's fog submit (`0x6b6323`–`0x6b6342`) on exactly the same
+    ///   `[0xca7f00]` as the WMO *geometry* pass (`0x6b51d9`/`0x6b51ea`) — one flag, so the pool and
+    ///   the room can never disagree. ADT liquid is 0: the ADT pass submits no fog of its own and
+    ///   draws under the once-a-frame scene submit.
+    /// - `w` = the sun-sheen **shininess** (`lighting::WATER_SHININESS`) for the `ocean0_s.bls`
+    ///   `secondary` Blinn term — water's own exponent, not the shared row-3 terrain shininess.
     #[uniform(102)]
-    pub light_ambient: Vec4,
-    /// `rgb` = directional (sun) diffuse color; `w` unused.
-    #[uniform(102)]
-    pub light_diffuse: Vec4,
-    /// `xyz` = world-space (Bevy) sun travel direction (lit where `N·(-sun) > 0`); `w` unused.
-    #[uniform(102)]
-    pub light_sun: Vec4,
-    /// **Sun sheen (specular)**: `rgb` = the sun specular colour (≈ row-9 near-white), `w` = shininess
-    /// (≈6, the water material's). The `ocean0_s.bls` `secondary` term: `liquid.wgsl` computes a
-    /// Blinn highlight `light_spec.rgb · pow(N·H, w)` and adds `(secondary + 0.25)·detail.a` — the
-    /// glinting sheen on the ripples, strongest at grazing (sunrise/sunset) sun. Fed by `apply_wow_lighting`.
-    #[uniform(102)]
-    pub light_spec: Vec4,
-    /// **Water shore tint + shallow alpha**: `rgb` = the shallow water-row tint (`Light.dbc` IntBand row
-    /// 16 river/lake / 14 ocean, RAW — the 2-endpoint depth swatch, VERIFIED `FUN_0068a830`); `w` =
-    /// `waterShallowAlpha` (river 0.5 / ocean 0.75). Fed per-kind by `WowLighting::water_colors`.
-    #[uniform(102)]
-    pub water_shallow: Vec4,
-    /// **Water deep tint + deep alpha**: `rgb` = the deep water-row tint (IntBand row 17 river / 15 ocean,
-    /// RAW); `w` = `waterDeepAlpha` (= 1.0, fully opaque). `liquid.wgsl` lerps the COLOUR `water_shallow.rgb
-    /// → water_deep.rgb` and the OPACITY `.w → .w` by the SAME depth V (river/lake `V = clamp(byte/42)`):
-    /// the from-above gradient (pale shore → opaque deep middle), colour and alpha tracking together.
-    #[uniform(102)]
-    pub water_deep: Vec4,
-    /// `rgb` = Light.dbc row 7 fog color (gamma 0..1); `w` = enable (>0.5 ⇒ blend). Same as terrain.
-    #[uniform(102)]
-    pub fog_color: Vec4,
-    /// `x` = `fog_start` yd, `y` = `fog_end` yd; `zw` reserved. Planar eye-Z linear fog, like terrain.
-    #[uniform(102)]
-    pub fog_params: Vec4,
+    pub kind: Vec4,
     /// `x` = current frame index (set each frame by `animate_liquid`), `y` = frame count; `zw` unused.
     #[uniform(102)]
     pub anim: Vec4,
+    /// **The shared global light** (`lighting::global_light`): the one storage buffer terrain and the
+    /// models already read, now liquid's source too. `liquid.wgsl` reads rows 0-5 (light + scene fog +
+    /// farclip), 13-16 (the two water swatches) and 18/19 (the interior fog block). Read in BOTH
+    /// stages — the vertex stage evaluates the faithful per-vertex sun sheen. Set once at material
+    /// creation, never mutated.
+    #[storage(90, read_only, buffer, visibility(vertex, fragment))]
+    pub light_buf: Buffer,
 }
 
 impl MaterialExtension for LiquidExt {

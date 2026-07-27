@@ -223,6 +223,7 @@ mod tests {
             ],
             fogs: Vec::new(),
             group_collision_tris: Vec::new(),
+            group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
             collision_bounds: None,
             collision: None,
@@ -237,6 +238,7 @@ mod tests {
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
+            doodad_groups: Default::default(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);
@@ -303,6 +305,7 @@ mod tests {
             group_nav: vec![nav(0.0, 3.0, 0, 1), nav(-303.0, -300.0, 1, 1)],
             fogs: Vec::new(),
             group_collision_tris: Vec::new(),
+            group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
             collision_bounds: None,
             collision: None,
@@ -317,6 +320,7 @@ mod tests {
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
+            doodad_groups: Default::default(),
         };
 
         let drawable = interior_group_selection(&model, &Affine3A::IDENTITY, Vec3::ZERO, 25.0, 0);

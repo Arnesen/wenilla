@@ -1,72 +1,46 @@
-//! Liquid (water) rendering: the animated lake/river/ocean surfaces the reference draws over MCLQ
-//! geometry. The parse + flat mesh live in `benilla_formats::liquid` (built into each `ChunkMesh.liquid`
-//! by the terrain loader); this is the Bevy render glue — one shared [`LiquidMaterial`] per
-//! [`LiquidKind`], a `texture_2d_array` of its animated frames, and a 24 fps frame-index cycler.
+//! **Where the liquid is, and whether you are in it** — the geometry side of the liquid subsystem,
+//! with no render glue at all.
 //!
-//! Faithful model (RE'd from `WoW.exe` + `ocean0_s.bls` + apitrace WoW.17 program 159, all agree).
-//! `ocean0_s.bls`: `rgb = primary·colorTex.rgb + detailTex.rgb + (secondary+0.25)·detailTex.a`,
-//! `alpha = colorTex.a`. The body colour is **`primary · waterTint`**, where:
-//! - **`waterTint`** is a plain **2-endpoint linear lerp** of the zone's dedicated `Light.dbc` water
-//!   rows, RAW (no ×0.711): IntBand rows 16/17 (river/lake) or 14/15 (ocean), shallow→deep, by the
-//!   per-vertex depth `V` (river/lake `V = clamp(byte/42)`, VERIFIED `c81768`/`FUN_0068d790`; saturates
-//!   ~5 yd so the channel middle reaches the deep/teal row). Swatch builder VERIFIED: WoW.exe
-//!   `FUN_0068a830`, golden-vector-matched to the apitrace swatch ≤1/255 over all 64 rows. (The earlier
-//!   "reflected sky × 0.711 via `FUN_0068c250`" model fingered the WRONG builder — a separate grey edge
-//!   texture never bound on the water unit; and `byte/255` was the wrong LUT → river never went teal.)
-//! - **`primary`** is the lit vertex colour `clamp(ambient + N·L·sun)`.
-//! - the animated `lake_a`/`ocean_h` frame is the **`detailTex`** (near-black RGB + ripple alpha): a
-//!   faint flat lift + an achromatic shimmer on crests — NOT the body colour. Mipped + 16× aniso so the
-//!   ripple averages out at distance (near-field samples mip 0, so near sparkle is the term itself).
-//! - **opacity** = the SAME `V` indexes both colour and alpha (one swatch row → RGB + A): a ramp between
-//!   the LightParams shallow/deep alphas — river 0.5→1.0, ocean 0.75→1.0 (VERIFIED WoW.exe `FUN_0068a830`
-//!   α = `127+2·row`). The river channel reaches α=1.0 (opaque, deep teal) by byte 42 ≈ 5 yd; the shore
-//!   stays see-through (the pale edge band, faithful — the bottom shows).
-//!
-//! River/lake `V = clamp(byte/42)` (steep `c81768` LUT, `FUN_0068d790`) — NOT `byte/255` (the `c7fcd8`
-//! LUT, a different draw list the from-above river path doesn't use; it left the river middle stuck on
-//! the shallow green row). Ocean uses a non-LUT UV path → placeholder `/255` pending its own RE+A/B.
-//! (Earlier cuts: ripple-as-colour → black; `×8` → "deep too early"; FLAT colour → "completely gone";
-//! sky × 0.711 → wrong builder; `byte/255` → wrong LUT, no teal centre. Faithful = rows 14–17 raw lerp
-//! + the /42 V. 2026-05-31.)
-//!
-//! Two-sided, alpha-blended, depth-write off (Bevy's transparent pass = the verified MCLQ water render
-//! state).
-//!
-//! The frame-flip is the client's first render animation — a deliberate **one-off** (a frame-index
-//! uniform off Bevy real `Time`), NOT a general animation system. Two clocks: animation =
-//! wall-clock; day/night = server game-time.
+//! Every spawned surface publishes its grid in world WoW space ([`WaterChunkInfo`], built by
+//! `super::surface::wet_footprint`); everything that asks a *position* question — swimming, the
+//! wade splash and footstep depth, the foam lattice, the ambient loops, and the submerged
+//! atmosphere — reads it through [`liquid_at`] and its filtered siblings. [`detect_submersion`] is
+//! the one cross-feed out of the subsystem: it publishes WHICH liquid the camera eye stands in
+//! ([`Underwater`]), and `lighting::update_time_lighting` selects the whole submerged atmosphere
+//! from that.
 
-use std::collections::HashMap;
-
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{ExtendedMaterial, MaterialPlugin};
 use bevy::prelude::*;
 
-use crate::assets::LockRecover;
-use crate::assets::{liquid_frame_array, AssetSet, RenderConfig, WorldAssets};
-use crate::lighting::{
-    WowLighting, OCEAN_SHALLOW_ALPHA, RIVER_SHALLOW_ALPHA, WATER_DEEP_ALPHA, WATER_SHININESS,
-};
 use crate::player::WorldCamera;
-use crate::terrain::{LiquidExt, LiquidMaterial};
+use crate::wmo_portal::{CameraInteriorClaim, PlayerWmoRoom, UnitWmoRoom, WmoRoom};
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use benilla_formats::{read_texture_mip_chain, BlpMipChain, LiquidKind, LiquidMesh};
+use benilla_formats::{LiquidKind, LiquidMesh};
 
-/// Frame-flip rate — 30 frames over 1.25 s (VERIFIED `FUN_0068aac0`), i.e. 24 fps, real wall-clock.
-const ANIM_FPS: f32 = 24.0;
+/// The **camera eye's** liquid claim — the reference's `[0xc7b748]` branch in the environment probe
+/// `0x6809c0`: a containing map-object selects its MLIQ, otherwise the ADT liquid answers.
+pub(crate) fn camera_claim(claim: &CameraInteriorClaim) -> LiquidClaim {
+    match claim.0 {
+        Some(c) => LiquidClaim::Inside(c.room),
+        None => LiquidClaim::Outdoors,
+    }
+}
 
-/// The water subsystem: load the per-kind frame arrays + shared materials at startup, then cycle the
-/// animation frame each update. Spawning the per-chunk surfaces happens in the terrain streamer (via
-/// [`spawn_liquids`], water lives *with* its tile), reading [`LiquidAssets`].
-pub(crate) struct LiquidPlugin;
+/// The **player's** liquid claim, from the interior down-ray `wmo_portal` already runs each frame.
+pub(crate) fn player_claim(room: &PlayerWmoRoom) -> LiquidClaim {
+    match room.0 {
+        Some(room) => LiquidClaim::Inside(room),
+        None => LiquidClaim::Outdoors,
+    }
+}
 
-impl Plugin for LiquidPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
-            .init_resource::<Underwater>()
-            .add_systems(Startup, setup_liquid.after(AssetSet::Open))
-            .add_systems(Update, (animate_liquid, detect_submersion));
+/// A **remote unit's** liquid claim, from its own per-unit room. The component is absent only on a
+/// unit's first frame, before `wmo_portal::track_unit_interiors` has reached it — that, and only
+/// that, is [`LiquidClaim::Unknown`].
+pub(crate) fn unit_claim(room: Option<&UnitWmoRoom>) -> LiquidClaim {
+    match room.map(UnitWmoRoom::room) {
+        Some(Some(room)) => LiquidClaim::Inside(room),
+        Some(None) => LiquidClaim::Outdoors,
+        None => LiquidClaim::Unknown,
     }
 }
 
@@ -85,21 +59,56 @@ impl Plugin for LiquidPlugin {
 #[derive(Resource, Default)]
 pub(crate) struct Underwater(pub(crate) benilla_formats::Submersion);
 
-/// Which file the liquid came from — the **delegation key** for [`liquid_at`].
+/// Where a liquid surface came from, and — for WMO liquid — **whose room it is**: the
+/// **delegation + scope key** for [`liquid_at`].
 ///
 /// The reference's liquid query is context-aware: terrain's `0x69b6d0` **delegates the WMO case out**
-/// via `0x69b520` (wow-re `terrain/scratch/class-batch3.md`), and the per-frame camera probe runs the
-/// ADT query `0x6b9f10` *or* the WMO fallback `0x6723d0` (`sound/scratch/benilla-pins.md`). Without
-/// the distinction a tunnel bored under a lake inherits the lake: an ADT footprint is a flat XY
-/// rectangle with no floor, so every position beneath it reads as submerged — the "swim in air"
-/// family (decision 0634).
+/// via `0x69b520` (wow-re `terrain/scratch/class-batch3.md`), which transforms the query point into
+/// each placed map-object's own space before any MLIQ is sampled; and the per-frame camera
+/// environment probe `0x6809c0` samples the **current WMO group's** MLIQ (`0x6b9f10`) when
+/// `[0xc7b748]` names a containing map-object, else the ADT query `0x6723d0 → 0x69b6d0`
+/// (wow-re `terrain/scratch/fog-env-state.md` §1, `models/scratch/wmo-lit-selector.md` §3.4).
+///
+/// Without the source split, a tunnel bored under a lake inherits the lake: an ADT footprint is a
+/// flat XY rectangle with no floor, so every position beneath it reads as submerged — the "swim in
+/// air" family (decision 0634). Without the **owner**, the same holds one level up: a WMO pool
+/// claims every position under its XY in *every other building on the map*, at any depth. That is
+/// decision 0696 — the Uldaman entrance read as submerged under a mushroom cave's pool 186 yd
+/// overhead, in a building the player was 191 yd below and had never entered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LiquidSource {
     /// An ADT map-chunk surface (MCLQ) — the outdoor world's lakes, rivers, coast.
     AdtChunk,
     /// A WMO group's embedded surface (MLIQ) — canals, fountains, the Great Forge lava,
-    /// Undercity's slime.
-    WmoGroup,
+    /// Undercity's slime — tagged with the [`WmoRoom`] that owns it.
+    ///
+    /// `None` only for a placement that spawned no [`WmoPortalInstance`](crate::wmo_portal::WmoPortalInstance)
+    /// — a portal-less building with no `WMOAreaTable` identity. Nothing can claim to be *inside*
+    /// such a placement (the interior trackers skip it), so its pool answers no one. That is the
+    /// pre-existing behaviour made explicit rather than a new gap: an unowned pool was already
+    /// unreachable, it just used to be unreachable by accident.
+    WmoGroup(Option<WmoRoom>),
+}
+
+/// Whose liquid answers for one subject at one position — the query's context, and the whole of the
+/// "swim in air" family's fix.
+///
+/// Every subject that asks the liquid a question carries one: the player (from
+/// [`PlayerWmoRoom`](crate::wmo_portal::PlayerWmoRoom)), the camera eye (from
+/// [`CameraInteriorClaim`](crate::wmo_portal::CameraInteriorClaim) — the reference's `[0xc7b748]`),
+/// and every remote unit (its own per-unit claim). Before 0696 the parameter was a bare
+/// `Option<bool>`, which could say *that* a subject was indoors but never *where* — so "indoors"
+/// admitted every MLIQ surface in the world.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LiquidClaim {
+    /// The subject stands in the open world: the ADT's MCLQ answers, nothing else.
+    Outdoors,
+    /// The subject stands in this placed building: **that placement's** MLIQ answers, nothing else.
+    Inside(WmoRoom),
+    /// No interior claim has been computed for this subject yet — its first frame, before the
+    /// tracker has run. Both sources answer (the pre-0634 behaviour), which is the wrong answer for
+    /// exactly one frame rather than a silent guess at the right one.
+    Unknown,
 }
 
 /// One liquid surface as the submersion/swim/foam/sound queries see it: its **grid**, in world WoW
@@ -231,6 +240,17 @@ impl LiquidGrid {
 }
 
 impl WaterChunkInfo {
+    /// The **chunk-maximum** height — the single highest wet vertex of the whole grid.
+    ///
+    /// This is the rule the per-cell sample REPLACED (decision 0634): it answered "swimming" from
+    /// anywhere under a surface's XY box, which is how Blackrock's staircase read as submerged with
+    /// its lava metres below. Nothing live reads it; `super::real_data` does, to assert the number
+    /// the fix moved away from — a regression test whose baseline would otherwise be a comment.
+    #[cfg(test)]
+    pub(super) fn chunk_max_z(&self) -> f32 {
+        self.grid.fallback_z
+    }
+
     /// Build a footprint from a **world-space** liquid grid: `cols × rows` positions row-major and
     /// one wet flag per cell. Bounds and the degenerate fallback height come from the wet cells'
     /// own corners, so a sparse grid's box stays as tight as its liquid.
@@ -349,6 +369,34 @@ impl WaterChunkInfo {
         x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
     }
 
+    /// Does this surface answer for a subject holding `claim`? — the delegation, in one place.
+    ///
+    /// An [`Inside`](LiquidClaim::Inside) subject reads its **own placement's** MLIQ and nothing
+    /// else: not the ADT liquid overhead (the 0634 delegation), and not another building's pool
+    /// (the 0696 owner scoping). An [`Outdoors`](LiquidClaim::Outdoors) subject reads only the ADT.
+    /// [`Unknown`](LiquidClaim::Unknown) is the un-classified first frame and admits both.
+    fn answers(&self, claim: LiquidClaim) -> bool {
+        match (claim, self.source) {
+            (LiquidClaim::Unknown, _) => true,
+            (LiquidClaim::Outdoors, LiquidSource::AdtChunk) => true,
+            (LiquidClaim::Outdoors, LiquidSource::WmoGroup(_)) => false,
+            (LiquidClaim::Inside(_), LiquidSource::AdtChunk) => false,
+            (LiquidClaim::Inside(room), LiquidSource::WmoGroup(owner)) => {
+                owner.is_some_and(|o| o.instance == room.instance)
+            }
+        }
+    }
+
+    /// The room this surface belongs to (`None` for ADT liquid and for an unowned WMO placement) —
+    /// the `/liquid` instrument's attribution column, which is what turns "some pool is claiming
+    /// me" into "*that* building's pool is claiming me".
+    fn owner(&self) -> Option<WmoRoom> {
+        match self.source {
+            LiquidSource::AdtChunk => None,
+            LiquidSource::WmoGroup(owner) => owner,
+        }
+    }
+
     /// Does this WoW-space XY box overlap the chunk's wet footprint?
     pub(crate) fn overlaps(&self, lo_x: f32, hi_x: f32, lo_y: f32, hi_y: f32) -> bool {
         hi_x >= self.min_x && lo_x <= self.max_x && hi_y >= self.min_y && lo_y <= self.max_y
@@ -383,6 +431,44 @@ impl WaterChunkInfo {
     }
 }
 
+/// A liquid surface's [`WaterChunkInfo`] — its grid lifted into **world** WoW space, with
+/// `transform` mapping the mesh's local space into the world.
+///
+/// For MCLQ water `lq.positions` are already absolute WoW and `transform` is `IDENTITY` —
+/// `bevy_to_wow(wow_to_bevy(p))` is an exact round-trip (a pure axis permutation with sign flips),
+/// so the grid comes through bit-for-bit. For WMO liquid the positions are model-local and
+/// `transform` is the building's MODF placement, so each vertex is carried local-WoW → local-Bevy →
+/// world-Bevy → world-WoW. That transform is affine, so the grid is still a regular lattice on the
+/// far side — which is what lets [`WaterChunkInfo`] invert a world XY straight to a cell.
+pub(super) fn wet_footprint(
+    lq: &LiquidMesh,
+    transform: &Transform,
+    source: LiquidSource,
+) -> WaterChunkInfo {
+    // The grid is carried in WORLD WoW space (placement baked in) so every consumer — the swim
+    // query's cell lookup, the height sample, the foam clip, the ambient loop — reads one set of
+    // vertices in one frame of reference.
+    let positions: Vec<[f32; 3]> = lq
+        .positions
+        .iter()
+        .map(|&p| world_wow(transform, p))
+        .collect();
+    WaterChunkInfo::new(
+        source,
+        lq.kind,
+        [lq.grid[0] as usize, lq.grid[1] as usize],
+        positions,
+        lq.wet.clone(),
+    )
+}
+
+/// A liquid vertex's world-space WoW position: **local-WoW → local-Bevy → world-Bevy → world-WoW**.
+/// The one place the placement transform is baked into raw liquid coords. For MCLQ water the
+/// transform is `IDENTITY`, so this is `bevy_to_wow(wow_to_bevy(p))` = `p` exactly.
+fn world_wow(transform: &Transform, local: [f32; 3]) -> [f32; 3] {
+    bevy_to_wow(transform.transform_point(wow_to_bevy(local)))
+}
+
 /// Marks a liquid surface that grows **foam** — water kinds only, never magma or slime.
 ///
 /// A marker, not data: the wet cells foam clips against live on [`WaterChunkInfo`]
@@ -402,41 +488,35 @@ pub(crate) struct LiquidHit {
 /// The liquid over a **WoW-space** position — the shared query under swim mode, submersion, wading
 /// and the enter-water sounds.
 ///
-/// **`indoors` is the whole delegation** ([`LiquidSource`]): `Some(true)` (inside a WMO interior)
-/// answers from that building's own MLIQ surfaces only, `Some(false)` from the ADT's MCLQ ones only.
-/// This mirrors the reference, whose terrain query delegates the WMO case out rather than unioning
-/// the two, and it is the fix for "swim in air": a footprint is a flat XY rectangle with **no
-/// floor**, so before the split the Stormwind canal claimed the mage-district tunnel beneath it and
-/// Undercity's water claimed the rooms below it.
+/// **`claim` is the whole delegation** ([`LiquidClaim`], [`LiquidSource`]):
+/// [`Inside`](LiquidClaim::Inside) answers from **that placement's own** MLIQ surfaces only,
+/// [`Outdoors`](LiquidClaim::Outdoors) from the ADT's MCLQ ones only. This mirrors the reference,
+/// whose terrain query delegates the WMO case out rather than unioning the two — and whose WMO leg
+/// transforms the point into each map-object's own space before sampling anything, so a building the
+/// subject is not in cannot answer for it.
 ///
-/// `None` = **the caller has no interior state for this subject** — today only the remote-unit wade
-/// probe (`net::motion::spline`), since `CurrentWmoInterior` is a down-ray published for the local
-/// player alone. Both sources answer, i.e. the pre-0634 behaviour, so another player wading inside a
-/// building can still read the outdoor water beneath it. Cosmetic (their splash sound and wade
-/// pose); a named gap, not a silent guess — fixing it wants a per-unit interior claim.
+/// It is the fix for "swim in air" at both levels. A footprint is a flat XY rectangle with **no
+/// floor**: before the source split the Stormwind canal claimed the mage-district tunnel beneath it
+/// (0634); before the *owner* scoping a mushroom cave's pool claimed the Uldaman entrance 186 yd
+/// below it, in a building the player had never entered (0696).
 ///
 /// Each candidate answers with its height **at this XY** ([`WaterChunkInfo::surface_z_at`]), and
 /// among them the **lowest wins**. Overlapping footprints used to resolve by iteration order
 /// (`.next()`) — an arbitrary pick that made the answer depend on spawn order. The lowest is the one
 /// whose volume you are actually in when standing between two stacked surfaces.
 ///
-/// Still ignores Z **below** the surface — see the module TODO: bounding a liquid from underneath
-/// needs the reference's rule, which is not yet carved. The `indoors` split removes the reported
-/// symptom; a multi-floor WMO whose upper storey holds water would still claim the storey below.
+/// **Still open — the bound BELOW a surface within one room.** Owner scoping bounds a pool to its
+/// building; it does not bound it to its *storey*. A multi-floor WMO whose upper room holds water
+/// would still claim the room beneath it, and whether the reference scopes to the containing GROUP
+/// (and whether a WMO hit with no liquid suppresses the ADT leg) is a live wow-re dispatch — 0634's
+/// deferral, re-asked with the group question attached in 0696. Do not invent the rule here.
 pub(crate) fn liquid_at<'a>(
     liquids: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
-    indoors: Option<bool>,
+    claim: LiquidClaim,
 ) -> Option<LiquidHit> {
-    let want = indoors.map(|inside| {
-        if inside {
-            LiquidSource::WmoGroup
-        } else {
-            LiquidSource::AdtChunk
-        }
-    });
     liquids
-        .filter(|w| want.is_none_or(|s| w.source == s))
+        .filter(|w| w.answers(claim))
         .filter_map(|w| {
             w.surface_z_at(wow[0], wow[1]).map(|surface_z| LiquidHit {
                 surface_z,
@@ -459,9 +539,16 @@ pub(crate) fn liquid_at<'a>(
 /// it shouldn't (wrong cell) versus claiming the right spot at the wrong height (wrong height rule).
 /// 0635 read a footprint's *size* off this instrument to find the first; a `grid z` span far from
 /// the sampled height is the second (decision 0642).
+///
+/// And each line names its **owner** — which placement + group a WMO pool belongs to, and whether
+/// the subject's own claim matches it (`◀ YOURS` / `other room`). Without that column the Uldaman
+/// report ("VERDICT Still, +185.91 over feet, WmoGroup WET-CELL") was indistinguishable from a
+/// legitimate pool sampled at the wrong height: nothing on the line said the surface belonged to a
+/// *different building* — which was the entire bug (0696).
 pub(crate) fn describe_at<'a>(
     liquids: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
+    claim: LiquidClaim,
 ) -> Vec<String> {
     let mut out: Vec<(f32, String)> = liquids
         .filter(|w| w.contains(wow[0], wow[1]))
@@ -479,11 +566,23 @@ pub(crate) fn describe_at<'a>(
                 ),
                 (None, _) => "box-only (dry here)".to_string(),
             };
+            let owner = match (w.source, w.owner()) {
+                (LiquidSource::AdtChunk, _) => "AdtChunk".to_string(),
+                (LiquidSource::WmoGroup(_), Some(o)) => {
+                    format!("WmoGroup {:?} g{}", o.instance, o.group)
+                }
+                (LiquidSource::WmoGroup(_), None) => "WmoGroup (unowned)".to_string(),
+            };
             (
                 z.unwrap_or(hi),
                 format!(
-                    "{:?} {:?} {here}  grid z [{lo:.2}..{hi:.2}]  xy [{:.0}..{:.0}, {:.0}..{:.0}]",
-                    w.source, w.kind, w.min_x, w.max_x, w.min_y, w.max_y,
+                    "{owner} {} {:?} {here}  grid z [{lo:.2}..{hi:.2}]  xy [{:.0}..{:.0}, {:.0}..{:.0}]",
+                    if w.answers(claim) { "◀ YOURS" } else { "· other room" },
+                    w.kind,
+                    w.min_x,
+                    w.max_x,
+                    w.min_y,
+                    w.max_y,
                 ),
             )
         })
@@ -503,9 +602,9 @@ pub(crate) fn describe_at<'a>(
 pub(crate) fn water_surface_at<'a>(
     water: impl Iterator<Item = &'a WaterChunkInfo>,
     wow: [f32; 3],
-    indoors: Option<bool>,
+    claim: LiquidClaim,
 ) -> Option<f32> {
-    liquid_at(water.filter(|w| !w.kind.is_fullbright()), wow, indoors).map(|h| h.surface_z)
+    liquid_at(water.filter(|w| !w.kind.is_fullbright()), wow, claim).map(|h| h.surface_z)
 }
 
 // The **wade ceiling** used to live here, as `WADE_MAX = 2.0` — a flat proxy for a boundary B7
@@ -537,6 +636,21 @@ fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
 /// [`WaterChunkInfo::surface_z_at`] does, so this is the binary's own rule and no longer a per-chunk
 /// flat approximation of it). One pass over the loaded surfaces (a few hundred, cheap).
 ///
+/// **The candidate set is the camera's own room, not the world.** The reference's per-frame
+/// environment probe `0x6809c0` reads the render eye `[0xc7cf20/24/28]` and then queries **one**
+/// source: the current WMO group's MLIQ (`0x6b9f10`) when `[0xc7b748]` names a containing
+/// map-object, otherwise the ADT liquid (`0x6723d0 → 0x69b6d0`) — VERIFIED, wow-re
+/// `terrain/scratch/fog-env-state.md` §1 (the two `[0xc7f288]` writers) and
+/// `ui/scratch/camera-arm-liquid-blind.md` §2's band census, which names both call sites inside
+/// `[0x6809c0, 0x680b90)`. We take the eye's claim from [`CameraInteriorClaim`], which
+/// `wmo_portal::compute_wmo_pvs` publishes off the very down-ray that writes `[0xc7b748]`.
+///
+/// This probe used to consult **every** loaded surface with no delegation at all, while the player's
+/// query had delegated since 0634 — so the two disagreed by construction, and the screen took the
+/// underwater filter in rooms the player was demonstrably dry in. Standing in Undercity's Rogues'
+/// Quarter at `(1414.08, 53.00, -62.26)`, 95 yd of rock below Tirisfal's ADT water at z 32.93, the
+/// player read "not in liquid" and the whole scene still rendered green (decision 0696).
+///
 /// **Every** liquid counts, including magma and slime — they are not the water murk, they are their
 /// own atmospheres (see [`Underwater`]). The eye's own **`+0.01` accept margin is water's alone**:
 /// byte-VERIFIED (`0x8029d0` = `0x3c23d70a` = 0.01, strict `<`, at `0x69ba23`) that the WMO
@@ -546,19 +660,22 @@ fn submersion_of(kind: LiquidKind) -> benilla_formats::Submersion {
 /// Where surfaces stack, the **deepest submerging** one wins: standing in the Great Forge's lava
 /// under an unrelated water footprint should read as lava, and a `.any()` over an unordered query
 /// would otherwise answer with whichever entity the ECS happened to yield first.
-fn detect_submersion(
+pub(super) fn detect_submersion(
     mut underwater: ResMut<Underwater>,
     camera: Query<&Transform, With<WorldCamera>>,
     water: Query<&WaterChunkInfo>,
+    eye_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     time: Res<Time>,
     mut last_dump: Local<Option<u32>>,
 ) {
     let Ok(cam) = camera.single() else {
         return;
     };
+    let claim = camera_claim(&eye_claim);
     let eye = bevy_to_wow(cam.translation); // [x, y, z] WoW yards
     underwater.0 = water
         .iter()
+        .filter(|w| w.answers(claim))
         .filter_map(|w| {
             let z = w.surface_z_at(eye[0], eye[1])?;
             let eps = if w.kind.is_fullbright() {
@@ -579,16 +696,24 @@ fn detect_submersion(
     if std::env::var_os("WOW_FOG_DUMP").is_some() {
         let sec = time.elapsed_secs() as u32;
         if last_dump.replace(sec) != Some(sec) {
+            // Every surface over the eye's XY, whether or not the eye's claim admits it — a
+            // candidate the delegation REJECTED is exactly what the Undercity green-screen report
+            // needed to see, and a list filtered to the winners can never show it.
             let mut cands: Vec<String> = water
                 .iter()
                 .filter_map(|w| {
-                    w.surface_z_at(eye[0], eye[1])
-                        .map(|z| format!("{:?} z {z:.2}", w.kind))
+                    w.surface_z_at(eye[0], eye[1]).map(|z| {
+                        format!(
+                            "{:?} z {z:.2}{}",
+                            w.kind,
+                            if w.answers(claim) { "" } else { " (not yours)" }
+                        )
+                    })
                 })
                 .collect();
             cands.sort();
             eprintln!(
-                "[submerged] {:?} eye [{:.1} {:.1} {:.2}] over-xy {}",
+                "[submerged] {:?} claim {claim:?} eye [{:.1} {:.1} {:.2}] over-xy {}",
                 underwater.0,
                 eye[0],
                 eye[1],
@@ -599,402 +724,6 @@ fn detect_submersion(
                     cands.join(", ")
                 }
             );
-        }
-    }
-}
-
-/// The shared liquid materials, one per [`LiquidKind`], plus each one's animated frame count (for
-/// the modulo in `animate_liquid`). Read by the terrain streamer (via [`spawn_liquids`]) to material
-/// the per-chunk water meshes. Absent when the client has no data (no `WorldAssets`).
-#[derive(Resource, Default)]
-pub(crate) struct LiquidAssets {
-    materials: HashMap<LiquidKind, LiquidEntry>,
-}
-
-struct LiquidEntry {
-    material: Handle<LiquidMaterial>,
-    frame_count: u32,
-}
-
-impl LiquidAssets {
-    /// The shared material for a liquid kind, if its frames loaded.
-    pub(crate) fn material(&self, kind: LiquidKind) -> Option<Handle<LiquidMaterial>> {
-        self.materials.get(&kind).map(|e| e.material.clone())
-    }
-
-    /// `(kind, material handle)` for each loaded kind — so `lighting::apply_wow_lighting` can push the
-    /// per-kind water colours + alpha onto the right shared material each light change.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (LiquidKind, &Handle<LiquidMaterial>)> {
-        self.materials.iter().map(|(k, e)| (*k, &e.material))
-    }
-}
-
-/// Marks a spawned water surface (one per liquid MCNK chunk), so it can be queried/culled as a group.
-#[derive(Component)]
-pub(crate) struct LiquidSurface;
-
-/// What the **above-water ambient-loop system** needs beyond the surface's geometry (wow-re
-/// `liquid-ambience-loop.md`, decision 0506): the sound-class nibble the driver resolves through
-/// `SoundWaterType.dbc`. Attached to **every** liquid surface, the fullbright kinds included (the
-/// Ironforge lava rumble, Undercity slime).
-///
-/// It used to carry its own copy of the footprint — bounds + a surface height — because when 0506
-/// wrote it, magma and slime carried no [`WaterChunkInfo`] to read them from. 0634 gave every kind
-/// one (that is what made lava swimmable), so the copy became a third set of numbers describing the
-/// same surface, and its height stayed the chunk maximum after the grid sample landed. The driver
-/// queries `(&LiquidSoundSource, &WaterChunkInfo)` instead — the pairing both spawn paths already
-/// guarantee — and reads the geometry from the one component that owns it.
-#[derive(Component)]
-pub(crate) struct LiquidSoundSource {
-    /// The surface's sound-class nibble (`class = n & 3`, `FluidSpeed = n & 0xc`).
-    pub(crate) nibble: u8,
-}
-
-/// A liquid surface's [`WaterChunkInfo`] — its grid lifted into **world** WoW space, with
-/// `transform` mapping the mesh's local space into the world.
-///
-/// For MCLQ water `lq.positions` are already absolute WoW and `transform` is `IDENTITY` —
-/// `bevy_to_wow(wow_to_bevy(p))` is an exact round-trip (a pure axis permutation with sign flips),
-/// so the grid comes through bit-for-bit. For WMO liquid the positions are model-local and
-/// `transform` is the building's MODF placement, so each vertex is carried local-WoW → local-Bevy →
-/// world-Bevy → world-WoW. That transform is affine, so the grid is still a regular lattice on the
-/// far side — which is what lets [`WaterChunkInfo`] invert a world XY straight to a cell.
-fn wet_footprint(lq: &LiquidMesh, transform: &Transform, source: LiquidSource) -> WaterChunkInfo {
-    // The grid is carried in WORLD WoW space (placement baked in) so every consumer — the swim
-    // query's cell lookup, the height sample, the foam clip, the ambient loop — reads one set of
-    // vertices in one frame of reference.
-    let positions: Vec<[f32; 3]> = lq
-        .positions
-        .iter()
-        .map(|&p| world_wow(transform, p))
-        .collect();
-    WaterChunkInfo::new(
-        source,
-        lq.kind,
-        [lq.grid[0] as usize, lq.grid[1] as usize],
-        positions,
-        lq.wet.clone(),
-    )
-}
-
-/// A liquid vertex's world-space WoW position: **local-WoW → local-Bevy → world-Bevy → world-WoW**.
-/// The one place the placement transform is baked into raw liquid coords. For MCLQ water the
-/// transform is `IDENTITY`, so this is `bevy_to_wow(wow_to_bevy(p))` = `p` exactly.
-fn world_wow(transform: &Transform, local: [f32; 3]) -> [f32; 3] {
-    bevy_to_wow(transform.transform_point(wow_to_bevy(local)))
-}
-
-/// Spawn a set of water surfaces — one flat mesh per [`LiquidMesh`], on its [`LiquidKind`]'s shared
-/// animated material. Used by the `AdtTile` pipeline (`terrain_stream`). No-op when the client has no
-/// data (`liquid_assets` absent) or a kind's frames didn't load. Spawned entities are pushed onto
-/// `entities` so they despawn with their tile.
-pub(crate) fn spawn_liquids<'a>(
-    commands: &mut Commands,
-    liquids: impl Iterator<Item = &'a LiquidMesh>,
-    liquid_assets: Option<&LiquidAssets>,
-    meshes: &mut Assets<Mesh>,
-    entities: &mut Vec<Entity>,
-) {
-    let Some(liquid) = liquid_assets else {
-        return;
-    };
-    for lq in liquids {
-        let Some(material) = liquid.material(lq.kind) else {
-            continue; // this kind's frames failed to load (warned at setup)
-        };
-        // The world-space liquid grid (MCLQ positions are already absolute WoW, so the IDENTITY
-        // transform is a no-op round-trip).
-        let info = wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk);
-        let foam = !lq.kind.is_fullbright(); // white surf is a water thing
-        entities.push(
-            commands
-                .spawn((
-                    Mesh3d(meshes.add(liquid_bevy_mesh(lq))),
-                    MeshMaterial3d(material),
-                    Transform::IDENTITY,
-                    LiquidSurface,
-                    info,
-                    LiquidSoundSource {
-                        nibble: lq.sound_nibble,
-                    },
-                ))
-                .id(),
-        );
-        // Foam is water-only; the cells it clips against ride `info`, not the marker.
-        if foam {
-            commands
-                .entity(*entities.last().expect("just pushed"))
-                .insert(FoamPatch);
-        }
-    }
-}
-
-/// Build the Bevy render mesh for one [`LiquidMesh`]: positions mapped WoW→Bevy (`lq.positions` are
-/// raw WoW coords — absolute for MCLQ, WMO-model-local for WMO liquid), a flat up normal, the tiling
-/// UVs, and the per-vertex swatch `V` packed into UV1.x for the shader's colour/opacity ramp. The
-/// caller decides the surface's world placement via the spawned entity's `Transform` (`IDENTITY` for
-/// absolute MCLQ water; the WMO placement transform for WMO liquid).
-fn liquid_bevy_mesh(lq: &LiquidMesh) -> Mesh {
-    let positions: Vec<[f32; 3]> = lq
-        .positions
-        .iter()
-        .map(|p| wow_to_bevy(*p).to_array())
-        .collect();
-    let n = positions.len();
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    // Flat surface: WoW up (0,0,1) → Bevy up (0,1,0). The shader lights against this (rotated into
-    // world by the entity transform) + the sun.
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, lq.uvs.clone());
-    // UV1.x carries the per-vertex swatch depth (0..1) for the shader's opacity ramp.
-    let uv1: Vec<[f32; 2]> = lq.depths.iter().map(|&d| [d, 0.0]).collect();
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
-    mesh.insert_indices(Indices::U32(lq.indices.clone()));
-    mesh
-}
-
-/// Spawn a WMO group's embedded liquid surfaces (Stormwind's canals + fountains, the Ironforge lava,
-/// dungeon pools) at the building's placement `transform`, on the shared per-kind liquid material —
-/// the same animated water render as MCLQ, but its geometry is WMO-model-local (built by
-/// `benilla_formats::wmo_group_liquid_mesh`) so the placement transform lifts it into the world.
-///
-/// No-op when the client has no data (`liquid_assets` absent) or a kind's frames didn't load. Each
-/// WATER surface also carries a world-space [`WaterChunkInfo`] + [`FoamPatch`] (both built by baking the
-/// placement transform into the raw liquid coords, [`world_wow`]) so the whole water-interaction stack
-/// sees WMO liquid exactly like MCLQ: swimming ([`crate::player::swim`]), the underwater murk
-/// ([`detect_submersion`]), the wading splash/footstep sounds, AND the `CWater0Ripple` wade wake /
-/// standing ring ([`crate::water_fx`], which builds each foam decal from the wet-cell lattice). The
-/// foam's world-axis texgen + per-triangle overlap consume the transformed cells fine, so a rotated
-/// canal's ring is still correctly world-oriented. Spawned entities are pushed onto `entities` so they
-/// despawn with the placement.
-pub(crate) fn spawn_wmo_liquids<'a>(
-    commands: &mut Commands,
-    liquids: impl Iterator<Item = &'a LiquidMesh>,
-    liquid_assets: Option<&LiquidAssets>,
-    meshes: &mut Assets<Mesh>,
-    transform: Transform,
-    entities: &mut Vec<Entity>,
-) {
-    let Some(liquid) = liquid_assets else {
-        return;
-    };
-    for lq in liquids {
-        let Some(material) = liquid.material(lq.kind) else {
-            continue; // this kind's frames failed to load (warned at setup)
-        };
-        let surface = commands
-            .spawn((
-                Mesh3d(meshes.add(liquid_bevy_mesh(lq))),
-                MeshMaterial3d(material),
-                transform,
-                LiquidSurface,
-                // The ambient-loop source rides EVERY kind — the fullbright lava/slime hum too
-                // (0506). It reads its geometry off the `WaterChunkInfo` inserted below.
-                LiquidSoundSource {
-                    nibble: lq.sound_nibble,
-                },
-            ))
-            .id();
-        // The swim/submersion grid rides EVERY kind, magma and slime included — that is what
-        // makes Blackrock's lava and Undercity's slime swimmable instead of something you fall
-        // through (decision 0634, bugs B24/B25). It used to be gated on `!is_fullbright()` because
-        // `WaterChunkInfo` carried no kind, so tagging lava would have swum the player under a teal
-        // *water* murk with white foam. The component carries [`LiquidKind`] now and the
-        // water-flavoured consumers filter on it (`water_surface_at`, `detect_submersion`), so the
-        // exclusion is no longer what keeps lava from looking like a lake.
-        //
-        // Lava/slime **damage** is still not modelled — a named gap, not a reason to keep the
-        // geometry non-solid.
-        commands
-            .entity(surface)
-            .insert(wet_footprint(lq, &transform, LiquidSource::WmoGroup));
-        // Foam stays water-only: it is white surf, and there is no such thing on magma.
-        if !lq.kind.is_fullbright() {
-            commands.entity(surface).insert(FoamPatch);
-        }
-        entities.push(surface);
-    }
-}
-
-/// Each kind's animated frame set: `(kind, XTextures subdir, file stem, frame count on disk)`.
-/// Frames are `XTextures\<dir>\<stem>.<1..=count>.blp` (256² RGBA, RGB dark + alpha ripple).
-const FRAME_SETS: &[(LiquidKind, &str, &str, u32)] = &[
-    (LiquidKind::Still, "river", "lake_a", 30),
-    (LiquidKind::Rapids, "river", "fast_a", 16),
-    (LiquidKind::Ocean, "ocean", "ocean_h", 30),
-    // WMO-liquid-only kinds (magma/slime carry no MCLQ data). Opaque + fullbright: the animated
-    // texture IS the body colour (VERIFIED wow-re — magma vert-fill = constant 1.0, no depth LUT).
-    (LiquidKind::Magma, "lava", "lava", 30),
-    (LiquidKind::Slime, "slime", "slime", 30),
-];
-
-fn setup_liquid(
-    mut commands: Commands,
-    config: Option<Res<RenderConfig>>,
-    world_assets: Option<ResMut<WorldAssets>>,
-    lighting: Option<Res<WowLighting>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<LiquidMaterial>>,
-) {
-    let (Some(_config), Some(mut world_assets)) = (config, world_assets) else {
-        return; // no client data → no terrain, so no water either
-    };
-    // Seed light/fog + water colours from the current light (or a sane default) so a surface renders
-    // correctly on its first frame; `apply_wow_lighting` keeps these in sync afterward (same path as
-    // terrain/WDL). Water colour = the per-kind Light.dbc close→far depth gradient (seeded below).
-    let light = lighting
-        .as_ref()
-        .map(|l| l.terrain_uniforms(false))
-        .unwrap_or_default();
-
-    let mut assets = LiquidAssets::default();
-    for &(kind, dir, stem, count) in FRAME_SETS {
-        let Some((frames, frame_count)) =
-            load_frame_array(&mut world_assets, &mut images, dir, stem, count)
-        else {
-            warn!("liquid: no frames for {stem} — {kind:?} water will not render");
-            continue;
-        };
-        // Per-kind water-swatch SEED (frame 0): the Light.dbc water-row shallow→deep endpoints (river/lake
-        // = IntBand 16/17, ocean = 14/15, RAW) + shallow alpha (river 0.5 / ocean 0.75; both reach deep =
-        // 1.0). Daytime fallback mirroring `Atmosphere::DEFAULT`; `apply_wow_lighting` replaces it with the
-        // live per-zone values on frame 1. The shader lerps both colour AND alpha by the same depth V.
-        let (shallow, deep, shallow_a) = match kind {
-            LiquidKind::Ocean => (
-                [0.063, 0.294, 0.349],
-                [0.0, 0.114, 0.161],
-                OCEAN_SHALLOW_ALPHA,
-            ),
-            LiquidKind::Still | LiquidKind::Rapids => (
-                [0.310, 0.365, 0.078],
-                [0.200, 0.322, 0.333],
-                RIVER_SHALLOW_ALPHA,
-            ),
-            // Magma/slime are fullbright (the shader takes the animated texture as the opaque body,
-            // ignoring the swatch); these endpoints are unread but kept white/opaque for clarity.
-            LiquidKind::Magma | LiquidKind::Slime => ([1.0, 1.0, 1.0], [1.0, 1.0, 1.0], 1.0),
-        };
-        let material = materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                // We do our own (WoW) lighting in the shader; blend + two-sided + depth-write-off
-                // (Bevy's transparent pass) is exactly the verified MCLQ water render state.
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                cull_mode: None,
-                double_sided: true,
-                ..default()
-            },
-            extension: LiquidExt {
-                frames,
-                light_ambient: light.light_ambient,
-                light_diffuse: light.light_diffuse,
-                light_sun: light.light_sun,
-                light_spec: Vec4::new(
-                    light.light_spec.x,
-                    light.light_spec.y,
-                    light.light_spec.z,
-                    WATER_SHININESS,
-                ),
-                water_shallow: Vec4::new(shallow[0], shallow[1], shallow[2], shallow_a),
-                water_deep: Vec4::new(deep[0], deep[1], deep[2], WATER_DEEP_ALPHA),
-                fog_color: light.fog_color,
-                fog_params: light.fog_params,
-                // x = frame 0 (index driven by `animate_liquid`); y = frame count; z = the fullbright
-                // flag (>0.5 ⇒ magma/slime: output the animated texture opaque, skip the swatch/lighting
-                // — VERIFIED wow-re magma path); w unused.
-                anim: Vec4::new(
-                    0.0,
-                    frame_count as f32,
-                    if kind.is_fullbright() { 1.0 } else { 0.0 },
-                    0.0,
-                ),
-            },
-        });
-        assets.materials.insert(
-            kind,
-            LiquidEntry {
-                material,
-                frame_count,
-            },
-        );
-    }
-    info!(
-        "liquid: loaded {} water frame set(s)",
-        assets.materials.len()
-    );
-    commands.insert_resource(assets);
-}
-
-/// Decode frames `1..=count` for a kind — each with its BLP **authored mip chain** — into one
-/// repeating, mipmapped + anisotropic `texture_2d_array` (`assets::liquid_frame_array`; mips are what
-/// stop the ripple aliasing into sparkle at distance). Stops at the first missing/non-square/
-/// size-mismatched frame (the on-disk sets are contiguous 256² runs). Returns the image handle + the
-/// number of frames actually loaded, or `None` if none decoded.
-fn load_frame_array(
-    world_assets: &mut WorldAssets,
-    images: &mut Assets<Image>,
-    dir: &str,
-    stem: &str,
-    count: u32,
-) -> Option<(Handle<Image>, u32)> {
-    let mut frames: Vec<BlpMipChain> = Vec::new();
-    let mut size = 0u32;
-    for i in 1..=count {
-        let path = format!("XTextures\\{dir}\\{stem}.{i}.blp");
-        let Ok(chain) = read_texture_mip_chain(&mut world_assets.chain.lock_recover(), &path)
-        else {
-            break;
-        };
-        if chain.width != chain.height {
-            break; // water frames are square; bail rather than build a ragged array
-        }
-        if size == 0 {
-            size = chain.width;
-        } else if chain.width != size {
-            break; // a frame at a different resolution can't share the array
-        }
-        frames.push(chain);
-    }
-    if frames.is_empty() {
-        return None;
-    }
-    let loaded = frames.len() as u32;
-    Some((images.add(liquid_frame_array(frames)), loaded))
-}
-
-/// Advance every liquid material's frame index at [`ANIM_FPS`] off Bevy **real** `Time` (wall-clock,
-/// mirroring the reference's `GetTickCount`-driven cycler — NOT the day/night game clock). Writes
-/// only on the [`ANIM_FPS`] tick edge: `Assets::get_mut` alone marks the asset Modified and feeds
-/// the respecialization pipeline (the mark-changed scan + `Changed<Mesh3d>` sweeps) every frame —
-/// the 0353 demand-price law; between ticks the frame index cannot have changed.
-fn animate_liquid(
-    time: Res<Time>,
-    liquid: Option<Res<LiquidAssets>>,
-    mut materials: ResMut<Assets<LiquidMaterial>>,
-    mut last_ticks: Local<Option<u32>>,
-) {
-    let Some(liquid) = liquid else {
-        return;
-    };
-    // Captures pin the cycler to frame 0: the wall-clock at screenshot time varies with load
-    // times, so any framing with open water diffs differently run to run — the flake substrate's
-    // baseline redesign caught (MAE 3.97 → 0.009 pinned; decision 0600). One clause, one frame.
-    let ticks = if crate::capture::scenario_active() {
-        0
-    } else {
-        (time.elapsed_secs() * ANIM_FPS) as u32
-    };
-    if *last_ticks == Some(ticks) {
-        return;
-    }
-    *last_ticks = Some(ticks);
-    for entry in liquid.materials.values() {
-        if let Some(m) = materials.get_mut(&entry.material) {
-            m.extension.anim.x = (ticks % entry.frame_count.max(1)) as f32;
         }
     }
 }
@@ -1048,6 +777,32 @@ mod tests {
         grid_info(source, kind, 2, 2, 10.0, vec![true], move |_, _| z)
     }
 
+    /// A stand-in placement identity — two distinct buildings, so "whose pool is this" is testable
+    /// without a `World`. `Entity::from_raw_u32` is the only way to mint one outside an ECS.
+    fn placement(n: u32) -> Entity {
+        Entity::from_raw_u32(n).expect("valid entity id")
+    }
+
+    /// A WMO pool owned by placement `n`, group 0.
+    fn wmo_info(owner: u32, kind: LiquidKind, z: f32) -> WaterChunkInfo {
+        flat_info(
+            LiquidSource::WmoGroup(Some(WmoRoom {
+                instance: placement(owner),
+                group: 0,
+            })),
+            kind,
+            z,
+        )
+    }
+
+    /// The claim of a subject standing inside placement `n`.
+    fn inside(owner: u32) -> LiquidClaim {
+        LiquidClaim::Inside(WmoRoom {
+            instance: placement(owner),
+            group: 0,
+        })
+    }
+
     /// MCLQ water passes `IDENTITY`: `bevy_to_wow(wow_to_bevy(p))` is a pure axis permutation with
     /// sign flips, so the footprint must equal the raw wet-vertex bounds exactly (bit-for-bit — the
     /// refactor that routed MCLQ through `wet_footprint` must not move a single lake edge).
@@ -1077,7 +832,7 @@ mod tests {
                 rotation: Quat::from_rotation_y(deg.to_radians()), // yaw about vertical
                 scale: Vec3::ONE,
             };
-            let info = wet_footprint(&flat_quad(5.0), &transform, LiquidSource::WmoGroup);
+            let info = wet_footprint(&flat_quad(5.0), &transform, LiquidSource::WmoGroup(None));
             let centre = bevy_to_wow(transform.transform_point(wow_to_bevy([5.0, 5.0, 5.0])));
             let z = info
                 .surface_z_at(centre[0], centre[1])
@@ -1140,33 +895,99 @@ mod tests {
     #[test]
     fn indoors_and_outdoors_see_different_liquid() {
         let lake = flat_info(LiquidSource::AdtChunk, LiquidKind::Still, 50.0);
-        let canal = flat_info(LiquidSource::WmoGroup, LiquidKind::Still, 8.0);
+        let canal = wmo_info(1, LiquidKind::Still, 8.0);
         let all = [&lake, &canal];
         let deep_under = [5.0, 5.0, 0.0];
 
         // Standing in the tunnel: the lake 50 yd overhead must NOT answer.
-        let inside = liquid_at(all.into_iter(), deep_under, Some(true)).unwrap();
-        assert_eq!(
-            inside.surface_z, 8.0,
-            "indoors must read the WMO's own liquid"
-        );
+        let hit = liquid_at(all.into_iter(), deep_under, inside(1)).unwrap();
+        assert_eq!(hit.surface_z, 8.0, "indoors must read the WMO's own liquid");
         // Out on the surface: the ADT lake answers and the building's canal does not.
-        let outside = liquid_at(all.into_iter(), deep_under, Some(false)).unwrap();
+        let outside = liquid_at(all.into_iter(), deep_under, LiquidClaim::Outdoors).unwrap();
         assert_eq!(outside.surface_z, 50.0);
-        // No claim (remote units): both sources answer — the documented pre-0634 behaviour.
-        assert!(liquid_at(all.into_iter(), deep_under, None).is_some());
+        // Un-classified (a unit's first frame): both sources answer — the pre-0634 behaviour, and
+        // the ONLY arm that still has it.
+        assert!(liquid_at(all.into_iter(), deep_under, LiquidClaim::Unknown).is_some());
         // Outside the XY footprint nothing answers, either way.
-        assert!(liquid_at(all.into_iter(), [99.0, 99.0, 0.0], Some(false)).is_none());
+        assert!(liquid_at(all.into_iter(), [99.0, 99.0, 0.0], LiquidClaim::Outdoors).is_none());
+    }
+
+    /// **The Uldaman bug** (director repro at `-6152.73, -2969.59, 213.73`): the claiming surface
+    /// belonged to a DIFFERENT BUILDING. Offline against the real client files, the player stands in
+    /// `kz_uldaman_a.wmo` (id 1218) group 22 — which carries no liquid over that XY at all — while
+    /// the pool answering `+185.91` over their feet is group 1 of a `md_mushroomcave.wmo` placement
+    /// whose every group bbox EXCLUDES the player, 186 yd overhead.
+    ///
+    /// A footprint has no floor, so "indoors" as a bare bool admitted every MLIQ surface on the map.
+    /// Being inside building A must never read building B's water.
+    #[test]
+    fn another_buildings_pool_never_claims_you() {
+        let mine = wmo_info(1, LiquidKind::Still, 8.0);
+        let theirs = wmo_info(2, LiquidKind::Still, 190.0);
+        let all = [&mine, &theirs];
+        let feet = [5.0, 5.0, 0.0];
+
+        assert_eq!(
+            liquid_at(all.into_iter(), feet, inside(1))
+                .unwrap()
+                .surface_z,
+            8.0,
+            "in building 1: only building 1's pool"
+        );
+        // In building 2 the tall pool IS yours — the scoping is an attribution, not a height cap.
+        assert_eq!(
+            liquid_at(all.into_iter(), feet, inside(2))
+                .unwrap()
+                .surface_z,
+            190.0
+        );
+        // The Uldaman shape exactly: standing in a building with no pool of its own, under someone
+        // else's. Pre-0696 the lowest of the two answered and the player swam in air.
+        assert!(
+            liquid_at([&theirs].into_iter(), feet, inside(1)).is_none(),
+            "building 1 has no liquid; building 2's must not stand in for it"
+        );
+    }
+
+    /// A pool on a placement that spawned no instance entity is claimable by nobody — the honest
+    /// consequence of having no owner, rather than a silent fallback to "everybody".
+    #[test]
+    fn an_unowned_pool_answers_no_one() {
+        let orphan = flat_info(LiquidSource::WmoGroup(None), LiquidKind::Still, 8.0);
+        let feet = [5.0, 5.0, 0.0];
+        assert!(liquid_at([&orphan].into_iter(), feet, inside(1)).is_none());
+        assert!(liquid_at([&orphan].into_iter(), feet, LiquidClaim::Outdoors).is_none());
+        // …but an un-classified subject still sees it, like every other surface.
+        assert!(liquid_at([&orphan].into_iter(), feet, LiquidClaim::Unknown).is_some());
+    }
+
+    /// **The Undercity camera bug** (director repro at `1414.08, 53.00, -62.26`): the player's query
+    /// said "not in liquid" while the camera-eye probe still saw Tirisfal's ADT water at z 32.93,
+    /// 95 yd overhead, and the whole scene took the underwater filter. Both subjects now run the
+    /// same delegation, so an indoor claim excludes the ADT surface for the eye exactly as it does
+    /// for the feet.
+    #[test]
+    fn an_indoor_eye_does_not_see_the_adt_water_overhead() {
+        let tirisfal = flat_info(LiquidSource::AdtChunk, LiquidKind::Still, 32.93);
+        let eye = [5.0, 5.0, -62.26];
+        assert!(
+            liquid_at([&tirisfal].into_iter(), eye, LiquidClaim::Outdoors).is_some(),
+            "outdoors under the same water: still submerged (the control)"
+        );
+        assert!(
+            liquid_at([&tirisfal].into_iter(), eye, inside(1)).is_none(),
+            "inside a building, the ADT water overhead is not the eye's liquid"
+        );
     }
 
     /// Stacked surfaces resolve to the LOWEST, not to whichever the iterator yields first — the old
     /// `.next()` made the answer depend on spawn order.
     #[test]
     fn stacked_surfaces_take_the_lowest() {
-        let upper = flat_info(LiquidSource::WmoGroup, LiquidKind::Still, 40.0);
-        let lower = flat_info(LiquidSource::WmoGroup, LiquidKind::Still, 4.0);
+        let upper = wmo_info(1, LiquidKind::Still, 40.0);
+        let lower = wmo_info(1, LiquidKind::Still, 4.0);
         for order in [[&upper, &lower], [&lower, &upper]] {
-            let hit = liquid_at(order.into_iter(), [5.0, 5.0, 0.0], Some(true)).unwrap();
+            let hit = liquid_at(order.into_iter(), [5.0, 5.0, 0.0], inside(1)).unwrap();
             assert_eq!(hit.surface_z, 4.0);
         }
     }
@@ -1177,12 +998,12 @@ mod tests {
     /// The submerged atmosphere is deliberately NOT in that list any more: it is per-kind.
     #[test]
     fn fullbright_kinds_swim_but_are_not_water() {
-        let lava = flat_info(LiquidSource::WmoGroup, LiquidKind::Magma, 6.0);
+        let lava = wmo_info(1, LiquidKind::Magma, 6.0);
         let here = [5.0, 5.0, 0.0];
-        let hit = liquid_at([&lava].into_iter(), here, Some(true)).expect("lava is a swim volume");
+        let hit = liquid_at([&lava].into_iter(), here, inside(1)).expect("lava is a swim volume");
         assert_eq!(hit.kind, LiquidKind::Magma);
         assert!(
-            water_surface_at([&lava].into_iter(), here, Some(true)).is_none(),
+            water_surface_at([&lava].into_iter(), here, inside(1)).is_none(),
             "magma must not read as water"
         );
     }
@@ -1197,7 +1018,10 @@ mod tests {
         // Three cells in a row; the MIDDLE one is a hole, so the box spans dry ground between two
         // wet halves — the canal-either-side-of-a-tunnel shape.
         let info = grid_info(
-            LiquidSource::WmoGroup,
+            LiquidSource::WmoGroup(Some(WmoRoom {
+                instance: placement(1),
+                group: 0,
+            })),
             LiquidKind::Still,
             4,
             2,
@@ -1215,8 +1039,8 @@ mod tests {
             "inside the box but over the HOLE — must NOT be liquid (the canal tunnel)"
         );
         // And the query agrees, which is what actually decides swimming.
-        assert!(liquid_at([&info].into_iter(), [5.0, 5.0, 0.0], Some(true)).is_some());
-        assert!(liquid_at([&info].into_iter(), [15.0, 5.0, 0.0], Some(true)).is_none());
+        assert!(liquid_at([&info].into_iter(), [5.0, 5.0, 0.0], inside(1)).is_some());
+        assert!(liquid_at([&info].into_iter(), [15.0, 5.0, 0.0], inside(1)).is_none());
     }
 
     /// A grid we cannot invert (here a plane stood on edge, so it projects to a line in XY) falls
@@ -1261,176 +1085,8 @@ mod tests {
         info.for_each_wet_cell(|_| cells += 1);
         assert_eq!(cells, 0, "nothing to walk, and no panic walking it");
         assert!(
-            describe_at([&info].into_iter(), [0.0, 0.0, 0.0]).is_empty(),
+            describe_at([&info].into_iter(), [0.0, 0.0, 0.0], LiquidClaim::Outdoors).is_empty(),
             "and `/liquid` lists no candidate for it"
-        );
-    }
-}
-
-/// The height rule against the **real client data** at the two positions the director reported —
-/// Blackrock Mountain's lava (a WMO's 55×82 MLIQ under a rotated placement) and Felwood's Felfire
-/// Hill river (one MCNK's 9×9 MCLQ). Both read as "swimming" while the liquid was visibly below the
-/// feet; both are the chunk-maximum height rule, and nothing but real grids reproduces them.
-///
-/// Skips when the 1.12.1 client isn't present (the repo never carries Blizzard data).
-#[cfg(test)]
-mod real_data {
-    use super::*;
-    use benilla_assets::coords::placement_rotation;
-    use benilla_formats::{parse_wmo_root, wmo_group_liquid_mesh};
-
-    /// Every loaded liquid surface covering `wow`'s tile neighbourhood on `map`, world-placed —
-    /// the ADT's own MCLQ chunks and every WMO placement's MLIQ groups, i.e. the same candidate set
-    /// the running client's `WaterChunkInfo` query sees.
-    fn surfaces_near(map: &str, wow: [f32; 3]) -> Vec<WaterChunkInfo> {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            return Vec::new();
-        }
-        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
-        let (cx, cy) = benilla_formats::world_to_tile(wow[0], wow[1]);
-        let mut out = Vec::new();
-        // A building as big as Blackrock is placed in every tile it straddles, so its MODF may sit
-        // in a neighbour of the tile the position falls in.
-        for dx in -1i32..=1 {
-            for dy in -1i32..=1 {
-                let (tx, ty) = ((cx as i32 + dx) as u32, (cy as i32 + dy) as u32);
-                let Ok(tile) = benilla_formats::load_tile_mesh(&mut chain, map, tx, ty) else {
-                    continue;
-                };
-                for lq in tile.chunks.iter().filter_map(|c| c.liquid.as_ref()) {
-                    out.push(wet_footprint(
-                        lq,
-                        &Transform::IDENTITY,
-                        LiquidSource::AdtChunk,
-                    ));
-                }
-                for w in &tile.wmos {
-                    let transform = Transform {
-                        translation: wow_to_bevy(w.position),
-                        rotation: placement_rotation(w.rotation),
-                        scale: Vec3::ONE,
-                    };
-                    let root_path = w.model.to_ascii_lowercase();
-                    let Ok(bytes) = chain.read_file(&root_path) else {
-                        continue;
-                    };
-                    let Ok(root) = parse_wmo_root(&bytes) else {
-                        continue;
-                    };
-                    let stem = root_path.strip_suffix(".wmo").unwrap_or(&root_path);
-                    for gi in 0..root.group_count() {
-                        let Ok(gb) = chain.read_file(&format!("{stem}_{gi:03}.wmo")) else {
-                            continue;
-                        };
-                        if let Some(lq) = wmo_group_liquid_mesh(&gb) {
-                            out.push(wet_footprint(
-                                lq_ref(&lq),
-                                &transform,
-                                LiquidSource::WmoGroup,
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    fn lq_ref(lq: &LiquidMesh) -> &LiquidMesh {
-        lq
-    }
-
-    /// The verdict at a position, and the highest wet vertex among the surfaces that claim it —
-    /// i.e. what the query answers now, beside what the chunk-maximum rule used to answer.
-    fn verdict(map: &str, wow: [f32; 3], indoors: bool) -> Option<(f32, f32)> {
-        let all = surfaces_near(map, wow);
-        if all.is_empty() {
-            return None; // no client data
-        }
-        let hit = liquid_at(all.iter(), wow, Some(indoors))?;
-        let old = all
-            .iter()
-            .filter(|w| w.surface_z_at(wow[0], wow[1]).is_some())
-            .map(|w| w.grid.fallback_z)
-            .fold(f32::MIN, f32::max);
-        Some((hit.surface_z, old))
-    }
-
-    /// **Blackrock Mountain's lava** at the director's `.go xyz -7531.21 -1123.64 172.58` (indoors,
-    /// `blackrock.wmo` group 038 — a 55×82 magma grid running 167.29 → 175.00 under a ~7° yaw
-    /// placement). The old chunk-maximum answered 175.00, i.e. 2.42 yd OVER the feet and well past
-    /// the 1.52 yd swim line, on a staircase whose lava is metres below.
-    #[test]
-    fn blackrock_lava_is_below_the_feet_not_above_it() {
-        let feet = [-7531.21_f32, -1123.64, 172.58];
-        let Some((surface, old_max)) = verdict("Azeroth", feet, true) else {
-            eprintln!("skipping: no WoW client data");
-            return;
-        };
-        assert!(
-            (old_max - 175.00).abs() < 0.05,
-            "the chunk maximum this replaces (got {old_max})"
-        );
-        assert!(
-            (surface - 168.45).abs() < 0.05,
-            "the lava under the feet is the cell's own height (got {surface})"
-        );
-        assert!(
-            surface < feet[2],
-            "surface {surface} must be UNDER the feet {} — standing on the stairs, not swimming",
-            feet[2]
-        );
-    }
-
-    /// **Felfire Hill's river** at the director's `.go xyz 1983.97 -2875.84 98.00` (outdoors, one
-    /// MCNK's 9×9 MCLQ falling 95.78 → 99.56 across the chunk). The old chunk-maximum answered
-    /// 99.56 — 1.56 yd over the feet, just past the 1.52 yd swim line — while the player stands on
-    /// the bank with the water at their soles.
-    #[test]
-    fn felfire_hill_river_does_not_swim_on_the_bank() {
-        let feet = [1983.97_f32, -2875.84, 98.00];
-        let Some((surface, old_max)) = verdict("Kalimdor", feet, false) else {
-            eprintln!("skipping: no WoW client data");
-            return;
-        };
-        assert!(
-            (old_max - 99.56).abs() < 0.05,
-            "the chunk maximum this replaces (got {old_max})"
-        );
-        assert!(
-            surface < feet[2],
-            "surface {surface} must be UNDER the feet {} — standing on the bank",
-            feet[2]
-        );
-        assert!(
-            (feet[2] - surface) < 1.0,
-            "…but only just: the water is at the player's soles (got {surface})"
-        );
-    }
-
-    /// **The gradient the swim law is sized against** (decision 0644): Felwood's Felfire Hill
-    /// channel, along the run the live probe swam. A liquid surface is a heightfield, and *how far
-    /// from flat* is exactly what decides whether the swim latch's 1/36-yd hysteresis band can
-    /// absorb travelling along it — so the slope `player::swim`'s regression test drives is pinned
-    /// here against the shipped ADT instead of living as a constant someone can only take on faith.
-    #[test]
-    fn the_felfire_channel_falls_about_a_tenth_of_a_yard_per_yard() {
-        let (downstream, upstream) = ([1953.97_f32, -2866.84, 0.0], [2013.97_f32, -2866.84, 0.0]);
-        let all = surfaces_near("Kalimdor", downstream);
-        if all.is_empty() {
-            eprintln!("skipping: no WoW client data");
-            return;
-        }
-        let z = |at: [f32; 3]| {
-            liquid_at(all.iter(), at, Some(false))
-                .unwrap_or_else(|| panic!("no river at {at:?}"))
-                .surface_z
-        };
-        let slope = (z(upstream) - z(downstream)) / (upstream[0] - downstream[0]);
-        assert!(
-            (slope - 0.099).abs() < 0.005,
-            "the channel's gradient over 60 yd (got {slope})"
         );
     }
 }

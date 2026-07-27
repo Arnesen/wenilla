@@ -16,7 +16,6 @@ use bevy::prelude::*;
 
 use crate::assets::LockRecover;
 use crate::assets::{AssetSet, RenderConfig, WorldAssets};
-use crate::lighting::WowLighting;
 use crate::player::{Player, WorldCamera};
 use crate::terrain::{WdlExt, WdlMaterial};
 use crate::world_map::{CurrentMap, MapCatalogRes};
@@ -49,8 +48,8 @@ impl Plugin for WdlPlugin {
 }
 
 /// Streams the coarse WDL ring: the parsed file, the shared material every ring tile uses, and which
-/// ring tiles are currently spawned. (The fog uniforms on the material are kept in sync by
-/// `lighting::apply_wow_lighting`, same as terrain/model materials.)
+/// ring tiles are currently spawned. (The material holds no fog of its own — it reads the shared
+/// global-light buffer, same as terrain and the models.)
 #[derive(Resource)]
 pub(crate) struct WdlStreamer {
     wdl: WdlFile,
@@ -80,7 +79,6 @@ fn setup_wdl(
     mut commands: Commands,
     config: Option<Res<RenderConfig>>,
     world_assets: Option<ResMut<WorldAssets>>,
-    lighting: Option<Res<WowLighting>>,
     mut materials: ResMut<Assets<WdlMaterial>>,
 ) {
     let (Some(_config), Some(world_assets)) = (config, world_assets) else {
@@ -100,19 +98,9 @@ fn setup_wdl(
             return;
         }
     };
-    // One shared material; seed its fog from the current light (or a sane default until frame 1's
-    // apply_wow_lighting). Opaque ⇒ depth-LEQUAL + depth-write, no blend (the verified WoW.8 state).
-    let (fog_color, fog_params) = lighting
-        .map(|l| {
-            let u = l.terrain_uniforms(false);
-            (u.fog_color, u.fog_params)
-        })
-        .unwrap_or((
-            // fog_params.w = farclip (the wall) so WDL near-clips correctly even before the first
-            // apply_wow_lighting push; matches the 777 seed terrain uses.
-            Vec4::new(0.323, 0.477, 0.516, 1.0),
-            Vec4::new(80.0, 481.0, 0.0, 777.0),
-        ));
+    // One shared material, reading the shared global light like terrain does — no seed and no
+    // per-frame push: `build_light_data` has already packed the fog by the first draw. Opaque ⇒
+    // depth-LEQUAL + depth-write, no blend (the verified WoW.8 state).
     let material = materials.add(ExtendedMaterial {
         base: StandardMaterial {
             base_color: Color::WHITE,
@@ -121,8 +109,7 @@ fn setup_wdl(
             ..default()
         },
         extension: WdlExt {
-            fog_color,
-            fog_params,
+            light_buf: world_assets.shared_light.clone(),
         },
     });
     commands.insert_resource(WdlStreamer {

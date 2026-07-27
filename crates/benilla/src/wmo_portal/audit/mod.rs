@@ -69,6 +69,16 @@ const FARGODEEP: Site = Site {
     uid: 210351,
 };
 
+/// The Deadmines dungeon shell — decision 0692's repro site: the zone-in tunnel (g35) opens through
+/// the swirl-portal doorway into a sealed pocket (g39) floored entirely with DETAIL faces, where the
+/// faithful down-ray legs find nothing and the client blanks the building around its own camera.
+const DEADMINES: Site = Site {
+    wmo: r"world\wmo\dungeon\az_deadmines\az_deadmines_b.wmo",
+    map: "DeadminesInstance",
+    tile: (32, 32),
+    uid: 170633,
+};
+
 /// The Goldshire blacksmith — the fire-lit forge floor (the 2026-07-13 per-step light-flash report).
 const BLACKSMITH: Site = Site {
     wmo: r"world\wmo\azeroth\buildings\goldshireblacksmith\goldshireblacksmith.wmo",
@@ -153,6 +163,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         })
         .collect();
     let mut group_collision_tris: Vec<Vec<[[f32; 3]; 3]>> = vec![Vec::new(); n];
+    let mut group_camera_only_tris: Vec<Vec<[[f32; 3]; 3]>> = vec![Vec::new(); n];
     let mut group_footprints: Vec<Option<benilla_formats::FootprintTris>> =
         (0..n).map(|_| None).collect();
     let mut cam_pos = Vec::new();
@@ -191,6 +202,19 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         let base = walk_pos.len() as u32;
         walk_pos.extend_from_slice(&cp);
         walk_idx.extend(ci.iter().map(|i| i + base));
+        // Leg C's fallback set — the camera-only complement (DETAIL set, NOCAMCOLLIDE clear),
+        // exactly as the asset loader stores it (decision 0692).
+        let (mut dp, mut di): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
+        benilla_formats::accumulate_wmo_group_camera_only_collision(&gbytes, &mut dp, &mut di);
+        for t in di.chunks_exact(3) {
+            if let (Some(&a), Some(&b), Some(&c)) = (
+                dp.get(t[0] as usize),
+                dp.get(t[1] as usize),
+                dp.get(t[2] as usize),
+            ) {
+                group_camera_only_tris[gi].push([a, b, c]);
+            }
+        }
         names[gi] = root
             .group_infos()
             .get(gi)
@@ -210,6 +234,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_nav,
         fogs: root.fogs().to_vec(),
         group_collision_tris,
+        group_camera_only_tris,
         group_collision_bounds,
         collision_bounds,
         collision: None,
@@ -224,6 +249,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_liquids: Vec::new(),
         doodad_base: Vec::new(),
         doodad_owner: Vec::new(),
+        doodad_groups: Vec::new(),
     };
     Subject {
         model,
@@ -798,5 +824,50 @@ fn wmo_pvs_audit() {
         hard.is_empty(),
         "{} hard PVS violations (camera seeded a group but the flood missed the player's — see trace)",
         hard.len()
+    );
+}
+
+/// Decision 0692's repro, on the shipped data: the camera pulled back from the Deadmines zone-in
+/// crosses the swirl-portal doorway into the sealed g35/g39 pocket, whose floor is entirely DETAIL
+/// faces — camera collision holds the eye there (every back-hemisphere ray hits a camera face within
+/// ~16 yd) while Legs A+B find nothing, and the client's own verdict blanks the building around its
+/// own camera. Leg C must name the pocket's room; the terrain race must still own the columns where
+/// its answer is right (the hilltop lid ~272 yd above the tunnel).
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn wmo_camera_void_audit() {
+    let subject = load_subject(DEADMINES.wmo, Some(&DEADMINES));
+    // The zone-in head: areatrigger 78's destination (-14.5732, -385.475, 62.4561) + head height,
+    // mapped through the MODF placement (uid 170633) into B-local space.
+    let head = [268.56, -137.17, 34.61];
+    assert_eq!(
+        subject.seeds(head).in_group,
+        Some(35),
+        "the entrance tunnel must stay Leg A's answer — Leg C never touches a faithful verdict"
+    );
+    // Eyes along the swept camera path behind the head: level-back at 8/12/13.2 yd and the raised
+    // zoom arc. All sit past the last walking-gather floor; each must still name the pocket's room.
+    for eye in [
+        [260.6, -137.3, 34.6],
+        [256.6, -137.4, 34.6],
+        [255.4, -137.4, 34.6],
+        [256.0, -137.4, 41.9],
+    ] {
+        let s = subject.seeds(eye);
+        let g = s.in_group.unwrap_or_else(|| {
+            panic!("camera-void eye {eye:?} read OUTSIDE — the building blanks around the camera")
+        });
+        assert!(
+            g == 35 || g == 39,
+            "camera-void eye {eye:?} named g{g}, not the entrance pocket (g35/g39)"
+        );
+        assert!(s.across.is_none(), "Leg C seeds a single root");
+    }
+    // Above the hilltop lid the terrain race owns the column: an eye over open ground must stay
+    // outside — the fallback's terrain gate keeps the divergence out of the client's right answers.
+    assert_eq!(
+        subject.seeds([255.4, -137.4, 280.0]).in_group,
+        None,
+        "an eye above the terrain lid must remain OUTSIDE"
     );
 }

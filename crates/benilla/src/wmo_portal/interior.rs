@@ -19,7 +19,7 @@ use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::{AdtTile, WmoModel};
 
 use super::seed::{area_down_ray, down_ray_claim, down_ray_seeds, DownRayClaim};
-use super::{WmoPortalInstance, WorldCamera, EXTERIOR, EXTERIOR_LIT};
+use super::{WmoPortalInstance, WmoRoom, WorldCamera, EXTERIOR, EXTERIOR_LIT};
 use crate::terrain_stream::{terrain_height_under, PropLobeLight, TerrainStreamer};
 
 /// The WMO interior the camera eye is currently in — the `WMOAreaTable` join keys of the group
@@ -28,6 +28,44 @@ use crate::terrain_stream::{terrain_height_under, PropLobeLight, TerrainStreamer
 /// (`sound::interior`) and any future interior consumer (light, fog, minimap names).
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentWmoInterior(pub Option<WmoInteriorKeys>);
+
+/// The **room** the player stands in — the same down-ray claim [`CurrentWmoInterior`] names, but as
+/// the placement identity ([`WmoRoom`]) rather than the `WMOAreaTable` join keys. Written by
+/// [`track_current_interior`] in the same pass (no second ray).
+///
+/// Its consumer is the liquid query's scope key (decision 0696): a building's MLIQ pool belongs to
+/// that building, so only a subject standing in *that placement* can be in it. Before this, "indoors"
+/// was a bare `bool` and every WMO pool on the map answered — the Uldaman entrance read as submerged
+/// under a mushroom cave's water 186 yd overhead, in a building the player was 191 yd below.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerWmoRoom(pub Option<WmoRoom>);
+
+/// The WMO room **one remote unit** stands in — its own liquid claim, the per-unit twin of
+/// [`PlayerWmoRoom`].
+///
+/// It exists because the liquid query's `None` ("no interior claim for this subject") arm was a
+/// standing gap: every consumer that walks *units* rather than the local player — the creature swim
+/// marker, the wade splash, the footstep splash slot, the remote-motion depth — passed it, so both
+/// sources answered and an ADT lake claimed anything beneath it. In Undercity's Rogues' Quarter the
+/// NPCs stood 95 yd under Tirisfal's water at z 32.93 and swam on dry stone, in the same rooms the
+/// player (who *did* have a claim) walked normally (decision 0696).
+///
+/// Re-rayed only when the unit MOVES or a building streams in/out — a room changes at doorways, not
+/// per frame — so a town full of standing NPCs costs one position compare each.
+#[derive(Component, Clone, Copy, Default, PartialEq)]
+pub struct UnitWmoRoom {
+    room: Option<WmoRoom>,
+    /// Where the claim was last sampled, and the WMO-residency generation then: the re-test gate.
+    at: Vec3,
+    generation: u32,
+}
+
+impl UnitWmoRoom {
+    /// The room, for the liquid query's scope key.
+    pub fn room(&self) -> Option<WmoRoom> {
+        self.room
+    }
+}
 
 /// `WMOAreaTable` lookup keys: `(WMOID, NameSetID, WMOGroupID)`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -131,14 +169,16 @@ pub(super) fn track_area_interior(
 /// flicker, 2026-07-03). The camera is the fallback before login / detached free-fly.
 /// Independent of the PVS compute (which early-outs on portal-less models — a portal-less hut
 /// still has a floor to stand on; the *render* seed stays the camera, as the client's does).
+#[allow(clippy::too_many_arguments)] // a Bevy system: each arg is a distinct resource/query
 pub(super) fn track_current_interior(
     wmos: Res<Assets<WmoModel>>,
     player: Res<crate::player::Player>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    instances: Query<&WmoPortalInstance>,
+    instances: Query<(Entity, &WmoPortalInstance)>,
     streamer: Res<TerrainStreamer>,
     adt_tiles: Res<Assets<AdtTile>>,
     mut current: ResMut<CurrentWmoInterior>,
+    mut room: ResMut<PlayerWmoRoom>,
 ) {
     let eye_world = if player.active && !player.detached {
         player.pos + Vec3::Y * INTERIOR_PROBE_HEIGHT
@@ -152,7 +192,8 @@ pub(super) fn track_current_interior(
     // player standing on the grass above it.
     let terrain = terrain_height_under(&streamer, &adt_tiles, eye_world);
     let mut found = None;
-    for inst in &instances {
+    let mut found_room = None;
+    for (entity, inst) in &instances {
         let Some(model) = wmos.get(&inst.handle) else {
             continue;
         };
@@ -168,12 +209,130 @@ pub(super) fn track_current_interior(
                 name_set: u32::from(inst.name_set),
                 group_area_id: model.group_nav.get(gi).map_or(0, |g| g.area_table_id),
             });
+            // The same claim as a placement identity — the liquid query's scope key (0696).
+            found_room = Some(WmoRoom {
+                instance: entity,
+                group: gi as u16,
+            });
             break;
         }
     }
     if current.0 != found {
         current.0 = found;
     }
+    if room.0 != found_room {
+        room.0 = found_room;
+    }
+}
+
+/// Squared distance (yd²) a unit must move before its room claim is re-rayed. A room changes at a
+/// doorway, not continuously, so this is a travel gate rather than a precision one: the claim can
+/// lag a transition by at most this distance, which for a swim/submersion verdict is well inside the
+/// wade band. Deliberately coarser than `interior::RESAMPLE_DIST_SQ` (the light classifier's ~0,
+/// which must not quantize a *continuous* MOCV field into steps — a room index has no such field).
+const UNIT_ROOM_RESAMPLE_DIST_SQ: f32 = 0.25 * 0.25;
+
+/// Maintain [`UnitWmoRoom`] on every net entity: the room its position stands in, from the same
+/// faces-only down-ray the zone-text claim uses ([`area_down_ray`], EXTERIOR `0x8` excluded, terrain
+/// raced) cast from the unit's own position.
+///
+/// The leg is the **position-cast faces** one, not the render seed's lifted eye + portal race: the
+/// client casts its position legs from the position itself (`zonetext-indoor-bit.md` (b)), and a unit
+/// is a position, not a camera. Which leg the reference's *own* per-unit liquid depth uses — and
+/// whether it scopes to the containing GROUP rather than the placement — is the open half of the
+/// wow-re dispatch 0696 re-asked; this is the claim that makes the query *scoped at all*, and it is
+/// re-pointable at one call site when that lands.
+pub(super) fn track_unit_interiors(
+    mut commands: Commands,
+    wmos: Res<Assets<WmoModel>>,
+    instances: Query<(Entity, &WmoPortalInstance)>,
+    streamer: Res<TerrainStreamer>,
+    adt_tiles: Res<Assets<AdtTile>>,
+    residency: Res<crate::interior::WmoResidency>,
+    mut units: Query<
+        (Entity, &GlobalTransform, Option<&mut UnitWmoRoom>),
+        With<crate::net::NetEntity>,
+    >,
+) {
+    let generation = residency.generation();
+    for (entity, transform, claim) in &mut units {
+        // World position, not the local one: a mounted unit's `Transform` is seat-relative
+        // (0441), and its room is decided where it actually stands.
+        let pos = transform.translation();
+        // The re-test gate: a settled unit in an unchanged world keeps its room for free. A
+        // building streaming in UNDER a standing NPC must still re-claim it — that is the whole
+        // point of the generation leg, and without it a creature spawned before its own dungeon
+        // would hold an "outdoors" claim and read the lake overhead forever.
+        if let Some(claim) = claim.as_ref() {
+            if claim.generation == generation
+                && pos.distance_squared(claim.at) < UNIT_ROOM_RESAMPLE_DIST_SQ
+            {
+                continue;
+            }
+        }
+        let room = room_at(&wmos, &instances, &streamer, &adt_tiles, pos);
+        let next = UnitWmoRoom {
+            room,
+            at: pos,
+            generation,
+        };
+        match claim {
+            Some(mut claim) => {
+                if *claim != next {
+                    *claim = next;
+                }
+            }
+            // `try_insert`: a unit despawning this frame (the net teardown) applies before this
+            // command, and the insert must not panic at apply time.
+            None => {
+                commands.entity(entity).try_insert(next);
+            }
+        }
+    }
+}
+
+/// The WMO room a world position stands in — the placement + group of the nearest **face** under it,
+/// faces-only ([`area_down_ray`], EXTERIOR `0x8` excluded, terrain raced), first claim wins.
+///
+/// The shared body of the per-unit claim; the same shape as [`track_area_interior`]'s loop, returning
+/// the placement identity instead of the `WMOAreaTable` keys.
+fn room_at(
+    wmos: &Assets<WmoModel>,
+    instances: &Query<(Entity, &WmoPortalInstance)>,
+    streamer: &TerrainStreamer,
+    adt_tiles: &Assets<AdtTile>,
+    feet_world: Vec3,
+) -> Option<WmoRoom> {
+    let probe_world = feet_world + Vec3::Y * POSITION_PROBE_LIFT;
+    let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
+    for (entity, inst) in instances {
+        let Some(model) = wmos.get(&inst.handle) else {
+            continue;
+        };
+        if model.wmo_id == 0 {
+            continue; // the same placement set the player's own claim walks
+        }
+        let local_from_world = inst.world_from_local.inverse();
+        let probe_local = bevy_to_wow(local_from_world.transform_point3(probe_world));
+        if !column_in_collision_bounds(model.collision_bounds, probe_local) {
+            continue; // no face of this building can own the probe column
+        }
+        let terrain_local = terrain.map(|z| terrain_z_local(&local_from_world, probe_world, z));
+        if let Some(gi) = area_down_ray(
+            &model.group_collision_tris,
+            &model.group_collision_bounds,
+            &model.group_nav,
+            probe_local,
+            terrain_local,
+            EXTERIOR,
+        ) {
+            return Some(WmoRoom {
+                instance: entity,
+                group: gi as u16,
+            });
+        }
+    }
+    None
 }
 
 /// Whether a world position stands INDOORS **for the unit LIGHT law** — the nearest surface under
@@ -426,6 +585,7 @@ mod tests {
             group_nav: Vec::new(),
             fogs: Vec::new(),
             group_collision_tris: Vec::new(),
+            group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
             collision_bounds: None,
             collision: None,
@@ -440,6 +600,7 @@ mod tests {
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
+            doodad_groups: Default::default(),
         }
     }
 

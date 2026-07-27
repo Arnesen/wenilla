@@ -10,20 +10,18 @@ use bevy::prelude::*;
 use crate::assets::AssetSet;
 use benilla_formats::{LightCatalog, LiquidKind};
 
-mod apply; // the per-frame material/ClearColor push (apply_wow_lighting, apply_sky_backdrop)
 mod daynight; // the two sun directions + day/night interp + the dawn/dusk warp curve
 mod global_light; // the one shared global-light storage buffer (replaces the per-material push)
 mod prop_probes; // the per-instance interior-prop SH probe table (slot ↔ MeshTag payload)
 mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO interior-fog crossfade
 mod sh; // the model SH light-probe coefficient math
-use apply::{apply_sky_backdrop, apply_wow_lighting};
 pub(crate) use global_light::{
     commit_raw, light_blob_bytes, new_shared_light_buffer, pack_model_core_rows, SharedLightBuffer,
     LIGHT_HEADER_ROWS,
 };
 pub(crate) use prop_probes::{prop_probe_region_offset, PropProbeSlot, PropProbes};
 pub(crate) use resolve::fog_range;
-use resolve::{setup_lighting, update_time_lighting};
+use resolve::{apply_sky_backdrop, setup_lighting, update_time_lighting};
 pub(crate) use sh::prop_probe_coeffs;
 
 /// Scene lighting sampled from `Light.dbc` for the current time of day — fed into the terrain
@@ -162,64 +160,7 @@ pub(crate) struct WowLighting {
     pub(crate) cloud_glow_track: f32,
 }
 
-/// The terrain/model lighting + fog uniforms resolved from the current [`WowLighting`] — the single
-/// source of truth shared by [`apply_wow_lighting`] (the per-frame material push) and
-/// the terrain streamer, which seeds a freshly-streamed tile with these so it renders with the
-/// right light + fog on its FIRST frame instead of popping in un-fogged / placeholder-lit while it
-/// waits a frame for `apply_wow_lighting`. The shared fields (ambient/diffuse/fog) are identical for
-/// terrain and models; `light_sun.w` and the specular term differ per surface and are set at the call.
-#[derive(Clone, Copy)]
-pub(crate) struct TerrainLightUniforms {
-    pub(crate) light_ambient: Vec4,
-    pub(crate) light_diffuse: Vec4,
-    pub(crate) light_sun: Vec4,
-    pub(crate) light_spec: Vec4,
-    pub(crate) fog_color: Vec4,
-    pub(crate) fog_params: Vec4,
-}
-
-impl Default for TerrainLightUniforms {
-    /// Mirrors the streamer's historical placeholders (fog disabled, neutral light) — used only when
-    /// no [`WowLighting`] exists yet (DBCs absent); `apply_wow_lighting` is also inert then, so a
-    /// tile keeps these, exactly as before.
-    fn default() -> Self {
-        Self {
-            light_ambient: Vec4::new(0.4, 0.4, 0.4, 2.0),
-            light_diffuse: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            light_sun: Vec4::new(0.0, -1.0, 0.0, 0.0),
-            light_spec: Vec4::ZERO,
-            fog_color: Vec4::ZERO,
-            fog_params: Vec4::new(125.0, 500.0, 0.0, 777.0),
-        }
-    }
-}
-
 impl WowLighting {
-    /// Resolve the terrain/model fog + light uniforms for the current light. `disable_fog` is the
-    /// debug-panel toggle (off = faithful, fog enabled). Terrain specular is row 9 + shininess 20
-    /// (Step 3b); `light_sun.w = 1.0` (full directional / MCSH on) — the model path overrides `.w`
-    /// with the SH-enable flag at its own call site.
-    pub(crate) fn terrain_uniforms(&self, disable_fog: bool) -> TerrainLightUniforms {
-        let fog_enable = if disable_fog { 0.0 } else { 1.0 };
-        TerrainLightUniforms {
-            light_ambient: Vec4::new(self.ambient[0], self.ambient[1], self.ambient[2], 1.0),
-            light_diffuse: Vec4::new(self.diffuse[0], self.diffuse[1], self.diffuse[2], 1.0),
-            light_sun: self.sun_dir.extend(1.0),
-            light_spec: Vec4::new(self.spec[0], self.spec[1], self.spec[2], 20.0),
-            fog_color: Vec4::new(
-                self.fog_color[0],
-                self.fog_color[1],
-                self.fog_color[2],
-                fog_enable,
-            ),
-            // .w = the hard far-clip "wall" distance (yd): terrain.wgsl / wow_model.wgsl discard
-            // fragments with planar eye-Z beyond it, reproducing the reference's projection far plane
-            // (`farclip`, 777). `apply_wow_lighting` overrides this with the live `ViewDistance.farclip`
-            // each frame; the 777 seed clips a freshly-streamed tile correctly on its first frame.
-            fog_params: Vec4::new(self.fog_start, self.fog_end, 0.0, 777.0),
-        }
-    }
-
     /// Per-kind **water swatch endpoints**: `(shallow_rgb, deep_rgb, shallow_alpha, deep_alpha)`. The
     /// from-above depth swatch is a plain **2-endpoint linear lerp** of the zone's dedicated `Light.dbc`
     /// water rows — IntBand 16/17 (river/lake) or 14/15 (ocean), **RAW** (no ×0.711) — by the per-vertex
@@ -232,6 +173,17 @@ impl WowLighting {
     /// colour, not transparency) — VERIFIED vs the apitrace swatch alpha + user-confirmed in-game.
     /// (The earlier "water reflects the sky × 0.711 via `FUN_0068c250`" derivation fingered the WRONG
     /// builder; the dedicated rows 14-17 we'd originally used were right.)
+    ///
+    /// The opacity ramp itself is indexed by the raw MCLQ depth byte (0 = shore → 255 = deep) with
+    /// **no scale** — VERIFIED `WoW.exe FUN_006b6b60` builds `ca7f10[d] = shallow + d·(deep−shallow)/256`
+    /// from `gWorldLight+0x114/+0x118`, corroborated by the apitrace swatch (`α = 127 + 2·row` ⇒
+    /// 0.5→1.0 for river/lake, 0.75→1.0 for ocean). The alpha and the colour ride the SAME per-vertex
+    /// `V`, and the river/lake `V` is the **steep `clamp(byte/42)`** (VERIFIED `c81768` LUT /
+    /// `FUN_0068d790`) — NOT `byte/255`: a river channel saturates to opaque deep teal by **byte 42 ≈
+    /// 5 yd** (ramp ≈8.5 byte/yd, VERIFIED `probe_water_depth`), leaving only the shore edge
+    /// see-through. Ocean uses a different non-LUT path (placeholder `/255`, pending its own RE+A/B).
+    /// (Earlier bugs: `×8 DEPTH_RAMP_SCALE` saturated at ~4 yd; then the gentle `byte/255` was the
+    /// WRONG LUT and the river middle never reached teal.)
     pub(crate) fn water_colors(&self, kind: LiquidKind) -> ([f32; 3], [f32; 3], f32, f32) {
         let (shallow_rgb, deep_rgb, alpha) = if kind == LiquidKind::Ocean {
             (
@@ -249,22 +201,6 @@ impl WowLighting {
         (shallow_rgb, deep_rgb, alpha[0], alpha[1])
     }
 }
-
-/// `Light.dbc` LightParams **water blend alphas** — the depth-ramp opacity endpoints, indexed by the
-/// raw MCLQ depth byte (0 = shallow shore → 255 = deep), **no scale**. VERIFIED from `WoW.exe`
-/// (`FUN_006b6b60` builds `ca7f10[d] = shallow + d·(deep−shallow)/256` from `gWorldLight+0x114/+0x118`,
-/// LightParams 13 for Elwynn) and corroborated by the apitrace swatch (`α = 127 + 2·row` ⇒ 0.5→1.0).
-/// River/lake shallow-α = 0.5, ocean = 0.75; both reach 1.0 (opaque) where the swatch coord `V`
-/// saturates. The alpha and the colour ride the SAME per-vertex `V`, and the river/lake `V` is the
-/// **steep `clamp(byte/42)`** (VERIFIED `WoW.exe c81768` LUT / `FUN_0068d790`) — NOT `byte/255`. So a
-/// river channel saturates to opaque + deep-teal by **byte 42 ≈ 5 yd** (the river depth ramp is ≈8.5
-/// byte/yd, VERIFIED `probe_water_depth`); only the shore edge stays semi-transparent (the brown bottom
-/// shows). Ocean uses a different non-LUT path (placeholder `/255`, pending its own RE+A/B). Per-zone DBC
-/// plumbing deferred; LightParams 13 covers Elwynn. (Earlier bugs: `×8 DEPTH_RAMP_SCALE` saturated at ~4
-/// yd; then the gentle `byte/255` was the WRONG LUT and the river middle never reached teal.)
-pub(crate) const RIVER_SHALLOW_ALPHA: f32 = 0.5;
-pub(crate) const OCEAN_SHALLOW_ALPHA: f32 = 0.75;
-pub(crate) const WATER_DEEP_ALPHA: f32 = 1.0;
 
 /// Water surface **specular shininess** — the water material's Phong power for the sun sheen
 /// (`ffp_material.shininess` at the traced water draw ≈ 6; terrain uses 20). Lower ⇒ a broader,
@@ -318,7 +254,7 @@ impl Plugin for LightingPlugin {
             .add_systems(Startup, setup_lighting.after(AssetSet::Open))
             .add_systems(
                 Update,
-                (update_time_lighting, apply_wow_lighting, apply_sky_backdrop)
+                (update_time_lighting, apply_sky_backdrop)
                     .chain()
                     // The storm blend reads this frame's weather densities (decision 0302).
                     .after(crate::weather::WeatherTick),

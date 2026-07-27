@@ -274,14 +274,15 @@ fn control(
             ),
         >,
         Query<&ChildOf>,
-        // The player's live WMO-interior claim — the liquid query's delegation key: inside a
-        // building only that building's own MLIQ answers, outdoors only the ADT's (decision 0634,
-        // the "swim in air" fix). Fourth slot here rather than a 17th top-level param.
-        Res<crate::wmo_portal::CurrentWmoInterior>,
+        // The player's live WMO-interior claim — the liquid query's delegation + scope key:
+        // inside a building only THAT PLACEMENT's own MLIQ answers, outdoors only the ADT's
+        // (decisions 0634 + 0696, the "swim in air" family). Fourth slot here rather than a 17th
+        // top-level param.
+        Res<crate::wmo_portal::PlayerWmoRoom>,
     ),
 ) {
     let (water, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
-    let indoors = world_q.3 .0.is_some();
+    let claim = crate::liquid::player_claim(&world_q.3);
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
     let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
         return;
@@ -715,7 +716,7 @@ fn control(
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
         // doesn't flicker between the two physics regimes.
-        let surface_y = swim::surface_over_feet(water, player.pos, indoors);
+        let surface_y = swim::surface_over_feet(water, player.pos, claim);
         let swimming = swim::update_swimming(&mut player, surface_y, time.elapsed_secs());
         if let Some(surface) = surface_y {
             move_trace::swim(player.pos.y, surface, swimming, player.collision_height.0);
@@ -876,7 +877,7 @@ fn control(
                 capsule,
                 dir3 * dir_speed,
                 surface,
-                |feet| swim::surface_over_feet(water, feet, indoors),
+                |feet| swim::surface_over_feet(water, feet, claim),
             );
             // The surface redirect (decisions 0499+0505 — a NAMED DIVERGENCE, see
             // `swim::cap_redirect`): when the rise capped at the rest line, the stroke went

@@ -27,12 +27,17 @@ pub enum LiquidKind {
     Rapids,
     /// Ocean — `XTextures\ocean\ocean_h.*` (30 frames). Coastal / sea tiles.
     Ocean,
-    /// Magma / lava — `XTextures\lava\lava.*`. Opaque, fullbright (the animated texture IS the body,
-    /// no depth LUT; VERIFIED wow-re `rf-water-liquid-type-texture-material.md`, magma vert-fill
-    /// `0x68d890` = constant 1.0). WMO liquid only (nibbles `2`/`6`) — the Ironforge Great Forge.
+    /// Magma / lava — `XTextures\lava\lava.*`. Opaque and **unlit**: the animated texture IS the body,
+    /// with no depth LUT to modulate it by — but still **fogged**, like every liquid batch (VERIFIED
+    /// wow-re `liquid-render-state-sided.md` §3/§5, which corrected the earlier
+    /// `rf-water-liquid-type-texture-material.md` reading of the `0x68d890` vert-fill: its
+    /// `0x3f800000` is an up normal's Z, not a colour or alpha, and it is byte-identical in the river
+    /// and ocean fills). WMO liquid only (nibbles `2`/`6`) — the Ironforge Great Forge.
     Magma,
-    /// Slime — `XTextures\slime\slime.*`. Its own texture on the magma render category (opaque,
-    /// fullbright). WMO liquid only (nibbles `3`/`7`) — Undercity, the Sludge Fields.
+    /// Slime — `XTextures\slime\slime.*`. Its own texture on the magma render category, and **code-path
+    /// identical to magma** on the WMO side: one handler, no type-2-vs-3 branch anywhere (VERIFIED
+    /// wow-re `liquid-render-state-sided.md` §5). WMO liquid only (nibbles `3`/`7`) — Undercity, the
+    /// Sludge Fields.
     Slime,
 }
 
@@ -52,9 +57,13 @@ impl LiquidKind {
         }
     }
 
-    /// Whether this kind renders as an **opaque, fullbright** surface (the animated texture is the
-    /// body colour, no water swatch / depth ramp / N·L darkening) — magma and slime. Water/ocean use
-    /// the depth-swatch `ocean0_s.bls` path instead.
+    /// Whether this kind renders as an **opaque, unlit** surface (the animated texture is the body
+    /// colour, no water swatch / depth ramp / N·L darkening) — magma and slime. Water/ocean use the
+    /// depth-swatch `ocean0_s.bls` path instead.
+    ///
+    /// "Fullbright" here means **unlit, not unfogged**: every liquid batch in the reference draws with
+    /// GL_FOG enabled, magma and slime included (wow-re `liquid-render-state-sided` §3/§5). Reading it
+    /// as "no fog" is what made a submerged slime surface a flat unshaded sheet.
     pub fn is_fullbright(self) -> bool {
         matches!(self, LiquidKind::Magma | LiquidKind::Slime)
     }

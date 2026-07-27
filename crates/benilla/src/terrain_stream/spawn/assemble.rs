@@ -275,9 +275,10 @@ pub(crate) fn spawn_model_entities(
         // Animated material alpha (decision 0130 phase 2): the rare batch whose colour-alpha/weight
         // tracks animate (fire flicker) or constantly dim gets its per-instance sampler; the
         // visibility authority composes the value into the render-alpha tag + the A ≤ 0 cull.
-        // Captures freeze the clock at 0 (deterministic frames). NB a lit interior prop's tag
-        // carries its room colour, so its partial alpha can't show yet — only the 0-cull applies
-        // there (flagged in decision 0130; the population is a handful of instances per town).
+        // Captures freeze the clock at 0 (deterministic frames). A lit interior prop composes the
+        // same way since the 0355 re-lane gave the probe-slot payload its own alpha field (bits
+        // 0..=15) — the 0130-era "partial alpha can't show on the colour payload" deferral is
+        // collected (bug B30: the Undercity lightshaft's authored 0.10/0.05 dimming).
         if let Some(anim) = &sub.alpha_anim {
             commands
                 .entity(entity)

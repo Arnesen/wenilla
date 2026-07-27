@@ -29,6 +29,17 @@
 //!   under it (decision 0258; it is what 0233 deferred). Terrain *above* the eye is not on the
 //!   down-segment at all, which is exactly what keeps a real tunnel reading INSIDE, and a column in an
 //!   MCNK hole has no terrain surface to hit, which is how a mine entrance stays walkable.
+//!
+//! - **Leg C — the camera-void fallback** (decision 0692; **ours**, not the client's): only when Legs
+//!   A and B both miss AND no terrain surface sits at or below the eye's column, the same race runs
+//!   once more over the **camera-only** faces (DETAIL set, NOCAMCOLLIDE clear — the faces that stop
+//!   the camera but never carried the walking BSP). The client returns "outside" here and blanks the
+//!   building — reproducible in 5875 at the Deadmines entrance, whose behind-the-portal pocket is
+//!   floored entirely with DETAIL faces: the camera is sealed in by its own collision yet the flood
+//!   loses it. An eye that camera-collision itself proves is between interior surfaces, under ground
+//!   level, names the room that owns the surface below it instead. The gates keep the divergence out
+//!   of every place the client's verdict is *right*: any terrain at/below the eye (doorsteps, streets,
+//!   open country) or any Leg A/B result leaves the faithful answer untouched.
 
 use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalInfo, WmoPortalRef};
 pub(crate) use benilla_formats::triangle_z_at as floor_z_at;
@@ -57,6 +68,7 @@ pub(crate) fn down_ray_seeds(
 ) -> DownRaySeeds {
     down_ray_pick(
         &model.group_collision_tris,
+        &model.group_camera_only_tris,
         &model.group_nav,
         &model.portal_vertices,
         &model.portal_infos,
@@ -72,8 +84,10 @@ pub(crate) fn down_ray_seeds(
 /// space** (the down-ray's own frame), or `None` where there is no terrain surface to hit — off the
 /// streamed tiles, or a hole cut through the ground into this very interior. It is the client's second
 /// probe, and it wins the column whenever it is *strictly* nearer to the eye than the WMO's hit.
+#[allow(clippy::too_many_arguments)] // the model's stored pieces, passed as parallel slices
 pub(crate) fn down_ray_pick(
     tris: &[Vec<[[f32; 3]; 3]>],
+    camera_only_tris: &[Vec<[[f32; 3]; 3]>],
     nav: &[WmoGroupNav],
     portal_vertices: &[[f32; 3]],
     portal_infos: &[WmoPortalInfo],
@@ -167,7 +181,37 @@ pub(crate) fn down_ray_pick(
     // Outside: nothing within the ray length, or the winning surface belongs to an exterior group
     // (the client clears the instance for either — and then appends no seeds).
     let Some(in_group) = best else {
-        return DownRaySeeds::default();
+        // Leg C — the camera-void fallback (decision 0692; ours, the module doc has the case).
+        // Fires only when BOTH faithful legs found nothing AND no terrain surface sits at or below
+        // the eye: an under-ground eye with a camera-collidable DETAIL surface below it is between
+        // interior surfaces the camera itself cannot leave, and blanking the building there is the
+        // client artifact the director rejected. Same race, same broad phase, same exterior and
+        // ray-length rules as Leg A; a single root, no `across` (no portal was crossed).
+        if terrain_z.is_some_and(|tz| tz <= eye[2]) {
+            return DownRaySeeds::default();
+        }
+        let mut fb_z = f32::NEG_INFINITY;
+        let mut fb: Option<usize> = None;
+        for (gi, g) in nav.iter().enumerate() {
+            if !in_column(g) {
+                continue;
+            }
+            for tri in camera_only_tris.get(gi).into_iter().flatten() {
+                if let Some(z) = floor_z_at(tri, eye[0], eye[1]) {
+                    if z <= eye[2] && z > fb_z {
+                        fb_z = z;
+                        fb = Some(gi);
+                    }
+                }
+            }
+        }
+        let named = fb.filter(|&g| {
+            eye[2] - fb_z <= MAX_FLOOR_DROP && nav.get(g).is_some_and(|n| n.flags & EXTERIOR == 0)
+        });
+        return DownRaySeeds {
+            in_group: named,
+            across: None,
+        };
     };
     if eye[2] - best_z > MAX_FLOOR_DROP || nav.get(in_group).is_none_or(|g| g.flags & EXTERIOR != 0)
     {
@@ -363,7 +407,7 @@ mod tests {
         nav: &[WmoGroupNav],
         eye: [f32; 3],
     ) -> Option<usize> {
-        down_ray_pick(tris, nav, &[], &[], &[], eye, None).in_group
+        down_ray_pick(tris, &[], nav, &[], &[], &[], eye, None).in_group
     }
 
     /// `down_ray_pick` with a portal graph, no terrain — the pre-terrain-race fixtures.
@@ -377,6 +421,7 @@ mod tests {
     ) -> DownRaySeeds {
         down_ray_pick(
             tris,
+            &[],
             nav,
             portal_vertices,
             portal_infos,
@@ -770,31 +815,165 @@ mod tests {
         let tris = [quad(0.0, 20.0)];
         // A camera 2 yd over the tunnel floor. With no terrain leg (or terrain far below), it is inside.
         assert_eq!(
-            down_ray_pick(&tris, &[mine], &[], &[], &[], [0.0, 0.0, 2.0], None).in_group,
+            down_ray_pick(&tris, &[], &[mine], &[], &[], &[], [0.0, 0.0, 2.0], None).in_group,
             Some(0)
         );
         // The hillside surface sits at z=8, between the eye (z=2) and... no: the eye is BELOW the
         // surface, so the surface is above the eye and off the down-segment — a real tunnel under a
         // hill still reads INSIDE.
         assert_eq!(
-            down_ray_pick(&tris, &[mine], &[], &[], &[], [0.0, 0.0, 2.0], Some(8.0)).in_group,
+            down_ray_pick(
+                &tris,
+                &[],
+                &[mine],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                Some(8.0)
+            )
+            .in_group,
             Some(0)
         );
         // Now the camera is in open air 12 yd up, and the ground surface is at z=8 — below the eye and
         // ABOVE the tunnel floor (z=0). The terrain wins the column: outside.
         assert_eq!(
-            down_ray_pick(&tris, &[mine], &[], &[], &[], [0.0, 0.0, 12.0], Some(8.0)).in_group,
+            down_ray_pick(
+                &tris,
+                &[],
+                &[mine],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 12.0],
+                Some(8.0)
+            )
+            .in_group,
             None
         );
         // A terrain surface exactly coincident with the WMO floor keeps the WMO (the client's strict
         // `<`: equal is not "strictly nearer").
         assert_eq!(
-            down_ray_pick(&tris, &[mine], &[], &[], &[], [0.0, 0.0, 2.0], Some(0.0)).in_group,
+            down_ray_pick(
+                &tris,
+                &[],
+                &[mine],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                Some(0.0)
+            )
+            .in_group,
             Some(0)
         );
         // A terrain surface just above the floor (z=0.1 vs floor 0) steals the column.
         assert_eq!(
-            down_ray_pick(&tris, &[mine], &[], &[], &[], [0.0, 0.0, 2.0], Some(0.1)).in_group,
+            down_ray_pick(
+                &tris,
+                &[],
+                &[mine],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                Some(0.1)
+            )
+            .in_group,
+            None
+        );
+    }
+
+    #[test]
+    fn camera_void_fallback_names_the_detail_floored_room() {
+        // The Deadmines-pocket shape (decision 0692): an interior group whose only floor is DETAIL
+        // faces — present in the camera-only set, absent from the walking set.
+        let pocket = nav(0, [-10.0, -10.0, 0.0], [10.0, 10.0, 12.0], 0, 0);
+        let walk: [Vec<[[f32; 3]; 3]>; 1] = [Vec::new()];
+        let detail = [quad(0.0, 10.0)];
+        // Both faithful legs miss, no terrain below ⇒ Leg C names the room, single root.
+        let s = down_ray_pick(
+            &walk,
+            &detail,
+            &[pocket],
+            &[],
+            &[],
+            &[],
+            [0.0, 0.0, 2.0],
+            None,
+        );
+        assert_eq!(s.in_group, Some(0));
+        assert_eq!(s.across, None);
+        // Terrain under a hill (surface above the eye) is off the down-segment: Leg C still fires.
+        assert_eq!(
+            down_ray_pick(
+                &walk,
+                &detail,
+                &[pocket],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                Some(8.0)
+            )
+            .in_group,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn camera_void_fallback_defers_to_terrain_and_to_the_walking_leg() {
+        let pocket = nav(0, [-10.0, -10.0, 0.0], [10.0, 10.0, 12.0], 0, 0);
+        let detail = [quad(0.0, 10.0)];
+        // Any terrain surface at/below the eye (a doorstep decal over open ground) keeps the client's
+        // outside verdict — the fallback's gate.
+        assert_eq!(
+            down_ray_pick(
+                &[Vec::new()],
+                &detail,
+                &[pocket],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                Some(1.9),
+            )
+            .in_group,
+            None
+        );
+        // A walking-leg answer anywhere (even a lower floor of another group) pre-empts Leg C: the
+        // faithful verdict is never touched.
+        let hall = nav(0, [-30.0, -30.0, -5.0], [30.0, 30.0, 12.0], 0, 0);
+        let walk = [Vec::new(), quad(-5.0, 30.0)];
+        let det2: [Vec<[[f32; 3]; 3]>; 2] = [quad(0.0, 10.0), Vec::new()];
+        assert_eq!(
+            down_ray_pick(
+                &walk,
+                &det2,
+                &[pocket, hall],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                None,
+            )
+            .in_group,
+            Some(1)
+        );
+        // An EXTERIOR group's detail surface reads as outside, mirroring Leg A's rule.
+        let ext = nav(EXTERIOR, [-10.0, -10.0, 0.0], [10.0, 10.0, 12.0], 0, 0);
+        assert_eq!(
+            down_ray_pick(
+                &[Vec::new()],
+                &detail,
+                &[ext],
+                &[],
+                &[],
+                &[],
+                [0.0, 0.0, 2.0],
+                None,
+            )
+            .in_group,
             None
         );
     }

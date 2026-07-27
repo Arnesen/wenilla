@@ -409,6 +409,21 @@ pub(super) fn resolve_equipment(
             .or_else(|| driver.and_then(|d| d.sheath_state()))
             .or_else(|| s.unit_sheath_state())
             .unwrap_or(0);
+        // A player wearing a NON-character display (druid form, GM morph — decision 0695)
+        // attaches no equipment sub-models at all: the reference's held/helm/shoulder attach
+        // lives on the CCharacterComponent (`0x47a0c0`, wow-re charactermodel node), which only
+        // a character body builds — a bear-form druid shows no weapon by construction, not by a
+        // hide flag. [`Wielded`] (the anim-class pair) still resolves below: what's IN the hand
+        // is independent of whether its model is displayed. The creature virtual-item path (a
+        // naga's trident) is a different, unit-level mechanism and rides the Unit arms untouched.
+        // An unresolved display cache entry (the one-frame window after a live swap) reads as a
+        // character body — harmless: this diff re-runs every frame, and an attach needs the
+        // rebuilt body's `BoneAttach` first anyway.
+        let char_component = net_entity.kind != EntityKind::Player
+            || net_entity
+                .display_id
+                .and_then(|d| creatures.as_deref()?.models.get(&d))
+                .is_none_or(|dm| dm.is_character_body);
         let mut slots: [Option<HeldSlot>; ATTACH_SLOTS] = [None; ATTACH_SLOTS];
         let mut wielded = Wielded::default();
         let mut ranged_inv_type = None;
@@ -465,6 +480,9 @@ pub(super) fn resolve_equipment(
                 }
                 _ => {}
             }
+            if !char_component {
+                continue; // wielded resolved; the model never attaches on a non-character body
+            }
             let Some(attach) = placement(slot, inv_type, item_sheath, unit_sheath) else {
                 continue;
             };
@@ -487,7 +505,11 @@ pub(super) fn resolve_equipment(
         // display is written per shot from `SMSG_SPELL_START`, any caster; the attach follows the
         // client's `$BWP`/`$BWR` keyframes through [`NockLatch`] (`drive_nock_latch`, decision
         // 0408 — the arrow appears at the pull and leaves with the release).
-        if let (Some(ammo), Some(attach)) = (nocked, ammo_attach(ranged_inv_type, nock_latched)) {
+        if let (true, Some(ammo), Some(attach)) = (
+            char_component,
+            nocked,
+            ammo_attach(ranged_inv_type, nock_latched),
+        ) {
             ensure_item_model(
                 &mut held,
                 ammo.display_id,
@@ -507,7 +529,7 @@ pub(super) fn resolve_equipment(
         // transform override; no cloak conflict). Self-only by construction, exactly like the
         // client: bag slots are never replicated in 1.12, so a remote player's scan finds
         // nothing (§H1 — a two-client capture would be the clean confirmation).
-        if net_entity.kind == EntityKind::Player && unit_sheath == 2 {
+        if net_entity.kind == EntityKind::Player && char_component && unit_sheath == 2 {
             let mut quiver_display = None;
             for bag in 19u8..23 {
                 let entry = s
@@ -539,7 +561,7 @@ pub(super) fn resolve_equipment(
         // direct ItemDisplayInfo display ids, no template round-trip. A beast NPC (no appearance row)
         // resolves nothing here, exactly as before.
         let head_shoulder: Option<(u32, u32, u8, u8)> = match net_entity.kind {
-            EntityKind::Player => {
+            EntityKind::Player if char_component => {
                 let race = s.unit_race().unwrap_or(1);
                 let sex = s.unit_gender().unwrap_or(0).min(1);
                 let mut resolve = |slot: u8| {

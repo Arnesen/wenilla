@@ -55,11 +55,20 @@ const WDL_OVERLAP: f32 = 33.0;
 /// then be draw order). Multiplicative so it can never cross zero into the sky.
 const WDL_DEPTH_PUSH: f32 = 0.999;
 
-struct WdlParams {
-    fog_color: vec4<f32>,  // rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
-    fog_params: vec4<f32>, // x = fog_start yd; y = fog_end yd; z reserved; w = farclip wall (0 ⇒ off)
+// The shared global light (`lighting::global_light`) — the same buffer terrain, the models and liquid
+// bind, mirrored here as the row prefix WDL needs. Rows 4/5 are the SCENE fog (block 1) plus the
+// farclip wall, and that is the right block by construction: the band IS the horizon, so it is never
+// inside a WMO and never wants the interior block. (WDL used to hold its own copy of these two rows,
+// re-pushed per material by `apply_wow_lighting`.)
+struct WowLight {
+    _light_ambient: vec4<f32>, // 0
+    _light_diffuse: vec4<f32>, // 1
+    _light_sun: vec4<f32>,     // 2
+    _light_spec: vec4<f32>,    // 3
+    fog_color: vec4<f32>,      // 4 rgb = Light.dbc row 7 (gamma 0..1); w = enable (>0.5 ⇒ blend)
+    fog_params: vec4<f32>,     // 5 x = fog_start yd; y = fog_end yd; z unused; w = farclip wall (0 ⇒ off)
 };
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> w: WdlParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> w: WowLight;
 
 struct WdlVsOut {
     @builtin(position) clip_position: vec4<f32>,

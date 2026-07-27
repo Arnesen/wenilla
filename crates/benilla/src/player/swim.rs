@@ -51,7 +51,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::collision::player_query_filter;
-use crate::liquid::WaterChunkInfo;
+use crate::liquid::{LiquidClaim, WaterChunkInfo};
 
 use super::mover::Outcome;
 use super::{Player, CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE, SKIN_WIDTH};
@@ -122,15 +122,14 @@ fn rest_cap(h: f32) -> f32 {
 ///
 /// Uses [`liquid_at`], not the water-only wrapper: **you swim in lava and slime too** — Blackrock's
 /// magma and Undercity's sludge are surfaces you enter, not ones you fall through (decision 0634).
-/// `indoors` is the player's live WMO-interior claim, which picks whose liquid answers.
+/// `claim` is the player's live WMO-interior claim — which ROOM's liquid answers (decision 0696).
 pub(super) fn surface_over_feet(
     water: &Query<&WaterChunkInfo>,
     feet: Vec3,
-    indoors: bool,
+    claim: LiquidClaim,
 ) -> Option<f32> {
     let wow = bevy_to_wow(feet);
-    crate::liquid::liquid_at(water.iter(), wow, Some(indoors))
-        .map(|hit| feet.y + (hit.surface_z - wow[2]))
+    crate::liquid::liquid_at(water.iter(), wow, claim).map(|hit| feet.y + (hit.surface_z - wow[2]))
 }
 
 /// Update [`Player::swimming`] from the water surface over the feet, with the verified enter/leave

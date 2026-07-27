@@ -452,6 +452,35 @@ pub(super) fn update_time_lighting(
     }
 }
 
+/// **Step 6** — drive the camera's `ClearColor` from the same Light.dbc row-7 fog colour the
+/// terrain and model shaders blend in (Step 5). Sky / skybox proper is deferred; for now the
+/// backdrop is just the fog colour, so a fully-fogged texel at the far plane lands on the same
+/// gamma byte as the void behind it (no horizon seam). q6 RE: the reference client's sky pass
+/// actually sets its own tiny 70→75 fog and draws in the fog colour, so the horizon converges on
+/// row 7 the same way; we approximate that with `glClearColor` until the sky dome is built
+/// (out-of-scope per the plan).
+///
+/// `Color::srgb` takes gamma-space 0..1 — that's exactly the form `WowLighting.fog_color` carries
+/// (the DBC byte triple divided by 255). Bevy's clear pass writes the bytes to the sRGB surface
+/// target directly, so the on-screen byte equals the DBC byte (same invariant as the shader output
+/// decode). Only writes when the colour actually changes, so frame-to-frame churn stays at zero.
+pub(super) fn apply_sky_backdrop(
+    lighting: Option<Res<WowLighting>>,
+    mut clear: ResMut<ClearColor>,
+    mut last: Local<Option<[f32; 3]>>,
+) {
+    let Some(l) = lighting else {
+        return;
+    };
+    if *last == Some(l.fog_color) {
+        return;
+    }
+    *last = Some(l.fog_color);
+    // GAMMA LANE (0161): the buffer holds gamma bytes — the clear writes the authored DBC
+    // value RAW (`linear_rgb` = no conversion); the frame's one decode is the FFXGlow combine.
+    clear.0 = Color::linear_rgb(l.fog_color[0], l.fog_color[1], l.fog_color[2]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

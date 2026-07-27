@@ -76,6 +76,34 @@ pub struct ItemDisplay {
     pub spell_visual: u32,
 }
 
+impl ItemDisplay {
+    /// The `HelmetGeosetVisData` row pair (`[male, female]`) this display hides hair / facial hair /
+    /// ears with — **only when the display is actually a worn helm**, i.e. it names a head model.
+    ///
+    /// The gate is the point. `helmet_vis` is authored on 1314 of the 29604 shipped rows, and **12
+    /// of those name no model at all** — jewellery-shaped rows (15676 is an
+    /// `INV_Jewelry_Amulet_01` icon with no mesh) that still carry a full hide mask. Nothing wears
+    /// them: with no `ModelName` there is no helm to attach and no helm to tuck hair under. But
+    /// `CreatureDisplayInfoExtra`'s head column points **126 character-model NPC displays** at
+    /// exactly those rows, and honouring the mask there strips the NPC's hairstyle to the bare
+    /// scalp (geoset 1), its ears to the tucked variant (701) and its earrings/beard to their
+    /// group bases — while 1.12.1 renders them in full (B93: Jubie Gadgetspring, display 7969 →
+    /// extra 5503 → head display **15676** → vis row **306** = `[446,478,510,222,238]`, every
+    /// column with the gnome bit `1<<7` set).
+    ///
+    /// **The gate is `ModelName[0]` alone** — on-disk column 1, the LEFT slot — VERIFIED at the
+    /// bytes (wow-re RF-0085, `0x4799c1`): the head-slot handler `0x4799a0` loads
+    /// `[[cc+0x4a8] + 4]` and `cmp byte ptr [ecx],0`, a **string-emptiness** test, jumping straight
+    /// to the epilogue `0x479b33` past the whole geoset-vis tail. Column 2 (the right slot) is
+    /// never consulted, and neither is the helm M2's load result — `0x4798c0`'s return is clobbered
+    /// untested, so this is decided synchronously off the DBC row, never off whether the model
+    /// resolved. On the shipped table the two readings coincide (41 rows fill only the right slot;
+    /// **none** of them carries a vis pair), which the test asserts rather than assumes.
+    pub fn worn_helm_vis(&self) -> Option<[u32; 2]> {
+        self.model[0].is_some().then_some(self.helmet_vis)
+    }
+}
+
 /// `ItemDisplayInfo.dbc`, keyed by `displayId` (the id `ItemDisplayInfoID`/`UNIT_VIRTUAL_ITEM_SLOT_DISPLAY`
 /// resolve into — decision 0072).
 pub struct ItemDisplayCatalog {

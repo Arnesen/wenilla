@@ -1018,6 +1018,11 @@ pub(super) fn attach_entity_visuals(
         commands
             .entity(entity)
             .insert(VisualAttached)
+            // The display this visual was built with (decision 0695, the same pattern):
+            // `refresh_live_display` diffs it against the live descriptor and rebuilds on a
+            // change (druid form, GM morph). Stamped on the cube fallback too, so a model-less
+            // unit can never churn.
+            .insert(super::live_display::AppliedDisplay(net.display_id))
             .remove::<super::equipment::Reattached>();
     }
 }

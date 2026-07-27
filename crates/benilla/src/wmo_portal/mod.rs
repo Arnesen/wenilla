@@ -27,6 +27,8 @@
 //! `w`-clamp pair, the `0.1` near-parallel snap) are the client's own constants, read from the binary
 //! — do not "fix" them to tolerances without re-deriving there first.
 
+use std::sync::Arc;
+
 mod fog;
 mod interior;
 mod probe;
@@ -37,8 +39,8 @@ pub use fog::{CameraWmoFog, WmoFogTarget};
 pub(crate) use interior::{
     indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, INTERIOR_PROBE_HEIGHT,
 };
-use interior::{track_area_interior, track_current_interior};
-pub use interior::{CurrentAreaInterior, CurrentWmoInterior};
+use interior::{track_area_interior, track_current_interior, track_unit_interiors};
+pub use interior::{CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom};
 pub use probe::WmoCullProbe;
 use probe::{TraceLog, PROBE_DUMP_PATH};
 use seed::dominant_axes;
@@ -101,12 +103,29 @@ const MAX_ITERS: u32 = 1 << 16;
 type Rect = [f32; 4];
 const FULL_SCREEN: Rect = [-1.0, -1.0, 1.0, 1.0];
 
-/// Static tag on every WMO **group** render submesh entity: which placement instance it belongs to and
-/// its absolute group index, so the visibility authority can look up this group's per-frame PVS bit.
-#[derive(Component, Clone, Copy)]
+/// Static tag on every portal-culled WMO piece — a group render submesh, a group's MLIQ surface, a
+/// MODD prop — naming which placement instance it belongs to and which absolute group indices can
+/// draw it, so the visibility authority can look up their per-frame PVS bits.
+///
+/// Geometry and liquid belong to exactly one group. A **prop** can be named by many: the reference
+/// draws doodads per *visible* group out of that group's own MODR, so every referrer is an
+/// independent chance to be drawn (see [`Self::drawn_by`]). Built once per group/prop at spawn, so
+/// the `Arc` is one allocation per key, not one per submesh.
+#[derive(Component, Clone)]
 pub struct WmoGroupVis {
     pub instance: Entity,
-    pub group: u16,
+    pub groups: Arc<[u16]>,
+}
+
+impl WmoGroupVis {
+    /// The portal verdict: drawn iff **any** referencing group is in this frame's PVS. An index
+    /// past the instance's visible set (a stale or short set) reads as visible — the same fail-open
+    /// the rest of the cull takes, so a lookup miss can never blank a building.
+    pub fn drawn_by(&self, inst: &WmoPortalInstance) -> bool {
+        self.groups
+            .iter()
+            .any(|&g| inst.visible.get(g as usize).copied().unwrap_or(true))
+    }
 }
 
 /// One placed WMO building's portal-cull state. Spawned alongside the building's geometry; despawns
@@ -128,11 +147,31 @@ pub struct WmoPortalInstance {
     pub visible: Vec<bool>,
 }
 
+/// One WMO **room**: a placed building's instance entity plus the absolute group index inside it.
+///
+/// This is the client's `[0xc7b748]` (the camera-containing placed map-object — wow-re
+/// `models/scratch/wmo-current-group.md`) paired with the current group index its visible-group set
+/// `0xc7cd88` carries. It is the identity every "which room is this subject in" answer resolves to,
+/// and — since decision 0696 — the **scope key of the liquid query**: a building's pool belongs to a
+/// room, so only a subject standing in that placement can be in it. A liquid footprint has no floor,
+/// so without an owner a pool claims every position under its XY forever, in any building, at any
+/// depth (Uldaman read as submerged under a *mushroom cave's* water 186 yd overhead).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WmoRoom {
+    /// The placement's [`WmoPortalInstance`] entity.
+    pub instance: Entity,
+    /// Absolute group index within the building.
+    pub group: u16,
+}
+
 /// The camera's PVS-flood interior claim this frame — `None` with the camera over open world or
 /// an EXTERIOR (`0x8`) group's floor; an EXTERIOR_LIT-only porch (`0x40`) still claims (the
 /// `[0xc7b748]` writer's 0x8-only rejection, round-6 Q-H(c)). Written by [`compute_wmo_pvs`] off
 /// the same down-ray seed the flood runs; consumed by the weather-visible gate
-/// (`weather::precip`). When `Some`, `exterior_visible` reports whether this placement's flood
+/// (`weather::precip`) and by the camera-eye submersion verdict (`liquid::detect_submersion` —
+/// the reference's per-frame environment probe `0x6809c0` picks the WMO group's MLIQ over the ADT
+/// liquid on exactly this global, wow-re `terrain/scratch/fog-env-state.md` §1).
+/// When `Some`, `exterior_visible` reports whether this placement's flood
 /// reached an EXTERIOR-flagged group (`flags & 0x148`) through a screen-rect-surviving portal
 /// window — the carved pass-2 law of the weather flag `[0xca80c4]` (`0x6b42d9`, round-6 Q-H(a)):
 /// rain stays visible — and falling — through a doorway the camera can SEE; face away and the
@@ -143,6 +182,8 @@ pub struct CameraInteriorClaim(pub Option<InteriorClaim>);
 /// See [`CameraInteriorClaim`].
 #[derive(Clone, Copy, PartialEq)]
 pub struct InteriorClaim {
+    /// The room the camera EYE is in — the placement + its current group.
+    pub room: WmoRoom,
     /// An EXTERIOR-flagged group (`flags & 0x148`) is in the claiming placement's PVS.
     pub exterior_visible: bool,
 }
@@ -157,13 +198,20 @@ pub struct WmoPortalPlugin;
 impl Plugin for WmoPortalPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentWmoInterior>()
+            .init_resource::<PlayerWmoRoom>()
             .init_resource::<CurrentAreaInterior>()
             .init_resource::<CameraWmoFog>()
             .init_resource::<CameraInteriorClaim>()
             .init_resource::<WmoCullProbe>()
             .add_systems(
                 Update,
-                (compute_wmo_pvs, track_current_interior, track_area_interior).in_set(WmoPvsSet),
+                (
+                    compute_wmo_pvs,
+                    track_current_interior,
+                    track_area_interior,
+                    track_unit_interiors,
+                )
+                    .in_set(WmoPvsSet),
             );
     }
 }
@@ -178,7 +226,7 @@ const MAX_FLOOR_DROP: f32 = 1760.0;
 fn compute_wmo_pvs(
     wmos: Res<Assets<WmoModel>>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
-    mut instances: Query<&mut WmoPortalInstance>,
+    mut instances: Query<(Entity, &mut WmoPortalInstance)>,
     streamer: Res<TerrainStreamer>,
     adt_tiles: Res<Assets<AdtTile>>,
     mut probe: ResMut<WmoCullProbe>,
@@ -203,7 +251,7 @@ fn compute_wmo_pvs(
     // group wins both.
     let mut fog_target: Option<WmoFogTarget> = None;
     let mut claim: Option<InteriorClaim> = None;
-    for mut inst in &mut instances {
+    for (entity, mut inst) in &mut instances {
         let Some(model) = wmos.get(&inst.handle) else {
             continue;
         };
@@ -257,6 +305,10 @@ fn compute_wmo_pvs(
                     if let Some(nav) = model.group_nav.get(gi).filter(|n| n.flags & 0x8 == 0) {
                         fog_target = select_wmo_fog(&model.fogs, nav.fog_indices, eye_local);
                         claim = Some(InteriorClaim {
+                            room: WmoRoom {
+                                instance: entity,
+                                group: gi as u16,
+                            },
                             exterior_visible: model
                                 .group_nav
                                 .iter()
@@ -598,6 +650,36 @@ mod audit;
 mod tests {
     use super::*;
 
+    /// A prop is drawn while ANY room that names it is visible — the reference's per-visible-group
+    /// MODR walk. Blackrock's lava falls hang through up to 19 groups; keying them to one owner hid
+    /// the fall from every camera angle whose flood reached a different referrer. Geometry (a
+    /// single-group key) is unaffected, and an index past the visible set fails OPEN.
+    #[test]
+    fn a_prop_is_drawn_while_any_of_its_rooms_is_visible() {
+        let inst = WmoPortalInstance {
+            handle: Handle::default(),
+            world_from_local: Affine3A::IDENTITY,
+            name_set: 0,
+            visible: vec![false, true, false],
+        };
+        let key = |groups: &[u16]| WmoGroupVis {
+            instance: Entity::PLACEHOLDER,
+            groups: Arc::from(groups),
+        };
+        assert!(key(&[1]).drawn_by(&inst), "its own room is visible");
+        assert!(!key(&[0]).drawn_by(&inst), "its own room is culled");
+        assert!(
+            key(&[0, 2, 1]).drawn_by(&inst),
+            "one visible referrer out of three draws the fall"
+        );
+        assert!(!key(&[0, 2]).drawn_by(&inst), "no referrer is visible");
+        assert!(
+            !key(&[]).drawn_by(&inst),
+            "no referrers at all: nothing ORs"
+        );
+        assert!(key(&[9]).drawn_by(&inst), "index past the set fails open");
+    }
+
     #[test]
     fn eye_on_portal_only_within_the_band_and_polygon() {
         // A vertical doorway portal in the x=0 plane, spanning y ∈ [-2,2], z ∈ [0,4].
@@ -742,6 +824,7 @@ mod tests {
             group_nav: Vec::new(),
             fogs: Vec::new(),
             group_collision_tris: Vec::new(),
+            group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
             collision_bounds: None,
             collision: None,
@@ -756,6 +839,7 @@ mod tests {
             group_liquids: Vec::new(),
             doodad_base: Default::default(),
             doodad_owner: Default::default(),
+            doodad_groups: Default::default(),
         }
     }
 }

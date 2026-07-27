@@ -192,6 +192,13 @@ pub(super) struct DisplayModel {
     /// §5): `1` = pitch to slope, `3` = pitch+roll, else level. Captured with `parts` on load;
     /// `0` for WMO / model-less / still-loading displays.
     pub(super) terrain_tilt: u8,
+    /// Whether this display resolves to a **character body** (a `Character\…` model path) — the
+    /// gate for the char-customization pipeline (geoset filter + skin composite). The look follows
+    /// the DISPLAY, not the entity kind (decision 0695): a druid in bear form is a Player-kind
+    /// entity wearing a plain creature model, and the reference's own race/gender getters answer
+    /// from the display's cached row, not the unit's descriptor (wow-re `w2d2.md`'s `0x60c690`
+    /// getter family).
+    pub(super) is_character_body: bool,
 }
 
 /// Resolve a creature display id to a [`DisplayModel`]: load its M2 (no skins — the slots are filled at
@@ -207,6 +214,10 @@ pub(super) fn new_creature_display(
             dir: model_dir(&m.model_path).to_string(),
             skins: m.textures,
             npc_appearance: m.npc_appearance,
+            is_character_body: m
+                .model_path
+                .get(..10)
+                .is_some_and(|p| p.eq_ignore_ascii_case("character\\")),
             ..empty_shell()
         },
         _ => empty_display(),
@@ -261,6 +272,7 @@ pub(super) fn empty_shell() -> DisplayModel {
         bbox_z_local: 0.0,
         bake_center_local: Vec3::ZERO,
         terrain_tilt: 0,
+        is_character_body: false,
     }
 }
 

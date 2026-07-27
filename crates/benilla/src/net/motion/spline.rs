@@ -11,10 +11,11 @@ use bevy::prelude::*;
 
 use crate::collision::player_query_filter;
 use crate::entities::CollisionHeight;
-use crate::liquid::{water_surface_at, WaterChunkInfo};
+use crate::liquid::{unit_claim, water_surface_at, WaterChunkInfo};
 use crate::player::swim_enter_depth;
 
 use super::super::NetEntity;
+use crate::wmo_portal::UnitWmoRoom;
 
 /// A server-dictated movement path (`SMSG_MONSTER_MOVE`): the unit traverses `points` at constant
 /// speed over `duration` from `start`. All points are raw WoW coords; [`sample_splines`] interpolates
@@ -322,12 +323,14 @@ pub(in crate::net) fn ground_clamp_creatures(
 }
 
 /// What [`mark_swimming_creatures`] reads per unit: identity, kind, pose, its own collision height
-/// (`None` only on a unit's first frame, before the stamp), and whether it is already marked.
+/// (`None` only on a unit's first frame, before the stamp), its own WMO-room claim (whose liquid may
+/// answer for it — decision 0696), and whether it is already marked.
 type SwimMarkQuery = (
     Entity,
     &'static NetEntity,
     &'static Transform,
     Option<&'static CollisionHeight>,
+    Option<&'static UnitWmoRoom>,
     Has<CreatureSwimming>,
 );
 
@@ -360,14 +363,23 @@ pub(in crate::net) fn mark_swimming_creatures(
     units: Query<SwimMarkQuery>,
     water: Query<&WaterChunkInfo>,
 ) {
-    for (e, net, t, collision, marked) in &units {
+    for (e, net, t, collision, room, marked) in &units {
         if net.kind != EntityKind::Unit {
             continue; // players carry the real flag on the wire; GameObjects don't swim
         }
+        // The unit's OWN room claim decides whose liquid answers (0696). It used to pass "no claim",
+        // so both sources answered: Undercity's NPCs read Tirisfal's ADT water 95 yd over their
+        // heads and swam on dry stone in rooms the player walked.
+        let claim = unit_claim(room);
+        // A unit the room tracker hasn't reached yet cannot ENTER swim. `Unknown` admits both
+        // sources — the very false positive this fix removes — so a freshly streamed NPC standing
+        // in an interior would flash the swim gait for the frame before its claim lands. It can
+        // still LEAVE: a stale mark must always be able to clear.
+        if !marked && claim == crate::liquid::LiquidClaim::Unknown {
+            continue;
+        }
         let wow = bevy_to_wow(t.translation);
-        // `None`: no per-unit interior claim exists (CurrentWmoInterior is the local player's
-        // down-ray), so both sources answer here — the pre-0634 behaviour, named in `liquid_at`.
-        let depth = water_surface_at(water.iter(), wow, None).map_or(f32::MIN, |s| s - wow[2]);
+        let depth = water_surface_at(water.iter(), wow, claim).map_or(f32::MIN, |s| s - wow[2]);
         let boundary = swim_enter_depth(collision.copied().unwrap_or_default().0);
         let swimming = if marked {
             depth >= boundary - CREATURE_SWIM_EXIT_BAND

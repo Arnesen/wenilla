@@ -30,11 +30,12 @@ use benilla_formats::FootstepCatalog;
 use crate::assets::{AssetSet, LockRecover, WorldAssets};
 use crate::creature_anim::{is_footstep, AnimSoundEvent};
 use crate::entities::CollisionHeight;
-use crate::liquid::{water_surface_at, WaterChunkInfo};
+use crate::liquid::{unit_claim, water_surface_at, WaterChunkInfo};
 use crate::net::NetEntity;
 use crate::player::swim_enter_depth;
 use crate::schedule::WorldStage;
 use crate::terrain_stream::{ground_effect_under, TerrainStreamer};
+use crate::wmo_portal::UnitWmoRoom;
 
 use super::creature::CreatureVoices;
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
@@ -64,7 +65,12 @@ fn footstep_sounds(
     // GlobalTransform: a mounted unit's steps are the MOUNT model's own tags, fired by the
     // mount CHILD entity — whose local Transform is the seat-relative ~origin. World position
     // is the only correct read for both parented and top-level sources (0441 fold-back).
-    units: Query<(&NetEntity, &GlobalTransform, Option<&CollisionHeight>)>,
+    units: Query<(
+        &NetEntity,
+        &GlobalTransform,
+        Option<&CollisionHeight>,
+        Option<&UnitWmoRoom>,
+    )>,
     footsteps: Option<Res<Footsteps>>,
     voices: Option<Res<CreatureVoices>>,
     streamer: Res<TerrainStreamer>,
@@ -89,7 +95,7 @@ fn footstep_sounds(
         if !is_footstep(&ev.ident) {
             continue;
         }
-        let Ok((net, transform, collision)) = units.get(ev.entity) else {
+        let Ok((net, transform, collision, room)) = units.get(ev.entity) else {
             continue;
         };
         // The unit's footstep class (module docs): the voice row's class verbatim; zero or no
@@ -100,9 +106,9 @@ fn footstep_sounds(
         };
         // Wading picks the splash slot; swimming (deeper than the wade ceiling) is silent.
         let wow = bevy_to_wow(transform.translation());
-        // `None` — this walks every unit, and only the local player has an interior claim
-        // (`liquid_at`'s named gap).
-        let depth = water_surface_at(water.iter(), wow, None)
+        // The unit's own room claim (0696) — it used to pass "no claim", so every unit walking
+        // under an ADT lake picked the splash slot on dry indoor stone.
+        let depth = water_surface_at(water.iter(), wow, unit_claim(room))
             .map(|s| s - wow[2])
             .filter(|d| *d > 0.0);
         let wade_max = swim_enter_depth(collision.copied().unwrap_or_default().0);

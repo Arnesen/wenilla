@@ -10,6 +10,7 @@ pub(crate) use assemble::spawn_model_entities;
 pub(crate) use fx::point_light;
 use fx::{spawn_emitters_for, spawn_lights_for, spawn_ribbons_for, spawn_wmo_lights_for};
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
@@ -26,7 +27,7 @@ use crate::liquid::{spawn_wmo_liquids, LiquidAssets};
 use crate::model_render::{m2_url, ShadeSel};
 use crate::particles::WowParticleMaterial;
 use crate::terrain::WowModelMaterial;
-use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
+use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 
 use super::collider::{build_collider_task, placement_collider_data, PendingCollider};
 use super::{
@@ -213,15 +214,27 @@ pub(super) fn spawn_loaded_placements(
                             })
                             .id();
                         if has_portals {
+                            // One shared single-group key per group — geometry belongs to exactly
+                            // one room, and sharing keeps the tag one allocation per group rather
+                            // than per submesh (a city is ~100k submeshes).
+                            let group_key: Vec<Arc<[u16]>> = (0..m.group_nav.len() as u16)
+                                .map(|g| Arc::from([g].as_slice()))
+                                .collect();
                             for (&entity, &group) in ents.iter().zip(&m.submesh_group) {
+                                let Some(groups) = group_key.get(group as usize).cloned() else {
+                                    continue;
+                                };
                                 commands
                                     .entity(entity)
-                                    .insert(WmoGroupVis { instance, group });
+                                    .insert(WmoGroupVis { instance, groups });
                             }
-                            // The props spawn later — each waits on its own M2 — so they can't be
-                            // tagged here; hold the instance for them (decision 0689).
-                            p.portal_instance = Some(instance);
                         }
+                        // The props spawn later — each waits on its own M2 — so they can't be
+                        // tagged here; hold the instance for them (decision 0689). Held for EVERY
+                        // instance, not just a portal-bearing one: since 0696 it is also the
+                        // placement identity each embedded pool is scoped by, and a portal-less
+                        // building's pool needs an owner exactly as much as a canal does.
+                        p.portal_instance = Some(instance);
                         ents.push(instance); // despawns with the placement
                     }
                     // The building's embedded MLIQ liquid (Stormwind's canals + fountains, the
@@ -241,13 +254,24 @@ pub(super) fn spawn_loaded_placements(
                             liquid_assets.as_deref(),
                             &mut meshes,
                             p.transform,
+                            // The group's own interior class (`MOGI & 0x48 == 0`) — which FOG BLOCK
+                            // its pool draws under, so an indoor pool hazes with the room the way
+                            // the walls beside it do (decision 0691's open lane).
+                            m.group_bounds.get(gi).is_some_and(|g| g.interior),
+                            // …and the ROOM the pool belongs to — the liquid query's scope key
+                            // (0696): only a subject standing in this placement can be in it.
+                            p.portal_instance.map(|instance| WmoRoom {
+                                instance,
+                                group: gi as u16,
+                            }),
                             &mut ents,
                         );
                         if let Some(instance) = p.portal_instance {
+                            let groups: Arc<[u16]> = Arc::from([gi as u16].as_slice());
                             for &e in &ents[first..] {
                                 commands.entity(e).insert(WmoGroupVis {
                                     instance,
-                                    group: gi as u16,
+                                    groups: groups.clone(),
                                 });
                             }
                         }
@@ -396,15 +420,17 @@ pub(super) fn spawn_loaded_placements(
             if let (Some(slot), Some(&first)) = (interior_slot, ents.first()) {
                 commands.entity(first).insert(PropProbeSlot(slot));
             }
-            // Portal-cull the prop with the group that owns it — the reference commits a WMO's
+            // Portal-cull the prop with the rooms that name it — the reference commits a WMO's
             // doodads per VISIBLE group (`0x695aa0` over the group's MODR refs, from the
-            // visible-group walk `0x698720`), so furniture never outlives its room. Every submesh
-            // spawned above is this one prop, so they all take the same key (decision 0689).
-            if let (Some(instance), Some(group)) = (portal_instance, d.group) {
+            // visible-group walk `0x698720`), so furniture never outlives its room (decision 0689)
+            // and a prop several rooms name is drawn from ANY of them. Every submesh spawned above
+            // is this one prop, so they all share the one key.
+            if let (Some(instance), false) = (portal_instance, d.groups.is_empty()) {
                 for &entity in &ents {
-                    commands
-                        .entity(entity)
-                        .insert(WmoGroupVis { instance, group });
+                    commands.entity(entity).insert(WmoGroupVis {
+                        instance,
+                        groups: d.groups.clone(),
+                    });
                 }
             }
             // Prop collider (avian): a static trimesh from the prop's collision hull at its world
@@ -523,9 +549,10 @@ fn resolve_wmo_doodads(
             out.push(WmoDoodadInst {
                 handle: asset_server.load(m2_url(&d.model)),
                 transform: wmo_world.mul_transform(local),
-                // The MODR owner, resolved with the lighting base at load — the prop's portal-cull
-                // key, so a lantern is hidden with the room it hangs in (decision 0689).
-                group: wmo.doodad_owner.get(di).copied().flatten(),
+                // Every MODR referrer, inverted with the lighting base at load — the prop's
+                // portal-cull key, so a lantern is hidden with the room it hangs in (decision 0689)
+                // and a lava fall the rooms below and above both name survives either being culled.
+                groups: wmo.doodad_groups.get(di).cloned().unwrap_or_default(),
                 light,
                 spawned: false,
             });

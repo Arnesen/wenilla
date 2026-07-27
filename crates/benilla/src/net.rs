@@ -130,9 +130,11 @@ pub(crate) struct NetEntity {
     /// the DBC scale (`CreatureModelData.modelScale × CreatureDisplayInfo.scale`, or a per-spawn
     /// override) into it, so the renderer ([`crate::entities`]) bakes this onto the transform *alone*,
     /// never times its own DBC scale (that would double-apply). `1.0` is the default (no rescale).
-    /// Deferred: a *live* SCALE_X change (a values delta on an existing unit) isn't applied at all
-    /// yet — the reference eases the render scale to the new value over 2 s with a cosine smoothstep
-    /// (byte-verified, `0x614bbf`; the code once misread as a selection fade-in).
+    /// A *live* SCALE_X change (a values delta on an existing unit) updates this and eases the
+    /// render scale over 2 s with a cosine smoothstep — the reference's own transition
+    /// (byte-verified, `0x614bbf`; the code once misread as a selection fade-in) — through
+    /// `entities::live_display` (decision 0695), which likewise applies a live
+    /// `UNIT_FIELD_DISPLAYID` change (druid forms, GM morphs — the old F04 deferral).
     pub(crate) scale: f32,
 }
 

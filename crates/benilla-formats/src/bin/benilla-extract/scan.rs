@@ -10,6 +10,149 @@ use benilla_formats::{Chain, M2AnimSummary, M2Light};
 
 use crate::{model_key, yn};
 
+/// Dump a WMO root's placed-prop tables: every MODD doodad with its MODS set membership and its
+/// OWNING group(s) read from the group files' MODR lists — the relation the reference instantiates
+/// from (`0x695aa0` loops a *visible* group's own refs, wow-re `m2-interior-doodad-base-light.md`
+/// §453). A prop referenced by NO group is never created by the real client at all — the
+/// divergence decision 0689 names and benilla still spawns. This answers "which props exist here,
+/// who owns them, and which would the reference even draw" in one read (the B30/B32 question).
+pub fn wmodoodads(chain: &mut Chain, raw_path: &str, filter: Option<&str>) -> Result<()> {
+    let root_path = raw_path.replace('/', "\\").to_ascii_lowercase();
+    let bytes = chain
+        .read_file(&root_path)
+        .with_context(|| format!("reading WMO root '{root_path}'"))?;
+    let root = benilla_formats::parse_wmo_root(&bytes)
+        .with_context(|| format!("parsing WMO root '{root_path}'"))?;
+    let set_names = mods_set_names(&bytes);
+
+    // MODD index -> the groups whose MODR reference it (the ownership relation).
+    let stem = root_path.strip_suffix(".wmo").unwrap_or(&root_path);
+    let mut owners: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+    let mut groups_read = 0u32;
+    for gi in 0..root.group_count() {
+        let group_path = format!("{stem}_{gi:03}.wmo");
+        let Ok(gbytes) = chain.read_file(&group_path) else {
+            continue;
+        };
+        groups_read += 1;
+        for r in benilla_formats::wmo_group_doodad_refs(&gbytes) {
+            owners.entry(r).or_default().push(gi);
+        }
+    }
+
+    println!(
+        "{} doodad(s), {} set(s), {} group(s) ({} group file(s) read)",
+        root.doodads().len(),
+        root.doodad_sets().len(),
+        root.group_count(),
+        groups_read,
+    );
+    for (si, s) in root.doodad_sets().iter().enumerate() {
+        let name = set_names.get(si).map(String::as_str).unwrap_or("?");
+        println!(
+            "set {si:>2}  [{:>5}..{:>5})  count {:>5}  {name}",
+            s.start,
+            s.start + s.count,
+            s.count
+        );
+    }
+
+    let needle = filter.map(str::to_ascii_lowercase);
+    let infos = root.group_infos();
+    let mut shown = 0u32;
+    let mut orphans_total = 0u32;
+    let mut orphans_shown = 0u32;
+    for (i, d) in root.doodads().iter().enumerate() {
+        let orphan = !owners.contains_key(&(i as u16));
+        if orphan {
+            orphans_total += 1;
+        }
+        if let Some(n) = &needle {
+            if !model_key(&d.model).contains(n.as_str()) {
+                continue;
+            }
+        }
+        shown += 1;
+        if orphan {
+            orphans_shown += 1;
+        }
+        let sets: Vec<String> = root
+            .doodad_sets()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| (s.start..s.start + s.count).contains(&(i as u32)))
+            .map(|(si, _)| si.to_string())
+            .collect();
+        let owner_cell = match owners.get(&(i as u16)) {
+            Some(gs) => gs
+                .iter()
+                .map(|&g| {
+                    let class = match infos.get(g as usize) {
+                        Some(gi) if gi.interior => "INT",
+                        Some(_) => "EXT",
+                        None => "?",
+                    };
+                    format!("g{g}({class})")
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => "ORPHAN".into(),
+        };
+        println!(
+            "modd {i:>5}  pos ({:>8.2}, {:>8.2}, {:>8.2})  scale {:.3}  color #{:02x}{:02x}{:02x}{:02x}  sets [{}]  {owner_cell}  {}",
+            d.position[0], d.position[1], d.position[2],
+            d.scale,
+            d.color[0], d.color[1], d.color[2], d.color[3],
+            sets.join(","),
+            d.model,
+        );
+    }
+    match needle {
+        Some(_) => eprintln!(
+            "{shown} doodad(s) matched ({orphans_shown} ORPHAN); {orphans_total} orphan(s) among all {}",
+            root.doodads().len()
+        ),
+        None => eprintln!(
+            "{orphans_total} of {} doodad(s) are ORPHANS (in no group's MODR — the reference never instantiates these)",
+            root.doodads().len()
+        ),
+    }
+    Ok(())
+}
+
+/// The MODS set names (`char name[20]` per 32-byte record) — `WmoDoodadSet` keeps only the ranges,
+/// so read the names off the raw root bytes here (top-level chunks are `[magic][size][data]`, magic
+/// on disk reversed: MODS → `SDOM`).
+fn mods_set_names(bytes: &[u8]) -> Vec<String> {
+    let mut off = 0usize;
+    while off + 8 <= bytes.len() {
+        let size = u32::from_le_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+        ]) as usize;
+        let Some(data_end) = (off + 8).checked_add(size) else {
+            return Vec::new();
+        };
+        if data_end > bytes.len() {
+            return Vec::new();
+        }
+        if &bytes[off..off + 4] == b"SDOM" {
+            return bytes[off + 8..data_end]
+                .chunks_exact(32)
+                .map(|rec| {
+                    let name = &rec[..20];
+                    let end = name.iter().position(|&b| b == 0).unwrap_or(20);
+                    String::from_utf8_lossy(&name[..end]).into_owned()
+                })
+                .collect();
+        }
+        off = data_end;
+    }
+    Vec::new()
+}
+
 /// Sweep every `.m2` (under `prefix`, if given) and classify every BILLBOARD batch by which way its
 /// geometry faces — see the `Bbfacescan` command doc for why the sign decides visibility.
 ///

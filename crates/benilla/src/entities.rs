@@ -64,6 +64,12 @@ use equipment::{attach_held_items, refresh_player_looks, resolve_equipment};
 pub(crate) mod mount;
 use mount::refresh_mounts;
 
+/// Live descriptor appearance (decision 0695): a `Values` delta moving the display id swaps the
+/// model in place (druid forms, GM morphs — ledger B69/F04) and one moving `SCALE_X` eases the
+/// render scale (the reference's 2 s cosine smoothstep); both restamp the collision height.
+mod live_display;
+use live_display::{refresh_live_display, tick_scale_ease};
+
 /// Terrain conform (decisions 0482/0486): every flagged model (`GlobalModelFlags & 3 ∈ {1,3}` —
 /// mounts and wild quadrupeds alike) tilts to the ground under its unit, through the conform
 /// node its root bones parent under.
@@ -356,6 +362,10 @@ impl Plugin for EntitiesPlugin {
                     // A mount transition does the same (decision 0441): the field diff tears the
                     // visual down, attach rebuilds it mounted (or dismounted) next frame(s).
                     refresh_mounts,
+                    // A live display-id / scale change (decision 0695): the display swap is the
+                    // same teardown-and-rebuild; the scale change arms the reference's 2 s ease.
+                    refresh_live_display,
+                    tick_scale_ease,
                 )
                     .chain()
                     .in_set(EntityVisualsSet)

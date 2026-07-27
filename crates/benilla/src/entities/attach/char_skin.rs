@@ -61,45 +61,53 @@ pub(super) fn resolve_char_look(
     entity: Entity,
     stores: &Query<&ObjectStore>,
 ) -> Option<CharLook> {
-    match net.kind {
-        EntityKind::Player => {
-            // A player entity is always a character body. Race/sex come from `UNIT_FIELD_BYTES_0`; the
-            // `PLAYER_BYTES` / `PLAYER_BYTES_2` customization is *optional on the wire* — vmangos omits an
-            // all-zero field from the create mask, so a fully-default character (like our own "One") sends
-            // no `PLAYER_BYTES` at all. Per UpdateFields semantics an absent field means its default (0),
-            // not "no data": default each byte to 0 rather than gate the whole look on its presence (an
-            // over-strict `?` here left a default-customized avatar unskinned — the pre-0061 component
-            // path defaulted these implicitly).
-            let s = &stores.get(entity).ok()?.0;
-            Some(CharLook {
-                race: s.unit_race()?,
-                sex: s.unit_gender()?,
-                skin: s.player_skin().unwrap_or(0),
-                hair_style: s.player_hair_style().unwrap_or(0),
-                hair_color: s.player_hair_color().unwrap_or(0),
-                facial_hair: s.player_facial_hair().unwrap_or(0),
-                body: BodySkin::Composite {
-                    face: s.player_face().unwrap_or(0),
-                },
-            })
-        }
-        EntityKind::Unit => {
-            let npc = dm?.npc_appearance.as_ref()?;
-            Some(CharLook {
-                race: npc.race,
-                sex: npc.sex,
-                skin: npc.skin,
-                hair_style: npc.hair_style,
-                hair_color: npc.hair_color,
-                facial_hair: npc.facial_hair,
-                body: match &npc.bake_name {
-                    Some(name) => BodySkin::Baked(name.clone()),
-                    None => BodySkin::Composite { face: npc.face },
-                },
-            })
-        }
-        _ => None,
+    // The look follows the DISPLAY, not the entity kind (decision 0695): with live display-id
+    // swaps a Player-kind entity can wear any display — a druid's bear form is a plain creature
+    // model (no look; Monster skins instead), and a GM-morphed player wearing a humanoid NPC
+    // display wears ITS CreatureDisplayInfoExtra appearance. The reference's own race/gender
+    // getters answer from the display's cached row with the descriptor as fallback (wow-re
+    // `w2d2.md`, the `0x60c690` getter family) — exactly this order: display appearance first,
+    // wire appearance only for a character body that carries none.
+    let d = dm?;
+    if let Some(npc) = d.npc_appearance.as_ref() {
+        // A character-model NPC display (whoever wears it): its CreatureDisplayInfoExtra
+        // appearance — a baked body when the row names one, else a live composite.
+        return Some(CharLook {
+            race: npc.race,
+            sex: npc.sex,
+            skin: npc.skin,
+            hair_style: npc.hair_style,
+            hair_color: npc.hair_color,
+            facial_hair: npc.facial_hair,
+            body: match &npc.bake_name {
+                Some(name) => BodySkin::Baked(name.clone()),
+                None => BodySkin::Composite { face: npc.face },
+            },
+        });
     }
+    if net.kind == EntityKind::Player && d.is_character_body {
+        // A player wearing a character body. Race/sex come from `UNIT_FIELD_BYTES_0`; the
+        // `PLAYER_BYTES` / `PLAYER_BYTES_2` customization is *optional on the wire* — vmangos omits an
+        // all-zero field from the create mask, so a fully-default character (like our own "One") sends
+        // no `PLAYER_BYTES` at all. Per UpdateFields semantics an absent field means its default (0),
+        // not "no data": default each byte to 0 rather than gate the whole look on its presence (an
+        // over-strict `?` here left a default-customized avatar unskinned — the pre-0061 component
+        // path defaulted these implicitly).
+        let s = &stores.get(entity).ok()?.0;
+        return Some(CharLook {
+            race: s.unit_race()?,
+            sex: s.unit_gender()?,
+            skin: s.player_skin().unwrap_or(0),
+            hair_style: s.player_hair_style().unwrap_or(0),
+            hair_color: s.player_hair_color().unwrap_or(0),
+            facial_hair: s.player_facial_hair().unwrap_or(0),
+            body: BodySkin::Composite {
+                face: s.player_face().unwrap_or(0),
+            },
+        });
+    }
+    // A beast display (whoever wears it), a GameObject, a model-less display: no look.
+    None
 }
 
 /// The `mpq://` URL for a pre-baked NPC body atlas (a CreatureDisplayInfoExtra bake name) under
@@ -179,7 +187,14 @@ pub(in crate::entities) fn equip_geosets(
             eg.cloak = d.catalog.get(cloak).map(|row| row.geoset_groups[0]);
         }
         if helm != 0 {
-            eg.helm_vis = d.catalog.get(helm).map(|row| row.helmet_vis);
+            // Only a display that names a head MODEL is a worn helm, and only a worn helm tucks
+            // hair/facial/ears away (B93: `CreatureDisplayInfoExtra`'s head column points 126
+            // character-model NPC displays at model-less jewellery rows that still carry a full
+            // hide mask — see [`benilla_formats::ItemDisplay::worn_helm_vis`]).
+            eg.helm_vis = d
+                .catalog
+                .get(helm)
+                .and_then(benilla_formats::ItemDisplay::worn_helm_vis);
         }
     }
     eg

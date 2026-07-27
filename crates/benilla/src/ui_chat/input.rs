@@ -104,6 +104,8 @@ pub(super) struct ChatProbes<'w, 's> {
     clock: Option<Res<'w, crate::lighting::GameClock>>,
     liquids: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
     interior: Res<'w, crate::wmo_portal::CurrentWmoInterior>,
+    player_room: Res<'w, crate::wmo_portal::PlayerWmoRoom>,
+    camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
     stores: Query<'w, 's, &'static crate::net::ObjectStore>,
     self_store: Query<'w, 's, &'static crate::net::ObjectStore, With<SelfPlayer>>,
     factions: Option<Res<'w, crate::target::Factions>>,
@@ -141,6 +143,8 @@ pub(super) fn drain_chat_input(
         clock,
         liquids,
         interior,
+        player_room,
+        camera_claim,
         stores,
         self_store,
         factions,
@@ -275,11 +279,12 @@ pub(super) fn drain_chat_input(
                     continue;
                 };
                 let wow = benilla_assets::coords::bevy_to_wow(feet);
-                let indoors = interior.0.is_some();
-                let verdict = crate::liquid::liquid_at(liquids.iter(), wow, Some(indoors));
+                let claim = crate::liquid::player_claim(player_room);
+                let eye = crate::liquid::camera_claim(camera_claim);
+                let verdict = crate::liquid::liquid_at(liquids.iter(), wow, claim);
                 let mut lines = vec![
                     format!(
-                        "liquid: feet [{:.2}, {:.2}, {:.2}] · indoors {indoors} ({})",
+                        "liquid: feet [{:.2}, {:.2}, {:.2}] · claim {claim:?} ({})",
                         wow[0],
                         wow[1],
                         wow[2],
@@ -291,6 +296,10 @@ pub(super) fn drain_chat_input(
                             None => "no WMO interior claim".into(),
                         }
                     ),
+                    // The camera EYE is a separate subject with its own claim (the reference's
+                    // `[0xc7b748]`), and it is the one that decides the underwater filter. Printing
+                    // only the player's is what let the two disagree unseen for a whole bug.
+                    format!("liquid: EYE claim {eye:?}"),
                     match verdict {
                         Some(h) => format!(
                             "liquid: VERDICT {:?} surface z {:.2} ({:+.2} over feet)",
@@ -301,7 +310,7 @@ pub(super) fn drain_chat_input(
                         None => "liquid: VERDICT none — not in liquid".into(),
                     },
                 ];
-                let candidates = crate::liquid::describe_at(liquids.iter(), wow);
+                let candidates = crate::liquid::describe_at(liquids.iter(), wow, claim);
                 if candidates.is_empty() {
                     lines.push("liquid: no footprint covers this XY at all".into());
                 }

@@ -9,12 +9,14 @@
 //! Same app-independent shape as the M2 loader (meshes + texture handles + metadata; materials at
 //! spawn). WMOs don't size-fade, so there are no bounds.
 
+use std::sync::Arc;
+
 use benilla_formats::{
-    accumulate_wmo_group_camera_collision, accumulate_wmo_group_collision, parse_wmo_lights,
-    parse_wmo_root, wmo_group_doodad_refs, wmo_group_footprint_tris, wmo_group_header,
-    wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_submeshes, CollisionMesh, FootprintTris,
-    LiquidMesh, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupInfo, WmoLight, WmoPortalInfo,
-    WmoPortalRef,
+    accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
+    accumulate_wmo_group_collision, parse_wmo_lights, parse_wmo_root, wmo_group_doodad_refs,
+    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
+    wmo_group_submeshes, CollisionMesh, FootprintTris, LiquidMesh, WmoDoodad, WmoDoodadSet, WmoFog,
+    WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
 };
 use bevy::asset::io::Reader;
 use bevy::asset::{Asset, AssetLoader, LoadContext};
@@ -74,6 +76,13 @@ pub struct WmoModel {
     /// BSP, mask `0x84`; an earlier render-face `|n.z|` floor heuristic mis-seeded doorways and slab
     /// edges). Same triangles as [`Self::collision`], kept per group for group attribution.
     pub group_collision_tris: Vec<Vec<[[f32; 3]; 3]>>,
+    /// Per-group **camera-only** triangles (parallel to [`Self::group_collision_tris`]): the faces
+    /// the camera gather keeps but the walking gather drops — DETAIL (`0x04`) set, NOCAMCOLLIDE
+    /// (`0x02`) clear. The down-ray's **camera-void fallback** (decision 0692) races this set only
+    /// after the faithful walking Leg A and portal Leg B both miss AND no terrain surface sits at or
+    /// below the eye: an eye held between camera-collidable surfaces (the Deadmines entrance pocket,
+    /// whose floor is all-DETAIL) then still names its room instead of blanking the building.
+    pub group_camera_only_tris: Vec<Vec<[[f32; 3]; 3]>>,
     /// Per-group AABB of [`Self::group_collision_tris`] (parallel; `None` = no collision faces),
     /// computed at load **from the triangles themselves** — the broad phase for the faces-only
     /// down-ray (`area_down_ray`). Bounds derived from the faces can only summarize the geometry,
@@ -113,16 +122,24 @@ pub struct WmoModel {
     /// attach path — a WMO MODD doodad never reaches it (create never calls SetMatrix; wow-re
     /// `trace-forensics-abbey-interior-d3d` §1.1).
     pub doodad_base: Vec<DoodadBase>,
-    /// Per-MODD **owning group** (the first group whose MODR refs name it), parallel to
-    /// [`Self::doodads`]; `None` for a MODD no group references.
+    /// Per-MODD **instantiating group** (the first group whose MODR refs name it), parallel to
+    /// [`Self::doodads`]; `None` for a MODD no group references. The reference creates a doodad
+    /// once, on the first visible-group walk that reaches it, and that create is what freezes its
+    /// lighting lane — so this is the LIGHTING key ([`Self::doodad_base`]), not the cull key.
+    pub doodad_owner: Vec<Option<u16>>,
+    /// Per-MODD **referencing groups** — every group whose MODR names it, parallel to
+    /// [`Self::doodads`]; empty for a MODD no group references.
     ///
     /// This is the prop's portal-cull key. The reference commits a WMO's doodads **per visible
     /// group** — `0x695aa0` loops the group's own MODR refs at `group+0xe8`/count `+0x144`, called
     /// from the visible-group walk `0x698720` (wow-re `m2-interior-doodad-base-light.md` §453,
     /// `trace-forensics-abbey-interior-d3d.md` §90) — so a group the portal flood culled draws none
-    /// of its furniture. Without this the props outlive their own building: cull every group of a
-    /// dungeon and its lanterns, crates and cobwebs hang in the void (decision 0689).
-    pub doodad_owner: Vec<Option<u16>>,
+    /// of its furniture, and a prop **any** of whose referrers is visible is drawn. Without the key
+    /// at all, props outlive their own building: cull every group of a dungeon and its lanterns,
+    /// crates and cobwebs hang in the void (decision 0689). With the key collapsed to one owner, a
+    /// prop that hangs through several rooms — a lava fall — blinks out on every camera angle whose
+    /// flood reaches a different one of its referrers.
+    pub doodad_groups: Vec<Arc<[u16]>>,
     /// Per-group FOOTPRINT face set (render tris + baked MOCV + MOPY flags), indexed by absolute
     /// group index; `None` for exterior groups / groups without MOCV. The **GameObject M2** light
     /// lane samples it: the entity node's env-update attach down-rays the render mesh under the
@@ -288,9 +305,10 @@ pub fn floor168(c: [u8; 3]) -> [f32; 3] {
     floor_raise(c, 168)
 }
 
-/// Invert MODR: MODD index → its owning group. First referencing group wins — a doodad named by two
-/// groups gets one def *per group* in the reference; we instantiate it once, under its first owner.
-/// `None` = referenced by no group at all (the reference never instantiates such a MODD).
+/// Invert MODR: MODD index → its **instantiating** group. First referencing group wins — the
+/// reference creates a doodad once, on the first visible-group walk that names it, and that create
+/// is what freezes its lighting lane. `None` = referenced by no group at all (the reference never
+/// instantiates such a MODD). This is the LIGHTING key only; the *cull* key is [`modr_refs`].
 fn modr_owners(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Option<u16>> {
     let mut owner: Vec<Option<u16>> = vec![None; doodad_count];
     for (gi, refs) in group_doodad_refs.iter().enumerate() {
@@ -301,6 +319,28 @@ fn modr_owners(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Optio
         }
     }
     owner
+}
+
+/// Invert MODR the other way: MODD index → **every** group whose refs name it. The draw loop is
+/// per *visible* group over that group's own MODR (`0x695aa0` from the visible-group walk
+/// `0x698720`), so a doodad named by N groups is reached by N independent chances to draw — it is
+/// on screen when ANY of them is in the portal PVS, not only its first. Collapsing this to the
+/// first owner is what made Blackrock's and the Great Forge's lava falls blink out by camera
+/// angle: `BLACKROCKSTATUELAVAFLOW` is named by 9–19 groups apiece and `LAVAPOTS` by 13, so all
+/// but one referrer's rooms hid a prop that the reference draws from every one of them.
+fn modr_refs(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Arc<[u16]>> {
+    let mut refs: Vec<Vec<u16>> = vec![Vec::new(); doodad_count];
+    for (gi, group) in group_doodad_refs.iter().enumerate() {
+        for &di in group {
+            if let Some(slot) = refs.get_mut(di as usize) {
+                // MODR may name the same doodad twice in one group; the cull only needs the set.
+                if slot.last() != Some(&(gi as u16)) {
+                    slot.push(gi as u16);
+                }
+            }
+        }
+    }
+    refs.into_iter().map(Arc::from).collect()
 }
 
 /// Resolve every MODD placement's lighting base once, at load. Ownership and interior class follow
@@ -404,6 +444,10 @@ impl AssetLoader for WmoModelLoader {
         // group index (the flat collider below is fed from the same gather).
         let mut group_collision_tris: Vec<Vec<[[f32; 3]; 3]>> =
             vec![Vec::new(); root.group_count() as usize];
+        // Per-group camera-only triangles (DETAIL set, NOCAMCOLLIDE clear) — the down-ray's
+        // camera-void fallback set (decision 0692), disjoint from the walking gather above.
+        let mut group_camera_only_tris: Vec<Vec<[[f32; 3]; 3]>> =
+            vec![Vec::new(); root.group_count() as usize];
         // Collidable triangles flattened across every group (raw WMO-local coords), accumulated as we
         // read each group's bytes — no second pass / second read.
         let mut col_pos: Vec<[f32; 3]> = Vec::new();
@@ -456,6 +500,21 @@ impl AssetLoader for WmoModelLoader {
             col_pos.extend_from_slice(&gpos);
             col_idx.extend(gidx.iter().map(|i| i + base));
             accumulate_wmo_group_camera_collision(&gbytes, &mut cam_pos, &mut cam_idx);
+            // Camera-only gather (the walking gather's DETAIL complement) — kept per group for the
+            // down-ray's camera-void fallback (decision 0692).
+            let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
+            accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
+            if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
+                for t in didx.chunks_exact(3) {
+                    if let (Some(&a), Some(&b), Some(&c)) = (
+                        dpos.get(t[0] as usize),
+                        dpos.get(t[1] as usize),
+                        dpos.get(t[2] as usize),
+                    ) {
+                        tris.push([a, b, c]);
+                    }
+                }
+            }
             let subs = wmo_group_submeshes(&gbytes, &root).map_err(to_io)?;
             // This group's MODR (which MODD placements it owns/instantiates) + MOLR (which MOLT
             // lights fold into its doodads' committed light) — the per-doodad base resolution below
@@ -513,9 +572,11 @@ impl AssetLoader for WmoModelLoader {
             }
         }
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
-        // light lists are all fixed in the root/groups, so nothing here is ever re-derived. The MODR
-        // inversion is shared with the portal-cull key below, so the two can't disagree.
+        // light lists are all fixed in the root/groups, so nothing here is ever re-derived. Both
+        // MODR inversions come off the same refs: the first-owner one freezes the lighting lane at
+        // create, the full-set one is the per-visible-group cull key.
         let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
+        let doodad_groups = modr_refs(root.doodads().len(), &group_doodad_refs);
         let doodad_base = resolve_doodad_bases(
             root.doodads(),
             root.group_infos(),
@@ -545,6 +606,7 @@ impl AssetLoader for WmoModelLoader {
             group_nav,
             fogs: root.fogs().to_vec(),
             group_collision_tris,
+            group_camera_only_tris,
             group_collision_bounds,
             collision_bounds,
             collision,
@@ -555,6 +617,7 @@ impl AssetLoader for WmoModelLoader {
             group_bounds: root.group_infos().to_vec(),
             doodad_base,
             doodad_owner,
+            doodad_groups,
             group_footprints,
             group_footprint_bounds,
             group_light_refs,
@@ -671,11 +734,11 @@ mod doodad_base_tests {
     }
 
     /// A MODD named by several groups resolves to its **first** referencing group, and the mapping is
-    /// dense over the doodad list — the portal cull keys every prop off this (decision 0689), so a
-    /// shared prop is culled with one real room rather than never culled at all. Out-of-range MODR
-    /// entries (a malformed group) are ignored rather than panicking.
+    /// dense over the doodad list — the LIGHTING lane keys off this (the create that freezes the base
+    /// runs once, on the first visible-group walk to reach it). Out-of-range MODR entries (a
+    /// malformed group) are ignored rather than panicking.
     #[test]
-    fn a_shared_modd_belongs_to_its_first_referencing_group() {
+    fn a_shared_modd_is_lit_by_its_first_referencing_group() {
         // g0 names doodad 2; g1 names 0 and 2; g2 names 1 — plus a ref past the end of the list.
         let modr = vec![vec![2u16], vec![0u16, 2u16], vec![1u16, 99u16]];
         assert_eq!(
@@ -685,5 +748,27 @@ mod doodad_base_tests {
         );
         // No groups at all ⇒ nothing is owned, and nothing is cullable.
         assert_eq!(modr_owners(2, &[]), vec![None, None]);
+    }
+
+    /// The CULL key is the whole referrer set, not the first: the draw loop runs per *visible* group
+    /// over that group's MODR, so a prop several rooms name is drawn from every one of them. Keying
+    /// it to the first owner instead is what blinked Blackrock's and the Great Forge's lava falls
+    /// out by camera angle — real files name those props from 9–19 groups apiece.
+    #[test]
+    fn the_cull_key_is_every_referencing_group() {
+        // Same fixture as above: g0 names 2; g1 names 0 and 2; g2 names 1 + an out-of-range ref.
+        let modr = vec![vec![2u16], vec![0u16, 2u16], vec![1u16, 99u16]];
+        let refs = modr_refs(3, &modr);
+        assert_eq!(&*refs[0], &[1], "doodad 0 is named by g1 alone");
+        assert_eq!(&*refs[1], &[2]);
+        assert_eq!(
+            &*refs[2],
+            &[0, 1],
+            "doodad 2 hangs in two rooms — either one draws it"
+        );
+        // A group naming the same doodad twice contributes it once; no groups ⇒ no key at all (the
+        // prop is uncullable, matching `modr_owners`' `None`).
+        assert_eq!(&*modr_refs(1, &[vec![0u16, 0u16]])[0], &[0]);
+        assert!(modr_refs(2, &[])[0].is_empty());
     }
 }

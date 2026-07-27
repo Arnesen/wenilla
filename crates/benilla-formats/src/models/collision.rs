@@ -139,7 +139,7 @@ pub fn accumulate_wmo_group_collision(
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
-    accumulate_wmo_group_faces(group_bytes, MOPY_DETAIL, positions, indices);
+    accumulate_wmo_group_faces(group_bytes, MOPY_DETAIL, 0, positions, indices);
 }
 
 /// Accumulate one WMO **group** file's *camera/LOS*-collidable triangles (raw WMO-local coords): the
@@ -151,16 +151,37 @@ pub fn accumulate_wmo_group_camera_collision(
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
-    accumulate_wmo_group_faces(group_bytes, MOPY_NOCAMCOLLIDE, positions, indices);
+    accumulate_wmo_group_faces(group_bytes, MOPY_NOCAMCOLLIDE, 0, positions, indices);
 }
 
-/// Shared WMO group-face gather: accumulate every triangle whose MOPY flags don't intersect `skip_mask`,
-/// remapping verts to a compact subset *per group* (equal local indices in different groups are distinct
-/// verts). A group that doesn't parse is skipped. The two collision audiences differ only in `skip_mask`
-/// — `0x04` DETAIL for walking, `0x02` NOCAMCOLLIDE for the camera (see [`MOPY_DETAIL`]).
+/// Accumulate one WMO **group** file's *camera-only* triangles — the faces the camera collides with
+/// but the walking gather drops: DETAIL (`flags & 0x04`) set, NOCAMCOLLIDE (`flags & 0x02`) clear.
+/// Exactly the camera gather minus the walking gather, kept as its own set so the down-ray's
+/// camera-void fallback (decision 0692) can race it *after* the faithful walking leg has missed,
+/// without double-counting the faces the walking leg already saw.
+pub fn accumulate_wmo_group_camera_only_collision(
+    group_bytes: &[u8],
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
+    accumulate_wmo_group_faces(
+        group_bytes,
+        MOPY_NOCAMCOLLIDE,
+        MOPY_DETAIL,
+        positions,
+        indices,
+    );
+}
+
+/// Shared WMO group-face gather: accumulate every triangle whose MOPY flags don't intersect `skip_mask`
+/// (and carry all of `require_mask`, when non-zero), remapping verts to a compact subset *per group*
+/// (equal local indices in different groups are distinct verts). A group that doesn't parse is skipped.
+/// The two collision audiences differ only in `skip_mask` — `0x04` DETAIL for walking, `0x02`
+/// NOCAMCOLLIDE for the camera (see [`MOPY_DETAIL`]); the camera-only set requires DETAIL on top.
 fn accumulate_wmo_group_faces(
     group_bytes: &[u8],
     skip_mask: u8,
+    require_mask: u8,
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
@@ -173,7 +194,7 @@ fn accumulate_wmo_group_faces(
         let Some(mopy) = group.material_info.get(t) else {
             continue;
         };
-        if mopy.flags & skip_mask != 0 {
+        if mopy.flags & skip_mask != 0 || mopy.flags & require_mask != require_mask {
             continue;
         }
         for k in 0..3 {

@@ -15,6 +15,7 @@
 //! [`crate::clutter::ClutterPlugin`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
@@ -157,10 +158,11 @@ struct Placement {
 struct WmoDoodadInst {
     handle: Handle<M2Model>,
     transform: Transform,
-    /// The prop's owning WMO group (its MODR referencer) — the portal-cull key, so a prop is hidden
-    /// with the room it furnishes. `None` for a MODD no group references (the reference never
-    /// instantiates one at all; we still show it, uncullable, rather than change what draws today).
-    group: Option<u16>,
+    /// Every WMO group whose MODR names this prop — the portal-cull key, so a prop is hidden with
+    /// the rooms it furnishes and drawn while any one of them is visible. Empty for a MODD no group
+    /// references (the reference never instantiates one at all; we still show it, uncullable,
+    /// rather than change what draws today).
+    groups: Arc<[u16]>,
     /// The prop's lighting ([`PropLight`], from `WmoModel::doodad_base` composed with this
     /// placement): exterior sky-lit, or the interior MODD-colour base + its owning group's MOLR
     /// lights placed in world space — folded into the prop's SH probe once its M2 loads (the fold

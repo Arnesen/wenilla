@@ -316,6 +316,18 @@ enum Command {
         /// ADT tile radius around the center tile to scan (0 = just the containing tile).
         tile_radius: u32,
     },
+    /// Dump a WMO root's placed-prop tables: every MODD doodad with its MODS set membership and
+    /// its OWNING group(s) read from the group files' MODR lists — the relation the reference
+    /// instantiates from (a *visible* group's own refs, `0x695aa0`), so a prop referenced by NO
+    /// group is one the real client never creates at all (the divergence decision 0689 names,
+    /// which benilla still spawns). The "which props exist in this building, who owns them, and
+    /// which would the reference even draw" instrument.
+    Wmodoodads {
+        /// Internal path to the WMO **root** (forward or back slashes accepted).
+        internal_path: String,
+        /// Case-insensitive substring of the prop's model path (e.g. `lightray`); all if omitted.
+        filter: Option<String>,
+    },
     /// List individual doodad (MDDF) and WMO (MODF) placements around a world position whose
     /// model path contains a substring — position, Euler rotation (deg), scale, uniqueId. The
     /// "point at a thing in the world, tell me exactly how it's placed" instrument: an
@@ -487,6 +499,10 @@ fn main() -> Result<()> {
             let catalog = benilla_formats::LightCatalog::load(&mut chain)?;
             catalog.debug_slots(map, [x, y, z], minute * 2);
         }
+        Command::Wmodoodads {
+            internal_path,
+            filter,
+        } => scan::wmodoodads(&mut chain, &internal_path, filter.as_deref())?,
         Command::Placescan {
             map,
             center_x,

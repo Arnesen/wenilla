@@ -64,6 +64,19 @@ impl MaterialExtension for WowParticleExt {
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialExtensionKey<Self>,
     ) -> std::result::Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        // `$WOW_PARTICLE_NODEPTH=1` — the occlusion A/B. Force the depth COMPARE to `Always` on
+        // every particle quad, so "this effect doesn't draw" splits cleanly into *nothing is
+        // emitted* (the census's job — `WOW_PARTICLE_CENSUS` counts live particles) and *it is
+        // emitted, rasterized, and the depth buffer eats it*. Those two look identical on screen
+        // and want completely different fixes. It found B16: the voidwalker's eye glow is two
+        // emitters mounted flush with the head skin (a ray from the eye bone crosses the body
+        // mesh at 3–6 mm), which our own opaque body pass then depth-rejects — under this switch
+        // both eyes appear exactly where the artist put them.
+        if std::env::var_os("WOW_PARTICLE_NODEPTH").is_some() {
+            if let Some(ds) = descriptor.depth_stencil.as_mut() {
+                ds.depth_compare = bevy::render::render_resource::CompareFunction::Always;
+            }
+        }
         if key.bind_group_data.mod2x {
             use bevy::render::render_resource::{
                 BlendComponent, BlendFactor, BlendOperation, BlendState,

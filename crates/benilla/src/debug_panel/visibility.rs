@@ -119,8 +119,7 @@ pub(super) fn apply_model_visibility(
                     instances
                         .get(gv.instance)
                         .ok()
-                        .and_then(|inst| inst.visible.get(gv.group as usize).copied())
-                        .unwrap_or(true)
+                        .is_none_or(|inst| gv.drawn_by(inst))
                 });
 
             // The batch's animated material-alpha factor (decision 0130 phase 2): the sampled
@@ -149,10 +148,17 @@ pub(super) fn apply_model_visibility(
             // already on the cutout material) cost nothing and don't re-batch every frame.
             //
             // The alpha field is written for `DoodadFade` holders (the fade composes `mat_factor` in)
-            // AND for a `MatAnim` that owns the channel outright (`drives_tag` — spell-effect parts,
-            // which have no fade). A lit interior prop's `MatAnim` sets neither (its tag is a packed
-            // colour the alpha field must never overwrite) — only its `mat_factor > 0` cull applies.
-            if fade.is_some() || mat_anim.is_some_and(|m| m.drives_tag) {
+            // AND for every other non-unit-lane `MatAnim`: the parts that own the channel outright
+            // (`drives_tag` — spell-effect parts, which have no fade) and the pinned no-fade lane —
+            // the lit interior props. The latter used to be skipped ("the tag is a packed colour"),
+            // which was true before the 0355 re-lane but stale after it: the probe-slot payload
+            // keeps bits 0..=15 as the alpha field precisely so `with_alpha` composes with the slot.
+            // Skipping them dropped a batch's authored dimming constant entirely — the Undercity
+            // throne room's LD_lightshaft01 (weights const 0.10/0.05, the reference's near-invisible
+            // haze) blasted at full brightness (bug B30). Only the unit lane stays out:
+            // `entities::apply_unit_mat_alpha` owns that compose, ordered against the interior
+            // classifier and the appear-fade.
+            if fade.is_some() || mat_anim.is_some_and(|m| !m.composes_unit_tag()) {
                 // Glow cards render at AUTHORED brightness (decision 0159 — the dimmer knob died
                 // with the faithful FFXGlow pass; the square-law is what keeps halos in check).
                 let alpha = fade_alpha * mat_factor;
@@ -188,8 +194,7 @@ pub(super) fn apply_model_visibility(
             || instances
                 .get(gv.instance)
                 .ok()
-                .and_then(|inst| inst.visible.get(gv.group as usize).copied())
-                .unwrap_or(true)
+                .is_none_or(|inst| gv.drawn_by(inst))
         {
             Visibility::Inherited
         } else {
