@@ -89,6 +89,44 @@ pub(super) fn swim(feet_y: f32, surface_y: f32, swimming: bool, h: f32) {
     );
 }
 
+/// How the post-teleport settle gate **ended** — the whole diagnosis of a fall-through report.
+///
+/// `found` means a floor was under the feet and the hold released onto it; `!found` is the
+/// [`super::SETTLE_TIMEOUT`] backstop firing, which switches gravity on having never seen ground.
+/// The distinction is invisible from inside the game (both look like "the loading screen went
+/// away") and it is the difference between a world that streamed in time and one that did not, so
+/// the timeout end is also a `warn!` on the ordinary log — a reporter's paste can then name it
+/// without owning a trace.
+pub(super) fn settle(found: bool, waited: f32, pos: bevy::prelude::Vec3) {
+    if !found {
+        bevy::log::warn!(
+            "settle: TIMED OUT after {waited:.2}s with no ground under the feet at \
+             ({:.1},{:.1},{:.1}) — releasing into free fall. If a building stands here, its \
+             collider had not finished streaming and the body is about to fall through it.",
+            pos.x,
+            pos.y,
+            pos.z,
+        );
+    }
+    if !dbg_trace::enabled() {
+        return;
+    }
+    dbg_trace::line(
+        "sett",
+        &format!(
+            "{} after {waited:6.2}s at ({:8.2},{:7.2},{:8.2})",
+            if found {
+                "ground found"
+            } else {
+                "TIMED OUT   "
+            },
+            pos.x,
+            pos.y,
+            pos.z,
+        ),
+    );
+}
+
 static PREV_GROUNDED: AtomicBool = AtomicBool::new(true);
 
 pub(super) fn frame(f: Frame) {

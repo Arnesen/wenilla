@@ -102,6 +102,13 @@ pub(super) fn read_monster_move(r: &mut &[u8]) -> io::Result<ServerPacket> {
 ///   in travel order. We invert each (`waypoint = endpoint − offset`) and append the endpoint, so the
 ///   returned list is `[waypoint₀ ≈ start, waypoint₁, …, endpoint]`. `waypoint₀` re-encodes the packet's
 ///   `start` (¼-yd quantized); the caller drops it in favour of the exact `start`.
+///   **`count == 2` carries no offsets at all**: vmangos guards the offset loop with `last_idx > 1`
+///   (`packet_builder.cpp:92`) while still writing `last_idx + 1` as the count, so a plain two-point
+///   `MoveTo` announces 2 points and ships only the destination. Reading the phantom offset anyway
+///   over-runs the body and the whole packet is skipped — i.e. that creature stops dead until its next
+///   move, the same freeze decision 0708 is about. Never observed on this deploy (its pathfinder emits
+///   3+ point paths, verified over four live runs: no `nodes=2` in any `csp`/`mmv` trace), but a map
+///   without mmaps would hit it on every step.
 /// - **Flying (Catmull-Rom, `WriteCatmullRomPath`):** a `u32` count, then `count` **absolute** `Vector3d`s
 ///   (the control points from `getPoint(2)` on — the post-start waypoints through the endpoint). Returned
 ///   verbatim. (Reading these as packed offsets — the old single-layout path — mis-sized the body and
@@ -129,7 +136,10 @@ fn read_monster_move_spline(r: &mut &[u8], catmull_rom: bool) -> io::Result<Vec<
     }
     let endpoint = Vector3d::read(r)?;
     let mut points = Vec::with_capacity(cap);
-    for _ in 1..count {
+    // `count == 2` ⇒ the producer skipped its offset loop entirely (`last_idx > 1`); the destination is
+    // the whole payload, and the caller pairs it with the packet's exact `start`.
+    let offsets = if count > 2 { count - 1 } else { 0 };
+    for _ in 0..offsets {
         let off = packed_to_vector3d(read_i32_le(r)?);
         points.push(Vector3d {
             x: endpoint.x - off.x,
@@ -162,11 +172,16 @@ mod tests {
     /// The producer's linear encoder, transcribed from vmangos `PacketBuilder::WriteLinearPath`:
     /// count = number of points, the **endpoint** written absolute, then each earlier point as a packed
     /// `endpoint − point` offset in travel order. `path` is the full `[start, …mids…, endpoint]`.
+    /// The `last_idx > 1` guard is transcribed too: a **two**-point path writes the count and the
+    /// destination and stops — no offsets at all, not even for the start.
     fn append_linear_path(body: &mut Vec<u8>, path: &[[f32; 3]]) {
         let (&endpoint, leading) = path.split_last().expect("a path has an endpoint");
         body.extend_from_slice(&(path.len() as u32).to_le_bytes());
         for f in endpoint {
             body.extend_from_slice(&f.to_le_bytes());
+        }
+        if path.len() <= 2 {
+            return; // vmangos `packet_builder.cpp:92` — `if (last_idx > 1)`
         }
         // `leading` = [start, …mids…]; each packed as endpoint − point (¼-yd quantized).
         for &p in leading {
@@ -222,6 +237,26 @@ mod tests {
                     MonsterMoveFacing::Angle(a) => assert!((a - 1.25).abs() < 1e-6),
                     other => panic!("expected an Angle facing, got {other:?}"),
                 }
+            }
+            _ => panic!("expected MonsterMove"),
+        }
+    }
+
+    /// The plain two-point hop — a `MoveTo` with no intermediate waypoints. vmangos announces `count = 2`
+    /// but ships **only** the destination (its offset loop is guarded by `last_idx > 1`), so a decoder
+    /// that trusts the count and reads `count − 1` offsets over-runs the body and the packet is skipped
+    /// entirely — the creature freezes where it stands. Encoded here by the transcribed producer above.
+    #[test]
+    fn monster_move_two_point_path_carries_no_offsets() {
+        let mut body = head(0x77, [4.0, 8.0, 0.0], 0);
+        body.extend_from_slice(&0u32.to_le_bytes()); // spline flags: ground
+        body.extend_from_slice(&1_000u32.to_le_bytes()); // duration
+        append_linear_path(&mut body, &[[4.0, 8.0, 0.0], [12.0, 8.0, 0.0]]);
+        let p = parse_server(opcode::SMSG_MONSTER_MOVE, &body).expect("a two-point hop parses");
+        match p {
+            ServerPacket::MonsterMove { path, .. } => {
+                assert_eq!(path.len(), 2, "start + destination, got {path:?}");
+                assert!((path[0].x - 4.0).abs() < 1e-6 && (path[1].x - 12.0).abs() < 1e-6);
             }
             _ => panic!("expected MonsterMove"),
         }

@@ -785,6 +785,7 @@ fn decode_objects(objects: Vec<Object>) -> Vec<SessionEvent> {
                         speeds,
                         transport_progress: movement.transport_progress,
                         transport: movement.transport,
+                        spline: movement.spline,
                         fields: mask,
                     });
                 }

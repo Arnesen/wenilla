@@ -58,6 +58,12 @@ const RAIN_FOG_GREY: vec3<f32> = vec3<f32>(0.50196078, 0.50196078, 0.50196078);
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    // `$WOW_PARTICLE_FLAT` (B16 instrument): solid magenta, no inputs — see material.rs.
+#ifdef WOW_PARTICLE_FLAT
+    var flat_out: FragmentOutput;
+    flat_out.color = vec4<f32>(1.0, 0.0, 1.0, 1.0);
+    return flat_out;
+#else
     // HARD FAR-CLIP WALL (faithful `farclip` ~777 yd) — see terrain.wgsl for the law. The reference
     // has ONE projection far plane and it clips the whole detailed world: terrain, models, liquid AND
     // the effect family, which is drawn by the same scene pass through the same matrix. benilla
@@ -123,4 +129,5 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #endif
     out.color = main_pass_post_lighting_processing(pbr_input, final_color);
     return out;
+#endif
 }

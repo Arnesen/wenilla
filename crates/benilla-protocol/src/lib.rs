@@ -15,9 +15,9 @@ pub mod world;
 pub use auth::AuthReject;
 pub use events::{decode, CharAction, EntityKind, LoginStage, MoveSpeeds, Poll, SessionEvent};
 pub use messages::{
-    CharCreateReq, CharEnumItem, Character, ItemInfo, JumpInfo, MonsterMoveFacing, ObjectFields,
-    ServerPacket, SpeedKind, TransportPose, CHARACTER_FLAG_GHOST, CHARACTER_FLAG_HIDE_CLOAK,
-    CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
+    CharCreateReq, CharEnumItem, Character, CreateSpline, ItemInfo, JumpInfo, MonsterMoveFacing,
+    ObjectFields, ServerPacket, SpeedKind, TransportPose, CHARACTER_FLAG_GHOST,
+    CHARACTER_FLAG_HIDE_CLOAK, CHARACTER_FLAG_HIDE_HELM, CHARACTER_FLAG_RENAME,
 };
 pub use world::{WardenRequired, WorldReader, WorldSession, WorldWriter, WORLD_PORT};
 

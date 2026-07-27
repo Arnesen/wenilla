@@ -228,6 +228,24 @@ pub(crate) struct Player {
     pub(crate) settling: bool,
     /// `Time::elapsed_secs` deadline to give up settling and release (see [`Player::settling`]).
     pub(super) settle_deadline: f32,
+    /// **The colliders under our feet may still belong to the map we just left.** Set at every
+    /// snap, cleared by the terrain streamer once the destination's own world is resident.
+    ///
+    /// The snap and the settle probe run in the SAME system (`control`: `wire_in` then the mover),
+    /// one whole `WorldStage` *before* the streamer swaps maps — so on the arrival frame the physics
+    /// world is still entirely the old map's, and its despawn is a deferred command on top of that.
+    /// A settle probe that fires into that window is asking the wrong world whether there is a floor.
+    ///
+    /// It normally answers "no" and costs nothing: a `.go` across the continent lands nowhere near
+    /// the old ground. But an **instance entrance sits within a yard of its own outdoor portal** —
+    /// Zul'Gurub's pad is z 92.53 against the Stranglethorn ground you were standing on at 92.30 —
+    /// so the probe hit the world we were leaving, declared the floor found, released the hold on
+    /// frame 0, and dropped the body 15 yd through the WMO onto the terrain below (the ZG and
+    /// Stratholme entry fall-through). Only walking a portal could show it; `.go` between the two
+    /// maps never reproduces, because only the portal puts the two floors on top of each other.
+    /// Cleared by `terrain_stream` (the only system that knows which map the resident colliders
+    /// belong to); read by the mover's settle gate.
+    pub(crate) world_stale: bool,
     /// A same-map teleport landed: the server relocated the mover, so any in-progress self
     /// server-ride (charge/taxi) is **void** — vmangos teleports at ITS flight end (its own spline
     /// finishes ~latency before ours) and its spline-done handler ignores acks while the teleport

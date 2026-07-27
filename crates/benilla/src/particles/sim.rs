@@ -2,6 +2,7 @@ use avian3d::prelude::SpatialQuery;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::Projection;
 use bevy::prelude::*;
 
 use crate::player::WorldCamera;
@@ -168,7 +169,7 @@ pub(super) fn simulate_particles(
     // The far-clip wall — the emitter draw-set gate's depth bound (see the gate below).
     view: Res<crate::view::ViewDistance>,
     mut commands: Commands,
-    cam: Query<(&GlobalTransform, &Frustum), With<WorldCamera>>,
+    cam: Query<(&GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
     // both `&mut GlobalTransform` queries below.
     transforms: Query<&GlobalTransform, (Without<ParticleEmitter>, Without<ChildDraw>)>,
@@ -218,8 +219,10 @@ pub(super) fn simulate_particles(
     // `AnimationPlayer` names the playing sequence + clip time, same resolution as the
     // material-alpha sampler (`doodad_anim::playing_seq`).
     hosts: Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
+    // `$WOW_PARTICLE_DEPTHDUMP`'s frame counter (see [`super::depthdump`]); inert without the env.
+    mut dump_count: Local<u32>,
 ) {
-    let Ok((cam_tf, frustum)) = cam.single() else {
+    let Ok((cam_tf, frustum, camera, projection)) = cam.single() else {
         return;
     };
     // Clamp dt so a load hitch doesn't fling every particle out of existence in one step.
@@ -237,6 +240,8 @@ pub(super) fn simulate_particles(
                                                                    // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
                                                                    // doodad's own cull along, so an emitter and its owner cross the wall together.
     let cam_fwd = Vec3::from(cam_tf.forward());
+    // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
+    let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
 
     for (entity, mut emitter, mut entity_tf, mut entity_global, fade, mut vis, layers) in
         &mut emitters
@@ -750,6 +755,27 @@ pub(super) fn simulate_particles(
             up: e_up,
             face_normal: e_normal,
         };
+        // `$WOW_PARTICLE_DEPTHDUMP` (B16): the depth numbers this pool brings to the compare.
+        // Booth emitters are skipped — their pixels belong to a booth camera's target, not the
+        // world depth buffer `WOW_DEPTH` reads.
+        if let Some(fidx) = dump_frame {
+            if !is_booth && def.geometry_model.is_none() && !particles.is_empty() {
+                super::depthdump::dump_emitter(
+                    fidx,
+                    def,
+                    particles,
+                    &frame,
+                    placement,
+                    &cam,
+                    cam_tf,
+                    camera,
+                    projection,
+                    images.contains(&*texture),
+                    *vis,
+                    meshes.get(&*mesh),
+                );
+            }
+        }
         if let Some(m) = meshes.get_mut(&*mesh) {
             // A GEOMETRY (model-particle) emitter never draws quads — the reference's render
             // dispatch skips the whole quad path when the model mode is on; its instances

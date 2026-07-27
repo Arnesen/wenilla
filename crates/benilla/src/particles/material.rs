@@ -77,6 +77,14 @@ impl MaterialExtension for WowParticleExt {
                 ds.depth_compare = bevy::render::render_resource::CompareFunction::Always;
             }
         }
+        // `$WOW_PARTICLE_FLAT=1` — the fragment-input A/B (B16): the shader emits solid magenta,
+        // ignoring texture, vertex colour and fog. Splits "the quad rasterizes but its inputs
+        // multiply to zero" from "the fragments never execute".
+        if std::env::var_os("WOW_PARTICLE_FLAT").is_some() {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WOW_PARTICLE_FLAT".into());
+            }
+        }
         if key.bind_group_data.mod2x {
             use bevy::render::render_resource::{
                 BlendComponent, BlendFactor, BlendOperation, BlendState,

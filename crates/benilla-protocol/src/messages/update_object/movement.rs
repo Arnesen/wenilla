@@ -45,11 +45,53 @@ const UPDATE_FLAG_HAS_POSITION: u8 = 0x40;
 const SPLINE_FLAG_FINAL_POINT: u32 = 0x1_0000;
 const SPLINE_FLAG_FINAL_TARGET: u32 = 0x2_0000;
 const SPLINE_FLAG_FINAL_ANGLE: u32 = 0x4_0000;
+/// `MoveSplineFlag::Flying` — and in vmangos 1.12 that bit alone *is* `Mask_CatmullRom`
+/// (`MoveSplineFlag.h:48,77`), the same split [`crate::ServerPacket::MonsterMove`] reads: set ⇒ a 3-D
+/// flight path that keeps its own Z, clear ⇒ a ground walk whose Z the client re-derives from terrain.
+const SPLINE_FLAG_FLYING: u32 = 0x200;
+/// `MoveSplineFlag::Cyclic` (`MoveSplineFlag.h:59`) — the path loops back on itself forever.
+const SPLINE_FLAG_CYCLIC: u32 = 0x10_0000;
+
+/// The **live spline a unit is already riding** when it streams into view — the `LIVING` block's
+/// `MOVEFLAG_SPLINE_ENABLED` tail (vmangos `Object.cpp:535` → `PacketBuilder::WriteCreate`,
+/// `packet_builder.cpp:152`). Without it, a creature that was walking when we first saw it stands
+/// frozen at its create pose until the server's *next* `SMSG_MONSTER_MOVE` — which then teleports it
+/// to wherever it actually got to (decision 0708).
+///
+/// [`Self::path`] is the **travel-order polyline**, the same shape `MonsterMove` decodes to. The wire
+/// carries the server's raw internal control array (`MoveSpline::getPath()` = `Spline::getPoints()`),
+/// which is *not* that: vmangos builds every spline — linear ones included — through
+/// `SplineBase::InitCatmullRom` ("we should use catmullrom initializer even for linear mode!",
+/// `spline.cpp:52`), so the array is `[phantom, p₀, …, pₙ, tail]` whose walkable range is
+/// `index_lo = 1 ..= index_hi = len − 2` (`spline.cpp:238-270`): the phantom head is `p₀` extrapolated
+/// one segment *backwards*, and the tail duplicates the destination (or, cyclic, closes the loop).
+/// We hand over exactly that range.
+#[derive(Debug, Clone)]
+pub struct CreateSpline {
+    /// The full travel-order polyline in raw WoW coords: `[start, …waypoints…, endpoint]`.
+    pub path: Vec<[f32; 3]>,
+    /// The server's spline id (`MoveSpline::GetId`), as on `MonsterMove`.
+    pub id: u32,
+    /// Milliseconds of this spline the server has **already ridden** (`MoveSpline::timePassed`): the
+    /// unit is `time_passed_ms / duration_ms` of the way along `path`, so a client that starts the
+    /// ride at `now − time_passed_ms` lands exactly where the server has it.
+    pub time_passed_ms: u32,
+    /// The whole path's duration in ms (`MoveSpline::Duration` = the spline's length, which vmangos
+    /// initialises in *time* units at one constant velocity — `CommonInitializer`,
+    /// `MoveSpline.cpp:125-135`). Time is therefore uniform in arc length along the whole polyline,
+    /// which is what makes the `time_passed` fraction above exact.
+    pub duration_ms: u32,
+    /// `MoveSplineFlag::Flying`: a 3-D flight path (keep the spline's Z); clear for a ground walk.
+    pub flying: bool,
+    /// `MoveSplineFlag::Cyclic` — the server loops this path forever. The app rides it once; a looping
+    /// follow is unbuilt (the same gap `MonsterMove`'s cyclic paths have).
+    pub cyclic: bool,
+}
 
 /// The decoded fields a movement block carries: the pose (from its `LIVING`/`HAS_POSITION` flag),
-/// for a `LIVING` block the unit's 6 movement speeds and (if `ON_TRANSPORT`) its rider pose, and (if
-/// `UPDATE_FLAG_TRANSPORT`) a transport GameObject's path progress. The rest of the block is parsed and
-/// discarded to stay aligned.
+/// for a `LIVING` block the unit's 6 movement speeds, its live [`CreateSpline`] and (if
+/// `ON_TRANSPORT`) its rider pose, and (if `UPDATE_FLAG_TRANSPORT`) a transport GameObject's path
+/// progress. The rest of the block is parsed and discarded to stay aligned.
 pub struct MovementBlock {
     pub position: Option<(Vector3d, f32)>,
     /// A `LIVING` block's 6 movement speeds (yd/s) in wire order `[walk, run, run_back, swim, swim_back,
@@ -72,6 +114,9 @@ pub struct MovementBlock {
     /// (decision 0438 "Riding is the mover's platform frame" — an observed rider carried this way
     /// re-anchors through the transport's live matrix each frame, never treating `pos` as world-space).
     pub transport: Option<TransportPose>,
+    /// The path this unit is **already walking** at create time (`MOVEFLAG_SPLINE_ENABLED`) — see
+    /// [`CreateSpline`]. `None` for a unit standing still, and for every non-`LIVING` block.
+    pub spline: Option<CreateSpline>,
 }
 
 impl MovementBlock {
@@ -81,6 +126,7 @@ impl MovementBlock {
         let mut speeds = None;
         let mut transport = None;
         let mut transport_progress = None;
+        let mut spline = None;
 
         if update_flag & UPDATE_FLAG_LIVING != 0 {
             let flags = read_u32_le(r)?;
@@ -121,6 +167,10 @@ impl MovementBlock {
             speeds = Some(s);
             if flags & MOVEMENT_FLAG_SPLINE_ENABLED != 0 {
                 let spline_flags = read_u32_le(r)?;
+                // The dictated final facing, in vmangos's own angle → target → point order
+                // (`packet_builder.cpp:162-167`). Parsed for alignment only: a unit still riding a
+                // path faces its travel tangent every frame, exactly as `MonsterMove`'s facing snap is
+                // overwritten while a path runs (`net::apply::objects::monster_move`).
                 if spline_flags & SPLINE_FLAG_FINAL_ANGLE != 0 {
                     let _ = read_f32_le(r)?;
                 } else if spline_flags & SPLINE_FLAG_FINAL_TARGET != 0 {
@@ -128,14 +178,28 @@ impl MovementBlock {
                 } else if spline_flags & SPLINE_FLAG_FINAL_POINT != 0 {
                     let _ = Vector3d::read(r)?;
                 }
-                let _time_passed = read_u32_le(r)?;
-                let _duration = read_u32_le(r)?;
-                let _id = read_u32_le(r)?;
+                let time_passed_ms = read_u32_le(r)?;
+                let duration_ms = read_u32_le(r)?;
+                let id = read_u32_le(r)?;
                 let amount_of_nodes = read_u32_le(r)?;
+                let mut nodes = Vec::with_capacity(amount_of_nodes.min(0xFFFF) as usize);
                 for _ in 0..amount_of_nodes {
-                    let _ = Vector3d::read(r)?;
+                    let v = Vector3d::read(r)?;
+                    nodes.push([v.x, v.y, v.z]);
                 }
+                // The final destination trails the array; it is `path`'s last real point again
+                // (`MoveSpline::FinalDestination` = `getPoint(last())`), or zero on a cyclic path.
                 let _final_node = Vector3d::read(r)?;
+                // Drop the server's two virtual control points — see [`CreateSpline`]. Fewer than
+                // four nodes cannot hold a two-point path, so there is nothing to ride.
+                spline = (nodes.len() >= 4).then(|| CreateSpline {
+                    path: nodes[1..nodes.len() - 1].to_vec(),
+                    id,
+                    time_passed_ms,
+                    duration_ms,
+                    flying: spline_flags & SPLINE_FLAG_FLYING != 0,
+                    cyclic: spline_flags & SPLINE_FLAG_CYCLIC != 0,
+                });
             }
         } else if update_flag & UPDATE_FLAG_HAS_POSITION != 0 {
             let pos = Vector3d::read(r)?;
@@ -161,6 +225,7 @@ impl MovementBlock {
             speeds,
             transport_progress,
             transport,
+            spline,
         })
     }
 }

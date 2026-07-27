@@ -2,11 +2,12 @@
 //! goes with it ([`ground_clamp_creatures`]) — the creature half of [`super`]'s motion model
 //! (decisions 0052/0059/0097).
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::SpatialQuery;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
-use benilla_protocol::EntityKind;
+use benilla_protocol::{CreateSpline, EntityKind};
 use bevy::prelude::*;
 
 use crate::collision::player_query_filter;
@@ -216,6 +217,127 @@ pub(in crate::net) fn monster_move_spline(
         duration: Duration::from_millis(u64::from(duration_ms)),
         id: spline_id,
         grounded: !flying,
+    })
+}
+
+/// Build the [`Spline`] a unit is **already riding** at the moment it streams into view — its create
+/// block's `MOVEFLAG_SPLINE_ENABLED` tail (decision 0708). Same path, same sampler as
+/// [`monster_move_spline`]; the one difference is *where the ride starts*: the server tells us how much
+/// of the path it has already covered ([`CreateSpline::time_passed_ms`]), so the spline's clock is
+/// **back-dated** by that much and [`Spline::sample`] picks the walk up exactly where the server has it,
+/// rather than restarting it from the top.
+///
+/// Returns `None` — "this unit is not walking, leave it at its create pose" — for a degenerate path, a
+/// zero duration, or a ride the server has already finished (`time_passed ≥ duration`: the create pose
+/// *is* the endpoint). `WOW_CREATE_SPLINE=off` also returns `None` for everything, restoring the
+/// pre-0708 behaviour for an A/B.
+pub(in crate::net) fn create_spline(spline: CreateSpline) -> Option<Spline> {
+    if !create_spline_enabled()
+        || spline.duration_ms == 0
+        || spline.path.len() < 2
+        || spline.time_passed_ms >= spline.duration_ms
+    {
+        return None;
+    }
+    let passed = Duration::from_millis(u64::from(spline.time_passed_ms));
+    Some(Spline {
+        points: spline.path,
+        // `checked_sub` because `Instant` has no epoch to spare: a client started seconds after boot
+        // can be handed a spline older than its own monotonic clock, and plain `-` panics there.
+        start: Instant::now()
+            .checked_sub(passed)
+            .unwrap_or_else(Instant::now),
+        duration: Duration::from_millis(u64::from(spline.duration_ms)),
+        id: spline.id,
+        grounded: !spline.flying,
+    })
+}
+
+/// One `csp` line per create block that carried a live spline — the **supply** half of the
+/// spawn-freeze instrument (decision 0708), written to the shared `WOW_MOVE_TRACE` sink so it
+/// interleaves with everything else on one clock. Logged from the wire, *before* the ride is
+/// interpreted, so the `WOW_CREATE_SPLINE=off` leg records the same lines as the fixed one and the two
+/// are directly diffable.
+///
+/// `left` is the number that matters: the yards of path still ahead of the server at create time — i.e.
+/// exactly how far this unit will drift from us while we hold it still, and therefore how big a jump
+/// its next `SMSG_MONSTER_MOVE` has to make up. Read it against the `mmv` lines' realized snaps.
+pub(in crate::net) fn trace_create_spline(guid: u64, spline: Option<&CreateSpline>) {
+    if !crate::dbg_trace::enabled() {
+        return;
+    }
+    let Some(s) = spline else { return };
+    let length: f32 = s
+        .path
+        .windows(2)
+        .map(|w| {
+            let (dx, dy, dz) = (w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]);
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        })
+        .sum();
+    let ridden = s.time_passed_ms as f32 / s.duration_ms.max(1) as f32;
+    let left = length * (1.0 - ridden).clamp(0.0, 1.0);
+    crate::dbg_trace::line(
+        "csp",
+        &format!(
+            "{guid:#x} nodes={} len={length:.2} left={left:.2} t={}/{} ms{}{}{}",
+            s.path.len(),
+            s.time_passed_ms,
+            s.duration_ms,
+            if s.flying { " flying" } else { "" },
+            if s.cyclic { " cyclic" } else { "" },
+            if create_spline_enabled() {
+                ""
+            } else {
+                " DROPPED(WOW_CREATE_SPLINE=off)"
+            },
+        ),
+    );
+}
+
+/// One `mmv` line per `SMSG_MONSTER_MOVE` — the **realized** half of the same instrument: the distance
+/// from where we were drawing the unit to where the server says its new path starts, which is the
+/// teleport the director sees. `?` when the unit has no transform yet (its spawn command hasn't
+/// flushed), which is not a snap at all.
+///
+/// Split into `xy` and `z` on purpose: only the **horizontal** part is a desync. A grounded creature's
+/// Z is deliberately ours, not the server's — [`ground_clamp_creatures`] re-derives it from our terrain
+/// (decision 0059), so on a slope a correctly-followed creature still reads a Z difference of a yard or
+/// two against the wire. Read `xy`; `z` is the terrain disagreement, and reading the 3-D total instead
+/// would bury a clean follow in hill noise.
+pub(in crate::net) fn trace_move_snap(
+    guid: u64,
+    from: Option<[f32; 3]>,
+    start: [f32; 3],
+    stop: bool,
+    duration_ms: u32,
+) {
+    if !crate::dbg_trace::enabled() {
+        return;
+    }
+    let snap = from.map_or("xy=? z=?".to_string(), |f| {
+        let (dx, dy, dz) = (start[0] - f[0], start[1] - f[1], start[2] - f[2]);
+        format!("xy={:.2} z={dz:+.2}", (dx * dx + dy * dy).sqrt())
+    });
+    crate::dbg_trace::line(
+        "mmv",
+        &format!(
+            "{guid:#x} {snap} start=[{:.2},{:.2},{:.2}] dur={duration_ms}{}",
+            start[0],
+            start[1],
+            start[2],
+            if stop { " stop" } else { "" },
+        ),
+    );
+}
+
+/// The A/B switch behind [`create_spline`]: `WOW_CREATE_SPLINE=off` drops every create-block spline,
+/// which is exactly what the client did before decision 0708 (creatures frozen at first sight until
+/// their next `SMSG_MONSTER_MOVE` snapped them forward).
+fn create_spline_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("WOW_CREATE_SPLINE").is_ok_and(|v| matches!(v.as_str(), "off" | "0"))
     })
 }
 
@@ -488,6 +610,48 @@ mod tests {
             bank < -0.1 && bank > -std::f32::consts::FRAC_PI_2,
             "right turn leans right, unsnapped — got {bank}"
         );
+    }
+
+    /// A create-block spline is joined **where the server already is**, not restarted from the top
+    /// (decision 0708): a 20-yd path 12 s long, 9 s of it already ridden, samples three quarters
+    /// along — 15 yd in. Restarting it (the naive read of the same packet) would sample at 0 and put
+    /// the creature back at the start.
+    #[test]
+    fn a_create_spline_joins_the_walk_in_progress() {
+        let s = create_spline(CreateSpline {
+            path: vec![[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]],
+            id: 7,
+            time_passed_ms: 9_000,
+            duration_ms: 12_000,
+            flying: false,
+            cyclic: false,
+        })
+        .expect("a live walk");
+        let (pos, facing, _) = s.sample(Instant::now());
+        assert!(
+            (pos[0] - 15.0).abs() < 0.05 && pos[1].abs() < 1e-3,
+            "expected three quarters along, got {pos:?}"
+        );
+        assert!(facing.unwrap().abs() < 1e-3, "facing down the path");
+        assert!(s.grounded, "no Flying bit ⇒ terrain-clamped");
+    }
+
+    /// A ride the server has already finished — and a degenerate one — leave the unit at its create
+    /// pose rather than replaying a walk that is over.
+    #[test]
+    fn a_finished_or_degenerate_create_spline_is_no_walk() {
+        let spline = |time_passed_ms, duration_ms, path: Vec<[f32; 3]>| CreateSpline {
+            path,
+            id: 1,
+            time_passed_ms,
+            duration_ms,
+            flying: false,
+            cyclic: false,
+        };
+        let straight = vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
+        assert!(create_spline(spline(5_000, 5_000, straight.clone())).is_none());
+        assert!(create_spline(spline(0, 0, straight)).is_none());
+        assert!(create_spline(spline(0, 5_000, vec![[1.0, 2.0, 3.0]])).is_none());
     }
 
     /// The SNAP past ±π/2 (0516 — `0x7c5573..`: a snap to ±π, not a soft clamp): approaching a

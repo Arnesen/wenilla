@@ -291,7 +291,7 @@ fn stream_terrain(
     liquid_assets: Option<Res<LiquidAssets>>,
     clutter: Option<Res<GroundClutter>>,
     clutter_cfg: Option<Res<ClutterConfig>>,
-    player: Res<Player>,
+    mut player: ResMut<Player>,
     camera: Query<&Transform, With<WorldCamera>>,
     shared_light: Option<Res<SharedLightBuffer>>,
     cfg: Option<Res<RenderConfig>>,
@@ -558,6 +558,15 @@ fn stream_terrain(
             p.total += 1;
             p.ready += usize::from(up);
             p.focus_resident &= up;
+        }
+        // The streamer is the only authority on *which map* the colliders under the player belong
+        // to, so it is what lifts the mover's post-snap hold ([`Player::world_stale`]). Residency
+        // here means this map's own tile (or, on a WMO-only map, its one building) is spawned —
+        // which is only reachable after the swap above drained every tile of the map we left. Until
+        // then a settle probe would be answered by the old world, and at an instance entrance the
+        // old floor sits within a yard of the new one.
+        if p.focus_resident && p.total > 0 {
+            player.world_stale = false;
         }
     }
 }

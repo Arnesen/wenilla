@@ -2,8 +2,10 @@
 //!
 //! Two motion sources drive an entity's [`Transform`] between the sparse server packets (decisions 0052
 //! + 0053):
-//! - **[`Spline`]** — a server-authored path (`SMSG_MONSTER_MOVE`), sampled at constant speed by
-//!   [`spline::sample_splines`]. Creatures ride these.
+//! - **[`Spline`]** — a server-authored path, sampled at constant speed by
+//!   [`spline::sample_splines`]. Creatures ride these. Two sources, one component: a fresh
+//!   `SMSG_MONSTER_MOVE` ([`spline::monster_move_spline`]), and the walk a unit was **already** on when
+//!   it streamed into view, joined mid-path from its create block ([`spline::create_spline`], 0708).
 //! - **[`RemoteMotion`]** — another player's flag-driven locomotion, integrated by
 //!   [`remote::extrapolate_remote_units`]: the client's own dead-reckoning in miniature (extrapolate
 //!   from the last reported state, snap to the truth on the next packet). A jump is a **ballistic
@@ -34,7 +36,8 @@ pub(crate) use remote::RemoteMotion;
 pub(in crate::net) use remote::{apply_move, arrival_snap, trace_relay, RelayOutcome};
 pub(super) use remote::{drain_pending_moves, extrapolate_remote_units};
 pub(super) use spline::{
-    ground_clamp_creatures, mark_swimming_creatures, monster_move_spline, sample_splines,
+    create_spline, ground_clamp_creatures, mark_swimming_creatures, monster_move_spline,
+    sample_splines, trace_create_spline, trace_move_snap,
 };
 pub(crate) use spline::{CreatureSwimming, Spline};
 

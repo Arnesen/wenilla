@@ -14,7 +14,10 @@ use crate::items::Items;
 use crate::model_fade::DespawnFade;
 use crate::names::NameCache;
 
-use super::super::motion::{monster_move_spline, pose_transform, resolve_facing, write_pose};
+use super::super::motion::{
+    create_spline, monster_move_spline, pose_transform, resolve_facing, trace_create_spline,
+    trace_move_snap, write_pose,
+};
 use super::super::{
     Guid, GuidIndex, NetCommands, NetEntity, ObjectStore, RemoteMotion, SelfGuid,
     SpeedChangeMessage, Spline, UnitSpeeds,
@@ -33,6 +36,7 @@ pub(super) fn object_create(
     speeds: Option<MoveSpeeds>,
     transport_progress: Option<u32>,
     transport: Option<benilla_protocol::TransportPose>,
+    spline: Option<benilla_protocol::CreateSpline>,
     fields: ObjectFields,
     commands: &mut Commands,
     index: &mut GuidIndex,
@@ -115,14 +119,15 @@ pub(super) fn object_create(
             position[2],
         );
     }
+    // The walk this unit is ALREADY on (decision 0708): its create block's live spline, joined at the
+    // server's own progress along it. Traced before it is interpreted, so the `WOW_CREATE_SPLINE=off`
+    // leg of the A/B still records what the wire offered.
+    trace_create_spline(guid, spline.as_ref());
+    let walk = spline.and_then(create_spline);
     if let Some(&e) = index.0.get(&guid) {
-        // Re-create of a tracked guid: refresh identity + pose, drop any stale path. A create
-        // is a fresh server snapshot, so any in-flight extrapolation is stale too — clear it.
-        commands
-            .entity(e)
-            .insert(net)
-            .remove::<Spline>()
-            .remove::<RemoteMotion>();
+        // Re-create of a tracked guid: refresh identity + pose. A create is a fresh server snapshot, so
+        // any in-flight extrapolation is stale too — clear it.
+        commands.entity(e).insert(net).remove::<RemoteMotion>();
         if let Some(s) = speeds {
             commands.entity(e).insert(UnitSpeeds(s));
         }
@@ -140,6 +145,16 @@ pub(super) fn object_create(
                 commands
                     .entity(e)
                     .remove::<crate::transport::TransportRider>();
+            }
+        }
+        // The snapshot's own path outranks whatever we were riding; a create *without* one says the
+        // unit is standing still, so a stale path goes.
+        match walk {
+            Some(s) => {
+                commands.entity(e).insert(s);
+            }
+            None => {
+                commands.entity(e).remove::<Spline>();
             }
         }
         write_pose(transforms, e, position, orientation);
@@ -171,6 +186,9 @@ pub(super) fn object_create(
         }
         if let Some(r) = rider {
             entity.insert(r);
+        }
+        if let Some(s) = walk {
+            entity.insert(s);
         }
         index.0.insert(guid, entity.id());
         // Seed the store via the pending flush — the entity isn't spawned until the sync point.
@@ -373,6 +391,16 @@ pub(super) fn monster_move(
     transforms: &mut Query<&mut Transform>,
 ) {
     if let Some(&e) = index.0.get(&guid) {
+        // The DESYNC readout (decision 0708): how far this packet is about to teleport the unit — the
+        // gap between where we have been drawing it and where the server says the path begins. A
+        // correctly-followed creature reads ~0; a frozen one reads the whole walk it slept through.
+        trace_move_snap(
+            guid,
+            transforms.get(e).ok().map(|t| bevy_to_wow(t.translation)),
+            start,
+            stop,
+            duration_ms,
+        );
         // Apply the dictated final facing (moveType 2/3/4) as a **snap** — faithful to the
         // client, which stores it straight into the unit's movement facing (`0x7c6f30`).
         // This is the *packet*-driven re-face — a scripted/emote/aggro `SetFacingTo` the

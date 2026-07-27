@@ -30,6 +30,7 @@ use bevy::prelude::*;
 
 use crate::lighting::SharedLightBuffer;
 
+mod depthdump;
 mod material;
 mod model;
 mod quads;
@@ -396,6 +397,13 @@ impl ParticleEmitter {
     /// per-emitter facts (blend, texture, rate keys) beside the live count.
     pub(crate) fn def(&self) -> &ParticleEmitterDef {
         &self.def
+    }
+
+    /// The particle texture handle — read by the phase probe ([`crate::capture`]) to report the
+    /// GPU-side image state beside the phase membership (a main-world-resident image whose GPU
+    /// prep failed leaves every draw silently skipped).
+    pub(crate) fn texture(&self) -> &Handle<Image> {
+        &self.texture
     }
 
     /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter

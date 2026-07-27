@@ -25,8 +25,11 @@
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::mesh::RenderMesh;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::{ViewBinnedRenderPhases, ViewSortedRenderPhases};
 use bevy::render::sync_world::MainEntity;
+use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::interact::WorldObject;
@@ -36,13 +39,20 @@ pub(crate) struct PhaseProbePlugin;
 
 impl Plugin for PhaseProbePlugin {
     fn build(&self, app: &mut App) {
-        let Some(object) = std::env::var("WOW_PHASE")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-        else {
-            warn!("phase: WOW_PHASE wants a placement uniqueId (e.g. 235256) — inert");
+        let raw = std::env::var("WOW_PHASE").ok();
+        // `WOW_PHASE=particles` — the same question asked of every live PARTICLE emitter's quad
+        // mesh instead of one placement's batches (B16: a pool that is emitted, meshed, visible
+        // and textured, whose pixels never change — "was its mesh ever SUBMITTED to a phase?" is
+        // exactly the gap between the sim-side depth dump and the framebuffer).
+        let particles = raw.as_deref().is_some_and(|v| v.trim() == "particles");
+        let object = raw.as_deref().and_then(|v| v.trim().parse::<u32>().ok());
+        if !particles && object.is_none() {
+            warn!(
+                "phase: WOW_PHASE wants a placement uniqueId (e.g. 235256) or `particles` — inert"
+            );
             return;
-        };
+        }
+        let object = object.unwrap_or(0);
         let at = std::env::var("WOW_PHASE_AT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -54,12 +64,13 @@ impl Plugin for PhaseProbePlugin {
             .max(1);
         app.insert_resource(PhaseWatch {
             object,
+            particles,
             at,
             count,
             batches: Vec::new(),
             armed: false,
         })
-        .add_systems(Update, collect_batches)
+        .add_systems(Update, (collect_batches, collect_emitters))
         .add_plugins(ExtractResourcePlugin::<PhaseWatch>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             warn!("phase: no render app — inert");
@@ -77,10 +88,14 @@ impl Plugin for PhaseProbePlugin {
 struct PhaseWatch {
     /// The placement `uniqueId` whose batches to follow.
     object: u32,
+    /// `WOW_PHASE=particles`: follow every live particle emitter's quad mesh instead.
+    particles: bool,
     at: f32,
     count: u32,
-    /// The watched batches: main-world entity, its WMO batch order, and how it draws.
-    batches: Vec<(Entity, i32, String)>,
+    /// The watched batches: main-world entity, its WMO batch order, how it draws, and (particles
+    /// mode) its mesh + texture assets — so the render half can say what the GPU-side copies hold
+    /// at draw time.
+    batches: Vec<WatchedBatch>,
     /// Have we found the object and started sampling?
     armed: bool,
 }
@@ -91,6 +106,10 @@ impl ExtractResource for PhaseWatch {
         source.clone()
     }
 }
+
+/// One watched batch: entity, WMO batch order (or emitter bone), how it draws, and — particles
+/// mode only — the mesh + texture asset ids the render half resolves to GPU-side state.
+type WatchedBatch = (Entity, i32, String, Option<(AssetId<Mesh>, AssetId<Image>)>);
 
 /// Find the object's batch entities once it has streamed in. Re-run until it is found, then hold:
 /// the set is per-placement and does not change, and re-collecting every frame would make the
@@ -113,7 +132,7 @@ fn collect_batches(
         return;
     }
     let want = watch.object;
-    let mut found: Vec<(Entity, i32, String)> = parts
+    let mut found: Vec<WatchedBatch> = parts
         .iter()
         .filter(|(_, obj, _, _)| obj.id == want)
         .map(|(e, _, part, mat)| {
@@ -123,16 +142,52 @@ fn collect_batches(
             let order = materials
                 .get(&mat.0)
                 .map_or(-1, |m| m.extension.sun_scale.y as i32);
-            (e, order, format!("{:?}", part.blend))
+            (e, order, format!("{:?}", part.blend), None)
         })
         .collect();
     if found.is_empty() {
         return;
     }
     // Sort by batch order so the report reads in the WMO's authored order, not spawn order.
-    found.sort_by_key(|&(_, order, _)| order);
+    found.sort_by_key(|&(_, order, _, _)| order);
     info!(
         "phase: watching {} batches of #{want} for {} frames",
+        found.len(),
+        watch.count
+    );
+    watch.batches = found;
+    watch.armed = true;
+}
+
+/// The `particles` mode's collector: every LIVE particle emitter's own quad-mesh entity, labeled
+/// by its emitter bone + blend (the same identity the sim-side depth dump prints, so a phase line
+/// and a dump line name the same pool). One-shot at the window like [`collect_batches`].
+fn collect_emitters(
+    mut watch: ResMut<PhaseWatch>,
+    time: Res<Time>,
+    emitters: Query<(Entity, &crate::particles::ParticleEmitter, &Mesh3d)>,
+) {
+    if !watch.particles || watch.armed || time.elapsed_secs() < watch.at {
+        return;
+    }
+    let found: Vec<WatchedBatch> = emitters
+        .iter()
+        .filter(|(_, e, _)| e.live() > 0)
+        .map(|(ent, e, mesh)| {
+            let def = e.def();
+            (
+                ent,
+                i32::from(def.bone),
+                format!("{:?}(pool {})", def.blend, e.live()),
+                Some((mesh.0.id(), e.texture().id())),
+            )
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    info!(
+        "phase: watching {} live emitter meshes for {} frames",
         found.len(),
         watch.count
     );
@@ -146,6 +201,8 @@ fn report_phases(
     opaque: Res<ViewBinnedRenderPhases<Opaque3d>>,
     alpha_mask: Res<ViewBinnedRenderPhases<AlphaMask3d>>,
     transparent: Res<ViewSortedRenderPhases<Transparent3d>>,
+    render_meshes: Res<RenderAssets<RenderMesh>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
     mut seen: Local<u32>,
 ) {
     let Some(watch) = watch else { return };
@@ -168,7 +225,36 @@ fn report_phases(
         binned_total(&alpha_mask),
         transparent_total,
     );
-    for &(entity, submesh, ref blend) in &watch.batches {
+    // `particles` mode: the transparent phase's TAIL — the items drawn LAST, i.e. over everything
+    // else. A watched mesh that is submitted, late, correct and still invisible means someone
+    // even later paints its pixels; this names the suspects with their sort distances.
+    if watch.particles {
+        if let Some(phase) = transparent.values().max_by_key(|p| p.items.len()) {
+            let n = phase.items.len();
+            for (i, item) in phase.items.iter().enumerate().skip(n.saturating_sub(25)) {
+                info!(
+                    "phase#{frame} tail @{i} {:?} dist {:.3}",
+                    item.entity.1, item.distance
+                );
+            }
+        }
+    }
+    for &(entity, submesh, ref blend, assets) in &watch.batches {
+        // What the GPU-side copies hold at draw time — the last links between "submitted to a
+        // phase" and "fragments exist": a phase item whose RenderMesh is absent draws nothing,
+        // and one whose material TEXTURE never became a GpuImage has no material bind group, so
+        // the draw command chain aborts silently every frame.
+        let gpu = assets.map(|(mesh_id, tex_id)| {
+            let mesh = match render_meshes.get(mesh_id) {
+                None => "gpu_mesh MISSING".to_string(),
+                Some(m) => format!("gpu_verts {}", m.vertex_count),
+            };
+            let tex = match gpu_images.get(tex_id) {
+                None => "gpu_tex MISSING".to_string(),
+                Some(img) => format!("gpu_tex {:?}", img.texture_format),
+            };
+            format!("{mesh} {tex}")
+        });
         let main = MainEntity::from(entity);
         let mut found = Vec::new();
         // The main view is whichever phase map holds the most entities: shadow and prepass views bin
@@ -192,7 +278,8 @@ fn report_phases(
         // (79 entities over 19 orders on the Far Watch Post tower). Keying a report by order alone
         // silently merges them and can hide the one batch that moved.
         info!(
-            "phase#{frame} {entity} batch order {submesh:3} {blend:10} -> {}",
+            "phase#{frame} {entity} batch order {submesh:3} {blend:10} {} -> {}",
+            gpu.as_deref().unwrap_or(""),
             if found.is_empty() {
                 "NOT SUBMITTED".to_string()
             } else {

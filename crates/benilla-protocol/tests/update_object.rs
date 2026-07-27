@@ -447,6 +447,140 @@ fn unit_living_block_surfaces_on_transport_rider_pose() {
     }
 }
 
+/// A unit that is **already walking** when it streams in: the `LIVING` block's
+/// `MOVEFLAG_SPLINE_ENABLED` (0x0040_0000) tail, byte-shaped exactly as vmangos writes it
+/// (`PacketBuilder::WriteCreate`, `packet_builder.cpp:152`). Two things are verified, and both are
+/// what decision 0708 turns on:
+///
+/// 1. The node array is the server's **internal** control array — `[phantom, p₀…pₙ, tail]`, since
+///    vmangos builds even a linear spline through `InitCatmullRom` (`spline.cpp:52`) — so the decoded
+///    `path` must be that array with its two virtual points trimmed, not the raw nodes.
+/// 2. The descriptor mask *after* the spline still parses: a mis-sized spline read (a missed node, a
+///    forgotten final destination) silently shifts every field that follows, which is precisely how a
+///    parse-and-discard block hides its own bugs.
+#[test]
+fn unit_living_block_surfaces_the_walk_it_is_already_on() {
+    // The real path: an L, 10 yd east then 20 yd north. What the server actually serializes is that
+    // path wrapped in its two virtual points: a phantom head at `p₀.lerp(p₁, -1)` = 2p₀ − p₁ (one
+    // segment *behind* the start) and a tail duplicating the destination.
+    let path = [
+        [10.0f32, 20.0, 30.0],
+        [20.0, 20.0, 30.0],
+        [20.0, 40.0, 30.0],
+    ];
+    let nodes = [
+        [0.0f32, 20.0, 30.0], // phantom: 2·p₀ − p₁
+        path[0],
+        path[1],
+        path[2],
+        path[2], // tail: the destination again
+    ];
+
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.push(0); // has_transport
+    body.push(2); // update_type: CREATE_OBJECT
+    write_packed_guid(0xAA, &mut body).unwrap();
+    body.push(3); // TypeId::Unit
+
+    body.push(0x20); // movement block: LIVING only
+    let flags: u32 = 0x0040_0000; // MOVEFLAG_SPLINE_ENABLED (vmangos MovementInfo.h:53)
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+                                                 // The unit's stored pose — vmangos re-syncs it to the spline only every 400 ms, so it trails the
+                                                 // true position; the spline below is what actually places the unit.
+    for v in [14.0f32, 20.0, 30.0, 0.0] {
+        body.extend_from_slice(&v.to_le_bytes()); // living pos + orientation
+    }
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time
+    for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
+        body.extend_from_slice(&v.to_le_bytes()); // the 6 speeds
+    }
+    // The spline tail: flags, time_passed, duration, id, node count, the nodes, final destination.
+    body.extend_from_slice(&0u32.to_le_bytes()); // spline flags: ground walk, no dictated facing
+    body.extend_from_slice(&3_000u32.to_le_bytes()); // time_passed: a quarter of the ride is done
+    body.extend_from_slice(&12_000u32.to_le_bytes()); // duration
+    body.extend_from_slice(&42u32.to_le_bytes()); // spline id
+    body.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+    for n in nodes {
+        for f in n {
+            body.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    for f in path[2] {
+        body.extend_from_slice(&f.to_le_bytes()); // FinalDestination
+    }
+
+    // A descriptor field behind the spline: UNIT_FIELD_DISPLAYID (131) = block 4, bit 3.
+    body.push(5); // 5 mask blocks
+    for m in [0u32, 0, 0, 0, 1 << 3] {
+        body.extend_from_slice(&m.to_le_bytes());
+    }
+    body.extend_from_slice(&1234u32.to_le_bytes());
+
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    let events = decode(packet);
+    match events.as_slice() {
+        [SessionEvent::ObjectCreate {
+            guid: 0xAA,
+            kind: EntityKind::Unit,
+            display_id,
+            position,
+            spline,
+            ..
+        }] => {
+            let s = spline.as_ref().expect("the create block's live spline");
+            assert_eq!(
+                s.path, path,
+                "the two virtual control points are the server's, not waypoints"
+            );
+            assert_eq!(s.time_passed_ms, 3_000);
+            assert_eq!(s.duration_ms, 12_000);
+            assert_eq!(s.id, 42);
+            assert!(!s.flying, "no Flying bit ⇒ a ground walk");
+            assert!(!s.cyclic);
+            assert_eq!(
+                *position,
+                [14.0, 20.0, 30.0],
+                "the block's own pose is the server's last 400 ms sync, kept as the spawn pose"
+            );
+            assert_eq!(
+                *display_id,
+                Some(1234),
+                "the descriptor mask behind the spline still parses — the block was sized right"
+            );
+        }
+        other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
+/// A unit standing still carries no spline tail at all — the flag gates it, so `spline` is `None` and
+/// nothing downstream tries to walk it.
+#[test]
+fn unit_living_block_without_the_spline_flag_carries_no_walk() {
+    let mut body = 1u32.to_le_bytes().to_vec();
+    body.push(0); // has_transport
+    body.push(2); // CREATE_OBJECT
+    write_packed_guid(0xAB, &mut body).unwrap();
+    body.push(3); // TypeId::Unit
+    body.push(0x20); // LIVING
+    body.extend_from_slice(&0u32.to_le_bytes()); // no move flags
+    body.extend_from_slice(&0u32.to_le_bytes()); // timestamp
+    for v in [1.0f32, 2.0, 3.0, 0.5] {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    body.extend_from_slice(&0.0f32.to_le_bytes()); // fall_time
+    for v in [2.5f32, 7.0, 4.5, 4.722_222_3, 2.5, std::f32::consts::PI] {
+        body.extend_from_slice(&v.to_le_bytes());
+    }
+    body.push(0); // no descriptor fields
+
+    let packet = messages::parse_server(messages::opcode::SMSG_UPDATE_OBJECT, &body).unwrap();
+    match decode(packet).as_slice() {
+        [SessionEvent::ObjectCreate { spline, .. }] => assert!(spline.is_none()),
+        other => panic!("expected one ObjectCreate, got {other:?}"),
+    }
+}
+
 /// `PLAYER_VISIBLE_ITEM_<n>_0` across the slot range — the PUBLIC entry the inspect window's whole
 /// paper doll is built from (decision 0631) and the same field equipment rendering resolves other
 /// players' gear through. Untested until now, and an off-by-one in its `258 + 2 + 12i` stride would

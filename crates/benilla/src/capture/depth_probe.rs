@@ -104,13 +104,29 @@ impl Plugin for DepthProbePlugin {
             // transmissive/transparent ones. That is the depth as it stood when the opaque fight was
             // decided, which is the question — see [`DepthReadbackNode`] for what reading it later
             // gets you instead.
+            //
+            // `WOW_DEPTH_AFTER=1` moves the copy to AFTER the transparent pass — deliberately
+            // measuring the thing the placement note warns about: the depth the transparent pass
+            // itself wrote. B38 first observed that phantom ("5–8 yd at pixels where the ray cast
+            // finds the tower at 32–43 yd … from something that tracks the camera") and never named
+            // it; B16's eye quads lose a depth compare that the opaque-pass buffer says they win,
+            // so the same writer is now the suspect. Before-vs-after at the same pixels names its
+            // depth, and its depth names it.
             .add_render_graph_edges(
                 Core3d,
-                (
-                    Node3d::MainOpaquePass,
-                    DepthReadbackLabel,
-                    Node3d::MainTransmissivePass,
-                ),
+                if std::env::var_os("WOW_DEPTH_AFTER").is_some() {
+                    (
+                        Node3d::MainTransparentPass,
+                        DepthReadbackLabel,
+                        Node3d::EndMainPass,
+                    )
+                } else {
+                    (
+                        Node3d::MainOpaquePass,
+                        DepthReadbackLabel,
+                        Node3d::MainTransmissivePass,
+                    )
+                },
             );
     }
 }

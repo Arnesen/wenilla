@@ -159,8 +159,8 @@ pub use trade::{
 };
 pub use trainer::{train_fail, trainer_buy_spell, trainer_list, trainer_spell_state, TrainerSpell};
 pub use update_object::{
-    quest_slot_state, MovementBlock, Object, ObjectFields, ObjectType, PlayerSkillSlot,
-    QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
+    quest_slot_state, CreateSpline, MovementBlock, Object, ObjectFields, ObjectType,
+    PlayerSkillSlot, QuestLogSlot, UnitAuraSlot, AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK,
     PLAYER_EXPLORED_ZONES_SLOTS, PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS,
     UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };

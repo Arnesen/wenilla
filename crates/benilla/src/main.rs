@@ -288,12 +288,18 @@ fn main() {
                     // Focused, it steals the keyboard — on 2026-07-19 a login-shot run swallowed
                     // their keystrokes out of another app and typed them into the account box,
                     // which is also how that capture lost the bare caret it was taken to measure.
-                    // Merely unfocused, a normal-level window still opens on TOP of their work.
-                    // So every probe/capture/regression run (`bgwin`) opens unfocused at the
-                    // bottom of the window stack — still on screen, so rendering, readback and
-                    // screenshots are untouched. An ordinary `cargo run` is unaffected and
-                    // focuses normally. The app-level half (winit's forced macOS app activation)
-                    // is `BgWinPlugin`'s job below.
+                    // So every probe/capture/regression run (`bgwin`) opens unfocused; an ordinary
+                    // `cargo run` is unaffected and focuses normally.
+                    //
+                    // A background run is BORN at `AlwaysOnBottom` (`kCGNormalWindowLevel - 1`)
+                    // so it can never flash over their work on the way up — winit raises a new
+                    // window twice before our first frame runs, and at the normal level that
+                    // showed as ~half a second of probe window on top (measured). But it does not
+                    // STAY there: that level is a cage, and 0703 leaving it on for the whole run
+                    // is why an instrumented window could never be raised again however hard you
+                    // clicked it. `BgWinPlugin` promotes it back to Normal the moment the launch
+                    // settles (decision 0709), and owns the app-level half — winit's forced macOS
+                    // app activation — as well.
                     focused: !background,
                     window_level: if background {
                         bevy::window::WindowLevel::AlwaysOnBottom

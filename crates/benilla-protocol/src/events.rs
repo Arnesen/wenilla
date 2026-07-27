@@ -10,7 +10,7 @@
 //! Coordinates stay **raw WoW** (the `benilla` boundary applies `bevy = (-y, z, -x)`).
 
 use crate::messages::{
-    ActionButton, AttackerState, ChannelNoticeTail, Character, DamageShield,
+    ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
     EnvironmentalDamageLog, FriendEntry, FriendStatusUpdate, GossipOption, GroupLootInfo,
     GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MonsterMoveFacing, ObjectFields,
@@ -157,6 +157,12 @@ pub enum SessionEvent {
         /// `Some` when a freshly-created unit/player is standing on a boat/zeppelin/elevator at create
         /// time, local to that transport's frame (decision 0438).
         transport: Option<TransportPose>,
+        /// The path this unit was **already walking** when it streamed into view
+        /// (`MOVEFLAG_SPLINE_ENABLED` in its `LIVING` block) — the same travel-order polyline as
+        /// [`Self::MonsterMove`], plus the milliseconds of it the server has already ridden, so the app
+        /// can join the walk mid-path. Dropping it is what froze every creature that happened to be in
+        /// motion at first sight, until its next `MonsterMove` teleported it forward (decision 0708).
+        spline: Option<CreateSpline>,
         /// The object's full descriptor field set from the create mask — health/level/appearance/
         /// customization and everything else. The ECS seeds its `ObjectStore` from this, then merges
         /// later [`Self::ObjectValues`] deltas into it (decision 0061).

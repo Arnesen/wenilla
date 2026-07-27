@@ -92,6 +92,9 @@ pub(super) fn apply_server_moves(
             cam.yaw = w.orientation;
             player.settling = true; // hold (gravity off) until the new map's ground streams in
             player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+            // …and the physics world under the new position is still the OLD map's until the
+            // streamer swaps it, one stage from now. See [`Player::world_stale`].
+            player.world_stale = true;
         }
         player.move_flags = 0;
         player.airborne_since = None; // a snap ends any in-progress jump arc (no phantom FALL_LAND)
@@ -128,6 +131,9 @@ pub(super) fn apply_server_moves(
         player.airborne_since = None; // a snap ends any in-progress jump arc (no phantom FALL_LAND)
         player.settling = true; // hold (gravity off) until the destination's ground/buildings load
         player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+        // A far same-map teleport relocates us over ground that has not streamed either — the
+        // tiles we were standing on are still the resident ones. See [`Player::world_stale`].
+        player.world_stale = true;
         // The relocation voids any in-progress self server-ride (the taxi flight-end teleport
         // beats our own spline end by ~latency): `drive_self_ride` takes this flag next frame
         // and drops the ride instead of mirroring the stale flight pose back over this snap
@@ -206,6 +212,7 @@ pub(super) fn apply_server_moves(
             player.active = true;
             player.settling = true; // settle onto the initial ground once it loads (don't fall through)
             player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
+            player.world_stale = true; // nothing is streamed yet at all — see [`Player::world_stale`]
             cam.yaw = 0.0;
             cam.pitch = -0.45;
             player.face_yaw = 0.0;

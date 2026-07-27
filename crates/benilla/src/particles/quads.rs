@@ -65,6 +65,39 @@ pub(super) struct DrawFrame {
     pub attach_rot: Quat,
 }
 
+/// One particle's world-space quad centre — THE point [`expand_quads`] rasterizes around, factored
+/// out so the `WOW_PARTICLE_DEPTHDUMP` instrument reports the same value the GPU gets, not a
+/// re-derivation that can drift.
+pub(super) fn particle_center(frame: &DrawFrame, placement: &Transform, p: &Particle) -> Vec3 {
+    if frame.anchored {
+        frame.anchor + frame.attach_rot * p.pos
+    } else {
+        placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
+    }
+}
+
+/// The twinklePercent draw-gate — mirrors [`expand_quads`]'s `0x7b2adc` skip, exported so the
+/// depth dump reports only particles that actually emit a quad. **If that condition changes,
+/// change this.**
+pub(super) fn draw_gated(def: &ParticleEmitterDef, p: &Particle) -> bool {
+    let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
+    def.twinkle_percent < 1.0 && noise > def.twinkle_percent
+}
+
+/// One particle's rendered half-extent — mirrors the `half` term inside [`expand_quads`] (over-life
+/// size × gated twinkle × instance scale), which computes it inline because it needs the noise and
+/// over-life samples for other attributes too. **If that expression changes, change this.**
+pub(super) fn particle_half(def: &ParticleEmitterDef, placement: &Transform, p: &Particle) -> f32 {
+    let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
+    let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
+    let scale = if def.scale_size_by_instance() {
+        placement.scale.x.max(1e-4)
+    } else {
+        1.0
+    };
+    def.over_life.sample(u_age).size * def.twinkle(noise) * scale
+}
+
 /// Expand one pool into its billboard mesh (rewritten in place). Vertices are ANCHOR-relative —
 /// the caller carries the anchor on the mesh entity's transform (the transparent-pass sort key).
 pub(super) fn expand_quads(
@@ -148,11 +181,7 @@ pub(super) fn expand_quads(
         // rotation on an attached model (`DrawMx = A·Translate·V`, the heading-since-birth
         // fan); model mode folds the whole live placement transform (the reference's rt-0x100
         // render fold, `0x7b3d20`).
-        let center = if anchored {
-            anchor + frame.attach_rot * p.pos
-        } else {
-            placement.transform_point(wow_to_bevy([p.pos.x, p.pos.y, p.pos.z]))
-        };
+        let center = particle_center(frame, placement, p);
         // `size` is the half-extent: the reference quad corners are ±1.0 (verified in wow-5875-re,
         // `quad_expand`), so a vertex sits at `center ± size` and the world quad edge spans 2·size.
         // Rendered half-size (wow-re B2, byte-verified `0x7b2a50`): the over-life ramp is the

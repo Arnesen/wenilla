@@ -370,6 +370,7 @@ pub(super) fn apply_net_updates(
                 speeds,
                 transport_progress,
                 transport,
+                spline,
                 fields,
             } => {
                 // OUR corpse streaming into range (a TYPEID_CORPSE create whose owner is us):
@@ -390,6 +391,7 @@ pub(super) fn apply_net_updates(
                     speeds,
                     transport_progress,
                     transport,
+                    spline,
                     fields,
                     &mut commands,
                     &mut index,
