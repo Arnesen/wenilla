@@ -296,6 +296,46 @@ pub(crate) struct VisualAttached;
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct EntityVisualsSet;
 
+/// Drop every display/material dedup on a cross-map transition (`world_map::MapChange` — see its
+/// doc for why a clear is always safe mid-session). These caches are get-or-insert at every use
+/// site, so a cleared entry rebuilds on the next spawn that wants it; without this, every display
+/// id, material key, and composited skin ever seen stayed resident for the life of the process.
+fn evict_display_caches(
+    mut changes: MessageReader<crate::world_map::MapChange>,
+    mut entity_mats: ResMut<EntityMaterials>,
+    mut composites: ResMut<SkinComposites>,
+    mut fx: ResMut<spell_fx::SpellFx>,
+    creatures: Option<ResMut<Creatures>>,
+    gos: Option<ResMut<GameObjects>>,
+    items: Option<ResMut<equipment::ItemDisplays>>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    changes.clear();
+    info!(
+        "display caches evicted: {} materials, {} creature / {} go / {} item / {} fx models, {} skins",
+        entity_mats.0.len(),
+        creatures.as_ref().map_or(0, |c| c.models.len()),
+        gos.as_ref().map_or(0, |g| g.models.len()),
+        items.as_ref().map_or(0, |i| i.models.len()),
+        fx.models.len(),
+        composites.0.len(),
+    );
+    entity_mats.0.clear();
+    composites.0.clear();
+    fx.models.clear();
+    if let Some(mut c) = creatures {
+        c.models.clear();
+    }
+    if let Some(mut g) = gos {
+        g.models.clear();
+    }
+    if let Some(mut i) = items {
+        i.models.clear();
+    }
+}
+
 /// The streamed-entity subsystem: builds the shared cube assets + display catalogs at startup, then
 /// each frame resolves/builds display models and attaches a visual to every net entity.
 pub(crate) struct EntitiesPlugin;
@@ -311,6 +351,9 @@ impl Plugin for EntitiesPlugin {
             // The projectile flight-loop edges (`crate::sound::missile` consumes them).
             .add_message::<MissileSound>()
             .add_systems(Startup, setup_entities.after(AssetSet::Open))
+            // The map-scope teardown (`world_map::MapChange`): drop every display/material dedup
+            // so a map's assets actually die with it — the #bugs teleport leak.
+            .add_systems(Update, evict_display_caches)
             // Every streamed unit's collision height, the frame after `apply_net_updates` spawns it
             // (that stage's Commands are what create the entity, so this cannot be earlier). Its
             // consumers all read `Option<&CollisionHeight>` against the ctor default, so a unit's

@@ -55,7 +55,7 @@ mod mesh;
 mod setup;
 
 use follow::{follow_moons, follow_stars, follow_sun};
-use materials::{CelestialMaterial, StarMaterial};
+pub(crate) use materials::{CelestialMaterial, StarMaterial};
 use setup::setup_sun;
 
 /// A sun billboard sprite — the disc or its additive lens-flare glare. `SunPart` selects which.

@@ -388,6 +388,13 @@ fn main() {
     // player drives `MoveAndSlide` against them. WoW gravity (19.29 yd/s², binary-derived — now a
     // feel knob, not a fidelity target) replaces avian's 9.81 default.
     .add_plugins(PhysicsPlugins::default())
+    // One solver substep, not avian's 6: the world has NO dynamic bodies (static terrain,
+    // kinematic transports/attachments; the player is a shape-cast controller), so the substep
+    // loop's contact/joint solving iterates over nothing — and kinematic motion integrates
+    // exactly (constant velocity, no forces) at any substep count. Six substeps were pure
+    // fixed-tick schedule overhead (~10 substep-schedule runs per frame on the idle-floor
+    // ledger). Revisit if a dynamic body ever enters the world.
+    .insert_resource(avian3d::prelude::SubstepCount(1))
     .insert_resource(Gravity(Vec3::NEG_Y * 19.291_105))
     // The per-frame world-transition ordering (Input → Stream → Present) the loading screen relies
     // on to cover a teleport the same frame it happens. See `schedule.rs`.

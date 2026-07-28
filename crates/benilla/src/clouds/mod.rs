@@ -24,6 +24,8 @@ use crate::lighting::WowLighting;
 
 mod kernel;
 mod layer;
+
+pub(crate) use layer::CloudMaterial;
 mod tables;
 
 pub use kernel::{occ1_moon, occ1_sun};

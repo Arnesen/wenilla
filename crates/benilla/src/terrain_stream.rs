@@ -324,6 +324,11 @@ fn stream_terrain(
         if std::mem::take(&mut state.global_wmo) {
             release_placement(&mut commands, placements, GLOBAL_WMO_UID);
         }
+        // The material dedup goes with the placements it deduped for — its strong handles are
+        // what kept every previous map's materials (and their textures) resident forever (the
+        // #bugs teleport leak). Cleared here, not on `world_map::MapChange`, so it shares the
+        // exact trigger of the teardown it belongs to.
+        placements.materials.clear();
         state.map_dir = Some(dir.clone());
         state.wdt = Some(asset_server.load(format!("mpq://World/Maps/{dir}/{dir}.wdt")));
         state.wdt_ungated = false;

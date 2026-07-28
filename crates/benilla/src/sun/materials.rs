@@ -16,7 +16,7 @@ use bevy::shader::ShaderRef;
 /// `AlphaMode::Add` — the reference's SRC_ALPHA, ONE lens-flare blend (`0x7e5a16`), which is what lets
 /// the flare saturate the sun's core to white (decision 0502; plain linear `Add` under-weighted every
 /// mid-tone — the "too yellow" sun).
-pub(super) type CelestialMaterial = ExtendedMaterial<StandardMaterial, CelestialExt>;
+pub(crate) type CelestialMaterial = ExtendedMaterial<StandardMaterial, CelestialExt>;
 
 /// Per-material control. `fade.x` = the horizon alpha-ramp scale `k` (in sin-elevation terms;
 /// [`DISC_HORIZON_FADE`] for all three discs — the binary's 0.4-unit band at its radius-12 disc,
@@ -36,7 +36,7 @@ pub(super) type CelestialMaterial = ExtendedMaterial<StandardMaterial, Celestial
 /// clip, gamma add — the glares never route `0x6d1960`; their envelope gates them; `fade.w`/`span`
 /// unused there).
 #[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
-pub(super) struct CelestialExt {
+pub(crate) struct CelestialExt {
     #[uniform(100)]
     pub(super) fade: Vec4,
     /// The disc quad's vertical span in sin-elevation — `.x` = bottom edge, `.y` = top edge —
@@ -62,12 +62,12 @@ pub(super) const DISC_HORIZON_FADE: f32 = 30.0;
 /// (`star.wgsl`) does a **gamma-correct premultiplied** blend so the soft white dots blend into the sky
 /// like the reference, instead of over-brightening (our linear-space alpha blend would; see the shader
 /// header). Used with `AlphaMode::Premultiplied`. `StarExt` carries no uniforms.
-pub(super) type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
+pub(crate) type StarMaterial = ExtendedMaterial<StandardMaterial, StarExt>;
 
 /// Empty material extension — the star fragment needs no per-material uniforms (it reads the base-colour
 /// alpha = dot alpha × the star-curve global alpha).
 #[derive(Asset, AsBindGroup, Clone, TypePath, Default)]
-pub(super) struct StarExt {}
+pub(crate) struct StarExt {}
 
 impl MaterialExtension for StarExt {
     fn fragment_shader() -> ShaderRef {

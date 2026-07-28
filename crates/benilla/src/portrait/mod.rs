@@ -284,6 +284,8 @@ impl Plugin for PortraitPlugin {
             .init_resource::<BoothLight>()
             .init_resource::<crate::ui_session::InteractNpc>()
             .add_systems(Startup, setup_booths)
+            // The variant-cache reaper: booth twins die with their world source material.
+            .add_systems(Update, light::reap_dead_variants)
             // `feed_interact_npc` resolves the `"npc"` token's entity first; then the test bake owns
             // the booths when its env is set (the live syncs yield to it). The paper-doll sync runs
             // last (it shares the camera/booth/image resources, so the chain keeps the access ordered).

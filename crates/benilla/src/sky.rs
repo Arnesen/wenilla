@@ -260,22 +260,50 @@ fn update_sky_colors(
     let Ok(handle) = dome.single() else {
         return;
     };
-    let Some(mat) = materials.get_mut(&handle.0) else {
-        return;
-    };
-    mat.extension.sky0 = col(light.sky[0]);
-    mat.extension.sky1 = col(light.sky[1]);
-    mat.extension.sky2 = col(light.sky[2]);
-    mat.extension.sky3 = col(light.sky[3]);
-    mat.extension.sky4 = col(light.sky[4]);
-    let f = light.fog_color;
+    // Byte-quantized (`quant255` — Light.dbc stops are byte colors) and write-gated: the stops
+    // drift continuously with time-of-day, but an `Assets::get_mut` alone re-uploads the material
+    // every frame; gated, the dome only pays when a display-visible band actually moves.
+    let sky: Vec<Vec4> = light
+        .sky
+        .iter()
+        .map(|c| col(crate::assets::quant255(*c)))
+        .collect();
+    let f = crate::assets::quant255(light.fog_color);
     // `fog.w` unused by the shader (the old raw-vs-linearised A/B is gone — GAMMA LANE, 0161).
-    mat.extension.fog = Vec4::new(f[0], f[1], f[2], 0.0);
+    let fog = Vec4::new(f[0], f[1], f[2], 0.0);
     // Dawn/dusk warp: strength S + the sun's compass azimuth (Bevy world `atan2(z, x)` of the
     // camera→sun direction). The warp's glow table is symmetric about this bearing, so the sun-facing
     // dome quarter warms and the opposite side desaturates. S=0 (all midday / highlightSky=0 zones) →
-    // the shader leaves the gradient untouched.
+    // the shader leaves the gradient untouched. Azimuth/strength gate at 1/4096 — sub-visible
+    // steps of the warp's smooth glow table.
     let s = light.celestial_dir;
     let sun_az = s.z.atan2(s.x);
-    mat.extension.warp = Vec4::new(light.sky_warp, sun_az, 0.0, 0.0);
+    let warp = Vec4::new(
+        crate::assets::quantize(light.sky_warp, 4096.0),
+        crate::assets::quantize(sun_az, 4096.0),
+        0.0,
+        0.0,
+    );
+    crate::assets::write_gated(
+        &mut materials,
+        &handle.0,
+        |m| {
+            m.extension.sky0 != sky[0]
+                || m.extension.sky1 != sky[1]
+                || m.extension.sky2 != sky[2]
+                || m.extension.sky3 != sky[3]
+                || m.extension.sky4 != sky[4]
+                || m.extension.fog != fog
+                || m.extension.warp != warp
+        },
+        |m| {
+            m.extension.sky0 = sky[0];
+            m.extension.sky1 = sky[1];
+            m.extension.sky2 = sky[2];
+            m.extension.sky3 = sky[3];
+            m.extension.sky4 = sky[4];
+            m.extension.fog = fog;
+            m.extension.warp = warp;
+        },
+    );
 }

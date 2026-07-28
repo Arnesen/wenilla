@@ -417,7 +417,30 @@ impl Plugin for LiveFpsPlugin {
             samples: Vec::new(),
             cpu_at_start: None,
         })
-        .add_systems(Update, drive_live_fps);
+        .init_resource::<ChurnCensus>()
+        .add_systems(Update, drive_live_fps)
+        .add_systems(
+            First,
+            (
+                (
+                    churn_counter::<bevy::image::Image>("image"),
+                    churn_counter::<Mesh>("mesh"),
+                    churn_counter::<StandardMaterial>("std"),
+                    churn_counter::<crate::terrain::TerrainMaterial>("terrain"),
+                    churn_counter::<crate::terrain::WowModelMaterial>("model"),
+                    churn_counter::<crate::terrain::WdlMaterial>("wdl"),
+                    churn_counter::<crate::terrain::LiquidMaterial>("liquid"),
+                ),
+                (
+                    churn_counter::<crate::sky::SkyMaterial>("sky"),
+                    churn_counter::<crate::particles::WowParticleMaterial>("particle"),
+                    churn_counter::<crate::sun::CelestialMaterial>("celestial"),
+                    churn_counter::<crate::sun::StarMaterial>("star"),
+                    churn_counter::<crate::clouds::CloudMaterial>("cloud"),
+                    churn_counter::<crate::ui_pass::UiQuadMaterial>("uiquad"),
+                ),
+            ),
+        );
     }
 }
 
@@ -441,6 +464,97 @@ struct LiveFps {
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
+}
+
+/// Asset residency — the leak meter (the #bugs teleport leak: caches hold strong handles, so maps
+/// visited earlier keep their materials/meshes/images resident, and every uv/tint registry survivor
+/// is re-uploaded per frame). A tour probe reading the same counts as a fresh control is what
+/// "torn down" means, machine-checked. One struct because `drive_live_fps` is at Bevy's
+/// system-param arity limit.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ResidencyMeter<'w> {
+    mats: Res<'w, Assets<crate::terrain::WowModelMaterial>>,
+    meshes: Res<'w, Assets<Mesh>>,
+    images: Res<'w, Assets<bevy::image::Image>>,
+    uv_reg: Res<'w, crate::doodad_anim::UvAnimMaterials>,
+    tint_reg: Res<'w, crate::doodad_anim::TintAnimMaterials>,
+    models: Res<'w, Assets<benilla_assets::M2Model>>,
+    server: Res<'w, AssetServer>,
+    churn: ResMut<'w, ChurnCensus>,
+}
+
+/// The asset-churn census (the probe's ratchet meter): `AssetEvent::Modified` counts per asset
+/// type across the sample window, printed as one `MAT_CHURN` line beside `FPS_PROBE`. A modified
+/// material re-creates its uniform buffers + bind group that frame (the Metal non-bindless path),
+/// and a modified image/mesh re-uploads — the teleport leak's CPU engine was exactly a per-frame
+/// ratchet of this shape, so the floor hunt names them instead of guessing suspects one at a
+/// time. Counters register only under `WOW_LIVE_FPS` ([`LiveFpsPlugin`]) — a normal run carries
+/// none of this.
+#[derive(Resource, Default)]
+struct ChurnCensus(std::collections::BTreeMap<&'static str, usize>);
+
+/// One census counter for asset type `A`, folding this frame's `Modified` events in under
+/// `label` (a short stable name — the `type_name` of an `ExtendedMaterial` alias is unreadable).
+fn churn_counter<A: bevy::asset::Asset>(
+    label: &'static str,
+) -> impl FnMut(MessageReader<bevy::asset::AssetEvent<A>>, ResMut<ChurnCensus>) {
+    move |mut reader, mut census| {
+        let n = reader
+            .read()
+            .filter(|e| matches!(e, bevy::asset::AssetEvent::Modified { .. }))
+            .count();
+        if n > 0 {
+            *census.0.entry(label).or_default() += n;
+        }
+    }
+}
+
+impl ResidencyMeter<'_> {
+    /// `WOW_ASSET_DUMP=1`: one `ASSET_DUMP` line per resident image/mesh at sample time, path
+    /// via the asset server (runtime-built assets have no path and print as `<unpathed>` counts).
+    /// Diffing a tour probe's dump against a fresh control's names exactly which files a
+    /// teardown left behind — the leak meter's magnifying glass.
+    fn dump(&self) {
+        let mut lines: Vec<String> = Vec::new();
+        let mut unpathed = [0usize; 3];
+        for (kind, ids) in [
+            (
+                "image",
+                self.images.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
+            ),
+            (
+                "mesh",
+                self.meshes.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
+            ),
+            (
+                "model",
+                self.models.ids().map(|i| i.untyped()).collect::<Vec<_>>(),
+            ),
+        ] {
+            let slot = match kind {
+                "image" => 0,
+                "mesh" => 1,
+                _ => 2,
+            };
+            for id in ids {
+                match self.server.get_path(id) {
+                    Some(p) => lines.push(format!("ASSET_DUMP {kind} {p}")),
+                    None => unpathed[slot] += 1,
+                }
+            }
+        }
+        lines.sort();
+        for l in &lines {
+            println!("{l}");
+        }
+        println!(
+            "ASSET_DUMP <unpathed> images={} meshes={} models={} materials={}",
+            unpathed[0],
+            unpathed[1],
+            unpathed[2],
+            self.mats.len()
+        );
+    }
 }
 
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
@@ -467,6 +581,7 @@ fn drive_live_fps(
     // probe line proves the palette lane is actually populated (an all-zero table renders
     // origin-collapsed rigs, which no other probe number would catch).
     palettes: Option<Res<crate::rig_palette::RigPalettes>>,
+    mut residency: ResidencyMeter,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -500,6 +615,9 @@ fn drive_live_fps(
         LiveFpsPhase::Sampling => {
             if probe.samples.is_empty() {
                 probe.cpu_at_start = crate::perf::process_cpu_secs();
+                // The churn census restarts with the window — warmup noise (streaming, shader
+                // warms) would otherwise read as steady-state ratchets.
+                residency.churn.0.clear();
             }
             let ms = time.delta_secs() * 1000.0;
             probe.samples.push(ms);
@@ -558,8 +676,16 @@ fn drive_live_fps(
                     )
                 })
                 .unwrap_or_default();
+            let residency_line = format!(
+                " mats={} meshes={} images={} uv={} tint={}",
+                residency.mats.len(),
+                residency.meshes.len(),
+                residency.images.len(),
+                residency.uv_reg.0.len(),
+                residency.tint_reg.0.len(),
+            );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs} px={}x{}{cpu}{present}{at_pin}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{present}{at_pin}",
                 v.len(),
                 at(0.50),
                 at(0.95),
@@ -572,6 +698,21 @@ fn drive_live_fps(
                 px.0,
                 px.1,
             );
+            // The window's Modified-event totals per asset type — a type at ~1×/frame here is a
+            // per-frame re-upload ratchet (see [`ChurnCensus`]); absent means quiet.
+            if !residency.churn.0.is_empty() {
+                let churn = residency
+                    .churn
+                    .0
+                    .iter()
+                    .map(|(k, n)| format!("{k}={n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("MAT_CHURN frames={} {churn}", v.len());
+            }
+            if std::env::var_os("WOW_ASSET_DUMP").is_some() {
+                residency.dump();
+            }
             if probe.run {
                 keys.release(KeyCode::KeyW);
             }

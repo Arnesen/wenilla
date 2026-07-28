@@ -36,14 +36,14 @@ use super::kernel::COLS;
 
 /// The cloud dome material: unlit premultiplied-gamma blend over the sky, coverage from the R8
 /// tile texture, palette/glow uniforms packed like `SkyExt`.
-pub(super) type CloudMaterial = ExtendedMaterial<StandardMaterial, CloudExt>;
+pub(crate) type CloudMaterial = ExtendedMaterial<StandardMaterial, CloudExt>;
 
 /// The colored cloud texture (see `cloud.wgsl`). All color math already happened CPU-side in the
 /// kernel's `0x6cfb00` port (gradient + glow + weather dim, in gamma bytes exactly like the
 /// reference) — the material only carries the resulting RGBA image, whose texels are **raw gamma
 /// values** (a non-sRGB texture, never linearised).
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
-pub(super) struct CloudExt {
+pub(crate) struct CloudExt {
     /// The live colored tile (RGBA8, 128², alpha = coverage), re-uploaded on regen — the
     /// reference's `0x58ac70` zero-copy bind of the `0x6cfb00` color buffer (Addendum A §3).
     #[texture(100)]

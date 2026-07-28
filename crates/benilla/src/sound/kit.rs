@@ -581,6 +581,23 @@ fn stop_all_channels(mut out: NonSendMut<SoundOutput>) {
     }
 }
 
+/// Drop the decoded-SFX cache on a cross-map transition (`world_map::MapChange` — see its doc):
+/// kit variations are decoded on demand, so a new map's soundscape rebuilds its own working set
+/// while the old map's decodes stop occupying RAM forever (the #bugs teleport leak). Playing
+/// channels own their frames (`StaticSoundData` clones share them), so nothing audible cuts.
+fn evict_kit_cache(
+    mut changes: MessageReader<crate::world_map::MapChange>,
+    kits: Option<ResMut<SoundKits>>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    changes.clear();
+    if let Some(mut k) = kits {
+        k.cache.clear();
+    }
+}
+
 /// Registration hook for [`super::SoundPlugin`].
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(Startup, load_sound_kits.after(AssetSet::Open))
@@ -589,6 +606,7 @@ pub(super) fn plugin(app: &mut App) {
             (
                 pump_channels.in_set(crate::schedule::WorldStage::Present),
                 apply_kit_debug,
+                evict_kit_cache,
             ),
         )
         .add_systems(

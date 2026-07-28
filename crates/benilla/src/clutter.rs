@@ -33,7 +33,23 @@ pub(crate) struct ClutterPlugin;
 impl Plugin for ClutterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_clutter.after(AssetSet::Open))
-            .add_systems(Update, stream_chunk_clutter);
+            .add_systems(Update, (stream_chunk_clutter, evict_clutter_geometry));
+    }
+}
+
+/// Drop the decoded clutter-geometry cache on a cross-map transition (`world_map::MapChange` —
+/// see its doc): it holds CPU submesh copies of every detail M2 ever decoded, and clutter models
+/// are map-flavored (a new map re-decodes its own handful on first build).
+fn evict_clutter_geometry(
+    mut changes: MessageReader<crate::world_map::MapChange>,
+    geometry: Option<ResMut<ClutterGeometry>>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    changes.clear();
+    if let Some(mut g) = geometry {
+        g.0.clear();
     }
 }
 

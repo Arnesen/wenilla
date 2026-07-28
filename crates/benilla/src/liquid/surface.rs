@@ -419,10 +419,19 @@ pub(super) fn animate_liquid(
     liquid: Option<Res<LiquidAssets>>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
     mut last_ticks: Local<Option<u32>>,
+    surfaces: Query<(), With<MeshMaterial3d<LiquidMaterial>>>,
 ) {
     let Some(liquid) = liquid else {
         return;
     };
+    // No liquid mesh in the world → nothing samples these materials; skip the whole cycle (the
+    // startup-built kind set otherwise re-uploads ~10 materials at every 24 Hz edge on maps with
+    // no water at all). The cycler is wall-clock ([`ANIM_FPS`] × elapsed), so when the first
+    // surface streams in the index resumes at the current wall frame — exactly the reference's
+    // `GetTickCount`-driven phase.
+    if surfaces.is_empty() {
+        return;
+    }
     // Captures pin the cycler to frame 0: the wall-clock at screenshot time varies with load
     // times, so any framing with open water diffs differently run to run — the flake substrate's
     // baseline redesign caught (MAE 3.97 → 0.009 pinned; decision 0600). One clause, one frame.
@@ -436,9 +445,16 @@ pub(super) fn animate_liquid(
     }
     *last_ticks = Some(ticks);
     for entry in liquid.materials.values() {
-        if let Some(m) = materials.get_mut(&entry.material) {
-            m.extension.anim.x = (ticks % entry.frame_count.max(1)) as f32;
-        }
+        // Gated per entry: a single-frame liquid (`frame_count` 1) never changes index, and the
+        // shared cache holds every kind ever built — re-marking them all Modified on each tick
+        // edge re-uploaded ~10 materials/frame on maps with no water at all.
+        let frame = (ticks % entry.frame_count.max(1)) as f32;
+        crate::assets::write_gated(
+            &mut materials,
+            &entry.material,
+            |m| m.extension.anim.x != frame,
+            |m| m.extension.anim.x = frame,
+        );
     }
 }
 

@@ -64,9 +64,19 @@ pub(super) fn drive_script(
     // way in (input.rs), and measures ÷s on the way back. At a 768-tall window with the dial at
     // 1 the whole pipeline is bit-identical to the pre-virtual behavior.
     let s = super::seam_scale(h, ui_scale.0);
-    script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
-    script.tick(time.delta_secs());
-    script.resolve();
+    // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
+    // on an idle frame, and the ledger can only rank what has a name — tick (Lua OnUpdate),
+    // resolve (layout), measure (the text round-trips), extract (tree walk + rasterize), diff.
+    {
+        let _span = bevy::log::info_span!("ui_script: tick").entered();
+        script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
+        script.tick(time.delta_secs());
+    }
+    {
+        let _span = bevy::log::info_span!("ui_script: resolve").entered();
+        script.resolve();
+    }
+    let measure_span = bevy::log::info_span!("ui_script: measure").entered();
     // The digit-advance feed (the synchronous half of the money layout's metrics): measure
     // NumberFontNormal's '0'..'9' once per atlas scale and push them as `BENILLA_DIGIT_W`, so
     // `BenillaMoney_Set` can size its coin slots to their numbers *inside* one update — the real
@@ -162,6 +172,7 @@ pub(super) fn drive_script(
             script.set_message_line_rows(&rows);
         }
     }
+    drop(measure_span);
     for err in script.take_errors() {
         warn!("ui_script: {err}");
     }
@@ -169,6 +180,7 @@ pub(super) fn drive_script(
         warn!("ui_script: {w}");
     }
 
+    let extract_span = bevy::log::info_span!("ui_script: extract").entered();
     let mut out = Vec::new();
     let mut assets = world_assets;
     let mut minimap_slot = None;
@@ -461,7 +473,9 @@ pub(super) fn drive_script(
     // Park this frame's Minimap widget slot (or clear it — a hidden cluster extracts nothing);
     // `minimap::emit_minimap` runs later in the frame (UiQuadAppend) and fills the hole.
     minimap_widget.0 = minimap_slot;
+    drop(extract_span);
 
+    let _span = bevy::log::info_span!("ui_script: diff").entered();
     if quads.quads != out {
         quads.quads = out;
         quads.dirty = true;

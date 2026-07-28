@@ -268,7 +268,7 @@ struct UiWhiteTexture(Handle<Image>);
 /// pipeline (`ui_quad.wgsl`) so straight-alpha and WoW-ADD quads share the pipeline and differ
 /// only per-material. Vertex colors carry the per-quad tint.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
-struct UiQuadMaterial {
+pub(crate) struct UiQuadMaterial {
     #[uniform(0)]
     additive: u32,
     #[texture(1)]

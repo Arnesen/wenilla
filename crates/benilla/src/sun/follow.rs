@@ -121,6 +121,19 @@ pub(super) fn disc_span(dir_y: f32, size: f32) -> Vec4 {
     Vec4::new((elev - half).sin(), (elev + half).sin(), 0.0, 0.0)
 }
 
+/// [`crate::assets::quantize`] a [`disc_span`] to 1/4096 sin-elevation steps — the write gate's
+/// floor for the one geometry lane the celestial writes carry. A step is ≪ one pixel of fade edge
+/// on any disc, while un-quantized the span drifts every frame with time-of-day and would defeat
+/// the gate.
+fn quant_span(v: Vec4) -> Vec4 {
+    Vec4::new(
+        crate::assets::quantize(v.x, 4096.0),
+        crate::assets::quantize(v.y, 4096.0),
+        v.z,
+        v.w,
+    )
+}
+
 /// True when no resident-terrain column blocks the camera→body ray within [`FLARE_RAY_RANGE`].
 /// Pure over a height oracle (`Some(ground WoW z)` under a Bevy point, `None` = no terrain in that
 /// column — never an occluder), so the march is unit-testable without a streamed world. Quadratic
@@ -286,7 +299,9 @@ pub(super) fn follow_sun(
     let rot = Quat::from_rotation_arc(Vec3::Z, -to_light);
     let hidden = debug.lighting.disable_sky_dome; // the sun is part of the sky — hide it with the dome
     let f = view_lerp(*cam_gt.forward(), to_light);
-    let tint = light.celestial_tint;
+    // Byte-quantized at the source ([`crate::assets::quant255`]) so the write gates below only
+    // fire on a display-visible change — the reference's own color lanes are bytes.
+    let tint = crate::assets::quant255(light.celestial_tint);
     // The weather celestial-alpha seed — dims the disc + glare under active weather.
     let seed = celestial_alpha_seed(light.storm_bcc);
     // The occlusion probe covers the disc's own quad (Addendum #8): its angular half-size.
@@ -313,13 +328,25 @@ pub(super) fn follow_sun(
                     SUN_SIZE * light.sun_disc_scale
                 };
                 tf.scale = Vec3::splat(size * dist);
-                if let Some(m) = mats.get_mut(&mat.0) {
-                    m.base.base_color = Color::srgb(tint[0], tint[1], tint[2]);
-                    m.extension.span = disc_span(to_light.y, size);
-                    // Above-band disc opacity: the 0xFF broadcast, overwritten by the weather
-                    // seed under active weather ([`celestial_alpha_seed`]).
-                    m.extension.fade.w = seed.unwrap_or(1.0);
-                }
+                let color = Color::srgb(tint[0], tint[1], tint[2]);
+                let span = quant_span(disc_span(to_light.y, size));
+                // Above-band disc opacity: the 0xFF broadcast, overwritten by the weather
+                // seed under active weather ([`celestial_alpha_seed`]).
+                let fade_w = crate::assets::quantize(seed.unwrap_or(1.0), 255.0);
+                crate::assets::write_gated(
+                    &mut mats,
+                    &mat.0,
+                    |m| {
+                        m.base.base_color != color
+                            || m.extension.span != span
+                            || m.extension.fade.w != fade_w
+                    },
+                    |m| {
+                        m.base.base_color = color;
+                        m.extension.span = span;
+                        m.extension.fade.w = fade_w;
+                    },
+                );
             }
             SunPart::Glare => {
                 tf.translation = cam_pos + to_light * GLARE_DIST;
@@ -334,10 +361,15 @@ pub(super) fn follow_sun(
                 // SRC_ALPHA byte weighting (decision 0502).
                 // × the weather seed — the glare's alpha byte is the seed the per-frame pack
                 // modulates (Addendum #6: `oldByte` into `0x6cf490`), so storms dim the flare.
-                let env = (0.5 + 0.5 * f) * env30 * seed.unwrap_or(1.0);
-                if let Some(m) = mats.get_mut(&mat.0) {
-                    m.base.base_color = Color::srgba(tint[0], tint[1], tint[2], env);
-                }
+                let env =
+                    crate::assets::quantize((0.5 + 0.5 * f) * env30 * seed.unwrap_or(1.0), 255.0);
+                let color = Color::srgba(tint[0], tint[1], tint[2], env);
+                crate::assets::write_gated(
+                    &mut mats,
+                    &mat.0,
+                    |m| m.base.base_color != color,
+                    |m| m.base.base_color = color,
+                );
             }
         }
         // Propagation already ran this frame — the direct global write is what renders.
@@ -373,7 +405,9 @@ pub(super) fn follow_moons(
     let dist = far * 0.85;
     let cam_pos = cam_gt.translation();
     let hidden = debug.lighting.disable_sky_dome;
-    let tint = light.celestial_tint;
+    // Byte-quantized at the source, like [`follow_sun`] — the write gates fire on display-visible
+    // change only.
+    let tint = crate::assets::quant255(light.celestial_tint);
     // The weather celestial-alpha seed — dims both moons' discs + the glare under active weather.
     let seed = celestial_alpha_seed(light.storm_bcc);
     // One slewed envelope per frame, along the white moon's ray (only its glare exists). The moon's
@@ -416,11 +450,23 @@ pub(super) fn follow_moons(
                     SUN_SIZE * 1.75 * light.moon_disc_scale
                 };
                 tf.scale = Vec3::splat(size * dist);
-                if let Some(m) = mats.get_mut(&mat.0) {
-                    m.base.base_color = Color::srgb(tint[0], tint[1], tint[2]);
-                    m.extension.span = disc_span(to_moon.y, size);
-                    m.extension.fade.w = seed.unwrap_or(1.0);
-                }
+                let color = Color::srgb(tint[0], tint[1], tint[2]);
+                let span = quant_span(disc_span(to_moon.y, size));
+                let fade_w = crate::assets::quantize(seed.unwrap_or(1.0), 255.0);
+                crate::assets::write_gated(
+                    &mut mats,
+                    &mat.0,
+                    |m| {
+                        m.base.base_color != color
+                            || m.extension.span != span
+                            || m.extension.fade.w != fade_w
+                    },
+                    |m| {
+                        m.base.base_color = color;
+                        m.extension.span = span;
+                        m.extension.fade.w = fade_w;
+                    },
+                );
             }
             MoonPart::Moon02 => {
                 // Base ×1.0, the shared size curve on moon02's own phase clock. The binary never
@@ -436,10 +482,17 @@ pub(super) fn follow_moons(
                     SUN_SIZE * light.moon02_disc_scale
                 };
                 tf.scale = Vec3::splat(size * dist);
-                if let Some(m) = mats.get_mut(&mat.0) {
-                    m.extension.span = disc_span(to_moon.y, size);
-                    m.extension.fade.w = seed.unwrap_or(0.0);
-                }
+                let span = quant_span(disc_span(to_moon.y, size));
+                let fade_w = crate::assets::quantize(seed.unwrap_or(0.0), 255.0);
+                crate::assets::write_gated(
+                    &mut mats,
+                    &mat.0,
+                    |m| m.extension.span != span || m.extension.fade.w != fade_w,
+                    |m| {
+                        m.extension.span = span;
+                        m.extension.fade.w = fade_w;
+                    },
+                );
             }
             MoonPart::Glare => {
                 // `2.0 × the moon size curve` world units (`[0xce9718]=2.0`; both view-lerp
@@ -457,10 +510,15 @@ pub(super) fn follow_moons(
                 // envelope (dnCurve × horizon × visibility) — Addendum #5's byte shape.
                 let f = view_lerp(*cam_gt.forward(), to_moon);
                 // × the weather seed (the glare alpha byte the pack modulates, Addendum #6).
-                let env = (0.1 + 0.9 * f) * env30 * seed.unwrap_or(1.0);
-                if let Some(m) = mats.get_mut(&mat.0) {
-                    m.base.base_color = Color::srgba(tint[0], tint[1], tint[2], env);
-                }
+                let env =
+                    crate::assets::quantize((0.1 + 0.9 * f) * env30 * seed.unwrap_or(1.0), 255.0);
+                let color = Color::srgba(tint[0], tint[1], tint[2], env);
+                crate::assets::write_gated(
+                    &mut mats,
+                    &mat.0,
+                    |m| m.base.base_color != color,
+                    |m| m.base.base_color = color,
+                );
             }
         }
         // Propagation already ran this frame — the direct global write is what renders.
@@ -510,11 +568,21 @@ pub(super) fn follow_stars(
         tf.scale = Vec3::splat(far * 0.88);
         // Propagation already ran this frame — the direct global write is what renders.
         *gt = GlobalTransform::from(*tf);
-        if let Some(m) = star_mats.get_mut(&mat.0) {
-            // White dots; global fade × the patch's authored weight, multiplied onto the texture's
-            // per-dot alpha, then blended gamma-correctly by star.wgsl.
-            m.base.base_color = Color::srgba(1.0, 1.0, 1.0, global * dome.weight);
-        }
+        // White dots; global fade × the patch's authored weight, multiplied onto the texture's
+        // per-dot alpha, then blended gamma-correctly by star.wgsl. The vertex alpha is a byte
+        // in the reference, so the product gates at 1/255 like the rest of the family.
+        let color = Color::srgba(
+            1.0,
+            1.0,
+            1.0,
+            crate::assets::quantize(global * dome.weight, 255.0),
+        );
+        crate::assets::write_gated(
+            &mut star_mats,
+            &mat.0,
+            |m| m.base.base_color != color,
+            |m| m.base.base_color = color,
+        );
     }
 }
 

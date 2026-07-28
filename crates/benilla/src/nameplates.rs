@@ -626,6 +626,7 @@ impl Plugin for NameplatesPlugin {
                 .after(crate::vplates::VPlateSet)
                 .after(crate::chat_bubble::BubbleSet),
         )
+        .add_systems(Update, evict_name_meshes)
         .add_systems(
             PostUpdate,
             place_nameplates
@@ -633,6 +634,20 @@ impl Plugin for NameplatesPlugin {
                 .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
         );
     }
+}
+
+/// Drop the per-line-stack mesh dedup on a cross-map transition (`world_map::MapChange` — see its
+/// doc): it grows with every distinct name ever seen and the old map's population never comes
+/// back. The palette `materials` stay — a small fixed set, rebuilt only if the atlas changes.
+fn evict_name_meshes(
+    mut changes: MessageReader<crate::world_map::MapChange>,
+    mut plates: ResMut<Nameplates>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    changes.clear();
+    plates.meshes.clear();
 }
 
 #[cfg(test)]

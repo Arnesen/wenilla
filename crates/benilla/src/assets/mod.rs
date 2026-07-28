@@ -83,6 +83,46 @@ pub(crate) fn normalize_path(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
 }
 
+/// Mutate an asset only when `differs` says its current state doesn't already match.
+///
+/// `Assets::get_mut` alone marks the asset Modified — a uniform re-upload and (on the Metal
+/// non-bindless path) a bind-group rebuild that frame — so a per-frame writer re-pushing an
+/// unchanged value is pure cost (the teleport leak's CPU engine was exactly this shape; the sky
+/// family idled at ~17 such writes per frame). The gate decides on the immutable view; pair it
+/// with values quantized to display precision ([`quantize`]/[`quant255`]) or continuous inputs
+/// defeat the compare.
+pub(crate) fn write_gated<M: bevy::asset::Asset>(
+    assets: &mut Assets<M>,
+    handle: &Handle<M>,
+    differs: impl Fn(&M) -> bool,
+    apply: impl FnOnce(&mut M),
+) {
+    if assets.get(handle).is_none_or(differs) {
+        if let Some(m) = assets.get_mut(handle) {
+            apply(m);
+        }
+    }
+}
+
+/// Quantize to `n`-ths — the write-gate's precision floor for continuously-drifting inputs
+/// (time-of-day bands, camera-aim envelopes). Choose `n` at or below what the output can show:
+/// the reference packs its celestial/sky lanes to bytes (`floor(255·…)`, the 0xFF broadcasts)
+/// and re-submits them as per-frame vertex data, so a 1/255 step IS the reference's own
+/// precision for color/alpha; geometry scalars gate at a sub-pixel step instead.
+pub(crate) fn quantize(x: f32, n: f32) -> f32 {
+    (x * n).round() / n
+}
+
+/// [`quantize`] each channel to the display's 1/255 LSB — the byte precision the reference's own
+/// color lanes carry.
+pub(crate) fn quant255(c: [f32; 3]) -> [f32; 3] {
+    [
+        quantize(c[0], 255.0),
+        quantize(c[1], 255.0),
+        quantize(c[2], 255.0),
+    ]
+}
+
 /// Lock a `Mutex`, recovering the guard even if a previous holder **poisoned** it by panicking.
 ///
 /// The shared [`WorldAssets::chain`] is read from many systems; one panic mid-read would otherwise
@@ -376,6 +416,26 @@ pub(crate) struct AssetPlugin;
 impl Plugin for AssetPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, open_world_assets.in_set(AssetSet::Open));
+        app.add_systems(Update, evict_world_art);
+    }
+}
+
+/// Drop the world-art dedup on a cross-map transition (`world_map::MapChange` — see its doc for
+/// why a clear is always safe): `textures` + `model_materials` pin every map's world art forever
+/// otherwise (the #bugs teleport leak). The UI sprite caches (`sprites`/`tiled_sprites`/
+/// `portraits`/`masks`) stay — they are game-global UI scope, and their negative entries exist
+/// precisely to stop per-frame re-walks of the chain.
+fn evict_world_art(
+    mut changes: MessageReader<crate::world_map::MapChange>,
+    assets: Option<ResMut<WorldAssets>>,
+) {
+    if changes.is_empty() {
+        return;
+    }
+    changes.clear();
+    if let Some(mut a) = assets {
+        a.textures.clear();
+        a.model_materials.clear();
     }
 }
 

@@ -27,6 +27,17 @@ pub(crate) struct CurrentMap(pub(crate) u32);
 #[derive(Resource)]
 pub(crate) struct MapCatalogRes(pub(crate) MapCatalog);
 
+/// A cross-map transition, observed as a [`CurrentMap`] flip — the **world-scope teardown
+/// signal**. Every module that dedups map-scoped assets behind a strong-handle cache reads this
+/// and clears its own cache (the #bugs teleport leak: those caches pinned every map ever visited,
+/// and each retained uv/tint-animated material re-uploaded per frame, forever). A clear is always
+/// safe mid-session — live users hold handle clones, so it only drops the *dedup*; the assets die
+/// when their last user despawns, and the next spawn rebuilds under the loading screen. Carries
+/// no payload: every evictor clears unconditionally, and [`announce_map_change`] logs the
+/// transition itself.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct MapChange;
+
 /// Startup set the world-map catalog loads in, so the terrain/WDL streamers can order their own setup
 /// after it (they read [`MapCatalogRes`]/[`CurrentMap`] the moment they initialize).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,10 +49,32 @@ pub(crate) struct WorldMapPlugin;
 
 impl Plugin for WorldMapPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.add_message::<MapChange>().add_systems(
             Startup,
             load_world_map.after(AssetSet::Open).in_set(WorldMapLoad),
         );
+        app.add_systems(Update, announce_map_change);
+    }
+}
+
+/// Announce every [`CurrentMap`] flip as a [`MapChange`]. The `Local` holds the last *announced*
+/// map, so the startup seed (the first observation) announces nothing — there is no old map to
+/// tear down. Watching the resource rather than the worldport wire keeps one definition of
+/// "the map changed", and a same-map worldport (an instance re-enter) correctly stays silent.
+fn announce_map_change(
+    map: Option<Res<CurrentMap>>,
+    mut last: Local<Option<u32>>,
+    mut changes: MessageWriter<MapChange>,
+) {
+    let Some(map) = map else { return };
+    if let Some(prev) = last.replace(map.0) {
+        if prev != map.0 {
+            info!(
+                "map change: {prev} → {} — evicting map-scoped caches",
+                map.0
+            );
+            changes.write(MapChange);
+        }
     }
 }
 
