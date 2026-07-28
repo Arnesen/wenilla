@@ -94,6 +94,12 @@ pub(crate) struct RigPalettes {
     peak_slots: usize,
     peak_bones: u32,
     live_bones: u32,
+    /// `WOW_RIG_COST` meters (decision 0736 premise check): whole-vec deep copies this frame
+    /// (`Arc::make_mut` clones when the extract still holds last publish's reference), the µs
+    /// they took, and the rows (bones) written. Printed + reset by [`publish_rig_palettes`].
+    cost_copies: u32,
+    cost_copy_us: f32,
+    cost_rows: u32,
 }
 
 impl Default for RigPalettes {
@@ -111,8 +117,38 @@ impl Default for RigPalettes {
             peak_slots: 0,
             peak_bones: 0,
             live_bones: 0,
+            cost_copies: 0,
+            cost_copy_us: 0.0,
+            cost_rows: 0,
         }
     }
+}
+
+/// `WOW_RIG_COST=1`: the rig lane's per-frame cost split — copy vs compose vs upload — in
+/// grep-and-average lines beside `FPS_PROBE` (the 0736 premise meter; the 0734 lesson made
+/// premise checks law). Zero-cost when off: one env read, once.
+pub(crate) fn rig_cost_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WOW_RIG_COST").is_some())
+}
+
+/// `Arc::make_mut` on the shared rows, timing the calls that actually deep-copy: between a
+/// publish and the frame's first write the extract holds a second reference, so that write
+/// clones the whole ~6.3 MB vec. A static helper (not a method) so call sites keep their
+/// split-field borrows.
+fn rows_make_mut<'a>(
+    rows: &'a mut Arc<Vec<[f32; 4]>>,
+    copies: &mut u32,
+    copy_us: &mut f32,
+) -> &'a mut Vec<[f32; 4]> {
+    if Arc::strong_count(rows) > 1 || Arc::weak_count(rows) > 0 {
+        let t = std::time::Instant::now();
+        let out = Arc::make_mut(rows);
+        *copy_us += t.elapsed().as_secs_f32() * 1e6;
+        *copies += 1;
+        return out;
+    }
+    Arc::make_mut(rows)
 }
 
 impl RigPalettes {
@@ -167,7 +203,11 @@ impl RigPalettes {
         self.free_slots.push(slot);
         self.live_bones -= len;
         self.table_generation += 1;
-        let rows = Arc::make_mut(&mut self.rows);
+        let rows = rows_make_mut(
+            &mut self.rows,
+            &mut self.cost_copies,
+            &mut self.cost_copy_us,
+        );
         rows[3 * base as usize..3 * (base + len) as usize].fill([0.0; 4]);
         self.dirty.push((base, len, self.mirrored[s]));
         // Insert sorted + coalesce with both neighbours.
@@ -202,7 +242,12 @@ impl RigPalettes {
         worlds: &Query<Ref<GlobalTransform>>,
     ) {
         let n = (joints.len().min(ibp.len()) as u32).min(alloc_len);
-        let rows = Arc::make_mut(&mut self.rows);
+        self.cost_rows += n;
+        let rows = rows_make_mut(
+            &mut self.rows,
+            &mut self.cost_copies,
+            &mut self.cost_copy_us,
+        );
         for b in 0..n as usize {
             let Ok(g) = worlds.get(joints[b]) else {
                 continue; // a torn-down joint keeps its last rows
@@ -232,7 +277,12 @@ impl RigPalettes {
     ) {
         let n = (worlds.len().min(ibp.len()) as u32).min(rig.len);
         let (slot, base) = (rig.slot, rig.base);
-        let rows = Arc::make_mut(&mut self.rows);
+        self.cost_rows += n;
+        let rows = rows_make_mut(
+            &mut self.rows,
+            &mut self.cost_copies,
+            &mut self.cost_copy_us,
+        );
         for b in 0..n as usize {
             let m = worlds[b].affine() * Affine3A::from_mat4(ibp[b]);
             let (m3, t) = (m.matrix3, m.translation);
@@ -442,6 +492,16 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
         return;
     }
     let p = palettes.as_mut();
+    if rig_cost_enabled() {
+        eprintln!(
+            "[rig-cost] ranges={} rows={} copies={} copy_ms={:.3}",
+            p.dirty.len(),
+            p.cost_rows,
+            p.cost_copies,
+            p.cost_copy_us / 1000.0
+        );
+        (p.cost_copies, p.cost_copy_us, p.cost_rows) = (0, 0.0, 0);
+    }
     out.rows = Arc::clone(&p.rows);
     out.table = Arc::clone(&p.table);
     out.dirty = Arc::new(std::mem::take(&mut p.dirty));
@@ -475,6 +535,9 @@ fn upload_rig_palettes(
         return;
     }
     *last = (Some(data.table_generation), dirty_ptr);
+    let cost_t0 = rig_cost_enabled().then(std::time::Instant::now);
+    let mut cost_calls = 0u32;
+    let mut cost_bytes = 0u64;
     // Coalesce the per-rig dirty ranges before touching the queue: rigs allocate contiguously,
     // so a steady frame's ~750 one-rig ranges merge into a handful of runs — the 0724 ledger
     // measured the per-range `write_buffer` loop at 2.7 ms/frame, almost all call overhead.
@@ -509,8 +572,17 @@ fn upload_rig_palettes(
                     palette_region_offset() + base as u64 * BONE_BYTES,
                     bytemuck::cast_slice(rows),
                 );
+                cost_calls += 1;
+                cost_bytes += len as u64 * BONE_BYTES;
             }
         }
+    }
+    if let Some(t0) = cost_t0 {
+        eprintln!(
+            "[rig-upload] calls={cost_calls} kb={} ms={:.3}",
+            cost_bytes / 1024,
+            t0.elapsed().as_secs_f32() * 1000.0
+        );
     }
 }
 

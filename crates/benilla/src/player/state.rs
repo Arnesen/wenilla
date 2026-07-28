@@ -140,13 +140,11 @@ pub(super) const FALL_FAR_TIME: f32 = 0.5;
 pub(super) const SKIN_WIDTH: f32 = 0.02;
 
 /// Max seconds to hold the avatar after a teleport while the world streams in (see [`Player::settling`]).
-/// Generous — a dense city's WMO colliders load in a couple seconds; this only backstops a genuinely
-/// airborne teleport or a missing collider so we never hang in mid-air forever.
-pub(super) const SETTLE_TIMEOUT: f32 = 6.0;
-/// How far below the feet a settle probe looks for the ground that ends settling. Small, so it ends on
-/// the *close* floor we were placed on (terrain or a now-loaded building floor) — not on distant terrain
-/// glimpsed through a building whose collider hasn't streamed in yet.
-pub(super) const SETTLE_REACH: f32 = 1.0;
+/// Generous — a dense city's spawn + collider queue drains in a couple seconds; this only backstops a
+/// world that never becomes resident (missing data, a stalled stream) so we never hang forever. The
+/// release itself is the terrain streamer's (decision 0737), which also pushes the deadline while the
+/// resident world is still the departed map's (0710's fail-closed law).
+pub(crate) const SETTLE_TIMEOUT: f32 = 6.0;
 
 /// The player body's collision capsule, built once at startup and swept by avian's `MoveAndSlide`
 /// each frame. Its origin is the capsule centre; the player's `pos` is its feet (centre −
@@ -233,30 +231,30 @@ pub(crate) struct Player {
     pub(super) stand_pending: Option<u8>,
     /// **Settling after a teleport/summon/login**: the streamed world (terrain *and* its WMO
     /// buildings + colliders) arrives over several frames, so the collision under the destination
-    /// isn't there the instant we snap to it. While settling we hold the avatar in place with gravity
-    /// **off** — otherwise it falls through the not-yet-loaded city/building floor — and keep the
-    /// loading screen up. Cleared once a downward probe finds the ground under our feet, or after
-    /// [`SETTLE_TIMEOUT`] (so a genuinely airborne teleport, or missing collision, still releases).
+    /// isn't there the instant we snap to it. While settling the movers hold the avatar in place
+    /// with gravity **off** — otherwise it falls through the not-yet-loaded city/building floor —
+    /// and the loading screen waits for the release. **Released by the terrain streamer** (decision
+    /// 0737) once the destination is resident — scene spawned and collider queue quiet
+    /// ([`crate::loading_screen::WorldLoadProgress`]) — or at [`SETTLE_TIMEOUT`]; **never by ground
+    /// contact**, which a flyer, a swimmer, or a genuinely airborne teleport never produces (the
+    /// old probe release ran only in the walk mover, and each other mover mode needed — and got —
+    /// its own leak patch before 0737 deleted the class).
     pub(crate) settling: bool,
     /// `Time::elapsed_secs` deadline to give up settling and release (see [`Player::settling`]).
-    pub(super) settle_deadline: f32,
+    /// Pushed forward by the streamer while [`Player::world_stale`] (0710's fail-closed law).
+    pub(crate) settle_deadline: f32,
     /// **The colliders under our feet may still belong to the map we just left.** Set at every
     /// snap, cleared by the terrain streamer once the destination's own world is resident.
     ///
-    /// The snap and the settle probe run in the SAME system (`control`: `wire_in` then the mover),
-    /// one whole `WorldStage` *before* the streamer swaps maps — so on the arrival frame the physics
-    /// world is still entirely the old map's, and its despawn is a deferred command on top of that.
-    /// A settle probe that fires into that window is asking the wrong world whether there is a floor.
-    ///
-    /// It normally answers "no" and costs nothing: a `.go` across the continent lands nowhere near
-    /// the old ground. But an **instance entrance sits within a yard of its own outdoor portal** —
-    /// Zul'Gurub's pad is z 92.53 against the Stranglethorn ground you were standing on at 92.30 —
-    /// so the probe hit the world we were leaving, declared the floor found, released the hold on
-    /// frame 0, and dropped the body 15 yd through the WMO onto the terrain below (the ZG and
-    /// Stratholme entry fall-through). Only walking a portal could show it; `.go` between the two
-    /// maps never reproduces, because only the portal puts the two floors on top of each other.
-    /// Cleared by `terrain_stream` (the only system that knows which map the resident colliders
-    /// belong to); read by the mover's settle gate.
+    /// The snap runs a whole `WorldStage` *before* the streamer swaps maps — so on the arrival
+    /// frame the physics world is still entirely the old map's, and its despawn is a deferred
+    /// command on top of that. Any settle judgement made in that window would be about the wrong
+    /// world — and an **instance entrance sits within a yard of its own outdoor portal**
+    /// (Zul'Gurub's pad is z 92.53 against the Stranglethorn ground you left at 92.30), which is
+    /// how the pre-0710 ground probe declared the floor found on frame 0 and dropped the body
+    /// 15 yd through the ZG city WMO. While this flag is set the streamer makes no release
+    /// judgement and pushes [`Player::settle_deadline`] forward, so the timeout budget measures
+    /// time waiting for the *destination's* world (decisions 0710 + 0737).
     pub(crate) world_stale: bool,
     /// A same-map teleport landed: the server relocated the mover, so any in-progress self
     /// server-ride (charge/taxi) is **void** — vmangos teleports at ITS flight end (its own spline
@@ -386,6 +384,16 @@ impl Player {
     /// camera).
     pub(crate) fn facing(&self) -> f32 {
         self.face_yaw
+    }
+
+    /// End the post-snap settle hold (decision 0737) — called by the terrain streamer, the only
+    /// system that knows the destination's residency. `resident` = the world arrived (scene +
+    /// colliders); `false` = the [`SETTLE_TIMEOUT`] backstop fired without it. Which end it was is
+    /// the whole diagnosis of a fall-through report, so it goes through the `sett` trace either way.
+    pub(crate) fn end_settle(&mut self, resident: bool, now: f32) {
+        self.settling = false;
+        let waited = SETTLE_TIMEOUT - (self.settle_deadline - now);
+        super::move_trace::settle(resident, waited, self.pos);
     }
 
     /// The avatar's current CMovement move-flags as last streamed (directional + turn bits — see

@@ -331,14 +331,10 @@ fn apply_self_move(
     // echo"). This pair is GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
     player.swimming = player.move_flags & move_flags::SWIMMING != 0;
     player.levitating = player.move_flags & move_flags::LEVITATING != 0;
-    if player.swimming {
-        // A latched swim ends the settle hold — `update_swimming`'s own rule, and it has to be
-        // repeated here because that function is exactly what LEVITATING switches off. Without it,
-        // `.cheat fly` during a post-teleport settle strands `settling` forever: the swim mover
-        // never reaches the walk mover's release gate, and the loading screen waits on `!settling`
-        // (the shape of the Booty Bay underwater-login hang).
-        player.settling = false;
-    }
+    // Neither mode touches `settling`: the settle release is the terrain streamer's, keyed on the
+    // destination's residency in every mover mode alike (decision 0737). The pre-0737 special case
+    // here (swim clears the hold) existed only because the old release was a walk-mover ground
+    // probe a swimmer/flyer never reached.
 
     player.pos = wow_to_bevy(m.position);
     // Facing turns **rigidly** — aim, rendered body and camera all take the same delta (the

@@ -33,6 +33,7 @@ use crate::liquid::{spawn_liquids, LiquidAssets};
 use crate::loading_screen::WorldLoadProgress;
 use crate::model_render::{m2_url, wmo_url, MaterialCache};
 use crate::player::{Player, WorldCamera};
+use crate::schedule::WorldStage;
 use crate::terrain::{TerrainExtension, TerrainMaterial};
 use crate::world_map::{CurrentMap, MapCatalogRes};
 use crate::SPAWN_XY;
@@ -242,29 +243,36 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<TerrainStreamer>()
             .init_resource::<Placements>()
             .init_resource::<CurrentArea>()
-            .add_systems(
-                Update,
-                (
-                    stream_terrain,
-                    spawn_loaded_placements,
-                    sync_interior_volumes,
-                )
-                    .chain(),
-            )
-            // Attaches off-thread-built colliders when ready (independent of the streaming chain).
+            // **The streaming chain lives in `WorldStage::Stream`** — the load-bearing half of the
+            // frame ordering contract (schedule.rs): the teleport snap (Input) → the streamer
+            // recomputes focus + publishes residency HERE → the loading screen covers (Present),
+            // all in one frame, so a swap never renders uncovered. The legacy streamer carried
+            // this membership and the cutover to this one silently dropped it — the executor was
+            // then free to run the streamer *before* the snap, and the cover landed a frame late
+            // on exactly the burst frame (the `.tele` destination flash; decision 0738).
+            // `finish_colliders` heads the chain so the collider-queue depth the settle release
+            // and the Present-stage clear read is this frame's, not last frame's.
             .add_systems(
                 Update,
                 (
                     finish_colliders,
-                    // After the interior claim so the leaf override reads THIS frame's claim —
-                    // the client resolves leaf + indoor + names from ONE node state in one pass
-                    // (`0x67e510`); a stale-leaf/fresh-claim frame let the abbey login big-splash
-                    // (the A ≠ subzone gate saw "Northshire Valley" against the abbey's name).
-                    // `AreaAuthoritySet` lets the zone-text feed order after this in turn.
-                    update_current_area
-                        .after(crate::wmo_portal::WmoPvsSet)
-                        .in_set(AreaAuthoritySet),
-                ),
+                    stream_terrain,
+                    spawn_loaded_placements,
+                    sync_interior_volumes,
+                )
+                    .chain()
+                    .in_set(WorldStage::Stream),
+            )
+            .add_systems(
+                Update,
+                // After the interior claim so the leaf override reads THIS frame's claim —
+                // the client resolves leaf + indoor + names from ONE node state in one pass
+                // (`0x67e510`); a stale-leaf/fresh-claim frame let the abbey login big-splash
+                // (the A ≠ subzone gate saw "Northshire Valley" against the abbey's name).
+                // `AreaAuthoritySet` lets the zone-text feed order after this in turn.
+                update_current_area
+                    .after(crate::wmo_portal::WmoPvsSet)
+                    .in_set(AreaAuthoritySet),
             );
     }
 }
@@ -287,6 +295,7 @@ fn stream_terrain(
         ResMut<Assets<TerrainMaterial>>,
         ResMut<Assets<Mesh>>,
         Res<Assets<WdtIndex>>,
+        Res<Time>,
     ),
     liquid_assets: Option<Res<LiquidAssets>>,
     clutter: Option<Res<GroundClutter>>,
@@ -299,7 +308,7 @@ fn stream_terrain(
     map_catalog: Option<Res<MapCatalogRes>>,
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
 ) {
-    let (mut materials, mut meshes, wdts) = asset_stores;
+    let (mut materials, mut meshes, wdts, time) = asset_stores;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
     // there's nothing to stream against, so idle.
     let (Some(shared_light), Some(map_catalog)) = (shared_light, map_catalog) else {
@@ -532,10 +541,12 @@ fn stream_terrain(
         }
     }
 
-    // Publish residency for the loading screen: how many desired tiles are actually spawned, and
-    // whether the tile under the view focus is up (the screen clears once it is — covers the cold-start
-    // burst + the post-teleport gap). A focus tile that doesn't exist (map edge) counts as resident so
-    // we never get stuck waiting for ground that isn't there.
+    // Publish residency for the loading screen: how many desired tiles are actually spawned,
+    // whether the tile under the view focus is up (the backstop trigger), and the scene term
+    // (decision 0737) — the focus tile + its 8 neighbours with every placement they reference, so
+    // "ready to reveal" means the buildings and trees around you exist, not just bare terrain. A
+    // focus tile that doesn't exist (map edge) counts as resident so we never get stuck waiting
+    // for ground that isn't there.
     if let Some(p) = load_progress.as_mut() {
         let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.entity.is_some());
         p.total = desired.len();
@@ -544,6 +555,35 @@ fn stream_terrain(
             .tiles
             .get(&(cx, cy))
             .is_none_or(|t| t.entity.is_some());
+        // The focus neighbourhood's placements join the accounting (bar + scene term). A placement
+        // is *up* once its own model spawned AND its WMO props (each an M2 arriving on its own
+        // schedule) have — the furniture the reveal would otherwise pop in. Placements of tiles not
+        // yet spawned aren't known yet; the missing tile itself holds `scene_ready` down.
+        let mut near_pending = 0usize;
+        let mut near_tile_missing = false;
+        for dx in -1..=1i32 {
+            for dy in -1..=1i32 {
+                let c = (cx + dx, cy + dy);
+                if !desired.contains(&c) {
+                    continue; // off-grid or WDT says no tile — nothing to wait for
+                }
+                match state.tiles.get(&c) {
+                    Some(t) if t.entity.is_some() => {
+                        for uid in &t.placements {
+                            if let Some(pl) = placements.by_id.get(uid) {
+                                let up = pl.spawned && pl.doodads.iter().all(|d| d.spawned);
+                                p.total += 1;
+                                p.ready += usize::from(up);
+                                near_pending += usize::from(!up);
+                            }
+                        }
+                    }
+                    _ => near_tile_missing = true,
+                }
+            }
+        }
+        p.placements_pending = near_pending;
+        p.scene_ready = p.focus_resident && !near_tile_missing && near_pending == 0;
         // Until the WDT answers we don't yet know what this map is made of, so nothing under the
         // focus can be called resident. Without this the post-worldport frames before the index
         // lands read as "ground is up" — harmless on an ADT map (the tile entries below close the
@@ -551,27 +591,46 @@ fn stream_terrain(
         // difference between a loading screen and a glimpse of the void.
         if wdt_index.is_none() && !state.wdt_ungated {
             p.focus_resident = false;
+            p.scene_ready = false;
         }
         // A WMO-only map's residency IS its one building (0688) — there are no tiles to count, so
         // the bar and the clear-condition ride the placement instead. Counting it keeps
         // `total > 0`, which is what `is_ready` requires before it will clear the screen at all.
+        // The backstop/`world_stale` term takes the building's spawn; the scene term also waits
+        // for its props (the Stockade's 740 candles are the reveal).
         if state.global_wmo {
-            let up = placements
-                .by_id
-                .get(&GLOBAL_WMO_UID)
-                .is_some_and(|p| p.spawned);
+            let pl = placements.by_id.get(&GLOBAL_WMO_UID);
+            let up = pl.is_some_and(|p| p.spawned);
+            let full = pl.is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
             p.total += 1;
-            p.ready += usize::from(up);
+            p.ready += usize::from(full);
             p.focus_resident &= up;
+            p.scene_ready &= full;
         }
         // The streamer is the only authority on *which map* the colliders under the player belong
         // to, so it is what lifts the mover's post-snap hold ([`Player::world_stale`]). Residency
         // here means this map's own tile (or, on a WMO-only map, its one building) is spawned —
-        // which is only reachable after the swap above drained every tile of the map we left. Until
-        // then a settle probe would be answered by the old world, and at an instance entrance the
-        // old floor sits within a yard of the new one.
+        // which is only reachable after the swap above drained every tile of the map we left.
         if p.focus_resident && p.total > 0 {
             player.world_stale = false;
+        }
+        // The settle release (decision 0737): the post-snap hold ends when the destination's world
+        // — scene AND colliders — is resident, never on ground contact (feet-on-ground dragged the
+        // whole mover-mode matrix into a loading decision; a flyer or swimmer never touched it).
+        // It lives HERE, not in a mover, precisely so every mover mode releases the same way.
+        // While the resident colliders still belong to the map we just left the deadline is pushed
+        // (0710's fail-closed law: a world that never arrives keeps the hold and the screen).
+        // `colliders_pending` is `finish_colliders`' published count — fresh this frame (it heads
+        // this chain).
+        if player.settling {
+            let now = time.elapsed_secs();
+            if player.world_stale {
+                player.settle_deadline = now + crate::player::SETTLE_TIMEOUT;
+            } else if p.scene_ready && p.colliders_pending == 0 {
+                player.end_settle(true, now);
+            } else if now >= player.settle_deadline {
+                player.end_settle(false, now);
+            }
         }
     }
 }

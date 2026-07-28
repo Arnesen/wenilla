@@ -146,13 +146,10 @@ pub(super) fn surface_over_feet(
 /// clears FALLING, `+0xa0` left dormant), which our swim arm mirrors (`swim_step` zeroes `vel_y`,
 /// the controller clears the arc). `now` is `Time::elapsed_secs`, for the airborne clock.
 ///
-/// A latched swim also **ends the post-teleport/login settle** (benilla's own streaming gate —
-/// the ref blocks on load and has no such state). Settling holds the avatar so it can't fall
-/// through not-yet-streamed floors, and its release gate runs only in the walk mover
-/// ([`super::mover::step`]) — which a swimmer never reaches — while the floating resolver can't
-/// fall at all (gravity bypassed, depth frozen). The latch itself proves the tile's liquid is
-/// resident, so the water IS the arrived support; without this, a login into swim-depth water
-/// held `settling` — and the loading screen, which waits on it — forever.
+/// The latch deliberately does NOT touch [`Player::settling`]: the settle release is the terrain
+/// streamer's, keyed on the destination's residency in every mover mode alike (decision 0737 —
+/// this latch used to release it as a special case, because the old release was a ground probe
+/// only the walk mover ran).
 pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: f32) -> bool {
     // **LEVITATING bails the whole decision** — the reference's very first instruction here
     // (`0x6030d2 test ah,4` → `0x6031fa`; VERIFIED, wow-re `swim-transition.md`): neither the ENTER
@@ -178,9 +175,6 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
                 .is_some_and(|t0| now - t0 < player.jump_zspeed / (2.0 * GRAVITY));
         depth > swim_enter_depth(h) && !hop_blocked
     };
-    if player.swimming {
-        player.settling = false;
-    }
     player.swimming
 }
 
@@ -493,38 +487,23 @@ mod tests {
         );
     }
 
-    /// A login/teleport into swim-depth water must end the settle hold: the settle release gate
-    /// runs only in the walk mover, which a swimmer never reaches — before this rule, `settling`
-    /// stayed latched forever and the loading screen (which clears only on `!settling`) hung at a
-    /// full bar (the Booty Bay underwater-login hang, 2026-07-18). Wading depth and dry land keep
-    /// the hold — there the walk mover runs and its own gate (ground probe / timeout) decides.
+    /// The latch never touches the settle hold (decision 0737): the release is the terrain
+    /// streamer's, keyed on residency in every mover mode alike. This pins the *absence* of the
+    /// old special case — a swim latch that cleared `settling` here would race the streamer's
+    /// judgement (the pre-0737 rule existed only because the old release was a walk-mover ground
+    /// probe a swimmer never reached; the Booty Bay underwater-login hang, 2026-07-18).
     #[test]
-    fn latching_swim_ends_the_settle_hold() {
-        let mut p = player_at(0.0);
-        p.settling = true;
-        assert!(update_swimming(
-            &mut p,
-            Some(swim_enter_depth(HUMAN_MALE) + 1.0),
-            0.0
-        ));
-        assert!(!p.settling, "the water is the support settling waited for");
-
-        let mut wading = player_at(0.0);
-        wading.settling = true;
-        assert!(!update_swimming(
-            &mut wading,
-            Some(swim_exit_depth(HUMAN_MALE) - 0.5),
-            0.0
-        ));
-        assert!(
-            wading.settling,
-            "wading depth leaves the hold to the walk gate"
-        );
-
-        let mut dry = player_at(0.0);
-        dry.settling = true;
-        assert!(!update_swimming(&mut dry, None, 0.0));
-        assert!(dry.settling, "no liquid leaves the hold to the walk gate");
+    fn the_latch_leaves_the_settle_hold_alone() {
+        for (surface, name) in [
+            (Some(swim_enter_depth(HUMAN_MALE) + 1.0), "swim depth"),
+            (Some(swim_exit_depth(HUMAN_MALE) - 0.5), "wading depth"),
+            (None, "dry land"),
+        ] {
+            let mut p = player_at(0.0);
+            p.settling = true;
+            update_swimming(&mut p, surface, 0.0);
+            assert!(p.settling, "{name} must leave the hold to the streamer");
+        }
     }
 
     /// The verified fall re-entry gate (`0x7c5de0`): a fresh swim jump is not re-latched into swim

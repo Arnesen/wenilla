@@ -80,23 +80,34 @@ pub(super) fn finish_colliders(
     // Capped: a cold zone load queues *tens of thousands* of pending colliders (10 500 at once
     // entering Stormwind), and the budget below can attach at most ~500 of the cheapest ones in a
     // frame. Collecting every ready entity would rebuild a huge list each frame to use a slice of
-    // it. `READY_SCAN_CAP` keeps the pass bounded while staying far above what any frame can spend;
+    // it. `READY_SCAN_CAP` bounds the ready list while staying far above what any frame can spend;
     // the rest are picked up next frame (they stay in the query until attached, so none is skipped).
+    // The walk itself covers the whole set regardless (it is the ~0.005 ms part) — it also yields
+    // the queue-depth publish below.
     const READY_SCAN_CAP: usize = 2048;
     let mut ready: Vec<Entity> = Vec::new();
+    let mut pending = 0usize;
     for (entity, mut pc) in state.get_mut(world).iter_mut() {
+        pending += 1;
         if let Some(task) = pc.task.as_mut() {
             if let Some(collider) = block_on(future::poll_once(task)) {
                 pc.task = None;
                 pc.built = Some(collider);
             }
         }
-        if pc.built.is_some() {
+        if pc.built.is_some() && ready.len() < READY_SCAN_CAP {
             ready.push(entity);
-            if ready.len() >= READY_SCAN_CAP {
-                break;
-            }
         }
+    }
+    // Publish the queue depth (decision 0737): the loading-screen clear and the settle release
+    // both refuse to call the world presentable while attaches are outstanding — a spawned
+    // building whose collider still sits in this queue is exactly what a body must not be
+    // released onto. This system heads the Stream chain (0738), so the consumers read this
+    // frame's depth; the count is the depth entering the frame (attaches below shrink it next
+    // publish), which can only delay a release, never wrong one.
+    if let Some(mut progress) = world.get_resource_mut::<crate::loading_screen::WorldLoadProgress>()
+    {
+        progress.colliders_pending = pending;
     }
     if ready.is_empty() {
         return;

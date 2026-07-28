@@ -133,14 +133,21 @@ pub(crate) fn finalize_rig_worlds(
         .single()
         .ok()
         .map(|t| (*t.forward(), *t.right(), *t.up()));
-    // Which rigs refresh this frame: pose-dirty, model frame moved, or camera-faced live.
+    // Which rigs refresh this frame: pose-dirty, model frame moved, or camera-faced — and never
+    // a parked one (decision 0739). The LOD gate ruled a parked rig un-viewable, so neither an
+    // idle's pose_dirty, a patrol's root motion, nor a billboard face can matter until the wake
+    // — which drops the marker before the same frame's pose evaluation, re-raising `pose_dirty`
+    // before this pass runs, so a woken rig's rows are current before anything draws them. (The
+    // world-space rows of a moving parked rig go stale on purpose — nothing reads them; at the
+    // LBRS pin the parked-but-patrolling re-writes were ~260 of the ~620 per-frame refreshes.)
     let refresh: Vec<Entity> = {
         let roots_changed = worlds_params.p0();
         rigs.iter()
             .filter(|(_, rig, _, parked)| {
-                rig.pose_dirty
-                    || roots_changed.contains(rig.joints_root)
-                    || (rig.has_billboard && !parked)
+                !parked
+                    && (rig.pose_dirty
+                        || roots_changed.contains(rig.joints_root)
+                        || rig.has_billboard)
             })
             .map(|(holder, ..)| holder)
             .collect()
@@ -148,6 +155,9 @@ pub(crate) fn finalize_rig_worlds(
     if refresh.is_empty() {
         return;
     }
+    // The `WOW_RIG_COST` compose meter (decision 0736): how many rigs refresh and what the
+    // whole finalize pass costs, beside the palette's copy/write and upload lines.
+    let cost_t0 = crate::rig_palette::rig_cost_enabled().then(std::time::Instant::now);
     let mut globals = worlds_params.p1();
     // The rigid-child re-walk's do-not-enter set, exactly the entity pass's: a nested rig with
     // its own billboard output owns its interior (and its root keeps the propagated frame).
@@ -229,6 +239,13 @@ pub(crate) fn finalize_rig_worlds(
             finalize(rig, holder, skin, &mut globals, &mut ignore);
             rig.pose_dirty = false;
         }
+    }
+    if let Some(t0) = cost_t0 {
+        eprintln!(
+            "[rig-finalize] refreshed={} ms={:.3}",
+            refresh.len(),
+            t0.elapsed().as_secs_f32() * 1000.0
+        );
     }
 }
 

@@ -1,5 +1,8 @@
-//! The unit animation-LOD gate (decision 0448): park an off-frustum rig's **per-bone pose
-//! evaluation**, keep **every clock** running.
+//! The animation-LOD gate (decision 0448): park an off-frustum — or, since decision 0739,
+//! portal-invisible — rig's **per-bone pose evaluation**, keep **every clock** running. Since
+//! 0739 it governs the whole [`RigPose`] population — units, players, AND GameObject rigs (see
+//! the query's comment for why the old `With<AnimDriver>` filter left every animated GO
+//! sampling off-view).
 //!
 //! The reference has NO view cull on unit skeletons — every in-range, non-hidden unit is fully
 //! animated every frame (wow-re `unit-anim-visibility-gate.md`: worklist admission is the CGUnit
@@ -23,18 +26,39 @@
 //! gate on the same marker. Contrast the DOODAD gate ([`crate::doodad_anim`]), which faithfully
 //! stops the player and re-arms on the shared clock — correct there (no one consumes a doodad's
 //! events off-screen), the exact 0075 trap here.
+//!
+//! **The room leg (decision 0739).** The frustum is the wrong instrument indoors: a dungeon
+//! camera's view cone passes through walls, so most of an instance's population stays "in
+//! frustum" while only the current room chain is drawable. The portal PVS
+//! ([`crate::wmo_portal`], the faithful WMO group cull) already knows which rooms the camera can
+//! reach, and [`UnitWmoRoom`] already names each unit's room — so a unit whose room (and every
+//! room one portal hop from it) is outside this frame's PVS parks too. Soundness: a unit is
+//! room-parked exactly when the geometry *around* it — its room's walls, floor, furniture — is
+//! portal-culled by the same bits, and a body can poke only through a portal, never a wall, so
+//! the one-hop guard bounds the doorway straddle. Reveals carry no artifact by construction: a
+//! mob can only become visible through a portal, and the moment that portal's screen window is
+//! non-zero the flood marks its room visible (`compute_wmo_pvs` runs in `Update`, this gate in
+//! `PostUpdate` before the evaluator — same-frame wake, absolute-clock pose). Fail-open at every
+//! seam: no claim (outdoors, EXTERIOR groups), a despawned placement, a still-loading model, an
+//! out-of-range index — all read visible, the [`crate::wmo_portal::WmoGroupVis::drawn_by`]
+//! convention.
+//! `WOW_NO_ROOM_LOD=1` disables just this leg (the A/B lever); `WOW_RIG_COST=1` prints the
+//! per-frame `[rig-gate]` counters.
 
 use bevy::app::AnimationSystems;
 use bevy::camera::primitives::{Frustum, Sphere as CullSphere};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
+use benilla_assets::{WmoGroupNav, WmoModel, WmoPortalRef};
+
 use crate::entities::mount::MountBody;
 use crate::net::SelfPlayer;
 use crate::player::WorldCamera;
 use crate::target::SelectionRadius;
+use crate::wmo_portal::{UnitWmoRoom, WmoPortalInstance, WmoRoom};
 
-use super::AnimDriver;
+use super::RigPose;
 
 /// This rig's per-bone pose evaluation is parked (decision 0448): the pose evaluator and the pose
 /// post-passes skip it. The sequence clocks, the driver state machine, and the event scanner all
@@ -55,12 +79,13 @@ const RADIUS_SCALE: f32 = 2.0;
 const RADIUS_PAD: f32 = 4.0;
 const FALLBACK_RADIUS: f32 = 6.0;
 
-/// Park/wake streamed rigs by the padded sphere-vs-frustum test (decision 0448). PostUpdate,
+/// Park/wake streamed rigs by the padded sphere-vs-frustum test (decision 0448) ANDed with the
+/// portal-PVS room test (decision 0739 — see the module doc's "room leg"). PostUpdate,
 /// before [`AnimationSystems`] — a wake drops the marker in time for the same frame's pose
 /// evaluation, so the re-appearing unit samples the absolute-clock pose with no stale
 /// frame. Exempt: the self-avatar (the camera rides its attachment-17 pivot, and it must keep
 /// animating faded-out in first person) and its mount child. `WOW_NO_ANIM_LOD=1` disables
-/// parking — the live-probe A/B lever.
+/// parking — the live-probe A/B lever; `WOW_NO_ROOM_LOD=1` disables only the room leg.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
@@ -73,13 +98,25 @@ pub(super) fn gate_rig_animation(
             Has<AnimParked>,
             Has<SelfPlayer>,
             Option<&MountBody>,
+            Option<&UnitWmoRoom>,
         ),
-        With<AnimDriver>,
+        // The whole collapsed-rig population (decision 0739), not `With<AnimDriver>`: GameObject
+        // rigs deliberately carry no driver (their looping player IS the animation — attach's GO
+        // arm), and gating on the driver left every animated GO sampling and refreshing off-view
+        // — at the LBRS pin, ~350 of the ~620 per-frame refreshes. Parking preserves their whole
+        // observable surface: the event scanner requires `AnimDriver` (GOs never fired anim
+        // events), `go_anim`'s state machine arms the player regardless of the marker, and the
+        // wake samples the absolute clock. Booth/studio rigs are entity-joint-lane (no
+        // `RigPose`), so this query can never park the character pane.
+        With<RigPose>,
     >,
     self_hosts: Query<Has<SelfPlayer>>,
+    instances: Query<&WmoPortalInstance>,
+    wmos: Res<Assets<WmoModel>>,
     mut out_since: Local<EntityHashMap<f32>>,
     mut disabled: Local<Option<bool>>,
     mut park_all: Local<Option<bool>>,
+    mut no_room: Local<Option<bool>>,
     mut commands: Commands,
 ) {
     let disabled = *disabled.get_or_insert_with(|| std::env::var_os("WOW_NO_ANIM_LOD").is_some());
@@ -89,25 +126,45 @@ pub(super) fn gate_rig_animation(
     // profiler build (the chrome-trace feature costs a 5-minute rebuild and a GB-scale file).
     // Not a shipping mode: it freezes visible rigs on purpose.
     let park_all = *park_all.get_or_insert_with(|| std::env::var_os("WOW_ANIM_PARK_ALL").is_some());
+    let no_room = *no_room.get_or_insert_with(|| std::env::var_os("WOW_NO_ROOM_LOD").is_some());
+    // `[rig-gate]` counters (`WOW_RIG_COST`): `room_out` is the room leg's *marginal* park set —
+    // rigs the frustum keeps that the PVS rejects — so a `WOW_NO_ROOM_LOD=1` leg reads the
+    // premise number without applying the leg (counted either way, applied only when the lever
+    // is off).
+    let cost_on = crate::rig_palette::rig_cost_enabled();
+    let (mut n_rigs, mut n_parked, mut room_out) = (0u32, 0u32, 0u32);
     let Ok(frustum) = cam.single() else {
         return;
     };
     let now = time.elapsed_secs();
-    for (entity, tf, radius, parked, is_self, mount) in &rigs {
+    for (entity, tf, radius, parked, is_self, mount, room) in &rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
         let visible = exempt
             || !park_all && {
                 let scale = tf.to_scale_rotation_translation().0.max_element();
                 let r = radius.map_or(FALLBACK_RADIUS, |r| r.0 * scale * RADIUS_SCALE + RADIUS_PAD);
-                frustum.intersects_sphere(
+                let sphere_in = frustum.intersects_sphere(
                     &CullSphere {
                         center: tf.translation().into(),
                         radius: r,
                     },
                     false,
-                )
+                );
+                // The room leg: only a rig the frustum leg kept can be room-parked.
+                let room_in = !sphere_in || (no_room && !cost_on) || {
+                    let ok = room_pvs_visible(room, &instances, &wmos);
+                    if !ok {
+                        room_out += 1;
+                    }
+                    ok || no_room
+                };
+                sphere_in && room_in
             };
+        if cost_on {
+            n_rigs += 1;
+            n_parked += u32::from(parked);
+        }
         if visible {
             out_since.remove(&entity);
             if parked {
@@ -121,8 +178,52 @@ pub(super) fn gate_rig_animation(
             }
         }
     }
+    if cost_on {
+        eprintln!("[rig-gate] rigs={n_rigs} parked={n_parked} room_out={room_out}");
+    }
     // Drop entries for rigs that despawned (or lost their model) before parking.
     out_since.retain(|e, _| rigs.contains(*e));
+}
+
+/// The room leg's resolve chain: unit claim → placement instance → model → PVS bits. Fail-open
+/// at every seam (no claim, despawned placement, still-loading model) — a lookup miss must never
+/// park a drawable rig.
+fn room_pvs_visible(
+    room: Option<&UnitWmoRoom>,
+    instances: &Query<&WmoPortalInstance>,
+    wmos: &Assets<WmoModel>,
+) -> bool {
+    let Some(WmoRoom { instance, group }) = room.and_then(|r| r.room()) else {
+        return true;
+    };
+    let Ok(inst) = instances.get(instance) else {
+        return true;
+    };
+    let Some(model) = wmos.get(&inst.handle) else {
+        return true;
+    };
+    room_visible(&inst.visible, &model.group_nav, &model.portal_refs, group)
+}
+
+/// Is the claimed group — or any group one portal hop from it — in the PVS? The one-hop union is
+/// the doorway-straddle guard: a body can extend past its feet's room only through a portal
+/// opening, so the neighbour set bounds everything of the unit that could be on screen. Indices
+/// out of range read visible (fail-open, [`crate::wmo_portal::WmoGroupVis::drawn_by`]'s
+/// convention); a group with no portal refs at all can only be seen with the camera inside it
+/// (the flood cannot reach it), which the direct bit already answered.
+fn room_visible(visible: &[bool], nav: &[WmoGroupNav], refs: &[WmoPortalRef], group: u16) -> bool {
+    let vis = |g: usize| visible.get(g).copied().unwrap_or(true);
+    if vis(group as usize) {
+        return true;
+    }
+    let Some(n) = nav.get(group as usize) else {
+        return true;
+    };
+    let Some(hops) = refs.get(n.ref_start as usize..(n.ref_start as usize + n.ref_count as usize))
+    else {
+        return true;
+    };
+    hops.iter().any(|r| vis(r.group as usize))
 }
 
 /// Register the gate: [`gate_rig_animation`] before the frame's pose evaluation.
@@ -140,7 +241,7 @@ mod tests {
         bone_target_id, AnimClip, ModelAnimations, PoseBone, PoseClip, PoseSource, PoseTrack,
     };
 
-    use super::super::{events::fire_anim_events, AnimSoundEvent};
+    use super::super::{events::fire_anim_events, AnimDriver, AnimSoundEvent};
     use super::*;
 
     /// The test clip's loop length (seconds) — short so real-dt frames wrap it several times.
@@ -266,6 +367,7 @@ mod tests {
             AssetPlugin::default(),
             bevy::animation::AnimationPlugin,
         ));
+        app.init_asset::<WmoModel>();
         app.add_message::<AnimSoundEvent>();
         // The live schedule's shape: the gate ahead of the frame's pose evaluation; the event
         // scanner reading the advanced seek after it.
@@ -374,6 +476,139 @@ mod tests {
             bone(&app, twin_joint),
             "the woken pose equals the never-parked twin's — the absolute-clock snap"
         );
+    }
+
+    /// A [`WmoGroupNav`] whose only meaningful fields are its portal-ref slice — the room-leg
+    /// tests never touch flags/bounds.
+    fn nav(ref_start: u16, ref_count: u16) -> WmoGroupNav {
+        WmoGroupNav {
+            flags: 0,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            ref_start,
+            ref_count,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+        }
+    }
+
+    fn pref(group: u16) -> WmoPortalRef {
+        WmoPortalRef {
+            portal: 0,
+            group,
+            side: 1,
+        }
+    }
+
+    /// The room predicate's whole truth table: direct bit, the one-hop straddle guard, the
+    /// all-dark park, the sealed room, and both fail-open seams (group past every table, a
+    /// ref slice past the refs vec).
+    #[test]
+    fn room_visible_covers_the_hop_guard_and_fails_open() {
+        // Groups 0 ↔ 1 share one portal; group 2 is sealed (no refs).
+        let navs = vec![nav(0, 1), nav(1, 1), nav(2, 0)];
+        let refs = vec![pref(1), pref(0)];
+        assert!(
+            room_visible(&[true, false, false], &navs, &refs, 0),
+            "direct PVS bit"
+        );
+        assert!(
+            room_visible(&[true, false, false], &navs, &refs, 1),
+            "own bit dark but the neighbour lit — the doorway-straddle guard keeps it live"
+        );
+        assert!(
+            !room_visible(&[false, false, true], &navs, &refs, 0),
+            "own room and every hop dark ⇒ parked"
+        );
+        assert!(
+            !room_visible(&[true, true, false], &navs, &refs, 2),
+            "a sealed room's own bit decides — no hops exist to save it"
+        );
+        assert!(
+            room_visible(&[false], &navs, &refs, 9),
+            "a group past the PVS table reads visible (fail-open)"
+        );
+        assert!(
+            room_visible(&[false], &[nav(7, 2)], &refs, 0),
+            "a ref slice past the refs vec reads visible (fail-open)"
+        );
+    }
+
+    /// The room leg end to end: an IN-FRUSTUM rig whose claimed room (and its one hop) is
+    /// outside the PVS parks past the hysteresis window; setting the room's bit wakes it and its
+    /// bones sample again — the same instant-wake law as the frustum leg.
+    #[test]
+    fn a_room_dark_rig_parks_and_wakes_when_the_pvs_reaches_it() {
+        let mut app = app();
+        spawn_camera(&mut app);
+        // In front of the camera — only the room leg can park this rig.
+        let (rig, joint) = spawn_rig(&mut app, -Vec3::Z * 20.0);
+        let model = WmoModel {
+            wmo_id: 1,
+            portal_refs: vec![pref(1), pref(0)],
+            group_nav: vec![nav(0, 1), nav(1, 1)],
+            ..Default::default()
+        };
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<WmoModel>>()
+            .add(model);
+        let inst = app
+            .world_mut()
+            .spawn(WmoPortalInstance {
+                handle,
+                world_from_local: bevy::math::Affine3A::IDENTITY,
+                name_set: 0,
+                visible: vec![false, false],
+            })
+            .id();
+        app.world_mut()
+            .entity_mut(rig)
+            .insert(UnitWmoRoom::claimed(WmoRoom {
+                instance: inst,
+                group: 0,
+            }));
+        advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
+        assert!(
+            app.world().entity(rig).contains::<AnimParked>(),
+            "in-frustum but room-dark past the hysteresis window ⇒ parked"
+        );
+        let frozen = bone(&app, joint);
+        // The flood reaches the room (a doorway's screen window opened): wake and sample.
+        app.world_mut()
+            .entity_mut(inst)
+            .get_mut::<WmoPortalInstance>()
+            .unwrap()
+            .visible[0] = true;
+        advance(&mut app, DUR * 0.3, 2);
+        assert!(
+            !app.world().entity(rig).contains::<AnimParked>(),
+            "PVS reach ⇒ instant wake"
+        );
+        assert_ne!(
+            frozen,
+            bone(&app, joint),
+            "the woken rig's bones sample again"
+        );
+    }
+
+    /// The coverage law (decision 0739): a driverless rig — a GameObject's, whose looping
+    /// player is its whole animation — parks by the same gate. `With<RigPose>`, not
+    /// `With<AnimDriver>`.
+    #[test]
+    fn a_driverless_go_rig_parks_too() {
+        let mut app = app();
+        spawn_camera(&mut app);
+        let (behind, joint) = spawn_rig(&mut app, Vec3::Z * 50.0);
+        app.world_mut().entity_mut(behind).remove::<AnimDriver>();
+        advance(&mut app, PARK_AFTER_SECS + 0.2, 4);
+        assert!(
+            app.world().entity(behind).contains::<AnimParked>(),
+            "no driver, still parked — the gate keys on RigPose"
+        );
+        let frozen = bone(&app, joint);
+        advance(&mut app, DUR * 0.35, 2);
+        assert_eq!(frozen, bone(&app, joint), "the parked GO rig's bones hold");
     }
 
     /// The self-avatar never parks (the camera rides its attachment pivot; first-person fades it

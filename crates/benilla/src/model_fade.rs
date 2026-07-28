@@ -248,7 +248,7 @@ pub struct PendingAppearFade {
 
 /// Backstop: arm a pending fade after this long even if the world never reports "shown" — bounds the
 /// worst case (a stuck load) so an entity can never hang invisible. Generous so it almost never fires
-/// before the real `focus_resident` signal does.
+/// before the real signal (the loading screen dropping) does.
 const PENDING_TIMEOUT_SECS: f32 = 8.0;
 
 /// The appear-fade's clock, mirrored onto a streamed unit's **root** entity the moment its body first
@@ -301,27 +301,29 @@ pub fn join_unit_appear_fade(unit: Option<UnitAppearFade>) -> JoinedFade {
     }
 }
 
-/// Arm each [`PendingAppearFade`] into a live [`RenderFade`] once the world is on-screen — the loading
-/// screen's focus tile is resident (`WorldLoadProgress::focus_resident`), so we're not covered — or after
-/// [`PENDING_TIMEOUT_SECS`] as a backstop. This is the faithful trigger: the ramp starts when the player
-/// can actually see the entity. Also advances each unit-root [`UnitAppearFade`] clock in lockstep (same
-/// trigger, same instant) — a separate, smaller query since the root marker carries no material handles.
+/// Arm each [`PendingAppearFade`] into a live [`RenderFade`] once the world is on-screen — the
+/// loading screen is not covering (it used to read the `focus_resident` proxy, which goes true
+/// well before the screen actually drops now that the clear waits for the whole scene — decision
+/// 0737) — or after [`PENDING_TIMEOUT_SECS`] as a backstop. This is the faithful trigger: the ramp
+/// starts when the player can actually see the entity. Also advances each unit-root
+/// [`UnitAppearFade`] clock in lockstep (same trigger, same instant) — a separate, smaller query
+/// since the root marker carries no material handles.
 pub(crate) fn arm_appear_fade(
     time: Res<Time>,
-    progress: Res<crate::loading_screen::WorldLoadProgress>,
+    screen: Res<crate::loading_screen::LoadingScreen>,
     mut commands: Commands,
     q: Query<(Entity, &PendingAppearFade)>,
     mut units: Query<&mut UnitAppearFade>,
 ) {
     let now = time.elapsed_secs();
-    let shown = progress.focus_resident;
+    let shown = !screen.covering();
     for (entity, pending) in &q {
         if shown || now - pending.since > PENDING_TIMEOUT_SECS {
             // `try_*`, like every fade command here: these entities are **wire-owned** — a net
             // destroy can apply at any sync point between this system's query and its own
             // commands, so fade bookkeeping on an already-dead entity is a no-op, never an error.
-            // (The observed crash: login flips `focus_resident`, every pending fade arms in one
-            // frame, and a same-frame wire despawn beat this insert — decision 0200.)
+            // (The observed crash: the login load ends, every pending fade arms in one frame,
+            // and a same-frame wire despawn beat this insert — decision 0200.)
             commands
                 .entity(entity)
                 .try_insert(RenderFade::appear(
@@ -477,11 +479,8 @@ mod tests {
 
         let mut world = World::new();
         world.init_resource::<Time>();
-        world.insert_resource(crate::loading_screen::WorldLoadProgress {
-            ready: 1,
-            total: 1,
-            focus_resident: true, // "world shown" — every pending fade arms this frame
-        });
+        // Default screen = not covering = "world shown" — every pending fade arms this frame.
+        world.init_resource::<crate::loading_screen::LoadingScreen>();
         let doomed = world
             .spawn(PendingAppearFade {
                 cutout: Handle::default(),
@@ -492,13 +491,13 @@ mod tests {
 
         let mut state: SystemState<(
             Res<Time>,
-            Res<crate::loading_screen::WorldLoadProgress>,
+            Res<crate::loading_screen::LoadingScreen>,
             Commands,
             Query<(Entity, &PendingAppearFade)>,
             Query<&mut UnitAppearFade>,
         )> = SystemState::new(&mut world);
-        let (time, progress, commands, q, units) = state.get_mut(&mut world);
-        arm_appear_fade(time, progress, commands, q, units);
+        let (time, screen, commands, q, units) = state.get_mut(&mut world);
+        arm_appear_fade(time, screen, commands, q, units);
 
         // The wire destroy beats the fade commands to the sync point.
         world.despawn(doomed);

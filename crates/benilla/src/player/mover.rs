@@ -33,9 +33,8 @@ use crate::collision::player_query_filter;
 
 use super::{
     move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE,
-    JUMP_SPEED, LAND_PROBE, SETTLE_REACH, SETTLE_TIMEOUT, SKIN_WIDTH, STEP_SLOPE_RATIO,
-    STEP_SNAP_SLACK, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
-    WEDGE_STILL_FRAMES,
+    JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
+    TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
 /// What the step decided — read by the move-flags / wire logic that follows it in `control`.
@@ -55,8 +54,9 @@ pub(super) struct Outcome {
     pub ground: Option<Entity>,
 }
 
-/// Advance the player mover one frame: settle gate, ground classify, the slide, and the
-/// step-down snap. Writes `player.pos`/`vel_y`/`horiz_vel`/`settling`.
+/// Advance the player mover one frame: settle hold, ground classify, the slide, and the
+/// step-down snap. Writes `player.pos`/`vel_y`/`horiz_vel` (the settle *release* is the terrain
+/// streamer's — decision 0737).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn step(
     player: &mut Player,
@@ -101,37 +101,15 @@ pub(super) fn step(
     } else {
         None
     };
-    // Settle gate (post-teleport/summon/login): the streamed world — terrain *and* WMO building
+    // Settle hold (post-teleport/summon/login): the streamed world — terrain *and* WMO building
     // floors + their colliders — arrives over several frames, so the ground under the snap isn't
-    // there yet. End settling once a probe finds the ground under our feet (`SETTLE_REACH`, kept
-    // small so it's the *close* floor we stand on, not distant terrain seen through an unloaded
-    // building) or once we time out. Until then `held` keeps gravity OFF and freezes us in place,
-    // so we don't fall through the not-yet-loaded city/building (the loading screen stays up too).
-    //
-    // Which of the two ends it is the whole diagnosis of a fall-through report, so say it out loud.
-    // The timeout branch is a **fail-open**: it switches gravity on without ever having found a
-    // floor, so a reporter's log has to be able to name it — a `warn!` here is the difference
-    // between a bug we can confirm and one we can only fail to reproduce.
-    //
-    // Neither end may be judged while the world under us is still the one we just left
-    // ([`Player::world_stale`]) — that probe would be asking the wrong map, and answering "found"
-    // is the instance-entry fall-through. The deadline is held off with it, so the timeout budget
-    // measures time spent waiting for the *destination's* floor rather than being spent before the
-    // destination exists; a world that never arrives keeps the hold (and the loading screen) rather
-    // than dropping the body into the void.
-    if player.settling {
-        if player.world_stale {
-            player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
-        } else {
-            let found = probe_down(center, SETTLE_REACH).is_some_and(|h| h.normal1.y >= GROUND_COS);
-            let timed_out = time.elapsed_secs() >= player.settle_deadline;
-            if found || timed_out {
-                player.settling = false;
-                let waited = SETTLE_TIMEOUT - (player.settle_deadline - time.elapsed_secs());
-                move_trace::settle(found, waited, player.pos);
-            }
-        }
-    }
+    // there yet. While settling, `held` keeps gravity OFF and freezes us in place, so we don't
+    // fall through the not-yet-loaded city/building (the loading screen stays up too). The
+    // *release* does not live here (decision 0737): it is the terrain streamer's, keyed on the
+    // destination's residency (scene + colliders, `WorldLoadProgress`) with the timeout backstop —
+    // never on ground contact, which only the walk mover could observe and which a flyer, a
+    // swimmer, or a genuinely airborne teleport never produces (the loading-screen-until-landing
+    // hang). The streamer runs every frame in every mover mode, so every mode releases the same way.
     let held = player.settling;
     let on_floor = !held && on_walkable && player.vel_y <= 0.0;
 

@@ -11,11 +11,17 @@
 //! The two cases out of current scope (taxi/boat/zeppelin's moving flight-path icon; a richer
 //! progress model) slot in as an extra overlay layer / a different progress source without restructure.
 //!
-//! Trigger (scope locked with the user): **startup + `CurrentMap` change only** — normal streaming
-//! stays seamless. Cleared once the tiles the streamer wants around the view are resident
-//! ([`WorldLoadProgress`], published by `terrain_stream`). The exact reference clear-condition +
-//! progress-fraction backing are still INFERRED (see the knowledge note); the streamer residency
-//! ratio is our faithful-enough stand-in until a capture says otherwise.
+//! **The lifecycle is event-raised, readiness-cleared (decision 0737).** The reference *blocks* on
+//! its world load, so its screen covers from the entry edge until the world is loaded by
+//! construction; an async-streaming client has to build that observable explicitly. The screen
+//! rises at the explicit edges — the character pick's `Connected` edge (before the glue tears
+//! down), `SMSG_TRANSFER_PENDING` (the portal walk-in), the worldport snap — all observed *here*,
+//! from the messages/resources the net bridge already publishes; a residency backstop catches any
+//! path with no edge (and covers boot, which is what warms the world pipelines behind the glue —
+//! decision 0540). It clears when the destination is **scene-presentable** ([`WorldLoadProgress`],
+//! published by `terrain_stream` + the collider queue): every wanted tile spawned, the focus
+//! neighbourhood's placements up, colliders quiet, the snap no longer awaited. Never anything
+//! about the *body* — feet-on-ground is not a load condition (the flying-teleport hang, 0737).
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -53,19 +59,39 @@ const BACKDROP_ASPECT: f32 = 4.0 / 3.0;
 /// Frames the world must read fully-resident before we clear the screen — debounces the post-teleport
 /// frame where `loaded` is drained (`total > 0`, `ready` momentarily 0) so we don't flicker off/on.
 const CLEAR_AFTER_READY_FRAMES: u32 = 3;
+/// The wait instrument (decision 0737): once the screen has been up this long, say *which term*
+/// still blocks the clear, every [`WAIT_LOG_EVERY`] seconds — so a "loading screen stuck" report is
+/// a one-line diagnosis instead of a session. Ordinary loads finish under the threshold and log
+/// nothing extra.
+const WAIT_LOG_AFTER: f32 = 3.0;
+const WAIT_LOG_EVERY: f32 = 2.0;
 
-/// How many of the tiles the streamer wants around the view focus are actually spawned. Written each
-/// frame by `terrain_stream::stream_terrain`; read here to drive the bar + the clear condition.
+/// How much of the world the streamer wants around the view focus is actually there. Written each
+/// frame by `terrain_stream::stream_terrain` (tiles + placements) and
+/// `terrain_stream::finish_colliders` (the attach queue); read here to drive the bar + the clear
+/// condition, and by the streamer's own settle release (decision 0737 — the physics hold keys on
+/// this same signal, never on ground contact).
 #[derive(Resource, Default)]
 pub(crate) struct WorldLoadProgress {
+    /// Units done, of [`Self::total`]: desired tiles spawned + focus-neighbourhood placements up.
     pub(crate) ready: usize,
     pub(crate) total: usize,
     /// Whether the tile under the view focus (the nearest desired tile) is spawned. `false` until the
     /// streamer first runs, and again whenever a teleport/worldport drops the focus onto unloaded
-    /// ground — this is what triggers the loading screen (covers startup, cross-map worldport, AND
-    /// far same-map teleports like a cross-continent `.tele`, which don't change `CurrentMap`). During
-    /// normal streaming the focus tile is always resident, so it never fires spuriously.
+    /// ground — the backstop trigger (covers startup, cross-map worldport, AND far same-map
+    /// teleports like a cross-continent `.tele`, which don't change `CurrentMap`). During normal
+    /// streaming the focus tile is always resident, so it never fires spuriously.
     pub(crate) focus_resident: bool,
+    /// The scene term (0737): the focus tile **and its 8 neighbours** are spawned with every
+    /// placement they reference (WMOs, doodads, WMO props) — "the buildings and trees around you
+    /// exist", which is what makes a reveal read as a world rather than bare terrain. Collider
+    /// quiet is deliberately *not* folded in here (it is published a stage apart); consumers use
+    /// [`Self::presentable`].
+    pub(crate) scene_ready: bool,
+    /// Outstanding collider attaches (decision 0610's queue) — published by `finish_colliders`.
+    pub(crate) colliders_pending: usize,
+    /// Focus-neighbourhood placements not yet spawned (the wait instrument's term).
+    pub(crate) placements_pending: usize,
 }
 
 impl WorldLoadProgress {
@@ -80,10 +106,16 @@ impl WorldLoadProgress {
         }
     }
 
-    /// True once every wanted tile is resident. Requires `total > 0` so the cold-start / post-swap
+    /// True once every wanted unit is resident. Requires `total > 0` so the cold-start / post-swap
     /// frame (before `desired` is computed) doesn't read as "done".
     fn is_ready(&self) -> bool {
         self.total > 0 && self.ready >= self.total
+    }
+
+    /// The world at the focus is presentable — the scene term plus a quiet collider queue. What
+    /// both consumers (the screen clear here, the settle release in the streamer) key on.
+    pub(crate) fn presentable(&self) -> bool {
+        self.scene_ready && self.colliders_pending == 0
     }
 }
 
@@ -92,11 +124,29 @@ impl WorldLoadProgress {
 #[derive(Resource)]
 struct LoadingScreenCatalogRes(LoadingScreenCatalog);
 
-/// Loading-screen state machine.
+/// Loading-screen state machine (decision 0737: event-raised, readiness-cleared).
 #[derive(Resource, Default)]
 pub(crate) struct LoadingScreen {
     active: bool,
-    /// Consecutive fully-resident frames while active (see [`CLEAR_AFTER_READY_FRAMES`]).
+    /// A raise from an entry edge (the pick's `Connected`, `SMSG_TRANSFER_PENDING`) holds until the
+    /// destination snap (worldport/teleport) actually lands — so the OLD location's readiness can
+    /// never clear a screen raised for the NEW one. This is what closes the world-entry flash: the
+    /// login-vista tiles are fully resident the moment the glue tears down, and without this hold
+    /// that residency would clear the screen seconds before `SMSG_LOGIN_VERIFY_WORLD` arrives.
+    awaiting_snap: bool,
+    /// Destination art before `CurrentMap` catches up: the roster's `Character.map` at the pick
+    /// edge, the transfer's map at `SMSG_TRANSFER_PENDING`. Cleared by the snap (from which frame
+    /// `CurrentMap` itself is correct).
+    pending_map: Option<u32>,
+    /// **Plain black cover, no art, no bar** — the logout transition (decision 0738). The logout
+    /// teardown despawns the avatar and the streamed world in the same frame's Net stage, but
+    /// `CharSelect` (and the glue screen with it) only applies at the NEXT frame's state
+    /// transition — without this the dead world renders uncovered for that frame, and it is
+    /// exactly the teardown-burst frame, so it lingers. The ref's world→glue swap shows black
+    /// there too. Dropped the moment the state leaves `InWorld` (the glue owns the screen from
+    /// then, at a higher z); any real raise replaces it with the full screen.
+    blackout: bool,
+    /// Consecutive presentable frames while active (see [`CLEAR_AFTER_READY_FRAMES`]).
     ready_frames: u32,
     /// Monotonic bar fill, 0..1 — only ever advances within a load (reset to 0 on each activation), so
     /// the bar reads as one continuous stream even though the raw residency ratio dips as `desired`
@@ -104,6 +154,10 @@ pub(crate) struct LoadingScreen {
     displayed: f32,
     /// Decoded backdrop art by BLP path, so repeated teleports to a continent don't re-decode.
     art_cache: HashMap<String, Handle<Image>>,
+    /// `Time::elapsed_secs` at the last raise + at the last wait-instrument line (see
+    /// [`WAIT_LOG_AFTER`]).
+    active_since: f32,
+    last_wait_log: f32,
 }
 
 impl LoadingScreen {
@@ -111,6 +165,20 @@ impl LoadingScreen {
     /// under it (pipeline warm-up), never behind the glue screens (decision 0540).
     pub(crate) fn covering(&self) -> bool {
         self.active
+    }
+
+    /// Raise (or re-arm) the screen for a fresh load. `awaiting_snap` marks a raise whose
+    /// destination snap is still in flight; `map` is the destination when the edge knows it.
+    fn raise(&mut self, reason: &str, awaiting_snap: bool, map: Option<u32>, now: f32) {
+        self.active = true;
+        self.blackout = false;
+        self.awaiting_snap = awaiting_snap;
+        self.pending_map = map;
+        self.ready_frames = 0;
+        self.displayed = 0.0; // restart the fill for the new load
+        self.active_since = now;
+        self.last_wait_log = now;
+        info!("loading screen: up ({reason}, map {map:?})");
     }
 }
 
@@ -121,6 +189,8 @@ struct LoadingRoot;
 struct LoadingBackdrop;
 #[derive(Component)]
 struct LoadingBarFill;
+#[derive(Component)]
+struct LoadingBarBorder;
 
 pub(crate) struct LoadingScreenPlugin;
 
@@ -237,6 +307,7 @@ fn setup_loading_screen(
                 ));
                 // Border frame, on top.
                 area.spawn((
+                    LoadingBarBorder,
                     Node {
                         position_type: PositionType::Absolute,
                         left: Val::Percent(BORDER_LEFT * 100.0),
@@ -255,8 +326,8 @@ fn setup_loading_screen(
         });
 }
 
-/// Per-frame: run the trigger state machine, resolve backdrop art on (re)activation, and push the
-/// progress fraction into the bar.
+/// Per-frame: observe the lifecycle edges, run the trigger/clear state machine, resolve backdrop
+/// art, and push the progress fraction into the bar.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn drive_loading_screen(
     mut screen: ResMut<LoadingScreen>,
@@ -266,43 +337,143 @@ fn drive_loading_screen(
     screens: Option<Res<LoadingScreenCatalogRes>>,
     mut assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
-    mut root: Query<&mut Visibility, With<LoadingRoot>>,
-    mut backdrop: Query<&mut ImageNode, With<LoadingBackdrop>>,
+    mut root: Query<&mut Visibility, (With<LoadingRoot>, Without<LoadingBackdrop>)>,
+    mut backdrop: Query<(&mut ImageNode, &mut Visibility), With<LoadingBackdrop>>,
     mut fill: Query<&mut Node, With<LoadingBarFill>>,
+    mut bar_vis: Query<
+        &mut Visibility,
+        (
+            Or<(With<LoadingBarFill>, With<LoadingBarBorder>)>,
+            Without<LoadingRoot>,
+            Without<LoadingBackdrop>,
+        ),
+    >,
     player: Option<Res<crate::player::Player>>,
+    time: Res<Time>,
+    // The lifecycle edges (decisions 0737/0738), all observed from what the net bridge already
+    // publishes — this module owns the whole state machine, nothing else is instrumented for it.
+    edges: (
+        Res<State<crate::char_select::ClientState>>,
+        MessageReader<crate::net::EnteredWorldMessage>,
+        MessageReader<crate::net::WorldportMessage>,
+        MessageReader<crate::net::TeleportMessage>,
+        MessageReader<crate::net::LoggedOutMessage>,
+        Option<Res<crate::net::PendingTransfer>>,
+        Option<Res<crate::char_select::Roster>>,
+    ),
 ) {
+    let (state, mut entered, mut worldports, mut teleports, mut logouts, transfer, roster) = edges;
+    let now = time.elapsed_secs();
     let map_id = current_map.as_ref().map(|m| m.0);
-    // The avatar is "settling" after a teleport until the collision under it (terrain *and* the
-    // destination's WMO building floors) has streamed in. Hold the screen until then — otherwise it
-    // clears the moment the terrain is ready, before the buildings load (and the avatar is mid-settle).
+    // The physics hold releases on the same residency signal that clears this screen (decision
+    // 0737 — never on ground contact), so waiting for it costs nothing and guarantees the safe
+    // order: the body's world is live before the reveal, never a reveal of a body about to drop.
     let player_settling = player.as_ref().is_some_and(|p| p.settling);
 
-    // --- Trigger: show whenever the ground under the view focus isn't resident (startup, cross-map
-    // worldport, or a far same-map teleport — all land us on unloaded tiles); clear once the desired
-    // ring is fully resident for a few frames. Normal streaming keeps the focus tile resident, so this
-    // never fires while walking. ---
-    if !screen.active && !progress.focus_resident {
-        screen.active = true;
-        screen.ready_frames = 0;
-        screen.displayed = 0.0; // restart the fill for the new load
-        info!("loading screen: up (map {map_id:?})");
+    // --- The edges. ---
+    // A real glue entry (not 0065's seamless in-world reconnect, which must stay seamless): the
+    // same frame `enter_on_connected` flips the state that tears the glue down, this raise puts
+    // the cover up — raise and teardown are atomic by construction. The destination snap
+    // (`SMSG_LOGIN_VERIFY_WORLD`) is still a server character-load away; `awaiting_snap` holds the
+    // screen across that gap. Art resolves at once from the roster's own `Character.map`.
+    if entered.read().next().is_some() && *state.get() != crate::char_select::ClientState::InWorld {
+        let map = roster.as_ref().and_then(|r| r.pending_map());
+        screen.raise("world entry", true, map, now);
     }
+    // A portal walk-in (`SMSG_TRANSFER_PENDING`, no transport): the server is about to unload us
+    // and the `SMSG_NEW_WORLD` snap follows after its own load — cover now, like the reference.
+    // Transport crossings (0455) keep riding visibly until their worldport lands below.
+    if let Some(t) = transfer.as_ref().filter(|t| t.is_changed()) {
+        match &t.0 {
+            Some(info) if info.transport_entry.is_none() => {
+                screen.raise("transfer pending", true, Some(info.map_id), now);
+            }
+            // The latch cleared with no snap in flight = `SMSG_TRANSFER_ABORTED` (a worldport
+            // clears it too, but that path also lands below this frame): stop awaiting, and the
+            // still-resident old world clears the screen through the ordinary debounce.
+            None => screen.awaiting_snap = false,
+            Some(_) => {}
+        }
+    }
+    // The snap: a worldport IS a fresh cross-map load (raise covers server-initiated ports that
+    // had no preceding edge); a same-map teleport just ends any awaited snap — whether it needs a
+    // screen at all is the backstop's call (a summon across the room shouldn't flash one).
+    for w in worldports.read() {
+        screen.raise("worldport", false, Some(w.map_id), now);
+    }
+    if teleports.read().next().is_some() {
+        screen.awaiting_snap = false;
+        screen.pending_map = None;
+    }
+    // Logout (decision 0738): the same frame's Net stage despawned the avatar and tore the world
+    // down, but `CharSelect` only applies at the NEXT frame's state transition — cover the dead
+    // world with plain black until the glue owns the screen. No art, no bar: the ref's
+    // world→glue swap is a black cut, not a loading screen.
+    if logouts.read().next().is_some() {
+        screen.active = true;
+        screen.blackout = true;
+        screen.awaiting_snap = false;
+        screen.pending_map = None;
+        screen.ready_frames = 0;
+        info!("loading screen: blackout (logout)");
+    }
+    if screen.blackout && *state.get() != crate::char_select::ClientState::InWorld {
+        // The glue is up (it renders above this root); the cover's job is done.
+        screen.blackout = false;
+        screen.active = false;
+    }
+
+    // --- Backstop trigger: the ground under the view focus isn't resident and nothing raised us
+    // (a far same-map `.tele`, boot — which is what warms the world pipelines behind the glue,
+    // decision 0540 — or any path with no edge). Normal streaming keeps the focus tile resident,
+    // so this never fires while walking. ---
+    if !screen.active && !progress.focus_resident {
+        screen.raise("focus not resident", false, None, now);
+    }
+
+    // --- Clear: the destination snap has landed, the scene is presentable (tiles + focus
+    // placements + colliders — [`WorldLoadProgress::presentable`]), and the physics hold is done,
+    // sustained a few frames. ---
     if screen.active {
-        if progress.is_ready() && !player_settling {
+        if progress.is_ready()
+            && progress.presentable()
+            && !screen.awaiting_snap
+            && !player_settling
+        {
             screen.ready_frames += 1;
             if screen.ready_frames >= CLEAR_AFTER_READY_FRAMES {
                 screen.active = false;
                 info!(
-                    "loading screen: cleared ({}/{} tiles resident, settle done)",
-                    progress.ready, progress.total
+                    "loading screen: cleared ({}/{} resident, {:.1}s)",
+                    progress.ready,
+                    progress.total,
+                    now - screen.active_since
                 );
             }
         } else {
             screen.ready_frames = 0;
+            // The wait instrument (0737): a screen up past the threshold names the blocking term.
+            if now - screen.active_since > WAIT_LOG_AFTER
+                && now - screen.last_wait_log >= WAIT_LOG_EVERY
+            {
+                screen.last_wait_log = now;
+                info!(
+                    "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
+                     {} colliders pending, awaiting_snap={}, settling={}",
+                    now - screen.active_since,
+                    progress.ready,
+                    progress.total,
+                    progress.placements_pending,
+                    progress.colliders_pending,
+                    screen.awaiting_snap,
+                    player_settling,
+                );
+            }
         }
     }
 
-    // --- Visibility. ---
+    // --- Visibility. The root is the cover; the backdrop art + bar hide under blackout (0738's
+    // plain black cut — the root's black background IS the frame then). ---
     if let Ok(mut vis) = root.single_mut() {
         *vis = if screen.active {
             Visibility::Visible
@@ -310,13 +481,30 @@ fn drive_loading_screen(
             Visibility::Hidden
         };
     }
-    if !screen.active {
+    let content_vis = if screen.blackout {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    if let Ok((_, mut vis)) = backdrop.single_mut() {
+        if *vis != content_vis {
+            *vis = content_vis;
+        }
+    }
+    for mut vis in &mut bar_vis {
+        if *vis != content_vis {
+            *vis = content_vis;
+        }
+    }
+    if !screen.active || screen.blackout {
         return;
     }
 
-    // --- Backdrop art (resolve once per map via the FK chain; cached by path). ---
+    // --- Backdrop art (resolve via the FK chain; cached by path). Before the snap lands the
+    // destination is `pending_map` (the roster/transfer told us); after it, `CurrentMap`. ---
+    let art_map = screen.pending_map.or(map_id);
     if let (Some(map_id), Some(maps), Some(screens), Some(assets)) =
-        (map_id, maps.as_ref(), screens.as_ref(), assets.as_mut())
+        (art_map, maps.as_ref(), screens.as_ref(), assets.as_mut())
     {
         if let Some(path) = maps
             .0
@@ -330,7 +518,7 @@ fn drive_loading_screen(
                     screen.art_cache.insert(path.clone(), h.clone());
                 }),
             };
-            if let (Some(handle), Ok(mut img)) = (handle, backdrop.single_mut()) {
+            if let (Some(handle), Ok((mut img, _))) = (handle, backdrop.single_mut()) {
                 if img.image != handle {
                     img.image = handle;
                     img.color = Color::WHITE; // reveal the art (was tinted black)
@@ -339,8 +527,12 @@ fn drive_loading_screen(
         }
     }
 
-    // --- Progress bar: monotonic fill, reveals left→right, width = progress·FILL_MAX_WIDTH. ---
-    screen.displayed = screen.displayed.max(progress.fraction());
+    // --- Progress bar: monotonic fill, reveals left→right, width = progress·FILL_MAX_WIDTH.
+    // While the snap is still in flight the residency being published is the OLD location's
+    // (fully resident) — hold the bar at zero until the destination's own numbers exist. ---
+    if !screen.awaiting_snap {
+        screen.displayed = screen.displayed.max(progress.fraction());
+    }
     let frac = screen.displayed;
     if let Ok(mut node) = fill.single_mut() {
         node.width = Val::Percent(frac * FILL_MAX_WIDTH * 100.0);

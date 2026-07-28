@@ -65,6 +65,17 @@ impl UnitWmoRoom {
     pub fn room(&self) -> Option<WmoRoom> {
         self.room
     }
+
+    /// A synthetic claim for tests that exercise a room consumer (the anim-LOD gate's room leg)
+    /// without running the tracker.
+    #[cfg(test)]
+    pub(crate) fn claimed(room: WmoRoom) -> Self {
+        Self {
+            room: Some(room),
+            at: Vec3::ZERO,
+            generation: 0,
+        }
+    }
 }
 
 /// `WMOAreaTable` lookup keys: `(WMOID, NameSetID, WMOGroupID)`.

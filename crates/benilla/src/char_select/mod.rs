@@ -141,6 +141,15 @@ impl Roster {
     pub(super) fn selected_char(&self) -> Option<&Character> {
         self.selected.and_then(|i| self.chars.get(i))
     }
+
+    /// The pending pick's map — the loading screen resolves the *destination's* art from the
+    /// roster at the entry edge, before the server's `SMSG_LOGIN_VERIFY_WORLD` snap lands
+    /// (decision 0737).
+    pub(crate) fn pending_map(&self) -> Option<u32> {
+        self.pending_pick
+            .and_then(|g| self.chars.iter().find(|c| c.guid == g))
+            .map(|c| c.map)
+    }
 }
 
 /// Ask the parked IO thread to log in as `guid` (the pick channel) and remember it as pending.

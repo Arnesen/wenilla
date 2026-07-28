@@ -38,3 +38,13 @@ opt-level = 1
 # No debuginfo trimming: `debug = "line-tables-only"` was A/B-measured (decision 0192) at zero
 # recurring win on this stack (macOS unpacked split-debuginfo; sccache; fast ld) — not worth
 # invalidating every warm target and the sccache cache for.
+
+# Shipping-grade optimization, A/B-graded at the pin (decision 0736): −1.0 cpu_ms (−5 %) vs
+# default release, flat at the empty-map and bare-Bevy floors. The campaign keeps grading on
+# default `release` — same-day A/B is the law, and fat LTO's link time would tax every
+# iteration for a constant offset. Build with `--profile ship` for actual releases (add
+# `RUSTFLAGS=-Ctarget-cpu=native` for a machine-local binary; not set here — it isn't portable).
+[profile.ship]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

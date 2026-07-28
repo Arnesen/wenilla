@@ -64,12 +64,15 @@ pub(crate) use camera::{head_height, CameraControl, CameraPivot, WorldCamera, CA
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, CAPSULE_RADIUS, FALL_FAR_DROP, FALL_FAR_TIME,
     GROUND_COS, GROUND_PROBE, JUMP_SPEED, LAND_PROBE, MOUSELOOK_PITCH_CLAMP, RUN_BACK_RATIO,
-    SETTLE_REACH, SETTLE_TIMEOUT, SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO,
-    STEP_SNAP_SLACK, STEP_UP_HEIGHT, TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL,
-    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    SKIN_WIDTH, STATIONARY_CHASE_RATE, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
+    TURN_RATE, TURN_RATE_MOVING, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
+// `SETTLE_TIMEOUT` is `pub(crate)`: the settle release lives in the terrain streamer (decision
+// 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
+// resident world is still the departed map's (0710).
 pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, GRAVITY, TERMINAL_VELOCITY,
+    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, GRAVITY, SETTLE_TIMEOUT,
+    TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature

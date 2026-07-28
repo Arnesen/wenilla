@@ -48,7 +48,8 @@ pub struct WmoGroupNav {
 
 /// A loaded WMO building: the render batches across all its groups, flattened, plus the flattened
 /// collidable triangles (the app bakes a collider from these per placement).
-#[derive(Asset, TypePath, Clone)]
+/// `Default` = the empty building (every field vacuous) — a test scaffold, never a loader product.
+#[derive(Asset, TypePath, Clone, Default)]
 pub struct WmoModel {
     /// The building's `WMOAreaTable.WMOID` key (root `MOHD.wmoID`; NSabbey → 59).
     pub wmo_id: u32,
