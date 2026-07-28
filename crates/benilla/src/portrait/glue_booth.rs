@@ -428,13 +428,11 @@ pub(super) fn sync_glue_scene(
     // The scene's particle-emitter spawn wiring (decision 0539 §5) + the skin-palette table and
     // its mirror registry (decision 0720) — one tuple param (the 16-SystemParam ceiling).
     particle_assets: (
-        ResMut<Assets<Mesh>>,
-        ResMut<Assets<crate::particles::WowParticleMaterial>>,
         ResMut<crate::rig_palette::RigPalettes>,
         ResMut<crate::rig_palette::RigPaletteMirrors>,
     ),
 ) {
-    let (mut meshes, mut particle_materials, mut palettes, mut mirrors) = particle_assets;
+    let (mut palettes, mut mirrors) = particle_assets;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -611,10 +609,10 @@ pub(super) fn sync_glue_scene(
         // The scene's authored particle emitters (decision 0539 §5) — the braziers/embers every
         // UI_* scene carries (MainMenu 28, Orc 11, NightElf 12…), dead until now. The world spawn
         // path, on the booth's layer, lit/fogged by the SCENE's own light buffer (the ModelFFX fog
-        // covers the whole model, emitters included); owner = the emitter bone's joint, so fire
-        // flicker rides the animated bones; anchored at the static scene root. No `EmitterFade`:
-        // a glue scene always ticks. Parented under the scene root so teardown cascades.
-        let scene_light_ref = crate::lighting::SharedLightBuffer(light.clone());
+        // covers the whole model, emitters included — carried by `EffectLightOverride` into the
+        // shared lane's per-draw bind group); owner = the emitter bone's joint, so fire flicker
+        // rides the animated bones; anchored at the static scene root. No `EmitterFade`: a glue
+        // scene always ticks. Parented under the scene root so teardown cascades.
         let mut emitters = 0usize;
         for em in &model.emitters {
             let owner = joints
@@ -622,9 +620,6 @@ pub(super) fn sync_glue_scene(
                 .map_or((scene.root, [0.0; 3]), |&j| (j, em.bone_pivot));
             if let Some(e) = crate::particles::spawn_emitter(
                 &mut commands,
-                &mut meshes,
-                &mut particle_materials,
-                &scene_light_ref,
                 em,
                 Transform::IDENTITY,
                 Some(owner),
@@ -633,9 +628,11 @@ pub(super) fn sync_glue_scene(
                 // A glue scene loops its one authored clip forever — the doodad law.
                 crate::particles::EmitClock::Pinned,
             ) {
-                commands
-                    .entity(e)
-                    .insert((booth.layer.clone(), ChildOf(scene.root)));
+                commands.entity(e).insert((
+                    booth.layer.clone(),
+                    ChildOf(scene.root),
+                    crate::particles::buffer::EffectLightOverride(light.clone()),
+                ));
                 emitters += 1;
             }
         }

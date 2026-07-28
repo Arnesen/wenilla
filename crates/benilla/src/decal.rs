@@ -4,44 +4,32 @@
 //! tiles + WMO faces — **never** doodads/GameObjects) whose BVH overlaps a projection box, clip
 //! each to the box ([`clip_to_frame`]), and emit them with planar top-down UVs. Because the
 //! emitted triangles are exact sub-pieces of the drawn surfaces, a decal is pixel-coplanar with
-//! what's on screen (the caller's `depth_bias` settles the depth test) and drapes down steps and
-//! ledge faces precisely like the reference (a vertical face gets the smeared texel column of its
-//! XZ spot: projective texturing, faithfully).
+//! what's on screen (the draw's rasterizer `depth_bias` settles the depth test) and drapes down
+//! steps and ledge faces precisely like the reference (a vertical face gets the smeared texel
+//! column of its XZ spot: projective texturing, faithfully).
 //!
-//! Two clients — the same emit loop in the binary: the **selection ring**
-//! ([`crate::target`]`::ring`, collector flags `0x200122`) and the **unit blob shadow**
+//! Since 0733 the projector emits **effect-stream triangles** ([`EffectVertex`], world-space,
+//! fan-unrolled) instead of `Mesh` assets: its clients cache the projected slice and push it
+//! into the shared lane per frame — zero mesh churn, tint/fade applied at push time.
+//!
+//! Three clients — the same emit loop in the binary: the **selection ring**
+//! ([`crate::target`]`::ring`, collector flags `0x200122`), the **unit blob shadow**
 //! ([`crate::blob_shadow`], flags `0x2f0122` — the ring's + the liquid receivers, a gap here:
-//! liquid surfaces aren't in the [`GroundDecalSurface`] set yet).
+//! liquid surfaces aren't in the [`GroundDecalSurface`] set yet), and the ground-fx spell
+//! decals ([`crate::ground_fx`]).
 
 use avian3d::parry::bounding_volume::{Aabb as ParryAabb, BoundingVolume};
 use avian3d::prelude::Collider;
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::collision::GroundDecalSurface;
-
-/// A decal mesh's initial (placeholder) contents: one degenerate triangle, so the vertex-buffer
-/// layout exists before the first projection. [`project_decal`] rewrites every attribute per
-/// rebuild.
-pub(crate) fn seed_mesh() -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, 0.0, 0.0]; 3]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 3]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.5, 0.5]; 3]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0, 1.0, 1.0, 1.0]; 3]);
-    mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
-    mesh
-}
+use crate::particles::buffer::EffectVertex;
 
 /// A decal's projection box: a yaw-rotated horizontal rectangle × a vertical slab, all relative
-/// to `center` (the owning object's feet — the mesh transform places the emitted positions there).
-/// The horizontal bounds live in the **rotated frame** (`x' = dx·cos − dz·sin`,
-/// `z' = dz·cos + dx·sin`); UVs map `[min_x, max_x] × [min_z, max_z]` to `[0,1]²`, so the texture
-/// square IS this rectangle. An axis-aligned box passes `(sin, cos) = (0, 1)`.
+/// to `center` (the owning object's feet). The horizontal bounds live in the **rotated frame**
+/// (`x' = dx·cos − dz·sin`, `z' = dz·cos + dx·sin`); UVs map `[min_x, max_x] × [min_z, max_z]`
+/// to `[0,1]²`, so the texture square IS this rectangle. An axis-aligned box passes
+/// `(sin, cos) = (0, 1)`.
 pub(crate) struct DecalFrame {
     pub center: Vec3,
     pub sin: f32,
@@ -102,17 +90,17 @@ impl DecalFrame {
     }
 }
 
-/// Rebuild `mesh` as a projected surface decal: gather + clip the [`GroundDecalSurface`]
-/// triangles to `frame`'s box and emit them with top-down UVs (positions **relative to
-/// `frame.center`** — the caller's transform places them). `alpha` computes each vertex's colour
-/// alpha from its in-frame position `(x', y_rel, z')` (vertical fades, edge ramps); `uv` maps
-/// in-frame `(x', z')` to the emitted texture coordinate ([`DecalFrame::rect_uv`] for the plain
-/// texture-square decals; the ground-fx lane bilerps its quad's authored corner UVs). Returns
-/// `false` when nothing was gathered (no receiving surface in the box) — the caller hides the
-/// decal, the reference's own no-ground gate (`0x6d74b5`: the whole draw is skipped).
+/// Project a surface decal into `out` as **world-space, fan-unrolled effect triangles**: the
+/// [`GroundDecalSurface`] triangles are gathered, clipped to `frame`'s box, and emitted with
+/// top-down UVs. `alpha` computes each vertex's colour alpha from its in-frame position
+/// `(x', y_rel, z')` (vertical fades, edge ramps); the colour is white × that alpha — the
+/// pushing client multiplies its tint/fade in. `uv` maps in-frame `(x', z')` to the emitted
+/// texture coordinate ([`DecalFrame::rect_uv`] for the plain texture-square decals; the
+/// ground-fx lane bilerps its quad's authored corner UVs). Returns `false` when nothing was
+/// gathered (no receiving surface in the box) — the caller hides the decal, the reference's
+/// own no-ground gate (`0x6d74b5`: the whole draw is skipped).
 pub(crate) fn project_decal(
-    meshes: &mut Assets<Mesh>,
-    mesh: &Mesh3d,
+    out: &mut Vec<EffectVertex>,
     surfaces: &Query<&Collider, With<GroundDecalSurface>>,
     frame: &DecalFrame,
     alpha: impl Fn(Vec3) -> f32,
@@ -122,13 +110,10 @@ pub(crate) fn project_decal(
     if frame.max_x - frame.min_x <= 0.0 || frame.max_z - frame.min_z <= 0.0 {
         return false;
     }
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    let start = out.len();
     for collider in surfaces {
-        // The marked colliders are static trimeshes with world-space vertices (identity pose), so
-        // their local AABB/triangles are world AABB/triangles.
+        // The marked colliders are static trimeshes with world-space vertices (identity pose),
+        // so their local AABB/triangles are world AABB/triangles.
         let Some(trimesh) = collider.shape().as_trimesh() else {
             continue;
         };
@@ -141,36 +126,25 @@ pub(crate) fn project_decal(
             if poly.len() < 3 {
                 continue;
             }
-            let base = positions.len() as u32;
-            for p in &poly {
-                let d = *p - frame.center;
-                positions.push([d.x, d.y, d.z]);
-                let (u, v) = frame.in_frame(*p);
-                uvs.push(uv(u, v));
-                let a = alpha(Vec3::new(u, d.y, v));
-                colors.push([1.0, 1.0, 1.0, a]);
-            }
-            // Fan-triangulate the clipped convex polygon.
-            for k in 1..poly.len() as u32 - 1 {
-                indices.extend([base, base + k, base + k + 1]);
+            let vert = |p: Vec3| {
+                let (u, v) = frame.in_frame(p);
+                let a = alpha(Vec3::new(u, p.y - frame.center.y, v));
+                EffectVertex {
+                    pos: p.to_array(),
+                    uv: uv(u, v),
+                    color: [1.0, 1.0, 1.0, a],
+                }
+            };
+            // Fan-triangulate the clipped convex polygon, unrolled (the stream's tri-list
+            // topology: identity indices, no shared vertices).
+            for k in 1..poly.len() - 1 {
+                out.push(vert(poly[0]));
+                out.push(vert(poly[k]));
+                out.push(vert(poly[k + 1]));
             }
         }
     }
-    if positions.is_empty() {
-        return false;
-    }
-    let Some(mesh) = meshes.get_mut(mesh.id()) else {
-        return false;
-    };
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        vec![[0.0, 1.0, 0.0]; positions.len()],
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_indices(Indices::U32(indices));
-    true
+    out.len() > start
 }
 
 /// Sutherland–Hodgman clip of a triangle against the frame's projection box: the yaw-rotated

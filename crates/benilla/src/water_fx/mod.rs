@@ -35,8 +35,8 @@
 //!   the 0264 INTERIM constants are resolved, decision 0265).
 //!
 //! The formulas + lifecycle math live in [`params`]; this half is the ECS: the emitter over the
-//! avatar + streamed units, the record pool, and the per-(chunk, category) additive meshes on the
-//! shared effect gamma lane (fog OFF — the reference's verified foam render state).
+//! avatar + streamed units, the record pool, and one additive effect-stream draw per
+//! (chunk, category) with live records (fog OFF — the reference's verified foam render state).
 
 mod params;
 mod view;
@@ -46,8 +46,6 @@ pub(crate) use view::{WaterFxView, WfxMode};
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::ExtendedMaterial;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -58,11 +56,12 @@ use benilla_protocol::EntityKind;
 use crate::assets::{AssetSet, WorldAssets};
 use crate::creature_anim::move_flags;
 use crate::entities::CollisionHeight;
-use crate::lighting::SharedLightBuffer;
 use crate::liquid::{FoamPatch, WaterChunkInfo};
 use crate::net::{NetEntity, SelfPlayer};
-use crate::particles::{WowParticleExt, WowParticleMaterial};
-use crate::player::Player;
+use crate::particles::buffer::{
+    begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
+};
+use crate::player::{Player, WorldCamera};
 use crate::schedule::WorldStage;
 
 use params::{foam_params, foam_uv, rand01, record_alpha, record_size, WadeState};
@@ -188,32 +187,26 @@ fn alloc_slot(cursor: &mut usize, base: usize, len: usize) -> usize {
     i
 }
 
-/// The two shared foam materials (ring/wake stencils on the effect gamma lane, fog off).
+/// The two foam stencils (ring/wake), decoded raw at startup. The draws they feed are
+/// effect-stream records: additive, fog OFF (VERIFIED `0x68fcc1`), sort bias +1.0 over the
+/// hosting water chunk (the coplanar tie — the reference draws foam in the water group right
+/// after the liquid surface).
 #[derive(Resource)]
-struct FoamMaterials {
-    ring: Handle<WowParticleMaterial>,
-    wake: Handle<WowParticleMaterial>,
+struct FoamAssets {
+    ring: Handle<Image>,
+    wake: Handle<Image>,
 }
 
-/// One pooled mesh entity per (liquid chunk, is-ring) with live records.
-#[derive(Resource, Default)]
-struct FoamMeshes(HashMap<(Entity, bool), Entity>);
+/// The foam draw's sort-bias over its water (the old material's `depth_bias: 1.0`).
+const FOAM_BIAS: f32 = 1.0;
 
-/// Marks a foam mesh entity.
-#[derive(Component)]
-struct FoamMesh;
-
-/// Load the stencils raw (CLAMP, no mips — the reference's measured sampler state), build the two
-/// materials on the shared effect lane with fog disabled (VERIFIED render state: FOG off).
+/// Load the stencils raw (CLAMP, no mips — the reference's measured sampler state).
 fn setup_water_fx(
     mut commands: Commands,
     world_assets: Option<ResMut<WorldAssets>>,
-    light: Res<SharedLightBuffer>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<WowParticleMaterial>>,
 ) {
     commands.init_resource::<WaterFoam>();
-    commands.init_resource::<FoamMeshes>();
     let Some(mut world_assets) = world_assets else {
         return;
     };
@@ -223,30 +216,7 @@ fn setup_water_fx(
     let Some(wake) = foam_image(&mut world_assets, WAKE_TEXTURE, &mut images) else {
         return;
     };
-    let mut material = |texture: Handle<Image>| {
-        materials.add(ExtendedMaterial {
-            base: StandardMaterial {
-                base_color_texture: Some(texture),
-                unlit: true,
-                alpha_mode: AlphaMode::Add,
-                cull_mode: None,
-                double_sided: true,
-                // Wins the coplanar transparent-sort tie against its own water chunk (the
-                // reference draws foam in the water group right after the liquid surface).
-                depth_bias: 1.0,
-                ..default()
-            },
-            extension: WowParticleExt {
-                light_buf: light.0.clone(),
-                // x = fog enable: the reference's foam render sets FOG off (VERIFIED `0x68fcc1`).
-                params: Vec4::ZERO,
-                mod2x: false,
-            },
-        })
-    };
-    let wake = material(wake);
-    let ring = material(ring);
-    commands.insert_resource(FoamMaterials { ring, wake });
+    commands.insert_resource(FoamAssets { ring, wake });
 }
 
 /// Decode a foam stencil, keeping its authored RGBA verbatim (raw gamma bytes, the house
@@ -411,7 +381,7 @@ fn drive_unit(
 /// selection bits) and for every streamed unit (the velocity/yaw proxy), emitting pool records.
 fn emit_water_foam(
     time: Res<Time>,
-    materials: Option<Res<FoamMaterials>>,
+    materials: Option<Res<FoamAssets>>,
     mut foam: ResMut<WaterFoam>,
     player: Res<Player>,
     self_store: Query<&NetEntity, With<SelfPlayer>>,
@@ -522,22 +492,21 @@ fn emit_water_foam(
     foam.units.retain(|_, uf| uf.active);
 }
 
-/// Per frame: age the pool, drop dead records, and rebuild one mesh per (chunk, category) with
-/// live records — positions static, UV = the texgen at `size(t)`, colour = white × the alpha ramp.
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
-fn render_water_foam(
+/// Per frame (PostUpdate, after the stream clear): age the pool, drop dead records, and push
+/// one effect-stream draw per (chunk, category) with live records — positions static, UV = the
+/// texgen at `size(t)`, colour = white × the alpha ramp (the stencil's near-black RGB carries
+/// the intensity through the texture product). Sorted at the group's vert centroid + the water
+/// tie-break bias; a chunk that streamed out lets its records age out silently.
+fn push_water_foam(
     time: Res<Time>,
-    materials: Option<Res<FoamMaterials>>,
+    assets: Option<Res<FoamAssets>>,
+    cam: Query<Entity, With<WorldCamera>>,
     mut foam: ResMut<WaterFoam>,
-    mut foam_meshes: ResMut<FoamMeshes>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut commands: Commands,
-    mesh_entities: Query<&Mesh3d, With<FoamMesh>>,
+    mut quads: ResMut<EffectQuads>,
     chunks_alive: Query<(), With<WaterChunkInfo>>,
 ) {
-    let Some(materials) = materials else {
-        return;
-    };
+    let Some(assets) = assets else { return };
+    let Ok(cam) = cam.single() else { return };
     let now = time.elapsed_secs();
 
     for slot in &mut foam.pool {
@@ -546,93 +515,60 @@ fn render_water_foam(
         }
     }
 
-    let mut groups: HashMap<(Entity, bool), MeshBuilder> = HashMap::default();
-    for rec in foam.pool.iter().flatten() {
+    // Group record indices per (chunk, category) — each group is one contiguous draw.
+    let mut groups: HashMap<(Entity, bool), Vec<usize>> = HashMap::default();
+    for (i, rec) in foam.pool.iter().enumerate() {
+        let Some(rec) = rec else { continue };
         if chunks_alive.get(rec.chunk).is_err() {
             continue; // chunk streamed out; the record ages out silently
         }
-        let b = groups.entry((rec.chunk, rec.ring)).or_default();
-        let size = record_size(rec.size0, rec.growth, rec.born, now);
-        let alpha = record_alpha(rec.peak, rec.lifetime, rec.born, now);
-        for v in &rec.verts {
-            let wow = bevy_to_wow(*v);
-            let uv = foam_uv(rec.center, rec.heading, size, [wow[0], wow[1]]);
-            b.push(*v, uv, alpha);
-        }
+        groups.entry((rec.chunk, rec.ring)).or_default().push(i);
     }
-
-    // Clear meshes whose group emptied; drop mesh entities whose chunk despawned.
-    foam_meshes.0.retain(|key, entity| {
-        if groups.contains_key(key) {
-            return true;
-        }
-        if chunks_alive.get(key.0).is_ok() {
-            if let Ok(Mesh3d(h)) = mesh_entities.get(*entity) {
-                if let Some(m) = meshes.get_mut(h) {
-                    MeshBuilder::default().write(m);
-                }
+    for ((_chunk, ring), records) in groups {
+        let start = quads.begin();
+        let mut centroid = Vec3::ZERO;
+        let mut n = 0u32;
+        for i in records {
+            let rec = foam.pool[i].as_ref().expect("grouped above");
+            let size = record_size(rec.size0, rec.growth, rec.born, now);
+            let alpha = record_alpha(rec.peak, rec.lifetime, rec.born, now);
+            for v in &rec.verts {
+                let wow = bevy_to_wow(*v);
+                quads.verts.push(EffectVertex {
+                    pos: v.to_array(),
+                    uv: foam_uv(rec.center, rec.heading, size, [wow[0], wow[1]]),
+                    color: [1.0, 1.0, 1.0, alpha],
+                });
+                centroid += *v;
+                n += 1;
             }
-            true
-        } else {
-            commands.entity(*entity).despawn();
-            false
         }
-    });
-    for (key, builder) in groups {
-        if let Some(&entity) = foam_meshes.0.get(&key) {
-            if let Ok(Mesh3d(h)) = mesh_entities.get(entity) {
-                if let Some(m) = meshes.get_mut(h) {
-                    builder.write(m);
-                }
-            }
-        } else {
-            let material = if key.1 {
-                materials.ring.clone()
-            } else {
-                materials.wake.clone()
-            };
-            let mut mesh = Mesh::new(
-                PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            );
-            builder.write(&mut mesh);
-            let entity = commands
-                .spawn((
-                    FoamMesh,
-                    Mesh3d(meshes.add(mesh)),
-                    MeshMaterial3d(material),
-                    Transform::IDENTITY,
-                ))
-                .id();
-            foam_meshes.0.insert(key, entity);
+        if n == 0 {
+            continue;
         }
-    }
-}
-
-/// A tiny growable triangle-list accumulator: white verts with per-vertex alpha, up normal, UV.
-/// Foam triangles are unshared (identity indices), like the reference's per-record fans.
-#[derive(Default)]
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
-    colors: Vec<[f32; 4]>,
-}
-
-impl MeshBuilder {
-    fn push(&mut self, pos: Vec3, uv: [f32; 2], alpha: f32) {
-        self.positions.push(pos.to_array());
-        self.uvs.push(uv);
-        self.colors.push([1.0, 1.0, 1.0, alpha]);
-    }
-
-    fn write(self, mesh: &mut Mesh) {
-        let n = self.positions.len();
-        let indices = (0..n as u32).collect::<Vec<_>>();
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; n]);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
-        mesh.insert_indices(Indices::U32(indices));
+        quads.commit_tris(
+            start,
+            EffectDrawSpec {
+                cam,
+                texture: if ring {
+                    assets.ring.id()
+                } else {
+                    assets.wake.id()
+                },
+                blend: EffectBlend::Add,
+                // The reference's foam render sets FOG off (VERIFIED `0x68fcc1`).
+                fog: EffectFog::Off,
+                anchor: centroid / n as f32,
+                bias: FOAM_BIAS,
+                raster_bias: 0,
+                // NEVER the chunk entity: a draw's probe identity must not own a registered
+                // mesh, or bevy's sorted-phase batcher claims the item and rewrites its
+                // `batch_range` (gpu_preprocessing.rs keys purely on `item.main_entity()`) —
+                // the Goldshire-teleport crash. The chunk still keys the record grouping above.
+                main_entity: Entity::PLACEHOLDER,
+                light: None,
+            },
+        );
     }
 }
 
@@ -644,15 +580,12 @@ impl Plugin for WaterFxPlugin {
         app.add_systems(Startup, setup_water_fx.after(AssetSet::Open))
             .add_systems(
                 Update,
-                (
-                    view::waterfx_spawn,
-                    view::waterfx_drive,
-                    emit_water_foam,
-                    render_water_foam,
-                )
+                (view::waterfx_spawn, view::waterfx_drive, emit_water_foam)
                     .chain()
                     .in_set(WorldStage::Present),
-            );
+            )
+            // The stream push: PostUpdate after the frame's clear (emission ran in Update).
+            .add_systems(PostUpdate, push_water_foam.after(begin_effect_frame));
     }
 }
 

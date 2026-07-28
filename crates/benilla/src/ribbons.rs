@@ -9,23 +9,23 @@
 //! the sim below transcribes it with the same simplifications as `particles` (distributions and
 //! frames mirrored, not the reference's exact float slots).
 //!
-//! Like particles, each trail owns one dynamically-rebuilt mesh in world space and an unlit
-//! material on its own pipeline. A trail rides its **owner** entity (a skinned model's host-bone
-//! joint, an item root, a missile); when the owner goes it drains — committed edges finish
-//! fading, then the trail despawns itself (the reference's enable-gate law).
+//! Like particles, each trail writes its strip into the **shared effect-quad stream**
+//! ([`crate::particles::buffer::EffectQuads`], decision 0732 slice P1) — per segment, one quad
+//! duplicating the shared edge vertices (identical triangles to the old strip mesh; a few dozen
+//! extra vertices per trail buys the whole family one vertex layout and one index pattern). A
+//! trail rides its **owner** entity (a skinned model's host-bone joint, an item root, a
+//! missile); when the owner goes it drains — committed edges finish fading, then the trail
+//! despawns itself (the reference's enable-gate law).
 
 use std::collections::VecDeque;
 
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::ModelRibbon;
 use benilla_formats::ParticleBlend;
-use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
-use crate::particles::{WowParticleExt, WowParticleMaterial};
+use crate::particles::buffer::{EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
+use crate::player::WorldCamera;
 
 /// Hard cap on stored edges — a backstop against a pathological rate·lifetime (the reference's
 /// ring capacity is `ceil(rate·lifetime)+2`; shipped trails sit far below this).
@@ -66,8 +66,12 @@ pub struct RibbonTrail {
     /// against (an effect model's ribbons spawn at its clip start, so age == clip time — the
     /// particle emitters' law; a persistent trail's constant tracks are age-invariant).
     age: f32,
-    mesh: Handle<Mesh>,
     texture: Handle<Image>,
+    /// The owner-last draw-order rung ([`crate::particles::owner_last_bias`] over the owner's
+    /// world reach, computed at spawn) — a trail is one of its model's emitters and takes the
+    /// SAME rung as the quad clouds beside it (0721). Was the material's `depth_bias`; now the
+    /// draw record's sort-key add.
+    bias: f32,
 }
 
 impl RibbonTrail {
@@ -83,15 +87,6 @@ impl RibbonTrail {
     }
 }
 
-/// Empty a trail mesh (draws nothing).
-fn clear_ribbon_mesh(mesh: &mut Mesh) {
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-    mesh.insert_indices(Indices::U32(Vec::new()));
-}
-
 /// Spawn a ribbon-trail entity for one [`ModelRibbon`], riding `owner` (a host-bone joint for a
 /// skinned model — pass the joint and the def's baked pivot does the rebase — or the model/item
 /// root). `current_anim` is the `AnimationData.dbc` id the owner's model is running (a static held
@@ -103,9 +98,6 @@ fn clear_ribbon_mesh(mesh: &mut Mesh) {
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_ribbon(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<WowParticleMaterial>,
-    light: &crate::lighting::SharedLightBuffer,
     ribbon: &ModelRibbon,
     owner: Entity,
     use_pivot: bool,
@@ -151,56 +143,12 @@ pub fn spawn_ribbon(
     } else {
         p
     };
-    let alpha_mode = match def.blend {
-        ParticleBlend::Add => AlphaMode::Add,
-        ParticleBlend::Alpha => AlphaMode::Blend,
-        ParticleBlend::Opaque => AlphaMode::Opaque,
-    };
-    // The shared effect material (gamma combine + output decode — see `WowParticleMaterial`).
-    let material = materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color_texture: Some(texture.clone()),
-            unlit: true,
-            alpha_mode,
-            cull_mode: None, // a trail is visible from both sides
-            double_sided: true,
-            // The reference's "a model's emitters draw after that model's batches" — the same
-            // rung the quad clouds take, from the same authored reach, because a trail is one of
-            // the model's emitters (`crate::particles::owner_last_bias`).
-            depth_bias: crate::particles::owner_last_bias(ribbon.owner_reach * owner_scale),
-            ..default()
-        },
-        extension: WowParticleExt {
-            light_buf: light.0.clone(),
-            // params.x = the per-blend fog-colour policy (the M2 batch state setter's table,
-            // `0x70baf0` / wow-re ROUND 4 — ribbons ride the same trio): additive trails fog
-            // toward BLACK, fading under the storm veil instead of adding grey; alpha/opaque
-            // trails fog toward the scene colour.
-            params: Vec4::new(
-                match def.blend {
-                    ParticleBlend::Add => 2.0,
-                    _ => 1.0,
-                },
-                0.0,
-                0.0,
-                0.0,
-            ),
-            mod2x: false,
-        },
-    });
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    clear_ribbon_mesh(&mut mesh);
-    let mesh = meshes.add(mesh);
     Some(
         commands
             .spawn((
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material),
+                // The sim writes the trail's sort anchor (the live head node) here each frame
+                // — the phase probe's read point.
                 Transform::IDENTITY,
-                NoFrustumCulling, // the trail AABB is a moving streak; skip culling
                 RibbonTrail {
                     local_offset: wow_to_bevy(local),
                     def,
@@ -208,8 +156,11 @@ pub fn spawn_ribbon(
                     edges: VecDeque::new(),
                     accumulator: 0.0,
                     age: 0.0,
-                    mesh,
                     texture,
+                    // The reference's "a model's emitters draw after that model's batches" —
+                    // the same rung the quad clouds take, from the same authored reach,
+                    // because a trail is one of the model's emitters.
+                    bias: crate::particles::owner_last_bias(ribbon.owner_reach * owner_scale),
                 },
             ))
             .id(),
@@ -217,15 +168,18 @@ pub fn spawn_ribbon(
 }
 
 /// Per-frame: place the node from the owner's live transform, commit/expire edges, sag by
-/// gravity, and rebuild the strip mesh.
-fn simulate_ribbons(
+/// gravity, and write the strip into the shared effect-quad stream.
+pub(crate) fn simulate_ribbons(
     time: Res<Time>,
     mut commands: Commands,
     // Owner reads (joints/roots — never trail entities): disjoint from the trail query's
     // `&mut GlobalTransform` below.
     transforms: Query<&GlobalTransform, Without<RibbonTrail>>,
     images: Res<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut quads: ResMut<EffectQuads>,
+    // Trails belong to the world lane (no booth ribbons; a booth-parked owner's strip is eaten
+    // by the shader's farclip wall, exactly as on the material path).
+    world_cam: Query<Entity, With<WorldCamera>>,
     mut trails: Query<(
         Entity,
         &mut RibbonTrail,
@@ -233,6 +187,9 @@ fn simulate_ribbons(
         &mut GlobalTransform,
     )>,
 ) {
+    let Ok(cam) = world_cam.single() else {
+        return;
+    };
     let dt = time.delta_secs().min(0.1);
     let now = time.elapsed_secs();
     for (entity, mut trail, mut entity_tf, mut entity_global) in &mut trails {
@@ -243,8 +200,8 @@ fn simulate_ribbons(
             edges,
             accumulator,
             age,
-            mesh,
             texture,
+            bias,
         } = &mut *trail;
         // The keyed look tracks sample on the trail's clip clock (see [`RibbonTrail::age`]):
         // heights at edge-commit time (each edge keeps the width it was born with — the
@@ -305,21 +262,16 @@ fn simulate_ribbons(
             }
         }
 
-        // Rebuild the strip: live head first (while the owner lives), then committed edges
-        // newest→oldest. u slides with age across the tex-slot cell (the texture's transparent
-        // tail is the fade); v spans the cell band. Colour = the authored tint × the shared
-        // intensity knob on the additive weight.
+        // Write the strip into the shared stream: live head first (while the owner lives), then
+        // committed edges newest→oldest. u slides with age across the tex-slot cell (the
+        // texture's transparent tail is the fade); v spans the cell band. An idle trail — no
+        // strip yet, or a non-resident texture — pushes nothing and commits nothing: the old
+        // "don't rewrite an already-empty mesh" guard is now the structure itself.
         if !images.contains(&*texture) {
-            if let Some(m) = meshes.get_mut(&*mesh) {
-                clear_ribbon_mesh(m);
-            }
             continue;
         }
         let n = edges.len() + usize::from(head.is_some());
         if n < 2 {
-            if let Some(m) = meshes.get_mut(&*mesh) {
-                clear_ribbon_mesh(m);
-            }
             continue;
         }
         let (rows, cols) = (def.tile_rows.max(1), def.tile_cols.max(1));
@@ -332,56 +284,71 @@ fn simulate_ribbons(
             f32::from(cell / cols) / f32::from(rows),
             f32::from(cell / cols + 1) / f32::from(rows),
         );
-        // RAW authored RGB — the gamma decode happens once in `wow_particle.wgsl` (decision 0152),
+        // RAW authored RGB — the gamma decode happens once in the effect shader (decision 0152),
         // covering the texture term too. Alpha is a blend weight, raw.
         let rgb = def.color.sample_ms(ms);
         let rgba = [rgb[0], rgb[1], rgb[2], def.alpha.sample_ms(ms).max(0.0)];
-        let mut positions = Vec::with_capacity(n * 2);
-        let mut uvs = Vec::with_capacity(n * 2);
-        // Verts are ANCHOR-relative and the entity transform carries the anchor: the transparent
-        // pass sorts meshes by entity position, so the trail needs a real depth (the same
-        // sort-tie flashing fix as the particle clouds). Draining trails anchor on their newest
-        // surviving edge.
+        // The trail's SORT anchor — the live head node (the point the material path's entity
+        // translation used to carry; same sort-tie flashing fix as the particle clouds).
+        // Draining trails anchor on their newest surviving edge.
         let anchor = head.map(|(node, _)| node).unwrap_or_else(|| {
             let e = edges.back().expect("n >= 2 ⇒ edges exist while draining");
             (e.top + e.bottom) * 0.5
         });
         entity_tf.translation = anchor;
-        // Post-propagation frame: publish directly, or the strip renders at last frame's anchor
-        // — the trail head visibly detached from a 20 yd/s missile (see the particle sim's
-        // matching note; trail entities live at the world root, the direct write is exact).
+        // Post-propagation frame: publish directly (see the particle sim's matching note; trail
+        // entities live at the world root, the direct write is exact).
         *entity_global = GlobalTransform::from(*entity_tf);
-        let mut push_pair = |t: Vec3, b: Vec3, age01: f32| {
-            positions.push((t - anchor).to_array());
-            positions.push((b - anchor).to_array());
-            let u = u0 + (u1 - u0) * age01;
-            uvs.push([u, v0]);
-            uvs.push([u, v1]);
-        };
+        // The edge sequence, head first then newest→oldest — each consecutive pair becomes one
+        // quad whose corner order reproduces the old strip's exact triangles: strip triangles
+        // (t₀,b₀,t₁),(b₀,b₁,t₁) = quad [b₀,b₁,t₁,t₀] under the lane's [0,1,2, 0,2,3] pattern.
+        let mut pairs: Vec<(Vec3, Vec3, f32)> = Vec::with_capacity(n);
         if let Some((node, axis)) = head {
-            push_pair(node + axis * h_above, node - axis * h_below, 0.0);
+            pairs.push((node + axis * h_above, node - axis * h_below, 0.0));
         }
         for e in edges.iter().rev() {
-            push_pair(
+            pairs.push((
                 e.top,
                 e.bottom,
                 ((now - e.born) / def.edge_lifetime).clamp(0.0, 1.0),
-            );
+            ));
         }
-        let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
-        let colors = vec![rgba; positions.len()];
-        let mut indices = Vec::with_capacity((n - 1) * 6);
-        for k in 0..(n - 1) as u32 {
-            let b = k * 2;
-            indices.extend_from_slice(&[b, b + 1, b + 2, b + 1, b + 3, b + 2]);
+        let start = quads.begin();
+        for w in pairs.windows(2) {
+            let ((t0, b0, a0), (t1, b1, a1)) = (w[0], w[1]);
+            let (ua0, ua1) = (u0 + (u1 - u0) * a0, u0 + (u1 - u0) * a1);
+            for (pos, uv) in [
+                (b0, [ua0, v1]),
+                (b1, [ua1, v1]),
+                (t1, [ua1, v0]),
+                (t0, [ua0, v0]),
+            ] {
+                quads.verts.push(EffectVertex {
+                    pos: pos.to_array(),
+                    uv,
+                    color: rgba,
+                });
+            }
         }
-        if let Some(m) = meshes.get_mut(&*mesh) {
-            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-            m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-            m.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-            m.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-            m.insert_indices(Indices::U32(indices));
-        }
+        quads.commit_quads(
+            start,
+            EffectDrawSpec {
+                cam,
+                texture: texture.id(),
+                blend: def.blend.into(),
+                // params.x = the per-blend fog-colour policy (the M2 batch state setter's
+                // table, `0x70baf0` / wow-re ROUND 4 — ribbons ride the same trio): additive
+                // trails fog toward BLACK, fading under the storm veil instead of adding grey;
+                // alpha/opaque trails fog toward the scene colour. (No ribbon authors the
+                // particle "unfogged" file flag — pass 0.)
+                fog: EffectFog::for_blend(0, def.blend),
+                anchor,
+                bias: *bias,
+                raster_bias: 0,
+                main_entity: entity,
+                light: None, // trails never carry a light override (world lane only)
+            },
+        );
     }
 }
 

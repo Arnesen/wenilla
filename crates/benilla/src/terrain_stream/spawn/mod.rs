@@ -25,7 +25,6 @@ use crate::lighting::SharedLightBuffer;
 use crate::lighting::{PropProbeSlot, PropProbes};
 use crate::liquid::{spawn_wmo_liquids, LiquidAssets};
 use crate::model_render::{m2_url, ShadeSel};
-use crate::particles::WowParticleMaterial;
 use crate::terrain::WowModelMaterial;
 use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 
@@ -51,7 +50,6 @@ pub(super) fn spawn_loaded_placements(
     // The shared per-kind animated liquid materials — WMO groups spawn their embedded water/lava/slime
     // on these, same as MCLQ terrain water. Absent when the client has no data.
     liquid_assets: Option<Res<LiquidAssets>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     // Read-only: the loaded-tile map + decoded tiles, for the global MCSH ground-shade lookup at spawn.
     // `stream_terrain` (chained before this) owns them mutably; here we only read.
     streamer: Res<TerrainStreamer>,
@@ -148,9 +146,6 @@ pub(super) fn spawn_loaded_placements(
                     }
                     spawn_emitters_for(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        &shared_light,
                         &m.emitters,
                         p.transform,
                         joints.as_deref(),
@@ -159,9 +154,6 @@ pub(super) fn spawn_loaded_placements(
                     );
                     spawn_ribbons_for(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        &shared_light,
                         &m.ribbons,
                         p.transform,
                         joints.as_deref(),
@@ -464,9 +456,6 @@ pub(super) fn spawn_loaded_placements(
             }
             spawn_emitters_for(
                 &mut commands,
-                &mut meshes,
-                &mut particle_materials,
-                &shared_light,
                 &m.emitters,
                 d.transform,
                 joints.as_deref(),
@@ -475,9 +464,6 @@ pub(super) fn spawn_loaded_placements(
             );
             spawn_ribbons_for(
                 &mut commands,
-                &mut meshes,
-                &mut particle_materials,
-                &shared_light,
                 &m.ribbons,
                 d.transform,
                 joints.as_deref(),

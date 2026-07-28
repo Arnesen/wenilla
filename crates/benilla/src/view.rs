@@ -50,7 +50,7 @@ impl Default for ViewDistance {
 /// **The one spelling of "is it nearer than `farclip`", shared by every CPU-side consumer.** The test is
 /// planar depth along the camera-forward axis (`(center − eye)·fwd`) of the sphere's NEAREST point, which
 /// is deliberately the *same coordinate* the per-pixel wall uses in the shaders (`terrain.wgsl` /
-/// `wow_model.wgsl` / `wow_particle.wgsl` all discard on eye-Z past `fog_params.w`). Agreeing on the
+/// `wow_model.wgsl` / `wow_effect.wgsl` all discard on eye-Z past `fog_params.w`). Agreeing on the
 /// coordinate is what makes an object straddling the boundary **dissolve** through it instead of popping
 /// when its origin crosses.
 ///

@@ -39,7 +39,6 @@ use crate::model_fade::{
     UnitAppearFade, APPEAR_FADE_SECS,
 };
 use crate::net::{NetCommands, NetEntity, ObjectStore};
-use crate::particles::WowParticleMaterial;
 
 use super::{Creatures, DisplayModel, ModelHandle};
 use crate::model_render::m2_url;
@@ -748,11 +747,8 @@ pub(super) fn attach_held_items(
     )>,
     held: Option<Res<ItemDisplays>>,
     time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
-    shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
-    let (Some(held), Some(light)) = (held, shared_light) else {
+    let Some(held) = held else {
         return;
     };
     let now = time.elapsed_secs();
@@ -895,7 +891,8 @@ pub(super) fn attach_held_items(
                         };
                         child.insert((
                             MeshTag(crate::mesh_tag::alpha_bits(tag_alpha)),
-                            InteriorLit::new(entity, lit_kind, part.material.clone()),
+                            InteriorLit::new(lit_kind, part.material.clone()),
+                            crate::interior::ClassifiedBy(entity),
                         ));
                     }
                     // `FadeMaterials` is persistent bookkeeping (self-avatar zoom fade, decision 0032's
@@ -965,9 +962,6 @@ pub(super) fn attach_held_items(
             for em in &dm.emitters {
                 crate::particles::spawn_emitter(
                     &mut commands,
-                    &mut meshes,
-                    &mut particle_materials,
-                    &light,
                     em,
                     spawn_tf,
                     Some((root, [0.0; 3])),
@@ -991,17 +985,7 @@ pub(super) fn attach_held_items(
             // rests in Stand (anim 0): a thrown weapon's trail is keyed dark there, so the flight
             // ribbon never shows in the hand — it lights only on the InFlight missile.
             for rb in &dm.ribbons {
-                crate::ribbons::spawn_ribbon(
-                    &mut commands,
-                    &mut meshes,
-                    &mut particle_materials,
-                    &light,
-                    rb,
-                    root,
-                    false,
-                    unit_scale,
-                    Some(0),
-                );
+                crate::ribbons::spawn_ribbon(&mut commands, rb, root, false, unit_scale, Some(0));
             }
             debug!(
                 "held attach: unit {entity} display {} → attach {} (bone {bone}, {} parts)",

@@ -59,7 +59,6 @@ use crate::creature_anim::{
     MissileSpawn,
 };
 use crate::model_render::m2_url;
-use crate::particles::WowParticleMaterial;
 
 use super::equipment::ItemDisplays;
 use super::spell_fx::{attach_effect_visuals, SpellFx};
@@ -527,15 +526,12 @@ pub(super) fn attach_missile_models(
     mut missiles: Query<(Entity, &mut Missile)>,
     fx: Option<Res<SpellFx>>,
     time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     mut wow_materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
-    shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
-    let (Some(fx), Some(light)) = (fx, shared_light) else {
+    let Some(fx) = fx else {
         return;
     };
     for (entity, mut missile) in &mut missiles {
@@ -566,13 +562,10 @@ pub(super) fn attach_missile_models(
             time.elapsed_secs(),
             false, // a missile flies — its flat quads are geometry, never ground decals
             None,  // a missile is a FREE world model — its trail stays world-frozen
-            &mut meshes,
-            &mut particle_materials,
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
             &mut palettes,
-            &light,
             Some(INFLIGHT_ANIM),
         ) {
             continue;

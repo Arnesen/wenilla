@@ -2,6 +2,8 @@
 //! ground oracle cache, and the per-kind frame (`run_kind`). Split from `precip`'s root;
 //! byte-cited constants stay in the root's table, ECS wiring stays in the root's systems.
 
+use bevy::platform::collections::HashMap;
+
 use super::*;
 
 /// One falling particle. Positions/velocities are Bevy world space (y up).
@@ -57,7 +59,9 @@ pub(super) struct Patter {
     pub(super) variant: u8,
 }
 
-/// The per-kind pool + its two mesh handles (falling layer + ground layer).
+/// The per-kind pool (falling layer + ground layer) — its geometry rides the shared effect
+/// stream (0733), so it owns no meshes.
+#[derive(Default)]
 pub(super) struct Pool {
     /// ACTIVE drops — falling, rendered, landing.
     pub(super) drops: Vec<Drop>,
@@ -66,28 +70,9 @@ pub(super) struct Pool {
     /// SEALED packets — closed cohorts replaying (or waiting for) their baseTime windows.
     sealed: Vec<Packet>,
     pub(super) patters: Vec<Patter>,
-    pub(super) drop_mesh: Handle<Mesh>,
-    pub(super) ground_mesh: Handle<Mesh>,
-    /// Mesh-write liveness edges (one per mesh) — see [`WriteGate`]: an idle pool leaves its
-    /// fixed-capacity GPU buffers untouched instead of re-uploading them every frame.
-    pub(super) drop_written: WriteGate,
-    pub(super) ground_written: WriteGate,
 }
 
 impl Pool {
-    pub(super) fn new(drop_mesh: Handle<Mesh>, ground_mesh: Handle<Mesh>) -> Self {
-        Self {
-            drops: Vec::new(),
-            open: None,
-            sealed: Vec::new(),
-            patters: Vec::new(),
-            drop_mesh,
-            ground_mesh,
-            drop_written: WriteGate::default(),
-            ground_written: WriteGate::default(),
-        }
-    }
-
     /// Records still in the pipeline (open + sealed) — the instrument's "pipe" count.
     pub(super) fn pending_len(&self) -> usize {
         self.open.as_ref().map_or(0, |p| p.records.len())
@@ -398,7 +383,7 @@ mod tests {
     /// buffer, `0x6752b0` ← `0x675a97` sole caller).
     #[test]
     fn packet_seals_before_replaying() {
-        let mut pool = Pool::new(Handle::default(), Handle::default());
+        let mut pool = Pool::default();
         let close_age = RAIN_P / PACKET_CAP as f32; // 35000/6144 ≈ 5.7 s
         let (_, at0) = pool.open_for(0.0, RAIN_P, close_age);
         assert!((at0 - PACKET_CAP as f32 / RAIN_P).abs() < 1e-3);
@@ -421,16 +406,18 @@ mod tests {
             cell: (0, 0),
             size: 1.0,
         };
-        let mut pool = Pool::new(Handle::default(), Handle::default());
-        pool.open = Some(Packet {
-            opened: 9.0,
-            visible_at: 12.0,
-            records: vec![Pending {
-                at: 12.0,
-                drop: d(),
-            }],
-            count: 1,
-        });
+        let mut pool = Pool {
+            open: Some(Packet {
+                opened: 9.0,
+                visible_at: 12.0,
+                records: vec![Pending {
+                    at: 12.0,
+                    drop: d(),
+                }],
+                count: 1,
+            }),
+            ..Default::default()
+        };
         pool.sealed.push(Packet {
             opened: 0.0,
             visible_at: 1.0, // replaying since t=1
@@ -458,7 +445,7 @@ mod tests {
     /// pre-pipeline 2.5 s.
     #[test]
     fn upswing_first_visible_rain_is_gated() {
-        let mut pool = Pool::new(Handle::default(), Handle::default());
+        let mut pool = Pool::default();
         let close_age = RAIN_P / PACKET_CAP as f32;
         let dt = 1.0 / 60.0;
         let mut first_visible = f32::MAX;

@@ -46,22 +46,20 @@
 //!   clear-down. A wire TYPE change instead cuts: emission stops at once and the unreplayed
 //!   pipeline is discarded (`pool::Pool::cut`). See `pool` and [`SHADER_LEG`].
 //!
-//! Meshes are rebuilt per frame from the live pools (the `particles.rs` pattern) on
-//! [`WowParticleMaterial`]; rain's Mod2x blend + forced fog ride the material's `mod2x` key and
-//! forced-fog params.
+//! Geometry is pushed per frame from the live pools onto the shared effect stream (0733):
+//! rain's Mod2x blend + forced fog are the lane's `EffectBlend::Mod2x` + `EffectFog::Rain`
+//! variants; snow and mist ride the Alpha/fog-off rows. Idle pools push nothing — the
+//! structural replacement for the old fixed-capacity meshes' write gate (the 0353 fps hunt).
 
-use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::ExtendedMaterial;
-use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::render_resource::Buffer;
 
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 
 use crate::collision::player_query_filter;
-use crate::lighting::{SharedLightBuffer, WowLighting};
-use crate::particles::{WowParticleExt, WowParticleMaterial};
+use crate::lighting::WowLighting;
+use crate::particles::buffer::{
+    begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads,
+};
 use crate::player::WorldCamera;
 use crate::wmo_portal::{CameraInteriorClaim, WmoPvsSet};
 
@@ -71,9 +69,9 @@ mod mist;
 mod pool;
 mod render;
 mod wind;
-use mist::{build_mist_mesh, run_mist, Mist, MIST_CAP};
+use mist::{push_mist, run_mist, Mist};
 use pool::{run_kind, HeightCache, Pool};
-use render::{build_flake_mesh, build_patter_mesh, build_streak_mesh};
+use render::{push_flakes, push_patters, push_streaks};
 pub(crate) use wind::{wow_azimuth_to_bevy, WeatherWind};
 
 // ===== The reference's constants (byte-cited; render laws from wow-re rf-weather-render.md,
@@ -133,9 +131,10 @@ const RAIN_SPREAD_BIAS: f32 = f32::from_bits(0x3d56_7750); // 0x80ffc0 ≈ 0.052
 const STREAK_HALF_W: f32 = 0.05;
 const STREAK_TAIL: f32 = 2.0;
 /// Rain's forced fog window (render-state 0x0a/0x0b, CPU leg): start 70, end 75 — under Mod2x
-/// the grey-0.5 fog colour is NEUTRAL, so this IS the streak distance fade.
-const RAIN_FOG_START: f32 = 70.0;
-const RAIN_FOG_END: f32 = 75.0;
+/// the grey-0.5 fog colour is NEUTRAL, so this IS the streak distance fade. `pub(crate)`: the
+/// effect lane's canonical `EffectFog::Rain` params row is written from these (0733 §4).
+pub(crate) const RAIN_FOG_START: f32 = 70.0;
+pub(crate) const RAIN_FOG_END: f32 = 75.0;
 /// Patter triangle half-edges: `view_right/12` × `view_up/6` (`0x80e004`/`0x803568`, CONFIRMED).
 const PATTER_RIGHT: f32 = 1.0 / 12.0;
 const PATTER_UP: f32 = 1.0 / 6.0;
@@ -196,24 +195,11 @@ pub(super) struct Precip {
 pub(super) struct WeatherIndoors(bool);
 
 /// Resolve [`WeatherIndoors`] from the camera's PVS-flood interior claim
-/// ([`CameraInteriorClaim`], written by the portal pass this frame) and flip the layer
-/// entities' visibility: hidden only when the claimed room reaches no exterior.
-fn gate_weather_indoors(
-    claim: Res<CameraInteriorClaim>,
-    mut indoors: ResMut<WeatherIndoors>,
-    mut layers: Query<&mut Visibility, With<PrecipLayer>>,
-) {
-    let now_hidden = claim.0.is_some_and(|c| !c.exterior_visible);
-    if now_hidden != indoors.0 {
-        indoors.0 = now_hidden;
-        for mut vis in &mut layers {
-            *vis = if now_hidden {
-                Visibility::Hidden
-            } else {
-                Visibility::Inherited
-            };
-        }
-    }
+/// ([`CameraInteriorClaim`], written by the portal pass this frame). The flag gates both the
+/// sim ([`simulate_precip`] — the freeze) and the stream push ([`push_precip`] — frozen drops
+/// hang, unrendered, exactly the reference's `[0xca80c4]` draw kill).
+fn gate_weather_indoors(claim: Res<CameraInteriorClaim>, mut indoors: ResMut<WeatherIndoors>) {
+    indoors.0 = claim.0.is_some_and(|c| !c.exterior_visible);
 }
 
 /// xorshift32 → [0,1) — the reference's lagged-table generator is byte-known but its
@@ -227,144 +213,31 @@ fn rand01(rng: &mut u32) -> f32 {
     (x >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// Marks the layer entities. The sim writes the camera anchor into their `Transform` each
-/// frame and builds vertices anchor-relative — the `particles.rs` convention: the transparent
-/// pass sorts (and the GPU transforms) per entity, and a mesh whose entity sits at the world
-/// origin ~9000 yd from its absolute-coordinate vertices does not survive the view transform
-/// intact (the streak/flake fragments vanished; anchor-relative verts render).
-#[derive(Component)]
-struct PrecipLayer;
-
 /// Ground-layer capacity — the reference's patter pool is 0x1800 slots (`Packet<Patter,Rain>`),
 /// same as the drop pool; at grade 1 the 1:1 landing spawns keep ~rate·0.25 s ≈ 3–6k alive.
 const GROUND_CAP: usize = 0x1800;
 
-/// Pad the vertex arrays + indices to a **fixed capacity** with degenerate (zero-area, alpha-0)
-/// geometry, so the mesh's GPU buffers keep one size for life (no per-frame reallocation as the
-/// pools breathe). The padding indices all reference vertex 0 → zero-area triangles, no
-/// fragments.
-fn pad_mesh(
-    pos: &mut Vec<[f32; 3]>,
-    uv: &mut Vec<[f32; 2]>,
-    col: &mut Vec<[f32; 4]>,
-    idx: &mut Vec<u32>,
-    vert_cap: usize,
-    idx_cap: usize,
-) {
-    pos.resize(vert_cap, [0.0; 3]);
-    uv.resize(vert_cap, [0.0; 2]);
-    col.resize(vert_cap, [0.0; 4]);
-    idx.resize(idx_cap, 0);
-}
-
-/// A fresh mesh with the particle vertex layout (`particles.rs` convention), pre-filled to its
-/// full fixed capacity with degenerate geometry so the buffers hold ONE size for life (no
-/// per-frame reallocation, and the render side's first extraction is already final-sized).
-fn blank_mesh_sized(vert_cap: usize, idx_cap: usize) -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
-    );
-    let (mut pos, mut uv, mut col, mut idx) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    pad_mesh(&mut pos, &mut uv, &mut col, &mut idx, vert_cap, idx_cap);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; pos.len()]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
-    mesh.insert_indices(Indices::U32(idx));
-    mesh
-}
-
-/// Gates a pool's per-frame mesh write on its **liveness edge**. An idle pool re-writing its
-/// already all-degenerate fixed-capacity buffer is not free: `Assets::get_mut` alone marks the
-/// asset Modified, and the renderer re-extracts and re-uploads the whole capacity-sized buffer
-/// every frame — capacity-priced, not demand-priced (at the shader leg's `POOL` = 0xC000 that
-/// was ~5 ms/frame on a clear noon — the 0353 fps hunt). Write while live, write ONCE more on
-/// the live→empty edge (so the last drops actually clear from the GPU), then leave the asset
-/// untouched. Empty content is all-degenerate and camera-independent, so the skip is exact.
-#[derive(Default)]
-pub(super) struct WriteGate {
-    written_live: bool,
-}
-
-impl WriteGate {
-    /// `Some(mesh)` when this frame's write must happen (live content, or the clearing write).
-    pub(super) fn write<'a>(
-        &mut self,
-        meshes: &'a mut Assets<Mesh>,
-        mesh: &Handle<Mesh>,
-        live: bool,
-    ) -> Option<&'a mut Mesh> {
-        let write = live || self.written_live;
-        self.written_live = live;
-        write.then(|| meshes.get_mut(mesh)).flatten()
-    }
-}
-
-/// The three verified weather render states (rf-weather-render Q3).
-enum WeatherBlend {
-    /// Rain streak/patter: **Mod2x** (`2·src·dst`) + the FORCED fog — grey-0.5 over 70..75 yd,
-    /// regardless of scene fog. Under Mod2x grey-0.5 is neutral, so the fog IS the distance fade.
-    RainMod2x,
-    /// Snow: standard alpha blend, fog OFF.
-    SnowAlpha,
-    /// Mist: standard alpha blend, fog OFF (the puff RGB is the fog colour already).
-    MistAlpha,
-}
-
-fn weather_material(
-    materials: &mut Assets<WowParticleMaterial>,
-    texture: Handle<Image>,
-    light_buf: Buffer,
-    blend: WeatherBlend,
-) -> Handle<WowParticleMaterial> {
-    // AlphaMode::Blend keeps every layer in the transparent pass with depth-write off (the
-    // reference's 0x12 = 0); the Mod2x key swaps the blend equation in specialize().
-    let (params, mod2x) = match blend {
-        WeatherBlend::RainMod2x => (Vec4::new(0.0, 1.0, RAIN_FOG_START, RAIN_FOG_END), true),
-        WeatherBlend::SnowAlpha | WeatherBlend::MistAlpha => (Vec4::ZERO, false),
-    };
-    materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color_texture: Some(texture),
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None, // the reference's 0x14 = 0, two-sided
-            ..default()
-        },
-        extension: WowParticleExt {
-            light_buf,
-            params,
-            mod2x,
-        },
-    })
+/// The four precip textures (loaded once; the stream's render-side residency gate withholds
+/// draws until they arrive).
+#[derive(Resource)]
+struct PrecipAssets {
+    streak: Handle<Image>,
+    splash: Handle<Image>,
+    flake: Handle<Image>,
+    mist: Handle<Image>,
 }
 
 fn setup_precip(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<WowParticleMaterial>>,
-    light: Option<Res<SharedLightBuffer>>,
     asset_server: Res<AssetServer>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
     existing: Option<Res<Precip>>,
 ) {
     // Lazy spawn on the first frame with a live camera (the same lifecycle as every other
-    // particle entity — M2 emitters spawn when terrain streams). No asset chain (data-less
-    // run) → no shared light buffer → no weather visuals.
+    // particle entity — M2 emitters spawn when terrain streams).
     if existing.is_some() || cam.single().is_err() {
         return;
     }
-    let Some(light) = light else { return };
-
-    // Constant per-purpose buffer sizes: streaks are 3-vert triangles, flakes 4-vert quads,
-    // ground layers their own caps. Fixed-size buffers skip per-frame reallocation and keep the
-    // render side's first extraction at final size.
-    let rain_drop_mesh = meshes.add(blank_mesh_sized(POOL * 3, POOL * 3));
-    let rain_ground_mesh = meshes.add(blank_mesh_sized(GROUND_CAP * 3, GROUND_CAP * 3));
-    let snow_drop_mesh = meshes.add(blank_mesh_sized(POOL * 4, POOL * 6));
-    let snow_ground_mesh = meshes.add(blank_mesh_sized(GROUND_CAP * 4, GROUND_CAP * 6));
-    let mist_mesh = meshes.add(blank_mesh_sized(MIST_CAP * 4, MIST_CAP * 6));
     // Streaks keep the authored mips (a solid bar survives minification); the flake + splash
     // cut-outs load mip-0-only (`BlpVariant::Effect`) — their thin arms collapse to near-zero
     // alpha under the mip chain and vanish at a few pixels (the reference's point-sprite path
@@ -372,64 +245,34 @@ fn setup_precip(
     let effect = |s: &mut benilla_assets::BlpLoaderSettings| {
         s.variant = benilla_assets::BlpVariant::Effect;
     };
-    let streak_tex: Handle<Image> = asset_server.load("mpq://textures/weather/raindrop01.blp");
-    let splash_tex: Handle<Image> =
-        asset_server.load_with_settings("mpq://textures/weather/raindropsplash01.blp", effect);
-    let flake_tex: Handle<Image> =
-        asset_server.load_with_settings("mpq://textures/weather/snowflake01.blp", effect);
-    let mist_tex: Handle<Image> =
-        asset_server.load_with_settings("mpq://textures/weather/snowmist01.blp", effect);
-
-    // The verified render states (rf-weather-render Q3): rain streak + patter draw Mod2x under
-    // the forced grey fog (their textures are authored grey-128-neutral — checked: both
-    // backgrounds mean exactly RGB 128); snow and mist are standard alpha blends with fog off.
-    for (mesh, tex, blend) in [
-        (&rain_drop_mesh, streak_tex, WeatherBlend::RainMod2x),
-        (&rain_ground_mesh, splash_tex, WeatherBlend::RainMod2x),
-        (&snow_drop_mesh, flake_tex.clone(), WeatherBlend::SnowAlpha),
-        (&snow_ground_mesh, flake_tex, WeatherBlend::SnowAlpha),
-        (&mist_mesh, mist_tex, WeatherBlend::MistAlpha),
-    ] {
-        commands.spawn((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(weather_material(
-                &mut materials,
-                tex,
-                light.0.clone(),
-                blend,
-            )),
-            Transform::IDENTITY,
-            NoFrustumCulling, // a camera-tracking cloud; its AABB is meaningless
-            PrecipLayer,
-        ));
-    }
-
+    commands.insert_resource(PrecipAssets {
+        streak: asset_server.load("mpq://textures/weather/raindrop01.blp"),
+        splash: asset_server
+            .load_with_settings("mpq://textures/weather/raindropsplash01.blp", effect),
+        flake: asset_server.load_with_settings("mpq://textures/weather/snowflake01.blp", effect),
+        mist: asset_server.load_with_settings("mpq://textures/weather/snowmist01.blp", effect),
+    });
     commands.insert_resource(Precip {
-        rain: Pool::new(rain_drop_mesh, rain_ground_mesh),
-        snow: Pool::new(snow_drop_mesh, snow_ground_mesh),
-        mist: Mist::new(mist_mesh),
+        rain: Pool::default(),
+        snow: Pool::default(),
+        mist: Mist::default(),
         rng: 0x9E37_79B9,
     });
 }
 
-/// `WOW_WEATHER_PROBE=1`: spawn a STATIC one-off grid of flake quads at fixed offsets ahead of
-/// the spawn point — built once, never touched again. Splits "per-frame rebuild breaks it" from
-/// "material/texture/distance breaks it" (diagnosis-only; costs nothing when the env is unset).
-/// Per frame: wind, spawn budgets, integrate, land, and rebuild the four meshes.
+/// Per frame: wind, spawn budgets, integrate, land. (The geometry push is [`push_precip`]'s,
+/// in `PostUpdate` after the stream clear.)
 #[allow(clippy::too_many_arguments)]
 fn simulate_precip(
     time: Res<Time>,
     weather: Res<WeatherState>,
-    lighting: Res<WowLighting>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    player: Query<&Transform, (With<crate::net::SelfPlayer>, Without<PrecipLayer>)>,
+    player: Query<&Transform, (With<crate::net::SelfPlayer>, Without<WorldCamera>)>,
     spatial: SpatialQuery,
     indoors: Res<WeatherIndoors>,
     mut wind: ResMut<WeatherWind>,
     mut heights: ResMut<HeightCache>,
     mut precip: Option<ResMut<Precip>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut layers: Query<&mut Transform, With<PrecipLayer>>,
     mut last_cut: Local<u32>,
 ) {
     let Some(precip) = precip.as_deref_mut() else {
@@ -536,68 +379,84 @@ fn simulate_precip(
             cam_pos,
         );
     }
+}
 
-    // ===== rebuild the meshes (verts anchor-relative; the entities ride the anchor) =====
-    let Precip {
-        rain, snow, mist, ..
-    } = precip;
-    let anchor = cam_pos;
-    for mut tf in &mut layers {
-        tf.translation = anchor;
+/// Push the frame's precip geometry onto the shared effect stream (PostUpdate, after the
+/// stream clear): rain streaks + patters as Mod2x tri-lists under the forced grey fog (their
+/// textures are authored grey-128-neutral — checked: both backgrounds mean exactly RGB 128);
+/// snow and mist as alpha-blended quads with fog off (rf-weather-render Q3). All four draws
+/// anchor at the camera — view-z ≈ 0 sorts them after every world transparent, before the
+/// biased glare/nameplate rungs, exactly where the old camera-anchored layer entities landed.
+/// Indoors nothing is pushed — the frozen drops hang, unrendered (`[0xca80c4]`'s draw kill).
+#[allow(clippy::too_many_arguments)] // one push system's full input set
+fn push_precip(
+    precip: Option<Res<Precip>>,
+    assets: Option<Res<PrecipAssets>>,
+    indoors: Res<WeatherIndoors>,
+    lighting: Res<WowLighting>,
+    wind: Res<WeatherWind>,
+    cam: Query<(Entity, &GlobalTransform), With<WorldCamera>>,
+    mut quads: ResMut<EffectQuads>,
+) {
+    let (Some(precip), Some(assets)) = (precip, assets) else {
+        return;
+    };
+    if indoors.0 {
+        return;
     }
+    let Ok((cam_entity, cam_tf)) = cam.single() else {
+        return;
+    };
+    let cam_pos = cam_tf.translation();
     let cam_right = cam_tf.right().as_vec3();
     let cam_up = cam_tf.up().as_vec3();
-    let rain_drops_live = !rain.drops.is_empty();
-    build_streak_mesh(
-        rain.drop_written
-            .write(&mut meshes, &rain.drop_mesh, rain_drops_live),
-        &rain.drops,
-        wind.tilt,
-        cam_pos,
-        anchor,
+    let spec = |texture: &Handle<Image>, blend: EffectBlend, fog: EffectFog| EffectDrawSpec {
+        cam: cam_entity,
+        texture: texture.id(),
+        blend,
+        fog,
+        anchor: cam_pos,
+        bias: 0.0,
+        raster_bias: 0,
+        main_entity: Entity::PLACEHOLDER,
+        light: None,
+    };
+    let start = quads.begin();
+    push_streaks(&mut quads.verts, &precip.rain.drops, wind.tilt, cam_pos);
+    quads.commit_tris(
+        start,
+        spec(&assets.streak, EffectBlend::Mod2x, EffectFog::Rain),
     );
-    let rain_ground_live = !rain.patters.is_empty();
-    build_patter_mesh(
-        rain.ground_written
-            .write(&mut meshes, &rain.ground_mesh, rain_ground_live),
-        &rain.patters,
+    let start = quads.begin();
+    push_patters(&mut quads.verts, &precip.rain.patters, cam_right, cam_up);
+    quads.commit_tris(
+        start,
+        spec(&assets.splash, EffectBlend::Mod2x, EffectFog::Rain),
+    );
+    let start = quads.begin();
+    push_flakes(
+        &mut quads.verts,
+        &precip.snow.drops,
+        &precip.snow.patters,
         cam_right,
         cam_up,
-        anchor,
     );
-    let snow_drops_live = !snow.drops.is_empty();
-    build_flake_mesh(
-        snow.drop_written
-            .write(&mut meshes, &snow.drop_mesh, snow_drops_live),
-        &snow.drops,
-        &[],
-        cam_right,
-        cam_up,
-        anchor,
-        POOL * 4,
-        POOL * 6,
+    quads.commit_quads(
+        start,
+        spec(&assets.flake, EffectBlend::Alpha, EffectFog::Off),
     );
-    let snow_ground_live = !snow.patters.is_empty();
-    build_flake_mesh(
-        snow.ground_written
-            .write(&mut meshes, &snow.ground_mesh, snow_ground_live),
-        &[],
-        &snow.patters,
-        cam_right,
-        cam_up,
-        anchor,
-        GROUND_CAP * 4,
-        GROUND_CAP * 6,
-    );
-    let mist_live = mist.is_live();
-    build_mist_mesh(
-        mist.written.write(&mut meshes, &mist.mesh, mist_live),
-        mist,
+    let start = quads.begin();
+    push_mist(
+        &mut quads.verts,
+        &precip.mist,
         cam_right,
         cam_up,
         cam_pos,
-        anchor,
         lighting.fog_color,
+    );
+    quads.commit_quads(
+        start,
+        spec(&assets.mist, EffectBlend::Alpha, EffectFog::Off),
     );
 }
 
@@ -614,25 +473,7 @@ pub(super) fn register(app: &mut App) {
                     .after(WeatherTick)
                     .after(gate_weather_indoors),
             ),
-        );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The idle skip is edge-exact: untouched from birth, written while live, written ONCE
-    /// more on the live→empty edge (the clearing write), then untouched again — so a quiet
-    /// scene never re-uploads the fixed-capacity buffers (the 0353 fps hunt).
-    #[test]
-    fn write_gate_touches_on_live_and_the_clearing_edge_only() {
-        let mut meshes = Assets::<Mesh>::default();
-        let handle = meshes.add(blank_mesh_sized(4, 6));
-        let mut gate = WriteGate::default();
-        assert!(gate.write(&mut meshes, &handle, false).is_none());
-        assert!(gate.write(&mut meshes, &handle, true).is_some());
-        assert!(gate.write(&mut meshes, &handle, true).is_some());
-        assert!(gate.write(&mut meshes, &handle, false).is_some());
-        assert!(gate.write(&mut meshes, &handle, false).is_none());
-    }
+        )
+        // The stream push: PostUpdate after the frame's clear (the sim ran in Update).
+        .add_systems(PostUpdate, push_precip.after(begin_effect_frame));
 }

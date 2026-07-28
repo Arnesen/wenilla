@@ -155,3 +155,151 @@ fn hiding_a_frame_does_not_reopen_the_gate() {
         "visibility does not move rects, so the gate stays closed"
     );
 }
+
+/// The hover re-enter loop must be FREE while the content is unchanged.
+///
+/// `ContainerFrameItemButton_OnUpdate` re-runs `OnEnter` every frame while the tooltip is the
+/// button's own — faithful, and UNTHROTTLED in 1.12 (its `updateTooltip` throttle is commented
+/// out; `BagFrame.xml`'s `BenillaBagSlot_OnUpdate` ships the same loop). So a bag hover clears and
+/// rebuilds the SAME tooltip 60×/sec, and the engine must absorb that: identical content re-derives
+/// an identical model, so the measure cache re-validates on its content key and the gate stays shut.
+///
+/// This is the regression gate for the live report (a bag hover cost +10 CPU ms/frame, ~2 full
+/// arena solves + a re-shape of every line, every frame): `clear_content` wiped
+/// `RegionData::measured` — an invalidation the content-hash key already performs — so every
+/// re-enter re-measured every line, and the non-empty measure list forced a second full resolve
+/// that the gate could never close over.
+///
+/// It drives the app's real per-frame order (`ui_script::extract::drive_script`): Lua tick →
+/// resolve → measure round-trip → resolve.
+#[test]
+fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local owner = CreateFrame("Button", "Slot")
+        owner:SetPoint("TOPLEFT", 100, -100); owner:SetSize(40, 40)
+        tt = CreateFrame("GameTooltip", "TT")
+        -- One bag-slot OnEnter: the clear (SetOwner) + the content rebuild, verbatim in shape.
+        function reenter()
+            TT:SetOwner(Slot, "ANCHOR_RIGHT")
+            TT:AddLine("Small Shield", 0, 1, 0)
+            TT:AddDoubleLine("Shield", "Off Hand", 1, 1, 1, 1, 1, 1)
+            TT:AddLine("85 Armor")
+            -- A WRAP-flagged line: `clear_content` still drops the wrap-pinned width, which feeds
+            -- the measure key, so the re-pin at append time has to restore it byte-identically or
+            -- this line alone re-shapes forever (the real item tooltip's long green "Use:" line).
+            TT:AddLine("Restores 243 health over 21 sec.", 0, 1, 0, 1)
+            TT:AddLine("Durability 45 / 45")
+            TT:Show()
+        end
+        "#,
+    )
+    .expect("setup");
+
+    // The host's font engine: every distinct string has one deterministic size. Counts every
+    // string it is asked to shape, so the test can assert on shaping work directly.
+    let sizes: &[(&str, f32, f32)] = &[
+        ("Small Shield", 80.0, 14.0),
+        ("Shield", 50.0, 12.0),
+        ("Off Hand", 45.0, 12.0),
+        ("85 Armor", 60.0, 12.0),
+        ("Restores 243 health over 21 sec.", 118.0, 24.0),
+        ("Durability 45 / 45", 96.0, 12.0),
+    ];
+    // One frame of `drive_script`: tick (the re-enter) → resolve → measure round-trip → resolve.
+    // Returns how many strings the font engine was asked to shape this frame.
+    let frame = |s: &mut UiScript| -> usize {
+        s.run("reenter()").expect("re-enter");
+        s.resolve();
+        let reqs = s.fontstrings_needing_measure();
+        let shaped = reqs.len();
+        if !reqs.is_empty() {
+            let answers: Vec<(u32, f32, f32, u64)> = reqs
+                .iter()
+                .map(|r| {
+                    let (w, h) = sizes
+                        .iter()
+                        .find(|(t, _, _)| *t == r.text)
+                        .map(|&(_, w, h)| (w, h))
+                        .unwrap_or_else(|| panic!("unexpected string measured: {:?}", r.text));
+                    (r.id, w, h, r.key)
+                })
+                .collect();
+            s.set_measured_text(&answers);
+            s.resolve();
+        }
+        shaped
+    };
+
+    // Settle: the first frames legitimately shape the five strings and re-solve as the auto-size
+    // pre-pass converges on the fresh measures.
+    for _ in 0..4 {
+        frame(&mut s);
+    }
+
+    // Steady state: the hover is parked on an item whose tooltip has not changed.
+    let solves_before = solves(&s);
+    let mut shaped = 0;
+    for _ in 0..10 {
+        shaped += frame(&mut s);
+    }
+
+    assert_eq!(
+        shaped, 0,
+        "a re-enter with identical content must re-shape NO text: the measure cache keys on \
+         content, so rebuilding the same lines re-validates it"
+    );
+    assert_eq!(
+        solves(&s),
+        solves_before,
+        "a re-enter with identical content must not reopen the layout gate"
+    );
+
+    // The gate is shut because nothing MOVED — not because the tooltip went stale. Changed content
+    // must still re-measure exactly its own line, and a measure that resizes the auto-sized plate
+    // (this one overtakes the double line as the widest) must reopen the gate.
+    s.run(
+        r#"function reenter()
+            TT:SetOwner(Slot, "ANCHOR_RIGHT")
+            TT:AddLine("Small Shield", 0, 1, 0)
+            TT:AddDoubleLine("Shield", "Off Hand", 1, 1, 1, 1, 1, 1)
+            TT:AddLine("85 Armor")
+            TT:AddLine("Restores 243 health over 21 sec.", 0, 1, 0, 1)
+            TT:AddLine("Durability 44 / 45")
+            TT:Show()
+        end"#,
+    )
+    .expect("damage the shield");
+    // Wider than the 120 the double line contributes, so the plate itself has to grow.
+    let sizes: &[(&str, f32, f32)] = &[("Durability 44 / 45", 150.0, 12.0)];
+    s.run("reenter()").expect("re-enter");
+    s.resolve();
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "only the line whose text changed re-measures, got {:?}",
+        reqs.iter().map(|r| &r.text).collect::<Vec<_>>()
+    );
+    assert_eq!(reqs[0].text, "Durability 44 / 45");
+    let answers: Vec<(u32, f32, f32, u64)> = reqs
+        .iter()
+        .map(|r| {
+            let (w, h) = sizes
+                .iter()
+                .find(|(t, _, _)| *t == r.text)
+                .map(|&(_, w, h)| (w, h))
+                .expect("known string");
+            (r.id, w, h, r.key)
+        })
+        .collect();
+    s.set_measured_text(&answers);
+    s.resolve();
+    assert!(
+        solves(&s) > solves_before,
+        "changed content must reopen the gate"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

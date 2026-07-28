@@ -30,10 +30,13 @@
 //! `unit-light-combine-storm.md`; a hand-anchored shield split from its body, director-caught,
 //! 2026-07-13).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use benilla_assets::{cap96, floor168, AdtTile, WmoModel};
 use bevy::asset::AssetId;
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::relationship::RelationshipTarget as _;
+use bevy::ecs::world::DeferredWorld;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
@@ -99,7 +102,7 @@ pub(crate) enum InteriorKind {
 }
 
 /// The law a part currently renders under (`None` until first classified).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AppliedLaw {
     Exterior,
     /// Indoors on the plain matte (a footprint ray that missed or hit a MOPY&1 face, or a
@@ -117,33 +120,61 @@ enum AppliedLaw {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct BodyBakeCenter(pub(crate) Vec3);
 
+/// The part → anchor edge of the classifier's registry (0734): every [`InteriorLit`] part names
+/// its NET ENTITY root here — body parts and held/equipped items alike (module docs — the
+/// reference has one light node per unit and items alias it). Bevy's relationship hooks maintain
+/// the anchor-side [`LitParts`] list through spawn, gear-swap despawn, and teardown, so a law
+/// change can write exactly its own parts and a settled anchor touches none.
+#[derive(Component)]
+#[relationship(relationship_target = LitParts)]
+pub(crate) struct ClassifiedBy(pub(crate) Entity);
+
+/// The anchor-side part list [`ClassifiedBy`] maintains — the classifier's write fan-out. Never
+/// mutated by hand; bevy removes it when the last part leaves.
+#[derive(Component)]
+#[relationship_target(relationship = ClassifiedBy)]
+pub(crate) struct LitParts(Vec<Entity>);
+
+/// The anchor's classification record (0734) — the law its parts render under, plus the
+/// movement/residency gate that used to live per part. Inserted by the classifier on the first
+/// resolve; a settled anchor is one distance compare per frame, whatever its part count.
+#[derive(Component)]
+pub(crate) struct InteriorAnchor {
+    law: AppliedLaw,
+    /// Anchor position at the last down-ray + the residency generation then — the re-test gate.
+    last_pos: Vec3,
+    generation: u32,
+    /// Whether the law was resolved from a bake-capable part's kind — a bake-capable part
+    /// joining a matte-resolved anchor must force a re-resolve (the reauthor drain checks this),
+    /// or it would ride the matte fallback until the anchor next moves.
+    kind_bake: bool,
+}
+
+/// Parts whose material/tag need re-authoring from their anchor's current law — the classifier's
+/// convergence queue (0734), replacing the per-part sweep's repair duty. Fed by the
+/// [`InteriorLit`] `on_add` hook (a fresh part joining a settled anchor), the fade-latch observer
+/// ([`enqueue_on_fade_latch`] — a part re-entering the write query after a fade owned its
+/// channel), and the self-avatar zoom feather's release edge. Drained every classifier run;
+/// entries whose part is still excluded (or gone) are dropped — the next edge re-enqueues.
+#[derive(Resource, Default)]
+pub(crate) struct InteriorReauthor(pub(crate) Vec<Entity>);
+
 /// The interior/exterior material variants for one entity submesh part, so [`classify_entity_interior`]
 /// can swap by the model's current location without rebuilding. Attached only to M2 entity parts (WMO
-/// group geometry carries per-submesh interior in its own material + baked MOCV).
+/// group geometry carries per-submesh interior in its own material + baked MOCV); its anchor edge
+/// is the sibling [`ClassifiedBy`]. The `on_add` hook enqueues the part for authoring, so a
+/// gear-swap part joining an already-settled anchor still gets the standing law.
 #[derive(Component)]
+#[component(on_add = enqueue_new_part)]
 pub(crate) struct InteriorLit {
-    /// The model's classification anchor — the entity whose `GlobalTransform` the down-ray probes:
-    /// the NET ENTITY root, for body parts and held/equipped items alike (module docs — the
-    /// reference has one light node per unit and items alias it). Every part sharing an anchor
-    /// shares its verdict: a body, hands, and blade must never split across light laws.
-    anchor: Entity,
     /// The model's indoor law ([`InteriorKind`]) — uniform across an anchor's parts.
     kind: InteriorKind,
     /// The exterior/day-night material (the global-SH lane): since 0354 the Matte law rides it
     /// too — day/night is the intensity byte at the 1.0 point, not a separate material.
     exterior: Handle<WowModelMaterial>,
-    /// Last applied law — used to write the material + tag ONLY on change, so a standing prop/NPC
-    /// doesn't re-trigger extraction every frame. `None` until the first classification.
+    /// Last applied law — the part's last-written record (the anchor's [`InteriorAnchor`] is the
+    /// authority): the write gate, and [`Self::is_bake`]'s source. `None` until first written.
     applied: Option<AppliedLaw>,
-    /// A transient author (the self-avatar zoom feather) overwrote the material/tag: re-author
-    /// them on the next run WITHOUT treating the law as new ([`Self::invalidate`] — clearing
-    /// `applied` here replayed the bake lane's ENTRY effects, reseeding the ambient ramp from the
-    /// scene light: the director's "still flashes for a second on the zoom out").
-    reauthor: bool,
-    /// Anchor position at the last test + the residency generation then — the movement/registry gate
-    /// that keeps a static entity from re-running the down-ray every frame.
-    last_pos: Vec3,
-    generation: u32,
 }
 
 impl InteriorLit {
@@ -155,40 +186,49 @@ impl InteriorLit {
         matches!(self.applied, Some(AppliedLaw::Bake(_)))
     }
 
-    pub(crate) fn new(
-        anchor: Entity,
-        kind: InteriorKind,
-        exterior: Handle<WowModelMaterial>,
-    ) -> Self {
+    pub(crate) fn new(kind: InteriorKind, exterior: Handle<WowModelMaterial>) -> Self {
         Self {
-            anchor,
             kind,
             exterior,
             applied: None,
-            reauthor: false,
-            last_pos: Vec3::ZERO,
-            generation: u32::MAX, // != any real generation ⇒ classify on the first frame
         }
-    }
-
-    /// Hand the material/tag channel back to the classifier: a transient author (the self-avatar
-    /// zoom fade) wrote over them, so the settled/changed gates would otherwise never restore the
-    /// steady state. Forces a re-author (material + tag) on the classifier's next run while
-    /// KEEPING the applied law — resetting it made the classifier replay the bake lane's entry
-    /// effects (a fresh ambient-ramp seed from the scene light + a new owned slot), which read as
-    /// a second-long light flash at the end of every zoom-out (director-caught, 2026-07-13).
-    pub(crate) fn invalidate(&mut self) {
-        self.reauthor = true;
     }
 }
 
-/// Registers the residency registry + the per-frame entity classifier (the streamer fills the registry).
+/// `on_add` hook: a freshly spawned part asks for its anchor's standing law (drained by
+/// [`classify_entity_interior`] — a first-resolving anchor covers its parts anyway, but a part
+/// joining a SETTLED anchor gets no law-change write without this).
+fn enqueue_new_part(mut world: DeferredWorld, ctx: HookContext) {
+    if let Some(mut queue) = world.get_resource_mut::<InteriorReauthor>() {
+        queue.0.push(ctx.entity);
+    }
+}
+
+/// Fade latch: the appear-fade owned this part's material/tag while it lived (the classifier's
+/// write query excludes fading parts entirely), so the moment `RenderFade` leaves, the part
+/// re-authors from its anchor's law — the event-driven replacement for the old settled-path
+/// stale-slot repair (the "unit stays black indoors" bug: a slot freed while its part sat
+/// excluded). Removal on despawn also lands here; the drain drops dead entries.
+fn enqueue_on_fade_latch(
+    fade_end: On<Remove, RenderFade>,
+    parts: Query<(), With<InteriorLit>>,
+    mut queue: ResMut<InteriorReauthor>,
+) {
+    if parts.contains(fade_end.entity) {
+        queue.0.push(fade_end.entity);
+    }
+}
+
+/// Registers the residency registry, the reauthor queue + its fade-latch observer, and the
+/// per-frame entity classifier (the streamer fills the registry).
 pub(crate) struct InteriorPlugin;
 
 impl Plugin for InteriorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WmoResidency>()
-            .add_systems(Update, classify_entity_interior);
+            .init_resource::<InteriorReauthor>()
+            .add_systems(Update, classify_entity_interior)
+            .add_observer(enqueue_on_fade_latch);
     }
 }
 
@@ -212,8 +252,11 @@ pub(crate) struct BakeState {
 /// reference's per-tick env update, decision 0354), or the day/night state = the same exterior
 /// material at the intensity-1.0 byte point. One law for every entity M2, unit and GameObject
 /// alike (module docs). The verdict is the client's faces-only down-ray at the model's anchor —
-/// one ray per UNIT per re-test (memoised across its parts), re-run only when the anchor moves or
-/// a building streams in/out, so static entities cost a compare per frame and nothing else.
+/// one ray per UNIT per re-test, re-run only when the anchor moves or a building streams in/out.
+///
+/// The walk is over ANCHORS, not parts (0734): a settled anchor is one distance compare, whatever
+/// its part count, and parts are written only when their anchor's law changes (or through the
+/// [`InteriorReauthor`] drain — a fresh part, a fade latch, the zoom feather's release).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn classify_entity_interior(
     mut commands: Commands,
@@ -224,15 +267,22 @@ pub(crate) fn classify_entity_interior(
     adt_tiles: Res<Assets<AdtTile>>,
     lighting: Res<crate::lighting::WowLighting>,
     mut probes: ResMut<PropProbes>,
-    anchors: Query<&GlobalTransform>,
+    mut anchors: Query<(
+        Entity,
+        &GlobalTransform,
+        &LitParts,
+        Option<&mut InteriorAnchor>,
+    )>,
     mut nodes: Query<&mut crate::entity_shade::GroundShade>,
     bake_states: Query<&BakeState>,
     seats: Query<&PropProbeSlot>,
+    mut queue: ResMut<InteriorReauthor>,
+    part_anchors: Query<&ClassifiedBy>,
     // Skip an entity whose appear-fade is **pending or live**: it must stay invisible (on its blend twin
     // at α≈0) until armed, and while ramping `apply_render_fade` owns its material + `MeshTag` (the fade
     // alpha). We reclaim the channel (steady material) only once both are gone — i.e. the fade has
-    // latched. Without this the classifier would fight the fade for the tag (and force the pending
-    // entity opaque).
+    // latched (the latch observer re-enqueues). Without this the classifier would fight the fade for
+    // the tag (and force the pending entity opaque).
     mut parts: Query<
         (
             &mut InteriorLit,
@@ -242,95 +292,99 @@ pub(crate) fn classify_entity_interior(
         (Without<RenderFade>, Without<PendingAppearFade>),
     >,
 ) {
-    // One down-ray (and at most one probe fold) per unit per run: parts share their anchor's
-    // resolved law, so an 8-part body re-testing after a step costs one ray, not eight.
-    let mut verdicts: HashMap<Entity, AppliedLaw> = HashMap::new();
     let _t0 = std::time::Instant::now();
-    let (mut n_parts, mut n_resolved) = (0usize, 0usize);
+    let (mut n_anchors, mut n_resolved, mut n_written) = (0usize, 0usize, 0usize);
     let mut resolve_us = 0.0f32;
-    for (mut lit, mut material, mut tag) in &mut parts {
-        n_parts += 1;
-        let Ok(anchor_t) = anchors.get(lit.anchor) else {
-            continue; // anchor despawning this frame — the parts go with it
-        };
+    for (anchor, anchor_t, lit_parts, mut state) in &mut anchors {
+        n_anchors += 1;
         let pos = anchor_t.translation();
-        // Skip the down-ray entirely for a settled entity (no movement, no building streamed) —
-        // this is what keeps a town full of standing NPCs/props from re-raying every frame. A
+        let had_state = state.is_some();
+        // Skip the down-ray entirely for a settled anchor (no movement, no building streamed) —
+        // this is what keeps a town full of standing NPCs/props at one compare per frame. A
         // Bake-law anchor whose node ramps still chase keeps refolding (from the cached ray
         // products — no new ray), so a unit that stops just inside a warm zone finishes its
         // transition instead of freezing mid-ramp.
-        let moved = lit.applied.is_none()
-            || lit.generation != residency.generation
-            || pos.distance_squared(lit.last_pos) >= RESAMPLE_DIST_SQ;
-        // The anchor's seated [`PropProbeSlot`] is the single source of truth for the Bake slot —
-        // a part's cached `applied` is only its last-written record. Parts join and leave an
-        // anchor independently (gear/attachment swaps spawn fresh parts, fades exclude parts from
-        // this query for whole transitions), so a part-held slot CAN go stale; trusting the
-        // first-iterated part's copy once freed the live slot out from under a standing body's
-        // other parts, whose tags then pointed at a zeroed (black) row until the law next changed
-        // — the "unit goes black indoors until a charge crosses the doorway" bug.
-        let seated = seats.get(lit.anchor).ok().map(|s| s.0);
-        if !moved {
-            let ramping = lit.is_bake() && nodes.get(lit.anchor).is_ok_and(|n| !n.ramps_settled());
-            // A part whose recorded slot disagrees with the anchor's seated slot is stale (it was
-            // excluded — fading — across a law transition): repair it even though it didn't move.
-            let stale_slot = matches!(lit.applied, Some(AppliedLaw::Bake(s)) if seated != Some(s));
-            if !ramping && !lit.reauthor && !stale_slot {
+        if let Some(state) = state.as_deref_mut() {
+            let settled = state.generation == residency.generation
+                && pos.distance_squared(state.last_pos) < RESAMPLE_DIST_SQ;
+            if settled {
+                if let AppliedLaw::Bake(slot) = state.law {
+                    if let (Ok(node), Ok(bake)) = (nodes.get(anchor), bake_states.get(anchor)) {
+                        if !node.ramps_settled() {
+                            let coeffs = fold_interior_probe(
+                                node.ambient.to_array(),
+                                (bake.word * node.intensity()).to_array(),
+                                bake.ref_point,
+                                &bake.lobes,
+                            );
+                            probes.update_owned(slot, coeffs);
+                        }
+                    }
+                }
                 continue;
             }
         }
-        let law = *verdicts.entry(lit.anchor).or_insert_with(|| {
-            n_resolved += 1;
-            let _r = std::time::Instant::now();
-            let out = resolve_anchor_law(
-                &mut commands,
-                &mut probes,
-                &wmos,
-                &instances,
-                &streamer,
-                &adt_tiles,
-                &lighting,
-                &mut nodes,
-                &bake_states,
-                lit.anchor,
-                anchor_t,
-                &lit.kind,
-                lit.applied,
-                seated,
-                moved,
-            );
-            resolve_us += _r.elapsed().as_secs_f32() * 1e6;
-            out
-        });
-        if moved {
-            lit.last_pos = pos;
-            lit.generation = residency.generation;
-        }
-        // Write the material/tag only when the law actually changed — or when a transient author
-        // handed the channel back ([`InteriorLit::invalidate`]) — so re-testing a moving NPC
-        // mid-room doesn't churn the render extraction.
-        if lit.applied == Some(law) && !lit.reauthor {
+        // Re-resolving: the kind comes from the anchor's first classifiable part. Every part
+        // excluded (a whole-model appear-fade, pending or live) ⇒ no resolve at all — the fade
+        // owns the channel, and the latch observer brings the parts back through the queue.
+        let Some(kind) = lit_parts
+            .iter()
+            .find_map(|part| parts.get(part).ok().map(|(lit, _, _)| lit.kind.clone()))
+        else {
+            continue;
+        };
+        let seated = seats.get(anchor).ok().map(|s| s.0);
+        n_resolved += 1;
+        let _r = std::time::Instant::now();
+        let law = resolve_anchor_law(
+            &mut commands,
+            &mut probes,
+            &wmos,
+            &instances,
+            &streamer,
+            &adt_tiles,
+            &lighting,
+            &mut nodes,
+            anchor,
+            anchor_t,
+            &kind,
+            seated,
+        );
+        resolve_us += _r.elapsed().as_secs_f32() * 1e6;
+        let kind_bake = matches!(kind, InteriorKind::Bake { .. });
+        let changed = match state.as_deref_mut() {
+            Some(state) => {
+                let changed = state.law != law;
+                state.law = law;
+                state.last_pos = pos;
+                state.generation = residency.generation;
+                state.kind_bake = kind_bake;
+                changed
+            }
+            None => {
+                // `try_insert`: the anchor may carry a same-frame despawn already queued.
+                commands.entity(anchor).try_insert(InteriorAnchor {
+                    law,
+                    last_pos: pos,
+                    generation: residency.generation,
+                    kind_bake,
+                });
+                true
+            }
+        };
+        // Write the parts only when the law actually changed, so re-testing a moving NPC mid-room
+        // doesn't churn the render extraction.
+        if !changed {
             continue;
         }
-        lit.reauthor = false;
-        material.0 = match law {
-            // The exterior AND day/night states share the exterior material — the difference is
-            // the node's intensity target (the tag byte `entity_shade` ramps; 0354).
-            AppliedLaw::Exterior | AppliedLaw::Matte => lit.exterior.clone(),
-            AppliedLaw::Bake(_) => match &lit.kind {
-                InteriorKind::Bake { material, .. } => material.clone(),
-                InteriorKind::Matte => lit.exterior.clone(), // unreachable by construction
-            },
-        };
         // `WOW_INTERIOR_LOG=1`: print interior classifications — the live-probe instrument for
         // "did this entity actually classify indoors, and under which law?". Scoped to interior
         // verdicts (plus interior→exterior flips) so the world's exterior masses stay silent.
-        if (law != AppliedLaw::Exterior || lit.applied.is_some())
+        if (law != AppliedLaw::Exterior || had_state)
             && std::env::var_os("WOW_INTERIOR_LOG").is_some()
         {
             eprintln!(
-                "[interior] anchor {:?} at ({:.1}, {:.1}, {:.1}) -> {}",
-                lit.anchor,
+                "[interior] anchor {anchor:?} at ({:.1}, {:.1}, {:.1}) -> {}",
                 pos.x,
                 pos.y,
                 pos.z,
@@ -341,51 +395,117 @@ pub(crate) fn classify_entity_interior(
                 }
             );
         }
-        // The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field plus an
-        // opaque alpha field (a fade feather composes through `with_alpha` without clobbering the
-        // slot); the other laws reset to the opaque exterior payload (shade byte 0 —
-        // `entity_shade` runs after this classifier and re-asserts the ramped intensity byte
-        // the same frame; it skips only Bake parts). BOTH indoor laws carry the INTERIOR_FOG_BIT
-        // (Bake bakes it in): the reference fogs a unit by the unit's OWN interior
-        // classification, so an indoor day/night character keeps the room's fog — never the
-        // storm's near veil — while the exterior law returns it to the scene fog (wow-re
-        // `m2-unit-interior-fog.md`; the director's corridor-vs-porch walk-out). Every arm
-        // carries the part's rig field through (decision 0720): a skinned part keeps its palette
-        // across the indoor/outdoor transition.
-        tag.0 = match law {
-            AppliedLaw::Bake(slot) => crate::mesh_tag::with_interior_probe(tag.0, slot),
-            AppliedLaw::Matte => {
-                crate::mesh_tag::INTERIOR_FOG_BIT | crate::mesh_tag::with_exterior_reset(tag.0)
+        for part in lit_parts.iter() {
+            if let Ok((mut lit, mut material, mut tag)) = parts.get_mut(part) {
+                n_written += usize::from(write_part_law(
+                    law,
+                    &mut lit,
+                    &mut material,
+                    &mut tag,
+                    false,
+                ));
             }
-            AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
+        }
+    }
+    // Drain the convergence queue: each entry re-authors from its anchor's standing law. Forced
+    // through the part's change gate — the enqueuing edges (fade latch, zoom release) mean a
+    // transient author overwrote the material/tag while `applied` stayed current.
+    for part in std::mem::take(&mut queue.0) {
+        let Ok(edge) = part_anchors.get(part) else {
+            continue; // despawned since enqueue
         };
-        lit.applied = Some(law);
+        let Ok((_, _, _, mut state)) = anchors.get_mut(edge.0) else {
+            continue;
+        };
+        let Some(state) = state.as_deref_mut() else {
+            continue; // law not resolved yet — the anchor's first resolve writes every part
+        };
+        let Ok((mut lit, mut material, mut tag)) = parts.get_mut(part) else {
+            continue; // still fade-excluded — the latch re-enqueues
+        };
+        // The mixed-kind hole: a bake-capable part joining an anchor whose law was resolved from
+        // a matte-kind part must force a re-resolve (drop the record; next frame re-rays) — the
+        // standing law can't say Bake. Written with the standing law this frame regardless, so
+        // the part isn't naked for the gap.
+        if matches!(lit.kind, InteriorKind::Bake { .. }) && !state.kind_bake {
+            commands.entity(edge.0).try_remove::<InteriorAnchor>();
+        }
+        n_written += usize::from(write_part_law(
+            state.law,
+            &mut lit,
+            &mut material,
+            &mut tag,
+            true,
+        ));
     }
     // `WOW_INTERIOR_COST=1`: this lane's per-frame cost, in the terms that diagnose it — how many
-    // PARTS the walk touches vs how many ANCHORS actually re-resolve, and what the resolves cost.
-    // The split is the whole diagnosis: on 2026-07-27 the lane read 11.3 ms/frame at the LBRS pin
-    // and the walk was 0.1 ms of it — 35 moving units paying ~300 us each in `resolve_anchor_law`,
-    // which is what sent the hunt into the WMO column rays (decision 0711) rather than into this
-    // loop. Cheap enough to leave in: two counters and one `Instant` per frame.
+    // anchors the walk visits vs how many actually re-resolve vs how many PARTS got written, and
+    // what the resolves cost. The split is the whole diagnosis (it sent the 2026-07-27 hunt into
+    // the WMO column rays, decision 0711, and priced 0732's slice C — the 13.7k-part walk this
+    // anchor walk replaced). Cheap enough to leave in: three counters and one `Instant` per frame.
     static COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *COST.get_or_init(|| std::env::var_os("WOW_INTERIOR_COST").is_some()) {
         eprintln!(
-            "[interior-cost] parts={n_parts} anchors_resolved={n_resolved} resolve_ms={:.2} total_ms={:.2}",
+            "[interior-cost] anchors={n_anchors} resolved={n_resolved} parts_written={n_written} resolve_ms={:.2} total_ms={:.2}",
             resolve_us / 1000.0,
             _t0.elapsed().as_secs_f32() * 1000.0
         );
     }
 }
 
-/// Resolve one anchor's indoor law this run: the down-ray verdict (or, `!moved`, a ramp-only
-/// refold from the cached ray products), the node's target/seed updates, and for the Bake law the
-/// footprint fold into the anchor's OWNED probe slot. `seated` — the anchor's live
-/// [`PropProbeSlot`] — is the ONLY authority on that slot: Bake stays on it, entry/exit is judged
-/// by it, and a part-cached `Bake(slot)` is never believed (a fresh part's `previous = None` once
-/// re-allocated here and freed the seated slot under the anchor's other parts — the
-/// stuck-black-unit bug; the caller's stale-slot repair is the other half). The slot component
-/// lives on the ANCHOR — its on-remove hook frees the slot on despawn; law transitions
-/// remove/insert it here.
+/// Write one part's material + tag for `law` — the single place a part's channel is authored.
+/// Change-gated on the part's last-written record unless `force` (a transient author — fade,
+/// zoom feather — overwrote the channel while `applied` stayed current). Returns whether it wrote.
+///
+/// The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field plus an
+/// opaque alpha field (a fade feather composes through `with_alpha` without clobbering the
+/// slot); the other laws reset to the opaque exterior payload (shade byte 0 — `entity_shade`
+/// runs after the classifier and re-asserts the ramped intensity byte the same frame; it skips
+/// only Bake parts). BOTH indoor laws carry the INTERIOR_FOG_BIT (Bake bakes it in): the
+/// reference fogs a unit by the unit's OWN interior classification, so an indoor day/night
+/// character keeps the room's fog — never the storm's near veil — while the exterior law returns
+/// it to the scene fog (wow-re `m2-unit-interior-fog.md`; the director's corridor-vs-porch
+/// walk-out). Every arm carries the part's rig field through (decision 0720): a skinned part
+/// keeps its palette across the indoor/outdoor transition.
+fn write_part_law(
+    law: AppliedLaw,
+    lit: &mut InteriorLit,
+    material: &mut MeshMaterial3d<WowModelMaterial>,
+    tag: &mut MeshTag,
+    force: bool,
+) -> bool {
+    if lit.applied == Some(law) && !force {
+        return false;
+    }
+    material.0 = match law {
+        // The exterior AND day/night states share the exterior material — the difference is
+        // the node's intensity target (the tag byte `entity_shade` ramps; 0354).
+        AppliedLaw::Exterior | AppliedLaw::Matte => lit.exterior.clone(),
+        AppliedLaw::Bake(_) => match &lit.kind {
+            InteriorKind::Bake { material, .. } => material.clone(),
+            InteriorKind::Matte => lit.exterior.clone(), // a matte part under a bake-law anchor
+        },
+    };
+    tag.0 = match law {
+        AppliedLaw::Bake(slot) => crate::mesh_tag::with_interior_probe(tag.0, slot),
+        AppliedLaw::Matte => {
+            crate::mesh_tag::INTERIOR_FOG_BIT | crate::mesh_tag::with_exterior_reset(tag.0)
+        }
+        AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
+    };
+    lit.applied = Some(law);
+    true
+}
+
+/// Resolve one anchor's indoor law: the down-ray verdict, the node's target/seed updates, and for
+/// the Bake law the footprint fold into the anchor's OWNED probe slot. (The settled ramp-only
+/// refold from the cached ray products lives in the caller's walk — this always rays.) `seated` —
+/// the anchor's live [`PropProbeSlot`] — is the ONLY authority on that slot: Bake stays on it,
+/// entry/exit is judged by it, and a part-cached `Bake(slot)` is never believed (a fresh part
+/// once re-allocated here and freed the seated slot under the anchor's other parts — the
+/// stuck-black-unit bug; the fade-latch reauthor is the other half). The slot component lives on
+/// the ANCHOR — its on-remove hook frees the slot on despawn; law transitions remove/insert it
+/// here.
 #[allow(clippy::too_many_arguments)]
 fn resolve_anchor_law(
     commands: &mut Commands,
@@ -396,37 +516,12 @@ fn resolve_anchor_law(
     adt_tiles: &Assets<AdtTile>,
     lighting: &crate::lighting::WowLighting,
     nodes: &mut Query<&mut crate::entity_shade::GroundShade>,
-    bake_states: &Query<&BakeState>,
     anchor: Entity,
     anchor_t: &GlobalTransform,
     kind: &InteriorKind,
-    previous: Option<AppliedLaw>,
     seated: Option<u16>,
-    moved: bool,
 ) -> AppliedLaw {
     let pos = anchor_t.translation();
-    // The settled path (`!moved`): a seated anchor stays on its owned slot — refolded from the
-    // cached ray products when the node's chases still move, returned as-is otherwise. A part
-    // remembering Bake while the anchor holds NO slot is stale (its slot was freed while the part
-    // sat outside the query) — fall through and re-resolve with a fresh ray.
-    if !moved {
-        if let Some(slot) = seated {
-            if let (Ok(node), Ok(bake)) = (nodes.get(anchor), bake_states.get(anchor)) {
-                let coeffs = fold_interior_probe(
-                    node.ambient.to_array(),
-                    (bake.word * node.intensity()).to_array(),
-                    bake.ref_point,
-                    &bake.lobes,
-                );
-                probes.update_owned(slot, coeffs);
-            }
-            return AppliedLaw::Bake(slot);
-        }
-        match previous {
-            Some(AppliedLaw::Bake(_)) | None => {}
-            Some(settled) => return settled,
-        }
-    }
     let verdict = indoor_verdict_at(wmos, instances.iter(), streamer, adt_tiles, pos);
     // Publish the outdoor GROUND kind to the node before the law resolves: standing on an
     // outdoor-class WMO surface (street/deck/porch) forces the lit 2.5 target — the WMO-linked
@@ -565,17 +660,7 @@ fn seat_probe_slot(commands: &mut Commands, anchor: Entity, new: u16) {
 mod tests {
     use super::*;
 
-    /// The stuck-black repair: a part whose cached law names a slot the anchor no longer owns
-    /// (freed while the part sat outside the classifier's query — a fade/attach window) converges
-    /// to the anchor's SEATED slot even while standing perfectly still. Pre-fix, the resolver
-    /// trusted the stale part's slot: `update_owned` on the freed slot silently no-opped, the
-    /// applied==law gate skipped every rewrite, and the unit rendered the freed slot's zeroed rows
-    /// — a black silhouette that survived any in-room movement until the law itself changed
-    /// (director-caught: charge across the doorway un-blacked it).
-    #[test]
-    fn a_stale_part_converges_to_the_anchors_seated_slot() {
-        use bevy::ecs::system::RunSystemOnce;
-
+    fn classifier_world() -> World {
         let mut world = World::new();
         world.init_resource::<WmoResidency>();
         world.init_resource::<Assets<WmoModel>>();
@@ -583,6 +668,24 @@ mod tests {
         world.init_resource::<crate::lighting::WowLighting>();
         world.init_resource::<PropProbes>();
         world.init_resource::<TerrainStreamer>();
+        world.init_resource::<InteriorReauthor>();
+        world
+    }
+
+    /// The stuck-black repair, on 0734's queue: a part whose last-written record names a slot the
+    /// anchor no longer owns (it sat outside the classifier's write query — a fade window — across
+    /// a slot change) converges to the anchor's standing law even while everything stands
+    /// perfectly still, because re-entering the world enqueues it (here via the `on_add` hook; at
+    /// runtime the fade-latch observer is the same edge). Pre-0734's ancestor bug: the resolver
+    /// trusted the stale part's slot, `update_owned` on the freed slot silently no-opped, and the
+    /// unit rendered the freed slot's zeroed rows — a black silhouette that survived any in-room
+    /// movement until the law itself changed (director-caught: charge across the doorway
+    /// un-blacked it).
+    #[test]
+    fn a_stale_part_converges_to_the_anchors_standing_law() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
         let coeffs = [Vec4::ZERO; 7];
 
         // The anchor's live owned slot — and a defunct one its part still remembers.
@@ -598,10 +701,18 @@ mod tests {
 
         let generation = world.resource::<WmoResidency>().generation;
         let anchor = world
-            .spawn((GlobalTransform::default(), PropProbeSlot(live)))
+            .spawn((
+                GlobalTransform::default(),
+                PropProbeSlot(live),
+                InteriorAnchor {
+                    law: AppliedLaw::Bake(live),
+                    last_pos: Vec3::ZERO, // matches the transform: the settled gate sees NO movement
+                    generation,
+                    kind_bake: true,
+                },
+            ))
             .id();
         let mut lit = InteriorLit::new(
-            anchor,
             InteriorKind::Bake {
                 material: Handle::default(),
                 center: Vec3::ZERO,
@@ -609,11 +720,10 @@ mod tests {
             Handle::default(),
         );
         lit.applied = Some(AppliedLaw::Bake(stale));
-        lit.last_pos = Vec3::ZERO; // matches the anchor: the settled gate sees NO movement
-        lit.generation = generation;
         let part = world
             .spawn((
                 lit,
+                ClassifiedBy(anchor),
                 MeshMaterial3d::<WowModelMaterial>(Handle::default()),
                 MeshTag(crate::mesh_tag::probe_bits(stale)),
             ))
@@ -624,7 +734,7 @@ mod tests {
         let lit = world.get::<InteriorLit>(part).unwrap();
         assert!(
             matches!(lit.applied, Some(AppliedLaw::Bake(s)) if s == live),
-            "the part's law re-anchors on the seated slot"
+            "the part's law re-anchors on the anchor's standing slot"
         );
         assert_eq!(
             world.get::<MeshTag>(part).unwrap().0,
@@ -635,6 +745,118 @@ mod tests {
         assert_eq!(
             occupancy, 1,
             "repair neither re-allocates nor frees the live slot"
+        );
+    }
+
+    /// A part spawned onto a SETTLED anchor (the gear-swap-indoors case) takes the standing law
+    /// through the `on_add` hook + drain — no law change, no anchor movement, and still the fresh
+    /// part's material/tag land on the anchor's law the very next classifier run.
+    #[test]
+    fn a_fresh_part_on_a_settled_anchor_takes_the_standing_law() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let generation = world.resource::<WmoResidency>().generation;
+        let anchor = world
+            .spawn((
+                GlobalTransform::default(),
+                InteriorAnchor {
+                    law: AppliedLaw::Matte,
+                    last_pos: Vec3::ZERO,
+                    generation,
+                    kind_bake: false,
+                },
+            ))
+            .id();
+        let part = world
+            .spawn((
+                InteriorLit::new(InteriorKind::Matte, Handle::default()),
+                ClassifiedBy(anchor),
+                MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+                MeshTag(0),
+            ))
+            .id();
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        let lit = world.get::<InteriorLit>(part).unwrap();
+        assert_eq!(lit.applied, Some(AppliedLaw::Matte));
+        assert_ne!(
+            world.get::<MeshTag>(part).unwrap().0 & crate::mesh_tag::INTERIOR_FOG_BIT,
+            0,
+            "the day/night law carries the room's fog bit"
+        );
+    }
+
+    /// The mixed-kind hole (0734 §3): a bake-capable part joining an anchor whose law was
+    /// resolved from a matte-kind part drops the anchor's record — the next run re-rays with the
+    /// bake kind in reach instead of riding the matte fallback until the anchor happens to move.
+    #[test]
+    fn a_bake_part_joining_a_matte_resolved_anchor_forces_a_re_resolve() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let generation = world.resource::<WmoResidency>().generation;
+        let anchor = world
+            .spawn((
+                GlobalTransform::default(),
+                InteriorAnchor {
+                    law: AppliedLaw::Exterior,
+                    last_pos: Vec3::ZERO,
+                    generation,
+                    kind_bake: false,
+                },
+            ))
+            .id();
+        world.spawn((
+            InteriorLit::new(
+                InteriorKind::Bake {
+                    material: Handle::default(),
+                    center: Vec3::ZERO,
+                },
+                Handle::default(),
+            ),
+            ClassifiedBy(anchor),
+            MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+            MeshTag(0),
+        ));
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        assert!(
+            world.get::<InteriorAnchor>(anchor).is_none(),
+            "the matte-resolved record is dropped so the next run re-rays"
+        );
+    }
+
+    /// The fade-latch edge: removing a part's `RenderFade` re-enqueues it for authoring — the
+    /// event that closes every fade-exclusion window (0734 §3; the old settled-path sweep is
+    /// gone, so this observer IS the convergence path).
+    #[test]
+    fn a_fade_latch_enqueues_the_part_for_reauthoring() {
+        let mut world = classifier_world();
+        world.add_observer(enqueue_on_fade_latch);
+        let part = world
+            .spawn(InteriorLit::new(InteriorKind::Matte, Handle::default()))
+            .id();
+        world.resource_mut::<InteriorReauthor>().0.clear(); // drop the on_add entry
+        world
+            .entity_mut(part)
+            .insert(crate::model_fade::RenderFade {
+                started: 0.0,
+                duration: 1.0,
+                from: 0.0,
+                to: 1.0,
+                cutout: Handle::default(),
+                blend: Handle::default(),
+            });
+        world
+            .entity_mut(part)
+            .remove::<crate::model_fade::RenderFade>();
+        assert_eq!(
+            world.resource::<InteriorReauthor>().0,
+            vec![part],
+            "the latch is the re-entry edge"
         );
     }
 

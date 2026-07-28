@@ -1,6 +1,6 @@
 //! The **unit blob shadow** — the soft dark oval under every unit (the player, every NPC, every
 //! creature), the reference's per-frame shadow pass rebuilt on the shared surface-decal projector
-//! ([`crate::decal`]).
+//! ([`crate::decal`]), drawn on the shared effect stream (0733).
 //!
 //! **The byte-verified mechanism** (wow-re `unit-blob-shadow.md`, a §5 cross-check; the "cloud
 //! shadow" label on `0x6d7920` was corrected — it IS the unit shadow draw):
@@ -26,42 +26,48 @@
 //!   draws, six bit-stable box sizes, HumanMale 0.9134 × 1.0805 yd permanently, Walk/Run extents
 //!   never appear). Full extents, no missing half/scale factor — the standing size IS the law.
 //! - **Appearance**: multiplicative darken — `GL_DST_COLOR/GL_ZERO` with the fade riding the
-//!   combine, which is exactly Bevy's [`AlphaMode::Multiply`] (`dst × lerp(1, src, α)`). Vertex
-//!   diffuse is **white** with α = the model's fade alpha (`[model+0x180]` — spawn/despawn fades +
-//!   the self first-person fade ride into the shadow); the darkness lives in the texture RGB.
-//!   Unlit, no fog, no depth write. The texture loads as the default `WorldArt` `Rgba8Unorm`, so
-//!   the modulate multiplies raw bytes in the gamma lane — the reference's own arithmetic (0161).
+//!   combine, which is exactly the lane's `EffectBlend::Multiply` (`dst × lerp(1, src, α)`).
+//!   Vertex diffuse is **white** with α = the model's fade alpha (`[model+0x180]` — spawn/despawn
+//!   fades + the self first-person fade ride into the shadow); the darkness lives in the texture
+//!   RGB. Unlit, no fog, no depth write. The texture loads as the default `WorldArt`
+//!   `Rgba8Unorm`, so the modulate multiplies raw bytes in the gamma lane — the reference's own
+//!   arithmetic (0161).
 //! - **Gating**: the reference's `shadowLOD` cvar {0,1} is the master toggle (default on) — we are
 //!   always-on; `shadowBias` (default 0.1) is its depth-bias knob — [`SHADOW_DEPTH_BIAS`] plays
 //!   that role here. No dead/mount/kind test exists on the draw path; **which** objects register
 //!   for shadows is an open RE item (`HANDOFF(-> object-layer)`) — v1 policy: every Player/Unit
 //!   entity with a built animated model (GameObjects/doodads excluded).
 //!
-//! One decal entity per unit, its mesh rebuilt only when the inputs move ([`ShadowKey`]) — an idle
-//! unit costs a key compare per frame.
+//! One shadow record per unit, its projected triangles rebuilt only when the inputs move
+//! ([`ShadowKey`]) and pushed onto the effect stream every shown frame — an idle unit costs a
+//! key compare plus one memcpy of its cached slice. (The stream has no per-draw frustum cull;
+//! an off-screen shadow's triangles are vertex-clipped GPU-side — dozens of ~50-vert slices,
+//! below any ledger line.)
 
 use avian3d::prelude::Collider;
 use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
-use bevy::camera::primitives::Aabb;
 use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
 use crate::collision::GroundDecalSurface;
 use crate::creature_anim::AnimData;
-use crate::decal::{project_decal, seed_mesh, DecalFrame};
+use crate::decal::{project_decal, DecalFrame};
 use crate::model_fade::{fade_alpha, RenderFade};
 use crate::net::{NetEntity, SelfPlayer};
-use crate::player::CameraControl;
+use crate::particles::buffer::{
+    begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
+};
+use crate::player::{CameraControl, WorldCamera};
 use crate::schedule::WorldStage;
 
 /// The reference's shadow disc (`Textures\ShadowBlob.blp`, wow-re unit-blob-shadow RE): grayscale
 /// radial blob (gray-160 core → white rim) under a binary alpha disc, multiplied onto the ground.
 const SHADOW_TEXTURE: &str = "mpq://textures/shadowblob.blp";
-/// Rasterizer depth bias — the same coplanarity fix as the ring's (`RING_DEPTH_BIAS`, see the
-/// rationale there; the reference's own knob is the `shadowBias` cvar, default 0.1 → a polygon
-/// offset). Half the ring's bias, so where both decals stack the ring wins the depth tie
-/// deterministically.
+/// The shadow's ladder rung — sort bias AND rasterizer depth-bias constant (the coplanarity fix,
+/// same mechanism as the ring's `RING_DEPTH_BIAS`; the reference's own knob is the `shadowBias`
+/// cvar, default 0.1 → a polygon offset). Half the ring's, so where both decals stack the ring
+/// draws later deterministically.
 const SHADOW_DEPTH_BIAS: f32 = 4096.0;
 /// The byte clamp on the animation box: each corner component is clamped INTO ±5 yd pre-scale
 /// (`0x6992c0` MAX(−5) / `0x699250` MIN(+5) — a cap on huge authored boxes, never a floor).
@@ -70,14 +76,14 @@ const BOX_CLAMP: f32 = 5.0;
 /// the no-op exit — no shadow.
 const DEGENERATE_EPS: f32 = 2.384e-7;
 
-/// One unit's shadow decal (a top-level entity — the mesh is world-space, so it must not inherit
-/// the owner's transform). Despawned when the owner goes.
+/// One unit's shadow record (a top-level entity — no render components; the cached projection
+/// rides the effect stream). Despawned when the owner goes.
 #[derive(Component)]
 struct BlobShadow {
     owner: Entity,
 }
 
-/// Last frame's rebuild inputs — the mesh is re-projected only when one moves. `surfaces` counts
+/// Last frame's rebuild inputs — the projection is redone only when one moves. `surfaces` counts
 /// the [`GroundDecalSurface`] colliders: a tile streaming in under a *standing* unit changes it,
 /// re-arming the rebuild its stillness would otherwise skip.
 #[derive(Component, Default)]
@@ -91,12 +97,15 @@ struct ShadowKey {
     shown: bool,
 }
 
-/// The one shared shadow material (white base × the blob texture, multiplicative) + its texture
-/// handle (kept so the census can report the image's load state — a texture that never arrives
-/// blocks the whole material from rendering, silently).
+/// The cached projection: world-space effect triangles (white × the ramp/fade alpha), pushed
+/// onto the stream every shown frame, rebuilt on [`ShadowKey`] change. Empty = hidden.
+#[derive(Component, Default)]
+struct ShadowVerts(Vec<EffectVertex>);
+
+/// The one shadow texture (kept so the census can report the image's load state — a texture
+/// that never arrives withholds every shadow draw at the render-side residency gate, silently).
 #[derive(Resource)]
-struct ShadowMaterial {
-    material: Handle<StandardMaterial>,
+struct ShadowAssets {
     texture: Handle<Image>,
 }
 
@@ -104,48 +113,33 @@ pub(crate) struct BlobShadowPlugin;
 
 impl Plugin for BlobShadowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_material).add_systems(
-            Update,
-            (sync_shadows, update_shadows)
-                .chain()
-                // After net motion + input: the decal follows this frame's unit transforms.
-                .after(WorldStage::Input),
-        );
+        app.add_systems(Startup, setup_shadow_assets)
+            .add_systems(
+                Update,
+                (sync_shadows, update_shadows)
+                    .chain()
+                    // After net motion + input: the decal follows this frame's unit transforms.
+                    .after(WorldStage::Input),
+            )
+            // The stream push: after the frame's stream clear (the caches were rebuilt in
+            // `Update`, so this is a pure copy).
+            .add_systems(PostUpdate, push_shadows.after(begin_effect_frame));
     }
 }
 
-/// Build the shared multiply material once. `AlphaMode::Multiply` premultiplies in-shader and
-/// blends `dst × src + dst × (1−α)` = `dst × lerp(1, srcRGB, α)` — the reference's
-/// `GL_DST_COLOR/GL_ZERO` modulate with the fade riding the combine (see module docs).
-fn setup_material(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    asset_server: Res<AssetServer>,
-) {
+/// Load the shadow disc once.
+fn setup_shadow_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     let texture = asset_server.load::<Image>(SHADOW_TEXTURE);
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: Some(texture.clone()),
-        // Unlit (the reference's shadow pass: lighting off, fog off) — the darkening is pure
-        // framebuffer arithmetic, independent of time-of-day.
-        unlit: true,
-        alpha_mode: AlphaMode::Multiply,
-        cull_mode: None,
-        depth_bias: SHADOW_DEPTH_BIAS,
-        ..default()
-    });
-    commands.insert_resource(ShadowMaterial { material, texture });
+    commands.insert_resource(ShadowAssets { texture });
 }
 
-/// Keep one shadow decal per eligible unit: spawn for new Player/Unit entities whose model has
+/// Keep one shadow record per eligible unit: spawn for new Player/Unit entities whose model has
 /// built (an animated model — [`ModelAnimations`] arrives with it), despawn orphans (owner
 /// destroyed / streamed out). The registration *policy* is the open RE item; this is the v1 set
 /// (see module docs).
 #[allow(clippy::type_complexity)] // the filtered spawn-gate query, commented inline
 fn sync_shadows(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    material: Option<Res<ShadowMaterial>>,
     // A mount child never gets its own decal: its `Transform` is parent-relative (a shadow
     // keyed on it would project at the world origin) — the mounted composite casts ONE shadow,
     // the unit's, which reads the mount's box while mounted (`update_shadows`, decision 0441).
@@ -158,9 +152,6 @@ fn sync_shadows(
     >,
     shadows: Query<(Entity, &BlobShadow)>,
 ) {
-    let Some(material) = material else {
-        return;
-    };
     let mut shadowed = EntityHashSet::default();
     for (entity, shadow) in &shadows {
         // Owner gone or no longer eligible (model torn down) → the decal goes with it.
@@ -177,23 +168,19 @@ fn sync_shadows(
         commands.spawn((
             BlobShadow { owner },
             ShadowKey::default(),
-            Mesh3d(meshes.add(seed_mesh())),
-            MeshMaterial3d(material.material.clone()),
-            Transform::default(),
-            Visibility::Hidden,
+            ShadowVerts::default(),
         ));
     }
 }
 
-/// Re-project each shadow whose inputs moved; hide it when the box degenerates, the fade reaches
-/// zero, or no receiving surface is in the box (the reference's no-ground gate).
+/// Re-project each shadow whose inputs moved; clear it when the box degenerates, the fade
+/// reaches zero, or no receiving surface is in the box (the reference's no-ground gate).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_shadows(
     time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
     catalog: Option<Res<AnimData>>,
     rig: Option<Res<CameraControl>>,
-    shadow_material: Option<Res<ShadowMaterial>>,
+    shadow_assets: Option<Res<ShadowAssets>>,
     images: Res<Assets<Image>>,
     surfaces: Query<&Collider, With<GroundDecalSurface>>,
     // Spawn/despawn fades live on the model *part* entities; attribute each to its unit root so
@@ -216,15 +203,7 @@ fn update_shadows(
     // shadow box is untraced — this is the named approximation of decision 0441's P2, carried
     // until a wow-re shadow-consumer trace pins it.
     mount_anims: Query<(&NetEntity, &ModelAnimations), With<crate::entities::mount::MountBody>>,
-    mut commands: Commands,
-    mut shadows: Query<(
-        Entity,
-        &BlobShadow,
-        &mut ShadowKey,
-        &mut Transform,
-        &mut Visibility,
-        &Mesh3d,
-    )>,
+    mut shadows: Query<(&BlobShadow, &mut ShadowKey, &mut ShadowVerts)>,
     // Once-a-second census at debug level (`RUST_LOG=benilla::blob_shadow=debug`): how many
     // shadows exist and why the hidden ones hid — the first question of any "no shadow under X"
     // report, answerable from a log instead of a debugger.
@@ -248,11 +227,11 @@ fn update_shadows(
         *slot = slot.min(alpha);
     }
     let surface_count = surfaces.iter().count();
-    for (entity, shadow, mut key, mut transform, mut visibility, mesh) in &mut shadows {
+    for (shadow, mut key, mut verts) in &mut shadows {
         n_total += 1;
         let Ok((unit, anims, is_self, mount_child)) = owners.get(shadow.owner) else {
-            // sync_shadows despawns next frame; keep it invisible meanwhile.
-            *visibility = Visibility::Hidden;
+            // sync_shadows despawns next frame; keep it cleared meanwhile.
+            hide(&mut key, &mut verts);
             n_no_owner += 1;
             continue;
         };
@@ -269,7 +248,7 @@ fn update_shadows(
         let stand = catalog.as_deref().map_or(0, |c| anims.resolve(0, &c.0).id);
         let clip = anims.find(stand);
         let Some(clip) = clip else {
-            hide(&mut key, &mut visibility);
+            hide(&mut key, &mut verts);
             n_no_clip += 1;
             continue;
         };
@@ -285,7 +264,7 @@ fn update_shadows(
             * s;
         if bmax.x - bmin.x <= DEGENERATE_EPS || bmax.z - bmin.z <= DEGENERATE_EPS {
             // The reference's degenerate-box no-op exit (`0x61e9c0`): no shadow.
-            hide(&mut key, &mut visibility);
+            hide(&mut key, &mut verts);
             n_degen += 1;
             continue;
         }
@@ -295,7 +274,7 @@ fn update_shadows(
             alpha *= rig.as_deref().map_or(1.0, CameraControl::self_fade);
         }
         if alpha <= 0.0 {
-            hide(&mut key, &mut visibility);
+            hide(&mut key, &mut verts);
             continue;
         }
         let next = ShadowKey {
@@ -341,10 +320,10 @@ fn update_shadows(
             max_y: half_v,
         };
         let span_v = frame.max_y - frame.min_y;
+        verts.0.clear();
         let projected = span_v > 0.0
             && project_decal(
-                &mut meshes,
-                mesh,
+                &mut verts.0,
                 &surfaces,
                 &frame,
                 |p| {
@@ -356,32 +335,18 @@ fn update_shadows(
                 },
                 |x, z| frame.rect_uv(x, z),
             );
-        if projected {
-            transform.translation = unit.translation;
-            // A hand-set cull volume: the mesh is rewritten in place and Bevy won't recompute an
-            // entity's `Aabb` on asset change — unlike the single ring, dozens of shadows want
-            // real frustum culling, so the box is maintained here.
-            commands.entity(entity).insert(Aabb::from_min_max(
-                Vec3::new(min_x, frame.min_y, min_z),
-                Vec3::new(max_x, frame.max_y, max_z),
-            ));
-        }
         *key = next;
         key.shown = projected;
         if projected {
             n_shown += 1;
         } else {
+            verts.0.clear();
             n_no_ground += 1;
         }
-        *visibility = if projected {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
     }
     if census && n_total > 0 {
-        let tex = shadow_material.map_or("no-resource", |m| {
-            if images.contains(&m.texture) {
+        let tex = shadow_assets.map_or("no-resource", |a| {
+            if images.contains(&a.texture) {
                 "loaded"
             } else {
                 "MISSING"
@@ -395,10 +360,43 @@ fn update_shadows(
     }
 }
 
-/// Hide the decal and drop the cache key so the next eligible frame rebuilds from scratch.
-fn hide(key: &mut ShadowKey, visibility: &mut Visibility) {
+/// Push every shown shadow's cached triangles onto the stream — one Multiply draw per unit at
+/// the shadow rung, fog off (the reference's shadow pass state).
+fn push_shadows(
+    assets: Option<Res<ShadowAssets>>,
+    cam: Query<Entity, With<WorldCamera>>,
+    mut quads: ResMut<EffectQuads>,
+    shadows: Query<(Entity, &ShadowKey, &ShadowVerts)>,
+) {
+    let Some(assets) = assets else { return };
+    let Ok(cam) = cam.single() else { return };
+    for (entity, key, verts) in &shadows {
+        if verts.0.is_empty() {
+            continue;
+        }
+        let start = quads.begin();
+        quads.verts.extend_from_slice(&verts.0);
+        quads.commit_tris(
+            start,
+            EffectDrawSpec {
+                cam,
+                texture: assets.texture.id(),
+                blend: EffectBlend::Multiply,
+                fog: EffectFog::Off,
+                anchor: key.feet,
+                bias: SHADOW_DEPTH_BIAS,
+                raster_bias: SHADOW_DEPTH_BIAS as i32,
+                main_entity: entity,
+                light: None,
+            },
+        );
+    }
+}
+
+/// Clear the record and drop the cache key so the next eligible frame rebuilds from scratch.
+fn hide(key: &mut ShadowKey, verts: &mut ShadowVerts) {
     key.shown = false;
-    *visibility = Visibility::Hidden;
+    verts.0.clear();
 }
 
 /// Did any rebuild input move beyond noise? Position/box at a millimetre, rotation at ~0.05°,

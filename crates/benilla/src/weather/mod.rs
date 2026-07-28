@@ -31,6 +31,10 @@ use crate::net::WeatherMessage;
 
 mod precip;
 
+/// Rain's forced-fog window — the effect lane's `EffectFog::Rain` params row reads the law
+/// from its owner (0733 §4).
+pub(crate) use precip::{RAIN_FOG_END, RAIN_FOG_START};
+
 /// Wire weather types (`SMSG_WEATHER` / vmangos `WeatherType`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum WeatherKind {

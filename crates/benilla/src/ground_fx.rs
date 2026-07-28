@@ -13,33 +13,39 @@
 //! of a base-anchored instance instead of a mesh child. Each frame ([`update_ground_fx_decals`],
 //! in [`crate::billboard::BillboardPlace`] — post-propagation, like the cards), the quad's four
 //! authored corners are posed through its live joint × the bone's inverse bindpose (exactly the
-//! skinned-vertex path, so the authored slide/spin/scale animation is preserved), a projection
-//! frame is fitted to the posed rectangle, and the ground triangles inside it are emitted with
-//! the quad's own UVs bilerped across the frame — the crescent drapes the terrain it crosses.
-//! The part's material rides along (additive blend, animated tint clone, `MatAnim` alpha loops),
-//! plus the decal depth bias that settles coplanarity with the drawn ground. A decal despawns
-//! when its joint does (the effect instance's reap/self-termination), the billboard cards' orphan
-//! rule; it hides when no receiving surface is in the box (mid-air), the ring's no-ground gate.
+//! skinned-vertex path, so the authored slide/spin/scale animation is preserved); when the posed
+//! corners moved (0733 §5 — the ShadowKey treatment; a static pose costs a compare), a
+//! projection frame is fitted to the posed rectangle and the ground triangles inside it are
+//! re-emitted with the quad's own UVs bilerped across the frame — the crescent drapes the
+//! terrain it crosses. The cached triangles are pushed onto the shared effect stream every
+//! frame with the part's authored identity riding the draw record: its blend
+//! ([`crate::particles::buffer::EffectBlend::from_model`]), its `0x70baf0` fog policy, its
+//! M2Color RGB loop and `MatAnim` alpha loop sampled into the vertex tint at push time (the old
+//! path's per-instance material clones and their per-frame mutations are gone). A decal
+//! despawns when its joint does (the effect instance's reap/self-termination), the billboard
+//! cards' orphan rule; it pushes nothing when no receiving surface is in the box (mid-air), the
+//! ring's no-ground gate.
 
 use avian3d::prelude::Collider;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::GroundQuad;
-use bevy::camera::visibility::NoFrustumCulling;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::collision::GroundDecalSurface;
-use crate::decal::{project_decal, seed_mesh, DecalFrame};
-use crate::terrain::WowModelMaterial;
+use crate::decal::{project_decal, DecalFrame};
+use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
+use crate::player::WorldCamera;
 
-/// Rasterizer depth bias on ground-fx decal materials — the same constant, for the same reason,
-/// as the ring's (`RING_DEPTH_BIAS`, see the rationale there): the projected vertices are
-/// geometrically coplanar with the drawn ground, and this pushes only their *depth* far above the
-/// f32 noise floor. Ties against the ring/shadow don't matter: all three write no depth, so the
-/// bias only ever competes with the opaque ground.
+/// The decal ladder rung — sort bias + rasterizer depth-bias constant, the same constant, for
+/// the same reason, as the ring's (`RING_DEPTH_BIAS`, see the rationale there): the projected
+/// vertices are geometrically coplanar with the drawn ground, and this pushes only their
+/// *depth* far above the f32 noise floor. Ties against the ring/shadow don't matter: all three
+/// write no depth, so the bias only ever competes with the opaque ground.
 pub(crate) const GROUND_FX_DEPTH_BIAS: f32 = 8192.0;
 
-/// One ground-quad decal: the live effect-rig joint it rides, and the authored quad it projects.
+/// One ground-quad decal: the live effect-rig joint it rides, the authored quad it projects,
+/// the part's draw identity, and the cached projection.
 #[derive(Component)]
 pub(crate) struct GroundFxDecal {
     /// The joint entity whose pose animates the quad (the effect model's own rig; the instance
@@ -53,16 +59,37 @@ pub(crate) struct GroundFxDecal {
     corners: [Vec3; 4],
     /// The authored UV at each corner, parallel to `corners`.
     uvs: [[f32; 2]; 4],
+    /// The part's texture (the shared material's, resolved at spawn).
+    texture: Handle<Image>,
+    /// The part's authored blend, mapped onto the lane (`model_render.rs`'s law).
+    blend: EffectBlend,
+    /// The part's `0x70baf0` fog policy (from the shared material's baked marker bits).
+    fog: EffectFog,
+    /// The part's M2Color RGB loop on this instance's clock (loop, attach-time origin) —
+    /// sampled into the vertex tint at push time (was: a per-instance material clone mutated
+    /// per frame through `FxTintAnims`).
+    rgb_anim: Option<(std::sync::Arc<benilla_formats::RgbAnim>, f32)>,
+    /// The cached projection (world-space effect triangles, white × the vertical-fade alpha).
+    cache: Vec<EffectVertex>,
+    /// The posed corners the cache was projected from (NaN-seeded: the first pass always
+    /// projects) + the receiving-surface count that re-arms a static pose when a tile streams.
+    cached_corners: [Vec3; 4],
+    cached_surfaces: usize,
+    /// The cached frame's center — the draw's sort anchor.
+    center: Vec3,
 }
 
-/// Spawn one ground-quad decal entity (a world-root entity — placement is absolute, written by
-/// [`update_ground_fx_decals`]). `material` is the part's resolved per-instance material (the
-/// caller bakes in [`GROUND_FX_DEPTH_BIAS`] and any animated-tint clone); the caller also inserts
-/// the part's `ModelPart`/`MatAnim` riders. Spawns `Hidden` — the first placement pass shows it.
+/// Spawn one ground-quad decal entity (a world-root record — no render components; the
+/// projection rides the effect stream). The caller resolves the part's texture/blend/fog/tint
+/// identity from its shared material; the caller also inserts the part's `MatAnim` rider (its
+/// `current` is the push-time alpha).
+#[allow(clippy::too_many_arguments)] // the part's full draw identity, one call site
 pub(crate) fn spawn_ground_fx_decal(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    material: Handle<WowModelMaterial>,
+    texture: Handle<Image>,
+    blend: EffectBlend,
+    fog: EffectFog,
+    rgb_anim: Option<(std::sync::Arc<benilla_formats::RgbAnim>, f32)>,
     quad: &GroundQuad,
     joint: Entity,
     ibp: Mat4,
@@ -82,21 +109,20 @@ pub(crate) fn spawn_ground_fx_decal(
         uvs.swap(1, 3);
     }
     commands
-        .spawn((
-            GroundFxDecal {
-                joint,
-                ibp,
-                corners,
-                uvs,
-            },
-            Mesh3d(meshes.add(seed_mesh())),
-            MeshMaterial3d(material),
-            Transform::default(),
-            Visibility::Hidden,
-            // The mesh is rewritten in place every frame and Bevy won't recompute the Aabb on asset
-            // change (the ring's rule); live decals are bounded by live casts, so skip culling.
-            NoFrustumCulling,
-        ))
+        .spawn(GroundFxDecal {
+            joint,
+            ibp,
+            corners,
+            uvs,
+            texture,
+            blend,
+            fog,
+            rgb_anim,
+            cache: Vec::new(),
+            cached_corners: [Vec3::splat(f32::NAN); 4],
+            cached_surfaces: 0,
+            center: Vec3::ZERO,
+        })
         .id()
 }
 
@@ -137,62 +163,94 @@ fn bilerp_uv(uvs: &[[f32; 2]; 4], s: f32, t: f32) -> [f32; 2] {
     lerp2(lerp2(uvs[0], uvs[1], s), lerp2(uvs[2], uvs[3], s), t)
 }
 
-/// Per-frame placement (in [`crate::billboard::BillboardPlace`] — post-propagation, so the joint
-/// pose is THIS frame's): pose each decal's corners through its joint, fit the frame, re-project
-/// the mesh, and write the absolute world transform directly (the cards' direct-global rule).
-/// Orphaned decals (joint despawned with its effect instance) despawn; a frame with no receiving
-/// ground hides (the ring's no-ground gate).
+/// Per-frame placement + push (in [`crate::billboard::BillboardPlace`] — post-propagation, so
+/// the joint pose is THIS frame's; after `begin_effect_frame` — the push lands in this frame's
+/// stream): pose each decal's corners through its joint; re-project only when they (or the
+/// receiving surfaces) moved; push the cached triangles tinted with this frame's RGB/alpha loop
+/// samples. Orphaned decals (joint despawned with its effect instance) despawn; a frame with no
+/// receiving ground pushes nothing (the ring's no-ground gate).
 pub(crate) fn update_ground_fx_decals(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    time: Res<Time>,
+    cam: Query<Entity, With<WorldCamera>>,
     surfaces: Query<&Collider, With<GroundDecalSurface>>,
     joints: Query<&GlobalTransform, Without<GroundFxDecal>>,
+    mut quads: ResMut<EffectQuads>,
     mut decals: Query<(
         Entity,
-        &GroundFxDecal,
-        &Mesh3d,
-        &mut Transform,
-        &mut GlobalTransform,
-        &mut Visibility,
+        &mut GroundFxDecal,
+        Option<&crate::doodad_anim::MatAnim>,
     )>,
 ) {
-    for (entity, decal, mesh, mut tf, mut global, mut vis) in &mut decals {
+    let Ok(cam) = cam.single() else { return };
+    let now = time.elapsed_secs();
+    let mut surface_count = usize::MAX;
+    for (entity, mut decal, mat_anim) in &mut decals {
         let Ok(joint) = joints.get(decal.joint) else {
             commands.entity(entity).despawn();
             continue;
         };
+        if surface_count == usize::MAX {
+            surface_count = surfaces.iter().count();
+        }
         let pose = joint.affine() * Affine3A::from_mat4(decal.ibp);
         let corners = decal.corners.map(|c| pose.transform_point3(c));
-        let projected = fit_frame(&corners).is_some_and(|frame| {
-            let vert = frame.max_y;
-            let ok = project_decal(
-                &mut meshes,
-                mesh,
-                &surfaces,
-                &frame,
-                // The ring's vertical trapezoid: full within half the slab, fading to 0 at its
-                // edge — a wall/ledge smear dims with height instead of ending in a hard clip.
-                |p| ((vert - p.y.abs()) / (0.75 * vert)).clamp(0.0, 1.0),
-                |x, z| {
-                    let s = (x - frame.min_x) / (frame.max_x - frame.min_x);
-                    let t = (z - frame.min_z) / (frame.max_z - frame.min_z);
-                    bilerp_uv(&decal.uvs, s, t)
-                },
-            );
-            if ok {
-                tf.translation = frame.center;
-                tf.rotation = Quat::IDENTITY;
-                tf.scale = Vec3::ONE;
-                // Propagation already ran this frame — the direct global write is what renders.
-                *global = GlobalTransform::from(*tf);
+        // The rebuild gate (0733 §5): the posed corners capture the whole pose effect, so a
+        // static aura under a static rig costs this compare. (NaN-seeded corners make the
+        // first pass always project.)
+        if corners != decal.cached_corners || surface_count != decal.cached_surfaces {
+            let decal = &mut *decal;
+            decal.cached_corners = corners;
+            decal.cached_surfaces = surface_count;
+            decal.cache.clear();
+            if let Some(frame) = fit_frame(&corners) {
+                let vert = frame.max_y;
+                decal.center = frame.center;
+                project_decal(
+                    &mut decal.cache,
+                    &surfaces,
+                    &frame,
+                    // The ring's vertical trapezoid: full within half the slab, fading to 0 at
+                    // its edge — a wall/ledge smear dims with height instead of a hard clip.
+                    |p| ((vert - p.y.abs()) / (0.75 * vert)).clamp(0.0, 1.0),
+                    |x, z| {
+                        let s = (x - frame.min_x) / (frame.max_x - frame.min_x);
+                        let t = (z - frame.min_z) / (frame.max_z - frame.min_z);
+                        bilerp_uv(&decal.uvs, s, t)
+                    },
+                );
             }
-            ok
-        });
-        *vis = if projected {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+        }
+        if decal.cache.is_empty() {
+            continue;
+        }
+        // This frame's tint: the part's M2Color RGB loop (instance clock) × the MatAnim alpha
+        // loop — exactly what the material clone + MeshTag carried on the old path.
+        let tint = decal
+            .rgb_anim
+            .as_ref()
+            .map_or([1.0, 1.0, 1.0], |(anim, origin)| anim.sample(now - origin));
+        let alpha = mat_anim.map_or(1.0, |m| m.current);
+        let start = quads.begin();
+        quads.verts.extend(decal.cache.iter().map(|v| EffectVertex {
+            pos: v.pos,
+            uv: v.uv,
+            color: [tint[0], tint[1], tint[2], v.color[3] * alpha],
+        }));
+        quads.commit_tris(
+            start,
+            EffectDrawSpec {
+                cam,
+                texture: decal.texture.id(),
+                blend: decal.blend,
+                fog: decal.fog,
+                anchor: decal.center,
+                bias: GROUND_FX_DEPTH_BIAS,
+                raster_bias: GROUND_FX_DEPTH_BIAS as i32,
+                main_entity: entity,
+                light: None,
+            },
+        );
     }
 }
 

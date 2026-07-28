@@ -8,8 +8,7 @@ use benilla_assets::{ModelEmitter, ModelLight};
 use benilla_formats::WmoLight;
 use bevy::prelude::*;
 
-use crate::lighting::SharedLightBuffer;
-use crate::particles::{self, WowParticleMaterial};
+use crate::particles;
 
 /// Bevy `PointLight` intensity (lumens) for an M2 light of unit `diffuse_intensity`. Bevy stores the GPU
 /// colour as `linear_color × intensity/(4π)` (bevy_pbr light.rs), so `4π` makes the shader read exactly
@@ -115,9 +114,6 @@ pub(super) fn spawn_wmo_lights_for(
 #[allow(clippy::too_many_arguments)] // a spawn plumbing fn: every arg is a distinct resource
 pub(super) fn spawn_emitters_for(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    particle_materials: &mut Assets<WowParticleMaterial>,
-    light: &SharedLightBuffer,
     emitters: &[ModelEmitter],
     transform: Transform,
     joints: Option<&[Entity]>,
@@ -137,9 +133,6 @@ pub(super) fn spawn_emitters_for(
             .map(|&j| (j, em.bone_pivot));
         if let Some(e) = particles::spawn_emitter(
             commands,
-            meshes,
-            particle_materials,
-            light,
             em,
             transform,
             owner,
@@ -161,12 +154,8 @@ pub(super) fn spawn_emitters_for(
 /// [`spawn_emitters_for`]); a static placement's trail rides the first spawned submesh entity (its
 /// transform IS the placement). Trails self-despawn when their owner goes, so they don't join
 /// `out` — the placement's despawn cascades within a frame.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ribbons_for(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    particle_materials: &mut Assets<WowParticleMaterial>,
-    light: &SharedLightBuffer,
     ribbons: &[benilla_assets::ModelRibbon],
     transform: Transform,
     joints: Option<&[Entity]>,
@@ -185,9 +174,6 @@ pub(super) fn spawn_ribbons_for(
         // is immaterial here.
         crate::ribbons::spawn_ribbon(
             commands,
-            meshes,
-            particle_materials,
-            light,
             rb,
             owner,
             use_pivot,

@@ -199,7 +199,13 @@ impl Plugin for TargetPlugin {
             )
             // The model brighten writes MeshTag bit 31 — PostUpdate, after every Update payload
             // writer (fade/interior/…), so their whole-tag overwrites can't strand the bit.
-            .add_systems(PostUpdate, highlight::apply_highlight);
+            .add_systems(PostUpdate, highlight::apply_highlight)
+            // The ring's stream push: after the frame's stream clear (the projection cache was
+            // rebuilt by `update_ring` in Update; this is a tinted copy).
+            .add_systems(
+                PostUpdate,
+                ring::push_ring.after(crate::particles::buffer::begin_effect_frame),
+            );
     }
 }
 #[cfg(test)]

@@ -507,7 +507,7 @@ pub(crate) fn apply_self_model_fade(
             &mut MeshTag,
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
-            Option<&mut crate::interior::InteriorLit>,
+            Option<&crate::interior::InteriorLit>,
         ),
         (
             Without<RenderFade>,
@@ -522,6 +522,7 @@ pub(crate) fn apply_self_model_fade(
         &mut MeshTag,
         Option<&crate::doodad_anim::MatAnim>,
     )>,
+    mut reauthor: ResMut<crate::interior::InteriorReauthor>,
     mut was_fading: Local<bool>,
 ) {
     let fading = rig.self_fade_alpha < 1.0;
@@ -541,6 +542,7 @@ pub(crate) fn apply_self_model_fade(
         rig.self_fade_alpha,
         &children_of,
         &mut parts,
+        &mut reauthor,
         &mut walked,
     );
     let alpha = rig.self_fade_alpha.clamp(0.0, 1.0);
@@ -580,7 +582,7 @@ fn apply_self_fade_to_descendants(
             &mut MeshTag,
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
-            Option<&mut crate::interior::InteriorLit>,
+            Option<&crate::interior::InteriorLit>,
         ),
         (
             Without<RenderFade>,
@@ -588,21 +590,22 @@ fn apply_self_fade_to_descendants(
             Without<crate::billboard::BillboardCard>,
         ),
     >,
+    reauthor: &mut crate::interior::InteriorReauthor,
     walked: &mut EntityHashSet,
 ) {
     walked.insert(entity);
     if let Ok((fm, mut tag, mut mat, mut vis, lit)) = parts.get_mut(entity) {
         if alpha >= 1.0 {
             // The release edge (runs once, on the frame the fade ends — decision 0213): un-hide,
-            // and hand the material/tag channel back. A part the classifier lights gets
-            // invalidated so it re-authors the correct interior/exterior state next frame; a part
-            // without a classifier (some attach models) gets the direct restore — the same
-            // completion write `apply_render_fade` uses.
+            // and hand the material/tag channel back. A part the classifier lights is enqueued so
+            // it re-authors the correct interior/exterior state next classifier run (0734's
+            // convergence queue); a part without a classifier (some attach models) gets the
+            // direct restore — the same completion write `apply_render_fade` uses.
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
             }
-            if let Some(mut lit) = lit {
-                lit.invalidate();
+            if lit.is_some() {
+                reauthor.0.push(entity);
             } else {
                 let bits = crate::mesh_tag::with_alpha(tag.0, 1.0);
                 if tag.0 != bits {
@@ -643,7 +646,7 @@ fn apply_self_fade_to_descendants(
     }
     if let Ok(children) = children_of.get(entity) {
         for &child in children {
-            apply_self_fade_to_descendants(child, alpha, children_of, parts, walked);
+            apply_self_fade_to_descendants(child, alpha, children_of, parts, reauthor, walked);
         }
     }
 }
@@ -739,6 +742,7 @@ mod tests {
         };
         let mut app = App::new();
         app.init_resource::<CameraControl>();
+        app.init_resource::<crate::interior::InteriorReauthor>();
         app.add_systems(Update, apply_self_model_fade);
 
         // The avatar: root -> joint (the eye-glow bone). Its card follows the joint.

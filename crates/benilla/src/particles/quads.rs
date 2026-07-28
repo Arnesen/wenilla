@@ -6,9 +6,9 @@
 
 use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::ParticleEmitterDef;
-use bevy::mesh::Indices;
 use bevy::prelude::*;
 
+use super::buffer::EffectVertex;
 use super::{rand01, Particle};
 
 /// The 128-entry twinkle noise table — the reference seeds `DAT_00cf58f0` with uniform-random f32
@@ -50,11 +50,12 @@ pub(super) fn spin_angle(spin: f32, age: f32, phase: u32) -> f32 {
     }
 }
 
-/// The camera basis one frame of expansion billboards against.
+/// The camera basis one frame of expansion billboards against. (No facing normal: the effect
+/// shader is unlit and never backface-culled, and the lane's vertex stream carries none — the
+/// old per-vertex `cam.face_normal` existed only to satisfy the mesh pipeline's layout.)
 pub(super) struct CamBasis {
     pub right: Vec3,
     pub up: Vec3,
-    pub face_normal: Vec3,
 }
 
 /// The cloud's draw frame: where its vertices are relative to ([`anchor`]) and how stored
@@ -98,24 +99,19 @@ pub(super) fn particle_half(def: &ParticleEmitterDef, placement: &Transform, p: 
     def.over_life.sample(u_age).size * def.twinkle(noise) * scale
 }
 
-/// Expand one pool into its billboard mesh (rewritten in place). Vertices are ANCHOR-relative —
-/// the caller carries the anchor on the mesh entity's transform (the transparent-pass sort key).
+/// Expand one pool into the shared effect-quad stream (whole quads, corner order closed by the
+/// lane's static `[0,1,2, 0,2,3]` index pattern). Vertices are **world-space** — the draw
+/// record carries the sort anchor now (see [`super::buffer`]).
 pub(super) fn expand_quads(
     def: &ParticleEmitterDef,
     particles: &[Particle],
     frame: &DrawFrame,
     placement: &Transform,
     cam: &CamBasis,
-    mesh: &mut Mesh,
+    out: &mut Vec<EffectVertex>,
 ) {
-    let n = particles.len();
-    let (anchored, anchor) = (frame.anchored, frame.anchor);
+    let anchored = frame.anchored;
     let (cam_right, cam_up) = (cam.right, cam.up);
-    let mut positions = Vec::with_capacity(n * 4);
-    let mut normals = Vec::with_capacity(n * 4);
-    let mut uvs = Vec::with_capacity(n * 4);
-    let mut colors = Vec::with_capacity(n * 4);
-    let mut indices = Vec::with_capacity(n * 6);
     // Size scales with the instance transform only when the emitter flags it (0x200) — an
     // instance-scaled prop otherwise scales its particle *positions* only (wow-re B2).
     let scale = if def.scale_size_by_instance() {
@@ -170,8 +166,8 @@ pub(super) fn expand_quads(
         let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
         let ol = def.over_life.sample(u_age);
         let (rgba, size) = (ol.color, ol.size);
-        // RAW authored RGB — the gamma-space decode happens ONCE, in the material's fragment
-        // (`wow_particle.wgsl`, decision 0152), where it also covers the texture term that a
+        // RAW authored RGB — the gamma-space decode happens ONCE, in the lane's fragment
+        // (`wow_effect.wgsl`, decision 0152), where it also covers the texture term that a
         // CPU-side vertex linearisation (0150) could not reach. Alpha is a blend weight — raw
         // everywhere. The remaining bonfire-CORE brightness gap vs the reference is the
         // additive-composite-space question (0148 open item: the reference sums gamma bytes in
@@ -189,21 +185,18 @@ pub(super) fn expand_quads(
         // alike burn steady; the old base+rand reading collapsed the kobold candle to zero),
         // × the instance scale iff flagged.
         let half = size * def.twinkle(noise) * scale;
+        // Within one cloud, quad order stays pool order — the reference's global per-particle
+        // painter sort is a named deliberate simplification. Between clouds, the draw record's
+        // anchor gives each its real sorted depth (the old anchor-relative vertex encoding's
+        // job — two overlapping smoke plumes must never sort-tie and swap per frame).
         let mut push_quad = |corners: [Vec3; 4], quv: [[f32; 2]; 4]| {
-            let b = positions.len() as u32;
             for (c, t) in corners.iter().zip(quv) {
-                // Vertices are ANCHOR-relative (the entity transform carries the anchor):
-                // Bevy's transparent pass sorts meshes by their entity position, so every
-                // cloud needs a real depth — all-world-baked-at-origin made two overlapping
-                // smoke plumes sort-tie and swap draw order per frame (the distant-bonfire
-                // flashing). Within one cloud, quad order stays pool order — the reference's
-                // global per-particle painter sort is a named deliberate simplification.
-                positions.push((*c - anchor).to_array());
-                normals.push(cam.face_normal.to_array());
-                colors.push(rgba);
-                uvs.push(t);
+                out.push(EffectVertex {
+                    pos: c.to_array(),
+                    uv: t,
+                    color: rgba,
+                });
             }
-            indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
         };
         // HEAD quad (particleType 0/2), drawn first (`0x7b2bc9`): a camera-facing billboard,
         // or — XY-quad emitters — the flat plane basis computed above.
@@ -288,12 +281,6 @@ pub(super) fn expand_quads(
             }
         }
     }
-
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_indices(Indices::U32(indices));
 }
 
 #[cfg(test)]

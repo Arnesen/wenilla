@@ -41,22 +41,46 @@
 use avian3d::prelude::Collider;
 use benilla_formats::{load_faction_catalog, reputation_rank, FactionCatalog, Reaction};
 use benilla_protocol::EntityKind;
-use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
 use crate::assets::{LockRecover, WorldAssets};
 use crate::collision::GroundDecalSurface;
 use crate::decal::{project_decal, DecalFrame};
 use crate::net::{NetCommands, NetEntity, ObjectStore, Reputations, SelfPlayer};
+use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
 
 use super::click::clear;
 use super::{CombatFlash, Selection, SelectionRadius};
 use crate::creature_anim::Engaged;
 use crate::player::WorldCamera;
 
-/// The single, persistent ground-ring entity (spawned once, hidden until a target is set).
-#[derive(Component)]
-pub(super) struct SelectionRing;
+/// The single ring record (a resource since 0733 — the projection rides the effect stream; no
+/// entity, no mesh, no materials). `update_ring` rebuilds `verts` when the [`RingKey`] moves and
+/// re-resolves `color` every frame; `push_ring` copies the slice onto the stream tinted.
+#[derive(Resource, Default)]
+pub(super) struct RingState {
+    verts: Vec<EffectVertex>,
+    key: RingKey,
+    /// This frame's resolved tint (the selector's dword — or the combat flash's wave sample).
+    color: Color,
+    shown: bool,
+}
+
+/// The projection's rebuild inputs — a still target under a still camera costs a compare
+/// (0733 §5, the ShadowKey treatment; the old path re-projected every shown frame).
+#[derive(Default, PartialEq, Clone, Copy)]
+struct RingKey {
+    feet: Vec3,
+    radius: f32,
+    fade_angle: f32,
+    surfaces: usize,
+}
+
+/// The ring texture (the render-side residency gate withholds the draw until it loads).
+#[derive(Resource)]
+pub(super) struct RingAssets {
+    texture: Handle<Image>,
+}
 
 /// The reference's ground selection-circle texture (`Textures\UnitSelectTexture.blp`, wow-re
 /// selection-circle RE) — a white ring, sampled top-down, tinted + additively blended below.
@@ -110,28 +134,9 @@ impl Factions {
     }
 }
 
-/// The ring's prebuilt reaction materials (same texture/blend, different tint). [`update_ring`]
-/// swaps the ring's material handle between them as the resolved reaction changes — no per-frame
-/// material mutation, with one deliberate exception: the `flash` material's tint is rewritten each
-/// shown frame with the wave sample (the reference recolours its global every frame too).
-#[derive(Resource)]
-pub(super) struct RingMaterials {
-    hostile: Handle<StandardMaterial>,
-    unfriendly: Handle<StandardMaterial>,
-    neutral: Handle<StandardMaterial>,
-    friendly: Handle<StandardMaterial>,
-    player: Handle<StandardMaterial>,
-    dead: Handle<StandardMaterial>,
-    /// The party legs of the player path's `¬X∧¬Y` split (pale blue / pale green).
-    party: Handle<StandardMaterial>,
-    party_pvp: Handle<StandardMaterial>,
-    /// The combat-flash pulse — tint mutated per frame to [`CombatFlash::color`].
-    flash: Handle<StandardMaterial>,
-}
-
-/// The colour `GetSelectionCircleColor` resolves — the pure classification half of
-/// [`RingMaterials::pick`], split out so the branch logic (players vs NPCs, the `¬X∧¬Y` party
-/// split) is unit-testable without material handles.
+/// The colour `GetSelectionCircleColor` resolves — the pure classification half of the
+/// selector, split out so the branch logic (players vs NPCs, the `¬X∧¬Y` party split) is
+/// unit-testable.
 ///
 /// **This is the single source for BOTH surfaces the selector feeds** — the ground ring here and
 /// the overhead name (`nameplates.rs` fetches the same `vtable+0x2c`, decision 0156). It was a
@@ -219,75 +224,14 @@ pub(crate) fn ring_variant(
     }
 }
 
-impl RingMaterials {
-    /// The material for a resolved [`RingVariant`] (the handle-mapping half of the selector).
-    fn pick(
-        &self,
-        rank: u8,
-        is_player: bool,
-        is_dead: bool,
-        pvp: bool,
-        in_party: bool,
-    ) -> &Handle<StandardMaterial> {
-        match ring_variant(rank, is_player, is_dead, pvp, in_party) {
-            RingVariant::Hostile => &self.hostile,
-            RingVariant::Unfriendly => &self.unfriendly,
-            RingVariant::Neutral => &self.neutral,
-            RingVariant::Friendly => &self.friendly,
-            RingVariant::Player => &self.player,
-            RingVariant::Dead => &self.dead,
-            RingVariant::Party => &self.party,
-            RingVariant::PartyPvp => &self.party_pvp,
-        }
-    }
-}
-
-/// Spawn the one ring entity (hidden) and build its shared mesh + the reaction materials once.
-pub(super) fn setup_ring(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    asset_server: Res<AssetServer>,
-) {
-    let mesh = meshes.add(crate::decal::seed_mesh());
+/// Load the ring texture and seed the ring record. (The old path built 9 tinted
+/// `StandardMaterial` clones and a mesh asset here; the tint is per-vertex colour at push time
+/// now — the reference writes the selector's dword as every decal vertex's diffuse, which is
+/// exactly what the stream does.)
+pub(super) fn setup_ring(mut commands: Commands, asset_server: Res<AssetServer>) {
     let texture = asset_server.load::<Image>(RING_TEXTURE);
-    let mut tinted = |base_color| {
-        materials.add(StandardMaterial {
-            base_color,
-            base_color_texture: Some(texture.clone()),
-            // Unlit + additive (the reference's `GL_SRC_ALPHA/GL_ONE`): the ring glows on the ground
-            // regardless of time-of-day and never darkens it.
-            unlit: true,
-            alpha_mode: AlphaMode::Add,
-            cull_mode: None,
-            // Wins the depth test over the terrain it lies exactly on (see [`RING_DEPTH_BIAS`]).
-            depth_bias: RING_DEPTH_BIAS,
-            ..default()
-        })
-    };
-    let ring_mats = RingMaterials {
-        hostile: tinted(RING_HOSTILE),
-        unfriendly: tinted(RING_UNFRIENDLY),
-        neutral: tinted(RING_NEUTRAL),
-        friendly: tinted(RING_FRIENDLY),
-        player: tinted(RING_PLAYER),
-        dead: tinted(RING_DEAD),
-        party: tinted(RING_PARTY),
-        party_pvp: tinted(RING_PARTY_PVP),
-        // Seeded red (the wave's G=0 endpoint); update_ring rewrites the tint every flash frame.
-        flash: tinted(RING_HOSTILE),
-    };
-    commands.spawn((
-        SelectionRing,
-        Mesh3d(mesh),
-        MeshMaterial3d(ring_mats.neutral.clone()),
-        Transform::default(),
-        Visibility::Hidden,
-        // The projector mutates the mesh each frame and Bevy doesn't recompute an entity's `Aabb`
-        // on asset change — skip culling for this one tiny always-near-the-target mesh.
-        NoFrustumCulling,
-    ));
-    commands.insert_resource(ring_mats);
+    commands.insert_resource(RingAssets { texture });
+    commands.init_resource::<RingState>();
 }
 
 /// Startup (after the MPQ chain opens): load FactionTemplate.dbc for the reaction colour. On failure
@@ -319,9 +263,7 @@ pub(super) fn update_ring(
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
     flash: Res<CombatFlash>,
-    ring_mats: Res<RingMaterials>,
-    // The mesh + material stores, tupled into one param (Bevy caps function systems at 16).
-    mut assets: (ResMut<Assets<Mesh>>, ResMut<Assets<StandardMaterial>>),
+    mut state: ResMut<RingState>,
     camera: Query<&GlobalTransform, With<WorldCamera>>,
     surfaces: Query<&Collider, With<GroundDecalSurface>>,
     // The last camera-relative fade angle, kept across frames so a degenerate (straight-down) camera
@@ -335,26 +277,23 @@ pub(super) fn update_ring(
     // second kill (the bug this replaces).
     mut last_vitals: Local<Option<(u64, bool)>>,
     net_commands: Res<NetCommands>,
-    // `Without<SelectionRing>` makes this disjoint from the ring's own `&mut Transform` below (no access
-    // conflict); net entities are roots, so their `Transform` is already world-space + current this frame
-    // (net motion ran in `WorldStage::Net`), avoiding the 1-frame lag a `GlobalTransform` read would add.
-    // Tupled into one param (the 16-param ceiling): `.0` the target's own components; `.1` the
-    // mounted footprint source — while a mount model is attached, the ring reads the MOUNT's
-    // Stand-box footprint at the mount's rendered scale (VERIFIED wow-re `mount-composition.md`:
-    // the `+0xcf0` ring cache recomputes from the mount model's Stand box, `0x60ce70` tail →
-    // `0x60aee0`; the scale law is B3 — `SCALE_X × CreatureDisplayInfo.creatureModelScale`, and
-    // the child's `NetEntity.scale` carries exactly the CDI column).
+    // Net entities are roots, so their `Transform` is already world-space + current this frame
+    // (net motion ran in `WorldStage::Net`), avoiding the 1-frame lag a `GlobalTransform` read
+    // would add. Tupled into one param (the 16-param ceiling): `.0` the target's own components;
+    // `.1` the mounted footprint source — while a mount model is attached, the ring reads the
+    // MOUNT's Stand-box footprint at the mount's rendered scale (VERIFIED wow-re
+    // `mount-composition.md`: the `+0xcf0` ring cache recomputes from the mount model's Stand
+    // box, `0x60ce70` tail → `0x60aee0`; the scale law is B3 —
+    // `SCALE_X × CreatureDisplayInfo.creatureModelScale`, and the child's `NetEntity.scale`
+    // carries exactly the CDI column).
     targets: (
-        Query<
-            (
-                &Transform,
-                Option<&SelectionRadius>,
-                Option<&ObjectStore>,
-                Option<&NetEntity>,
-                Option<&crate::entities::mount::MountChild>,
-            ),
-            Without<SelectionRing>,
-        >,
+        Query<(
+            &Transform,
+            Option<&SelectionRadius>,
+            Option<&ObjectStore>,
+            Option<&NetEntity>,
+            Option<&crate::entities::mount::MountChild>,
+        )>,
         Query<(&NetEntity, Option<&SelectionRadius>), With<crate::entities::mount::MountBody>>,
         // The party roster — the selector's 4-slot guid table (the party ring colours).
         Res<crate::ui_party::GroupState>,
@@ -363,19 +302,8 @@ pub(super) fn update_ring(
     // Are *we* mid auto-attack (server-echoed [`Engaged`])? Both clear paths below end the swing
     // then — the reference's death/teardown edges stop the attack along with the selection.
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
-    mut ring: Query<
-        (
-            &mut Transform,
-            &mut Visibility,
-            &mut MeshMaterial3d<StandardMaterial>,
-            &Mesh3d,
-        ),
-        With<SelectionRing>,
-    >,
 ) {
-    let Ok((mut ring_tf, mut vis, mut ring_mat, ring_mesh)) = ring.single_mut() else {
-        return;
-    };
+    let state = &mut *state;
     let hide = match selection.target {
         None => {
             // No target: drop the per-target trackers, so re-selecting the *same* guid later is a
@@ -398,19 +326,24 @@ pub(super) fn update_ring(
                 };
                 let local = local.max(0.05);
                 let radius = local * (unit.scale.x * mount_scale).max(0.01);
-                // The mesh is built in feet-relative world axes (yards); the transform only places it.
-                ring_tf.translation = unit.translation;
-                ring_tf.scale = Vec3::ONE;
-                ring_tf.rotation = Quat::IDENTITY;
                 *fade_angle = ring_fade_angle(&camera).unwrap_or(*fade_angle);
-                let projected = project_ring(
-                    &mut assets.0,
-                    ring_mesh,
-                    &surfaces,
-                    unit.translation,
+                // The rebuild gate (0733 §5): a still target under a still camera keeps the
+                // cached projection — the old path re-projected every shown frame.
+                let key = RingKey {
+                    feet: unit.translation,
                     radius,
-                    *fade_angle,
-                );
+                    fade_angle: *fade_angle,
+                    surfaces: surfaces.iter().count(),
+                };
+                let projected = if state.shown && key == state.key {
+                    !state.verts.is_empty()
+                } else {
+                    state.verts.clear();
+                    state.key = key;
+                    project_ring(&mut state.verts, &surfaces, unit.translation, radius, {
+                        *fade_angle
+                    })
+                };
                 let rank = ring_reaction(
                     factions.as_deref(),
                     &reputations,
@@ -444,7 +377,8 @@ pub(super) fn update_ring(
                 if died {
                     clear(&mut selection, &net_commands, !engaged.is_empty());
                     *last_vitals = None;
-                    *vis = Visibility::Hidden;
+                    state.shown = false;
+                    state.verts.clear();
                     return;
                 }
                 // One line per target change — the whole colour decision, so a wrong ring colour in
@@ -463,20 +397,15 @@ pub(super) fn update_ring(
                         if is_dead { " [dead→gray]" } else { "" },
                     );
                 }
-                // The selector's first-priority branch (`0x605960`, byte order): the combat flash
-                // outranks player/dead/reaction. Its material tint is rewritten with this frame's
-                // wave sample — the module's one per-frame material mutation.
-                let want = if flash.unit == Some(target) {
-                    if let Some(mat) = assets.1.get_mut(&ring_mats.flash) {
-                        mat.base_color = flash.color;
-                    }
-                    &ring_mats.flash
+                // The selector's first-priority branch (`0x605960`, byte order): the combat
+                // flash outranks player/dead/reaction. The tint is a per-vertex colour at push
+                // time now, so the flash's per-frame wave sample costs a resource write — the
+                // old path's one material mutation is gone.
+                state.color = if flash.unit == Some(target) {
+                    flash.color
                 } else {
-                    ring_mats.pick(rank, is_player, is_dead, pvp, in_party)
+                    ring_variant(rank, is_player, is_dead, pvp, in_party).color()
                 };
-                if ring_mat.0 != *want {
-                    ring_mat.0 = want.clone();
-                }
                 // No receiving surface in the box (mid-air, unstreamed tile) → hide, the reference's
                 // own no-ground gate (`0x6d74b5`: the whole draw is skipped).
                 !projected
@@ -494,11 +423,10 @@ pub(super) fn update_ring(
             }
         },
     };
-    *vis = if hide {
-        Visibility::Hidden
-    } else {
-        Visibility::Visible
-    };
+    state.shown = !hide;
+    if hide {
+        state.verts.clear();
+    }
 }
 
 /// The ring fade's camera-relative angle θ: the texture's **faded side always points away from the
@@ -535,8 +463,7 @@ fn ring_fade_angle(camera: &Query<&GlobalTransform, With<WorldCamera>>) -> Optio
 /// the gather O(log n + k). Returns `false` when nothing was gathered (no ground in the box) —
 /// the caller hides the ring, the reference's no-ground gate.
 fn project_ring(
-    meshes: &mut Assets<Mesh>,
-    ring_mesh: &Mesh3d,
+    out: &mut Vec<EffectVertex>,
     surfaces: &Query<&Collider, With<GroundDecalSurface>>,
     feet: Vec3,
     radius: f32,
@@ -556,13 +483,52 @@ fn project_ring(
         max_y: vert,
     };
     project_decal(
-        meshes,
-        ring_mesh,
+        out,
         surfaces,
         &frame,
         |p| ((vert - p.y.abs()) / (1.5 * radius)).clamp(0.0, 1.0),
         |x, z| frame.rect_uv(x, z),
     )
+}
+
+/// Push the shown ring's cached projection onto the stream, tinted with this frame's resolved
+/// colour — one Add draw at the ring rung (the top decal, over the blob shadows), fog off.
+pub(super) fn push_ring(
+    assets: Option<Res<RingAssets>>,
+    state: Option<Res<RingState>>,
+    cam: Query<Entity, With<WorldCamera>>,
+    mut quads: ResMut<EffectQuads>,
+) {
+    let (Some(assets), Some(state)) = (assets, state) else {
+        return;
+    };
+    let Ok(cam) = cam.single() else { return };
+    if !state.shown || state.verts.is_empty() {
+        return;
+    }
+    let tint = state.color.to_linear();
+    let start = quads.begin();
+    quads.verts.extend(state.verts.iter().map(|v| EffectVertex {
+        pos: v.pos,
+        uv: v.uv,
+        // The selector's dword as every vertex's diffuse — the reference's own wiring
+        // (`0x605960` → vertex colour, alpha = the vertical fade the projector baked).
+        color: [tint.red, tint.green, tint.blue, v.color[3]],
+    }));
+    quads.commit_tris(
+        start,
+        EffectDrawSpec {
+            cam,
+            texture: assets.texture.id(),
+            blend: EffectBlend::Add,
+            fog: EffectFog::Off,
+            anchor: state.key.feet,
+            bias: RING_DEPTH_BIAS,
+            raster_bias: RING_DEPTH_BIAS as i32,
+            main_entity: Entity::PLACEHOLDER,
+            light: None,
+        },
+    );
 }
 
 /// The target's reaction toward our player — the direction the reference colours by (its nameplate/ring

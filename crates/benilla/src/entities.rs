@@ -415,11 +415,13 @@ impl Plugin for EntitiesPlugin {
                     .after(WorldStage::Net),
             )
             // The ground-fx decal placement (`crate::ground_fx`): rides the BillboardPlace set —
-            // post-propagation (the effect rig's joints carry THIS frame's pose), pre-visibility —
-            // the same slot the following cards place in, with the same direct-global write.
+            // post-propagation (the effect rig's joints carry THIS frame's pose) — after the
+            // stream clear, since it pushes its cached projection into this frame's stream.
             .add_systems(
                 PostUpdate,
-                crate::ground_fx::update_ground_fx_decals.in_set(crate::billboard::BillboardPlace),
+                crate::ground_fx::update_ground_fx_decals
+                    .in_set(crate::billboard::BillboardPlace)
+                    .after(crate::particles::buffer::begin_effect_frame),
             )
             // Terrain conform (decisions 0482/0486, the byte law of wow-re `terrain-tilt.md`):
             // reads each flagged unit's Update-final transform, writes its conform node's

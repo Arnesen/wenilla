@@ -30,7 +30,7 @@ use crate::view::ViewDistance;
 /// The shared light, std430-packed as contiguous `vec4<f32>` rows. All-`vec4` so std430 == std140
 /// (each row 16-aligned, no stride surprises). The row order is the canonical layout every shader
 /// bound at `storage(90)` mirrors as a prefix — the WGSL structs in `wow_model.wgsl`/`terrain.wgsl`/
-/// `wow_particle.wgsl`. (`liquid.wgsl`/`wdl.wgsl` reuse the field NAMES but bind their own
+/// `wow_effect.wgsl`. (`liquid.wgsl`/`wdl.wgsl` reuse the field NAMES but bind their own
 /// per-material uniforms fed by `apply_wow_lighting` — editing this layout does NOT reach them.)
 ///   0 light_ambient (w=Mod2x 1.0) · 1 light_diffuse (w=clamp on) · 2 light_sun (w=dir/SH enable) ·
 ///   3 light_spec (w=terrain shininess 20) · 4 fog_color (w=enable) · 5 fog_params (x=start y=end w=farclip) ·

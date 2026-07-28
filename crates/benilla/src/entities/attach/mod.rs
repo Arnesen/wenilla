@@ -28,7 +28,6 @@ use crate::lighting::SharedLightBuffer;
 use crate::model_fade::{FadeMaterials, PendingAppearFade};
 use crate::net::{NetEntity, ObjectStore};
 use crate::particles;
-use crate::particles::WowParticleMaterial;
 use crate::player::CameraPivot;
 use crate::target::SelectionRadius;
 use crate::terrain::WowModelMaterial;
@@ -278,8 +277,7 @@ pub(super) fn attach_entity_visuals(
         ResMut<Assets<WowModelMaterial>>,
         ResMut<EntityMaterials>,
     ),
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
+    meshes: Res<Assets<Mesh>>,
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
@@ -842,7 +840,8 @@ pub(super) fn attach_entity_visuals(
                         };
                         child.insert((
                             MeshTag(tag),
-                            InteriorLit::new(entity, lit_kind, mat.clone()),
+                            InteriorLit::new(lit_kind, mat.clone()),
+                            crate::interior::ClassifiedBy(entity),
                         ));
                     }
                     // The batch's **animated material alpha** (the verified combine's runtime half,
@@ -974,9 +973,7 @@ pub(super) fn attach_entity_visuals(
             // same rig identity) — the kobold's candle flame follows the head through the crouch
             // instead of floating at the rest-pose height. GameObjects/boneless models keep
             // whole-entity follow (no joints; their bones hold rest pose anyway).
-            // (Effects need the shared light buffer for the scene fog — decision 0155. It exists
-            // whenever parts were built, since every model material already binds it.)
-            if let Some(light) = shared_light.as_deref() {
+            {
                 for em in emitters {
                     let owner = skin
                         .as_ref()
@@ -984,9 +981,6 @@ pub(super) fn attach_entity_visuals(
                         .map_or((entity, [0.0; 3]), |&j| (j, em.bone_pivot));
                     particles::spawn_emitter(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        light,
                         em,
                         placement,
                         Some(owner),
@@ -1013,7 +1007,7 @@ pub(super) fn attach_entity_visuals(
             });
             // Ribbon trails (wisp streamers, trailing quest-object crystals) — the same host-bone
             // ride as the emitters; the trail self-despawns when its owner joint/entity goes.
-            if let Some(light) = shared_light.as_deref() {
+            {
                 for rb in dm.map(|d| d.ribbons.as_slice()).unwrap_or_default() {
                     let (owner, use_pivot) = skin
                         .as_ref()
@@ -1024,9 +1018,6 @@ pub(super) fn attach_entity_visuals(
                     // keying, which body models don't author — so the running gait is immaterial.
                     crate::ribbons::spawn_ribbon(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        light,
                         rb,
                         owner,
                         use_pivot,

@@ -56,7 +56,7 @@ pub enum ParticleShape {
 /// How a particle batch blends (file `blendingType` @ +0x28 = the M2/EGxBlend enum). Additive is the
 /// flame/glow case (the campfire is `4`); the rest fold to alpha for now (mod/mod2x are rare for the
 /// props we render and will get their own path when a model needs them).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParticleBlend {
     /// `3` NoAlphaAdd / `4` Add — `(SRC_ALPHA, ONE)`. Flames, glows, embers. No depth write/sort.
     Add,

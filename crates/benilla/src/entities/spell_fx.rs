@@ -53,7 +53,6 @@ use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, SpellKitFx};
 use crate::debug_panel::{ModelKind, ModelPart};
 use crate::model_render::m2_url;
 use crate::particles;
-use crate::particles::WowParticleMaterial;
 use crate::terrain::WowModelMaterial;
 
 use super::{BoneAttach, DisplayModel, EntityPart, ModelHandle};
@@ -140,30 +139,9 @@ fn fx_part_material(
     handle
 }
 
-/// Resolve a **ground-decal** part's material ([`crate::ground_fx`]): always a per-instance clone
-/// — it carries the decal depth bias (the projected mesh is coplanar with the drawn ground; the
-/// ring's `RING_DEPTH_BIAS` rationale) — with the [`fx_part_material`] tint-clone contract folded
-/// in when the part's M2Color RGB animates.
-fn ground_part_material(
-    part: &EntityPart,
-    now: f32,
-    wow_materials: &mut Assets<WowModelMaterial>,
-    tint_reg: &mut FxTintAnims,
-) -> Handle<WowModelMaterial> {
-    let Some(mut mat) = wow_materials.get(part.material.id()).cloned() else {
-        return part.material.clone(); // shared material not built yet — parts were checked ready
-    };
-    mat.base.depth_bias = crate::ground_fx::GROUND_FX_DEPTH_BIAS;
-    if let Some(anim) = &part.rgb_anim {
-        let t0 = anim.sample(0.0);
-        mat.extension.tint = Vec4::new(t0[0], t0[1], t0[2], 1.0);
-    }
-    let handle = wow_materials.add(mat);
-    if let Some(anim) = &part.rgb_anim {
-        tint_reg.0.insert(handle.id(), (anim.clone(), now));
-    }
-    handle
-}
+// (The ground-decal material clone died with 0733: a ground-quad part's draw identity —
+// texture, blend, fog policy, RGB/alpha loops — rides its `GroundFxDecal` record and the
+// effect stream's per-vertex tint instead of a per-instance `WowModelMaterial`.)
 
 /// Drive the `fxview` capture fixture (see [`crate::capture::FxViewRequest`]) — the effect-
 /// viewer instrument: once the capture driver arms it (scene settled), spawn a root at the
@@ -179,13 +157,10 @@ pub(crate) fn drive_fx_view(
     fx: Option<ResMut<SpellFx>>,
     asset_server: Res<AssetServer>,
     time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
-    light: Option<Res<crate::lighting::SharedLightBuffer>>,
     spatial: avian3d::prelude::SpatialQuery,
     mut transforms: Query<&mut Transform>,
 ) {
@@ -200,7 +175,6 @@ pub(crate) fn drive_fx_view(
         commands.init_resource::<SpellFx>();
         return;
     };
-    let Some(light) = light else { return };
     let root = *state.root.get_or_insert_with(|| {
         let mut pos = benilla_assets::coords::wow_to_bevy(crate::capture::FXVIEW_POS);
         // `WOW_FX_DISPLAY`: the UNIT lane. Spawn the live component set a streamed creature gets
@@ -313,13 +287,10 @@ pub(crate) fn drive_fx_view(
             time.elapsed_secs(),
             true, // the fixture plants at a world point — ground quads decal onto the terrain
             Some(root), // the fixture previews kit effects, which are attached models
-            &mut meshes,
-            &mut particle_materials,
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
             &mut palettes,
-            &light,
             None, // the fixture previews a kit effect at its default (first) clip
         ) {
             state.attached_at = Some(time.elapsed_secs());
@@ -351,27 +322,24 @@ pub(super) fn attach_effect_visuals(
     now: f32,
     ground_anchor: bool,
     attach: Option<Entity>,
-    meshes: &mut Assets<Mesh>,
-    particle_materials: &mut Assets<WowParticleMaterial>,
     wow_materials: &mut Assets<WowModelMaterial>,
     tint_reg: &mut FxTintAnims,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
     palettes: &mut crate::rig_palette::RigPalettes,
-    light: &crate::lighting::SharedLightBuffer,
     preferred_anim: Option<u16>,
 ) -> bool {
     let Some(parts) = dm.parts.as_ref() else {
         return false; // still loading — attach on a later pass
     };
     let is_ground_decal = |part: &EntityPart| ground_anchor && part.ground_quad.is_some();
-    // Per-part materials for THIS instance (a tint clone where the RGB animates; a biased decal
-    // clone for ground-quad parts), resolved before the child-spawn closure so the material
-    // assets aren't borrowed inside it.
+    // Per-part materials for THIS instance (a tint clone where the RGB animates), resolved
+    // before the child-spawn closure so the material assets aren't borrowed inside it.
+    // Ground-decal parts keep the shared handle unused — their identity rides the decal record.
     let part_materials: Vec<Handle<WowModelMaterial>> = parts
         .iter()
         .map(|p| {
             if is_ground_decal(p) {
-                ground_part_material(p, now, wow_materials, tint_reg)
+                p.material.clone()
             } else {
                 fx_part_material(p, now, wow_materials, tint_reg)
             }
@@ -480,10 +448,11 @@ pub(super) fn attach_effect_visuals(
     }
     // Ground-plane quad parts of a ground-anchored instance → projected surface decals
     // ([`crate::ground_fx`]): each rides its own joint (posed through the bone's inverse
-    // bindpose, exactly the skinned-vertex path) and carries the part's material animation
-    // exactly like a mesh child would.
+    // bindpose, exactly the skinned-vertex path). The part's draw identity — texture, blend,
+    // the shared material's baked `0x70baf0` fog policy, its RGB loop — rides the decal record
+    // (0733); the alpha loop stays a `MatAnim` rider whose `current` the push samples.
     let binds = dm.inverse_bindposes.as_ref().and_then(|h| ibps.get(h));
-    for (part, material) in parts.iter().zip(&part_materials) {
+    for part in parts.iter() {
         let Some(quad) = part.ground_quad.filter(|_| is_ground_decal(part)) else {
             continue;
         };
@@ -497,25 +466,31 @@ pub(super) fn attach_effect_visuals(
             ),
             None => (root, Mat4::IDENTITY), // boneless model: the quad rides the instance root
         };
+        let (texture, fog) = match wow_materials.get(part.material.id()) {
+            Some(mat) => (
+                mat.base.base_color_texture.clone(),
+                crate::particles::buffer::EffectFog::from_model_policy(
+                    (mat.extension.clutter_fade.z as u32 >> 4) & 7,
+                ),
+            ),
+            None => (None, crate::particles::buffer::EffectFog::Scene),
+        };
+        let Some(texture) = texture else {
+            continue; // texture-less ground quad: nothing the stream could draw
+        };
         let decal = crate::ground_fx::spawn_ground_fx_decal(
             commands,
-            meshes,
-            material.clone(),
+            texture,
+            crate::particles::buffer::EffectBlend::from_model(part.blend),
+            fog,
+            part.rgb_anim.as_ref().map(|a| (a.clone(), now)),
             &quad,
             joint,
             ibp,
         );
-        let mut spawned = commands.entity(decal);
-        spawned.insert(ModelPart {
-            kind: ModelKind::Creature,
-            blend: part.blend,
-        });
         if let Some(anim) = &part.alpha_anim {
             let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
-            spawned.insert((
-                bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
-                mat_anim,
-            ));
+            commands.entity(decal).insert(mat_anim);
         }
     }
     for em in &dm.emitters {
@@ -524,9 +499,6 @@ pub(super) fn attach_effect_visuals(
             .map_or((root, [0.0; 3]), |&j| (j, em.bone_pivot));
         particles::spawn_emitter(
             commands,
-            meshes,
-            particle_materials,
-            light,
             em,
             Transform::IDENTITY,
             Some(owner),
@@ -551,9 +523,6 @@ pub(super) fn attach_effect_visuals(
             .map_or((root, false), |&j| (j, true));
         crate::ribbons::spawn_ribbon(
             commands,
-            meshes,
-            particle_materials,
-            light,
             rb,
             owner,
             use_pivot,
@@ -752,15 +721,12 @@ pub(super) fn attach_spell_fx(
     mut units: Query<(Entity, &mut FxAttached, Option<&BoneAttach>)>,
     fx: Option<Res<SpellFx>>,
     time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
-    shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
-    let (Some(fx), Some(light)) = (fx, shared_light) else {
+    let Some(fx) = fx else {
         return;
     };
     let now = time.elapsed_secs();
@@ -826,13 +792,10 @@ pub(super) fn attach_spell_fx(
                 now,
                 ground_anchor,
                 Some(root), // a kit instance on a unit is an attached model
-                &mut meshes,
-                &mut particle_materials,
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,
                 &mut palettes,
-                &light,
                 None, // an attach-point kit effect runs its default (first) clip
             );
             inst.root = Some(root);

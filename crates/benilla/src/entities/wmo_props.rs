@@ -57,7 +57,7 @@ use bevy::prelude::*;
 use crate::lighting::{PropProbeSlot, PropProbes, SharedLightBuffer};
 use crate::model_render::{m2_url, ShadeSel};
 use crate::net::NetEntity;
-use crate::particles::{self, WowParticleMaterial};
+use crate::particles;
 use crate::terrain::WowModelMaterial;
 use crate::terrain_stream::{
     build_collider_task, fold_interior_probe, m2_fade, placement_collider_data, point_light,
@@ -189,8 +189,6 @@ pub(super) fn spawn_wmo_gameobject_props(
     mut entity_mats: ResMut<EntityMaterials>,
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     mut probes: ResMut<PropProbes>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
@@ -312,9 +310,6 @@ pub(super) fn spawn_wmo_gameobject_props(
                         .map_or((root, [0.0; 3]), |&j| (j, em.bone_pivot));
                     if let Some(e) = particles::spawn_emitter(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        &shared_light,
                         em,
                         placement,
                         Some(owner),
@@ -340,9 +335,6 @@ pub(super) fn spawn_wmo_gameobject_props(
                         .map_or((root, false), |&j| (j, true));
                     if crate::ribbons::spawn_ribbon(
                         &mut commands,
-                        &mut meshes,
-                        &mut particle_materials,
-                        &shared_light,
                         rb,
                         owner,
                         use_pivot,

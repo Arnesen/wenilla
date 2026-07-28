@@ -7,10 +7,11 @@ use bevy::prelude::*;
 
 use crate::player::WorldCamera;
 
+use super::buffer::{EffectDrawSpec, EffectFog, EffectLightOverride, EffectQuads};
 use super::quads::{expand_quads, CamBasis, DrawFrame};
 use super::{
-    accumulate_emission, clear_particle_mesh, emit_local, next_u32, rand01, rand_s11, ChildDraw,
-    ChildEmitter, EmitterFade, Particle, ParticleEmitter, ParticleTuning, MAX_PARTICLES,
+    accumulate_emission, emit_local, next_u32, rand01, rand_s11, ChildDraw, ChildEmitter,
+    EmitterFade, Particle, ParticleEmitter, ParticleTuning, MAX_PARTICLES,
 };
 
 /// The emitter-constant inputs of one integrator step ([`integrate_particle`]).
@@ -161,7 +162,8 @@ fn drive_child(
     }
 }
 
-/// Per-frame: emit, integrate, and rebuild each emitter's billboard mesh.
+/// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
+/// stream ([`super::buffer::EffectQuads`]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn simulate_particles(
     time: Res<Time>,
@@ -169,12 +171,12 @@ pub(super) fn simulate_particles(
     // The far-clip wall — the emitter draw-set gate's depth bound (see the gate below).
     view: Res<crate::view::ViewDistance>,
     mut commands: Commands,
-    cam: Query<(&GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
+    cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
     // both `&mut GlobalTransform` queries below.
     transforms: Query<&GlobalTransform, (Without<ParticleEmitter>, Without<ChildDraw>)>,
-    // CHILD draw entities (world-root meshes like the parent's own): anchored + published
-    // exactly like the parent entity each frame.
+    // MODEL-particle instance entities ([`super::model`]): the draw-set gate hides them with
+    // their frozen emitter.
     mut child_draws: Query<
         (&mut Transform, &mut GlobalTransform, &mut Visibility),
         (
@@ -184,7 +186,7 @@ pub(super) fn simulate_particles(
         ),
     >,
     images: Res<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut quads: ResMut<EffectQuads>,
     // The ground-snap probe (file 0x2000 births): terrain + WMO/doodad geometry, the walking
     // collision audience.
     spatial: SpatialQuery,
@@ -197,8 +199,8 @@ pub(super) fn simulate_particles(
             &mut Transform,
             &mut GlobalTransform,
             Option<&EmitterFade>,
-            &mut Visibility,
             Option<&RenderLayers>,
+            Option<&EffectLightOverride>,
         ),
         Without<WorldCamera>,
     >,
@@ -207,7 +209,7 @@ pub(super) fn simulate_particles(
     // rule. `Without<ParticleEmitter>`/`Without<ChildDraw>` keep the read provably disjoint from
     // the `&mut GlobalTransform` writes above.
     booth_cams: Query<
-        (&GlobalTransform, &RenderLayers),
+        (Entity, &GlobalTransform, &RenderLayers),
         (
             With<Camera3d>,
             Without<WorldCamera>,
@@ -222,7 +224,7 @@ pub(super) fn simulate_particles(
     // `$WOW_PARTICLE_DEPTHDUMP`'s frame counter (see [`super::depthdump`]); inert without the env.
     mut dump_count: Local<u32>,
 ) {
-    let Ok((cam_tf, frustum, camera, projection)) = cam.single() else {
+    let Ok((world_cam, cam_tf, frustum, camera, projection)) = cam.single() else {
         return;
     };
     // Clamp dt so a load hitch doesn't fling every particle out of existence in one step.
@@ -236,43 +238,30 @@ pub(super) fn simulate_particles(
     let (_, cam_rot, _) = cam_tf.to_scale_rotation_translation();
     let cam_right = cam_rot * Vec3::X;
     let cam_up = cam_rot * Vec3::Y;
-    // Toward the camera: a camera-facing billboard's normal is the camera's BACKWARD axis, and
-    // `right × up` = X × Y = +Z local, which is backward in Bevy (a camera looks down −Z). The
-    // reverse product — what this used to be, under a comment claiming "toward the camera" —
-    // points down the view direction instead. Inert either way today (`wow_particle.wgsl` reads no
-    // normal, and the material is unlit + never backface-culled), so this buys honesty in the
-    // vertex data rather than a pixel; a lit particle lane would have inherited the sign error.
-    let face_normal = cam_right.cross(cam_up).normalize_or_zero();
     // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
     // doodad's own cull along, so an emitter and its owner cross the wall together.
     let cam_fwd = Vec3::from(cam_tf.forward());
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
 
-    for (entity, mut emitter, mut entity_tf, mut entity_global, fade, mut vis, layers) in
+    for (entity, mut emitter, mut entity_tf, mut entity_global, fade, layers, light_override) in
         &mut emitters
     {
-        // The camera this emitter's quads face + its emission-LOD distance origin: a booth-layered
-        // emitter uses its booth's camera (decision 0539 §5 — the glue scenes' braziers, which the
-        // WORLD camera would billboard sideways and LOD from a nonsense distance); everything else
-        // the world camera.
+        // The camera this emitter's quads face + its emission-LOD distance origin — and, in the
+        // shared lane, the view its draw record targets: a booth-layered emitter uses its
+        // booth's camera (decision 0539 §5 — the glue scenes' braziers, which the WORLD camera
+        // would billboard sideways and LOD from a nonsense distance); everything else the world
+        // camera.
         let booth = layers
             .filter(|l| !l.intersects(&RenderLayers::default()))
-            .and_then(|l| booth_cams.iter().find(|(_, cl)| cl.intersects(l)));
+            .and_then(|l| booth_cams.iter().find(|(_, _, cl)| cl.intersects(l)));
         let is_booth = booth.is_some();
-        let (e_cam_pos, e_right, e_up, e_normal) = match booth {
-            Some((tf, _)) => {
+        let (draw_cam, e_cam_pos, e_right, e_up) = match booth {
+            Some((cam_entity, tf, _)) => {
                 let (_, rot, _) = tf.to_scale_rotation_translation();
-                let right = rot * Vec3::X;
-                let up = rot * Vec3::Y;
-                (
-                    tf.translation(),
-                    right,
-                    up,
-                    right.cross(up).normalize_or_zero(), // toward the booth camera — see above
-                )
+                (cam_entity, tf.translation(), rot * Vec3::X, rot * Vec3::Y)
             }
-            None => (cam_pos, cam_right, cam_up, face_normal),
+            None => (world_cam, cam_pos, cam_right, cam_up),
         };
         // Draw-set gate (byte-verified, decision 0171): the reference ticks an emitter only when
         // its owner doodad is in the frame's scene worklist — admission = the frustum sphere test
@@ -309,15 +298,11 @@ pub(super) fn simulate_particles(
                 ),
             );
             if !in_set {
-                if *vis != Visibility::Hidden {
-                    *vis = Visibility::Hidden;
-                    // Child + model-instance draw entities mirror the gate (frozen with the
-                    // parent).
-                    for c in &emitter.children {
-                        if let Ok((_, _, mut cv)) = child_draws.get_mut(c.entity) {
-                            *cv = Visibility::Hidden;
-                        }
-                    }
+                // Frozen: the pool writes no quads this frame (the shared stream is cleared
+                // per frame, so "not pushed" IS "not drawn"); model-instance entities mirror
+                // the gate on its edge, as the old entity-visibility flip did.
+                if !emitter.gated {
+                    emitter.gated = true;
                     for slot in &emitter.model_instances {
                         for (e, _) in &slot.meshes {
                             if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
@@ -328,9 +313,7 @@ pub(super) fn simulate_particles(
                 }
                 continue;
             }
-            if *vis != Visibility::Inherited {
-                *vis = Visibility::Inherited;
-            }
+            emitter.gated = false;
         } else if !is_booth && !emitter.draining {
             // ENTITY-owned emitters (creatures, GameObjects, spell kits, WMO-prop deck lanterns)
             // carry no `EmitterFade`, and the premise that excused them — "the population is
@@ -361,13 +344,8 @@ pub(super) fn simulate_particles(
             };
             if let Some(at) = subject {
                 if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, at, 0.0) {
-                    if *vis != Visibility::Hidden {
-                        *vis = Visibility::Hidden;
-                        for c in &emitter.children {
-                            if let Ok((_, _, mut cv)) = child_draws.get_mut(c.entity) {
-                                *cv = Visibility::Hidden;
-                            }
-                        }
+                    if !emitter.gated {
+                        emitter.gated = true;
                         for slot in &emitter.model_instances {
                             for (e, _) in &slot.meshes {
                                 if let Ok((_, _, mut cv)) = child_draws.get_mut(*e) {
@@ -378,9 +356,7 @@ pub(super) fn simulate_particles(
                     }
                     continue;
                 }
-                if *vis != Visibility::Inherited {
-                    *vis = Visibility::Inherited;
-                }
+                emitter.gated = false;
             }
         }
         let ParticleEmitter {
@@ -402,13 +378,13 @@ pub(super) fn simulate_particles(
             host,
             seq,
             rng,
-            owner_reach: _, // a draw-order rung, baked into the material at spawn
-            mesh,
+            owner_reach,
             texture,
             recursion: _,
             children,
             geometry: _,
             model_instances,
+            gated: _,
         } = &mut *emitter;
         *age += dt;
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
@@ -431,9 +407,6 @@ pub(super) fn simulate_particles(
             }
         }
         if *draining && particles.is_empty() && children.iter().all(|c| c.particles.is_empty()) {
-            for c in children.iter() {
-                commands.entity(c.entity).despawn();
-            }
             for slot in model_instances.iter() {
                 for (e, _) in &slot.meshes {
                     commands.entity(*e).despawn();
@@ -734,23 +707,23 @@ pub(super) fn simulate_particles(
                 .retain_mut(|p| integrate_particle(p, &c_env));
         }
 
-        // 3. Expand each pool into its billboard mesh ([`expand_quads`]) — per pool, only once
-        //    its texture is resident. While one streams (or failed to decode), that mesh draws
-        //    nothing rather than flash the engine fallback through the additive blend.
-        // The cloud's anchor: the emitter's live position. The entity transform carries it (and
-        // the mesh verts are relative to it) so the transparent pass sorts this cloud at a real
-        // depth — see the note at the vertex push in `expand_quads`.
+        // 3. Expand each pool into the shared effect-quad stream — per pool, only once its
+        //    texture is resident. While one streams (or failed to decode), the pool pushes
+        //    nothing rather than flash the engine fallback through the additive blend. An idle
+        //    pool pushes nothing and commits nothing — the old "don't rewrite an already-empty
+        //    mesh" guard is now the structure itself.
+        // The cloud's anchor: the emitter's live position — the draw record's SORT point (the
+        // transparent-phase depth this cloud takes; see `super::buffer`). Still published to
+        // the entity transform: the census probe and phase instruments read the anchor there.
         let anchor = if anchored {
             *anchor_pos
         } else {
             placement.translation
         };
         entity_tf.translation = anchor;
-        // Propagation already ran this frame (we're post-palette in PostUpdate) — publish the
-        // anchor to the rendered GlobalTransform directly, or the cloud draws at LAST frame's
-        // anchor: one frame × 20 yd/s detached the Shadow Bolt's puff cloud visibly behind the
-        // skull (the same exactness rule as `face_billboards`; emitter entities live at the
-        // world root, so the direct write is exact).
+        // Post-propagation frame (we're post-palette in PostUpdate) — publish directly so any
+        // same-frame reader sees THIS frame's anchor (the `face_billboards` exactness rule;
+        // emitter entities live at the world root, so the direct write is exact).
         *entity_global = GlobalTransform::from(*entity_tf);
         let frame = DrawFrame {
             anchored,
@@ -760,9 +733,20 @@ pub(super) fn simulate_particles(
         let cam = CamBasis {
             right: e_right,
             up: e_up,
-            face_normal: e_normal,
         };
-        // `$WOW_PARTICLE_DEPTHDUMP` (B16): the depth numbers this pool brings to the compare.
+        // A GEOMETRY (model-particle) emitter never draws quads — the reference's render
+        // dispatch skips the whole quad path when the model mode is on; its instances
+        // render via [`super::model::update_model_particles`].
+        let want_quads = def.geometry_model.is_none() && images.contains(&*texture);
+        // Every effect of one model takes the SAME rung (0719/0721) — computed here per frame,
+        // where it used to be baked into the material's `depth_bias` at spawn.
+        let bias = super::owner_last_bias(*owner_reach);
+        let start = quads.begin();
+        if want_quads && !particles.is_empty() {
+            expand_quads(def, particles, &frame, placement, &cam, &mut quads.verts);
+        }
+        // `$WOW_PARTICLE_DEPTHDUMP` (B16): the depth numbers this pool brings to the compare —
+        // now over the quads THIS frame just wrote (the exact vertices the draw will consume).
         // Booth emitters are skipped — their pixels belong to a booth camera's target, not the
         // world depth buffer `WOW_DEPTH` reads.
         if let Some(fidx) = dump_frame {
@@ -783,36 +767,54 @@ pub(super) fn simulate_particles(
                     camera,
                     projection,
                     images.contains(&*texture),
-                    *vis,
-                    meshes.get(&*mesh),
+                    &quads.verts[start as usize..],
                 );
             }
         }
-        if let Some(m) = meshes.get_mut(&*mesh) {
-            // A GEOMETRY (model-particle) emitter never draws quads — the reference's render
-            // dispatch skips the whole quad path when the model mode is on; its instances
-            // render via [`super::model::update_model_particles`].
-            if def.geometry_model.is_none() && images.contains(&*texture) {
-                expand_quads(def, particles, &frame, placement, &cam, m);
-            } else {
-                clear_particle_mesh(m);
-            }
-        }
+        quads.commit_quads(
+            start,
+            EffectDrawSpec {
+                cam: draw_cam,
+                texture: texture.id(),
+                blend: def.blend.into(),
+                fog: EffectFog::for_blend(def.flags, def.blend),
+                anchor,
+                bias,
+                raster_bias: 0,
+                main_entity: entity,
+                light: light_override.map(|l| l.0.clone()),
+            },
+        );
+        // CHILD pools: their own texture/blend/fog identity, the PARENT's anchor and rung
+        // (a child draws at the parent's anchor, and it is the parent's owner it must clear —
+        // `ParticleEmitter::owner_reach`'s doc).
         for child in children.iter() {
-            if let Ok((mut ct, mut cg, mut cv)) = child_draws.get_mut(child.entity) {
-                ct.translation = anchor;
-                *cg = GlobalTransform::from(*ct);
-                if *cv != Visibility::Inherited {
-                    *cv = Visibility::Inherited;
-                }
+            if child.particles.is_empty() || !images.contains(&child.texture) {
+                continue;
             }
-            if let Some(m) = meshes.get_mut(&child.mesh) {
-                if images.contains(&child.texture) {
-                    expand_quads(&child.def, &child.particles, &frame, placement, &cam, m);
-                } else {
-                    clear_particle_mesh(m);
-                }
-            }
+            let cstart = quads.begin();
+            expand_quads(
+                &child.def,
+                &child.particles,
+                &frame,
+                placement,
+                &cam,
+                &mut quads.verts,
+            );
+            quads.commit_quads(
+                cstart,
+                EffectDrawSpec {
+                    cam: draw_cam,
+                    texture: child.texture.id(),
+                    blend: child.def.blend.into(),
+                    fog: EffectFog::for_blend(child.def.flags, child.def.blend),
+                    anchor,
+                    bias,
+                    raster_bias: 0,
+                    main_entity: entity,
+                    light: light_override.map(|l| l.0.clone()),
+                },
+            );
         }
     }
 }

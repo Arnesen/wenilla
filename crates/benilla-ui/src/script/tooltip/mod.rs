@@ -276,9 +276,24 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
         if let Some(d) = model.region_data.get_mut(&rh) {
             d.text = None;
             d.hidden = true;
-            d.measured = None;
+            // `measured` is deliberately KEPT. It is a cache whose validity gate is its own
+            // content hash ([`RegionData::measure_key`] over text/font/wrap/outline), so wiping
+            // it here invalidates nothing the key would not — while destroying the one thing that
+            // makes the hover re-enter loop affordable. That loop
+            // (`ContainerFrameItemButton_OnUpdate`, unthrottled in 1.12 and shipped verbatim as
+            // `BagFrame.xml`'s `BenillaBagSlot_OnUpdate`) clears and rebuilds the SAME content
+            // every frame: keeping the cache lets each rebuilt line re-validate against its own
+            // key, so nothing re-shapes, the measure list stays empty, its forced second resolve
+            // never happens, and the layout gate's fingerprint — which exists precisely to
+            // "absorb idempotent writes for free" (layout.rs) — closes over the whole loop.
+            // Wiping it cost +10 CPU ms/frame on a live bag hover (measured 13.2 → 23.9 cpu_ms,
+            // `WOW_CAPTURE=ui-bag` vs `ui-tooltip`); the gate is
+            // `layout_gate::the_hover_re_enter_loop_neither_re_measures_nor_re_solves`.
+            //
             // A wrap-pinned width (the layout pass's wrap consumer) is per-content — the next
-            // content re-derives it.
+            // content re-derives it. It feeds the measure key, so `append_line`'s wrap re-pin is
+            // what keeps a wrap-flagged line's key stable across the clear (gated by the same
+            // test, whose stack carries one).
             d.size = None;
         }
     }

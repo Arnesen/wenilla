@@ -21,6 +21,7 @@
 use bevy::camera::Projection;
 use bevy::prelude::*;
 
+use super::buffer::EffectVertex;
 use super::quads::{draw_gated, particle_center, particle_half, CamBasis, DrawFrame};
 use super::Particle;
 use benilla_formats::ParticleEmitterDef;
@@ -82,52 +83,46 @@ pub(super) fn dump_emitter(
     cam_tf: &GlobalTransform,
     camera: &Camera,
     projection: &Projection,
-    // The sim's own draw gate: a non-resident texture means `expand_quads` was SKIPPED and none
+    // The sim's own draw gate: a non-resident texture means the expansion was SKIPPED and none
     // of these quads rasterized — numbers that look drawable but weren't. Stated on the line so
     // the reader can't pair a withheld pool with a framebuffer.
     texture_resident: bool,
-    // The emitter entity's own visibility, and the mesh asset as the LAST expansion left it (the
-    // dump runs just before this frame's expansion) — what the draw actually has in hand.
-    vis: Visibility,
-    mesh_positions: Option<&Mesh>,
+    // The quads THIS frame just wrote into the shared stream (world-space vertices — the exact
+    // data the draw consumes; the dump now runs right after expansion). Empty = the pool is
+    // live but nothing was pushed (non-resident texture / geometry emitter).
+    written: &[EffectVertex],
 ) {
     let Some(vp) = camera.physical_viewport_size() else {
         return;
     };
-    // The mesh's OWN first quad, exactly as last expansion wrote it (anchor-relative) — read back
-    // from the asset rather than recomputed, so vertex-data corruption is visible as itself.
-    // An EMPTY buffer is a real state, not an impossible one: an emitter's pool goes live one
-    // frame before that pool is first expanded into the mesh, so a live-world dump catches
-    // `pos == []` and indexing `pos[0]` panics the sim (it did, mid-session, on the director's
-    // client). Report the empty mesh as itself — it is exactly the "drawable numbers, nothing in
-    // the vertex buffer" state this dump exists to make visible.
-    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) =
-        mesh_positions.and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
-    {
-        if pos.is_empty() {
-            info!("PARTICLE_DEPTHDUMP f={fidx} mesh EMPTY (0 verts — pool live, not yet expanded)");
-        } else {
-            // Per-quad diagonal |v2−v0| over the WHOLE buffer — the young (big) quads live at the
-            // tail, and only reading quad 0 (the oldest, smallest) once mis-called this mesh "sane".
-            let diag = |q: &[[f32; 3]]| (Vec3::from(q[2]) - Vec3::from(q[0])).length();
-            let quads: Vec<f32> = pos.chunks_exact(4).map(diag).collect();
-            let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
-            for &d in &quads {
-                dmin = dmin.min(d);
-                dmax = dmax.max(d);
-            }
-            info!(
-                "PARTICLE_DEPTHDUMP f={fidx} mesh quads={} diag_min={dmin:.4} diag_max={dmax:.4} \
-             first=({:.4},{:.4},{:.4}) last=({:.4},{:.4},{:.4})",
-                quads.len(),
-                pos[0][0],
-                pos[0][1],
-                pos[0][2],
-                pos[pos.len() - 1][0],
-                pos[pos.len() - 1][1],
-                pos[pos.len() - 1][2],
-            );
+    // The stream's OWN quads, exactly as expansion wrote them — read back from the vertex data
+    // rather than recomputed, so vertex-data corruption is visible as itself. An EMPTY slice is
+    // a real state (the "drawable numbers, nothing in the vertex buffer" state this dump exists
+    // to make visible).
+    if written.is_empty() {
+        info!("PARTICLE_DEPTHDUMP f={fidx} stream EMPTY (0 verts — pool live, nothing pushed)");
+    } else {
+        // Per-quad diagonal |v2−v0| over the WHOLE range — the young (big) quads live at the
+        // tail, and only reading quad 0 (the oldest, smallest) once mis-called a mesh "sane".
+        let diag = |q: &[EffectVertex]| (Vec3::from(q[2].pos) - Vec3::from(q[0].pos)).length();
+        let quads: Vec<f32> = written.chunks_exact(4).map(diag).collect();
+        let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
+        for &d in &quads {
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
         }
+        let (first, last) = (written[0].pos, written[written.len() - 1].pos);
+        info!(
+            "PARTICLE_DEPTHDUMP f={fidx} stream quads={} diag_min={dmin:.4} diag_max={dmax:.4} \
+             first=({:.4},{:.4},{:.4}) last=({:.4},{:.4},{:.4})",
+            quads.len(),
+            first[0],
+            first[1],
+            first[2],
+            last[0],
+            last[1],
+            last[2],
+        );
     }
     let view_from_world = cam_tf.to_matrix().inverse();
     let clip_from_view = projection.get_clip_from_view();
@@ -146,7 +141,7 @@ pub(super) fn dump_emitter(
     };
     info!(
         "PARTICLE_DEPTHDUMP f={fidx} emitter bone={} pos=({:.3},{:.3},{:.3}) blend={:?} pool={} \
-         tex_resident={texture_resident} mesh_verts={} vis={vis:?} \
+         tex_resident={texture_resident} stream_verts={} \
          birth=({:.4},{:.4},{:.4}) joint=({:.4},{:.4},{:.4})",
         def.bone,
         def.position[0],
@@ -154,7 +149,7 @@ pub(super) fn dump_emitter(
         def.position[2],
         def.blend,
         particles.len(),
-        mesh_positions.map_or(0, Mesh::count_vertices),
+        written.len(),
         birth_world.x,
         birth_world.y,
         birth_world.z,

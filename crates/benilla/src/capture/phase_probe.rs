@@ -128,7 +128,12 @@ impl ExtractResource for PhaseWatch {
 
 /// One watched batch: entity, WMO batch order (or emitter bone), how it draws, and — particles
 /// mode only — the mesh + texture asset ids the render half resolves to GPU-side state.
-type WatchedBatch = (Entity, i32, String, Option<(AssetId<Mesh>, AssetId<Image>)>);
+type WatchedBatch = (
+    Entity,
+    i32,
+    String,
+    Option<(Option<AssetId<Mesh>>, AssetId<Image>)>,
+);
 
 /// Find the object's batch entities once it has streamed in. Re-run until it is found, then hold:
 /// the set is per-placement and does not change, and re-collecting every frame would make the
@@ -202,7 +207,7 @@ fn collect_batches(
 fn collect_emitters(
     mut watch: ResMut<PhaseWatch>,
     time: Res<Time>,
-    emitters: Query<(Entity, &crate::particles::ParticleEmitter, &Mesh3d)>,
+    emitters: Query<(Entity, &crate::particles::ParticleEmitter)>,
     trails: Query<(Entity, &crate::ribbons::RibbonTrail, &GlobalTransform)>,
     parts: Query<(Entity, &crate::debug_panel::ModelPart, &GlobalTransform)>,
 ) {
@@ -211,14 +216,16 @@ fn collect_emitters(
     }
     let mut found: Vec<WatchedBatch> = emitters
         .iter()
-        .filter(|(_, e, _)| e.live() > 0)
-        .map(|(ent, e, mesh)| {
+        .filter(|(_, e)| e.live() > 0)
+        .map(|(ent, e)| {
             let def = e.def();
             (
                 ent,
                 i32::from(def.bone),
                 format!("EMIT {:?}(pool {})", def.blend, e.live()),
-                Some((mesh.0.id(), e.texture().id())),
+                // No mesh asset since the shared effect lane (0732 P1) — the texture is the
+                // GPU-side link left to check; the vertices ride the lane's one buffer.
+                Some((None, e.texture().id())),
             )
         })
         .collect();
@@ -254,8 +261,8 @@ fn collect_emitters(
     const NEAR: f32 = 6.0;
     let anchors: Vec<Vec3> = emitters
         .iter()
-        .filter(|(_, e, _)| e.live() > 0)
-        .map(|(_, e, _)| e.anchor_world())
+        .filter(|(_, e)| e.live() > 0)
+        .map(|(_, e)| e.anchor_world())
         // A trail's entity translation IS its sort point (the sim writes the live head node
         // there), so its `GlobalTransform` is the anchor without an accessor of its own.
         .chain(trails.iter().map(|(_, _, gt)| gt.translation()))
@@ -329,9 +336,13 @@ fn report_phases(
         // and one whose material TEXTURE never became a GpuImage has no material bind group, so
         // the draw command chain aborts silently every frame.
         let gpu = assets.map(|(mesh_id, tex_id)| {
-            let mesh = match render_meshes.get(mesh_id) {
-                None => "gpu_mesh MISSING".to_string(),
-                Some(m) => format!("gpu_verts {}", m.vertex_count),
+            let mesh = match mesh_id {
+                // The shared effect lane: no per-emitter mesh asset exists to check.
+                None => "shared-lane".to_string(),
+                Some(id) => match render_meshes.get(id) {
+                    None => "gpu_mesh MISSING".to_string(),
+                    Some(m) => format!("gpu_verts {}", m.vertex_count),
+                },
             };
             let tex = match gpu_images.get(tex_id) {
                 None => "gpu_tex MISSING".to_string(),

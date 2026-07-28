@@ -18,13 +18,12 @@
 //! `bcc = min(1, density·4)`, which `lighting::update_time_lighting` already applies.)
 
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
-use bevy::mesh::Indices;
 use bevy::prelude::*;
 
 use crate::weather::{WeatherKind, WeatherState};
 
 use super::pool::{HeightCache, CELL};
-use super::{pad_mesh, rand01, wow_azimuth_to_bevy, WeatherWind, WriteGate};
+use super::{rand01, wow_azimuth_to_bevy, WeatherWind};
 
 /// Mist spawn-rate gain `Q` — per leg (fixed-func `0x80ff9c` = 18, shader `0x80ffa0` = 38;
 /// see [`super::SHADER_LEG`]). The rate is `2·max(density − 0.5, 0)·K·Q` nodes/s
@@ -115,30 +114,13 @@ struct MistNode {
 
 /// The mist companion pool — every precip type carries one (the reference builds it inside
 /// each effect ctor); it spawns only above the density 0.5 knee.
+#[derive(Default)]
 pub(super) struct Mist {
     nodes: Vec<MistNode>,
     budget: f32,
-    pub(super) mesh: Handle<Mesh>,
-    /// Mesh-write liveness edge — see [`WriteGate`]: an idle mist field leaves its GPU buffer
-    /// untouched instead of re-uploading it every frame.
-    pub(super) written: WriteGate,
 }
 
 impl Mist {
-    pub(super) fn new(mesh: Handle<Mesh>) -> Self {
-        Self {
-            nodes: Vec::new(),
-            budget: 0.0,
-            mesh,
-            written: WriteGate::default(),
-        }
-    }
-
-    /// Whether any puff is alive (the mesh-write gate's liveness input).
-    pub(super) fn is_live(&self) -> bool {
-        !self.nodes.is_empty()
-    }
-
     /// The stop-flag retire (`0x67b234`, round 7): a wire TYPE change also retires the
     /// SCHEDULED-but-unborn nodes — the spawn budget zeroes with the cut. Live nodes finish
     /// their (possibly truncated) lives normally.
@@ -280,58 +262,42 @@ pub(super) fn run_mist(
 /// evaluated **per corner** — `linearstep(6, 18, corner→cam) · trapezoid(age)` at full range
 /// (the reference computes the distance ramp per billboard corner: `mistr_corner_dist` →
 /// `mistr_color_repack`; no peak cap) — so a quad hanging beside the camera still shows its
-/// far corners. Alpha-blended, fog off (the tint already IS the fog colour).
-pub(super) fn build_mist_mesh(
-    mesh: Option<&mut Mesh>,
+/// far corners. Alpha-blended, fog off (the tint already IS the fog colour). Pushed onto the
+/// shared effect stream (0733), perimeter corner order for the quad-index pattern.
+pub(super) fn push_mist(
+    out: &mut Vec<crate::particles::buffer::EffectVertex>,
     mist: &Mist,
     cam_right: Vec3,
     cam_up: Vec3,
     cam_pos: Vec3,
-    anchor: Vec3,
     fog_color: [f32; 3],
 ) {
-    let Some(mesh) = mesh else { return };
-    let n = mist.nodes.len().min(MIST_CAP);
-    let mut pos = Vec::with_capacity(n * 4);
-    let mut uv = Vec::with_capacity(n * 4);
-    let mut col: Vec<[f32; 4]> = Vec::with_capacity(n * 4);
-    let mut idx = Vec::with_capacity(n * 6);
     let r = cam_right * MIST_HALF;
     let u = cam_up * MIST_HALF;
-    let cam_rel = cam_pos - anchor;
     for node in mist.nodes.iter().take(MIST_CAP) {
         // trapezoid = clamp(age/0.4) · clamp((life−age)/0.4) — 0.4 s ramps, plateau 1.0. The
         // spawn lookahead already truncated `life` at the first slope jump, so a wall-bound
         // puff rides this SAME ramp to zero before the wall — no separate hide.
         let trapezoid = (node.age / MIST_FADE_S).clamp(0.0, 1.0)
             * ((node.life - node.age) / MIST_FADE_S).clamp(0.0, 1.0);
-        let c = node.pos - anchor;
-        let corners = [c - r - u, c + r - u, c - r + u, c + r + u];
-        let base = pos.len() as u32;
-        for corner in corners {
-            let dist_a = ((corner.distance(cam_rel) - MIST_ALPHA_NEAR)
+        let c = node.pos;
+        // Perimeter order (bl, br, tr, tl).
+        for (corner, uv) in [
+            (c - r - u, [0.0, 1.0]),
+            (c + r - u, [1.0, 1.0]),
+            (c + r + u, [1.0, 0.0]),
+            (c - r + u, [0.0, 0.0]),
+        ] {
+            let dist_a = ((corner.distance(cam_pos) - MIST_ALPHA_NEAR)
                 / (MIST_ALPHA_FAR - MIST_ALPHA_NEAR))
                 .clamp(0.0, 1.0);
-            col.push([fog_color[0], fog_color[1], fog_color[2], dist_a * trapezoid]);
-            pos.push(corner.to_array());
+            out.push(crate::particles::buffer::EffectVertex {
+                pos: corner.to_array(),
+                uv,
+                color: [fog_color[0], fog_color[1], fog_color[2], dist_a * trapezoid],
+            });
         }
-        uv.extend([[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]]);
-        idx.extend([base, base + 1, base + 2, base + 1, base + 3, base + 2]);
     }
-    pad_mesh(
-        &mut pos,
-        &mut uv,
-        &mut col,
-        &mut idx,
-        MIST_CAP * 4,
-        MIST_CAP * 6,
-    );
-    let normals = vec![[0.0, 1.0, 0.0]; pos.len()];
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
-    mesh.insert_indices(Indices::U32(idx));
 }
 
 #[cfg(test)]

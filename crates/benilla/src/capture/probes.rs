@@ -416,6 +416,8 @@ impl Plugin for LiveFpsPlugin {
             phase: LiveFpsPhase::Waiting,
             samples: Vec::new(),
             cpu_at_start: None,
+            occluded_now: false,
+            occluded_frames: 0,
         })
         .init_resource::<ChurnCensus>()
         .add_systems(Update, drive_live_fps)
@@ -433,7 +435,6 @@ impl Plugin for LiveFpsPlugin {
                 ),
                 (
                     churn_counter::<crate::sky::SkyMaterial>("sky"),
-                    churn_counter::<crate::particles::WowParticleMaterial>("particle"),
                     churn_counter::<crate::sun::CelestialMaterial>("celestial"),
                     churn_counter::<crate::sun::StarMaterial>("star"),
                     churn_counter::<crate::clouds::CloudMaterial>("cloud"),
@@ -464,6 +465,15 @@ struct LiveFps {
     /// Process CPU seconds at the first sampled frame ([`crate::perf::process_cpu_secs`]) — the
     /// baseline for the window's `cpu_ms`/`cpu_pct`.
     cpu_at_start: Option<f64>,
+    /// The window's occlusion state, maintained from `WindowOccluded` transitions. macOS
+    /// throttles a FULLY covered window to ~1 fps (any covering window, not just the lock
+    /// screen — the director's correction to 0729/0730's lock-screen reading): a probe launched
+    /// detached spawns unfocused and can land completely behind other windows, and its leg then
+    /// measures the throttle, not the client.
+    occluded_now: bool,
+    /// Sampled frames taken while occluded — `occluded_frames=` on the probe line, so a
+    /// throttled leg names itself instead of being inferred from a ~1 s hitch signature.
+    occluded_frames: usize,
 }
 
 /// Asset residency — the leak meter (the #bugs teleport leak: caches hold strong handles, so maps
@@ -584,10 +594,28 @@ fn drive_live_fps(
     mut residency: ResidencyMeter,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
+    mut occlusions: MessageReader<bevy::window::WindowOccluded>,
 ) {
+    // Drain every frame so the state is current whichever phase we're in — the window can be
+    // occluded before sampling ever starts (a detached launch spawns behind whatever is open).
+    for o in occlusions.read() {
+        probe.occluded_now = o.occluded;
+    }
     match probe.phase {
         LiveFpsPhase::Done => {}
         LiveFpsPhase::Waiting => {
+            // A probe window that can't be covered can't be occlusion-throttled: macOS drops
+            // any FULLY covered window to ~1 fps drawables, and a detached probe launch spawns
+            // unfocused, possibly entirely behind other windows. Asserted from the FIRST tick,
+            // not at the uncap: an occluded SETTLE phase streams the world at ~1 fps and
+            // under-warms the scene before sampling even starts. Probe-only — a normal run
+            // never enters this system. (Write-gated: re-marking `Window` every frame would
+            // re-apply its whole state through winit.)
+            if let Ok(mut w) = windows.single_mut() {
+                if w.window_level != bevy::window::WindowLevel::AlwaysOnTop {
+                    w.window_level = bevy::window::WindowLevel::AlwaysOnTop;
+                }
+            }
             if time.elapsed_secs() < probe.at || self_player.is_empty() {
                 return;
             }
@@ -618,6 +646,10 @@ fn drive_live_fps(
                 // The churn census restarts with the window — warmup noise (streaming, shader
                 // warms) would otherwise read as steady-state ratchets.
                 residency.churn.0.clear();
+                probe.occluded_frames = 0;
+            }
+            if probe.occluded_now {
+                probe.occluded_frames += 1;
             }
             let ms = time.delta_secs() * 1000.0;
             probe.samples.push(ms);
@@ -685,7 +717,7 @@ fn drive_live_fps(
                 residency.tint_reg.0.len(),
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{present}{at_pin}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{present} occluded_frames={}{at_pin}",
                 v.len(),
                 at(0.50),
                 at(0.95),
@@ -697,6 +729,7 @@ fn drive_live_fps(
                 entities.iter().len(),
                 px.0,
                 px.1,
+                probe.occluded_frames,
             );
             // The window's Modified-event totals per asset type — a type at ~1×/frame here is a
             // per-frame re-upload ratchet (see [`ChurnCensus`]); absent means quiet.

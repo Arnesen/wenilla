@@ -218,16 +218,18 @@ impl ExtractResource for QuadProbes {
 
 /// Project every in-scope emitter's live quads into pixels, once a frame.
 ///
-/// Deliberately reads the **mesh asset**, not the simulation: these are the vertices the draw will
-/// consume, so a quad that was mis-built (collapsed, mis-billboarded, left at last frame's anchor)
-/// is measured as itself rather than as what the sim intended. Runs after `BillboardPlace`, the set
-/// that rebuilds the meshes, so the buffer read is this frame's.
+/// Deliberately reads the **shared effect stream** (0732 P1), not the simulation: these are the
+/// vertices the draw will consume, so a quad that was mis-built (collapsed, mis-billboarded,
+/// left at last frame's anchor) is measured as itself rather than as what the sim intended. Runs
+/// after `BillboardPlace`, the set that fills the stream, so the read is this frame's. An
+/// emitter's CHILD-pool quads ride its draw records too (same `main_entity`), attributed to the
+/// parent's bone — the old per-mesh read never saw them at all.
 fn collect_quads(
     watch: Res<QuadWatch>,
     mut probes: ResMut<QuadProbes>,
     cam: Query<(&Camera, &GlobalTransform, &Projection), With<WorldCamera>>,
-    emitters: Query<(&ParticleEmitter, &GlobalTransform, &Mesh3d)>,
-    meshes: Res<Assets<Mesh>>,
+    emitters: Query<(Entity, &ParticleEmitter)>,
+    quads: Res<crate::particles::buffer::EffectQuads>,
 ) {
     let Some(bones) = watch.0.as_deref() else {
         return;
@@ -242,24 +244,27 @@ fn collect_quads(
     // The frame's own matrices, the same pair `depthdump` projects with — so a quad's `dquad` here
     // and its `dquad` there are the same number, and the two logs can be read against each other.
     let clip_from_world = projection.get_clip_from_view() * cam_tf.to_matrix().inverse();
-    for (emitter, gt, mesh) in &emitters {
+    for (entity, emitter) in &emitters {
         if !bones.is_empty() && !bones.contains(&emitter.bone()) {
             continue;
         }
-        let Some(bevy::mesh::VertexAttributeValues::Float32x3(pos)) = meshes
-            .get(&mesh.0)
-            .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
-        else {
-            continue;
-        };
+        // Every draw record this emitter committed this frame (its own pool + child pools).
+        let ranges = quads
+            .draws
+            .iter()
+            .filter(|d| d.main_entity == entity)
+            .map(|d| d.range.clone());
+        let pos: Vec<[f32; 3]> = ranges
+            .flat_map(|r| quads.verts[r.start as usize..r.end as usize].iter())
+            .map(|v| v.pos)
+            .collect();
         for (index, quad) in pos.chunks_exact(4).enumerate() {
             let mut corners = [Vec2::ZERO; 4];
             let (mut dmin, mut dmax, mut center) = (f32::MAX, f32::MIN, Vec3::ZERO);
             let mut behind = false;
             for (i, v) in quad.iter().enumerate() {
-                // Verts are anchor-relative (the transparent-pass sort key); the entity transform
-                // is the anchor.
-                let world = gt.transform_point(Vec3::from(*v));
+                // Stream verts are world-space (the sort anchor rides the draw record).
+                let world = Vec3::from(*v);
                 center += world / 4.0;
                 let clip = clip_from_world * world.extend(1.0);
                 if clip.w <= 0.0 {
