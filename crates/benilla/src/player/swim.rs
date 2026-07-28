@@ -154,6 +154,15 @@ pub(super) fn surface_over_feet(
 /// resident, so the water IS the arrived support; without this, a login into swim-depth water
 /// held `settling` — and the loading screen, which waits on it — forever.
 pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: f32) -> bool {
+    // **LEVITATING bails the whole decision** — the reference's very first instruction here
+    // (`0x6030d2 test ah,4` → `0x6031fa`; VERIFIED, wow-re `swim-transition.md`): neither the ENTER
+    // arm nor the STOP arm runs, so the latch is left exactly as it stands. Not an optimisation —
+    // it IS the mechanism of GM flight (decision 0726). The server sets SWIMMING and LEVITATING in
+    // one packet, and the second is what stops the dry ground under us clearing the first on the
+    // very next frame.
+    if player.levitating {
+        return player.swimming;
+    }
     let Some(surface) = surface_y else {
         player.swimming = false; // not in liquid
         return false;
@@ -278,7 +287,7 @@ pub(super) fn swim_step(
     ms: &MoveAndSlide<'_, '_>,
     capsule: &Collider,
     input_vel: Vec3,
-    surface_y: f32,
+    surface_y: Option<f32>,
     surface_at: impl Fn(Vec3) -> Option<f32>,
 ) -> SwimOutcome {
     let dt = time.delta_secs();
@@ -296,11 +305,17 @@ pub(super) fn swim_step(
     // `depth` drops below the leave threshold, so we walk out. dt-based so it can't overshoot the
     // rest line and dip back under the exit depth (a flicker). No other vertical force exists here —
     // no gravity, no surface-seek (the verified floating resolver).
-    let rest_feet_y = surface_y - rest_cap(player.collision_height.0);
-    let cap = if dt > 0.0 {
-        ((rest_feet_y - player.pos.y) / dt).max(0.0)
-    } else {
-        f32::INFINITY
+    // **No waterline, no rest line.** `None` is GM flight (decision 0726): the swim regime with no
+    // liquid under it at all, where the one vertical constraint below has nothing to constrain
+    // against and an ascent must be free. It is deliberately NOT the same as a *momentary* sample
+    // miss in real water — the caller keeps that case as `Some(own feet Y)`, which caps the rise at
+    // zero and holds for the frame.
+    let cap = match surface_y {
+        Some(surface) if dt > 0.0 => {
+            let rest_feet_y = surface - rest_cap(player.collision_height.0);
+            ((rest_feet_y - player.pos.y) / dt).max(0.0)
+        }
+        _ => f32::INFINITY,
     };
     let (vel, surface_pitch) = cap_redirect(input_vel, cap);
 
@@ -440,6 +455,41 @@ mod tests {
         assert!(
             !update_swimming(&mut p, None, 0.0),
             "no liquid over the feet stops swimming (the binary's inLiquid == 0 → STOP)"
+        );
+    }
+
+    /// **GM flight is the suppression, not a lift** (decision 0726). `LEVITATING` bails the whole
+    /// water decision (`0x6030d2 test ah,4`), so the two things that would otherwise happen the very
+    /// next frame both stop happening: dry land cannot clear a server-granted swim (which is what
+    /// keeps you airborne), and deep water cannot grant one (the same bail, the other arm).
+    #[test]
+    fn levitating_bails_the_water_decision_in_both_directions() {
+        // The server just sent `.cheat fly on`: SWIMMING + LEVITATING, standing on dry ground.
+        let mut flying = player_at(0.0);
+        flying.swimming = true;
+        flying.levitating = true;
+        assert!(
+            update_swimming(&mut flying, None, 0.0),
+            "no liquid at all must NOT stop a levitating swimmer — this is the whole of GM flight"
+        );
+        assert!(
+            update_swimming(&mut flying, Some(-50.0), 0.0),
+            "nor may a surface far below the feet, which is what flying over a lake looks like"
+        );
+
+        // The other arm, and it is the same instruction: water cannot latch swim while levitating.
+        let mut dry = player_at(0.0);
+        dry.levitating = true;
+        assert!(
+            !update_swimming(&mut dry, Some(swim_enter_depth(HUMAN_MALE) + 1.0), 0.0),
+            "the ENTER arm is skipped too — the bail is before the branch, not inside it"
+        );
+
+        // And clearing the mode (`.cheat fly off` sends flags 0) hands the water its job back.
+        flying.levitating = false;
+        assert!(
+            !update_swimming(&mut flying, None, 0.0),
+            "with the mode gone, no liquid stops swimming again"
         );
     }
 

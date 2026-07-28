@@ -455,6 +455,21 @@ pub(super) fn monster_move(
     }
 }
 
+/// The ask-once GameObject template (`SMSG_GAMEOBJECT_QUERY_RESPONSE`, decision 0239): cache it and
+/// resolve the lockId from the type-specific `data[]` slot — the interact routing reads it to choose
+/// use-vs-cast; the hover tooltip reads the name (decision 0276's GO law).
+pub(super) fn gameobject_info(
+    entry: u32,
+    type_id: u32,
+    display_id: u32,
+    name: String,
+    data: &[i32; 24],
+    go_templates: &mut GameObjectTemplates,
+) {
+    debug!("net: gameobject template {entry} type {type_id} display {display_id} {name:?}");
+    go_templates.insert(entry, type_id, name, data);
+}
+
 /// Merge a descriptor delta into an object's store: into the per-drain `pending` seed when the entity was
 /// created earlier this same drain (its spawn `Command` hasn't run, so it isn't queryable yet), else in
 /// place on the live component. The final `else` — in the index but neither live nor pending — should not

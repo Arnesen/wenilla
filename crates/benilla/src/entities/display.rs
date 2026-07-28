@@ -33,8 +33,8 @@ pub(super) struct EntityPart {
     pub(super) mesh: Handle<Mesh>,
     /// The skinned twin of [`Self::mesh`] (decision 0019), present for every M2 part. An animated
     /// instance (a creature, or a GameObject that runs the state machine / loops a loader-idle seq)
-    /// renders this + a `SkinnedMesh` bound to its joints; a truly static instance uses `mesh`. `None`
-    /// for WMO-display parts (no skeleton).
+    /// renders this, skinned through its palette slot's rows (decision 0720); a truly static
+    /// instance uses `mesh`. `None` for WMO-display parts (no skeleton).
     pub(super) skinned_mesh: Option<Handle<Mesh>>,
     pub(super) material: Handle<WowModelMaterial>,
     /// The interior-lit variant (M2 only): the same material in the plain day/night matte
@@ -152,7 +152,7 @@ pub(super) struct DisplayModel {
     /// [`BoneAttach`] beside the attachments — the missile launch points ($CSL/$CSR/$CST/$BWR).
     pub(super) markers: Vec<benilla_assets::ModelMarker>,
     /// The matching inverse bind poses, shared across every instance of this display. `Some` for an M2
-    /// display, `None` for WMO / model-less. Paired with `skeleton` to build each instance's `SkinnedMesh`.
+    /// display, `None` for WMO / model-less. Paired with `skeleton` to build each instance's palette rig.
     pub(super) inverse_bindposes: Option<Handle<SkinnedMeshInverseBindposes>>,
     /// The model's animations (decision 0019), captured with `parts` on load. The creature attach path
     /// gives each instance an `AnimationPlayer` driving them (playing Stand). `None` for WMO / static.

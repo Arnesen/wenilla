@@ -322,6 +322,24 @@ fn apply_self_move(
     player.move_flags = merge_server_flags(player.move_flags, m.flags);
     let now_falling = player.move_flags & move_flags::FALLING != 0;
 
+    // **Lift the granted mover MODES out of the merged word into typed state** (decision 0726).
+    // `move_flags` is our last-streamed wire bookkeeping and is rebuilt from state every frame, so a
+    // bit parked there alone would be gone before the mover ever read it; the modes live as fields,
+    // the way `rooted` does. The reference needs no such step — it has one `[cmov+0x40]` that is both
+    // the state and the wire word — and it has the matching apply anyway: the same inbound merge also
+    // runs `0x61a1af → 0x61a230 → SetSwim` (wow-re `swim-transition.md`, "the local unit's server
+    // echo"). This pair is GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
+    player.swimming = player.move_flags & move_flags::SWIMMING != 0;
+    player.levitating = player.move_flags & move_flags::LEVITATING != 0;
+    if player.swimming {
+        // A latched swim ends the settle hold — `update_swimming`'s own rule, and it has to be
+        // repeated here because that function is exactly what LEVITATING switches off. Without it,
+        // `.cheat fly` during a post-teleport settle strands `settling` forever: the swim mover
+        // never reaches the walk mover's release gate, and the loading screen waits on `!settling`
+        // (the shape of the Booty Bay underwater-login hang).
+        player.settling = false;
+    }
+
     player.pos = wow_to_bevy(m.position);
     // Facing turns **rigidly** — aim, rendered body and camera all take the same delta (the
     // transport carry's idiom). The reference writes only the mover's own facing cells; hard-setting
@@ -417,11 +435,30 @@ mod self_move_tests {
         assert_eq!(merge_server_flags(0, f::ON_TRANSPORT), 0);
     }
 
+    /// **`.cheat fly` survives the merge intact** (decision 0726). vmangos's `Player::SetFly` sends
+    /// `LEVITATING | SWIMMING | MOVED | FLYING`; the two we model must both be inside the mask, or
+    /// GM flight arrives half-applied — SWIMMING without LEVITATING is a swimmer on dry land that
+    /// the water decision clears on the next frame, and LEVITATING without SWIMMING is a walker
+    /// whose swim latch has simply been frozen.
+    #[test]
+    fn the_fly_toggle_arrives_whole() {
+        const SET_FLY: u32 = f::LEVITATING | f::SWIMMING | 0x0080_0000 | 0x0100_0000;
+        let merged = merge_server_flags(f::FORWARD, SET_FLY);
+        assert_eq!(merged & f::LEVITATING, f::LEVITATING);
+        assert_eq!(merged & f::SWIMMING, f::SWIMMING);
+        // …and `.cheat fly off` (flags 0) takes both away again, which is what lands us.
+        assert_eq!(
+            merge_server_flags(merged, 0) & (f::LEVITATING | f::SWIMMING),
+            0
+        );
+    }
+
     /// Every flag benilla models except `ON_TRANSPORT` is inside the mask — a guard against the
     /// mask and our constants drifting apart as new bits get modelled.
     #[test]
     fn every_modelled_flag_but_the_transport_bit_is_server_authored() {
         for (name, bit) in [
+            ("LEVITATING", f::LEVITATING),
             ("FORWARD", f::FORWARD),
             ("BACKWARD", f::BACKWARD),
             ("STRAFE_LEFT", f::STRAFE_LEFT),

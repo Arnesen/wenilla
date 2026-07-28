@@ -50,9 +50,22 @@ pub(crate) struct NetPlugin {
     pub(crate) connect: bool,
 }
 
+/// Marker for "this process has **no** IO thread" — inserted only when [`NetPlugin::connect`] is
+/// false. Read by `crate::preflight`'s startup notice, which says so out loud, so a run that cannot
+/// exercise the wire path is never mistaken for one that did (decision 0728).
+///
+/// A resource of its own rather than a bool on [`NetStatus`], because it answers a different
+/// question: `connected` is *runtime* state that a refused or dropped connection also clears, while
+/// this one says the attempt was never made and no packet can ever arrive.
+#[derive(Resource)]
+pub(crate) struct NetOffline;
+
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         let handles = io::spawn_net(io::NetConfig::from_env(), self.connect);
+        if !self.connect {
+            app.insert_resource(NetOffline);
+        }
         app.insert_resource(NetEvents(handles.events))
             .insert_resource(NetCommands(handles.commands))
             .insert_resource(CharPick(handles.pick))

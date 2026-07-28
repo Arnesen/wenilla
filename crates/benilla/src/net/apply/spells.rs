@@ -11,7 +11,8 @@ use bevy::prelude::*;
 use crate::cooldowns::Cooldowns;
 use crate::creature_anim::{CastEvent, CastEventKind, Casting, SpellGoTargets};
 use crate::ui_action::{AutoRepeatActive, CastErrors, PlayerActions, Spells};
-use crate::ui_cast::{CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
+use crate::ui_aura::AuraDurations;
+use crate::ui_cast::{ActiveChannel, CastBarEdge, CastBarFeed, PendingCast, QueuedMeleeSpell};
 
 use super::super::{GuidIndex, ObjectStore, SelfGuid};
 
@@ -627,6 +628,43 @@ pub(super) fn cooldown_cheat(caster: u64, self_guid: &SelfGuid, cooldowns: &mut 
     if self_guid.0 == Some(caster) {
         cooldowns.wipe();
     }
+}
+
+/// `MSG_CHANNEL_START` — self-only on the wire (no guid), so it goes straight to the cast bar; the
+/// channel *animation* state rides the unit-field pair instead (decision 0137).
+pub(super) fn channel_start(
+    spell_id: u32,
+    duration_ms: u32,
+    channel: &mut ActiveChannel,
+    feed: &mut CastBarFeed,
+) {
+    channel.start(spell_id, duration_ms, Instant::now());
+    feed.0.push(CastBarEdge::ChannelStart {
+        spell_id,
+        duration_ms,
+    });
+}
+
+/// `MSG_CHANNEL_UPDATE` — the running channel's remaining time (`0` is its stop edge).
+pub(super) fn channel_update(
+    remaining_ms: u32,
+    channel: &mut ActiveChannel,
+    feed: &mut CastBarFeed,
+) {
+    channel.update(remaining_ms, Instant::now());
+    feed.0.push(CastBarEdge::ChannelUpdate { remaining_ms });
+}
+
+/// `SMSG_UPDATE_AURA_DURATION` — one of our own auras' remaining time (decisions 0255/0257), keyed
+/// by raw slot and stamped with the receive time. The `ui_aura` feed joins it to the aura in that
+/// slot by arrival order; it arrives *before* the descriptor delta that names the slot.
+pub(super) fn aura_duration(
+    slot: u8,
+    remaining_ms: u32,
+    durations: &mut AuraDurations,
+    now_secs: f64,
+) {
+    durations.set(slot, remaining_ms, now_secs);
 }
 
 #[cfg(test)]

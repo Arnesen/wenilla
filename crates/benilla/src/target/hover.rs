@@ -400,12 +400,22 @@ fn ray_posed_mesh(
     else {
         return None;
     };
-    let VertexAttributeValues::Uint16x4(joints) = mesh.attribute(Mesh::ATTRIBUTE_JOINT_INDEX)?
+    // The joint data rides the WOW attributes (decision 0720 retired Bevy's skin lane, and
+    // Bevy's `ATTRIBUTE_JOINT_INDEX` left our meshes with it). Every mesh that reaches this
+    // function is a skinned twin by construction (`RigPart` parts only), so a missing
+    // attribute is a broken authoring contract — not an unloaded asset — and it silently
+    // un-picks the whole unit: say so, once, loudly.
+    let (
+        Some(VertexAttributeValues::Uint16x4(joints)),
+        Some(VertexAttributeValues::Float32x4(weights)),
+    ) = (
+        mesh.attribute(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX),
+        mesh.attribute(benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT),
+    )
     else {
-        return None;
-    };
-    let VertexAttributeValues::Float32x4(weights) = mesh.attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT)?
-    else {
+        warn_once!(
+            "a skinned part's mesh lacks the WOW joint attributes — the posed pick cannot hit it"
+        );
         return None;
     };
     let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
@@ -528,6 +538,48 @@ mod tests {
     fn ray_triangle_is_two_sided() {
         // Same triangle hit from below (reversed winding relative to the ray) still connects.
         assert!(ray_triangle(Vec3::new(0.0, -5.0, 0.0), Vec3::Y, &TRI).is_some());
+    }
+
+    /// The picker ↔ mesh-builder attribute contract: `ray_posed_mesh` must read the WOW joint
+    /// attributes the skinned twin is authored with ([`benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX`],
+    /// decision 0720) — reading Bevy's standard skin attributes made every unit silently
+    /// unpickable, because a `None` here also blocks the AABB fallback (the `faithful` set).
+    #[test]
+    fn posed_pick_reads_the_wow_skin_attributes() {
+        use bevy::asset::RenderAssetUsages;
+        use bevy::mesh::PrimitiveTopology;
+
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            TRI.iter().map(|v| v.to_array()).collect::<Vec<_>>(),
+        );
+        mesh.insert_attribute(
+            benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX,
+            VertexAttributeValues::Uint16x4(vec![[1, 0, 0, 0]; 3]),
+        );
+        mesh.insert_attribute(
+            benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT,
+            VertexAttributeValues::Float32x4(vec![[1.0, 0.0, 0.0, 0.0]; 3]),
+        );
+        mesh.insert_indices(Indices::U16(vec![0, 1, 2]));
+        let mut assets = Assets::<Mesh>::default();
+        let handle = assets.add(mesh);
+
+        // Bone 1 lifts the triangle +2 on Y; bone 0 is a zero row (a hit through it would land
+        // at the origin) — so a 3.0-distance hit proves the indices routed through the WOW
+        // attribute into the right palette row.
+        let palette = [Mat4::ZERO, Mat4::from_translation(Vec3::Y * 2.0)];
+        let t = ray_posed_mesh(
+            &assets,
+            handle.id(),
+            &palette,
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::NEG_Y,
+            false,
+        )
+        .expect("the posed pick must hit the WOW-attributed mesh");
+        assert!((t - 3.0).abs() < 1e-5);
     }
 
     #[test]

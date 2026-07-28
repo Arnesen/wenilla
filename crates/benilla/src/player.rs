@@ -884,9 +884,13 @@ fn control(
             let fwd_axis = move_fwd * cp + Vec3::Y * sp;
             let v = fwd_axis * swim_fwd + move_right * swim_side;
             let dir3 = v.normalize_or_zero();
-            // Fall back to the current feet Y if the surface query briefly misses (a chunk seam):
-            // the rest cap is then at our own depth, so the avatar just holds for that frame.
-            let surface = surface_y.unwrap_or(player.pos.y);
+            // The rest line this stroke may not rise above. **`None` while levitating** — GM flight
+            // is the swim regime with no liquid under it (decision 0726), so there is no waterline
+            // to cap against and the climb must be free; capping there would let you dive but never
+            // gain height. Otherwise fall back to the current feet Y if the surface query briefly
+            // misses (a chunk seam): the cap is then at our own depth, so the avatar just holds for
+            // that frame — a transient miss in real water is not the same thing as flight.
+            let rest_line = (!player.levitating).then(|| surface_y.unwrap_or(player.pos.y));
             // Directional swim speed — **VERIFIED** (`0x7c4c90`'s swim arm, the §5's TU-H):
             // forward or strafe-only → swim; the backward bit `0x2` → `min(swimBack, swim)` —
             // byte-identical in template to the run arm's `min(runBack, run)`. Vanilla defaults
@@ -912,7 +916,7 @@ fn control(
                 &move_and_slide,
                 capsule,
                 dir3 * dir_speed,
-                surface,
+                rest_line,
                 |feet| swim::surface_over_feet(water, feet, claim),
             );
             // The surface redirect (decisions 0499+0505 — a NAMED DIVERGENCE, see
@@ -1021,6 +1025,14 @@ fn control(
         // never disagree. Direction bits mirror the client's MOVEMENTFLAGS; FALLING marks the airborne
         // arc (animation-only — it is masked off before going on the wire, see the send block).
         let mut move_flags_now = 0u32;
+        // The granted mover mode rides every packet, in or out of the water — the reference's
+        // builder reads the one `[cmov+0x40]` the server's merge wrote it into, so it echoes back
+        // whatever the server granted (decision 0726). Ours has to put it back explicitly, because
+        // this word is rebuilt from state each frame; dropping it would make the server forget we
+        // are flying and the next server-authored move would clear the mode under us.
+        if player.levitating {
+            move_flags_now |= move_flags::LEVITATING;
+        }
         // `landed`/`started_falling` gate the wire's jump/fall lifecycle; the swim branch never sets
         // them (leaving the water resumes the ground mover from rest, no airborne report).
         let landed;

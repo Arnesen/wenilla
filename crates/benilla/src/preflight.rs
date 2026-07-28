@@ -19,6 +19,16 @@
 //!    alive without poisoning any of that (decision 0677), and this banner reports which it is.
 //! 3. **Movement is server-blocked** — rooted, stunned, confused, fleeing, or mid-taxi-flight. The
 //!    controller ignores input and the honest report is "the mover is broken".
+//! 4. **The run has no server at all** ([`offline_notice`], decision 0728). Capture mode passes
+//!    `NetPlugin { connect: false }`, so no IO thread is spawned and the drain receives nothing —
+//!    the whole packet path (`net::apply`, the movement wire, every `MSG_MOVE_*`) simply does not
+//!    execute. This one is the mirror image of the other three: they make a healthy client *look*
+//!    broken, while this makes an untested change *look proven*. A capture run over a change to the
+//!    packet path exits clean no matter what that change does, and "clean run" then lands in a
+//!    commit message as evidence it never was (twice in one day — decisions 0725 and 0726, both
+//!    pure wire work, both reported with a capture run behind them). The banner above cannot catch
+//!    it: that one waits on [`EnteredWorldMessage`], which needs a server. So this notice fires at
+//!    **startup**, before anything can be concluded from the run.
 //!
 //! The banner is **not env-gated**: a warning nobody knows to switch on is not a warning. It costs
 //! one line per world entry when everything is fine, and it re-fires on every re-entry (a relog, a
@@ -83,11 +93,32 @@ pub(crate) struct PreflightPlugin;
 
 impl Plugin for PreflightPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Preflight>().add_systems(
-            Update,
-            report_session.after(crate::schedule::WorldStage::Net),
-        );
+        app.init_resource::<Preflight>()
+            .add_systems(Startup, offline_notice)
+            .add_systems(
+                Update,
+                report_session.after(crate::schedule::WorldStage::Net),
+            );
     }
+}
+
+/// Say out loud, once at startup, that this run has **no server** — so nobody reads its clean exit
+/// as evidence about code that never ran (module header §4, decision 0728).
+///
+/// Deliberately a `warn!` rather than an `info!`. A netless run is completely normal and completely
+/// fine — it is what every visual capture wants — so this is not a complaint about the run. It is
+/// aimed at the *reader*, who is usually a session skimming for the word "error" before pasting
+/// "clean run" into a commit message, and `warn` is the lowest level that survives that skim.
+fn offline_notice(net: Option<Res<crate::net::NetOffline>>) {
+    if net.is_none() {
+        return;
+    }
+    warn!(
+        "preflight: NET OFF — no IO thread this run, so the drain gets no packets and NOTHING on \
+         the wire path executes (net::apply, the movement stream, every MSG_MOVE_*). Fine for a \
+         visual capture; NOT evidence for a change to any of it. method.md's gate is a clean run \
+         of the AFFECTED path — for wire work that means a live server run."
+    );
 }
 
 /// The banner's once-per-entry latch: armed by [`EnteredWorldMessage`], disarmed when the report

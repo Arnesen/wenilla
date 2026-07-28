@@ -81,6 +81,19 @@ pub(crate) mod move_flags {
     /// WALK-mode (vs run). In the client this only scales the rate numerator (walk vs run speed), never
     /// the id choice. The net bridge reads it to extrapolate a `/walk`-toggled remote mover at walk speed.
     pub const WALK_MODE: u32 = 0x100;
+    /// MOVEFLAG_LEVITATING — **the free-flight bit, and it works by SUPPRESSION.** It is the very
+    /// first test in the client's per-frame swim decision `0x6030c0` (`0x6030d2 test ah,4` → bail to
+    /// `0x6031fa`; VERIFIED, wow-re `collision/scratch/swim-transition.md`): set, and the whole
+    /// water/depth decision is skipped — neither the ENTER arm nor the STOP arm runs, so liquid can
+    /// no longer latch *or unlatch* [`SWIMMING`].
+    ///
+    /// That suppression is the entirety of GM flight. vmangos's `.cheat fly` sends
+    /// `LEVITATING | SWIMMING | MOVED | FLYING` (`Player::SetFly`): `SWIMMING` puts the mover in the
+    /// 3-D floating regime (gravity bypassed, vertical from the aim pitch), and `LEVITATING` stops
+    /// the dry-land depth test from clearing it again the very next frame. `MOVED` (`0x800000`) and
+    /// `FLYING` (`0x1000000`) carry no behaviour on this build — vmangos's own header marks both
+    /// doubtful — and we model neither. Decision 0726.
+    pub const LEVITATING: u32 = 0x400;
     /// JUMPING/FALLING — set for the whole airborne arc; drives the jump Special state.
     pub const FALLING: u32 = 0x2000;
     /// MOVEFLAG_FALLINGFAR — the arc has become a **far fall** (`0x633220`/`0x633240`; wow-re

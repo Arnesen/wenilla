@@ -17,12 +17,13 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    DamageShield, PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellEnergizeLog, SpellHealLog,
-    SpellLogMiss, XpGain,
+    DamageShield, LevelUpInfo, PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellEnergizeLog,
+    SpellHealLog, SpellLogMiss, XpGain,
 };
 
 use crate::combat_text::{damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource};
 use crate::names::NameCache;
+use crate::ui_chat::ChatLog;
 use crate::ui_unit::{CombatTextEvent, UnitCombatFeedback};
 
 use super::super::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
@@ -567,12 +568,14 @@ pub(super) fn spell_log_miss(
 }
 
 /// `SMSG_LOG_XPGAIN` → `"XP: %d"` over **self**, category 4 — the one emitter that is
-/// self-anchored by design and skips Gate A (`0x607260`). Fires for kill and quest XP alike.
+/// self-anchored by design and skips Gate A (`0x607260`). Fires for kill and quest XP alike. The
+/// same packet also writes the combat log's own chat line.
 pub(super) fn xp_gain(
     x: XpGain,
     index: &GuidIndex,
     self_guid: &SelfGuid,
     text: &mut MessageWriter<CombatTextSpawn>,
+    chat_log: &mut ChatLog,
 ) {
     if let Some(&me) = self_guid.0.as_ref().and_then(|g| index.0.get(g)) {
         text.write(CombatTextSpawn {
@@ -582,4 +585,15 @@ pub(super) fn xp_gain(
             color: None, // row 4's own purple — XP skips the damage color law entirely
         });
     }
+    chat_log.push_xp_gain(&x);
+}
+
+/// `SMSG_LEVELUP_INFO` → the ding's chat lines (decision 0304). The talent-count arg is not on the
+/// wire — the client computes `(newLevel >= 10) ? 1 : 0` (byte-verified `0x5e407c`, wow-re
+/// levelup-ding.md — the 0305 fold-back), exactly this. The ding's VISUAL is deliberately absent
+/// here: it rides the UNIT_FIELD_LEVEL change-watcher (`entities` spell_fx::level_up_flash), never
+/// this packet.
+pub(super) fn level_up(l: LevelUpInfo, chat_log: &mut ChatLog) {
+    let talent_points = u32::from(l.level >= 10);
+    chat_log.push_level_up(&l, talent_points);
 }

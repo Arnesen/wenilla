@@ -13,7 +13,20 @@ use crate::ui_quest::QuestGiver;
 use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::{TrainerErrors, TrainerOpen};
 
-use super::super::{ClientCommand, NetCommands};
+use super::super::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
+
+/// A streamed unit's gender (`UNIT_FIELD_BYTES_0` byte 2) by guid — the gossip greeting's column
+/// selector (wow-re `gossip-npctext-law.md`: tested `== 1` for female, so genderless `2` reads as
+/// male). `0` when the guid isn't streamed in or carries no descriptor yet, which is the same
+/// column the reference takes for a gossip target that isn't a unit at all.
+fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) -> u8 {
+    index
+        .0
+        .get(&guid)
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_gender())
+        .unwrap_or(0)
+}
 
 /// A gossip menu opened (`SMSG_GOSSIP_MESSAGE`): fill the [`GossipState`] the gossip feed
 /// (`crate::ui_gossip`) reads. On a menu opening, auto-send the ask-once `CMSG_NPC_TEXT_QUERY`
@@ -21,18 +34,19 @@ use super::super::{ClientCommand, NetCommands};
 /// [`gossip_complete`] closes it.
 ///
 /// The greeting is **drawn here**, not at the packet — this is the reference's own moment for it
-/// (`0x4e2010`), and the draw needs both this NPC's gender and a fresh roll. `npc_gender` is
-/// `UNIT_FIELD_BYTES_0` byte 2 off the NPC's descriptor, defaulting to male when the unit isn't
-/// streamed in (which is also what the reference does for a non-unit gossip target).
+/// (`0x4e2010`), and the draw needs both this NPC's gender ([`npc_gender`]) and a fresh roll.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn gossip_menu(
     npc: u64,
-    npc_gender: u8,
     text_id: u32,
     options: Vec<GossipOption>,
     quests: Vec<(u32, u32, String)>,
     gossip: &mut GossipState,
     net_commands: &NetCommands,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
 ) {
+    let npc_gender = npc_gender(npc, index, stores);
     debug!(
         "net: gossip menu on {npc:#x} — {} options, {} quests",
         options.len(),
@@ -56,12 +70,17 @@ pub(super) fn gossip_menu(
 /// The NPC-text answer (`SMSG_NPC_TEXT_UPDATE`) — seed the cache with the whole record, and draw
 /// the greeting only for the OPEN menu (a late answer for a menu we already closed just seeds the
 /// cache; the next open draws its own line).
+///
+/// The record answers a query we sent for the OPEN menu, so its NPC is the one whose gender picks
+/// the column (decision 0081's ask-once flow).
 pub(super) fn npc_greeting(
     text_id: u32,
-    npc_gender: u8,
     blocks: Vec<NpcTextBlock>,
     gossip: &mut GossipState,
+    index: &GuidIndex,
+    stores: &Query<&mut ObjectStore>,
 ) {
+    let npc_gender = gossip.npc.map_or(0, |npc| npc_gender(npc, index, stores));
     gossip.remember_record(text_id, blocks);
     if gossip.npc.is_some() && gossip.text_id == text_id {
         gossip.greeting = gossip.draw_greeting(text_id, npc_gender);

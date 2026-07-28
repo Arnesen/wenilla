@@ -52,6 +52,13 @@ const OUTBOUND_FLAG_MASK: u32 = move_flags::FORWARD
     | move_flags::FALLING
     | move_flags::FALLING_FAR
     | move_flags::SWIMMING
+    // …**and `LEVITATING`** (0x400, GM flight — decision 0726). Echoing it is not cosmetic: the
+    // reference's packet builder reads the same `[cmov+0x40]` the server's flags merged into, so a
+    // real client sends it straight back, and vmangos refreshes its `m_movementInfo` from whatever
+    // we report. Drop it from our stream and the server's copy loses the bit — then the next
+    // server-authored move (a `.go forward`, a forced speed change) echoes a LEVITATING-less word
+    // back at us, our merge clears the mode, and we fall out of the sky mid-flight.
+    | move_flags::LEVITATING
     | move_flags::ON_TRANSPORT;
 
 /// This frame's **arc edges** — the airborne lifecycle as the send law reads it. One struct rather

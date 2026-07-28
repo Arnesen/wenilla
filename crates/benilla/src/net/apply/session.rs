@@ -1,8 +1,8 @@
 //! Session-lifecycle arm bodies for [`super::apply_net_updates`]'s dispatch match — the connection
-//! edges (character select, entering the world, logout, the disconnect teardown), our own
-//! teleport/worldport snaps, the server clock, and the login reputation store. Each `pub(super)`
-//! fn here is exactly one arm's body; the match at the call site stays the dispatcher, one call
-//! per arm.
+//! edges (the login stages, character select, entering the world, logout, the disconnect
+//! teardown), our own teleport/worldport snaps, the server clock, and the login reputation store.
+//! Each `pub(super)` fn here is exactly one arm's body; the match at the call site stays the
+//! dispatcher, one call per arm.
 
 use benilla_protocol::messages::Character;
 use bevy::prelude::*;
@@ -20,10 +20,44 @@ use crate::ui_taxi::TaxiState;
 use crate::ui_trainer::TrainerOpen;
 
 use super::super::{
-    CharListMessage, ClientCommand, DroppedOpcodes, EnteredWorldMessage, GameTime, GuidIndex,
-    LoggedOutMessage, NetCommands, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid,
+    CharActionResultMessage, CharListMessage, ClientCommand, DisconnectedMessage, DroppedOpcodes,
+    EnteredWorldMessage, GameTime, GuidIndex, LoggedOutMessage, LoginFailedMessage,
+    LoginStageMessage, NetCommands, NetStatus, PendingTransfer, PingShared, Reputations, SelfGuid,
     ServerTime, TeleportMessage, WorldportMessage,
 };
+
+/// The pre-logon handshake reached a new stage (decision 0539) — the login screen's dialog reads it.
+pub(super) fn login_stage(
+    stage: benilla_protocol::LoginStage,
+    out: &mut MessageWriter<LoginStageMessage>,
+) {
+    out.write(LoginStageMessage { stage });
+}
+
+/// A login attempt failed before the roster (decision 0539): the IO thread is back at its pre-logon
+/// park, and [`crate::login`]'s policy decides what happens next.
+pub(super) fn login_failed(
+    code: Option<u8>,
+    reason: String,
+    terminal: bool,
+    out: &mut MessageWriter<LoginFailedMessage>,
+) {
+    out.write(LoginFailedMessage {
+        code,
+        reason,
+        terminal,
+    });
+}
+
+/// The verdict on a character create/delete (`SMSG_CHAR_CREATE`/`SMSG_CHAR_DELETE`) — the glue
+/// screen turns the code into its own refusal string.
+pub(super) fn char_action_result(
+    action: benilla_protocol::CharAction,
+    code: u8,
+    out: &mut MessageWriter<CharActionResultMessage>,
+) {
+    out.write(CharActionResultMessage { action, code });
+}
 
 /// The account's character roster (`SMSG_CHAR_ENUM`): the world socket is authenticated and parked
 /// at character select — surface the list (+ the connected realm's identity) to the glue screen.
@@ -126,7 +160,13 @@ pub(super) fn disconnected(
     duel: &mut crate::ui_duel::DuelState,
     social: &mut crate::ui_social::SocialState,
     pending_transfer: &mut PendingTransfer,
+    disconnects: &mut MessageWriter<DisconnectedMessage>,
 ) {
+    // The reconnect-policy feed first (decision 0539): [`crate::login`] reads it as "the IO thread
+    // is back at its pre-logon park".
+    disconnects.write(DisconnectedMessage {
+        reason: reason.clone(),
+    });
     warn!("net: {reason} — tearing down the streamed world");
     // An announced-but-unfinished far teleport died with the socket.
     pending_transfer.0 = None;
@@ -304,7 +344,11 @@ pub(super) fn reputations(standings: Vec<(u8, i32)>, reputations: &mut Reputatio
 /// A mid-session standing delta (`SMSG_SET_FACTION_STANDING`): overwrite the changed slots,
 /// growing the store for a list id past the login snapshot (flags default 0 — the wire's
 /// delta carries none).
-pub(super) fn reputation_delta(standings: Vec<(u32, i32)>, reputations: &mut Reputations) {
+pub(super) fn reputation_delta(
+    standings: Vec<(u32, i32)>,
+    reputations: &mut Reputations,
+    quest: &mut QuestGiver,
+) {
     for (list_id, standing) in standings {
         let i = list_id as usize;
         if reputations.0.len() <= i {
@@ -312,6 +356,9 @@ pub(super) fn reputation_delta(standings: Vec<(u32, i32)>, reputations: &mut Rep
         }
         reputations.0[i].1 = standing;
     }
+    // A standing change is a questgiver-status input (`SatisfyQuestReputation`, and the reaction
+    // gate): the reference sweeps from this handler too (0654).
+    quest.bump_reask();
 }
 
 /// The keepalive echo (`SMSG_PONG`): match it against the shared ping clock to measure the

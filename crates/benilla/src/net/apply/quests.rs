@@ -72,6 +72,9 @@ pub(super) fn quest_complete(c: QuestComplete, quest: &mut QuestGiver) {
         c.items.len()
     );
     quest.clear();
+    // The turn-in result is one of the `SMSG_QUESTGIVER_*` the reference sweeps from (0654): every
+    // other giver's `!`/`?` can move the moment a quest is handed in.
+    quest.bump_reask();
 }
 
 /// The full quest template (`SMSG_QUEST_QUERY_RESPONSE`, answering our `CMSG_QUEST_QUERY`) — the
@@ -90,13 +93,15 @@ pub(super) fn quest_template(t: Box<QuestTemplate>, quest_log: &mut QuestLog) {
 /// chat-line stopgap here is retired: the reference shows no chat echo for objective progress
 /// (INFERRED from ref screenshots; the dispatched §5 adjudicates, and this fn is the fold-back
 /// seat if the real handler does more — a sound, a distinct format).
-pub(super) fn quest_objective_kill(entry: u32, count: u32, required: u32) {
+pub(super) fn quest_objective_kill(entry: u32, count: u32, required: u32, quest: &mut QuestGiver) {
     debug!("net: quest kill/use objective {entry:#x} at {count}/{required}");
+    quest.bump_reask();
 }
 
 /// See [`quest_objective_kill`] — same surface, item flavor.
-pub(super) fn quest_objective_item(item_id: u32, count: u32) {
+pub(super) fn quest_objective_item(item_id: u32, count: u32, quest: &mut QuestGiver) {
     debug!("net: quest item objective {item_id} +{count}");
+    quest.bump_reask();
 }
 
 /// Every objective on the quest is complete (`SMSG_QUESTUPDATE_COMPLETE`, 0x198). The visible
@@ -104,8 +109,11 @@ pub(super) fn quest_objective_item(item_id: u32, count: u32) {
 /// kind-1 → UI_INFO_MESSAGE, never a chat line) — rides the quest-log diff's COMPLETE-flip
 /// detection (`crate::ui_quest_log::feed_quest_log`), same as the progress toasts; the slot's
 /// state byte carries the durable fact.
-pub(super) fn quest_objectives_complete(quest_id: u32) {
+pub(super) fn quest_objectives_complete(quest_id: u32, quest: &mut QuestGiver) {
     debug!("net: quest {quest_id} objectives complete");
+    // The turn-in `?` can go gold with no quest-log field change of its own, so the reference
+    // sweeps from these `SMSG_QUESTUPDATE_*` handlers (0654).
+    quest.bump_reask();
 }
 
 /// The quest failed (`SMSG_QUESTUPDATE_FAILED` / `_FAILEDTIMER` — `timed` picks which): the one
@@ -118,6 +126,7 @@ pub(super) fn quest_failed(
     quest_log: &mut QuestLog,
     net_commands: &NetCommands,
     chat_log: &mut ChatLog,
+    quest: &mut QuestGiver,
 ) {
     debug!("net: quest {quest_id} failed (timed: {timed})");
     let line = quest_log
@@ -127,6 +136,9 @@ pub(super) fn quest_failed(
         crate::ui_chat::ChatEventKind::System,
         line,
     ));
+    // A failure moves what the givers offer — the reference sweeps from these `SMSG_QUESTUPDATE_*`
+    // handlers too (0654).
+    quest.bump_reask();
 }
 
 /// The log refused a new quest — no free slot (`SMSG_QUESTLOG_FULL`). The ref's `0x195` arm is a

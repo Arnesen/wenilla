@@ -9,28 +9,32 @@ use benilla_protocol::{ObjectFields, SessionEvent};
 use bevy::prelude::*;
 
 use super::{
-    AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteKind, EmoteMessage,
-    EnteredWorldMessage, Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus,
-    ObjectStore, PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundKind,
-    ServerSoundMessage, ServerTime, TeleportMessage, WeatherMessage, WorldportMessage,
+    AiReactionMessage, CharActionResultMessage, CharListMessage, EmoteMessage, EnteredWorldMessage,
+    Guid, GuidIndex, LoggedOutMessage, NetCommands, NetEvents, NetStatus, ObjectStore,
+    PendingTransfer, RemoteMotion, Reputations, SelfGuid, SelfPlayer, ServerSoundMessage,
+    ServerTime, TeleportMessage, WeatherMessage, WorldportMessage,
 };
 
+mod anim;
 mod chat;
 mod combat;
 mod combat_log;
+mod death;
 mod group;
 mod loot;
 mod mail;
+mod mount;
+mod names;
 mod npc;
 mod objects;
 mod quests;
 mod session;
 mod spells;
 mod trade;
+mod world;
 
-// The large arm families, split out of the dispatch match below (each `pub(super)` fn is
-// one arm's body; the match stays the dispatcher, one call per arm — see the child modules).
-use group::push_group_lines;
+// The arm families, split out of the dispatch match below (each `pub(super)` fn is one arm's
+// body; the match stays the dispatcher, one call per arm — see the child modules).
 use loot::{
     inventory_failure, item_push_result, item_template, loot_all_passed, loot_clear_money,
     loot_error, loot_money_notify, loot_release_response, loot_removed, loot_response, loot_roll,
@@ -42,9 +46,9 @@ use quests::{
     quest_objectives_complete, quest_offer, quest_progress, quest_template,
 };
 use spells::{
-    action_buttons, cancel_auto_repeat, cast_result, clear_cooldown, cooldown_cheat,
-    cooldown_event, item_cooldown, learned_spell, spell_book, spell_cooldowns, spell_delayed,
-    spell_failed_other, spell_go, spell_start, superceded_spell,
+    action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
+    clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, spell_book,
+    spell_cooldowns, spell_delayed, spell_failed_other, spell_go, spell_start, superceded_spell,
 };
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
@@ -235,7 +239,9 @@ pub(super) fn apply_net_updates(
         Res<Time<bevy::time::Real>>,
     ),
 ) {
-    let play_seq = &mut aura.4;
+    // A `&mut` to the counter itself (deref-coerced through the `ResMut`), so the arms that stamp
+    // it *conditionally* can take it by reference and only advance it when they emit.
+    let play_seq: &mut crate::creature_anim::PlaySeq = &mut aura.4;
     let (
         mut names,
         mut items,
@@ -288,25 +294,17 @@ pub(super) fn apply_net_updates(
     let mut pending: HashMap<u64, ObjectFields> = HashMap::new();
     for ev in events.0.try_iter() {
         match ev {
-            SessionEvent::LoginStage { stage } => {
-                login_stages.write(super::LoginStageMessage { stage });
-            }
+            SessionEvent::LoginStage { stage } => session::login_stage(stage, &mut login_stages),
             SessionEvent::LoginFailed {
                 code,
                 reason,
                 terminal,
-            } => {
-                login_failures.write(super::LoginFailedMessage {
-                    code,
-                    reason,
-                    terminal,
-                });
-            }
+            } => session::login_failed(code, reason, terminal, &mut login_failures),
             SessionEvent::CharacterList { characters, realm } => {
                 session::character_list(characters, realm, &mut status, &mut char_lists)
             }
             SessionEvent::CharActionResult { action, code } => {
-                char_actions.write(CharActionResultMessage { action, code });
+                session::char_action_result(action, code, &mut char_actions)
             }
             SessionEvent::CinematicTriggered { cinematic_id } => {
                 session::cinematic_triggered(cinematic_id, &net_commands)
@@ -332,9 +330,6 @@ pub(super) fn apply_net_updates(
             }
             SessionEvent::LogoutCancelled => logout.apply_cancelled(),
             SessionEvent::Disconnected { reason } => {
-                disconnects.write(super::DisconnectedMessage {
-                    reason: reason.clone(),
-                });
                 session::disconnected(
                     reason,
                     &mut commands,
@@ -362,6 +357,7 @@ pub(super) fn apply_net_updates(
                     &mut duel,
                     &mut social,
                     &mut aura.6,
+                    &mut disconnects,
                 );
             }
             SessionEvent::ObjectCreate {
@@ -377,14 +373,7 @@ pub(super) fn apply_net_updates(
                 spline,
                 fields,
             } => {
-                // OUR corpse streaming into range (a TYPEID_CORPSE create whose owner is us):
-                // remember its guid for the reclaim send (decision 0308 §5). Corpses classify as
-                // EntityKind::Other; the owner field is corpse-only, so the filter is exact.
-                if kind == benilla_protocol::EntityKind::Other
-                    && fields.corpse_owner() == self_guid.0
-                {
-                    death_net.corpse_guid = Some(guid);
-                }
+                death::note_corpse(guid, kind, &fields, &self_guid, &mut death_net);
                 objects::object_create(
                     guid,
                     kind,
@@ -467,11 +456,7 @@ pub(super) fn apply_net_updates(
                 objects::object_values(guid, fields, &index, &mut stores, &mut pending, &mut items)
             }
             SessionEvent::ObjectDestroyed(guid) => {
-                // The corpse-to-bones swap destroys the corpse object under its guid (0308 §1);
-                // a stale guid must not ride a later reclaim.
-                if death_net.corpse_guid == Some(guid) {
-                    death_net.corpse_guid = None;
-                }
+                death::forget_corpse(guid, &mut death_net);
                 objects::object_destroyed(guid, &mut commands, &mut index, &mut items)
             }
             SessionEvent::ObjectsRemoved(guids) => {
@@ -545,10 +530,7 @@ pub(super) fn apply_net_updates(
                 session::reputations(standings, &mut reputations)
             }
             SessionEvent::ReputationDelta { standings } => {
-                // A standing change is a questgiver-status input (`SatisfyQuestReputation`, and
-                // the reaction gate): the reference sweeps from this handler too (0654).
-                session::reputation_delta(standings, &mut reputations);
-                quest.bump_reask();
+                session::reputation_delta(standings, &mut reputations, &mut quest)
             }
             SessionEvent::BindPoint { area } => home_bind.0 = Some(area),
             SessionEvent::Proficiency {
@@ -557,13 +539,11 @@ pub(super) fn apply_net_updates(
             } => {
                 proficiencies.0.insert(item_class, subclass_mask);
             }
-            // Name-query answers → the cache (asked by NameCache::resolve; race/gender/class ride
-            // the player answer but have no consumer yet — the cache stays name-only until one does).
             SessionEvent::PlayerName { guid, name, .. } => {
-                names.insert_player(guid, name);
+                names::player_name(guid, name, &mut names)
             }
             SessionEvent::PetName { pet_number, name } => {
-                names.insert_pet(pet_number, name);
+                names::pet_name(pet_number, name, &mut names)
             }
             SessionEvent::CreatureName {
                 entry,
@@ -574,20 +554,17 @@ pub(super) fn apply_net_updates(
                 type_flags,
                 civilian,
                 racial_leader,
-            } => {
-                names.insert_creature(
-                    entry,
-                    name.map(|n| crate::names::CreatureRecord {
-                        name: n,
-                        subname,
-                        creature_type: creature_type.unwrap_or(0),
-                        rank,
-                        type_flags,
-                        civilian,
-                        racial_leader,
-                    }),
-                );
-            }
+            } => names::creature_name(
+                entry,
+                name,
+                subname,
+                creature_type,
+                rank,
+                type_flags,
+                civilian,
+                racial_leader,
+                &mut names,
+            ),
             SessionEvent::GameObjectInfo {
                 entry,
                 type_id,
@@ -595,59 +572,24 @@ pub(super) fn apply_net_updates(
                 name,
                 data,
             } => {
-                // The ask-once GameObject template (decision 0239): cache it and resolve the lockId
-                // from the type-specific `data[]` slot — the interact routing reads it to choose
-                // use-vs-cast; the hover tooltip reads the name (decision 0276's GO law).
-                debug!(
-                    "net: gameobject template {entry} type {type_id} display {display_id} {name:?}"
-                );
-                go_templates.insert(entry, type_id, name, &data);
+                objects::gameobject_info(entry, type_id, display_id, name, &data, &mut go_templates)
             }
-            SessionEvent::PlaySound { sound_id } => {
-                audio.0.write(ServerSoundMessage {
-                    kind: ServerSoundKind::Sound2d,
-                    sound_id,
-                    source: None,
-                });
-            }
-            SessionEvent::PlayMusic { music_id } => {
-                audio.0.write(ServerSoundMessage {
-                    kind: ServerSoundKind::Music,
-                    sound_id: music_id,
-                    source: None,
-                });
-            }
+            SessionEvent::PlaySound { sound_id } => world::play_sound(sound_id, &mut audio.0),
+            SessionEvent::PlayMusic { music_id } => world::play_music(music_id, &mut audio.0),
             SessionEvent::PlayObjectSound { sound_id, guid } => {
-                audio.0.write(ServerSoundMessage {
-                    kind: ServerSoundKind::ObjectSound,
-                    sound_id,
-                    source: index.0.get(&guid).copied(),
-                });
+                world::play_object_sound(sound_id, guid, &index, &mut audio.0)
             }
             SessionEvent::Weather {
                 weather_type,
                 grade,
                 sound_id,
                 instant,
-            } => {
-                audio.1.write(WeatherMessage {
-                    weather_type,
-                    grade,
-                    sound_id,
-                    instant,
-                });
-            }
+            } => world::weather(weather_type, grade, sound_id, instant, &mut audio.1),
             SessionEvent::TextEmote { guid, text_emote } => {
-                audio.2.write(EmoteMessage {
-                    source: index.0.get(&guid).copied(),
-                    kind: EmoteKind::Text(text_emote),
-                });
+                anim::text_emote(guid, text_emote, &index, &mut audio.2)
             }
             SessionEvent::Emote { guid, emote_id } => {
-                audio.2.write(EmoteMessage {
-                    source: index.0.get(&guid).copied(),
-                    kind: EmoteKind::Anim(emote_id),
-                });
+                anim::emote(guid, emote_id, &index, &mut audio.2)
             }
             // The spell-book/action-bar pair → the action store the UI feed reads
             // (`crate::ui_action`), sent once at login (and the bar again on server-side edits).
@@ -696,61 +638,13 @@ pub(super) fn apply_net_updates(
                 &mut ui_actions.7,
             ),
             SessionEvent::Chat(m) => {
-                // The chat window (decision 0084): the feed ([`crate::ui_chat`]) formats + colors
-                // per type, resolves the sender name ask-once, and AddMessages it into ChatFrame1.
-                // System lines (`CHAT_MSG_SYSTEM` 0x0A, vmangos `SharedDefines.h`) are the SERVER'S
-                // ANSWER to a GM dot-command — "Premade gear template N applied", "No matching
-                // premade player template found", "There is no such command". For a headless probe
-                // that is the only channel the server has to say *why* something did not happen, so
-                // it rides at `info!`: at `debug!` it was in the log but invisible at the default
-                // level, and a refused command read exactly like an applied one (decision 0651 —
-                // the rig's whole batch silently no-op'd on a too-low GM level and nothing said so).
-                // Ordinary chat stays at `debug!`: conversation, not diagnosis, and high volume.
-                if m.chat_type == 0x0A {
-                    info!("net: server says — {}", m.text);
-                    // …and as a message, for the senders that must know whether their command
-                    // landed. Server state with no descriptor field (god mode) has no other tell.
-                    server_said.write(super::ServerSaidMessage {
-                        text: m.text.clone(),
-                    });
-                } else {
-                    debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
-                }
-                // …and on the trace clock too (decision 0624). A GM dot-command is the only way to
-                // ask the SERVER what it believes — `.gps` reads back the server-side position of a
-                // mover whose packets may or may not be reaching it — and its answer is only usable
-                // if it lands on the same timeline as the `snd`/`rly`/`run` lines it must be read
-                // against. `debug!` timestamps are wall-clock in a different format; this is one
-                // clock, one file.
-                if crate::dbg_trace::enabled() {
-                    crate::dbg_trace::line(
-                        "sys",
-                        &format!("[{:#04x}] {}", m.chat_type, m.text.replace('\n', " ⏎ ")),
-                    );
-                }
-                // The ignore gate (decision 0668): an ignored speaker is dropped SILENTLY —
-                // no line at all — which is the client's own `FriendList::IsIgnored 0x5ae5a0`
-                // check, VERIFIED for the sibling text-emote path (wow-re
-                // `system/ui/scratch/text-emote-composition.md`). A dropped WHISPER additionally
-                // tells the server, so the sender gets the "is ignoring you" answer: that is what
-                // `CMSG_CHAT_IGNORED` is for, and only the client can send it.
-                if social.is_ignored(m.sender_guid) {
-                    if m.chat_type == benilla_protocol::messages::CHAT_MSG_WHISPER {
-                        let _ = net_commands.0.send(crate::net::ClientCommand::ChatIgnored {
-                            guid: m.sender_guid,
-                        });
-                    }
-                    continue;
-                }
-                chat_log.push_wire(m);
+                chat::chat(m, &mut chat_log, &social, &net_commands, &mut server_said)
             }
             SessionEvent::ChannelNotify {
                 notice,
                 channel,
                 tail,
-            } => {
-                chat_log.push_channel_notice(notice, channel, &tail);
-            }
+            } => chat_log.push_channel_notice(notice, channel, &tail),
             SessionEvent::ChannelList {
                 channel, members, ..
             } => chat::channel_list(channel, &members, &mut chat_log),
@@ -770,59 +664,48 @@ pub(super) fn apply_net_updates(
                 max,
                 roll,
                 guid,
-            } => {
-                chat_log.push_roll(min, max, roll, guid);
-            }
-            // ── The group/party family (decision 0434 §D2, superseded by 0440): `GroupState`
-            // mirrors the wire; its composed lines ride CHAT_MSG_SYSTEM, the way the reference's
-            // engine-side errorId→GlobalStrings display does (mapping byte-verified, decision
-            // 0440's §5 fold-back) ──
+            } => chat_log.push_roll(min, max, roll, guid),
+            // ── The group/party family (decision 0434 §D2, superseded by 0440) — arm bodies in
+            // `group` ──
             SessionEvent::GroupInvite { inviter } => {
-                push_group_lines(&mut chat_log, group.apply_invited(&inviter));
+                group::invited(&mut group, &mut chat_log, &inviter)
             }
             SessionEvent::GroupDecline { name } => {
-                push_group_lines(&mut chat_log, group.apply_declined(&name));
+                group::declined(&mut group, &mut chat_log, &name)
             }
-            SessionEvent::GroupUninvited => {
-                push_group_lines(&mut chat_log, group.apply_uninvited());
-            }
-            SessionEvent::GroupLeaderChanged { name } => {
-                // Our own name is cache-seeded at login (session::connected), so this never asks.
-                let own = self_guid
-                    .0
-                    .and_then(|g| names.resolve(g, &net_commands).map(str::to_string));
-                push_group_lines(
-                    &mut chat_log,
-                    group.apply_leader_changed(&name, own.as_deref()),
-                );
-            }
-            SessionEvent::GroupDestroyed => {
-                push_group_lines(&mut chat_log, group.apply_destroyed());
-            }
+            SessionEvent::GroupUninvited => group::uninvited(&mut group, &mut chat_log),
+            SessionEvent::GroupLeaderChanged { name } => group::leader_changed(
+                &mut group,
+                &mut chat_log,
+                &name,
+                &self_guid,
+                &mut names,
+                &net_commands,
+            ),
+            SessionEvent::GroupDestroyed => group::destroyed(&mut group, &mut chat_log),
             SessionEvent::GroupList {
                 group_type,
                 own_flags,
                 members,
                 leader,
                 loot,
-            } => {
-                let lines = group.apply_list(group_type, own_flags, members, leader, loot);
-                push_group_lines(&mut chat_log, lines);
-                // Roster changes move shared-quest availability — the reference sweeps here (0654).
-                quest.bump_reask();
-            }
+            } => group::list(
+                &mut group,
+                &mut chat_log,
+                &mut quest,
+                group_type,
+                own_flags,
+                members,
+                leader,
+                loot,
+            ),
             SessionEvent::PartyCommandResult {
                 operation,
                 member,
                 result,
-            } => {
-                push_group_lines(
-                    &mut chat_log,
-                    group.apply_command_result(operation, &member, result),
-                );
-            }
+            } => group::command_result(&mut group, &mut chat_log, operation, &member, result),
             SessionEvent::PartyMemberStats { guid, full, info } => {
-                group.apply_stats(guid, full, *info);
+                group.apply_stats(guid, full, *info)
             }
             SessionEvent::RaidTargetSet { icon, guid } => group.apply_raid_target(icon, guid),
             SessionEvent::RaidTargetList { entries } => group.apply_raid_target_list(&entries),
@@ -894,68 +777,41 @@ pub(super) fn apply_net_updates(
             SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),
             SessionEvent::LootRollWon(p) => loot_roll_won(p, &mut loot_rolls),
             SessionEvent::LootAllPassed(p) => loot_all_passed(p, &mut loot_rolls),
-            // ── The death arc (decision 0308) — the wire-fed stores + the controller acks ──────
+            // ── The death arc (decision 0308) — arm bodies in `death` ─────────────────────────
             SessionEvent::CorpseQuery {
                 found,
                 display_map,
                 position,
                 corpse_map,
-            } => {
-                // A not-found (reactive or the unprompted bones-conversion push) drops the marker.
-                death_net.corpse = found.then_some(crate::death::CorpsePoint {
-                    display_map,
-                    position,
-                    corpse_map,
-                });
-            }
+            } => death::corpse_query(found, display_map, position, corpse_map, &mut death_net),
             SessionEvent::CorpseReclaimDelay { delay_ms } => {
-                death_net.reclaim_at =
-                    Some(aura.1.elapsed_secs_f64() + f64::from(delay_ms) / 1000.0);
-                // The client's 0x269 handler re-fires the corpse-range events through its latch
-                // (wow-re death-ui.md §4) — the feed re-announces on this bump.
-                death_net.reclaim_generation = death_net.reclaim_generation.wrapping_add(1);
+                death::corpse_reclaim_delay(delay_ms, aura.1.elapsed_secs_f64(), &mut death_net)
             }
             SessionEvent::ResurrectRequest {
                 caster,
                 name,
                 sickness,
                 has_timer,
-            } => {
-                death_net.resurrect = Some(crate::death::ResurrectOffer {
-                    caster,
-                    name,
-                    sickness,
-                    has_timer,
-                });
+            } => death::resurrect_request(caster, name, sickness, has_timer, &mut death_net),
+            SessionEvent::SpiritHealerConfirm { npc } => {
+                death::spirit_healer_confirm(npc, &mut death_net)
             }
-            SessionEvent::SpiritHealerConfirm { npc } => death_net.spirit_healer = Some(npc),
             SessionEvent::DurabilityDamageDeath => {
-                // The red line, verbatim GlobalStrings DURABILITYDAMAGE_DEATH (the %% unescaped).
-                ui_actions
-                    .14
-                     .0
-                    .push("Your equipped items suffer a 10% durability loss.".to_string());
+                death::durability_damage_death(&mut ui_actions.14)
             }
             SessionEvent::MoveRoot {
                 guid,
                 counter,
                 rooted,
-            } => {
-                // The server only addresses our own mover; the guard keeps a stray relay harmless.
-                if self_guid.0 == Some(guid) {
-                    move_roots.write(crate::death::MoveRootMessage {
-                        guid,
-                        counter,
-                        rooted,
-                    });
-                }
-            }
-            SessionEvent::WaterWalk { guid, counter, on } => {
-                if self_guid.0 == Some(guid) {
-                    death_net.water_walk = on;
-                    water_walks.write(crate::death::WaterWalkMessage { guid, counter, on });
-                }
-            }
+            } => death::move_root(guid, counter, rooted, &self_guid, &mut move_roots),
+            SessionEvent::WaterWalk { guid, counter, on } => death::water_walk(
+                guid,
+                counter,
+                on,
+                &self_guid,
+                &mut death_net,
+                &mut water_walks,
+            ),
             SessionEvent::ItemTemplate { entry, info } => {
                 item_template(entry, info.map(|b| *b), &mut items)
             }
@@ -1029,18 +885,9 @@ pub(super) fn apply_net_updates(
                 &mut audio.15 .1,
             ),
             SessionEvent::XpGain(x) => {
-                combat_log::xp_gain(x, &index, &self_guid, &mut audio.7);
-                chat_log.push_xp_gain(&x);
+                combat_log::xp_gain(x, &index, &self_guid, &mut audio.7, &mut chat_log)
             }
-            SessionEvent::LevelUp(l) => {
-                // The ding's chat lines (decision 0304). The talent-count arg is not on the
-                // wire — the client computes `(newLevel >= 10) ? 1 : 0` (byte-verified
-                // `0x5e407c`, wow-re levelup-ding.md — the 0305 fold-back), exactly this. The
-                // ding's VISUAL is deliberately absent here: it rides the UNIT_FIELD_LEVEL
-                // change-watcher (`entities` spell_fx::level_up_flash), never this packet.
-                let talent_points = u32::from(l.level >= 10);
-                chat_log.push_level_up(&l, talent_points);
-            }
+            SessionEvent::LevelUp(l) => combat_log::level_up(l, &mut chat_log),
             SessionEvent::SpellStart {
                 caster,
                 spell_id,
@@ -1151,92 +998,44 @@ pub(super) fn apply_net_updates(
             SessionEvent::CooldownCheat { caster } => {
                 cooldown_cheat(caster, &self_guid, &mut ui_actions.10)
             }
-            // The channel pair is self-only on the wire (no guid) — straight to the cast bar;
-            // the channel *animation* state rides the unit-field pair instead (decision 0137).
             SessionEvent::ChannelStart {
                 spell_id,
                 duration_ms,
-            } => {
-                let now = std::time::Instant::now();
-                ui_actions.13.start(spell_id, duration_ms, now);
-                ui_actions
-                    .5
-                     .0
-                    .push(crate::ui_cast::CastBarEdge::ChannelStart {
-                        spell_id,
-                        duration_ms,
-                    })
-            }
+            } => channel_start(spell_id, duration_ms, &mut ui_actions.13, &mut ui_actions.5),
             SessionEvent::ChannelUpdate { remaining_ms } => {
-                ui_actions
-                    .13
-                    .update(remaining_ms, std::time::Instant::now());
-                ui_actions
-                    .5
-                     .0
-                    .push(crate::ui_cast::CastBarEdge::ChannelUpdate { remaining_ms })
+                channel_update(remaining_ms, &mut ui_actions.13, &mut ui_actions.5)
             }
-            // One of our own auras' remaining time (decisions 0255/0257) — keyed by raw slot,
-            // stamped with the receive time. The `ui_aura` feed joins it to the aura in that slot
-            // by arrival order; it arrives *before* the descriptor delta that names the slot.
             SessionEvent::AuraDuration { slot, remaining_ms } => {
-                aura.0.set(slot, remaining_ms, aura.1.elapsed_secs_f64());
+                aura_duration(slot, remaining_ms, &mut aura.0, aura.1.elapsed_secs_f64())
             }
             SessionEvent::PlaySpellVisual { unit, kit_id } => {
-                // The kit-push opcode (decision 0280): stage-0 play on the unit — the eat/drink
-                // kit cadence and mid-channel swaps. Consumer: `creature_anim::spell_visual`.
-                if let Some(&e) = index.0.get(&unit) {
-                    audio.12.write(crate::creature_anim::KitPush {
-                        entity: e,
-                        kit_id,
-                        seq: play_seq.next(),
-                    });
-                }
+                anim::play_spell_visual(unit, kit_id, &index, play_seq, &mut audio.12)
             }
-            SessionEvent::EnvironmentalDamageLog(e) => {
-                // The 0x1FC consequence (wow-re `sound/scratch/uisound-tables.md`: reader
-                // `0x624fcc` inside `0x624f30`): the EnvironmentalDamage.dbc 6-slot table picks
-                // the damage type's SpellVisualKit — fall's is the DustCloud_Land puff — played
-                // on the victim through the ordinary discrete kit play (`0x60edf0`), the same
-                // leg the kit-push opcode rides. The pain vocal's exact trigger is a dispatched
-                // wow-re §5 (in flight) — it folds in as its own edge when the verdict lands.
-                if let Some(&ent) = index.0.get(&e.victim) {
-                    if let Some(kit_id) = aura.5.as_ref().and_then(|t| t.0.kit_id(e.damage_type)) {
-                        debug!(
-                            "net: environmental damage on {:#x} (type {}, {} dmg) → kit {kit_id}",
-                            e.victim, e.damage_type, e.damage
-                        );
-                        audio.12.write(crate::creature_anim::KitPush {
-                            entity: ent,
-                            kit_id,
-                            seq: play_seq.next(),
-                        });
-                    }
-                }
-            }
+            SessionEvent::EnvironmentalDamageLog(e) => anim::environmental_damage_log(
+                e,
+                &index,
+                aura.5.as_deref(),
+                play_seq,
+                &mut audio.12,
+            ),
             // The gossip/vendor/trainer NPC-interaction family — arm bodies in `npc`.
             SessionEvent::GossipMenu {
                 npc,
                 text_id,
                 options,
                 quests,
-            } => {
-                let gender = npc_gender(npc, &index, &stores);
-                npc::gossip_menu(
-                    npc,
-                    gender,
-                    text_id,
-                    options,
-                    quests,
-                    &mut gossip,
-                    &net_commands,
-                );
-            }
+            } => npc::gossip_menu(
+                npc,
+                text_id,
+                options,
+                quests,
+                &mut gossip,
+                &net_commands,
+                &index,
+                &stores,
+            ),
             SessionEvent::NpcGreeting { text_id, blocks } => {
-                // The record answers a query we sent for the OPEN menu, so its NPC is the one whose
-                // gender picks the column (decision 0081's ask-once flow).
-                let gender = gossip.npc.map_or(0, |npc| npc_gender(npc, &index, &stores));
-                npc::npc_greeting(text_id, gender, blocks, &mut gossip)
+                npc::npc_greeting(text_id, blocks, &mut gossip, &index, &stores)
             }
             SessionEvent::GossipComplete => npc::gossip_complete(&mut gossip, &mut quest),
             // Questgiver panels (decision 0088): fill the `QuestGiver` the quest feed
@@ -1249,12 +1048,7 @@ pub(super) fn apply_net_updates(
             SessionEvent::QuestDetail(d) => quest_detail(d, &mut quest),
             SessionEvent::QuestProgress(p) => quest_progress(p, &mut quest),
             SessionEvent::QuestOffer(o) => quest_offer(o, &mut quest),
-            SessionEvent::QuestComplete(c) => {
-                // The turn-in result — the `SMSG_QUESTGIVER_*` demux the reference sweeps from
-                // (0654): every other giver's `!`/`?` can move the moment a quest is handed in.
-                quest_complete(c, &mut quest);
-                quest.bump_reask();
-            }
+            SessionEvent::QuestComplete(c) => quest_complete(c, &mut quest),
             // Quest log (decision 0088's deferred second slice): the full template feeds the log
             // window's ask-once detail cache; the `SMSG_QUESTUPDATE_*` toasts have no dedicated
             // window of their own on this server (no ErrorsFrame-style transient panel yet), so they
@@ -1267,30 +1061,21 @@ pub(super) fn apply_net_updates(
                 entry,
                 count,
                 required,
-            } => {
-                quest_objective_kill(entry, count, required);
-                quest.bump_reask();
-            }
+            } => quest_objective_kill(entry, count, required, &mut quest),
             SessionEvent::QuestObjectiveItem { item_id, count } => {
-                quest_objective_item(item_id, count);
-                quest.bump_reask();
+                quest_objective_item(item_id, count, &mut quest)
             }
             SessionEvent::QuestObjectivesComplete { quest_id } => {
-                // The `SMSG_QUESTUPDATE_*` family: the turn-in `?` can go gold with no quest-log
-                // field change of its own, so the reference sweeps from these handlers (0654).
-                quest_objectives_complete(quest_id);
-                quest.bump_reask();
+                quest_objectives_complete(quest_id, &mut quest)
             }
-            SessionEvent::QuestFailed { quest_id, timed } => {
-                quest_failed(
-                    quest_id,
-                    timed,
-                    &mut quest_log,
-                    &net_commands,
-                    &mut chat_log,
-                );
-                quest.bump_reask();
-            }
+            SessionEvent::QuestFailed { quest_id, timed } => quest_failed(
+                quest_id,
+                timed,
+                &mut quest_log,
+                &net_commands,
+                &mut chat_log,
+                &mut quest,
+            ),
             SessionEvent::QuestLogFull => quest_log_full(&mut quest),
             SessionEvent::QuestGiverInvalid { reason } => quest_giver_invalid(reason, &mut quest),
             SessionEvent::QuestGiverFailed { quest_id, reason } => {
@@ -1357,35 +1142,12 @@ pub(super) fn apply_net_updates(
             SessionEvent::SpeedChanged { guid, kind, speed } => {
                 objects::speed_changed(guid, kind, speed, &index, &mut aura.3)
             }
-            // The (dis)mount attempt's result code (decision 0441): OK is silent in the reference
-            // (10 mounting / 3 dismounting); a failure queues the red error line
-            // (`ui_action::mount_result_key` — resolved against the VM's GlobalStrings at drain).
+            // ── The mount arc (decision 0441) — arm bodies in `mount` ─────────────────────────
             SessionEvent::MountResult { mount, code } => {
-                let ok = if mount { code == 10 } else { code == 3 };
-                if !ok {
-                    info!(
-                        "net: {}mount refused (code {code})",
-                        if mount { "" } else { "dis" }
-                    );
-                    ui_actions.1 .1 .0.push((mount, code));
-                }
+                mount::mount_result(mount, code, &mut ui_actions.1 .1)
             }
-            // A nearby rider's flourish: rear their mount (MountSpecial 94 on the mount child —
-            // the hop happens in `creature_anim::flourish_to_anim`). Our OWN guid is dropped:
-            // we played it locally at send time, and whether the sender gets the SMSG echoed
-            // back is a server-config detail (LIVE-VERIFIED 2026-07-17, double-flourish probe:
-            // vmangos's `SendMovementMessageToSet(.., false)` only cheat-logs on the flag — the
-            // non-broadcaster delivery hardcodes self=true, so our deployment echoes; the
-            // optional per-player broadcaster honors it and would not). Self-suppression on
-            // receive is correct under both configs.
             SessionEvent::MountSpecial { guid } => {
-                if self_guid.0 != Some(guid) {
-                    if let Some(&e) = index.0.get(&guid) {
-                        audio
-                            .14
-                            .write(crate::creature_anim::MountFlourish { unit: e });
-                    }
-                }
+                mount::mount_special(guid, &self_guid, &index, &mut audio.14)
             }
             SessionEvent::Pong { sequence } => session::pong(sequence, &aura.2, &mut status),
             SessionEvent::PacketDropped {
@@ -1432,18 +1194,8 @@ pub(super) fn apply_net_updates(
             SessionEvent::TradeStatusExtended { state } => {
                 trade::trade_status_extended(&state, &mut trade_session)
             }
-            // The world-state table (`SMSG_INIT_WORLD_STATES` / `SMSG_UPDATE_WORLD_STATE`) — both
-            // wires funnel into the one setter, as the reference's own handler does. An init does
-            // NOT clear first: what its `(map, zone)` dwords drive is unrecorded, so we log the
-            // scope rather than act on it (rationale on `crate::world_state`).
             SessionEvent::WorldStates { scope, states } => {
-                if let Some((map, zone)) = scope {
-                    debug!(
-                        "world states: map {map} zone {zone}, {} entries",
-                        states.len()
-                    );
-                }
-                world_states.write(&states);
+                world::world_states(scope, states, &mut world_states)
             }
         }
     }
@@ -1454,19 +1206,6 @@ pub(super) fn apply_net_updates(
             commands.entity(e).insert(ObjectStore(fields));
         }
     }
-}
-
-/// A streamed unit's gender (`UNIT_FIELD_BYTES_0` byte 2) by guid — the gossip greeting's column
-/// selector (wow-re `gossip-npctext-law.md`: tested `== 1` for female, so genderless `2` reads as
-/// male). `0` when the guid isn't streamed in or carries no descriptor yet, which is the same
-/// column the reference takes for a gossip target that isn't a unit at all.
-fn npc_gender(guid: u64, index: &GuidIndex, stores: &Query<&mut ObjectStore>) -> u8 {
-    index
-        .0
-        .get(&guid)
-        .and_then(|&e| stores.get(e).ok())
-        .and_then(|s| s.0.unit_gender())
-        .unwrap_or(0)
 }
 
 /// Tag our own player's streamed entity with [`SelfPlayer`] once we know our guid — by matching the

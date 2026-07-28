@@ -184,6 +184,18 @@ pub(crate) struct Player {
     /// death and release"); turning stays live, like a real rooted client. Set/cleared by the
     /// root-ack handler in [`super::wire_in`].
     pub(super) rooted: bool,
+    /// **The server put us in free flight** (`MOVEFLAG_LEVITATING`, GM `.cheat fly` — decision
+    /// 0726). Set/cleared only from a server-authored move ([`super::wire_in`]), like
+    /// [`Player::rooted`] — a granted mover *mode*, which in this architecture is typed state rather
+    /// than a raw bit ([`Player::move_flags`] is last-streamed wire bookkeeping, rebuilt from state
+    /// every frame).
+    ///
+    /// It does exactly one thing, and it does it by suppression: while set, the water/depth swim
+    /// decision does not run at all ([`super::swim::update_swimming`] — the reference's
+    /// `0x6030d2 test ah,4` bail). So a [`Player::swimming`] the server switched on stays on with no
+    /// water under it — which *is* GM flight — and, symmetrically, real water can no longer put us
+    /// into swim while it is set.
+    pub(super) levitating: bool,
     /// **Autorun** latched on — the reference's input bit `0x1000` in the local mover's input word
     /// `[MOVE+4]`, flipped by `ToggleAutoRun 0x513de0` (a read+invert: the command family's only
     /// *toggle*, where every directional command is a set/clear pair). VERIFIED, wow-re

@@ -1,11 +1,70 @@
-//! Chat-window system-line arm bodies for [`super::apply_net_updates`]'s dispatch match — the
-//! server notices and query answers that render as chat lines (the channel roster, whisper
-//! refusals, `SMSG_NOTIFICATION`, `/played`). Each `pub(super)` fn here is exactly one arm's
-//! body; the match at the call site stays the dispatcher, one call per arm.
+//! Chat-window arm bodies for [`super::apply_net_updates`]'s dispatch match — the spoken line
+//! itself, plus the server notices and query answers that render as chat lines (the channel
+//! roster, whisper refusals, `SMSG_NOTIFICATION`, `/played`). Each `pub(super)` fn here is exactly
+//! one arm's body; the match at the call site stays the dispatcher, one call per arm.
 
-use bevy::prelude::info;
+use benilla_protocol::messages::{ChatMessage, CHAT_MSG_WHISPER};
+use bevy::prelude::*;
 
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_social::SocialState;
+
+use super::super::{ClientCommand, NetCommands, ServerSaidMessage};
+
+/// A spoken line (`SMSG_MESSAGECHAT`) — the chat window's own feed (decision 0084):
+/// [`crate::ui_chat`] formats + colors per type, resolves the sender name ask-once, and
+/// AddMessages it into ChatFrame1.
+///
+/// System lines (`CHAT_MSG_SYSTEM` 0x0A, vmangos `SharedDefines.h`) are the SERVER'S ANSWER to a GM
+/// dot-command — "Premade gear template N applied", "No matching premade player template found",
+/// "There is no such command". For a headless probe that is the only channel the server has to say
+/// *why* something did not happen, so it rides at `info!`: at `debug!` it was in the log but
+/// invisible at the default level, and a refused command read exactly like an applied one
+/// (decision 0651 — the rig's whole batch silently no-op'd on a too-low GM level and nothing said
+/// so). Ordinary chat stays at `debug!`: conversation, not diagnosis, and high volume.
+pub(super) fn chat(
+    m: ChatMessage,
+    chat_log: &mut ChatLog,
+    social: &SocialState,
+    net_commands: &NetCommands,
+    server_said: &mut MessageWriter<ServerSaidMessage>,
+) {
+    if m.chat_type == 0x0A {
+        info!("net: server says — {}", m.text);
+        // …and as a message, for the senders that must know whether their command landed. Server
+        // state with no descriptor field (god mode) has no other tell.
+        server_said.write(ServerSaidMessage {
+            text: m.text.clone(),
+        });
+    } else {
+        debug!("net: chat [{:#04x}] {}", m.chat_type, m.text);
+    }
+    // …and on the trace clock too (decision 0624). A GM dot-command is the only way to ask the
+    // SERVER what it believes — `.gps` reads back the server-side position of a mover whose packets
+    // may or may not be reaching it — and its answer is only usable if it lands on the same
+    // timeline as the `snd`/`rly`/`run` lines it must be read against. `debug!` timestamps are
+    // wall-clock in a different format; this is one clock, one file.
+    if crate::dbg_trace::enabled() {
+        crate::dbg_trace::line(
+            "sys",
+            &format!("[{:#04x}] {}", m.chat_type, m.text.replace('\n', " ⏎ ")),
+        );
+    }
+    // The ignore gate (decision 0668): an ignored speaker is dropped SILENTLY — no line at all —
+    // which is the client's own `FriendList::IsIgnored 0x5ae5a0` check, VERIFIED for the sibling
+    // text-emote path (wow-re `system/ui/scratch/text-emote-composition.md`). A dropped WHISPER
+    // additionally tells the server, so the sender gets the "is ignoring you" answer: that is what
+    // `CMSG_CHAT_IGNORED` is for, and only the client can send it.
+    if social.is_ignored(m.sender_guid) {
+        if m.chat_type == CHAT_MSG_WHISPER {
+            let _ = net_commands.0.send(ClientCommand::ChatIgnored {
+                guid: m.sender_guid,
+            });
+        }
+        return;
+    }
+    chat_log.push_wire(m);
+}
 
 /// The `/chatlist` roster (`SMSG_CHANNEL_LIST`) — CHAT_CHANNEL_LIST_GET "[%s] " + the roster.
 /// Names arrive as guids; v1 renders the count (the per-member resolve fan-out lands with the
