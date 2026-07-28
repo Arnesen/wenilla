@@ -82,7 +82,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     _ => None,
                 }
             };
-            with_scroll(lua, &this, |s| s.child = new_child)
+            let changed = with_scroll(lua, &this, |s| {
+                let changed = s.child != new_child;
+                s.child = new_child;
+                changed
+            })?;
+            if changed {
+                // The child override is part of the resolve's read set (decision 0112's local
+                // anchor map — a fingerprint input), so a real re-target dirties tier 1.
+                lua.app_data_mut::<Model>().expect("model").touch_layout();
+            }
+            Ok(())
         })?,
     )?;
     m.set(
@@ -113,7 +123,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 scroll_range(&model, h)
             };
             let clamped = px.clamp(0.0, range);
-            with_scroll(lua, &this, |s| s.vertical = clamped)?;
+            let changed = with_scroll(lua, &this, |s| {
+                let changed = s.vertical.to_bits() != clamped.to_bits();
+                s.vertical = clamped;
+                changed
+            })?;
+            if changed {
+                lua.app_data_mut::<Model>().expect("model").touch_layout();
+            }
             fire_vertical_scroll(lua, &this, clamped)
         })?,
     )?;

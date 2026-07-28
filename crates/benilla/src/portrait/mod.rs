@@ -308,7 +308,11 @@ impl Plugin for PortraitPlugin {
             // globals; unordered w.r.t. the syncs — a fresh card just faces forward one frame).
             .add_systems(Update, booth::face_booth_billboards)
             // The phase-3 preview instrument (`WOW_CREATE_TEST`, decision 0423): inert without the env.
-            .add_systems(Update, glue_booth::drive_create_test);
+            .add_systems(Update, glue_booth::drive_create_test)
+            // `WOW_BOOTH_DUMP=<token>:<path>:<secs>` — photograph a booth's render target to disk
+            // (the headless eye on "what is the paperdoll actually showing right now"; the
+            // first-login black-pane hunt). Inert without the env.
+            .add_systems(Update, test_bake::dump_booth_target);
     }
 }
 
@@ -1014,6 +1018,20 @@ fn gate_booth_cameras(
         }
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
         let active = test || live_scene || booth.wake > 0 || !booth.pending.is_empty();
+        // `WOW_BOOTH_LOG=1`: the gate's timeline — every activity flip and every armed frame,
+        // wall-stamped (the first-login black-pane hunt).
+        static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LOG.get_or_init(|| std::env::var_os("WOW_BOOTH_LOG").is_some())
+            && (cam.is_active != active || active)
+        {
+            eprintln!(
+                "[booth] {} active={} wake={} pending={}",
+                token.as_str(),
+                active,
+                booth.wake,
+                booth.pending.len(),
+            );
+        }
         if cam.is_active != active {
             cam.is_active = active;
         }

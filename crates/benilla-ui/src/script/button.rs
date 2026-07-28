@@ -125,6 +125,7 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
                     ..Default::default()
                 },
             );
+            model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
             if let Some(frame) = model.arena.frame_mut(h) {
                 if let KindState::Button(bs) = &mut frame.kind_state {
                     slot.set(bs, rh);

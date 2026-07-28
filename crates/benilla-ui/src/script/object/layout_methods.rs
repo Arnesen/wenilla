@@ -27,8 +27,20 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            if let Some(input) = model.layout_inputs.get_mut(&h) {
-                input.anchors.clear();
+            // Every layout setter here follows one law: mutate ONLY on an actual value change,
+            // and report the change to the tier-1 epoch (`touch_layout`). The compare is what
+            // keeps an idempotent per-frame caller (the classic OnUpdate re-SetPoint idiom) from
+            // pinning the gate open — the same absorption the fingerprint gives, paid once at
+            // the write instead of per-frame over the whole model.
+            let changed = match model.layout_inputs.get_mut(&h) {
+                Some(input) if !input.anchors.is_empty() => {
+                    input.anchors.clear();
+                    true
+                }
+                _ => false,
+            };
+            if changed {
+                model.touch_layout();
             }
             Ok(())
         })?,
@@ -97,22 +109,22 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 }
                 _ => default_parent_id(&mut model, h),
             };
+            let pair = [
+                Anchor::new(Point::TopLeft, rel_id, Point::TopLeft, 0.0, 0.0),
+                Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
+            ];
             let input = model.layout_inputs.entry(h).or_default();
-            input.anchors.clear();
-            input.anchors.push(Anchor::new(
-                Point::TopLeft,
-                rel_id,
-                Point::TopLeft,
-                0.0,
-                0.0,
-            ));
-            input.anchors.push(Anchor::new(
-                Point::BottomRight,
-                rel_id,
-                Point::BottomRight,
-                0.0,
-                0.0,
-            ));
+            let same = input.anchors.len() == 2
+                && input
+                    .anchors
+                    .iter()
+                    .zip(&pair)
+                    .all(|(a, b)| anchor_bits_eq(a, b));
+            if !same {
+                input.anchors.clear();
+                input.anchors.extend_from_slice(&pair);
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -121,7 +133,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, w): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.layout_inputs.entry(h).or_default().width = w;
+            let input = model.layout_inputs.entry(h).or_default();
+            let changed = input.width.to_bits() != w.to_bits();
+            input.width = w;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -130,7 +147,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         lua.create_function(|lua, (this, ht): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.layout_inputs.entry(h).or_default().height = ht;
+            let input = model.layout_inputs.entry(h).or_default();
+            let changed = input.height.to_bits() != ht.to_bits();
+            input.height = ht;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -140,8 +162,13 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             let h = frame_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let input = model.layout_inputs.entry(h).or_default();
+            let changed =
+                input.width.to_bits() != w.to_bits() || input.height.to_bits() != ht.to_bits();
             input.width = w;
             input.height = ht;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -340,11 +367,37 @@ fn set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> mlua::Re
     let y = rest.get(cursor + 1).map(as_f32).unwrap_or(0.0);
 
     let input = model.layout_inputs.entry(h).or_default();
-    input.anchors.retain(|a| a.point != point);
-    input
+    let new = Anchor::new(point, rel_to_id, rel_point, x, y);
+    // No-op detection must mirror the retain+push below EXACTLY (the fingerprint hashes the vec
+    // in order, so a same-anchor call that would still REORDER the vec is a real change): a call
+    // is idempotent only when the identical anchor already sits at the tail and no earlier entry
+    // carries this point. Anchor's derived PartialEq compares f32 by value, which calls -0.0 ==
+    // 0.0 where the fingerprint's bit-compare would not — compare bits, or the verify assert
+    // trips on that (authored-XML-real) edge.
+    let same_at_tail = input
         .anchors
-        .push(Anchor::new(point, rel_to_id, rel_point, x, y));
+        .last()
+        .is_some_and(|a| anchor_bits_eq(a, &new))
+        && !input.anchors[..input.anchors.len() - 1]
+            .iter()
+            .any(|a| a.point == point);
+    if !same_at_tail {
+        input.anchors.retain(|a| a.point != point);
+        input.anchors.push(new);
+        model.touch_layout();
+    }
     Ok(())
+}
+
+/// Bit-exact anchor equality — the same lens the layout gate's fingerprint reads anchors through
+/// (`InputFingerprint::anchors` feeds `f32::to_bits`), so the setters' no-op detection and the
+/// gate can never disagree about whether a write "changed" something.
+pub(crate) fn anchor_bits_eq(a: &Anchor, b: &Anchor) -> bool {
+    a.point == b.point
+        && a.relative_to == b.relative_to
+        && a.relative_point == b.relative_point
+        && a.x_off.to_bits() == b.x_off.to_bits()
+        && a.y_off.to_bits() == b.y_off.to_bits()
 }
 
 /// The default `relativeTo` id for a `SetPoint` with no explicit target: the frame's parent id, or

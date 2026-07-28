@@ -15,7 +15,19 @@ use crate::assets::WorldAssets;
 use crate::ui_pass::{UiQuad, UiQuads, UvRect};
 use crate::ui_text::UiFontAtlas;
 
+mod cooldown;
 mod text;
+use cooldown::cooldown_quads;
+
+/// `WOW_UI_COST=1` — the untraced per-frame cost meter for this system's phases (the premise
+/// instrument for the UI epoch-gate lane, 0730's warm slice): one `[ui-cost]` line per frame with
+/// each phase's wall μs, the quad counts, the layout gate's decision, and whether the diff found
+/// the produced quads changed. Untraced by design — the campaign grades untraced cpu_ms, and
+/// `trace_chrome` inflates exactly the fine-grained spans this measures (0718's calibration).
+fn ui_cost_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_UI_COST").as_deref() == Ok("1"))
+}
 
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
 /// drain to the log (throttled by being drained — each fires once).
@@ -48,6 +60,16 @@ pub(super) fn drive_script(
     mut digits_fed: Local<bool>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
+    // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
+    // The conversion loop below is a pure function of (extracted, text_ui, window dims × seam
+    // scale, the portrait token map) — the glyph atlas bakes once at Startup and the sprite
+    // caches are monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff
+    // would then discard. Capture mode never skips (the harness wants exact per-frame output,
+    // including the cursor-icon quad's live mouse position).
+    mut prev_extracted: Local<Vec<benilla_ui::script::ExtractedQuad>>,
+    mut prev_text_ui: Local<Option<benilla_ui::script::EditBoxTextUi>>,
+    mut prev_dims: Local<Option<(u32, u32, u32)>>,
+    mut prev_portraits: Local<std::collections::HashMap<String, crate::portrait::PortraitSource>>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -67,15 +89,30 @@ pub(super) fn drive_script(
     // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
     // on an idle frame, and the ledger can only rank what has a name — tick (Lua OnUpdate),
     // resolve (layout), measure (the text round-trips), extract (tree walk + rasterize), diff.
+    let cost_on = ui_cost_enabled();
+    let solves_before = cost_on.then(|| script.layout_solves());
+    let mut t_mark = cost_on.then(std::time::Instant::now);
+    // Marks phase boundaries under the meter: returns μs since the previous mark and re-arms.
+    // With the meter off it does nothing (a run carries six no-op calls, not six clock reads).
+    let mut lap = move || -> u128 {
+        if !cost_on {
+            return 0;
+        }
+        t_mark
+            .replace(std::time::Instant::now())
+            .map_or(0, |t| t.elapsed().as_micros())
+    };
     {
         let _span = bevy::log::info_span!("ui_script: tick").entered();
         script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
         script.tick(time.delta_secs());
     }
+    let us_tick = lap();
     {
         let _span = bevy::log::info_span!("ui_script: resolve").entered();
         script.resolve();
     }
+    let us_resolve = lap();
     let measure_span = bevy::log::info_span!("ui_script: measure").entered();
     // The digit-advance feed (the synchronous half of the money layout's metrics): measure
     // NumberFontNormal's '0'..'9' once per atlas scale and push them as `BENILLA_DIGIT_W`, so
@@ -173,6 +210,7 @@ pub(super) fn drive_script(
         }
     }
     drop(measure_span);
+    let us_measure = lap();
     for err in script.take_errors() {
         warn!("ui_script: {err}");
     }
@@ -227,7 +265,41 @@ pub(super) fn drive_script(
     // x-spans within it — advance-derived engine-side (the blink phase too, `0x77a790`'s 0.5 s
     // law in the engine tick), matched in the Text arm below.
     let text_ui = script.focused_editbox_text_ui();
-    for eq in script.extract() {
+    let _ = lap(); // re-arm: the editbox seam above is not the walk's cost
+    let extracted = script.extract();
+    let us_exm = lap();
+    let n_extracted = extracted.len();
+    // ── The extract gate (decision 0740) ──────────────────────────────────────────────────────
+    // Every input the conversion below reads, compared against last frame's. Equal inputs make
+    // the loop a pure re-derivation of `UiQuads` the diff at the bottom would discard — at the
+    // LBRS pin that was every single settled frame, ~0.3 ms/frame of glyph re-rasterization for
+    // an identical `Vec`. On a skip, `quads`/`minimap_widget`/the engine's link spans all keep
+    // last frame's values, which the equal inputs prove are this frame's values too.
+    let dims = (w.to_bits(), h.to_bits(), s.to_bits());
+    let settled = capture.is_none()
+        && *prev_dims == Some(dims)
+        && text_ui == *prev_text_ui
+        && portraits.0 == *prev_portraits
+        && extracted == *prev_extracted;
+    if settled {
+        drop(extract_span);
+        let us_cmp = lap();
+        if cost_on {
+            let solves = script.layout_solves() - solves_before.unwrap_or(0);
+            eprintln!(
+                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                 exm={us_exm} exa={us_cmp} diff=0 eq={n_extracted} quads={} \
+                 solves={solves} changed=0 skip=1",
+                quads.quads.len()
+            );
+        }
+        return;
+    }
+    *prev_dims = Some(dims);
+    *prev_text_ui = text_ui.clone();
+    *prev_portraits = portraits.0.clone();
+    *prev_extracted = extracted.clone();
+    for eq in extracted {
         let Some(r) = eq.rect else { continue };
         // WoW UI space is y-up from the bottom-left in 768-virtual units; the quad pass is
         // y-down window px from the top-left — scale ×s, then flip through the window height.
@@ -474,11 +546,24 @@ pub(super) fn drive_script(
     // `minimap::emit_minimap` runs later in the frame (UiQuadAppend) and fills the hole.
     minimap_widget.0 = minimap_slot;
     drop(extract_span);
+    let us_exa = lap();
 
     let _span = bevy::log::info_span!("ui_script: diff").entered();
-    if quads.quads != out {
+    let n_quads = out.len();
+    let changed = quads.quads != out;
+    if changed {
         quads.quads = out;
         quads.dirty = true;
+    }
+    if cost_on {
+        let us_diff = lap();
+        let solves = script.layout_solves() - solves_before.unwrap_or(0);
+        eprintln!(
+            "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+             exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
+             solves={solves} changed={} skip=0",
+            u8::from(changed)
+        );
     }
 }
 
@@ -496,284 +581,6 @@ fn cursor_icon_quad(pos: Vec2, texture: Handle<Image>) -> UiQuad {
         z_key: u64::MAX,
         texture: Some(texture),
         ..default()
-    }
-}
-
-/// The cooldown wipe's paint: flat black at α = 0x99/255 — the byte content of
-/// `Interface\Cooldown\cooldown.blp` (a uniform 32² black texel field at alpha 0x99, with only a
-/// transparent clamp column for the sweep edge), constant through the sweep (the model's
-/// quadrant color-alpha tracks hold 1.0 for all of sequence 0 — the m2anim key dump).
-const COOLDOWN_WIPE_ALPHA: f32 = 153.0 / 255.0;
-
-/// The finish-flash star's bone-scale pulse — sequence 1's 5 keys, byte-read off
-/// `UI-Cooldown-Indicator.m2` with the `m2anim` bone-scale dump (uniform XYZ, so one scalar per
-/// key): grow to 1.85× with the alpha rise, then a shrinking double-bounce while it fades.
-const STAR_SCALE_KEYS: [(f32, f32); 5] = [
-    (0.0, 1.0),
-    (0.333, 1.853),
-    (0.666, 1.305),
-    (0.833, 1.605),
-    (1.0, 1.155),
-];
-
-/// Linear sample of [`STAR_SCALE_KEYS`] at flash progress `t` (the M2 linear-track read).
-fn star_scale(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    for w in STAR_SCALE_KEYS.windows(2) {
-        let ((t0, v0), (t1, v1)) = (w[0], w[1]);
-        if t <= t1 {
-            return v0 + (v1 - v0) * ((t - t0) / (t1 - t0));
-        }
-    }
-    STAR_SCALE_KEYS[4].1
-}
-
-/// The Cooldown widget's pixels (decision 0137 phase 4): the radial dark wipe + the finish flash,
-/// rebuilt natively from the byte-read `UI-Cooldown-Indicator.m2`.
-///
-/// **The wipe.** The model draws 4 quadrant quads whose UVs rotate over a clamp-edged
-/// half-transparent texture — 2001's way of sweeping a straight edge through each quadrant; with
-/// a *flat* texture behind it (`cooldown.blp` is uniform black at α 0x99), the composed result is
-/// exactly a uniform dark pie whose bright sector grows **clockwise from 12 o'clock** as the
-/// cooldown elapses. Rebuilt as ≤4 quads: one full-dark rect per still-covered quadrant, plus
-/// the active quadrant's **wedge** — an exact convex fan (`c → ray exit → [outer corner] →
-/// quadrant-end edge midpoint`) through [`UiQuad::corners`]. Pixel-equivalent, no scissor
-/// interplay. (The wedge bypasses the scroll clip — no cooldown sits in a ScrollFrame; the
-/// full-dark rects still carry it.)
-///
-/// **The flash.** The model's sequence 1 (authored 1.000 s): the additive `star4` burst whose
-/// alpha is the byte-read texture-weight ramp — linear 0→1 over the first third, hold 1 to the
-/// half, linear 1→0 over the back half — scaled by the star bone's byte-read 5-key pulse
-/// ([`STAR_SCALE_KEYS`], the `m2anim` bone-scale dump): grow to 1.85× with the alpha rise, then
-/// a shrinking double-bounce as it fades.
-#[allow(clippy::too_many_arguments)] // one draw arm's full input set
-fn cooldown_quads(
-    rect: Rect,
-    z_key: u64,
-    frame_alpha: f32,
-    fraction: f32,
-    flash: Option<f32>,
-    clip: Option<Rect>,
-    assets: &mut Option<ResMut<WorldAssets>>,
-    images: &mut Assets<Image>,
-    out: &mut Vec<UiQuad>,
-) {
-    let c = rect.center();
-    let dark = [0.0, 0.0, 0.0, COOLDOWN_WIPE_ALPHA * frame_alpha];
-
-    if let Some(progress) = flash {
-        // The finish flash: the byte-read weight ramp (keys 0→1 over 0..⅓, hold to ½, →0 at 1).
-        let ramp = if progress < 1.0 / 3.0 {
-            progress * 3.0
-        } else if progress < 0.5 {
-            1.0
-        } else {
-            (1.0 - progress) * 2.0
-        };
-        let handle = assets
-            .as_mut()
-            .and_then(|a| a.sprite_texture("Interface\\Cooldown\\star4", images));
-        if let Some(handle) = handle {
-            let s = star_scale(progress);
-            let half = rect.half_size() * s;
-            out.push(UiQuad {
-                rect: Rect::from_center_half_size(c, half),
-                z_key,
-                texture: Some(handle),
-                color: [1.0, 1.0, 1.0, ramp * frame_alpha],
-                additive: true,
-                clip,
-                ..default()
-            });
-        }
-        return;
-    }
-
-    // The sweep: bright sector [0, θ) clockwise from 12 o'clock; quadrants wholly past the edge
-    // are full-dark rects, the active one carries the exact wedge.
-    let theta = fraction.clamp(0.0, 1.0) * std::f32::consts::TAU;
-    let active = ((theta / std::f32::consts::FRAC_PI_2) as usize).min(3);
-    // Clockwise from 12 in y-down screen space: top-right, bottom-right, bottom-left, top-left.
-    let quadrant = |k: usize| match k {
-        0 => Rect::new(c.x, rect.min.y, rect.max.x, c.y),
-        1 => Rect::new(c.x, c.y, rect.max.x, rect.max.y),
-        2 => Rect::new(rect.min.x, c.y, c.x, rect.max.y),
-        _ => Rect::new(rect.min.x, rect.min.y, c.x, c.y),
-    };
-    for k in (active + 1)..4 {
-        out.push(UiQuad {
-            rect: quadrant(k),
-            z_key,
-            color: dark,
-            clip,
-            ..default()
-        });
-    }
-
-    // The active quadrant's wedge. The sweep ray from c at angle θ has direction
-    // d(θ) = (sin θ, −cos θ) (y-down); per quadrant it can exit through two edges — the "first"
-    // one (adjacent to the sweep's entry axis, whose crossing keeps the quadrant's outer corner
-    // dark) or the "second" (past the corner). Vertices fan from c, clockwise:
-    // c → E (ray exit) → [K (outer corner) if the ray exits the first edge] → M (the
-    // quadrant-end axis point). A three-vertex wedge repeats M (the fan's degenerate second
-    // triangle draws nothing).
-    let d = Vec2::new(theta.sin(), -theta.cos());
-    // Per active quadrant: (first-edge t, second-edge t, K, M). A division by ±0 yields ±inf,
-    // which the min-pick handles (the boundary angles resolve to the finite edge).
-    let (t_first, t_second, k_corner, m_point) = match active {
-        0 => (
-            (rect.min.y - c.y) / d.y,
-            (rect.max.x - c.x) / d.x,
-            Vec2::new(rect.max.x, rect.min.y),
-            Vec2::new(rect.max.x, c.y),
-        ),
-        1 => (
-            (rect.max.x - c.x) / d.x,
-            (rect.max.y - c.y) / d.y,
-            Vec2::new(rect.max.x, rect.max.y),
-            Vec2::new(c.x, rect.max.y),
-        ),
-        2 => (
-            (rect.max.y - c.y) / d.y,
-            (rect.min.x - c.x) / d.x,
-            Vec2::new(rect.min.x, rect.max.y),
-            Vec2::new(rect.min.x, c.y),
-        ),
-        _ => (
-            (rect.min.x - c.x) / d.x,
-            (rect.min.y - c.y) / d.y,
-            Vec2::new(rect.min.x, rect.min.y),
-            Vec2::new(c.x, rect.min.y),
-        ),
-    };
-    let e_point = c + d * t_first.min(t_second);
-    let corners = if t_first <= t_second {
-        [c, e_point, k_corner, m_point]
-    } else {
-        [c, e_point, m_point, m_point]
-    };
-    out.push(UiQuad {
-        rect: quadrant(active),
-        z_key,
-        color: dark,
-        corners: Some(corners),
-        ..default()
-    });
-}
-
-#[cfg(test)]
-mod cooldown_quad_tests {
-    use super::{cooldown_quads, star_scale, STAR_SCALE_KEYS};
-    use bevy::prelude::*;
-
-    /// Emit the sweep for `fraction` on a unit-friendly 40×40 button at (0,0)..(40,40).
-    fn sweep(fraction: f32) -> Vec<crate::ui_pass::UiQuad> {
-        let mut out = Vec::new();
-        cooldown_quads(
-            Rect::new(0.0, 0.0, 40.0, 40.0),
-            7,
-            1.0,
-            fraction,
-            None,
-            None,
-            &mut None,
-            &mut Assets::<Image>::default(),
-            &mut out,
-        );
-        out
-    }
-
-    /// Total dark coverage of the emitted quads (rect quads + the corner wedge's shoelace area).
-    fn dark_area(quads: &[crate::ui_pass::UiQuad]) -> f32 {
-        quads
-            .iter()
-            .map(|q| match q.corners {
-                None => q.rect.width() * q.rect.height(),
-                Some(c) => {
-                    // Shoelace over the fan's two triangles (0,1,2) + (0,2,3).
-                    let tri = |a: Vec2, b: Vec2, d: Vec2| ((b - a).perp_dot(d - a) / 2.0).abs();
-                    tri(c[0], c[1], c[2]) + tri(c[0], c[2], c[3])
-                }
-            })
-            .sum()
-    }
-
-    /// The square-cornered pie's exact per-phase geometry (a square pie's area is not linear in
-    /// the swept angle, so the checkpoints below are the analytically known shapes: full, the
-    /// 45° corner ray, the 180° half, the end sliver).
-    #[test]
-    fn cooldown_sweep_geometry_is_the_exact_square_pie() {
-        // Fraction 0: everything dark — 3 full quadrant rects + a wedge covering the fourth.
-        let q0 = sweep(0.0);
-        assert_eq!(q0.len(), 4);
-        assert!(
-            (dark_area(&q0) - 1600.0).abs() < 1e-2,
-            "fully dark at start"
-        );
-
-        // Fraction 1/8 (45° — the ray through quadrant 0's outer corner): the bright half of
-        // quadrant 0 is gone; the wedge is the triangle {center, corner, right-edge midpoint}.
-        let q = sweep(0.125);
-        assert_eq!(q.len(), 4);
-        assert!(
-            (dark_area(&q) - (1600.0 - 200.0)).abs() < 1.0,
-            "45°: half of one 400px² quadrant is bright, got {}",
-            dark_area(&q)
-        );
-
-        // Fraction 0.5 (180°): the right half is bright — two full-dark quadrants + a wedge
-        // that spans exactly quadrant 2 (t ties pick the corner-inclusive fan; area 400).
-        let q = sweep(0.5);
-        assert!((dark_area(&q) - 800.0).abs() < 1.0, "half bright at 180°");
-
-        // Fraction ~1: a sliver — near-zero dark area, no full quadrants left.
-        let q = sweep(0.999);
-        assert!(dark_area(&q) < 20.0, "almost done — a sliver remains");
-        assert_eq!(q.len(), 1, "only the active quadrant's wedge remains");
-
-        // The wedge always fans from the button center.
-        for f in [0.05, 0.3, 0.6, 0.9] {
-            let q = sweep(f);
-            let wedge = q
-                .iter()
-                .find_map(|u| u.corners)
-                .expect("a wedge each phase");
-            assert_eq!(wedge[0], Vec2::new(20.0, 20.0), "fan apex at the center");
-        }
-    }
-
-    /// The star pulse samples its byte-read keys exactly and lerps between them — the ⅓ peak
-    /// coincides with the alpha ramp's own peak.
-    #[test]
-    fn star_scale_follows_the_five_key_curve() {
-        for (t, v) in STAR_SCALE_KEYS {
-            assert!((star_scale(t) - v).abs() < 1e-4, "key at {t}");
-        }
-        // Midway up the rise: halfway between 1.0 and 1.853.
-        let mid = star_scale(0.333 / 2.0);
-        assert!((mid - (1.0 + 1.853) / 2.0).abs() < 1e-2, "got {mid}");
-        // Clamped outside the band.
-        assert!((star_scale(-1.0) - 1.0).abs() < 1e-4);
-        assert!((star_scale(2.0) - 1.155).abs() < 1e-4);
-    }
-
-    /// The flash phase draws no dark pie — only the additive star (skipped here: no assets in a
-    /// unit test — the pie's absence is the machine-checkable half).
-    #[test]
-    fn cooldown_flash_phase_emits_no_dark_pie() {
-        let mut out = Vec::new();
-        cooldown_quads(
-            Rect::new(0.0, 0.0, 40.0, 40.0),
-            7,
-            1.0,
-            1.2,
-            Some(0.4),
-            None,
-            &mut None,
-            &mut Assets::<Image>::default(),
-            &mut out,
-        );
-        assert!(out.is_empty(), "no assets → no star; and never a dark quad");
     }
 }
 
@@ -945,5 +752,102 @@ mod clip_plumb_tests {
             .find(|q| q.color[0] == 0.0 && q.color[1] == 1.0 && q.color[2] == 0.0)
             .expect("the green marker quad extracted");
         assert_eq!(marker.clip, None);
+    }
+}
+
+/// The extract gate (decision 0740): a settled frame skips the whole conversion loop, and — the
+/// dangerous direction — any extract-visible change must reopen it, INCLUDING paint-only writes
+/// that never dirty the layout gate. Uses the same minimal headless app as `clip_plumb_tests`.
+#[cfg(test)]
+mod extract_gate_tests {
+    use bevy::prelude::*;
+    use bevy::window::PrimaryWindow;
+
+    use benilla_ui::script::UiScript;
+
+    use super::{drive_script, UiQuads};
+    use crate::portrait::PortraitImages;
+
+    fn app_with_marker() -> App {
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+            local plain = CreateFrame("Frame", "Plain")
+            plain:SetPoint("TOPLEFT", 0, 0)
+            plain:SetSize(50, 50)
+            marker = plain:CreateTexture(nil, "ARTWORK")
+            marker:SetTexture(1, 0, 0)
+        "#,
+            )
+            .unwrap();
+        let mut app = App::new();
+        app.insert_non_send_resource(script);
+        app.init_resource::<UiQuads>();
+        app.init_resource::<Assets<Image>>();
+        app.init_resource::<PortraitImages>();
+        app.init_resource::<crate::minimap::MinimapWidget>();
+        app.init_resource::<Time>();
+        app.init_resource::<Time<Real>>();
+        app.init_resource::<crate::ui_script::UiScaleCvar>();
+        app.world_mut().spawn((
+            Window {
+                resolution: UVec2::new(1024, 768).into(),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app.add_systems(Update, drive_script);
+        app
+    }
+
+    #[test]
+    fn a_settled_frame_skips_and_a_paint_write_reopens_the_gate() {
+        let mut app = app_with_marker();
+        app.update(); // frame 1: builds the quads
+        assert!(app.world().resource::<UiQuads>().dirty, "first frame draws");
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+
+        app.update(); // frame 2: identical inputs — the gate must leave the resource alone
+        assert!(
+            !app.world().resource::<UiQuads>().dirty,
+            "a settled frame must not re-mark the quads dirty"
+        );
+
+        // A PAINT-ONLY write: invisible to the layout gate (no anchors/size moved), so only the
+        // extracted-list compare can reopen extraction. If the gate wrongly ate it, the marker
+        // would stay red on screen.
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("marker:SetTexture(0, 0, 1)")
+            .unwrap();
+        app.update();
+        let quads = app.world().resource::<UiQuads>();
+        assert!(quads.dirty, "a paint write must reopen the extract gate");
+        assert!(
+            quads
+                .quads
+                .iter()
+                .any(|q| q.color[0] == 0.0 && q.color[2] == 1.0),
+            "and the produced quads carry the new color"
+        );
+    }
+
+    #[test]
+    fn a_layout_write_reopens_the_gate_too() {
+        let mut app = app_with_marker();
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<UiQuads>().dirty = false;
+
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run("getglobal('Plain'):SetPoint('TOPLEFT', 40, -40)")
+            .unwrap();
+        app.update();
+        assert!(
+            app.world().resource::<UiQuads>().dirty,
+            "a moved frame must re-extract"
+        );
     }
 }

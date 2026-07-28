@@ -198,6 +198,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                     }
                 }];
                 model.region_data.insert(left, d);
+                model.touch_layout(); // a line row entered the layout graph (decision 0740)
             }
             let left_id = model.region_id(left);
 
@@ -224,6 +225,7 @@ fn ensure_lines(lua: &Lua, this: &Table, n: usize) -> mlua::Result<()> {
                 d.justify_h = super::JustifyH::Right;
                 d.anchors = vec![Anchor::new(Point::Right, left_id, Point::Right, 0.0, 0.0)];
                 model.region_data.insert(right, d);
+                model.touch_layout(); // a line row entered the layout graph (decision 0740)
             }
             let right_id = model.region_id(right);
 
@@ -272,8 +274,10 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
         Some(KindState::Tooltip(t)) => (t.left_lines.clone(), t.right_lines.clone()),
         _ => return,
     };
+    let mut any_size_dropped = false;
     for rh in lefts.into_iter().chain(rights) {
         if let Some(d) = model.region_data.get_mut(&rh) {
+            any_size_dropped |= d.size.is_some();
             d.text = None;
             d.hidden = true;
             // `measured` is deliberately KEPT. It is a cache whose validity gate is its own
@@ -296,6 +300,11 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
             // test, whose stack carries one).
             d.size = None;
         }
+    }
+    if any_size_dropped {
+        // The size wipes above are gate-read-set writes; in the hover re-enter loop this fires
+        // every frame and tier 2 (the fingerprint) absorbs the burst — see the epoch's doc.
+        model.touch_layout();
     }
     if let Ok(t) = tip_mut(model, h) {
         t.num_lines = 0;
@@ -484,6 +493,10 @@ pub(super) fn append_line(
     if wrap {
         if let Some(d) = model.region_data.get_mut(&lh) {
             d.size = Some((crate::widget::TOOLTIP_WRAP_WIDTH, 0.0));
+            // A size write straight into the gate's read set. In the bag-hover re-enter loop
+            // this re-pins every frame after clear_content's wipe — tier 1 goes dirty and the
+            // FINGERPRINT (tier 2) absorbs the idempotent burst, exactly the pre-epoch behavior.
+            model.touch_layout();
         }
     }
     if let Some((text, color)) = right {

@@ -216,3 +216,54 @@ fn bake_test(
     }
     true
 }
+
+/// `WOW_BOOTH_DUMP=<token>:<path>:<secs>`: once `secs` of app time have elapsed, screenshot the
+/// named booth's render target (e.g. `paperdoll`) to `path`. A probe run can then look at the
+/// pane a live session would see under the character window — without a UI click path (the
+/// first-login black-pane hunt). One shot per run; inert without the env.
+pub(super) fn dump_booth_target(
+    mut commands: Commands,
+    booths: Res<Booths>,
+    time: Res<Time<bevy::time::Real>>,
+    mut fired: Local<bool>,
+) {
+    static SPEC: std::sync::OnceLock<Option<(String, String, f32)>> = std::sync::OnceLock::new();
+    let Some((token, path, secs)) = SPEC.get_or_init(|| {
+        let v = std::env::var("WOW_BOOTH_DUMP").ok()?;
+        let mut it = v.splitn(3, ':');
+        Some((
+            it.next()?.to_string(),
+            it.next()?.to_string(),
+            it.next()?.parse().ok()?,
+        ))
+    }) else {
+        return;
+    };
+    if *fired || time.elapsed_secs() < *secs {
+        return;
+    }
+    *fired = true;
+    let Some(booth) = booths.0.get(token.as_str()) else {
+        warn!("WOW_BOOTH_DUMP: no booth named {token:?}");
+        return;
+    };
+    use bevy::render::view::window::screenshot::{Screenshot, ScreenshotCaptured};
+    info!("WOW_BOOTH_DUMP: shooting booth {token:?} -> {path}");
+    let out = std::path::PathBuf::from(path.clone());
+    commands
+        .spawn(Screenshot::image(booth.target.clone()))
+        .observe(move |shot: On<ScreenshotCaptured>| {
+            // The booth target is deliberately non-sRGB (`new_target_image`), which bevy's stock
+            // `save_to_disk` refuses to convert — relabel the identical bytes as sRGB for the PNG.
+            let mut img = shot.image.clone();
+            img.texture_descriptor.format =
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb;
+            match img.try_into_dynamic() {
+                Ok(dyn_img) => match dyn_img.save(&out) {
+                    Ok(()) => info!("WOW_BOOTH_DUMP: saved {}", out.display()),
+                    Err(e) => warn!("WOW_BOOTH_DUMP: save failed: {e}"),
+                },
+                Err(e) => warn!("WOW_BOOTH_DUMP: convert failed: {e}"),
+            }
+        });
+}

@@ -303,3 +303,87 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// Tier 1 of the gate (decision 0740): the mutation epoch. The epoch closes only on a SETTLED
+/// resolve (one whose fingerprint matched — the first resolve after a change hashes outgrown
+/// seeds, so it may not close), and from then on a quiet frame skips at a `u64` compare without
+/// computing the fingerprint at all.
+fn tier_one_closed(s: &UiScript) -> bool {
+    let m = s.lua().app_data_ref::<Model>().expect("model app_data");
+    m.layout_epoch_resolved == Some(m.layout_epoch)
+}
+
+#[test]
+fn a_settled_resolve_closes_tier_one_and_a_real_write_reopens_it() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    setup(&s);
+
+    s.resolve(); // the change-driven solve (fingerprint hashed over pre-solve seeds)
+    s.resolve(); // the settling pass — fingerprint matches, tier 1 closes
+    assert!(
+        tier_one_closed(&s),
+        "a settled resolve must close the epoch"
+    );
+
+    s.run("parent:SetWidth(150)").expect("resize");
+    assert!(
+        !tier_one_closed(&s),
+        "a real layout write must reopen tier 1"
+    );
+    s.resolve();
+    s.resolve();
+    assert!(tier_one_closed(&s), "and settling closes it again");
+}
+
+#[test]
+fn an_idempotent_setter_call_leaves_tier_one_closed() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    setup(&s);
+    s.resolve();
+    s.resolve();
+    assert!(tier_one_closed(&s));
+
+    // The classic per-frame OnUpdate idiom: re-assert the exact same geometry every frame. The
+    // setters' compare-before-write keeps the epoch untouched, so an idle UI never re-enters
+    // the fingerprint path at all.
+    s.run(
+        r#"
+        parent:SetWidth(100); parent:SetHeight(40)
+        parent:SetPoint("TOPLEFT", nil, "TOPLEFT", 10, -10)
+        child:SetPoint("TOPLEFT", parent, "BOTTOMRIGHT", 0, 0)
+        "#,
+    )
+    .expect("idempotent re-set");
+    assert!(
+        tier_one_closed(&s),
+        "value-identical setter calls must not dirty the epoch"
+    );
+    let before = solves(&s);
+    s.resolve();
+    assert_eq!(solves(&s), before, "and the resolve stays skipped");
+}
+
+#[test]
+fn a_paint_only_write_leaves_tier_one_closed() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    setup(&s);
+    // A paint region with NO anchors: its region_data entry is created by a paint setter and
+    // must stay invisible to the layout gate (the resolve sweep skips anchor-less entries).
+    s.run(r#"tex = parent:CreateTexture(nil, "ARTWORK")"#)
+        .expect("region");
+    s.resolve();
+    s.resolve();
+    assert!(tier_one_closed(&s));
+
+    s.run(r#"tex:SetTexture(1, 0, 0)"#).expect("paint");
+    assert!(
+        tier_one_closed(&s),
+        "creating/painting an anchor-less region is not a layout change"
+    );
+    let before = solves(&s);
+    s.resolve();
+    assert_eq!(solves(&s), before);
+}

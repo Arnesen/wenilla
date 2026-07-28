@@ -350,13 +350,15 @@ impl super::UiScript {
             let input = model.layout_inputs.entry(h).or_default();
             // Anchor only — the screen clamp is the tooltip FRAME's own flag
             // (`Frame::clamped_to_screen`), synced with live extents at every resolve.
-            input.anchors = vec![Anchor::new(
-                Point::Bottom,
-                root_id,
-                Point::BottomLeft,
-                ui_x,
-                ui_y,
-            )];
+            let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
+            // Compare-then-touch: a still cursor re-seats the plate at the same point every
+            // frame — tier 1 of the layout gate stays quiet unless the pointer actually moved.
+            let same =
+                input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
+            if !same {
+                input.anchors = vec![new];
+                model.touch_layout();
+            }
         }
         let wrapper = match super::object::frame_wrapper(&self.lua, id) {
             Ok(w) => w,
@@ -430,13 +432,15 @@ impl super::UiScript {
             // edge slides back in instead of clipping, director's report at the screen-right
             // minimap) is the tooltip FRAME's own flag (`Frame::clamped_to_screen`), synced with
             // live extents at every resolve.
-            input.anchors = vec![Anchor::new(
-                Point::Bottom,
-                root_id,
-                Point::BottomLeft,
-                ui_x,
-                ui_y,
-            )];
+            let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
+            // Compare-then-touch: a still cursor re-seats the plate at the same point every
+            // frame — tier 1 of the layout gate stays quiet unless the pointer actually moved.
+            let same =
+                input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
+            if !same {
+                input.anchors = vec![new];
+                model.touch_layout();
+            }
         }
         fire_cleared(&self.lua, h);
         // The blip name renders GOLD like the reference (the engine tooltip's SetText line —
@@ -491,13 +495,15 @@ impl super::UiScript {
         let input = model.layout_inputs.entry(h).or_default();
         // Anchor only — the frame's own clamp flag keeps the plate on screen (see
         // `Frame::clamped_to_screen`).
-        input.anchors = vec![Anchor::new(
-            Point::Bottom,
-            root_id,
-            Point::BottomLeft,
-            ui_x,
-            ui_y,
-        )];
+        let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
+        // Compare-then-touch, as in the seat/blip paths above: the follow fires per pointer
+        // event, and a still cursor must not dirty the layout gate's tier 1.
+        let same =
+            input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
+        if !same {
+            input.anchors = vec![new];
+            model.touch_layout();
+        }
     }
 
     /// Arm the mouseover tooltip's fade-out (hover loss — the byte law arms a timestamped fade,

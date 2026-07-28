@@ -28,6 +28,7 @@ use crate::widget::{FrameHandle, FrameKind};
 mod events_regions;
 mod frame_state;
 mod layout_methods;
+pub(crate) use layout_methods::anchor_bits_eq;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // id ↔ lightuserdata

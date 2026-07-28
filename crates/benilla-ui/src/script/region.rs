@@ -6,7 +6,9 @@
 
 use mlua::{Lua, Table, Value};
 
-use super::object::{as_f32, decode_id, draw_layer_from_str, id_to_lud, point_from_str};
+use super::object::{
+    anchor_bits_eq, as_f32, decode_id, draw_layer_from_str, id_to_lud, point_from_str,
+};
 use super::{
     JustifyH, JustifyV, Model, Outline, TexCoords, REG_REGION_META, REG_REGION_METHODS,
     REG_WRAPPERS, SCREEN,
@@ -321,7 +323,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            d.size = Some((w, d.size.map_or(0.0, |s| s.1)));
+            let new = Some((w, d.size.map_or(0.0, |s| s.1)));
+            let changed = !size_bits_eq(d.size, new);
+            d.size = new;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -331,7 +338,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let d = model.region_data.entry(rh).or_default();
-            d.size = Some((d.size.map_or(0.0, |s| s.0), h));
+            let new = Some((d.size.map_or(0.0, |s| s.0), h));
+            let changed = !size_bits_eq(d.size, new);
+            d.size = new;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -340,7 +352,13 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (this, w, h): (Table, f32, f32)| {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().size = Some((w, h));
+            let d = model.region_data.entry(rh).or_default();
+            let new = Some((w, h));
+            let changed = !size_bits_eq(d.size, new);
+            d.size = new;
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -439,7 +457,12 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, this: Table| {
             let rh = region_handle_of(lua, &this)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            model.region_data.entry(rh).or_default().anchors.clear();
+            let d = model.region_data.entry(rh).or_default();
+            let changed = !d.anchors.is_empty();
+            d.anchors.clear();
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -450,22 +473,22 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model");
             let owner = region_owner_id(&mut model, rh);
             let rel_id = resolve_target(&mut model, &target, owner);
+            let pair = [
+                Anchor::new(Point::TopLeft, rel_id, Point::TopLeft, 0.0, 0.0),
+                Anchor::new(Point::BottomRight, rel_id, Point::BottomRight, 0.0, 0.0),
+            ];
             let data = model.region_data.entry(rh).or_default();
-            data.anchors.clear();
-            data.anchors.push(Anchor::new(
-                Point::TopLeft,
-                rel_id,
-                Point::TopLeft,
-                0.0,
-                0.0,
-            ));
-            data.anchors.push(Anchor::new(
-                Point::BottomRight,
-                rel_id,
-                Point::BottomRight,
-                0.0,
-                0.0,
-            ));
+            let same = data.anchors.len() == 2
+                && data
+                    .anchors
+                    .iter()
+                    .zip(&pair)
+                    .all(|(a, b)| anchor_bits_eq(a, b));
+            if !same {
+                data.anchors.clear();
+                data.anchors.extend_from_slice(&pair);
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -764,6 +787,19 @@ fn resolve_target(model: &mut Model, target: &Value, owner: u32) -> u32 {
     }
 }
 
+/// Bit-exact equality for a region's explicit size — the layout gate's own lens
+/// (`InputFingerprint::input` feeds `f32::to_bits`), so a setter's no-op detection and the gate
+/// can never disagree; see [`anchor_bits_eq`].
+fn size_bits_eq(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some((aw, ah)), Some((bw, bh))) => {
+            aw.to_bits() == bw.to_bits() && ah.to_bits() == bh.to_bits()
+        }
+        _ => false,
+    }
+}
+
 /// `Region:SetPoint(point [, relativeTo [, relativePoint]] [, x, y])` — the region twin of
 /// [`super::object`]'s frame `SetPoint`, writing [`super::RegionData::anchors`]. The overload is
 /// disambiguated by argument *type* exactly as the frame version.
@@ -796,8 +832,17 @@ fn region_set_point(lua: &Lua, this: &Table, point: &str, rest: [Value; 4]) -> m
     let y = rest.get(cursor + 1).map(as_f32).unwrap_or(0.0);
 
     let data = model.region_data.entry(rh).or_default();
-    data.anchors.retain(|a| a.point != point);
-    data.anchors
-        .push(Anchor::new(point, rel_to_id, rel_point, x, y));
+    let new = Anchor::new(point, rel_to_id, rel_point, x, y);
+    // Same no-op law as the frame twin (`layout_methods::set_point`): idempotent only when the
+    // bit-identical anchor already holds the tail and no earlier entry carries this point.
+    let same_at_tail = data.anchors.last().is_some_and(|a| anchor_bits_eq(a, &new))
+        && !data.anchors[..data.anchors.len() - 1]
+            .iter()
+            .any(|a| a.point == point);
+    if !same_at_tail {
+        data.anchors.retain(|a| a.point != point);
+        data.anchors.push(new);
+        model.touch_layout();
+    }
     Ok(())
 }

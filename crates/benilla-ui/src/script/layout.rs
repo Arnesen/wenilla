@@ -13,16 +13,19 @@ use super::{
 /// A 128-bit rolling fingerprint of everything [`UiScript::resolve_layout`] *reads*, so a resolve
 /// whose inputs are byte-identical to the last one can be skipped outright.
 ///
-/// ## Why a fingerprint and not a dirty flag
+/// ## Tier 2 of a two-tier gate (decision 0740)
 ///
-/// A dirty flag has to be *set* at every mutation site, and the resolve's read set is spread over
-/// `layout_inputs`, the arena (scale, clamp, ScrollFrame child + offset, frame/region liveness),
-/// `region_data` (anchors, size, measured), and `screen`. Missing one site is a silently stale
-/// layout — the worst failure mode this module has, and one no test reliably catches because the
-/// staleness only shows on the frame the missed setter fires. A fingerprint has no sites to miss:
-/// it is computed FROM the read set, so any change to any of it changes the value by construction.
-/// It also absorbs *idempotent* writes for free — the GameTooltip pre-pass rewrites tooltip sizes
-/// and anchor offsets every single call, which would pin a mutation-tracked flag permanently dirty.
+/// This fingerprint began as the WHOLE gate, chosen over a dirty flag because a flag has sites to
+/// miss and a fingerprint is computed FROM the read set — any change moves it by construction.
+/// That safety cost ~0.6 ms *every idle frame* at a live pin (hashing ~2k inputs to conclude
+/// "quiet"), which is why the mutation epoch ([`Model::touch_layout`], tier 1) now sits in front:
+/// a frame with no layout-visible write skips at a `u64` compare and never reaches this hash. The
+/// fingerprint remains load-bearing where the flag is structurally weak — a *dirty* frame whose
+/// writes were idempotent (the bag-hover re-enter loop clears and rebuilds identical content
+/// every frame; the GameTooltip pre-pass rewrites tooltip sizes every call) hashes clean here and
+/// still skips the solve. And the flag's own failure mode — a missed touch site, a silently stale
+/// layout — is machine-checked: under [`layout_verify_enabled`] (forced on in this crate's tests)
+/// a tier-1-quiet frame asserts the fingerprint agrees, so the tiers police each other.
 ///
 /// ## Why 128 bits
 ///
@@ -97,15 +100,18 @@ impl InputFingerprint {
 /// posture). When set, a resolve the gate wants to SKIP runs in full anyway and asserts it
 /// reproduced the previous rects exactly; a divergence means the fingerprint's read set is
 /// incomplete, and it fails loudly at the resolve that proves it rather than silently rendering a
-/// stale frame days later.
+/// stale frame days later. It also checks tier 1 against tier 2: a frame the epoch judged quiet
+/// whose fingerprint nevertheless moved names a mutation path missing its `touch_layout()`.
 ///
-/// This is what makes the gate's central claim — "the fingerprint covers everything the rounds
-/// read" — machine-checked instead of argued: run the workspace suite under it and every UI test
-/// (the shipped windows, driven through real FrameXML + Lua) becomes a probe for a missed input.
-/// Read once; when off it costs a relaxed atomic load per resolve.
+/// This is what makes the gates' central claims — "the fingerprint covers everything the rounds
+/// read" and "every fingerprint-visible write bumps the epoch" — machine-checked instead of
+/// argued: it is FORCED ON for this crate's own tests, so every UI test (the shipped windows,
+/// driven through real FrameXML + Lua) is a standing probe for a missed input or a missed touch;
+/// set the env to extend that to a live run or another crate's suite. Read once; when off it
+/// costs a relaxed atomic load per resolve.
 fn layout_verify_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
+    *ON.get_or_init(|| cfg!(test) || std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
 }
 
 impl UiScript {
@@ -121,6 +127,18 @@ impl UiScript {
     /// it fresh. Cheap to call on demand: the fixpoint early-exits in one round on a quiet graph
     /// (this function's own doc).
     pub(super) fn resolve_layout(model: &mut Model) {
+        // ── Tier 1: the mutation epoch ────────────────────────────────────────────────────────
+        // Nothing has called `touch_layout` since the last converged resolve ⇒ the read set the
+        // fingerprint below hashes cannot have moved ⇒ skip everything, including the tooltip
+        // pre-pass and the fingerprint itself (which was the whole idle cost of this function —
+        // ~0.6 ms/frame at the LBRS pin, hashing ~2k inputs per frame to decide "quiet"). Under
+        // verify, fall through: tier 2 then proves the claim (`gate_skips` must agree).
+        let verify = layout_verify_enabled();
+        let tier1_clean = model.layout_epoch_resolved == Some(model.layout_epoch);
+        if tier1_clean && !verify {
+            return;
+        }
+        let epoch_at_entry = model.layout_epoch;
         // The GameTooltip auto-size + right-flush pre-pass (decision 0274): writes tooltip frame
         // sizes + right-column anchor offsets from the measure round-trip's cached extents, so
         // the graph below solves them like any other frame.
@@ -138,6 +156,7 @@ impl UiScript {
             warnings,
             solver,
             layout_fingerprint,
+            layout_epoch_resolved,
             layout_solves,
             ..
         } = model;
@@ -271,8 +290,16 @@ impl UiScript {
                 None => fp.feed(u64::MAX),
             }
         }
-        fp.feed(region_data.len() as u64);
+        let mut fed_regions = 0u64;
         for (&rh, data) in region_data.iter() {
+            // Anchor-less entries are invisible to the rounds — the sweep `continue`s on empty
+            // anchors and the seed retain drops them — so they are not inputs and must not be
+            // hashed: a paint-only setter creating a region's entry (`SetTexture`'s
+            // `or_default()`) would otherwise read as a layout change no touch site can own.
+            if data.anchors.is_empty() {
+                continue;
+            }
+            fed_regions += 1;
             fp.feed(rh.fingerprint_bits());
             fp.anchors(&data.anchors);
             match data.size {
@@ -298,6 +325,9 @@ impl UiScript {
             // it and the sweep's `continue` would go unnoticed.
             fp.feed(u64::from(arena.region(rh).is_some()));
         }
+        // The count of FED entries (not the map's len — see the vacuous-entry skip above), so an
+        // entry leaving the anchored set is a change even if a sibling enters the same frame.
+        fp.feed(fed_regions);
         for (&id, rh) in id_to_region.iter() {
             if let Some(r) = region_resolved.get(rh) {
                 fp.feed(u64::from(id));
@@ -305,8 +335,28 @@ impl UiScript {
             }
         }
         let gate_skips = *layout_fingerprint == Some(fp);
-        if gate_skips && !layout_verify_enabled() {
-            return;
+        // The tier-1/tier-2 cross-check (only reachable under verify when tier 1 judged quiet):
+        // the epoch said nothing layout-visible was written, so the fingerprint must agree — a
+        // divergence is a mutation path missing its `Model::touch_layout()`, named here at the
+        // frame that proves it instead of shipping as a silently stale rect.
+        if tier1_clean {
+            assert!(
+                gate_skips,
+                "WOW_LAYOUT_VERIFY: the layout epoch judged this frame quiet but the input \
+                 fingerprint moved — a layout write path is missing its touch_layout()"
+            );
+        }
+        // Tier 1 closes ONLY on a settled frame (the fingerprint verdict `gate_skips`): the fp is
+        // hashed over the SEEDS (last pass's outputs), so the first resolve after a real change
+        // stores a fingerprint the very next, mutation-free resolve would not reproduce — the
+        // seeds grew under it. That next resolve pays one fingerprint (exactly today's price),
+        // proves the input set has settled, and closes the epoch here; every later quiet frame
+        // skips at the u64 compare.
+        if gate_skips {
+            *layout_epoch_resolved = Some(epoch_at_entry);
+            if !verify {
+                return;
+            }
         }
         // Under `WOW_LAYOUT_VERIFY=1` a skippable resolve runs anyway, against a copy of the rects
         // it is supposed to reproduce — see [`layout_verify_enabled`].
@@ -314,8 +364,10 @@ impl UiScript {
         // Cleared, not stored, until the fixpoint actually CONVERGES: a run that exhausts the
         // round cap (a genuine anchor cycle) leaves its rects mid-flight, and the 0294 cross-frame
         // seed is what lets the next frame carry them further. Storing here would freeze a
-        // pathological graph at whatever partial state it reached.
+        // pathological graph at whatever partial state it reached. The epoch mirror follows the
+        // same law: a cycle-bailed pass must re-enter tier 1 dirty next frame.
         *layout_fingerprint = None;
+        *layout_epoch_resolved = None;
         // Counted on the gate's DECISION, not on the fixpoint running: under
         // `WOW_LAYOUT_VERIFY=1` a skipped resolve still runs below, and a counter that moved for
         // it would mean something different in the two modes — exactly the ambiguity the tests
@@ -461,6 +513,13 @@ impl UiScript {
                     );
                 }
                 *layout_fingerprint = Some(fp);
+                // Tier 1 closes only on a `gate_skips` frame: a real solve (`!gate_skips`) hashed
+                // `fp` over now-outgrown seeds — see the gate above. The re-store here is for the
+                // VERIFY path, whose full re-run of a settled frame passed through the state
+                // clears; production returned at the gate. Either mode leaves the same state.
+                if gate_skips {
+                    *layout_epoch_resolved = Some(epoch_at_entry);
+                }
                 return;
             }
             if round + 1 == round_cap {

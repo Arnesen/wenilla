@@ -382,11 +382,21 @@ fn set_text_insets(lua: &Lua, h: FrameHandle, l: f32, r: f32, t: f32, b: f32) {
 fn write_inset_anchors(lua: &Lua, h: FrameHandle, rh: RegionHandle, [l, r, t, b]: [f32; 4]) {
     let owner = frame_id_of(lua, h);
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-    let data = model.region_data.entry(rh).or_default();
-    data.anchors = vec![
+    let pair = [
         Anchor::new(Point::TopLeft, owner, Point::TopLeft, l, -t),
         Anchor::new(Point::BottomRight, owner, Point::BottomRight, -r, b),
     ];
+    let data = model.region_data.entry(rh).or_default();
+    let same = data.anchors.len() == 2
+        && data
+            .anchors
+            .iter()
+            .zip(&pair)
+            .all(|(a, b)| super::object::anchor_bits_eq(a, b));
+    if !same {
+        data.anchors = pair.to_vec();
+        model.touch_layout();
+    }
 }
 
 /// The loader's special-`<FontString>` slot assignment: adopt `region` as `frame`'s text region,
@@ -434,6 +444,7 @@ pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHand
     };
     apply_text_region_justify(&mut data, multi_line);
     model.region_data.insert(rh, data);
+    model.touch_layout(); // a region entered the layout gate's read set (decision 0740)
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {
         eb.text_region = Some(rh);
     }

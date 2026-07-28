@@ -310,9 +310,16 @@ impl UiScript {
     }
 
     /// Set the screen-root rect from a pixel size (`[0,0]` origin, y-up). Top-level frames anchor to
-    /// it; changing it invalidates the next `resolve`.
+    /// it; changing it invalidates the next `resolve`. The app calls this every frame with an
+    /// almost-always-identical size — compared before writing so the per-frame idiom doesn't
+    /// dirty the layout gate's tier 1 (`Model::touch_layout`).
     pub fn set_screen_size(&mut self, width: f32, height: f32) {
-        self.model_mut().screen = Rect::new(0.0, 0.0, height, width);
+        let new = Rect::new(0.0, 0.0, height, width);
+        let mut model = self.model_mut();
+        if model.screen != new {
+            model.screen = new;
+            model.touch_layout();
+        }
     }
 
     /// Push the modifier-key state (shift, ctrl, alt) behind `IsShiftKeyDown`/`IsControlKeyDown`/
@@ -467,13 +474,20 @@ impl UiScript {
     /// the request). The next [`UiScript::resolve`] uses them as the FontStrings' implicit size.
     pub fn set_measured_text(&mut self, measures: &[(u32, f32, f32, u64)]) {
         let mut model = self.model_mut();
+        let mut changed = false;
         for &(id, w, h, key) in measures {
             let Some(&rh) = model.id_to_region.get(&id) else {
                 continue;
             };
             if let Some(d) = model.region_data.get_mut(&rh) {
-                d.measured = Some(MeasuredText { w, h, key });
+                let new = MeasuredText { w, h, key };
+                changed |= d.measured != Some(new);
+                d.measured = Some(new);
             }
+        }
+        if changed {
+            // Measured extents are the auto-size axes' inputs — the layout gate's read set.
+            model.touch_layout();
         }
     }
 
@@ -564,6 +578,13 @@ impl UiScript {
         model
             .focused_editbox
             .is_some_and(|h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
+    }
+
+    /// How many resolves the layout change gate has let through (`Model::layout_solves`) — the
+    /// gate's effectiveness, readable by tests and the app's cost meters (a per-frame delta of 0
+    /// means the fingerprint judged the frame quiet).
+    pub fn layout_solves(&self) -> u64 {
+        self.model_ref().layout_solves
     }
 
     /// A snapshot of the script errors collected so far (from `pcall`'d handlers).

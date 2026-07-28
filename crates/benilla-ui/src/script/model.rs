@@ -35,6 +35,19 @@ pub(crate) struct Model {
     /// initial state, and what a non-converging (cyclic) pass leaves behind so its progress can
     /// carry into the next frame.
     pub(crate) layout_fingerprint: Option<super::layout::InputFingerprint>,
+    /// The layout mutation epoch — tier 1 of the resolve change gate (the fingerprint is tier 2).
+    /// Bumped by [`Model::touch_layout`] at every write path that can move the anchor solve's
+    /// read set; `resolve` returns immediately while it still equals [`Self::layout_epoch_resolved`],
+    /// paying a `u64` compare instead of fingerprinting ~2k inputs. An idempotent-write burst (the
+    /// bag-hover re-enter loop) bumps this every frame and falls through to the fingerprint, which
+    /// absorbs it exactly as before — the tiers are complementary, not redundant.
+    pub(crate) layout_epoch: u64,
+    /// The [`Self::layout_epoch`] value the last SETTLED resolve closed on — one whose
+    /// fingerprint matched, proving the input set (seeds included) has stopped moving. `None`
+    /// forces the next resolve through tier 1: the initial state, a cycle-bailed pass, and every
+    /// real solve (whose stored fingerprint answers for now-outgrown seeds — layout.rs, "Tier 1
+    /// closes ONLY on a settled frame").
+    pub(crate) layout_epoch_resolved: Option<u64>,
     /// How many times the change gate has LET A RESOLVE THROUGH. `UiScript::resolve` is called
     /// unconditionally every frame, so the gap between call count and this is the gate's whole
     /// value; it is also what lets a test assert that a no-op resolve really was one, rather than
@@ -620,6 +633,8 @@ impl Model {
             layout_inputs: HashMap::new(),
             solver: LayoutSolver::new(),
             layout_fingerprint: None,
+            layout_epoch: 0,
+            layout_epoch_resolved: None,
             layout_solves: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),
@@ -812,6 +827,10 @@ impl Model {
         self.next_id += 1;
         self.frame_to_id.insert(h, id);
         self.id_to_frame.insert(id, h);
+        // A fresh id means a frame just entered the layout graph (`frame_to_id` is the resolve's
+        // roster) — the mint is the one chokepoint every creation path funnels through (bindings,
+        // the XML loader, anchor-target resolution), so the tier-1 gate can't miss a birth.
+        self.touch_layout();
         id
     }
 
@@ -824,6 +843,21 @@ impl Model {
         self.next_id += 1;
         self.region_to_id.insert(h, id);
         self.id_to_region.insert(id, h);
+        // A fresh region id can seat the region in the resolve's external set — same birth
+        // chokepoint as `frame_id`'s.
+        self.touch_layout();
         id
+    }
+
+    /// A write that can move [`UiScript::resolve_layout`]'s read set happened: anchors, sizes,
+    /// measured text, scale, clamp, scroll state, frame/region births, or the screen rect. Every
+    /// mutating BINDING (and app-facing setter) on that set calls this — tier 1 of the resolve
+    /// change gate. The resolve's own pre-pass (`tooltip::layout_tooltips`) deliberately does NOT:
+    /// its writes are derived from state that already arrived through touched paths, and a
+    /// self-touch would pin the gate open forever. A missed site is a silently stale layout —
+    /// exactly the failure `WOW_LAYOUT_VERIFY` (on for every benilla-ui test) exists to catch
+    /// loudly, by proving the fingerprint still matches whenever tier 1 claims quiet.
+    pub(crate) fn touch_layout(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
     }
 }

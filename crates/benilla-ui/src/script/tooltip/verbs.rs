@@ -60,20 +60,31 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
                     };
                     match pts {
                         Some((own, rel)) => {
+                            let new =
+                                Anchor::new(own, owner_id, rel, x.unwrap_or(0.0), y.unwrap_or(0.0));
                             let input = model.layout_inputs.entry(h).or_default();
-                            input.anchors = vec![Anchor::new(
-                                own,
-                                owner_id,
-                                rel,
-                                x.unwrap_or(0.0),
-                                y.unwrap_or(0.0),
-                            )];
+                            // The no-op compare keeps the per-frame SetOwner idiom (the bag
+                            // hover's OnUpdate re-enter) from dirtying tier 1 by itself; the
+                            // content clear above already reports its own writes.
+                            let same = input.anchors.len() == 1
+                                && crate::script::object::anchor_bits_eq(&input.anchors[0], &new);
+                            if !same {
+                                input.anchors = vec![new];
+                                model.touch_layout();
+                            }
                         }
                         None if anchor.eq_ignore_ascii_case("ANCHOR_NONE") => {
                             // The caller points it (ClearAllPoints+SetPoint) — drop ours now so a
                             // stale owner anchor never wins the frame the caller forgets to.
-                            if let Some(input) = model.layout_inputs.get_mut(&h) {
-                                input.anchors.clear();
+                            let dropped = match model.layout_inputs.get_mut(&h) {
+                                Some(input) if !input.anchors.is_empty() => {
+                                    input.anchors.clear();
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if dropped {
+                                model.touch_layout();
                             }
                         }
                         None => {} // ANCHOR_PRESERVE

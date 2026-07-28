@@ -123,7 +123,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
             };
             let changed = {
                 let mut model = lua.app_data_mut::<Model>().expect("model");
-                model.arena.set_parent(h, new_parent)
+                let before = model.arena.frame(h).and_then(|f| f.parent);
+                let changed = model.arena.set_parent(h, new_parent);
+                // A real reparent can move the subtree's effective scale — a layout-gate input
+                // (the arena rejects same-parent/cycle calls, so `before` moving is the test).
+                if model.arena.frame(h).and_then(|f| f.parent) != before {
+                    model.touch_layout();
+                }
+                changed
             };
             event::fire_visibility_changes(lua, changed);
             Ok(())
@@ -178,10 +185,14 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetScale",
         lua.create_function(|lua, (this, scale): (Table, f32)| {
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .arena
-                .set_scale(h, scale);
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            // Effective-scale changes ride the propagation's own eps gate; the own-scale compare
+            // is the cheap superset (same own scale => no effective change is possible).
+            let changed = model.arena.frame(h).is_some_and(|f| f.scale != scale);
+            model.arena.set_scale(h, scale);
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
@@ -329,10 +340,12 @@ pub(super) fn install(lua: &Lua, m: &Table) -> mlua::Result<()> {
         "SetClampedToScreen",
         lua.create_function(|lua, (this, clamp): (Table, bool)| {
             let h = frame_handle_of(lua, &this)?;
-            lua.app_data_mut::<Model>()
-                .expect("model")
-                .arena
-                .set_clamped_to_screen(h, clamp);
+            let mut model = lua.app_data_mut::<Model>().expect("model");
+            let changed = model.arena.is_clamped_to_screen(h) != clamp;
+            model.arena.set_clamped_to_screen(h, clamp);
+            if changed {
+                model.touch_layout();
+            }
             Ok(())
         })?,
     )?;
