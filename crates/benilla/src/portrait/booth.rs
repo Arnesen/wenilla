@@ -71,6 +71,7 @@ pub(super) enum BoothMotion {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_booth_model(
     commands: &mut Commands,
+    palettes: &mut crate::rig_palette::RigPalettes,
     root: Entity,
     layer: RenderLayers,
     parts: &[BoothPart],
@@ -92,13 +93,14 @@ pub(super) fn spawn_booth_model(
     // no eye bone); the boneless bake below drops them. `&[]` for booths that dress none.
     billboards: &[BoothBillboardSpec],
 ) -> Vec<Entity> {
-    use bevy::mesh::skinning::SkinnedMesh;
     // A re-bake must not inherit the previous model's animation state on the shared root — nor a
-    // stale global-sequence drive holding the despawned joints.
+    // stale global-sequence drive holding the despawned joints, nor the previous rig's palette
+    // slot (`RigSkin`'s on_replace hook frees it; the boneless bake below has no new one).
     commands.entity(root).remove::<(
         AnimationPlayer,
         AnimationGraphHandle,
         crate::creature_anim::GlobalSeqDrive,
+        crate::rig_palette::RigSkin,
     )>();
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
         for p in parts {
@@ -112,7 +114,19 @@ pub(super) fn spawn_booth_model(
         }
         return Vec::new();
     };
-    let joints = crate::entities::spawn_joints(commands, root, skeleton);
+    let joints = crate::entities::spawn_joints(commands, root, root, skeleton);
+    // The owned palette rig (decision 0720): the booth's skinned parts tag this slot; the palette
+    // compute reads these joints like any world rig, and the booth's studio light buffer mirrors
+    // the palette region (`rig_palette::RigPaletteMirrors`), so the booth camera sees the pose.
+    let rig_slot = crate::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone())
+        .map_or(0, |rig| {
+            let slot = rig.slot;
+            commands.entity(root).insert(rig);
+            // Booth materials bind a STUDIO light buffer, not the shared one — route this
+            // rig's rows to the registered mirrors too.
+            palettes.mark_mirrored(slot);
+            slot
+        });
     // The model's global-sequence bone channels, by motion (decision 0539 §5):
     // - **Loop** (the glue scenes + the create/select character): LIVE, on the world's own
     //   clock-driven sampler — the login gate's fires flicker, the Tauren windmill turns, the
@@ -155,7 +169,12 @@ pub(super) fn spawn_booth_model(
         }
     }
     for p in parts {
-        let mesh = p.skinned.clone().unwrap_or_else(|| p.static_mesh.clone());
+        let use_rig = p.skinned.is_some() && rig_slot != 0;
+        let mesh = if use_rig {
+            p.skinned.clone().expect("use_rig ⇒ skinned twin present")
+        } else {
+            p.static_mesh.clone()
+        };
         let mut child = commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(p.material.clone()),
@@ -163,11 +182,13 @@ pub(super) fn spawn_booth_model(
             layer.clone(),
             ChildOf(root),
         ));
-        if p.skinned.is_some() {
-            child.insert(SkinnedMesh {
-                inverse_bindposes: ibp.clone(),
-                joints: joints.clone(),
-            });
+        if use_rig {
+            child.insert((
+                crate::rig_palette::RigPart(root),
+                bevy::mesh::MeshTag(
+                    crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
+                ),
+            ));
         }
     }
     for r in riders {

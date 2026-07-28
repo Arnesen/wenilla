@@ -234,17 +234,21 @@ mod tests {
                 driver,
             ))
             .id();
-        let joint = app
-            .world_mut()
-            .spawn((Transform::default(), ChildOf(root)))
-            .id();
-        // The evaluator's rig handle (0712); target ids no longer ride the joints.
+        // The evaluator's pose buffer (0712 -> 0724); no joint entities at all.
+        let skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![benilla_assets::ModelJoint {
+                parent: -1,
+                local_translation: Vec3::ZERO,
+                billboard: None,
+                ignore_parent_rotation: false,
+            }],
+            spine_bone: None,
+            head_bone: None,
+        };
         app.world_mut()
             .entity_mut(root)
-            .insert(super::super::PosedRig {
-                joints: vec![joint],
-            });
-        (root, joint)
+            .insert(super::super::RigPose::new(root, &skeleton));
+        (root, root)
     }
 
     /// A camera at the origin looking down −Z (view = identity): rigs at −Z are in frame, rigs
@@ -286,11 +290,12 @@ mod tests {
         active.seek_time()
     }
 
-    fn bone(app: &App, joint: Entity) -> Vec3 {
+    fn bone(app: &App, rig: Entity) -> Vec3 {
         app.world()
-            .entity(joint)
-            .get::<Transform>()
+            .entity(rig)
+            .get::<super::super::RigPose>()
             .unwrap()
+            .locals[0]
             .translation
     }
 

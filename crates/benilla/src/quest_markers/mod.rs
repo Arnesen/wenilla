@@ -47,7 +47,6 @@ use query::query_statuses;
 
 use std::collections::HashMap;
 
-use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 
 use benilla_assets::{BillboardInfo, M2Model};
@@ -256,6 +255,7 @@ fn build_markers(
     mut roots: Query<(Entity, &mut QuestMarkerRoot)>,
     m2s: Res<Assets<M2Model>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     light: Res<SharedLightBuffer>,
     index: Res<GuidIndex>,
     anchors: Query<&BoneAttach>,
@@ -291,7 +291,7 @@ fn build_markers(
         let Some((joint, offset)) = anchor
             .points
             .get(&slot)
-            .and_then(|&(bone, offset)| Some((*anchor.joints.get(bone as usize)?, offset)))
+            .and_then(|&(bone, offset)| Some((anchor.anchor(bone)?, offset)))
         else {
             debug!(
                 "quest_markers: {:#x} has no slot-{slot} attachment — marker never parents (invisible, the client's own behavior)",
@@ -310,7 +310,9 @@ fn build_markers(
             .submeshes
             .iter()
             .any(|s| s.billboard.is_none())
-            .then(|| crate::doodad_anim::spawn_anim_host(&mut commands, model, seat_tf))
+            .then(|| {
+                crate::doodad_anim::spawn_anim_host(&mut commands, &mut palettes, model, seat_tf)
+            })
             .flatten();
         let seat = match &host {
             Some(h) => h.root,
@@ -372,26 +374,34 @@ fn build_markers(
                     commands.entity(root).add_child(child);
                 }
                 None => {
-                    // Plain geometry under the seat: the skinned twin bound to the host's joints
-                    // when the model animates (the `!` bob); the static mesh otherwise (capture
-                    // mode keeps every marker static, like the doodad rail).
-                    let mesh = match &host {
-                        Some(_) => sub.skinned_mesh.clone(),
-                        None => sub.mesh.clone(),
+                    // Plain geometry under the seat: the skinned twin bound to the host's palette
+                    // rig when the model animates (the `!` bob — decision 0720); the static mesh
+                    // otherwise (capture mode keeps every marker static, like the doodad rail),
+                    // including the palette-full fallback (slot 0).
+                    let use_rig = host.as_ref().is_some_and(|h| h.slot != 0);
+                    let mesh = if use_rig {
+                        sub.skinned_mesh.clone()
+                    } else {
+                        sub.mesh.clone()
                     };
+                    let rig_tag = host
+                        .as_ref()
+                        .filter(|_| use_rig)
+                        .map_or(0, |h| crate::mesh_tag::rig_bits(h.slot));
                     let child = commands
                         .spawn((
                             Mesh3d(mesh),
                             MeshMaterial3d(material),
-                            MeshTag(alpha_bits(1.0)),
+                            MeshTag(rig_tag | alpha_bits(1.0)),
                             Transform::IDENTITY,
                         ))
                         .id();
                     if let Some(h) = &host {
-                        commands.entity(child).insert(SkinnedMesh {
-                            inverse_bindposes: h.inverse_bindposes.clone(),
-                            joints: h.joints.clone(),
-                        });
+                        if use_rig {
+                            commands
+                                .entity(child)
+                                .insert(crate::rig_palette::RigPart(h.root));
+                        }
                     }
                     commands.entity(seat).add_child(child);
                 }

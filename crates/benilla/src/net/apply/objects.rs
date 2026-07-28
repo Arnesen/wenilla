@@ -237,10 +237,15 @@ pub(super) fn unit_move(
     remote_motion: &mut Query<&mut RemoteMotion>,
     transforms: &mut Query<&mut Transform>,
     landings: &mut MessageWriter<crate::creature_anim::HardLanding>,
+    self_moves: &mut MessageWriter<crate::net::SelfMoveMessage>,
 ) {
     use crate::net::motion::{apply_move, arrival_snap, trace_relay, PendingMove, RelayOutcome};
-    // A relayed move belongs to another player; never let one drive our own avatar (the
-    // controller owns it, and the server doesn't echo our moves back anyway).
+    // Addressed to US: the server writing our own pose, never an echo of ours (every one is
+    // `SetAsServerSide`, `ctime = 0`). The reference APPLIES it — there is no mover-guid gate
+    // anywhere on its inbound move path, and the local player resolves through the same object
+    // lookup as anyone else (decision 0725; wow-re `self-addressed-move.md`). What is ours is only
+    // *where it goes*: our avatar's motion source is the controller, not [`RemoteMotion`], so the
+    // pose crosses to `player::wire_in` instead of down this lane.
     if self_guid.0 == Some(guid) {
         trace_relay(
             guid,
@@ -250,6 +255,14 @@ pub(super) fn unit_move(
             0,
             RelayOutcome::SelfMover,
         );
+        self_moves.write(crate::net::SelfMoveMessage {
+            position: mv.position,
+            orientation: mv.orientation,
+            flags: mv.flags,
+            pitch: mv.pitch,
+            fall_time: mv.fall_time,
+            jump: mv.jump,
+        });
         return;
     }
     let Some(&e) = index.0.get(&guid) else {

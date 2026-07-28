@@ -28,7 +28,7 @@ mod model;
 pub use model::{
     bone_target_id, AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations,
     ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
-    PoseNode, PoseSource, PoseTrack,
+    PoseNode, PoseSource, PoseTrack, ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
 };
 mod adt;
 mod terrain;

@@ -483,6 +483,43 @@ fn relay_chain_seeds_holds_stale_stamps_and_survives_the_clock_wrap() {
     );
 }
 
+/// **What the chain would do with a server-authored SELF move** — the measurement decision 0725's
+/// inline apply rests on, rather than an assertion about it. The reference has one move machine and
+/// routes a self-addressed `MSG_MOVE_*` (a GM `.go forward`, a `.cheat fly` toggle, an anticheat
+/// snap-back) through this same chain, so the honest question is what fire-time it hands one.
+///
+/// Two arms, and the second is the one that matters. **Fresh chain → arrival**: the local mover's
+/// chain is fed by these packets and nothing else, and in ordinary play none arrive at all, so the
+/// first one is a seed and fires immediately. **Seeded chain → the sender's cadence, held**: once
+/// there are stamps to pace against, a packet that arrives *earlier* than the previous fire plus
+/// the wire step is deliberately delayed to preserve the spacing the stamps carry. That is the
+/// chain's headline property working exactly as designed — and it is the property benilla's self
+/// arm skips, because reproducing the "cadence" between one GM command and the next buys nothing
+/// while delaying a correction to our own pose.
+///
+/// The stamps are vmangos's own: `SetAsServerSide` writes a fresh `WorldTimer::getMSTime()` into
+/// `stime`, so the wire steps track the real time between the commands.
+#[test]
+fn the_chain_paces_a_server_authored_self_move_and_would_hold_an_early_one() {
+    let mut chain = RelayChain::default();
+    // Standing still, nothing queued — the state a GM command finds us in.
+    assert_eq!(
+        chain.schedule(1_000, 0.0, 0, true),
+        0.0,
+        "the first server-authored move seeds the chain and fires at arrival"
+    );
+    // 30 s later, arriving 140 ms behind the chain's pacing: the pacing law says fire at arrival
+    // (a late packet is already overdue), and the lateness enters the window.
+    assert_eq!(chain.schedule(31_000, 30_140.0, 0, true), 30_140.0);
+    // 30 s later again, arriving 90 ms *ahead* of the pacing. The chain holds it back to keep the
+    // sender's spacing — so the reference would apply this one 90 ms after it landed.
+    assert_eq!(
+        chain.schedule(61_000, 60_050.0, 0, true),
+        60_140.0,
+        "an early arrival is held to the sender's cadence — the pacing benilla's self arm skips"
+    );
+}
+
 /// The de-jitter buffer is re-sized **only** on a standing mover with an empty queue (`@0x618ce4` /
 /// `@0x618cf3`), and it is sized by the window's worst lateness (`0x618b50`) — then held, not
 /// re-charged: the ring stores lateness *relative to the base*, so a spike already absorbed doesn't

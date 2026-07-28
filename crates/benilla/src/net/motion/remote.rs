@@ -88,7 +88,9 @@ pub(in crate::net) enum RelayOutcome {
     Queued,
     /// The unit's first packet: seeds the chain and places it immediately.
     Seed,
-    /// Ours. The controller owns our avatar; the server never echoes our own moves anyway.
+    /// **Ours** — a server-authored pose for our own mover (`.go forward`, `.cheat fly`, an
+    /// anticheat snap-back). Handed to the controller as a [`crate::net::SelfMoveMessage`] rather
+    /// than applied down this lane; the reference has no mover-guid gate at all (decision 0725).
     SelfMover,
     /// **No entity for this guid.** The mover isn't in our object index — so this packet, Stop or
     /// not, changes nothing. A stale mover that keeps running while these accumulate is a streaming
@@ -625,7 +627,7 @@ pub(in crate::net) fn extrapolate_remote_units(
 /// and the current up-speed is `-zspeed - g·t`. Mirrors vmangos `Unit.cpp` `ExtrapolateMovement`
 /// (`z = start.z + jumpInitialSpeed·t - ½g·t²`, `jumpInitialSpeed = -zspeed`) under the same `gravity`
 /// (decision 0053; sign corrected by the sniff — decision 0054).
-pub(in crate::net) fn jump_seed(jump: Option<JumpInfo>, fall_time: u32) -> (f32, [f32; 2]) {
+pub(crate) fn jump_seed(jump: Option<JumpInfo>, fall_time: u32) -> (f32, [f32; 2]) {
     match jump {
         Some(j) => {
             let t = fall_time as f32 / 1000.0;

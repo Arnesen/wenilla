@@ -335,12 +335,14 @@ fn new_target_image(size: u32) -> Image {
 /// Startup: stand up one booth per slot — its image (registered in [`PortraitImages`]), a model-root
 /// entity, and a camera rendering only that slot's layer into the image (transparent, no bloom/MSAA,
 /// rendered before the world camera via a negative order).
+#[allow(clippy::too_many_arguments)]
 fn setup_booths(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut portraits: ResMut<PortraitImages>,
     mut booths: ResMut<Booths>,
     mut booth_light: ResMut<BoothLight>,
+    mut mirrors: ResMut<crate::rig_palette::RigPaletteMirrors>,
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
 ) {
@@ -368,6 +370,16 @@ fn setup_booths(
         "wow_model_pane_light",
         model_pane_light_rows(),
     ));
+    // Booth rigs skin from the palette regions of THESE buffers (decision 0720): register both
+    // as mirrors so the palette upload keeps their regions live.
+    for (key, buf) in [
+        ("portrait", &booth_light.studio.buffer),
+        ("pane", &booth_light.pane.buffer),
+    ] {
+        if let Some(b) = buf {
+            mirrors.0.insert(key, b.clone());
+        }
+    }
 
     for (i, token) in SLOTS.iter().enumerate() {
         let image = images.add(new_target_image(PORTRAIT_SIZE));
@@ -579,12 +591,18 @@ fn sync_portraits(
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     interact_npc: Res<crate::ui_session::InteractNpc>,
-    // The party slots' roster + entity index (one tuple param — the 16-SystemParam ceiling).
-    party: (Res<crate::ui_party::GroupState>, Res<crate::net::GuidIndex>),
+    // The party slots' roster + entity index + the skin-palette table (decision 0720) —
+    // one tuple param (the 16-SystemParam ceiling).
+    party: (
+        Res<crate::ui_party::GroupState>,
+        Res<crate::net::GuidIndex>,
+        ResMut<crate::rig_palette::RigPalettes>,
+    ),
 ) {
     if test_mode(&mut env_cache) {
         return; // the test bake owns the booths
     }
+    let (party_roster, party_index, mut palettes) = party;
     for token in SLOTS {
         let unit: Option<Entity> = match token {
             "player" => self_q.single().ok(),
@@ -598,8 +616,8 @@ fn sync_portraits(
             tok => tok
                 .strip_prefix("party")
                 .and_then(|n| n.parse::<usize>().ok())
-                .and_then(|n| party.0.party_slots().nth(n - 1))
-                .and_then(|m| party.1 .0.get(&m.guid))
+                .and_then(|n| party_roster.party_slots().nth(n - 1))
+                .and_then(|m| party_index.0.get(&m.guid))
                 .copied(),
         };
         let Some(booth) = booths.0.get_mut(token) else {
@@ -684,6 +702,7 @@ fn sync_portraits(
             commands.entity(booth.root).despawn_related::<Children>();
             spawn_booth_model(
                 &mut commands,
+                &mut palettes,
                 booth.root,
                 booth.layer.clone(),
                 &booth_parts,
@@ -753,6 +772,7 @@ fn sync_paperdoll(
     ent_q: Query<&NetEntity>,
     look: DressedLook,
     paperdoll: Res<PaperDollBooth>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
     mut last_yaw: Local<Option<f32>>,
@@ -763,6 +783,7 @@ fn sync_paperdoll(
         return; // the test bake owns the booths (it drives the paper doll too, see `bake_test`)
     }
     sync_body_booth(
+        &mut palettes,
         PAPERDOLL_SLOT,
         self_q.single().ok(),
         paperdoll.yaw,
@@ -792,6 +813,7 @@ fn sync_inspect_booth(
     ent_q: Query<&NetEntity>,
     look: DressedLook,
     inspect: Res<InspectBooth>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut wow_mats: ResMut<Assets<WowModelMaterial>>,
     mut env_cache: Local<Option<bool>>,
     mut last_yaw: Local<Option<f32>>,
@@ -802,6 +824,7 @@ fn sync_inspect_booth(
         return;
     }
     sync_body_booth(
+        &mut palettes,
         INSPECT_SLOT,
         inspect.unit,
         inspect.yaw,
@@ -824,6 +847,7 @@ fn sync_inspect_booth(
 /// there is nothing to show, which empties the booth.
 #[allow(clippy::too_many_arguments)]
 fn sync_body_booth(
+    palettes: &mut crate::rig_palette::RigPalettes,
     slot: &str,
     unit: Option<Entity>,
     yaw: f32,
@@ -911,6 +935,7 @@ fn sync_body_booth(
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
             commands,
+            palettes,
             booth.root,
             booth.layer.clone(),
             &booth_parts,

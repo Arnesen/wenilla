@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::camera::primitives::Aabb;
-use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
@@ -90,7 +89,10 @@ pub(super) fn update_hover(
     plate_rects: Res<crate::vplates::PlateRects>,
     mut hovered: ResMut<Hovered>,
     mesh_assets: Res<Assets<Mesh>>,
-    ibp_assets: Res<Assets<SkinnedMeshInverseBindposes>>,
+    // The owned palette table (decision 0720): the picker reads the same world-space matrices
+    // the vertex stage skins with, straight from the CPU rows.
+    palettes: Res<crate::rig_palette::RigPalettes>,
+    rigs: Query<&crate::rig_palette::RigSkin>,
     // Last frame's pick, for pass 2's sticky-hover (the reference's anti-flicker cache: the previous
     // pick outranks everything in the halo retry, so the hover doesn't strobe between two units).
     mut last_pick: Local<Option<Entity>>,
@@ -112,9 +114,8 @@ pub(super) fn update_hover(
     // A mounted unit's mount-child part children (decision 0441): the mount's geometry joins the
     // unit's pick set — the reference draws mount + rider as one clickable unit.
     child_sets: Query<&Children>,
-    // A part child's mesh + skinned binding (the joints its vertices pose through).
-    parts: Query<(&Mesh3d, &SkinnedMesh)>,
-    joint_tfs: Query<&GlobalTransform>,
+    // A part child's mesh + its palette-rig link (the rig its vertices pose through).
+    parts: Query<(&Mesh3d, &crate::rig_palette::RigPart)>,
     // Fallback path: a unit's pickable mesh children — `WorldObject` kind, model-local `Aabb`, world
     // transform, and the link to the streamed parent (whose `Guid` we resolve the hit to).
     meshes: Query<(&ChildOf, &Aabb, &GlobalTransform, &WorldObject)>,
@@ -189,20 +190,14 @@ pub(super) fn update_hover(
                 continue;
             }
         }
-        // The posed joint palette (parts of one skeleton share the joint set): the same
-        // world-from-bind-pose matrices GPU skinning applies.
-        let palette_of = |sk: &[(&Mesh3d, &SkinnedMesh)]| -> Option<Vec<Mat4>> {
-            sk.first().and_then(|(_, skin)| {
-                let ibp = ibp_assets.get(&skin.inverse_bindposes)?;
-                Some(
-                    skin.joints
-                        .iter()
-                        .zip(ibp.iter())
-                        .map(|(&j, ibp)| {
-                            joint_tfs.get(j).map_or(Mat4::IDENTITY, |t| t.to_matrix()) * *ibp
-                        })
-                        .collect(),
-                )
+        // The posed joint palette (parts of one skeleton share the rig): the same
+        // world-from-bind-pose matrices GPU skinning applies, read from the owned palette rows
+        // (decision 0720 — last frame's propagated pose, exactly what the previous
+        // joint-GlobalTransform read gave).
+        let palette_of = |sk: &[(&Mesh3d, &crate::rig_palette::RigPart)]| -> Option<Vec<Mat4>> {
+            sk.first().and_then(|(_, part)| {
+                let rig = rigs.get(part.0).ok()?;
+                palettes.world_palette(rig.slot, rig.bones() as usize)
             })
         };
         let Some(palette) = palette_of(&skinned) else {

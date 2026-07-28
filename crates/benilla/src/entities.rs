@@ -143,7 +143,7 @@ pub(crate) fn overhead_anchor<F: bevy::ecs::query::QueryFilter>(
                 ATTACH_OVERHEAD
             };
             let &(bone, offset) = a.points.get(&slot)?;
-            let joint = *a.joints.get(bone as usize)?;
+            let joint = a.anchor(bone)?;
             Some(globals.get(joint).ok()?.transform_point(offset))
         })
         .unwrap_or_else(|| {

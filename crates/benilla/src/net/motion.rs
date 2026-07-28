@@ -32,6 +32,7 @@ mod tests;
 pub(crate) use facing::FacingStep;
 pub(super) use facing::{face_target, resolve_facing};
 pub(crate) use relay::{PendingMove, RelayMove};
+pub(crate) use remote::jump_seed;
 pub(crate) use remote::RemoteMotion;
 pub(in crate::net) use remote::{apply_move, arrival_snap, trace_relay, RelayOutcome};
 pub(super) use remote::{drain_pending_moves, extrapolate_remote_units};

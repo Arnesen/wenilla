@@ -57,7 +57,7 @@ fn draw_bowstrings(
             .filter(|(_, latched)| *latched)
             .and_then(|(bones, _)| {
                 let &(bone, offset) = bones.points.get(&HAND_ARROW)?;
-                let joint = *bones.joints.get(bone as usize)?;
+                let joint = bones.anchor(bone)?;
                 Some(joints.get(joint).ok()?.transform_point(offset))
             })
             .unwrap_or_else(|| (top + bottom) / 2.0);

@@ -11,19 +11,24 @@
 //! `0` (lid retracted, eye open) for ~96% of the loop and `1` (lid full, eye shut) for ~100 ms — the
 //! blink. Without this pass the eyelid sits at its default identity scale (full size) forever: eyes shut.
 
-use bevy::app::AnimationSystems;
 use bevy::prelude::*;
-use bevy::transform::TransformSystems;
 
 use benilla_assets::GlobalBone;
 
-/// Per-instance driver for a model's global-sequence bone channels: each channel's joint entity paired
-/// with its baked channels, plus the free-running clock they wrap on. Attached beside the
+/// One channel's write target: a live joint entity (the doodad/effect/booth lane) or a bone index
+/// into the host's [`super::RigPose`] locals (the collapsed unit lane, decision 0724).
+enum SeqTarget {
+    Joint(Entity),
+    Bone(u16),
+}
+
+/// Per-instance driver for a model's global-sequence bone channels: each channel's write target
+/// paired with its baked channels, plus the free-running clock they wrap on. Attached beside the
 /// [`AnimationPlayer`] on a skinned instance whose model carries any global-sequence track.
 #[derive(Component)]
 pub(crate) struct GlobalSeqDrive {
-    /// `(joint entity, its baked global-sequence channels)`.
-    bones: Vec<(Entity, GlobalBone)>,
+    /// `(write target, its baked global-sequence channels)`.
+    bones: Vec<(SeqTarget, GlobalBone)>,
     /// Seconds since spawn — the model clock each channel wraps (`t mod period`).
     elapsed: f32,
     /// Paused: skip sampling entirely (the doodad host gates animation to drawn instances — wow-re
@@ -39,7 +44,26 @@ impl GlobalSeqDrive {
     pub(crate) fn new(global_bones: &[GlobalBone], joints: &[Entity]) -> Option<Self> {
         let bones: Vec<_> = global_bones
             .iter()
-            .filter_map(|g| joints.get(g.bone as usize).map(|&e| (e, g.clone())))
+            .filter_map(|g| {
+                joints
+                    .get(g.bone as usize)
+                    .map(|&e| (SeqTarget::Joint(e), g.clone()))
+            })
+            .collect();
+        (!bones.is_empty()).then_some(Self {
+            bones,
+            elapsed: 0.0,
+            paused: false,
+        })
+    }
+
+    /// The collapsed-rig lane (decision 0724): channels write the host's [`super::RigPose`]
+    /// locals by bone index — no joint entities exist. Same `None` gate as [`Self::new`].
+    pub(crate) fn new_rig(global_bones: &[GlobalBone], nbones: usize) -> Option<Self> {
+        let bones: Vec<_> = global_bones
+            .iter()
+            .filter(|g| (g.bone as usize) < nbones)
+            .map(|g| (SeqTarget::Bone(g.bone), g.clone()))
             .collect();
         (!bones.is_empty()).then_some(Self {
             bones,
@@ -61,22 +85,23 @@ impl GlobalSeqDrive {
     }
 }
 
-/// Sample each instance's global-sequence channels on its own clock and write the driven joint
-/// components — after [`AnimationSystems`] posed the skeleton, before [`TransformSystems::Propagate`]
-/// (the same window as the body twist). A channel overwrites only its own component; a bone the playing
-/// animation never keyed (the eyelid) keeps its rest translation/rotation and takes only the global
-/// scale, so the eye opens and blinks over whatever gait is playing.
+/// Sample each instance's global-sequence channels on its own clock and write the driven bone —
+/// in the pose post-pass window ([`super::PosePost`], the same as the body twist), so the model
+/// compose folds it. A channel overwrites only its own component; a bone the playing animation
+/// never keyed (the eyelid) keeps its rest translation/rotation and takes only the global scale,
+/// so the eye opens and blinks over whatever gait is playing.
 fn apply_global_sequences(
     time: Res<Time>,
-    mut drives: Query<(&mut GlobalSeqDrive, Has<super::AnimParked>)>,
+    mut drives: Query<(Entity, &mut GlobalSeqDrive, Has<super::AnimParked>)>,
     mut joints: Query<&mut Transform>,
+    mut rigs: Query<&mut super::RigPose>,
 ) {
     let dt = time.delta_secs();
-    for (mut drive, parked) in &mut drives {
+    for (host, mut drive, parked) in &mut drives {
         if drive.paused {
             continue;
         }
-        // A parked unit's channel clock keeps running — only the joint writes stop (decision
+        // A parked unit's channel clock keeps running — only the bone writes stop (decision
         // 0448: units are absolute-clock, never freeze-and-resume; the doodad lane pauses via
         // [`GlobalSeqDrive::set_paused`] + [`GlobalSeqDrive::sync`] instead and never parks).
         drive.elapsed += dt;
@@ -84,9 +109,23 @@ fn apply_global_sequences(
             continue;
         }
         let t = drive.elapsed;
-        for (joint, bone) in &drive.bones {
-            let Ok(mut tf) = joints.get_mut(*joint) else {
-                continue;
+        let mut rig = rigs.get_mut(host).ok();
+        for (target, bone) in &drive.bones {
+            let tf: &mut Transform = match target {
+                SeqTarget::Joint(joint) => {
+                    let Ok(tf) = joints.get_mut(*joint) else {
+                        continue;
+                    };
+                    tf.into_inner()
+                }
+                SeqTarget::Bone(b) => {
+                    let Some(rig) = rig.as_mut() else { continue };
+                    rig.pose_dirty = true;
+                    let Some(tf) = rig.locals.get_mut(*b as usize) else {
+                        continue;
+                    };
+                    tf
+                }
             };
             if let Some(c) = &bone.translation {
                 tf.translation = c.sample(t);
@@ -101,14 +140,9 @@ fn apply_global_sequences(
     }
 }
 
-/// Register [`apply_global_sequences`] in the post-animation window (mirrors the body-twist plugin).
+/// Register [`apply_global_sequences`] in the pose post-pass window (beside the body twist).
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(
-        PostUpdate,
-        apply_global_sequences
-            .after(AnimationSystems)
-            .before(TransformSystems::Propagate),
-    );
+    app.add_systems(PostUpdate, apply_global_sequences.in_set(super::PosePost));
 }
 
 #[cfg(test)]
@@ -147,13 +181,13 @@ mod tests {
         // Two instances: one clock parked mid-blink (shut), one parked in the open tail.
         let shut_joint = app.world_mut().spawn(Transform::default()).id();
         app.world_mut().spawn(GlobalSeqDrive {
-            bones: vec![(shut_joint, eyelid_bone())],
+            bones: vec![(SeqTarget::Joint(shut_joint), eyelid_bone())],
             elapsed: 0.06, // inside [0.033, 0.100] → scale 1
             paused: false,
         });
         let open_joint = app.world_mut().spawn(Transform::default()).id();
         app.world_mut().spawn(GlobalSeqDrive {
-            bones: vec![(open_joint, eyelid_bone())],
+            bones: vec![(SeqTarget::Joint(open_joint), eyelid_bone())],
             elapsed: 3.0, // inside [0.133, 6.633] → scale 0
             paused: false,
         });

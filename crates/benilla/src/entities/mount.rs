@@ -65,7 +65,12 @@ pub(super) fn refresh_mounts(
                 AnimationGraphHandle,
                 benilla_assets::ModelAnimations,
                 crate::creature_anim::AnimDriver,
-                crate::creature_anim::PosedRig,
+                (
+                    crate::creature_anim::RigPose,
+                    crate::creature_anim::BodyTwist,
+                    crate::creature_anim::GlobalSeqDrive,
+                ),
+                crate::rig_palette::RigSkin,
                 super::BoneAttach,
                 super::equipment::HeldAttached,
             )>()

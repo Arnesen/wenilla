@@ -211,13 +211,17 @@ pub(crate) fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffe
 }
 
 /// The full byte size of the shared light BUFFER: the per-frame blob ([`LightStd430`] — 19 header
-/// rows + the point-light table) PLUS the interior-prop probe region at its tail. **Every buffer
-/// bound as `wow_light` must be at least this big** — `wow_model.wgsl` declares the whole layout,
+/// rows + the point-light table) PLUS the interior-prop probe region PLUS the skin-palette
+/// regions (rig slot table + palette rows — decision 0720) at the tail. **Every buffer bound as
+/// `wow_light` must be at least this big** — `wow_model.wgsl` declares the whole layout,
 /// and wgpu validates bound size against the shader's struct at draw time. The portrait booth's
 /// frozen studio-light buffer sizes itself with this (its table regions stay zeroed ⇒ no scene
-/// point lights and black probes on portraits — the studio look is deliberately static).
+/// point lights and black probes on portraits — the studio look is deliberately static); a
+/// booth's PALETTE region is live, kept written by `rig_palette`'s mirror registry.
 pub(crate) fn light_blob_bytes() -> u64 {
-    per_frame_blob_bytes() + (7 * MAX_PROP_PROBES * 16) as u64
+    per_frame_blob_bytes()
+        + (7 * MAX_PROP_PROBES * 16) as u64
+        + crate::rig_palette::palette_regions_bytes()
 }
 
 /// Byte size of the per-frame prefix alone (= the probe region's offset — see

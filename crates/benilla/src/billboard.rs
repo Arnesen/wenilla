@@ -225,6 +225,12 @@ pub struct BillboardJointRig {
 }
 
 impl BillboardJointRig {
+    /// The host root — the collapsed-rig world pass's do-not-enter set reads it (a nested rig
+    /// with its own billboard output owns its interior, whichever lane the outer rig is on).
+    pub(crate) fn root(&self) -> Entity {
+        self.root
+    }
+
     /// Build for a spawned rig — `None` when the skeleton authors no billboard bone and no
     /// ignore-parent-rotation bone (the common case: ordinary rigs cost nothing). `root` is the
     /// host entity the joints hang under (the model-space frame).
@@ -481,7 +487,14 @@ impl Plugin for BillboardPlugin {
         )
         .add_systems(
             PostUpdate,
-            (billboard_joint_palette, face_billboards)
+            (
+                billboard_joint_palette,
+                // The collapsed-rig world pass (decision 0724): palette rows + replaced-subtree
+                // anchor re-seats, between the entity lane's joint rewrite and the card facing
+                // (cards following a unit's billboard-bone anchor read the replaced frame).
+                crate::creature_anim::finalize_rig_worlds,
+                face_billboards,
+            )
                 .chain()
                 .in_set(BillboardPlace),
         );

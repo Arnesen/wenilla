@@ -18,22 +18,116 @@
 //! driver, and events all keep running — which preserves 0448's two observables (absolute-clock
 //! snap on wake, off-screen combat audibility) with no `AnimatedBy` repoint machinery.
 
-use benilla_assets::{ModelAnimations, PoseSource};
+use benilla_assets::{ModelAnimations, ModelSkeleton, PoseSource};
 use bevy::animation::animatable::Animatable;
 use bevy::app::AnimationSystems;
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
 use super::AnimParked;
 
-/// The evaluator's rig handle, on the entity carrying the `AnimationPlayer`: bone index → joint
-/// entity, in skeleton order (decision 0712). Rigs spawn this **instead of** per-joint
-/// `AnimationTargetId`/`AnimatedBy` pairs — with no targets, Bevy's `animate_targets` never
-/// touches these bones.
+/// The collapsed rig's pose buffer (decision 0724), on the entity carrying the `AnimationPlayer`:
+/// one local `Transform` per bone in skeleton order — no joint entities at all (decision 0712's
+/// `PosedRig` handle grew into this when the ~59 k bone entities collapsed). Every pose writer —
+/// the evaluator below, the body twist, the global-sequence channels — writes `locals` and raises
+/// [`Self::pose_dirty`]; `compose` then folds the parent-sorted chain into per-bone model-space
+/// affines, and the world finalize (`creature_anim::compose`) turns those into palette rows and
+/// consumer-anchor frames.
 #[derive(Component)]
-pub(crate) struct PosedRig {
-    pub(crate) joints: Vec<Entity>,
+pub(crate) struct RigPose {
+    /// The rig's model-space frame: the holder itself, its conform node, or a mounted rider's
+    /// seat anchor. Its `GlobalTransform` is `world_from_model`; the palette recomputes when it
+    /// moves.
+    pub(crate) joints_root: Entity,
+    /// Per-bone local TRS, skeleton order — what the per-bone joint `Transform`s used to hold.
+    pub(crate) locals: Vec<Transform>,
+    /// Per-bone **animated** model-space affine (`parent_model × local`), the product transform
+    /// propagation used to compute through the joint entities. Rebuilt by [`Self::compose`] for a
+    /// dirty rig; billboard/ignore-rot replacements happen in the world pass, never here.
+    pub(crate) model: Vec<Affine3A>,
+    pub(crate) parents: Vec<i16>,
+    /// The bone's billboard arm (`0x08/0x10/0x20/0x40`), for the world pass's camera replacement.
+    pub(crate) kinds: Vec<Option<benilla_formats::BillboardKind>>,
+    /// Bone flag `0x04`: rotation resets to the model root's frame (the HandArrow helpers).
+    pub(crate) ignore_rot: Vec<bool>,
+    /// Any bone billboards — the world pass re-faces this rig whenever it isn't parked.
+    pub(crate) has_billboard: bool,
+    /// Any bone billboards or resets — the world pass's override walk runs at all.
+    pub(crate) has_special: bool,
+    /// `(bone, anchor entity)` — the consumer anchors (attachments, markers, emitter/ribbon/
+    /// light/billboard-card bones), children of [`Self::joints_root`]. The compose pass re-seats
+    /// their local `Transform`s so ordinary propagation carries every consumer subtree — held
+    /// items, nested effect rigs, the mount seat — exactly as the joint hierarchy did.
+    pub(crate) anchors: Vec<(u16, Entity)>,
+    /// A pose writer touched `locals` since the last world pass. Starts `true` so a rig that
+    /// never animates (bind pose) still gets its one palette write.
+    pub(crate) pose_dirty: bool,
 }
+
+impl RigPose {
+    /// Build the rig's buffer at bind pose (composed), `pose_dirty` armed for the first palette
+    /// write. Anchors are registered by the spawner as it creates them.
+    pub(crate) fn new(joints_root: Entity, skeleton: &ModelSkeleton) -> Self {
+        let locals: Vec<Transform> = skeleton
+            .joints
+            .iter()
+            .map(|j| Transform::from_translation(j.local_translation))
+            .collect();
+        let mut rig = Self {
+            joints_root,
+            model: vec![Affine3A::IDENTITY; locals.len()],
+            locals,
+            parents: skeleton.joints.iter().map(|j| j.parent).collect(),
+            kinds: skeleton.joints.iter().map(|j| j.billboard).collect(),
+            ignore_rot: skeleton
+                .joints
+                .iter()
+                .map(|j| j.ignore_parent_rotation)
+                .collect(),
+            has_billboard: skeleton.joints.iter().any(|j| j.billboard.is_some()),
+            has_special: skeleton
+                .joints
+                .iter()
+                .any(|j| j.billboard.is_some() || j.ignore_parent_rotation),
+            anchors: Vec::new(),
+            pose_dirty: true,
+        };
+        rig.compose();
+        rig
+    }
+
+    /// Forward-fold `locals` into `model` — the exact affine product transform propagation
+    /// computed through the joint entities (`parent_global.mul_transform(local)`, model-rooted).
+    /// M2 bones are parent-sorted (the format guarantees parent < child); a malformed child whose
+    /// parent follows it composes from the model root, matching the old hierarchy's `unwrap_or(root)`.
+    pub(crate) fn compose(&mut self) {
+        for i in 0..self.locals.len() {
+            let local = self.locals[i].compute_affine();
+            self.model[i] = match usize::try_from(self.parents[i]).ok().filter(|&p| p < i) {
+                Some(p) => self.model[p] * local,
+                None => local,
+            };
+        }
+    }
+}
+
+/// On every consumer anchor: which rig and bone it stands in for. The body twist's model-frame
+/// walk splices through it (a mounted rider's chain crosses the mount's seat bone), and the world
+/// pass uses it to cascade a re-seated root into dependent rigs.
+#[derive(Component)]
+pub(crate) struct RigAnchor {
+    /// The rig holder (the entity carrying [`RigPose`]).
+    pub(crate) rig: Entity,
+    pub(crate) bone: u16,
+}
+
+/// On an entity serving as some rig's `joints_root` while living inside ANOTHER rig's anchor
+/// subtree (the mounted rider's seat anchor under the mount's attachment-0 anchor): the world
+/// pass, having re-seated that subtree, re-finalizes the dependent rig too — its
+/// `world_from_model` moved after propagation ran.
+#[derive(Component)]
+pub(crate) struct RigFrame(pub(crate) Entity);
 
 /// One active animation's evaluation inputs, resolved against the rig's [`PoseSource`].
 struct Active {
@@ -49,12 +143,11 @@ struct Active {
 
 /// Evaluate every live rig's pose. Runs where `animate_targets` runs — inside [`AnimationSystems`]
 /// after `advance_animations` ticked the seek clocks — so the pose post-passes (body twist,
-/// global-sequence writes) and transform propagation see it at the same point in the frame.
+/// global-sequence writes) and the model compose see it at the same point in the frame.
 fn evaluate_rig_poses(
-    rigs: Query<(&AnimationPlayer, &ModelAnimations, &PosedRig), Without<AnimParked>>,
-    mut joints: Query<&mut Transform>,
+    mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
 ) {
-    for (player, anims, rig) in &rigs {
+    for (player, anims, mut rig) in &mut rigs {
         let src = &anims.pose;
         // This rig's contributing animations, ascending by node index (Bevy's effective blend
         // order — sorted children folded through a LIFO stack, see the module doc).
@@ -83,14 +176,12 @@ fn evaluate_rig_poses(
             [one] => {
                 // The steady state: one looping gait. A single contribution commits at full
                 // value whatever its weight (Bevy's register initializes unnormalized).
+                rig.pose_dirty = true;
                 for pb in &src.clips[one.clip].bones {
                     if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask != 0 {
                         continue;
                     }
-                    let Some(&joint) = rig.joints.get(pb.bone as usize) else {
-                        continue;
-                    };
-                    let Ok(mut tf) = joints.get_mut(joint) else {
+                    let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
                         continue;
                     };
                     if let Some(v) = pb.translation.sample(one.seek) {
@@ -104,19 +195,17 @@ fn evaluate_rig_poses(
                     }
                 }
             }
-            many => blend_rig(src, many, rig, &mut joints),
+            many => {
+                rig.pose_dirty = true;
+                blend_rig(src, many, &mut rig);
+            }
         }
     }
 }
 
 /// The multi-animation path (a cross-fade, a masked overlay, the grip): merge-walk the
 /// bone-sorted clips and fold each (bone, property)'s contributions in node order.
-fn blend_rig(
-    src: &PoseSource,
-    active: &mut [Active],
-    rig: &PosedRig,
-    joints: &mut Query<&mut Transform>,
-) {
+fn blend_rig(src: &PoseSource, active: &mut [Active], rig: &mut RigPose) {
     // Walk the next keyed bone across all clips until every cursor is spent.
     while let Some(bone) = active
         .iter()
@@ -147,10 +236,7 @@ fn blend_rig(
         if translation.is_none() && rotation.is_none() && scale.is_none() {
             continue;
         }
-        let Some(&joint) = rig.joints.get(bone as usize) else {
-            continue;
-        };
-        let Ok(mut tf) = joints.get_mut(joint) else {
+        let Some(tf) = rig.locals.get_mut(bone as usize) else {
             continue;
         };
         if let Some((v, _)) = translation {
@@ -327,14 +413,14 @@ mod tests {
     }
 
     /// Spawn the two rigs: the Bevy-path oracle (per-joint targets, `animate_targets` evaluates
-    /// it) and the evaluator rig (`PosedRig`). Returns `(oracle_root, oracle_joints, ours_root,
-    /// our_joints)`.
+    /// it) and the evaluator rig (a joint-less [`RigPose`] buffer). Returns `(oracle_root,
+    /// oracle_joints, ours_root)`.
     fn twin_rigs(
         app: &mut App,
         nbones: u16,
         graph: &Handle<AnimationGraph>,
         pose: &PoseSource,
-    ) -> (Entity, Vec<Entity>, Entity, Vec<Entity>) {
+    ) -> (Entity, Vec<Entity>, Entity) {
         let spawn_root = |app: &mut App| {
             app.world_mut()
                 .spawn((
@@ -359,20 +445,23 @@ mod tests {
             })
             .collect();
         let ours = spawn_root(app);
-        let our_joints: Vec<Entity> = (0..nbones)
-            .map(|_| {
-                app.world_mut()
-                    .spawn((Transform::default(), ChildOf(ours)))
-                    .id()
-            })
-            .collect();
+        let skeleton = ModelSkeleton {
+            joints: (0..nbones)
+                .map(|_| benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    ignore_parent_rotation: false,
+                })
+                .collect(),
+            spine_bone: None,
+            head_bone: None,
+        };
         app.world_mut().entity_mut(ours).insert((
             model_anims(graph.clone(), pose.clone()),
-            PosedRig {
-                joints: our_joints.clone(),
-            },
+            RigPose::new(ours, &skeleton),
         ));
-        (oracle, oracle_joints, ours, our_joints)
+        (oracle, oracle_joints, ours)
     }
 
     fn app() -> App {
@@ -386,15 +475,15 @@ mod tests {
         app
     }
 
-    /// Run `f` identically on both players, then step and assert every joint's `Transform` is
-    /// **exactly** equal between the oracle and the evaluator — same inputs, same `Animatable`
-    /// calls, bit-identical outputs.
+    /// Run `f` identically on both players, then step and assert every bone's local is
+    /// **exactly** equal between the oracle's joint `Transform`s and the evaluator's `locals`
+    /// array — same inputs, same `Animatable` calls, bit-identical outputs.
     #[track_caller]
-    fn assert_twins_equal(app: &mut App, oracle_joints: &[Entity], our_joints: &[Entity]) {
-        for (i, (&a, &b)) in oracle_joints.iter().zip(our_joints).enumerate() {
+    fn assert_twins_equal(app: &mut App, oracle_joints: &[Entity], ours: Entity) {
+        let rig = app.world().entity(ours).get::<RigPose>().unwrap();
+        for (i, &a) in oracle_joints.iter().enumerate() {
             let ta = *app.world().entity(a).get::<Transform>().unwrap();
-            let tb = *app.world().entity(b).get::<Transform>().unwrap();
-            assert_eq!(ta, tb, "bone {i} diverged (oracle vs evaluator)");
+            assert_eq!(ta, rig.locals[i], "bone {i} diverged (oracle vs evaluator)");
         }
     }
 
@@ -453,7 +542,7 @@ mod tests {
             mask: 0,
         };
         let (graph, nodes, pose) = build(&mut app, &[spec], vec![0, 0, 0]);
-        let (oracle, oj, ours, uj) = twin_rigs(&mut app, 3, &graph, &pose);
+        let (oracle, oj, ours) = twin_rigs(&mut app, 3, &graph, &pose);
         // One warm-up frame: Bevy's ThreadedAnimationGraphs builds off the graph asset's Added
         // event, so `animate_targets` bails on the spawn frame (our evaluator doesn't need it and
         // evaluates immediately — strictly earlier, not different). Compare from frame 2 on.
@@ -463,7 +552,7 @@ mod tests {
         });
         for _ in 0..5 {
             step(&mut app, 0.05);
-            assert_twins_equal(&mut app, &oj, &uj);
+            assert_twins_equal(&mut app, &oj, ours);
         }
     }
 
@@ -499,7 +588,7 @@ mod tests {
             mask: 0,
         };
         let (graph, nodes, pose) = build(&mut app, &[walk, run], vec![0]);
-        let (oracle, oj, ours, uj) = twin_rigs(&mut app, 1, &graph, &pose);
+        let (oracle, oj, ours) = twin_rigs(&mut app, 1, &graph, &pose);
         app.update(); // warm-up: see single_clip_matches_animate_targets
         drive(&mut app, &[oracle, ours], |p, tr| {
             tr.play(p, nodes[0], Duration::ZERO).repeat();
@@ -511,7 +600,7 @@ mod tests {
         });
         for _ in 0..6 {
             step(&mut app, 0.06);
-            assert_twins_equal(&mut app, &oj, &uj);
+            assert_twins_equal(&mut app, &oj, ours);
         }
     }
 
@@ -579,7 +668,7 @@ mod tests {
         };
         // bone 0 is in mask group 2 (the "outside the upper subtree" group).
         let (graph, nodes, pose) = build(&mut app, &[base, overlay, idle], vec![1 << 2, 0]);
-        let (oracle, oj, ours, uj) = twin_rigs(&mut app, 2, &graph, &pose);
+        let (oracle, oj, ours) = twin_rigs(&mut app, 2, &graph, &pose);
         app.update(); // warm-up: see single_clip_matches_animate_targets
         drive(&mut app, &[oracle, ours], |p, _| {
             p.play(nodes[0]).repeat();
@@ -588,11 +677,11 @@ mod tests {
         });
         for _ in 0..4 {
             step(&mut app, 0.07);
-            assert_twins_equal(&mut app, &oj, &uj);
+            assert_twins_equal(&mut app, &oj, ours);
         }
         // And the masked bone really is base-only: it moved off spawn (the base wrote it), yet
         // never took the overlay's parked 9.0 constant.
-        let t0 = app.world().entity(uj[0]).get::<Transform>().unwrap();
+        let t0 = app.world().entity(ours).get::<RigPose>().unwrap().locals[0];
         assert_ne!(
             t0.translation,
             Vec3::splat(9.0),
@@ -617,31 +706,20 @@ mod tests {
             mask: 0,
         };
         let (graph, nodes, pose) = build(&mut app, &[spec], vec![0]);
-        let (oracle, oj, ours, uj) = twin_rigs(&mut app, 1, &graph, &pose);
+        let (oracle, oj, ours) = twin_rigs(&mut app, 1, &graph, &pose);
         // The oracle twin runs unparked throughout — the absolute-clock witness.
         drive(&mut app, &[oracle, ours], |p, _| {
             p.play(nodes[0]).repeat();
         });
         step(&mut app, 0.05);
         app.world_mut().entity_mut(ours).insert(AnimParked);
-        let frozen = app
-            .world()
-            .entity(uj[0])
-            .get::<Transform>()
-            .unwrap()
-            .translation;
+        let bone0 =
+            |app: &App| app.world().entity(ours).get::<RigPose>().unwrap().locals[0].translation;
+        let frozen = bone0(&app);
         step(&mut app, 0.1);
-        assert_eq!(
-            app.world()
-                .entity(uj[0])
-                .get::<Transform>()
-                .unwrap()
-                .translation,
-            frozen,
-            "parked bones hold"
-        );
+        assert_eq!(bone0(&app), frozen, "parked bones hold");
         app.world_mut().entity_mut(ours).remove::<AnimParked>();
         step(&mut app, 0.05);
-        assert_twins_equal(&mut app, &oj, &uj); // woke to the absolute-clock pose
+        assert_twins_equal(&mut app, &oj, ours); // woke to the absolute-clock pose
     }
 }

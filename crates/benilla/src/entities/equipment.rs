@@ -168,7 +168,12 @@ pub(super) fn refresh_player_looks(
                 AnimationGraphHandle,
                 benilla_assets::ModelAnimations,
                 crate::creature_anim::AnimDriver,
-                crate::creature_anim::PosedRig,
+                (
+                    crate::creature_anim::RigPose,
+                    crate::creature_anim::BodyTwist,
+                    crate::creature_anim::GlobalSeqDrive,
+                ),
+                crate::rig_palette::RigSkin,
                 BoneAttach,
                 HeldAttached,
             )>()
@@ -235,18 +240,29 @@ pub(super) enum ItemModelKind {
     Quiver,
 }
 
-/// The per-instance bone-riding surface, inserted at visual attach (decision 0072): the joint
-/// entities in bone order + the model's attachment points (id → bone + Bevy-space local offset).
-/// Held items spawn under `joints[bone]` at the offset; future bone riders (mounts) use the same.
+/// The per-instance bone-riding surface, inserted at visual attach (decision 0072): the rig's
+/// consumer **anchors** by bone (decision 0724 — one anchor entity per bone something reaches,
+/// not a full joint hierarchy) + the model's attachment points (id → bone + Bevy-space local
+/// offset). Held items spawn under `anchor(bone)` at the offset; every bone rider (mount seat,
+/// spell effects, overhead anchors) uses the same two-step lookup.
 #[derive(Component)]
 pub(crate) struct BoneAttach {
-    pub(crate) joints: Vec<Entity>,
+    /// Bone index → its anchor entity. Populated for every bone in `points`/`markers` (and the
+    /// emitter/ribbon/light/billboard hosts) — a `points` hit always resolves.
+    pub(crate) anchors: HashMap<u16, Entity>,
     /// Attachment id → `(bone index, bevy-space offset from the bone's bind pivot)`.
     pub(crate) points: HashMap<u16, (u16, Vec3)>,
     /// Animation-event marker 4CC → the same `(bone, offset)` shape — first record per ident
     /// (the client's `0x7130e0` first-match scan). The missile launch points: `$CSL`/`$CSR`/`$CST`
     /// (casting hand left/right/two-hand, `0x60c9b0`'s cascade) and `$BWR` (ranged release).
     pub(crate) markers: HashMap<[u8; 4], (u16, Vec3)>,
+}
+
+impl BoneAttach {
+    /// The anchor entity standing in for `bone` — the frame a rider parents under / reads.
+    pub(crate) fn anchor(&self, bone: u16) -> Option<Entity> {
+        self.anchors.get(&bone).copied()
+    }
 }
 
 /// The held-item children currently spawned for a unit: the [`HeldItems`] they were built from (the
@@ -787,7 +803,7 @@ pub(super) fn attach_held_items(
                 // Body model has no such attach point (a non-character skeleton) — hold nothing.
                 continue;
             };
-            let Some(&joint) = bones.joints.get(bone as usize) else {
+            let Some(joint) = bones.anchor(bone) else {
                 continue;
             };
             let root = commands

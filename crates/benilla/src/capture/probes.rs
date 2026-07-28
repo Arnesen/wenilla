@@ -463,6 +463,10 @@ fn drive_live_fps(
     // fail (a bad map id, a refused command) leaving the run measuring the login spot.
     map: Option<Res<crate::world_map::CurrentMap>>,
     body: Option<Res<crate::player::Player>>,
+    // The owned skin-palette occupancy (decision 0720) — `rigs=live/peak bones=live/peak` on the
+    // probe line proves the palette lane is actually populated (an all-zero table renders
+    // origin-collapsed rigs, which no other probe number would catch).
+    palettes: Option<Res<crate::rig_palette::RigPalettes>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -545,8 +549,17 @@ fn drive_live_fps(
                 }
                 _ => String::new(),
             };
+            let rigs = palettes
+                .map(|p| {
+                    let (s, b, ps, pb) = p.occupancy();
+                    format!(
+                        " rigs={s}/{ps} rig_bones={b}/{pb} rig_computed={}",
+                        p.computed_rigs()
+                    )
+                })
+                .unwrap_or_default();
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={} px={}x{}{cpu}{present}{at_pin}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs} px={}x{}{cpu}{present}{at_pin}",
                 v.len(),
                 at(0.50),
                 at(0.95),

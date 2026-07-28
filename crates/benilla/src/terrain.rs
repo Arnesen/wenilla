@@ -169,9 +169,35 @@ impl MaterialExtension for WowModelExt {
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
+        layout: &MeshVertexBufferLayoutRef,
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
+        // The owned-palette skinning path (decision 0720): a mesh carrying the WOW joint
+        // attributes (the skinned twin — `benilla_assets::build_skinned_submesh_mesh`) compiles
+        // the WOW_RIG_SKIN vertex path, which skins from the shared buffer's palette region by
+        // the instance's MeshTag rig field. The base mesh pipeline built the vertex buffer
+        // layout without the joint attributes (they're not Bevy's, so it doesn't know them);
+        // rebuild it with the same conditionals (mesh.rs `specialize`, locations 0-5) plus ours
+        // at 10/11. Bevy's own SKINNED branch never fires for these meshes — that's the point.
+        if layout.0.contains(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX) {
+            descriptor.vertex.shader_defs.push("WOW_RIG_SKIN".into());
+            let mut attrs = Vec::with_capacity(7);
+            for (attr, loc) in [
+                (Mesh::ATTRIBUTE_POSITION, 0),
+                (Mesh::ATTRIBUTE_NORMAL, 1),
+                (Mesh::ATTRIBUTE_UV_0, 2),
+                (Mesh::ATTRIBUTE_UV_1, 3),
+                (Mesh::ATTRIBUTE_TANGENT, 4),
+                (Mesh::ATTRIBUTE_COLOR, 5),
+            ] {
+                if layout.0.contains(attr) {
+                    attrs.push(attr.at_shader_location(loc));
+                }
+            }
+            attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX.at_shader_location(10));
+            attrs.push(benilla_assets::ATTRIBUTE_WOW_JOINT_WEIGHT.at_shader_location(11));
+            descriptor.vertex.buffers = vec![layout.0.get_layout(&attrs)?];
+        }
         // M2 render flags 0x10 (no depth-write) / 0x08 (no depth-test), per batch. Default: write depth
         // (LEQUAL) like the real client — including transparent batches, which fixes the bleed-through.
         if let Some(ds) = descriptor.depth_stencil.as_mut() {

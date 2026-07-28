@@ -168,7 +168,7 @@ fn attach_world_pos(
     let point = bones.and_then(|b| {
         tags.into_iter()
             .find_map(|tag| b.points.get(&tag).copied())
-            .and_then(|(bone, offset)| b.joints.get(bone as usize).map(|&j| (j, offset)))
+            .and_then(|(bone, offset)| b.anchor(bone).map(|j| (j, offset)))
     });
     Some(
         match point.and_then(|(j, off)| joints.get(j).ok().map(|g| g.transform_point(off))) {
@@ -195,7 +195,7 @@ fn launch_world_pos(
             .into_iter()
             .chain(MARKER_CASCADE)
             .find_map(|ident| b.markers.get(&ident).copied())
-            .and_then(|(bone, offset)| b.joints.get(bone as usize).map(|&j| (j, offset)))
+            .and_then(|(bone, offset)| b.anchor(bone).map(|j| (j, offset)))
     });
     Some(
         match point.and_then(|(j, off)| joints.get(j).ok().map(|g| g.transform_point(off))) {
@@ -532,6 +532,7 @@ pub(super) fn attach_missile_models(
     mut wow_materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
     mut tint_reg: ResMut<super::spell_fx::FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
     let (Some(fx), Some(light)) = (fx, shared_light) else {
@@ -570,6 +571,7 @@ pub(super) fn attach_missile_models(
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
+            &mut palettes,
             &light,
             Some(INFLIGHT_ANIM),
         ) {
@@ -682,7 +684,7 @@ mod tests {
             .spawn((
                 GlobalTransform::default(),
                 BoneAttach {
-                    joints: vec![joint],
+                    anchors: HashMap::from([(0u16, joint)]),
                     points: HashMap::new(),
                     markers: HashMap::from([(*b"$CSL", (0u16, Vec3::ZERO))]),
                 },

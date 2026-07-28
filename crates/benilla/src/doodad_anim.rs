@@ -72,6 +72,9 @@ pub(crate) struct AnimHostSpawn {
     pub root: Entity,
     pub joints: Vec<Entity>,
     pub inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
+    /// The palette rig slot on `root` (decision 0720) — the spawn site tags it into each skinned
+    /// part's `MeshTag` rig field. `0` = the palette table was full: use the static mesh.
+    pub slot: u16,
     /// The looping first-sequence node + duration, `None` on the gseq-only tier.
     pub clip: Option<(AnimationNodeIndex, f32)>,
 }
@@ -86,6 +89,7 @@ pub(crate) struct AnimHostSpawn {
 /// the caller keeps today's path untouched.
 pub(crate) fn spawn_anim_host(
     commands: &mut Commands,
+    palettes: &mut crate::rig_palette::RigPalettes,
     m: &M2Model,
     transform: Transform,
 ) -> Option<AnimHostSpawn> {
@@ -101,7 +105,23 @@ pub(crate) fn spawn_anim_host(
     }
     let anims = m.animations.as_ref().expect("animated tier ⇒ animations");
     let root = commands.spawn((transform, Visibility::default())).id();
-    let joints = crate::entities::spawn_joints(commands, root, &m.skeleton);
+    let joints = crate::entities::spawn_joints(commands, root, root, &m.skeleton);
+    // The owned palette rig (decision 0720): the placement's skinned parts tag this slot; the
+    // palette compute reads the joints' worlds (Bevy's animate_targets still drives them — the
+    // doodad lane keeps the graph path, 0712's "cold consumers"). Slot 0 (table full, warned) ⇒
+    // the spawn site falls back to the static mesh.
+    let slot = match crate::rig_palette::RigSkin::allocate(
+        palettes,
+        joints.clone(),
+        m.inverse_bindposes.clone(),
+    ) {
+        Some(rig) => {
+            let slot = rig.slot;
+            commands.entity(root).insert(rig);
+            slot
+        }
+        None => 0,
+    };
     // Billboard bones on an animated doodad (a swinging lamp's glow child): the palette-level
     // camera facing, children inheriting.
     if let Some(bb) = crate::billboard::BillboardJointRig::new(&m.skeleton, &joints, root) {
@@ -142,6 +162,7 @@ pub(crate) fn spawn_anim_host(
         root,
         joints,
         inverse_bindposes: m.inverse_bindposes.clone(),
+        slot,
         clip: clip_info,
     })
 }

@@ -47,7 +47,6 @@ use std::collections::HashMap;
 use benilla_assets::bone_target_id;
 use bevy::animation::AnimatedBy;
 use bevy::ecs::entity::EntityHashMap;
-use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 
 use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, SpellKitFx};
@@ -185,6 +184,7 @@ pub(crate) fn drive_fx_view(
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     light: Option<Res<crate::lighting::SharedLightBuffer>>,
     spatial: avian3d::prelude::SpatialQuery,
     mut transforms: Query<&mut Transform>,
@@ -318,6 +318,7 @@ pub(crate) fn drive_fx_view(
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
+            &mut palettes,
             &light,
             None, // the fixture previews a kit effect at its default (first) clip
         ) {
@@ -355,6 +356,7 @@ pub(super) fn attach_effect_visuals(
     wow_materials: &mut Assets<WowModelMaterial>,
     tint_reg: &mut FxTintAnims,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
+    palettes: &mut crate::rig_palette::RigPalettes,
     light: &crate::lighting::SharedLightBuffer,
     preferred_anim: Option<u16>,
 ) -> bool {
@@ -376,7 +378,22 @@ pub(super) fn attach_effect_visuals(
         })
         .collect();
     let joints = arm_effect_rig(commands, root, dm, preferred_anim);
-    let rigged = !joints.is_empty() && dm.inverse_bindposes.is_some();
+    // The owned palette rig (decision 0720): allocated when the effect draws skinned parts; the
+    // hook frees the slot when the instance despawns (impact reap, missile arrival).
+    let rig_slot = match (&dm.inverse_bindposes, joints.is_empty()) {
+        (Some(ibp), false) => {
+            crate::rig_palette::RigSkin::allocate(palettes, joints.clone(), ibp.clone()).map_or(
+                0,
+                |rig| {
+                    let slot = rig.slot;
+                    commands.entity(root).insert(rig);
+                    slot
+                },
+            )
+        }
+        _ => 0,
+    };
+    let rigged = rig_slot != 0;
     // The clip this instance runs (the missile's InFlight, else the file-order-first) — the same
     // pick `arm_effect_rig` armed. Its **file sequence slot** is the key into each batch's
     // per-sequence material-alpha loops: an effect that plays a non-first sequence must read that
@@ -408,20 +425,27 @@ pub(super) fn attach_effect_visuals(
                     blend: part.blend,
                 },
             ));
-            if let (true, Some(ibp), Some(_)) = (rigged, &dm.inverse_bindposes, &part.skinned_mesh)
-            {
-                child.insert(SkinnedMesh {
-                    inverse_bindposes: ibp.clone(),
-                    joints: joints.clone(),
-                });
+            if let (true, Some(_)) = (rigged, &part.skinned_mesh) {
+                child.insert((
+                    crate::rig_palette::RigPart(root),
+                    bevy::mesh::MeshTag(
+                        crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
+                    ),
+                ));
             }
             // The part's colour-alpha × weight loops, on this instance's clock: the sampler owns
             // the child's render-alpha tag (`drives_tag` — no other writer touches fx parts).
+            // The rig field rides the whole-tag seed (decision 0720).
             if let Some(anim) = &part.alpha_anim {
                 let mat_anim =
                     crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
+                let rig_tag = if rigged && part.skinned_mesh.is_some() {
+                    crate::mesh_tag::rig_bits(rig_slot)
+                } else {
+                    0
+                };
                 child.insert((
-                    bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
+                    bevy::mesh::MeshTag(rig_tag | crate::mesh_tag::alpha_bits(mat_anim.current)),
                     mat_anim,
                 ));
             }
@@ -562,7 +586,7 @@ pub(super) fn arm_effect_rig(
     if dm.skeleton.joints.is_empty() {
         return Vec::new();
     }
-    let joints = super::spawn_joints(commands, root, &dm.skeleton);
+    let joints = super::spawn_joints(commands, root, root, &dm.skeleton);
     // Billboard bones face the camera at the PALETTE level, children inheriting (the frost-armor
     // sheets skin to a lock-Z bone's child) — the joint pass needs the map.
     if let Some(bb) = crate::billboard::BillboardJointRig::new(&dm.skeleton, &joints, root) {
@@ -733,6 +757,7 @@ pub(super) fn attach_spell_fx(
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
     ibps: Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     shared_light: Option<Res<crate::lighting::SharedLightBuffer>>,
 ) {
     let (Some(fx), Some(light)) = (fx, shared_light) else {
@@ -778,9 +803,7 @@ pub(super) fn attach_spell_fx(
                     .chain(ATTACH_FALLBACKS)
                     .find_map(|tag| b.points.get(&tag).copied().map(|p| (tag, p)))
                     .and_then(|(tag, (bone, offset))| {
-                        b.joints
-                            .get(bone as usize)
-                            .map(|&joint| (tag, joint, offset))
+                        b.anchor(bone).map(|joint| (tag, joint, offset))
                     })
             });
             // Ground-anchored: the cascade landed on the model's BASE point (`0x13`) or fell
@@ -808,6 +831,7 @@ pub(super) fn attach_spell_fx(
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,
+                &mut palettes,
                 &light,
                 None, // an attach-point kit effect runs its default (first) clip
             );

@@ -40,7 +40,7 @@ use motion::{
     drain_pending_moves, extrapolate_remote_units, face_target, ground_clamp_creatures,
     mark_swimming_creatures, sample_splines,
 };
-pub(crate) use motion::{CreatureSwimming, FacingStep, RemoteMotion, Spline};
+pub(crate) use motion::{jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline};
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
 pub(crate) struct NetPlugin {
@@ -73,6 +73,7 @@ impl Plugin for NetPlugin {
             .init_resource::<crate::items::Items>()
             .init_resource::<crate::world_state::WorldStates>()
             .add_message::<TeleportMessage>()
+            .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
             .add_message::<ServerSoundMessage>()
             .add_message::<WeatherMessage>()
@@ -1136,6 +1137,31 @@ pub(crate) struct TeleportMessage {
     pub(crate) counter: u32,
     pub(crate) position: [f32; 3],
     pub(crate) orientation: f32,
+}
+
+/// A **server-authored move for our own mover** — an inbound `MSG_MOVE_*` whose guid is ours. It is
+/// never an echo of our own reporting: vmangos stamps every one `MovementInfo::SetAsServerSide`
+/// (`ctime = 0`, "not a client packet"), and the senders are all server-side edges with no
+/// handshake and no ack owed — `.go forward`/`up`/`relative` (`Unit::NearLandTo` →
+/// `MSG_MOVE_FALL_LAND`), `.cheat fly`/`fixedz` and the movement anticheat's snap-back
+/// (`SendHeartBeat(true)` → `MSG_MOVE_HEARTBEAT`).
+///
+/// **The real client applies these** — its inbound move path has no mover-guid gate at all, and the
+/// local player sits in the object manager under its own guid, so a self-addressed packet resolves
+/// and applies exactly like a remote's (wow-re `system/collision/scratch/self-addressed-move.md`;
+/// decision 0725, which corrects the drop this used to take). Our avatar's motion source is the
+/// controller rather than the `RemoteMotion` lane, so the pose crosses as this message and lands in
+/// `player::wire_in`.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct SelfMoveMessage {
+    pub(crate) position: [f32; 3],
+    pub(crate) orientation: f32,
+    /// The wire's `MOVEMENTFLAGS`. Merged into ours under a mask, never assigned — see
+    /// [`crate::creature_anim::move_flags::SERVER_AUTHORED`].
+    pub(crate) flags: u32,
+    pub(crate) pitch: f32,
+    pub(crate) fall_time: u32,
+    pub(crate) jump: Option<benilla_protocol::JumpInfo>,
 }
 
 /// The server changed one of our own mover's speeds (`SMSG_FORCE_*_SPEED_CHANGE` — aura, mount, GM

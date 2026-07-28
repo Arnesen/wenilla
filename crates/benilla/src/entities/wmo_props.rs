@@ -192,6 +192,7 @@ pub(super) fn spawn_wmo_gameobject_props(
     mut meshes: ResMut<Assets<Mesh>>,
     mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
     mut probes: ResMut<PropProbes>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
 ) {
@@ -255,6 +256,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut commands,
                 &mut entity_mats.0,
                 &mut materials,
+                &mut palettes,
                 light,
                 &m.submeshes,
                 prop.local, // doodad-LOCAL — the parent composes the world pose

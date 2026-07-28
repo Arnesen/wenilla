@@ -6,7 +6,6 @@
 
 use benilla_assets::{M2Model, ModelSubmesh};
 use benilla_formats::ModelBlend;
-use bevy::mesh::skinning::SkinnedMesh;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::render::render_resource::Buffer;
@@ -31,6 +30,8 @@ pub(crate) fn spawn_model_entities(
     commands: &mut Commands,
     mat_cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
+    // The owned skin-palette table (decision 0720): an animated placement's rig claims a slot.
+    palettes: &mut crate::rig_palette::RigPalettes,
     light: &Buffer,
     submeshes: &[ModelSubmesh],
     transform: Transform,
@@ -89,12 +90,13 @@ pub(crate) fn spawn_model_entities(
                 || !m.emitters.is_empty()
                 || !m.ribbons.is_empty()
         })
-        .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, m, transform));
+        .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, palettes, m, transform));
     // Captures freeze material-alpha clocks at 0 (deterministic frames) — read the env once.
     let mat_frozen = crate::capture::scenario_active();
     let skin = host
         .as_ref()
         .map(|h| (h.joints.clone(), h.inverse_bindposes.clone()));
+    let (rig_root, rig_slot) = host.as_ref().map_or((None, 0), |h| (Some(h.root), h.slot));
     if let Some(h) = &host {
         out.push(h.root);
     }
@@ -245,11 +247,19 @@ pub(crate) fn spawn_model_entities(
             )
         } else {
             // An animated doodad's ordinary submesh draws the skinned twin bound to the placement's
-            // joint set (the entity keeps the placement transform — culling/fade read it; the
-            // skinned draw itself is joint-driven). Everything else draws the static mesh.
-            let mesh = match &skin {
-                Some(_) => sub.skinned_mesh.clone(),
-                None => sub.mesh.clone(),
+            // palette rig (decision 0720 — the rig slot in the tag; the entity keeps the placement
+            // transform — culling/fade read it; the skinned draw itself is palette-driven).
+            // Everything else — and the palette-full fallback (slot 0) — draws the static mesh.
+            let use_rig = skin.is_some() && rig_slot != 0;
+            let mesh = if use_rig {
+                sub.skinned_mesh.clone()
+            } else {
+                sub.mesh.clone()
+            };
+            let part_tag = if use_rig {
+                MeshTag(crate::mesh_tag::rig_bits(rig_slot) | mesh_tag.0)
+            } else {
+                mesh_tag
             };
             let entity = commands
                 .spawn((
@@ -260,14 +270,17 @@ pub(crate) fn spawn_model_entities(
                         kind,
                         blend: sub.blend,
                     },
-                    mesh_tag,
+                    part_tag,
                 ))
                 .id();
-            if let Some((joints, ibp)) = &skin {
-                commands.entity(entity).insert(SkinnedMesh {
-                    inverse_bindposes: ibp.clone(),
-                    joints: joints.clone(),
-                });
+            if skin.is_some() {
+                if let Some(root) = rig_root {
+                    commands
+                        .entity(entity)
+                        .insert(crate::rig_palette::RigPart(root));
+                }
+                // The draw-gate list is about visibility, not skinning — the bind-pose fallback
+                // part still represents the placement.
                 skinned_meshes.push(entity);
             }
             (entity, local_center)

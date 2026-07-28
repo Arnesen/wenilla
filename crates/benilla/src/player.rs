@@ -231,6 +231,9 @@ fn control(
         // The mounted space-bar flourish (decision 0441 P2): our own MountSpecial(94) plays
         // locally at send time; the net drain self-suppresses any broadcast echo.
         MessageWriter<crate::creature_anim::MountFlourish>,
+        // A `MSG_MOVE_*` the server addressed to our OWN mover (decision 0725) — a pose it wrote,
+        // with no handshake and no ack owed. `wire_in` snaps to it.
+        MessageReader<crate::net::SelfMoveMessage>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -407,6 +410,7 @@ fn control(
         &mut net.4,
         &mut net.5,
         &mut net.6,
+        &mut net.10,
         transports,
         self_player.single().ok().map(|(_, t, ..)| t.translation),
     );

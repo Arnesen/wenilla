@@ -75,6 +75,7 @@ mod probe_shield;
 mod quest_markers;
 mod raid_marks;
 mod ribbons;
+mod rig_palette;
 mod schedule;
 mod sky;
 mod sky_order;
@@ -228,10 +229,11 @@ fn main() {
     // never fights the director's screen (decision 0703; `WOW_BG` overrides). See `bgwin`.
     let background = bgwin::background_run();
     if capturing {
-        // Ground clutter scatters with per-run randomness (the only non-deterministic element in the
-        // scene), so disable it for byte-stable baselines — clutter isn't what the lighting rework
-        // validates, and the regression diff must not be masked by grass wobble. Set before plugins
-        // build so `ClutterConfig::from_env` reads it.
+        // Ground clutter scatters with per-run randomness, so disable it for byte-stable baselines
+        // — clutter isn't what the lighting rework validates, and the regression diff must not be
+        // masked by grass wobble. Set before plugins build so `ClutterConfig::from_env` reads it.
+        // It is not the only source of per-run drift, though it was long documented as such: the
+        // other is the frame clock itself, frozen in `capture` (decision 0723).
         std::env::set_var("WOW_CLUTTER_DENSITY", "0");
     }
 
@@ -399,6 +401,9 @@ fn main() {
     .add_plugins(InteractPlugin)
     // M2 billboard cards (glow halos, chains) — faced to the camera each frame.
     .add_plugins(BillboardPlugin)
+    // The owned skin palette (decision 0720): every skinned rig's joint matrices, computed by
+    // us and skinned in wow_model.wgsl — Bevy's SkinnedMesh lane is fully replaced.
+    .add_plugins(rig_palette::plugin)
     .add_plugins(BowstringPlugin)
     .add_plugins(QuestMarkersPlugin)
     // Frame-time HUD + diagnostics — the performance standard.

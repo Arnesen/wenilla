@@ -408,7 +408,7 @@ pub(super) fn spawn_glue_booth(
 /// seat the character on the stage spot, and hold the booth camera on the scene's authored camera 0
 /// — every frame, so the per-bake body framing from [`sync_glue_booth`] never wins while a scene
 /// shows. Leaving the screen (`look: None`) tears the scene down and restores the square target.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn sync_glue_scene(
     mut commands: Commands,
     preview: Res<GluePreview>,
@@ -425,14 +425,16 @@ pub(super) fn sync_glue_scene(
     window: Query<&Window, With<PrimaryWindow>>,
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
-    // The scene's particle-emitter spawn wiring (decision 0539 §5) — one tuple param (the
-    // 16-SystemParam ceiling).
+    // The scene's particle-emitter spawn wiring (decision 0539 §5) + the skin-palette table and
+    // its mirror registry (decision 0720) — one tuple param (the 16-SystemParam ceiling).
     particle_assets: (
         ResMut<Assets<Mesh>>,
         ResMut<Assets<crate::particles::WowParticleMaterial>>,
+        ResMut<crate::rig_palette::RigPalettes>,
+        ResMut<crate::rig_palette::RigPaletteMirrors>,
     ),
 ) {
-    let (mut meshes, mut particle_materials) = particle_assets;
+    let (mut meshes, mut particle_materials, mut palettes, mut mirrors) = particle_assets;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -514,6 +516,9 @@ pub(super) fn sync_glue_scene(
                 })
             })
             .clone();
+        // The scene's rigs skin from THIS buffer's palette region (decision 0720): register it
+        // as a mirror (re-registration replaces — a rebuilt scene's old buffer drops).
+        mirrors.0.insert("glue_scene", light.clone());
         let stage = attachment_point(&model.skeleton, &model.attachments, 0).unwrap_or(Vec3::ZERO);
         let rig = scene_rig(&model.lights);
         let (fog_rgb, fog_far) = scene_fog(token);
@@ -588,6 +593,7 @@ pub(super) fn sync_glue_scene(
             .collect();
         let joints = spawn_booth_model(
             &mut commands,
+            &mut palettes,
             scene.root,
             booth.layer.clone(),
             &scene_parts,
@@ -709,6 +715,7 @@ pub(super) fn sync_glue_booth(
     creatures: Option<Res<Creatures>>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     mut last: Local<Option<(u64, f32, u64)>>,
 ) {
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
@@ -798,6 +805,7 @@ pub(super) fn sync_glue_booth(
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
             &mut commands,
+            &mut palettes,
             booth.root,
             booth.layer.clone(),
             &booth_parts,

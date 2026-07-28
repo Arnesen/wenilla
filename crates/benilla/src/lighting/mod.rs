@@ -19,7 +19,9 @@ pub(crate) use global_light::{
     commit_raw, light_blob_bytes, new_shared_light_buffer, pack_model_core_rows, SharedLightBuffer,
     LIGHT_HEADER_ROWS,
 };
-pub(crate) use prop_probes::{prop_probe_region_offset, PropProbeSlot, PropProbes};
+pub(crate) use prop_probes::{
+    prop_probe_region_offset, PropProbeSlot, PropProbes, MAX_PROP_PROBES,
+};
 pub(crate) use resolve::fog_range;
 use resolve::{apply_sky_backdrop, setup_lighting, update_time_lighting};
 pub(crate) use sh::prop_probe_coeffs;

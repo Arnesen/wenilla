@@ -67,7 +67,12 @@ pub(crate) use global_seq::GlobalSeqDrive;
 mod lod;
 pub(crate) use lod::AnimParked;
 mod pose;
-pub(crate) use pose::PosedRig;
+pub(crate) use pose::{RigAnchor, RigFrame, RigPose};
+
+/// The collapsed rig's composition passes (decision 0724): the pre-propagation model compose +
+/// anchor re-seat, and the post-propagation world pass (palette rows + billboard replacements).
+mod compose;
+pub(crate) use compose::{finalize_rig_worlds, PosePost};
 
 /// The unit's wielded weapon classes — `(item class, item subclass)` per hand, `None` for an empty
 /// (or non-item) hand. Written by the held-item resolution ([`crate::entities`], decision 0072) from
@@ -665,6 +670,7 @@ impl Plugin for CreatureAnimPlugin {
         global_seq::plugin(app);
         lod::plugin(app);
         pose::plugin(app);
+        compose::plugin(app);
         app.add_message::<AnimSoundEvent>()
             .add_message::<SwingMessage>()
             .add_message::<SwingImpact>()

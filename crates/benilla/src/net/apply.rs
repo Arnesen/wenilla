@@ -87,6 +87,9 @@ pub(super) fn apply_net_updates(
         // The server's own answer to a GM dot-command, readable rather than only logged — the
         // probe shield's confirmation channel (decision 0677).
         MessageWriter<super::ServerSaidMessage>,
+        // A `MSG_MOVE_*` the server addressed to OUR mover (decision 0725): a pose it wrote, with
+        // no handshake — the controller applies it in `player::wire_in`.
+        MessageWriter<super::SelfMoveMessage>,
     ),
     // One tuple param (the 16-SystemParam ceiling): the ask-once query caches + the gossip/merchant
     // state the net drain fills for the NPC-interaction windows (decision 0081).
@@ -276,6 +279,7 @@ pub(super) fn apply_net_updates(
         mut login_failures,
         mut disconnects,
         mut server_said,
+        mut self_moves,
     ) = session_msgs;
     // Descriptor seeds/deltas for objects created *earlier in this same drain* can't land on their
     // entities yet (the spawn `Command` hasn't run), so they accumulate here and flush once at the end.
@@ -456,6 +460,7 @@ pub(super) fn apply_net_updates(
                     &mut remote_motion,
                     &mut transforms,
                     &mut audio.13,
+                    &mut self_moves,
                 );
             }
             SessionEvent::ObjectValues { guid, fields } => {

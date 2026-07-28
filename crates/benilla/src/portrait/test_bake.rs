@@ -29,6 +29,7 @@ pub(super) fn sync_test_portraits(
     mut env_cache: Local<Option<bool>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
 ) {
     if !test_mode(&mut env_cache) || *test_done {
         return;
@@ -36,6 +37,7 @@ pub(super) fn sync_test_portraits(
     let path = std::env::var("WOW_PORTRAIT_TEST").expect("gated by test_mode");
     if bake_test(
         &mut commands,
+        &mut palettes,
         &booths,
         &path,
         &asset_server,
@@ -58,6 +60,7 @@ pub(super) fn sync_test_portraits(
 #[allow(clippy::too_many_arguments)]
 fn bake_test(
     commands: &mut Commands,
+    palettes: &mut crate::rig_palette::RigPalettes,
     booths: &Booths,
     path: &str,
     asset_server: &AssetServer,
@@ -164,6 +167,7 @@ fn bake_test(
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
             commands,
+            palettes,
             booth.root,
             booth.layer.clone(),
             &parts,
@@ -188,6 +192,7 @@ fn bake_test(
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
             commands,
+            palettes,
             booth.root,
             booth.layer.clone(),
             &pane_parts, // the pane's own light, not the portraits' studio (decision 0638)

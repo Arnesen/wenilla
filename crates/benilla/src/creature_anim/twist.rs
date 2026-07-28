@@ -12,9 +12,7 @@
 //! the [`apply_body_twist`] system composes the twist onto the animated bone locals each frame,
 //! after Bevy's animation evaluation and before transform propagation.
 
-use bevy::app::AnimationSystems;
 use bevy::prelude::*;
-use bevy::transform::TransformSystems;
 
 /// The body's counter-twist state, on a skinned unit's root entity. Inserted at visual attach when
 /// the model carries either twist key-bone ([`benilla_assets::ModelSkeleton::spine_bone`]/
@@ -30,7 +28,7 @@ pub(crate) struct BodyTwist {
 }
 
 impl BodyTwist {
-    pub(crate) fn new(spine: Option<Entity>, head: Option<Entity>) -> Self {
+    pub(crate) fn new(spine: Option<u16>, head: Option<u16>) -> Self {
         Self {
             yaw_gap: 0.0,
             spine: spine.map(Channel::new),
@@ -39,22 +37,22 @@ impl BodyTwist {
     }
 }
 
-/// One twist channel's joint + composition bookkeeping.
+/// One twist channel's bone + composition bookkeeping.
 struct Channel {
-    joint: Entity,
+    bone: u16,
     /// The animated local rotation the twist last composed on — the "base" under our twist.
     base: Quat,
-    /// What we last wrote (`base * twist`). If the joint still holds exactly this next frame, the
-    /// animation didn't retouch the bone this frame (a clip need not key every bone), so `base`
-    /// stays authoritative — composing onto the joint's current value instead would accumulate the
-    /// twist frame over frame and spin the bone.
+    /// What we last wrote (`base * twist`). If the bone still holds exactly this next frame, the
+    /// animation didn't retouch it this frame (a clip need not key every bone), so `base`
+    /// stays authoritative — composing onto the bone's current value instead would accumulate the
+    /// twist frame over frame and spin it.
     last_out: Quat,
 }
 
 impl Channel {
-    fn new(joint: Entity) -> Self {
+    fn new(bone: u16) -> Self {
         Self {
-            joint,
+            bone,
             base: Quat::IDENTITY,
             last_out: Quat::IDENTITY,
         }
@@ -84,70 +82,109 @@ fn twist_shares(gap: f32) -> (f32, f32) {
     (spine, head)
 }
 
-/// Compose the counter-twist onto the animated bone locals — PostUpdate, after
-/// [`AnimationSystems`] wrote this frame's pose and before [`TransformSystems::Propagate`].
+/// Compose the counter-twist onto the animated bone locals — PostUpdate, in the pose post-pass
+/// window ([`super::PosePost`]: after the evaluator wrote this frame's pose, before the model
+/// compose folds it).
 ///
 /// Each channel yaws its subtree about **world up through the bone's own pivot**: with `g` the
 /// bone's model-space rotation (ancestors × its animated local), `local' = local · Quat(g⁻¹·Y, θ)`
 /// conjugates to a pure up-axis yaw of the subtree (units stand upright and their root rotation is
 /// a Y-yaw, so model up and world up coincide). The head channel runs after the spine write, so its
 /// ancestor chain already carries the spine's twist — the head counter-rotates relative to the
-/// twisted spine, exactly the client's residual-gap composition.
+/// twisted spine, exactly the client's residual-gap composition. The ancestor walk runs up the
+/// rig's own parent table, then the entity frames between its `joints_root` and the unit (a
+/// conform node's tilt; a mounted rider's seat — splicing through the mount's bone chain via its
+/// [`super::RigAnchor`]), exactly the frames the joint-entity walk used to compose.
 pub(super) fn apply_body_twist(
     // A parked rig's bones are frozen (decision 0448) — composing the twist onto them would
-    // re-dirty the subtree every frame for a unit no one sees; the wake re-seats `base` from the
+    // recompute the palette every frame for a unit no one sees; the wake re-seats `base` from the
     // fresh sample on its own (`cur != last_out`).
     mut units: Query<(Entity, &mut BodyTwist), Without<super::AnimParked>>,
-    mut joints: Query<&mut Transform>,
+    mut rigs: Query<&mut super::RigPose>,
+    anchors: Query<&super::RigAnchor>,
     parents: Query<&ChildOf>,
+    locals: Query<&Transform>,
 ) {
     for (unit, mut twist) in &mut units {
         let (spine, head) = twist_shares(twist.yaw_gap);
         let twist = &mut *twist;
         for (channel, angle) in [(&mut twist.spine, spine), (&mut twist.head, head)] {
             let Some(ch) = channel else { continue };
-            let Ok(cur) = joints.get(ch.joint).map(|t| t.rotation) else {
+            let bone = ch.bone as usize;
+            let Some((cur, base, out)) = ({
+                let rig = rigs.get(unit).ok();
+                rig.and_then(|rig| {
+                    let cur = rig.locals.get(bone)?.rotation;
+                    let base = if cur == ch.last_out { ch.base } else { cur };
+                    let out = if angle == 0.0 {
+                        base
+                    } else {
+                        // The bone's model-space rotation: its own ancestor chain…
+                        let mut g = base;
+                        let mut b = rig.parents.get(bone).copied().unwrap_or(-1);
+                        while let Ok(p) = usize::try_from(b) {
+                            g = rig.locals.get(p)?.rotation * g;
+                            b = rig.parents.get(p).copied().unwrap_or(-1);
+                        }
+                        // …then the frames between joints_root and (excluding) the unit, splicing
+                        // a rig anchor's bone chain (the mount seat). Depth-capped against a
+                        // malformed hierarchy; the joint walk bottomed out at the world root.
+                        let mut e = rig.joints_root;
+                        for _ in 0..32 {
+                            if e == unit {
+                                break;
+                            }
+                            if let Some(host) = anchors
+                                .get(e)
+                                .ok()
+                                .and_then(|a| rigs.get(a.rig).ok().map(|r| (r, a.bone)))
+                            {
+                                let (host_rig, hb) = host;
+                                let mut b = Ok(hb as usize);
+                                while let Ok(p) = b {
+                                    let Some(t) = host_rig.locals.get(p) else {
+                                        break;
+                                    };
+                                    g = t.rotation * g;
+                                    b = usize::try_from(
+                                        host_rig.parents.get(p).copied().unwrap_or(-1),
+                                    );
+                                }
+                                e = host_rig.joints_root;
+                                continue;
+                            }
+                            if let Ok(t) = locals.get(e) {
+                                g = t.rotation * g;
+                            }
+                            let Ok(p) = parents.get(e).map(|c| c.parent()) else {
+                                break;
+                            };
+                            e = p;
+                        }
+                        (base * Quat::from_axis_angle(g.inverse() * Vec3::Y, angle)).normalize()
+                    };
+                    Some((cur, base, out))
+                })
+            }) else {
                 continue;
-            };
-            let base = if cur == ch.last_out { ch.base } else { cur };
-            let out = if angle == 0.0 {
-                base
-            } else {
-                // The bone's model-space rotation: walk local rotations up to (excluding) the unit
-                // root. (Including the root would be harmless — its Y-yaw preserves the up axis —
-                // but stopping there keeps the walk from wandering into the world hierarchy.)
-                let mut g = base;
-                let mut e = ch.joint;
-                while let Ok(p) = parents.get(e).map(|c| c.parent()) {
-                    if p == unit {
-                        break;
-                    }
-                    if let Ok(t) = joints.get(p) {
-                        g = t.rotation * g;
-                    }
-                    e = p;
-                }
-                (base * Quat::from_axis_angle(g.inverse() * Vec3::Y, angle)).normalize()
             };
             ch.base = base;
             ch.last_out = out;
             if out != cur {
-                if let Ok(mut t) = joints.get_mut(ch.joint) {
-                    t.rotation = out;
+                if let Ok(mut rig) = rigs.get_mut(unit) {
+                    if let Some(t) = rig.locals.get_mut(bone) {
+                        t.rotation = out;
+                        rig.pose_dirty = true;
+                    }
                 }
             }
         }
     }
 }
 
-/// Register [`apply_body_twist`] in the post-animation window.
+/// Register [`apply_body_twist`] in the pose post-pass window.
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(
-        PostUpdate,
-        apply_body_twist
-            .after(AnimationSystems)
-            .before(TransformSystems::Propagate),
-    );
+    app.add_systems(PostUpdate, apply_body_twist.in_set(super::PosePost));
 }
 
 #[cfg(test)]

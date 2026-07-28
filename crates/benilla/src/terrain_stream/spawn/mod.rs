@@ -59,8 +59,11 @@ pub(super) fn spawn_loaded_placements(
     time: Res<Time>,
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
-    mut probes: ResMut<PropProbes>,
+    // Nested to stay inside Bevy's 16-element system-param tuple limit: the prop-probe table +
+    // the skin-palette table (decision 0720).
+    tables: (ResMut<PropProbes>, ResMut<crate::rig_palette::RigPalettes>),
 ) {
+    let (mut probes, mut palettes) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -108,6 +111,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         mat_cache,
                         materials,
+                        &mut palettes,
                         light,
                         &m.submeshes,
                         p.transform,
@@ -184,6 +188,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         mat_cache,
                         materials,
+                        &mut palettes,
                         light,
                         &m.submeshes,
                         p.transform,
@@ -408,6 +413,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 mat_cache,
                 materials,
+                &mut palettes,
                 light,
                 &m.submeshes,
                 d.transform,

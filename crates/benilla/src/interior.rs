@@ -38,7 +38,6 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::lighting::{PropProbeSlot, PropProbes};
-use crate::mesh_tag::alpha_bits;
 use crate::model_fade::{PendingAppearFade, RenderFade};
 use crate::terrain::WowModelMaterial;
 use crate::terrain_stream::{fold_interior_probe, PropLobeLight, TerrainStreamer};
@@ -342,19 +341,23 @@ pub(crate) fn classify_entity_interior(
                 }
             );
         }
-        // The tag: the Bake law's payload carries the probe SLOT in bits 16-29 plus an opaque
-        // alpha field (`probe_bits` — a fade feather composes through `with_alpha` without
-        // clobbering the slot); the other laws reset to the opaque exterior payload (shade byte 0
-        // — `entity_shade` runs after this classifier and re-asserts the ramped intensity byte
+        // The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field plus an
+        // opaque alpha field (a fade feather composes through `with_alpha` without clobbering the
+        // slot); the other laws reset to the opaque exterior payload (shade byte 0 —
+        // `entity_shade` runs after this classifier and re-asserts the ramped intensity byte
         // the same frame; it skips only Bake parts). BOTH indoor laws carry the INTERIOR_FOG_BIT
-        // (Bake bakes it into `probe_bits`): the reference fogs a unit by the unit's OWN interior
+        // (Bake bakes it in): the reference fogs a unit by the unit's OWN interior
         // classification, so an indoor day/night character keeps the room's fog — never the
         // storm's near veil — while the exterior law returns it to the scene fog (wow-re
-        // `m2-unit-interior-fog.md`; the director's corridor-vs-porch walk-out).
+        // `m2-unit-interior-fog.md`; the director's corridor-vs-porch walk-out). Every arm
+        // carries the part's rig field through (decision 0720): a skinned part keeps its palette
+        // across the indoor/outdoor transition.
         tag.0 = match law {
-            AppliedLaw::Bake(slot) => crate::mesh_tag::probe_bits(slot),
-            AppliedLaw::Matte => crate::mesh_tag::INTERIOR_FOG_BIT | alpha_bits(1.0),
-            AppliedLaw::Exterior => alpha_bits(1.0),
+            AppliedLaw::Bake(slot) => crate::mesh_tag::with_interior_probe(tag.0, slot),
+            AppliedLaw::Matte => {
+                crate::mesh_tag::INTERIOR_FOG_BIT | crate::mesh_tag::with_exterior_reset(tag.0)
+            }
+            AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
         };
         lit.applied = Some(law);
     }

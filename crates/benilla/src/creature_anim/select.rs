@@ -106,6 +106,22 @@ pub(crate) mod move_flags {
     /// way the root ack does, but the faithful ack echoes the applied state).
     pub const WATER_WALKING: u32 = 0x1000_0000;
 
+    /// The bits a **server-authored move packet owns**, and the only ones it may write — the
+    /// reference's flag *merge* mask, VERIFIED at `0x618c30 @0x618deb`
+    /// (`new = old ^ ((old ^ wire) & 0x75a07dff)`; wow-re `self-addressed-move.md`, decision 0725).
+    /// Applying a `MSG_MOVE_*` is not an assignment: bits outside this mask are kept from local
+    /// state, because they are the client's own (`0x618c30` also holds a second mask,
+    /// `0x75a01dff`, for a caller arm that passes a non-zero 4th arg — the plain state family
+    /// passes zero and takes this one).
+    ///
+    /// Two of ours land outside it and the omissions are the point. **[`ON_TRANSPORT`]** (bit 25)
+    /// is client-owned: a server-authored pose relocates you, it never boards or deboards you —
+    /// which is why the self-move arm re-anchors the ride rather than dropping it. Bit 27 (the
+    /// reference's free-advance selector) and bit 31 (its clock baseline) are CMovement internals
+    /// with no benilla analog. Every bit we *do* model besides `ON_TRANSPORT` — the direction and
+    /// turn bits, walk mode, root, [`FALLING`]/[`FALLING_FAR`], swim, water-walk — is inside.
+    pub const SERVER_AUTHORED: u32 = 0x75a0_7dff;
+
     /// Any horizontal-movement direction bit (forward/back/strafe) — the client's `[9e8] & 0xf` gate.
     pub const ANY_MOVE: u32 = FORWARD | BACKWARD | STRAFE_LEFT | STRAFE_RIGHT;
 

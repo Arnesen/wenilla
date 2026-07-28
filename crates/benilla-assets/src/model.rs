@@ -175,20 +175,43 @@ pub(crate) fn build_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
     mesh
 }
 
-/// Build the **skinned** twin of [`build_submesh_mesh`]: the same baked geometry plus the per-vertex
-/// `JOINT_INDEX` (`Uint16x4` — M2 bone indices, used directly as joint indices) + `JOINT_WEIGHT`
-/// (`Float32x4`, normalised). These two attributes are the entire trigger for Bevy's `SKINNED` shader
-/// path (decision 0019). When the submesh carries no skin (WMO / a boneless batch) this is identical
-/// to the static mesh — harmless, but the creature path is the only consumer regardless.
+/// The skinned twin's per-vertex joint indices (`Uint16x4` — M2 bone indices, used directly as
+/// palette indices). **Deliberately NOT `Mesh::ATTRIBUTE_JOINT_INDEX`** (decision 0720): Bevy's
+/// `SKINNED` pipeline path triggers on the standard attributes being in the mesh LAYOUT — while
+/// its draw-time skin bind group resolves per ENTITY registration — so a mesh carrying them can
+/// only ever render through Bevy's skin lane. Our own attribute ids keep Bevy's `is_skinned()`
+/// false everywhere; `WowModelExt::specialize` sees them in the layout and compiles the
+/// `WOW_RIG_SKIN` path instead, which skins from the owned palette region of the shared light
+/// buffer (`rig_palette`). Shader locations 10/11 (Bevy's builtin set ends at 7).
+pub const ATTRIBUTE_WOW_JOINT_INDEX: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Wow_JointIndex",
+        988_540_917,
+        bevy::render::render_resource::VertexFormat::Uint16x4,
+    );
+/// The skinned twin's per-vertex joint weights (`Float32x4`, normalised) — see
+/// [`ATTRIBUTE_WOW_JOINT_INDEX`].
+pub const ATTRIBUTE_WOW_JOINT_WEIGHT: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new(
+        "Wow_JointWeight",
+        988_540_918,
+        bevy::render::render_resource::VertexFormat::Float32x4,
+    );
+
+/// Build the **skinned** twin of [`build_submesh_mesh`]: the same baked geometry plus the
+/// per-vertex [`ATTRIBUTE_WOW_JOINT_INDEX`] + [`ATTRIBUTE_WOW_JOINT_WEIGHT`]. These two
+/// attributes are the entire trigger for the owned-palette skinning path (decisions 0019/0720).
+/// When the submesh carries no skin (WMO / a boneless batch) this is identical to the static
+/// mesh — harmless, but the creature path is the only consumer regardless.
 pub(crate) fn build_skinned_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
     let mut mesh = build_submesh_mesh(sub);
     if sub.joints.len() == sub.positions.len() && !sub.joints.is_empty() {
         mesh.insert_attribute(
-            Mesh::ATTRIBUTE_JOINT_INDEX,
+            ATTRIBUTE_WOW_JOINT_INDEX,
             VertexAttributeValues::Uint16x4(sub.joints.clone()),
         );
         mesh.insert_attribute(
-            Mesh::ATTRIBUTE_JOINT_WEIGHT,
+            ATTRIBUTE_WOW_JOINT_WEIGHT,
             VertexAttributeValues::Float32x4(sub.weights.clone()),
         );
     }

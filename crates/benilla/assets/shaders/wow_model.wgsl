@@ -35,10 +35,9 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
-    forward_io::{Vertex, VertexOutput, FragmentOutput},
+    forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::view,
     view_transformations::position_world_to_clip,
-    skinning,
     mesh_functions,
 }
 
@@ -131,6 +130,13 @@ struct WowLight {
     // [7·slot .. 7·slot+7) over the fragment normal. Only this shader declares the region — the
     // other shaders mirror the buffer PREFIX and bind the same (larger) buffer.
     prop_probes: array<vec4<f32>, 57344>,
+    // The owned skin palette (decision 0720; rig_palette.rs mirrors both sizes). `rig_table`:
+    // one base bone index per rig slot (2048 = mesh_tag's 11-bit rig field; the instance's slot
+    // rides its MeshTag bits 19-29). `palettes`: 3 vec4 rows per bone — the rows of
+    // `world_from_joint × inverse_bindpose`, the same matrix Bevy's skin lane would feed
+    // `skin_model` — blended in the vertex stage below (WOW_RIG_SKIN).
+    rig_table: array<u32, 2048>,
+    palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
@@ -230,28 +236,113 @@ fn mcnk_cell_anchor(P: vec3<f32>) -> vec3<f32> {
     return vec3<f32>((ix + 0.5) * cell - half, P.y, (iz + 0.5) * cell - half);
 }
 
-// Custom vertex stage — bevy 0.18's `mesh.wgsl` vertex verbatim (same defs: SKINNED skinning,
-// VERTEX_* attributes; morph targets omitted — no model mesh authors them), plus the per-vertex
-// point-light evaluation on the post-skin world position/normal. A `MaterialExtension` swaps the
-// whole stage, so the mirror must track bevy's on upgrades.
+// The vertex input — bevy 0.18's `forward_io::Vertex` fields at bevy's shader locations (the
+// VERTEX_* defs come from the base mesh-pipeline specialize, driven by what the mesh authors;
+// tangents / morphs never — no model mesh has them), PLUS the owned-palette joint attributes at
+// locations 10/11 under WOW_RIG_SKIN (`WowModelExt::specialize` sets the def and appends the
+// attributes to the buffer layout when the mesh carries `ATTRIBUTE_WOW_JOINT_INDEX` — decision
+// 0720; Bevy's `forward_io::Vertex` only declares joints under its own SKINNED path, which no
+// benilla mesh triggers anymore).
+struct WowVertex {
+    @builtin(instance_index) instance_index: u32,
+#ifdef VERTEX_POSITIONS
+    @location(0) position: vec3<f32>,
+#endif
+#ifdef VERTEX_NORMALS
+    @location(1) normal: vec3<f32>,
+#endif
+#ifdef VERTEX_UVS_A
+    @location(2) uv: vec2<f32>,
+#endif
+#ifdef VERTEX_UVS_B
+    @location(3) uv_b: vec2<f32>,
+#endif
+#ifdef VERTEX_COLORS
+    @location(5) color: vec4<f32>,
+#endif
+#ifdef WOW_RIG_SKIN
+    @location(10) joint_indices: vec4<u32>,
+    @location(11) joint_weights: vec4<f32>,
+#endif
+}
+
+#ifdef WOW_RIG_SKIN
+// The owned-palette skin model (decision 0720): the instance's rig slot from its MeshTag rig
+// field (bits 19-29) → the rig's base bone index → the four indexed bones' palette rows blended
+// by the vertex weights. Returns `world_from_local` exactly like Bevy's `skin_model` — the rows
+// ARE `world_from_joint × inverse_bindpose`, so the reconstruction below is the same matrix
+// Bevy's lane produced, and it REPLACES the mesh's world matrix (never composes with it).
+fn wow_skin_model(instance_index: u32, indices: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
+    let tag = mesh_functions::get_tag(instance_index);
+    let base = wow_light.rig_table[(tag >> 19u) & 0x7ffu];
+    let b0 = 3u * (base + indices.x);
+    let b1 = 3u * (base + indices.y);
+    let b2 = 3u * (base + indices.z);
+    let b3 = 3u * (base + indices.w);
+    let r0 = weights.x * wow_light.palettes[b0]
+        + weights.y * wow_light.palettes[b1]
+        + weights.z * wow_light.palettes[b2]
+        + weights.w * wow_light.palettes[b3];
+    let r1 = weights.x * wow_light.palettes[b0 + 1u]
+        + weights.y * wow_light.palettes[b1 + 1u]
+        + weights.z * wow_light.palettes[b2 + 1u]
+        + weights.w * wow_light.palettes[b3 + 1u];
+    let r2 = weights.x * wow_light.palettes[b0 + 2u]
+        + weights.y * wow_light.palettes[b1 + 2u]
+        + weights.z * wow_light.palettes[b2 + 2u]
+        + weights.w * wow_light.palettes[b3 + 2u];
+    // r0/r1/r2 are the affine's ROWS; a wgsl matrix is column-major.
+    return mat4x4<f32>(
+        vec4<f32>(r0.x, r1.x, r2.x, 0.0),
+        vec4<f32>(r0.y, r1.y, r2.y, 0.0),
+        vec4<f32>(r0.z, r1.z, r2.z, 0.0),
+        vec4<f32>(r0.w, r1.w, r2.w, 1.0),
+    );
+}
+
+// bevy_pbr::skinning's normal math verbatim (inverse-transpose via the adjugate), on our matrix.
+fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
+    let x = cross(in[1], in[2]);
+    let y = cross(in[2], in[0]);
+    let z = cross(in[0], in[1]);
+    let det = dot(in[2], z);
+    return mat3x3<f32>(x / det, y / det, z / det);
+}
+
+fn wow_skin_normals(world_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
+    return normalize(
+        inverse_transpose_3x3m(mat3x3<f32>(
+            world_from_local[0].xyz,
+            world_from_local[1].xyz,
+            world_from_local[2].xyz
+        )) * normal
+    );
+}
+#endif
+
+// Custom vertex stage — bevy 0.18's `mesh.wgsl` vertex verbatim (VERTEX_* attributes; morph
+// targets omitted — no model mesh authors them) with the owned-palette skinning in place of
+// Bevy's SKINNED path (decision 0720), plus the per-vertex point-light evaluation on the
+// post-skin world position/normal. A `MaterialExtension` swaps the whole stage, so the mirror
+// must track bevy's on upgrades.
 @vertex
-fn vertex(vertex: Vertex) -> WowVsOut {
+fn vertex(vertex: WowVertex) -> WowVsOut {
     var out: WowVsOut;
 
     let mesh_world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
-#ifdef SKINNED
-    var world_from_local = skinning::skin_model(
+#ifdef WOW_RIG_SKIN
+    var world_from_local = wow_skin_model(
+        vertex.instance_index,
         vertex.joint_indices,
-        vertex.joint_weights,
-        vertex.instance_index
+        vertex.joint_weights
     );
 #else
     var world_from_local = mesh_world_from_local;
 #endif
 
 #ifdef VERTEX_NORMALS
-#ifdef SKINNED
-    out.world_normal = skinning::skin_normals(world_from_local, vertex.normal);
+#ifdef WOW_RIG_SKIN
+    out.world_normal = wow_skin_normals(world_from_local, vertex.normal);
 #else
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         vertex.normal,
@@ -367,13 +458,16 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // constant `tex0.a < 224/255` (STABLE silhouette, never grows/snaps) — with blend on and source
     // alpha = `tex0.a × fade`. On the blend twin (`model_flags.y`) `AlphaMode::Blend` does no discard,
     // so we re-apply that hard cutout here on the UNFADED alpha; `specialize` keeps depth-write ON.
-    // The exterior payload is TYPED (mesh_tag.rs, decision 0173): bits 0-15 = fade alpha u16 (a whole
-    // payload of 0 = the untagged ⇒ opaque sentinel), bits 16-23 = the per-instance ground-shade byte
-    // (0 lit → 255 MCSH-shadowed — decoded at the doodad sun below; entities ramp it, statics leave 0).
-    // On an interior-mode material (interior z, not WMO x) the payload carries the SH-probe SLOT in
-    // bits 16-29 instead — static MODD props at spawn, and every indoor entity on the footprint-bake
-    // law (decision 0354: units keep the probe lane indoors; the day/night state is the exterior
-    // material at the intensity-1.0 shade byte, not a mode of its own).
+    // The payload is TYPED (mesh_tag.rs, decisions 0173/0720): bits 0-5 = the fade alpha (6-bit
+    // fraction; a whole payload of 0 = the untagged ⇒ opaque sentinel), bits 19-29 = the skin
+    // rig slot (vertex-stage concern — the fragment never reads it, but it rides every payload,
+    // so the 0-sentinel test uses the WHOLE masked payload as before). Between them the exterior
+    // payload carries the per-instance ground-shade byte in bits 6-13 (0 lit → 255 MCSH-shadowed
+    // — decoded at the doodad sun below; entities ramp it, statics leave 0). On an interior-mode
+    // material (interior z, not WMO x) bits 6-18 carry the SH-probe SLOT instead — static MODD
+    // props at spawn, and every indoor entity on the footprint-bake law (decision 0354: units
+    // keep the probe lane indoors; the day/night state is the exterior material at the
+    // intensity-1.0 shade byte, not a mode of its own).
     // Tag bits 31/30 are standalone flags (mesh_tag.rs), split off before the payload decode so the
     // 0-sentinel and both payload modes read the masked value: bit 31 = hover/target HIGHLIGHT,
     // bit 30 = INTERIOR FOG — the instance's model stands in a WMO interior, so it fogs with the
@@ -383,11 +477,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let raw_tag = mesh_functions::get_tag(in.instance_index);
     let highlighted = (raw_tag & 0x80000000u) != 0u;
     let interior_fogged = (raw_tag & 0x40000000u) != 0u;
-    // Bits 0-15 are the fade alpha in BOTH payload modes (the interior-probe slot rides bits
-    // 16-29 since 0355), so a feathering indoor entity keeps its probe AND its alpha ramp.
+    // Bits 0-5 are the fade alpha in BOTH payload modes, so a feathering indoor entity keeps its
+    // probe AND its alpha ramp — and a skinned part keeps its rig slot through either.
     let fade_tag = raw_tag & 0x3fffffffu;
-    let alpha16 = f32(fade_tag & 0xffffu) / 65535.0;
-    let obj_fade = select(alpha16, 1.0, fade_tag == 0u);
+    let alpha6 = f32(fade_tag & 0x3fu) / 63.0;
+    let obj_fade = select(alpha6, 1.0, fade_tag == 0u);
     if (m.model_flags.y > 0.5 && base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
@@ -447,7 +541,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // binary's `0x69e770`; statics leave it 0), 0.5..0.85 = fixed intensity 1.0 (an exterior WMO
     // MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
     // MCSH-shadowed (0.5).
-    let inst_shade = select(f32((fade_tag >> 16u) & 0xffu) / 255.0, 0.0, interior_prop);
+    let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
@@ -519,7 +613,7 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // slot. Evaluated here per fragment over the same basis — note the SH lobe's soft wrap (side-on
     // ≈ 0.088·C) is the reference's authored response, deliberately NOT a hard max(N·L,0).
     // Units/GameObjects never reach this lane (base CGLight — plain day/night ×1.0, §8/§9).
-    let probe = 7u * ((fade_tag >> 16u) & 0x3fffu);
+    let probe = 7u * ((fade_tag >> 6u) & 0x1fffu);
     let lit_m2_interior = clamp(
         vec3<f32>(
             dot(wow_light.prop_probes[probe + 0u], n1)

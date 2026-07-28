@@ -13,7 +13,6 @@ use benilla_formats::CharSkinSlot;
 use benilla_protocol::EntityKind;
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
@@ -70,28 +69,84 @@ pub(super) use glue_preview::build_glue_preview;
 ///     (which of the 30 types allocate the `[GO+0x210]` handler at the `0x5f708c` dispatch); the
 ///     seed below is what those types render in the meantime.
 ///
-/// Global-sequence channels ride along regardless of flavour. Returns the joints + inverse-bindposes
-/// for the caller to bind each submesh's skinned twin, or `None` when the model has no inverse
-/// bindposes. No animations ⇒ the joints just hold bind pose (Milestone A).
+/// Global-sequence channels ride along regardless of flavour. This lane spawns **no joint
+/// entities** (decision 0724): the pose lives in a [`crate::creature_anim::RigPose`] array on
+/// `entity`, and only the CONSUMER bones — attachment points, event markers, emitter/ribbon/
+/// light hosts, billboard-card bones — get an anchor entity under `joints_root`, re-seated from
+/// the composed pose each frame it changes. Returns the anchors + the palette rig slot
+/// (decision 0720), or `None` when the model has no inverse bindposes. Slot `0` = the palette
+/// table was full: the anchors still exist (emitters/attachments ride them), but parts fall
+/// back to the static bind-pose mesh. No animations ⇒ the pose just holds bind pose
+/// (Milestone A).
 fn setup_skinned_instance(
     commands: &mut Commands,
+    palettes: &mut crate::rig_palette::RigPalettes,
     entity: Entity,
     joints_root: Entity,
     d: &DisplayModel,
     kind: EntityKind,
     go_state_machine: bool,
-) -> Option<(Vec<Entity>, Handle<SkinnedMeshInverseBindposes>)> {
+) -> Option<RigBuild> {
     let ibp = d.inverse_bindposes.as_ref()?;
-    // `joints_root` — where the skeleton's root bones parent — is normally `entity` itself; a
-    // MOUNTED rider's joints root under the seat anchor instead (decision 0441), while the
-    // `AnimationPlayer`/driver components stay on `entity` (the pose evaluator binds joints
-    // through the root's `PosedRig`, decision 0712 — parentage never enters it).
-    // Skinned parts render purely from joint world transforms, so their own parentage is free.
-    let joints = spawn_joints(commands, joints_root, &d.skeleton);
-    // Billboard bones (glow riders on billboard children): palette-level camera facing, children inherit.
-    if let Some(bb) = crate::billboard::BillboardJointRig::new(&d.skeleton, &joints, entity) {
-        commands.entity(entity).insert(bb);
+    let nbones = d.skeleton.joints.len();
+    // `joints_root` — the rig's model-space frame — is normally `entity` itself; a MOUNTED
+    // rider's frame is the seat anchor instead (decision 0441), a conform-tilted model's its
+    // conform node, while the `AnimationPlayer`/driver components stay on `entity`. Skinned
+    // parts render purely from the palette, so their own parentage is free.
+    let mut pose = crate::creature_anim::RigPose::new(joints_root, &d.skeleton);
+    // The consumer bones: every bone something in the world reaches by entity — an attachment
+    // point (held items, spell effects, the mount seat, overhead anchors), an event marker, an
+    // emitter/ribbon/light host, a billboard card's bone. Everything else is palette-only.
+    let mut bone_set = std::collections::BTreeSet::new();
+    bone_set.extend(d.attachments.iter().map(|a| a.bone));
+    bone_set.extend(d.markers.iter().map(|m| m.bone));
+    bone_set.extend(d.emitters.iter().map(|e| e.def.bone));
+    bone_set.extend(d.ribbons.iter().map(|r| r.def.bone));
+    bone_set.extend(
+        d.lights
+            .iter()
+            .filter_map(|l| u16::try_from(l.def.bone).ok()),
+    );
+    if let Some(parts) = &d.parts {
+        bone_set.extend(
+            parts
+                .iter()
+                .filter_map(|p| p.billboard.as_ref().map(|b| b.bone)),
+        );
     }
+    let mut anchors = std::collections::HashMap::new();
+    for bone in bone_set {
+        let Some(m) = pose.model.get(bone as usize) else {
+            continue; // an out-of-range authored bone reference — no anchor, consumers miss
+        };
+        let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        let anchor = commands
+            .spawn((
+                Transform {
+                    translation,
+                    rotation,
+                    scale,
+                },
+                Visibility::default(),
+                crate::creature_anim::RigAnchor { rig: entity, bone },
+            ))
+            .id();
+        commands.entity(joints_root).add_child(anchor);
+        pose.anchors.push((bone, anchor));
+        anchors.insert(bone, anchor);
+    }
+    // The owned palette rig (decision 0720): the world pass writes this rig's composed frames ×
+    // these bindposes into the slot; every skinned part below tags the slot so the vertex stage
+    // finds its palette. The on-replace hook frees the slot with the visual teardown.
+    let slot =
+        match crate::rig_palette::RigSkin::allocate_bones(palettes, nbones as u32, ibp.clone()) {
+            Some(rig) => {
+                let slot = rig.slot;
+                commands.entity(entity).insert(rig);
+                slot
+            }
+            None => 0, // table full (warned) — parts render the static bind-pose mesh
+        };
     if let Some(anims) = d.animations.as_ref() {
         // **Every** GameObject instance gets the loader-idle seed, state machine or not — the
         // reference's `0x70ebd0` tail arms bone 0 the moment the M2 goes LIVE and has exactly two
@@ -147,22 +202,26 @@ fn setup_skinned_instance(
                     .remove::<crate::creature_anim::AnimParked>();
             }
         }
-        // The direct pose evaluator's rig handle (decision 0712) — instead of per-joint
-        // `AnimationTargetId`/`AnimatedBy` pairs: with no targets, Bevy's `animate_targets` never
-        // touches these bones, and `creature_anim::pose` samples the player state itself.
-        commands
-            .entity(entity)
-            .insert(crate::creature_anim::PosedRig {
-                joints: joints.clone(),
-            });
         // Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses; a GO's
         // free-running flicker): free-clock loops the per-sequence reader drops, driven on their own clock.
-        if let Some(drive) = crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
+        if let Some(drive) =
+            crate::creature_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
             commands.entity(entity).insert(drive);
         }
     }
-    Some((joints, ibp.clone()))
+    // The pose buffer last — the anchors above registered themselves into it. The evaluator
+    // (decision 0712) samples the player state straight into `locals`; with no joint entities and
+    // no `AnimationTargetId`s, Bevy's `animate_targets` has nothing of ours to touch.
+    commands.entity(entity).insert(pose);
+    Some(RigBuild { anchors, slot })
+}
+
+/// A collapsed rig's build result (decision 0724): the consumer anchors by bone + the palette
+/// slot each skinned part tags.
+struct RigBuild {
+    anchors: std::collections::HashMap<u16, Entity>,
+    slot: u16,
 }
 
 /// Attach a visual to each net entity that doesn't have one yet: its built model (creature / GameObject
@@ -221,6 +280,8 @@ pub(super) fn attach_entity_visuals(
     ),
     mut meshes: ResMut<Assets<Mesh>>,
     mut particle_materials: ResMut<Assets<WowParticleMaterial>>,
+    // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
+    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
 ) {
     let (
@@ -342,7 +403,7 @@ pub(super) fn attach_entity_visuals(
                         match mount_children.get(child) {
                             Ok((true, Some(bones), _)) => {
                                 if let Some(&(bone, offset)) = bones.points.get(&0) {
-                                    if let Some(&joint) = bones.joints.get(bone as usize) {
+                                    if let Some(joint) = bones.anchor(bone) {
                                         // The seat anchor: a child of the mount's attachment-0
                                         // joint at the authored offset, counter-scaled so the
                                         // rider keeps its own size (byte-verified: the client's
@@ -354,6 +415,11 @@ pub(super) fn attach_entity_visuals(
                                                     Vec3::splat(1.0 / mount_scale.max(0.001)),
                                                 ),
                                                 Visibility::default(),
+                                                // The rider's model frame lives inside the
+                                                // MOUNT's anchor subtree — the world pass
+                                                // cascades a re-seat into the rider's palette
+                                                // (decision 0724).
+                                                crate::creature_anim::RigFrame(entity),
                                             ))
                                             .id();
                                         commands.entity(joint).add_child(anchor);
@@ -411,89 +477,91 @@ pub(super) fn attach_entity_visuals(
             // whose entities are children of this entity (so they inherit its world pose; at bind pose
             // every joint matrix collapses to that pose, so the model renders exactly where the static
             // mesh did). Truly static props keep the static mesh. `skin` is `Some((joints,
-            // inverse_bindposes))` when instanced.
-            let skin: Option<(Vec<Entity>, Handle<SkinnedMeshInverseBindposes>)> =
-                match (net.kind, dm) {
-                    // A creature (or player body — decision 0041) with a real skeleton. The `!is_empty`
-                    // guard keeps a degenerate boneless model on the static mesh (its skinned twin would
-                    // carry joint attributes but have no joints to index — out of bounds).
-                    (EntityKind::Unit | EntityKind::Player, Some(d))
-                        if !d.skeleton.joints.is_empty() =>
-                    {
-                        // `rider_root`: the unit itself, or — mounted — the seat anchor under the
-                        // mount's attachment-0 joint (decision 0441). The `AnimationPlayer` stays
-                        // on the unit entity either way (targets bind by entity, not by path).
-                        //
-                        // Terrain conform (decisions 0482/0486): a flagged model's root bones
-                        // parent one level deeper, under a conform node `conform_units` rotates —
-                        // wild quadruped and mount child alike. A mounted RIDER never gets one
-                        // (`rider_root != entity`): the ref's `0x7106c0` dispatch is on the
-                        // mount-PREFERRED model, and the composite tilts through the mount's
-                        // node, seat joint included.
-                        let mut joints_root = rider_root;
-                        if d.terrain_tilt != 0 && rider_root == entity {
-                            let node = commands
-                                .spawn((
-                                    super::conform::ConformNode {
-                                        // The ground/yaw source: the streamed unit — for a
-                                        // mount child, its HOST (the child sits at the unit
-                                        // matrix; its own `Transform` is local).
-                                        unit: mount_body.map_or(entity, |mb| mb.host),
-                                        mode: d.terrain_tilt,
-                                    },
-                                    Transform::default(),
-                                    Visibility::default(),
-                                ))
-                                .id();
-                            commands.entity(entity).add_child(node);
-                            joints_root = node;
-                        }
-                        setup_skinned_instance(
-                            &mut commands,
-                            entity,
-                            joints_root,
-                            d,
-                            net.kind,
-                            false,
-                        )
+            // inverse_bindposes, palette_slot))` when instanced (decision 0720; slot 0 = palette
+            // full, parts fall back to the static mesh).
+            let skin: Option<RigBuild> = match (net.kind, dm) {
+                // A creature (or player body — decision 0041) with a real skeleton. The `!is_empty`
+                // guard keeps a degenerate boneless model on the static mesh (its skinned twin would
+                // carry joint attributes but have no joints to index — out of bounds).
+                (EntityKind::Unit | EntityKind::Player, Some(d))
+                    if !d.skeleton.joints.is_empty() =>
+                {
+                    // `rider_root`: the unit itself, or — mounted — the seat anchor under the
+                    // mount's attachment-0 joint (decision 0441). The `AnimationPlayer` stays
+                    // on the unit entity either way (targets bind by entity, not by path).
+                    //
+                    // Terrain conform (decisions 0482/0486): a flagged model's root bones
+                    // parent one level deeper, under a conform node `conform_units` rotates —
+                    // wild quadruped and mount child alike. A mounted RIDER never gets one
+                    // (`rider_root != entity`): the ref's `0x7106c0` dispatch is on the
+                    // mount-PREFERRED model, and the composite tilts through the mount's
+                    // node, seat joint included.
+                    let mut joints_root = rider_root;
+                    if d.terrain_tilt != 0 && rider_root == entity {
+                        let node = commands
+                            .spawn((
+                                super::conform::ConformNode {
+                                    // The ground/yaw source: the streamed unit — for a
+                                    // mount child, its HOST (the child sits at the unit
+                                    // matrix; its own `Transform` is local).
+                                    unit: mount_body.map_or(entity, |mb| mb.host),
+                                    mode: d.terrain_tilt,
+                                },
+                                Transform::default(),
+                                Visibility::default(),
+                            ))
+                            .id();
+                        commands.entity(entity).add_child(node);
+                        joints_root = node;
                     }
-                    // A GameObject whose model authors a real skeleton + animation draws through the
-                    // skinned twin like a creature. Two flavours share the rig: a door/button/chest
-                    // (`go_animates`) runs the open/close state machine off GAMEOBJECT_STATE (decision
-                    // 0242); ANY other animated GO — a mailbox's wind-swung flags, a banner, a windmill —
-                    // loops its first sequence as the reference's universal loader-idle seed (wow-re
-                    // `doodad-anim-host.md`: a non-transport CGGameObject animates identically to a placed
-                    // doodad). The content gate for the non-state flavour is the doodad classifier's: a GO
-                    // whose first sequence is a constant pose and which has no global sequences
-                    // (`DoodadAnimTier::Static`) has nothing to loop, so it keeps the static mesh.
-                    (EntityKind::GameObject, Some(d))
-                        if !d.skeleton.joints.is_empty() && d.animations.is_some() =>
-                    {
-                        let state_machine = stores
-                            .get(entity)
-                            .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
-                        let ambient = !matches!(
-                            crate::doodad_anim::classify(&d.skeleton, d.animations.as_ref()),
-                            crate::doodad_anim::DoodadAnimTier::Static
-                        );
-                        (state_machine || ambient)
-                            .then(|| {
-                                setup_skinned_instance(
-                                    &mut commands,
-                                    entity,
-                                    entity,
-                                    d,
-                                    net.kind,
-                                    state_machine,
-                                )
-                            })
-                            .flatten()
-                    }
-                    _ => None,
-                };
+                    setup_skinned_instance(
+                        &mut commands,
+                        &mut palettes,
+                        entity,
+                        joints_root,
+                        d,
+                        net.kind,
+                        false,
+                    )
+                }
+                // A GameObject whose model authors a real skeleton + animation draws through the
+                // skinned twin like a creature. Two flavours share the rig: a door/button/chest
+                // (`go_animates`) runs the open/close state machine off GAMEOBJECT_STATE (decision
+                // 0242); ANY other animated GO — a mailbox's wind-swung flags, a banner, a windmill —
+                // loops its first sequence as the reference's universal loader-idle seed (wow-re
+                // `doodad-anim-host.md`: a non-transport CGGameObject animates identically to a placed
+                // doodad). The content gate for the non-state flavour is the doodad classifier's: a GO
+                // whose first sequence is a constant pose and which has no global sequences
+                // (`DoodadAnimTier::Static`) has nothing to loop, so it keeps the static mesh.
+                (EntityKind::GameObject, Some(d))
+                    if !d.skeleton.joints.is_empty() && d.animations.is_some() =>
+                {
+                    let state_machine = stores
+                        .get(entity)
+                        .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
+                    let ambient = !matches!(
+                        crate::doodad_anim::classify(&d.skeleton, d.animations.as_ref()),
+                        crate::doodad_anim::DoodadAnimTier::Static
+                    );
+                    (state_machine || ambient)
+                        .then(|| {
+                            setup_skinned_instance(
+                                &mut commands,
+                                &mut palettes,
+                                entity,
+                                entity,
+                                d,
+                                net.kind,
+                                state_machine,
+                            )
+                        })
+                        .flatten()
+                }
+                _ => None,
+            };
             // The bone-riding surface (decision 0072): the instance's joints + the model's attachment
             // points, so held items (and future bone riders) can hang from the hand/hip/back joints.
-            if let (Some((joints, _)), Some(d)) = (&skin, dm) {
+            if let (Some(rb), Some(d)) = (&skin, dm) {
                 // The event markers keep the client's first-match scan order: an ident already
                 // present wins (character models carry six `$CSD` records — the first is the one
                 // `0x7130e0` would return).
@@ -502,7 +570,7 @@ pub(super) fn attach_entity_visuals(
                     markers.entry(m.ident).or_insert((m.bone, m.offset));
                 }
                 commands.entity(entity).insert(super::BoneAttach {
-                    joints: joints.clone(),
+                    anchors: rb.anchors.clone(),
                     points: d
                         .attachments
                         .iter()
@@ -510,13 +578,14 @@ pub(super) fn attach_entity_visuals(
                         .collect(),
                     markers,
                 });
-                // The display-facing counter-twist channels (the strafe body pose): resolve the
-                // model's SpineLow/Head key-bones to this instance's joints. Models without either
+                // The display-facing counter-twist channels (the strafe body pose): the model's
+                // SpineLow/Head key-bones, straight into the pose buffer. Models without either
                 // key-bone (beasts, props) get no component — the client's capability gates.
-                let joint_at = |b: Option<u16>| b.and_then(|i| joints.get(i as usize).copied());
+                let nb = d.skeleton.joints.len();
+                let in_range = |b: Option<u16>| b.filter(|&i| (i as usize) < nb);
                 let (spine, head) = (
-                    joint_at(d.skeleton.spine_bone),
-                    joint_at(d.skeleton.head_bone),
+                    in_range(d.skeleton.spine_bone),
+                    in_range(d.skeleton.head_bone),
                 );
                 if spine.is_some() || head.is_some() {
                     commands
@@ -616,7 +685,7 @@ pub(super) fn attach_entity_visuals(
                     if let Some(info) = &part.billboard {
                         let joint = skin
                             .as_ref()
-                            .and_then(|(joints, _)| joints.get(info.bone as usize).copied());
+                            .and_then(|rb| rb.anchors.get(&info.bone).copied());
                         // A mirror carrier under the unit for the eye-glow: the portrait / paper-doll
                         // booths mirror the unit's dressed DESCENDANTS, but the visible world card
                         // spawned below is a ROOT entity — never a descendant — so it can't be
@@ -684,10 +753,16 @@ pub(super) fn attach_entity_visuals(
                         Some(b) => (b.clone(), true),
                         None => (mat.clone(), false),
                     };
-                    // A skinned creature part draws its skinned-mesh twin (joint attributes → the SKINNED
-                    // shader path); everything else the static mesh.
-                    let mesh = match (&skin, &part.skinned_mesh) {
-                        (Some(_), Some(sm)) => sm.clone(),
+                    // A skinned creature part draws its skinned-mesh twin (the WOW joint
+                    // attributes → the owned-palette WOW_RIG_SKIN shader path, decision 0720);
+                    // everything else — and the palette-full fallback (slot 0) — the static mesh.
+                    let rig_slot = match (&skin, &part.skinned_mesh) {
+                        (Some(rb), Some(_)) => rb.slot,
+                        _ => 0,
+                    };
+                    let rig_tag = crate::mesh_tag::rig_bits(rig_slot);
+                    let mesh = match (rig_slot, &part.skinned_mesh) {
+                        (1.., Some(sm)) => sm.clone(),
                         _ => part.mesh.clone(),
                     };
                     let mut child = parent.spawn((
@@ -710,12 +785,16 @@ pub(super) fn attach_entity_visuals(
                         },
                         object.clone(),
                     ));
-                    // Bind this part to the instance's skeleton — all parts share the one joint set.
-                    if let (Some((joints, ibp)), Some(_)) = (&skin, &part.skinned_mesh) {
-                        child.insert(SkinnedMesh {
-                            inverse_bindposes: ibp.clone(),
-                            joints: joints.clone(),
-                        });
+                    // Bind this part to the instance's palette rig (decision 0720) — all parts
+                    // share the one joint set through the rig slot in their tag; `RigPart` is the
+                    // CPU-side link (the mouseover picker's skinned ray test).
+                    if rig_slot != 0 {
+                        child.insert((
+                            crate::rig_palette::RigPart(entity),
+                            MeshTag(rig_tag | crate::mesh_tag::alpha_bits(1.0)),
+                        ));
+                    }
+                    if let (Some(_), Some(_)) = (&skin, &part.skinned_mesh) {
                         // A streamed entity's M2 is **never view-culled** — the reference registers
                         // entity render records with effectively-infinite bounds (≈1e7) and the one
                         // frustum cull in its machinery is map-doodad-only (wow-re
@@ -745,7 +824,9 @@ pub(super) fn attach_entity_visuals(
                     // classifier reclaims the tag and the steady material. `mat_interior` (the
                     // interior-capable build) stays the gate for which parts classify at all.
                     if mat_interior.is_some() {
-                        let tag = crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 });
+                        // `rig_tag` rides every whole-tag write here and below (decision 0720).
+                        let tag =
+                            rig_tag | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 });
                         // Anchored at the unit root: every part shares the root's verdict, so a
                         // body never splits across the interior/exterior light laws. The indoor
                         // LAW is one for every entity M2 — unit, player, GameObject alike take the
@@ -779,11 +860,10 @@ pub(super) fn attach_entity_visuals(
                         // got one above; anything else (a WMO-display part, a model with no
                         // interior variants) is seeded with the same neutral value.
                         if mat_interior.is_none() {
-                            child.insert(MeshTag(crate::mesh_tag::alpha_bits(if fading {
-                                0.0
-                            } else {
-                                1.0
-                            })));
+                            child.insert(MeshTag(
+                                rig_tag
+                                    | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 }),
+                            ));
                         }
                     }
                     // Queue the appear-fade on M2 parts — `arm_appear_fade` starts the ramp once the world
@@ -900,7 +980,7 @@ pub(super) fn attach_entity_visuals(
                 for em in emitters {
                     let owner = skin
                         .as_ref()
-                        .and_then(|(joints, _)| joints.get(em.def.bone as usize))
+                        .and_then(|rb| rb.anchors.get(&em.def.bone))
                         .map_or((entity, [0.0; 3]), |&j| (j, em.bone_pivot));
                     particles::spawn_emitter(
                         &mut commands,
@@ -927,7 +1007,8 @@ pub(super) fn attach_entity_visuals(
             // `equipment`.)
             super::spawn_carried_lights(&mut commands, model_lights, entity, |bone| {
                 skin.as_ref()
-                    .and_then(|(joints, _)| joints.get(bone as usize))
+                    .zip(u16::try_from(bone).ok())
+                    .and_then(|(rb, b)| rb.anchors.get(&b))
                     .copied()
             });
             // Ribbon trails (wisp streamers, trailing quest-object crystals) — the same host-bone
@@ -936,7 +1017,7 @@ pub(super) fn attach_entity_visuals(
                 for rb in dm.map(|d| d.ribbons.as_slice()).unwrap_or_default() {
                     let (owner, use_pivot) = skin
                         .as_ref()
-                        .and_then(|(joints, _)| joints.get(rb.def.bone as usize))
+                        .and_then(|build| build.anchors.get(&rb.def.bone))
                         .map_or((entity, false), |&j| (j, true));
                     // A streamed unit's body trails are always-on (wisp streamers, crystal
                     // trails); the per-sequence visibility gate is the thrown weapon's InFlight
@@ -1031,14 +1112,19 @@ pub(super) fn attach_entity_visuals(
     }
 }
 
-/// Spawn a creature instance's joint-entity hierarchy under `root` (decision 0019): one entity per
-/// bone carrying its rest-local translation, parented per the skeleton — root bones under `root` so
-/// they inherit the entity's world pose, others under their parent joint. Returns the joints in bone
-/// order, so a vertex's joint index maps straight in and every submesh's `SkinnedMesh` shares this one
-/// set. At rest these reproduce the bind pose; the animation pass (next) will drive each joint's TRS.
+/// Spawn a rig's joint-entity hierarchy under `root` (decision 0019): one entity per bone
+/// carrying its rest-local translation, parented per the skeleton — root bones under `root` so
+/// they inherit the entity's world pose, others under their parent joint. Returns the joints in
+/// bone order, so a vertex's joint index maps straight in and every submesh's palette rig shares
+/// this one set. **The doodad/effect/booth lane only** (decision 0724): a streamed unit's rig is
+/// the joint-less [`crate::creature_anim::RigPose`] buffer instead — this hierarchy remains for
+/// the Bevy-graph-driven hosts. `holder` is the rig root that carries (or will carry) the
+/// [`crate::rig_palette::RigSkin`] — every joint marks it with a `RigJoint`, which is what the
+/// palette change-sweep iterates (0720).
 pub(crate) fn spawn_joints(
     commands: &mut Commands,
     root: Entity,
+    holder: Entity,
     skeleton: &ModelSkeleton,
 ) -> Vec<Entity> {
     let joints: Vec<Entity> = skeleton
@@ -1053,6 +1139,7 @@ pub(crate) fn spawn_joints(
                 .spawn((
                     Transform::from_translation(j.local_translation),
                     Visibility::default(),
+                    crate::rig_palette::RigJoint(holder),
                 ))
                 .id()
         })

@@ -873,7 +873,8 @@ impl Plugin for ParticlePlugin {
                 )
                     .chain()
                     .in_set(crate::billboard::BillboardPlace)
-                    .after(crate::billboard::billboard_joint_palette),
+                    .after(crate::billboard::billboard_joint_palette)
+                    .after(crate::creature_anim::finalize_rig_worlds),
             );
     }
 }
