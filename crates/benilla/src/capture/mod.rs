@@ -86,7 +86,7 @@ pub(crate) use probes::{
     EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
     ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
-use scenarios::{Scenario, UiFixture, GROUND_EYE, SCENARIOS};
+use scenarios::{Scenario, SubjectKind, UiFixture, GROUND_EYE, SCENARIOS};
 
 /// Is the app running a capture (`$WOW_CAPTURE` set)? Read by `main` to disable net + add the harness.
 pub(crate) fn scenario_active() -> bool {

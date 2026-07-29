@@ -235,6 +235,22 @@ fn main() -> AppExit {
         // It is not the only source of per-run drift, though it was long documented as such: the
         // other is the frame clock itself, frozen in `capture` (decision 0723).
         std::env::set_var("WOW_CLUTTER_DENSITY", "0");
+        // Third source of per-run drift, and the one the lighting matrix (decision 0746) hit: the
+        // anim-LOD park/wake gate (`creature_anim::lod::gate_rig_animation`). Whether a rig is
+        // parked, and which pose it wakes into, depends on when its model finished loading relative
+        // to the frustum/room evaluation — asset-load timing, which the frozen clock does not
+        // control. MEASURED: the seeded wolf lands in one of exactly two poses, the pair always
+        // MAE 4.123 apart, and three runs with the gate off are bit-identical.
+        //
+        // Off for captures, unless explicitly overridden. A still frame is meant to contain only
+        // rigs that are IN view, and a rig in view is one the gate should never park — so what a
+        // capture loses is the gate's own correctness, not the shot's subject. That loss is named,
+        // not free: a rig wrongly parked in frame stays invisible to the sweep, and the deeper
+        // question the measurement raises — why a woken rig does not converge on the absolute-clock
+        // pose the gate promises — is open in 0746 and worth its own hunt.
+        if std::env::var("WOW_NO_ANIM_LOD").is_err() {
+            std::env::set_var("WOW_NO_ANIM_LOD", "1");
+        }
     }
 
     // The `mpq://` asset source must be registered BEFORE `AssetPlugin` (inside `DefaultPlugins`)

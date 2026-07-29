@@ -47,6 +47,9 @@ impl BoothRig {
         let Some(buffer) = self.buffer.clone() else {
             // No booth buffer at all (headless tests) — there is nothing to wait FOR, so this
             // stays a plain fallback rather than an unready signal.
+            if super::booth_log() {
+                eprintln!("[booth] variant NO-BUFFER -> world lane (unlit in a booth)");
+            }
             return world.clone();
         };
         match material_variant(&mut self.variants, &buffer, world, materials, false) {

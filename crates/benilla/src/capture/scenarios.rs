@@ -96,6 +96,27 @@ pub(super) enum UiFixture {
     /// sweep covered this — decision 0519 wrote the law and shipped it with the sort bias
     /// pointing the wrong way, invisible to every gate. The name must read at full strength.
     NameWater,
+    /// One cell of the **lighting matrix** (decision 0744): a creature or a GameObject spawned
+    /// through the live path at `at`, so each lane an object's light can take is photographed from
+    /// two sides. See [`SubjectKind`] and the matrix note above [`SUBJECT_SUN`].
+    Subject {
+        kind: SubjectKind,
+        /// Where the subject stands, raw WoW coords — its FEET, not its body centre.
+        at: [f32; 3],
+    },
+}
+
+/// What the lighting matrix puts in frame. Both spawn with the same live component set a streamed
+/// entity gets (`NetEntity` + descriptor), differing only in `EntityKind` — so the matrix exercises
+/// the real unit and GameObject paths rather than a bespoke preview.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum SubjectKind {
+    /// The Timber Wolf (entry 69, display 604) — the same subject `vplates`/`name-water` use, so a
+    /// defect seen here can be A/B'd against them directly.
+    Creature,
+    /// `World\SkillActivated\Containers\TreasureChest01.mdx` (`GameObjectDisplayInfo` 259) — the
+    /// canonical world chest, at its closed rest pose.
+    Chest,
 }
 
 /// The ON-DEMAND Northshire framings, anchored at the Human start (around `SPAWN_XY`
@@ -217,6 +238,116 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         minute: 0,
         ui: None,
     },
+    Scenario {
+        name: "creature-sun-front",
+        map: MAP_AZEROTH,
+        eye: [-9496.46, 59.54, 58.28],
+        look: [-9500.00, 56.00, 57.28],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_SUN,
+        }),
+    },
+    Scenario {
+        name: "creature-sun-rear",
+        map: MAP_AZEROTH,
+        eye: [-9503.54, 52.46, 58.28],
+        look: [-9500.00, 56.00, 57.28],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_SUN,
+        }),
+    },
+    Scenario {
+        name: "creature-shade-front",
+        map: MAP_AZEROTH,
+        eye: [-9496.46, 47.54, 57.75],
+        look: [-9500.00, 44.00, 56.75],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_SHADE,
+        }),
+    },
+    Scenario {
+        name: "creature-shade-rear",
+        map: MAP_AZEROTH,
+        eye: [-9503.54, 40.46, 57.75],
+        look: [-9500.00, 44.00, 56.75],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_SHADE,
+        }),
+    },
+    Scenario {
+        name: "creature-indoor-front",
+        map: MAP_AZEROTH,
+        eye: [-9466.57, 34.73, 59.70],
+        look: [-9469.40, 31.90, 58.70],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_INDOOR,
+        }),
+    },
+    Scenario {
+        name: "creature-indoor-rear",
+        map: MAP_AZEROTH,
+        eye: [-9472.23, 29.07, 59.70],
+        look: [-9469.40, 31.90, 58.70],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_INDOOR,
+        }),
+    },
+    Scenario {
+        name: "chest-sun-front",
+        map: MAP_AZEROTH,
+        eye: [-9496.82, 59.18, 57.98],
+        look: [-9500.00, 56.00, 56.93],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_SUN,
+        }),
+    },
+    Scenario {
+        name: "chest-sun-rear",
+        map: MAP_AZEROTH,
+        eye: [-9503.18, 52.82, 57.98],
+        look: [-9500.00, 56.00, 56.93],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_SUN,
+        }),
+    },
+    Scenario {
+        name: "chest-shade-front",
+        map: MAP_AZEROTH,
+        eye: [-9496.82, 47.18, 57.45],
+        look: [-9500.00, 44.00, 56.40],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_SHADE,
+        }),
+    },
+    Scenario {
+        name: "chest-shade-rear",
+        map: MAP_AZEROTH,
+        eye: [-9503.18, 40.82, 57.45],
+        look: [-9500.00, 44.00, 56.40],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_SHADE,
+        }),
+    },
 ];
 
 /// Director shot 1 — the Northshire overlook, north-east of the Abbey looking at it: terrain,
@@ -261,10 +392,73 @@ pub(super) const INN_LOOK: [f32; 3] = [-9458.8, -7.5, 48.2];
 pub(super) const FELWOOD_EYE: [f32; 3] = [4060.9, -944.3, 256.8];
 pub(super) const FELWOOD_LOOK: [f32; 3] = [4014.0, -954.4, 242.9];
 
+// ---------------------------------------------------------------------------------------------
+// The LIGHTING MATRIX (decision 0744) — one subject, three lanes, two sides.
+//
+// The golden spots are landscape: they photograph terrain, buildings and water, and (captures being
+// server-less) contain no creature or GameObject at all. So the *object* light path — the one every
+// creature, player, pet and chest in the game is lit by — had no regression coverage whatsoever,
+// while the bug ledger's unit reports (blacked-out textures, mis-lit NPCs across city WMOs) sit
+// squarely on it.
+//
+// The three positions are the three lanes an object's light can take, and they were CHOSEN FROM THE
+// DATA, not by eye — `WOW_LIGHT_AT`/`WOW_LIGHT_GRID` (`wmo_portal::audit::light_probe`) reports the
+// lane and the terrain MCSH bit at any world point:
+//
+//   SUN    (-9500, 56)   terrain z 56.48   MCSH false  lane exterior-on-terrain  — sun term at full
+//   SHADE  (-9500, 44)   terrain z 55.95   MCSH true   lane exterior-on-terrain  — sun term dimmed
+//   INDOOR (-9469.4, 31.9)  terrain z none  zone-text indoor 5, lane BAKE g05    — no sun at all
+//
+// SUN and SHADE are twelve yards apart on the same open ground, so between that pair the ONLY
+// changed input is the baked shadow bit — exactly the discriminator `entity_shade` ramps on
+// (2.5 lit → 0.5 shadowed). INDOOR stands in the Goldshire inn's common room, where the interior
+// classifier owns the tag instead and the sun never reaches.
+//
+// Two sides per lane, straddling the light: the game's LIGHTING sun is near-fixed at azimuth 45°
+// (`sun::follow`), so `front` puts the camera on that bearing (sun behind us — the subject's lit
+// face) and `rear` puts it opposite (the shadowed face). Indoors there is no sun, so the pair simply
+// samples the bake from two sides. Cameras sit at a fixed offset off the subject's feet, eye a
+// little above and aimed at the body, so every cell frames the subject identically and a diff is
+// about light, never framing.
+
+/// Lighting-matrix subject positions (feet, raw WoW coords) — see the note above.
+pub(super) const SUBJECT_SUN: [f32; 3] = [-9500.0, 56.0, 56.48];
+pub(super) const SUBJECT_SHADE: [f32; 3] = [-9500.0, 44.0, 55.95];
+pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
+
 /// Every remaining named viewpoint — the UI look-pass fixtures, the sun/moon/sky regression
 /// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
 /// debugging and look passes, but NOT part of the blessed baseline sweep.
 pub(super) const ON_DEMAND: &[Scenario] = &[
+    // The chest INDOORS is out of the blessed sweep and in here instead: measured over two runs of
+    // one build it is not reproducible (front MAE 1.551 / 9.2 % of pixels, rear 0.529 / 7.6 %), and
+    // the diff is the whole body shifting brightness in perfect registration — LIGHT, not pose. The
+    // GameObject's interior light lane does not converge by the shutter, while the CREATURE at the
+    // same spot is bit-identical. That is the ledger's "mis-lit objects inside city WMOs" class, and
+    // it is open (decision 0746). Capture them by name to work on it; they rejoin the sweep the day
+    // they are deterministic.
+    Scenario {
+        name: "chest-indoor-front",
+        map: MAP_AZEROTH,
+        eye: [-9466.85, 34.45, 59.40],
+        look: [-9469.40, 31.90, 58.35],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_INDOOR,
+        }),
+    },
+    Scenario {
+        name: "chest-indoor-rear",
+        map: MAP_AZEROTH,
+        eye: [-9471.95, 29.35, 59.40],
+        look: [-9469.40, 31.90, 58.35],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Chest,
+            at: SUBJECT_INDOOR,
+        }),
+    },
     Scenario {
         name: "house-north",
         map: MAP_AZEROTH,

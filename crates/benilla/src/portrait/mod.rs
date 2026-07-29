@@ -299,6 +299,24 @@ fn booth_anchors(
     creatures?.display_anchors(display_id)
 }
 
+/// `WOW_BOOTH_LOG=1` — the resolved framing for a bake: which anchors it had and where the camera
+/// ended up. An opaque near-black pane is what a camera parked *inside* the model renders, so
+/// "black" and "zoomed to max" may be one symptom; this is the line that tells them apart.
+fn log_frame(token: &str, a: &PortraitAnchors, cam: &Transform) {
+    if booth_log() {
+        eprintln!(
+            "[booth] {token} frame eye=({:.3},{:.3},{:.3}) authored_cam={} pivot={:.3} head_y={:.3} gr={:.3}",
+            cam.translation.x,
+            cam.translation.y,
+            cam.translation.z,
+            a.camera.is_some(),
+            a.pivot_height,
+            a.head.map_or(f32::NAN, |h| h.y),
+            a.ground_radius,
+        );
+    }
+}
+
 /// Arm `booth` after a content edge: render the settle window, plus every frame until each twin
 /// material's texture is resident. `twins` = the material handles the bake just installed.
 fn wake_booth<'a>(
@@ -799,6 +817,7 @@ fn sync_portraits(
             );
             // Frame through the display's authored portrait camera (heuristic anchors for the
             // camera-less few), resolved above before anything was torn down.
+            log_frame(token, &anchors, &frame(&anchors).0);
             aim(&mut cams, token, &frame(&anchors));
             log_bake(token, "bake", parts.len(), riders.len(), billboards.len());
             wake_booth(
@@ -1042,6 +1061,7 @@ fn sync_body_booth(
         );
         // Body framing from the display's bounds — the full standing figure, feet-to-crown.
         // Resolved before the teardown above; see the portrait site for why it cannot be faked.
+        log_frame(slot, &anchors, &body_frame(&anchors).0);
         aim(cams, slot, &body_frame(&anchors));
         log_bake(slot, "bake", parts.len(), riders.len(), billboards.len());
         wake_booth(

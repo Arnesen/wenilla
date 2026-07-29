@@ -17,6 +17,18 @@ const WOLF_FACTION: u32 = 32;
 /// onto the water *beyond* it.
 const NAME_WATER_POS: [f32; 3] = [-9512.97, -331.29, 61.4];
 
+/// The lighting matrix's chest (decision 0744): `GameObjectDisplayInfo` 259,
+/// `World\SkillActivated\Containers\TreasureChest01.mdx`. GameObject guids carry the `0xF110` high
+/// word, and the descriptor is left at its defaults — an unstated `GAMEOBJECT_STATE` holds the
+/// closed rest pose, which is the frame we want.
+const CHEST_DISPLAY: u32 = 259;
+const CHEST_GUID: u64 = (0xF110u64 << 48) | 0x744;
+
+/// Which way a lighting-matrix subject faces (Bevy yaw). The matrix's `front` camera sits on the
+/// lighting sun's bearing (azimuth 45°), so the subject is turned to meet it: `front` reads the
+/// face, `rear` the tail — the same body, its lit and unlit sides.
+const SUBJECT_YAW: f32 = 2.36;
+
 /// Seed the fixture window's state resources once, right after the scene goes resident — the real
 /// feeds then push it into the VM during the settle window exactly as live wire data would. Item
 /// icons resolve through the offline `ItemDisplayCatalog` (display ids chosen from entries that
@@ -1023,6 +1035,53 @@ pub(super) fn seed_ui_fixture(
             ));
             // The floating NAME is the subject, so no V-plate may exist (a plated unit never
             // draws one — the ShouldShowName exclusivity) even though enemy plates boot ON.
+            vplates.enemies = false;
+        }
+        // The lighting matrix (decision 0744). One spawn, through the same component set a streamed
+        // entity gets, at a position whose light lane was read out of the data (see the matrix note
+        // in `scenarios`). Deliberately ANONYMOUS: no name is registered and plates are forced off,
+        // so no glyph rides over the body — the diff of these cells must be about light and nothing
+        // else.
+        UiFixture::Subject { kind, at } => {
+            use benilla_protocol::messages::ObjectFields;
+            let transform = Transform {
+                translation: wow_to_bevy(at),
+                rotation: Quat::from_rotation_y(SUBJECT_YAW),
+                ..default()
+            };
+            match kind {
+                SubjectKind::Creature => {
+                    commands.spawn((
+                        crate::net::Guid(WOLF_GUID),
+                        crate::net::NetEntity {
+                            kind: benilla_protocol::EntityKind::Unit,
+                            display_id: Some(WOLF_DISPLAY),
+                            scale: 1.0,
+                        },
+                        crate::net::ObjectStore(ObjectFields::from_pairs(&[
+                            (22, 100),          // UNIT_FIELD_HEALTH
+                            (28, 100),          // UNIT_FIELD_MAXHEALTH
+                            (34, 2),            // UNIT_FIELD_LEVEL
+                            (35, WOLF_FACTION), // UNIT_FIELD_FACTIONTEMPLATE
+                        ])),
+                        transform,
+                        Visibility::default(),
+                    ));
+                }
+                SubjectKind::Chest => {
+                    commands.spawn((
+                        crate::net::Guid(CHEST_GUID),
+                        crate::net::NetEntity {
+                            kind: benilla_protocol::EntityKind::GameObject,
+                            display_id: Some(CHEST_DISPLAY),
+                            scale: 1.0,
+                        },
+                        crate::net::ObjectStore(ObjectFields::default()),
+                        transform,
+                        Visibility::default(),
+                    ));
+                }
+            }
             vplates.enemies = false;
         }
     }
