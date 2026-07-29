@@ -57,6 +57,14 @@ pub(super) struct EntityPart {
     /// (creatures + M2 GameObjects, the CGObjects that appear-fade); `None` for WMO-display parts.
     pub(super) fade_blend: Option<Handle<WowModelMaterial>>,
     pub(super) blend: ModelBlend,
+    /// Whether this part blends **additively** (M2 blend mode 3 `NoAlphaAdd` / 4 `Add`).
+    /// [`ModelBlend`] deliberately folds "alpha-blended / additive" into its single `Blend`
+    /// variant, so [`Self::blend`] alone CANNOT answer this — the material path recovers it from
+    /// [`crate::model_render`]'s separate `is_additive` input (marker bit 2 of `clutter_fade.z`,
+    /// which `specialize` turns into the pure-add state). Any consumer that re-derives a blend
+    /// state from `blend` needs this alongside it, or every additive batch silently draws
+    /// alpha-blended — decision 0748, the black ground-decal tile.
+    pub(super) additive: bool,
     /// Whether this part renders two-sided (M2 material `0x04`). Retained so a per-appearance material
     /// swap (the character hair, decision 0045 — hair cards are two-sided) preserves it; `part.material`
     /// already bakes it for the un-swapped parts.
@@ -544,6 +552,7 @@ pub(super) fn build_parts(
                         material_interior_bake_blend: interior_bake_blend,
                         fade_blend,
                         blend: sub.blend,
+                        additive: sub.additive,
                         two_sided: sub.two_sided,
                         geoset_id: sub.geoset_id,
                         char_slot: sub.char_slot,
@@ -598,6 +607,7 @@ pub(super) fn build_parts(
                     material_interior_bake_blend: None,
                     fade_blend: None, // WMO-display GameObjects don't appear-fade (rare; M2 only)
                     blend: sub.blend,
+                    additive: false, // WMO MOMT carries no additive mode (`RenderSubmesh::additive`)
                     two_sided: sub.two_sided,
                     billboard: None,  // WMO groups have no billboard bones
                     alpha_anim: None, // …nor colour/weight loops

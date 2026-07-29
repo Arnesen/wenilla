@@ -456,13 +456,17 @@ mod tests {
         assert!((rgb[2] - 0.4).abs() < 1e-4, "blue commits raw: {rgb:?}");
     }
 
-    /// GOLDEN — the exterior M2 lane's contract, end to end through the packed rows: mirroring
-    /// `wow_model.wgsl`'s eval (DC lane + grade.yzw × I + I × (linear + quad + x²−y²)) over the
-    /// rows this packer writes must reproduce the disassembled `Model2.bls` closed form
-    /// `clamp01(ambient + D·I·(3 + 16μ + 15μ²)/34)` at every intensity rung (2.5 lit / 1.0
-    /// mid-band / 0.5 MCSH-shadowed). Pins the "every sun band scales by I, never I²" law and the
-    /// row homes (ambient in the DC lanes, the sun's DC redistribution on grade.yzw) — the two
-    /// ways this lane has silently drifted.
+    /// GOLDEN — the PACKER's SH block: evaluating the rows this packer writes (DC lane +
+    /// grade.yzw × I + I × (linear + quad + x²−y²)) must reproduce the disassembled `Model2.bls`
+    /// closed form `clamp01(ambient + D·I·(3 + 16μ + 15μ²)/34)` at every intensity rung (2.5 lit /
+    /// 1.0 mid-band / 0.5 MCSH-shadowed). Pins the "every sun band scales by I, never I²" law and
+    /// the row homes (ambient in the DC lanes, the sun's DC redistribution on grade.yzw).
+    ///
+    /// NB (0747): no shader currently READS rows 6-12.xyz / 17.yzw — the live exterior lane in
+    /// `wow_model.wgsl` implements the same closed form inline (sun side only, `max(0, f(μ))`;
+    /// the full block's back-side wrap stays out per the anti-sun ruling). This golden pins the
+    /// packed block itself; the flagged cleanup is either wiring a lane to the rows or retiring
+    /// the dead fold together with this test.
     #[test]
     fn exterior_lane_reproduces_the_closed_form_at_every_intensity_rung() {
         let ambient = [0.30, 0.32, 0.38];

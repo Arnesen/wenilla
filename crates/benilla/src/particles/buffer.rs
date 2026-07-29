@@ -72,11 +72,25 @@ impl From<ParticleBlend> for EffectBlend {
 }
 
 impl EffectBlend {
-    /// The ground-fx mapping from a part's authored [`ModelBlend`] — `model_render.rs`'s law
-    /// with the lane's two named approximations: `AlphaTest` folds to `Alpha` (no Mask variant
-    /// here; the groundscan census says flat `Spells\` quads are blend batches), and the part
-    /// renders unlit (spell fx are; a lit ground quad would differ — none observed).
-    pub fn from_model(blend: ModelBlend) -> Self {
+    /// The ground-fx mapping from a part's authored blend — `model_render.rs`'s law with the
+    /// lane's two named approximations: `AlphaTest` folds to `Alpha` (no Mask variant here; the
+    /// groundscan census says flat `Spells\` quads are blend batches), and the part renders unlit
+    /// (spell fx are; a lit ground quad would differ — none observed).
+    ///
+    /// `additive` is a SECOND, non-optional input because [`ModelBlend`] cannot express additive:
+    /// M2 blend modes 3/4 fold into its `Blend` variant (see its own doc, "Alpha-blended /
+    /// additive"), and the material path recovers them from `model_render`'s separate
+    /// `is_additive` flag. Taking only the enum made this function *unable* to be right for an
+    /// additive batch — every `Spells\` ground quad is mode 4, so Arcane Explosion / Blast Wave /
+    /// Battle Shout drew their black-backed additive art alpha-blended: an opaque black tile
+    /// (decision 0748). Keeping it in the signature is what stops the next caller repeating it.
+    pub fn from_model(blend: ModelBlend, additive: bool) -> Self {
+        if additive {
+            // `BLEND_ADD` is byte-for-byte the material path's additive: the shader gamma-
+            // premultiplies (`rgb·α`) and returns α = 0, turning `(One, 1−srcα)` into pure
+            // addition — the same fold `specialize` gates on marker bit 2 (0160/0161).
+            return EffectBlend::Add;
+        }
         match blend {
             ModelBlend::Opaque => EffectBlend::Opaque,
             ModelBlend::AlphaTest | ModelBlend::Blend => EffectBlend::Alpha,
@@ -270,4 +284,58 @@ impl EffectQuads {
 pub fn begin_effect_frame(mut quads: ResMut<EffectQuads>) {
     quads.verts.clear();
     quads.draws.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The additive flag OVERRIDES the folded enum (decision 0748). `ModelBlend::Blend` means
+    /// "alpha-blended **or** additive" — M2 modes 2/3/4 all land there — so a mapping that reads
+    /// only the enum cannot be right. Every `Spells\` flat ground quad in the 1.12.1 corpus is
+    /// mode 4 (`m2batch`: ArcaneExplosion_Base, BattleShout_Cast_Base, …), and drawing those
+    /// alpha-blended painted their black-backed additive art as an opaque black tile.
+    #[test]
+    fn additive_wins_over_the_folded_blend_enum() {
+        for blend in [
+            ModelBlend::Opaque,
+            ModelBlend::AlphaTest,
+            ModelBlend::Blend,
+            ModelBlend::Mod,
+            ModelBlend::Mod2x,
+        ] {
+            assert_eq!(
+                EffectBlend::from_model(blend, true),
+                EffectBlend::Add,
+                "{blend:?} + additive must reach the pure-add state, not {:?}",
+                EffectBlend::from_model(blend, false),
+            );
+        }
+    }
+
+    /// The non-additive law is unchanged — `model_render.rs`'s mapping, with `AlphaTest` folded
+    /// to `Alpha` (the lane has no Mask variant; flat `Spells\` quads are blend batches).
+    #[test]
+    fn non_additive_keeps_the_material_paths_law() {
+        assert_eq!(
+            EffectBlend::from_model(ModelBlend::Opaque, false),
+            EffectBlend::Opaque
+        );
+        assert_eq!(
+            EffectBlend::from_model(ModelBlend::AlphaTest, false),
+            EffectBlend::Alpha
+        );
+        assert_eq!(
+            EffectBlend::from_model(ModelBlend::Blend, false),
+            EffectBlend::Alpha
+        );
+        assert_eq!(
+            EffectBlend::from_model(ModelBlend::Mod, false),
+            EffectBlend::Multiply
+        );
+        assert_eq!(
+            EffectBlend::from_model(ModelBlend::Mod2x, false),
+            EffectBlend::Mod2x
+        );
+    }
 }

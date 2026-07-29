@@ -140,12 +140,14 @@ pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 pub(super) const MAP_AZEROTH: u32 = 0;
 pub(super) const MAP_KALIMDOR: u32 = 1;
 
-/// THE golden baseline: five spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
+/// THE golden baseline: six spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
 /// numbers below verbatim from their `~/.benilla/shots.txt`) — the Northshire overlook toward the
-/// Abbey, a Stormwind canal view, Elwynn water, the Lion's Pride Inn common room, and a Felwood
-/// hollow — each at noon and at night, except the inn (which the clock barely reaches; see below).
+/// Abbey, a Stormwind canal view, Elwynn water, the Lion's Pride Inn common room, a Felwood hollow,
+/// and an Elwynn fence lying across the sun's shadow line — each at noon and at night, except the
+/// inn (which the clock barely reaches) and the fence, whose DAY cell keeps the director's own
+/// 10:24 because its subject is where the shadow line falls; see both below.
 ///
-/// Nine shots of maximal mutual difference. The old set was thirty, and the director judged the
+/// Ten landscape shots of maximal mutual difference. The old set was thirty, and the director judged the
 /// design bad: low-value repetition (four compass looks at one farmhouse, five frames from one
 /// Northshire camera, sixteen UI windows over the same backdrop), each one a real window popping
 /// open on their screen while they worked. The law is **a few spots chosen with the director, times
@@ -235,6 +237,31 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         map: MAP_KALIMDOR,
         eye: FELWOOD_EYE,
         look: FELWOOD_LOOK,
+        minute: 0,
+        ui: None,
+    },
+    // The day cell keeps the director's own minute (10:24) rather than the sweep's noon: the subject
+    // IS the shadow boundary, and where it falls is a function of the sun's angle, so at noon it
+    // slides off the rails and the shot degrades into an ordinary fence.
+    Scenario {
+        name: "fence-shadowline-day",
+        map: MAP_AZEROTH,
+        eye: FENCE_EYE,
+        look: FENCE_LOOK,
+        minute: 624,
+        ui: None,
+    },
+    // The night twin, at the director's call — this record's own first draft argued against it on
+    // the grounds that there is no shadow line without a sun, which was reasoning from the mechanism
+    // and never measured. The bit it photographs is BAKED, present at every hour; what the night
+    // frame pins is the other half of the mechanism — how much of the shade term survives once the
+    // sun's contribution is gone and the ambient/moon palette carries the frame. That is a question
+    // about the light curves, and a baseline is the right place to hold the answer (0749 addendum).
+    Scenario {
+        name: "fence-shadowline-night",
+        map: MAP_AZEROTH,
+        eye: FENCE_EYE,
+        look: FENCE_LOOK,
         minute: 0,
         ui: None,
     },
@@ -379,6 +406,23 @@ pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
 /// reads "outside" and faithfully culls the containing group, which vanishes the room.
 pub(super) const INN_EYE: [f32; 3] = [-9471.4, 39.4, 59.9];
 pub(super) const INN_LOOK: [f32; 3] = [-9458.8, -7.5, 48.2];
+
+/// Director shot 6 (decision 0749) — an Elwynn rail fence lying ACROSS the sun's shadow boundary,
+/// at 10:24: the right-hand span is in full sun, the left-hand span in shade, and the same edge
+/// runs on across the road behind it. One frame holding **both** states of the MCSH sun term, on
+/// terrain and on a doodad at once, with the ramp visible as the hard line between them.
+///
+/// The lighting matrix (0746) samples the lit and shadowed lanes as SEPARATE cells at separate
+/// positions, so a regression that scaled both equally could pass both. Here the two states share
+/// one frame, one model and one texture, so only their DIFFERENCE can carry the shot — the control
+/// is inside the picture. It also lights the third lane neither matrix subject touches: a
+/// world-placed **doodad**, which takes its shade per-vertex at bake rather than through
+/// `entity_shade`'s per-object ramp.
+///
+/// Found by the director, who framed it because they had already spotted it was "both lit and unlit
+/// from sun, half half".
+pub(super) const FENCE_EYE: [f32; 3] = [-9511.9, -4.0, 61.9];
+pub(super) const FENCE_LOOK: [f32; 3] = [-9552.0, 18.6, 42.4];
 
 /// Director shot 5 (decision 0743) — a Felwood hollow on **Kalimdor** (`MAP_KALIMDOR`): the
 /// corrupted forest floor's root mat, a stand of emissive `felwoodmushroom` doodads, a pool of

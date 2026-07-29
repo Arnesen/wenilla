@@ -503,10 +503,10 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // `dot(L, that normal)` × a per-vertex colour, MODULATE × texture — so a tuft darkens with the
     // ground it stands on (shaded/sloped tufts go darker, like the dirt beneath). We bake that normal
     // in clutter.rs (`terrain_normal_at`). World-up was an earlier flat-ground approximation, removed.
-    // **Exterior M2 doodads use the same FFP `ambient + diffuse·max(N·L,0)`** as clutter/WMO, but with the
-    // diffuse/sun term scaled by the terrain-shade at the doodad's base (lit vs MCSH-shadowed ground). No
-    // separate lobe — the same directional matte, just a per-instance sun multiplier. Clutter keeps its own
-    // FFP N·L path lit by the ground normal (a different reference program).
+    // **Exterior M2 doodads take the verified `Model2.bls` sun curve** (0747, below) with the
+    // diffuse/sun term scaled by the terrain-shade at the doodad's base (lit vs MCSH-shadowed ground);
+    // clutter and WMO keep the plain FFP `ambient + diffuse·max(N·L,0)` — clutter lit by the ground
+    // normal, WMO by its own (both genuinely fixed-function reference programs).
     let is_clutter = m.clutter_fade.w > 0.5;
     let L = -normalize(wow_light.light_sun.xyz);
     let n_m2 = normalize(pbr_input.world_normal);
@@ -527,13 +527,15 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let n1 = vec4<f32>(n_lit, 1.0);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
-    // Exterior world doodad/entity: a hard-cutoff directional matte, scaled by the per-instance
-    // INTENSITY, the byte-verified `[node+0xa4]`: 2.5 on lit ground / 0.5 on MCSH-shadowed
-    // ground / 1.0 day-night (`0x69e4ad`, `0x69e280`). Lane history: the `Model2.bls` SH lobe
-    // (0354/0358, the mainstream VS-path curve) → the FFP matte with a hard cutoff (the SH wrap
-    // fed warm sun onto the anti-sun side; director's call: a sunlit character's shadow side
-    // must read the SAME as the skin standing in shade, so both sit exactly at the ambient
-    // level) → the same hard cutoff on an UNCLAMPED source (0706, below).
+    // Exterior world doodad/entity: the VERIFIED `Model2.bls` sun response, scaled by the
+    // per-instance INTENSITY, the byte-verified `[node+0xa4]`: 2.5 on lit ground / 0.5 on
+    // MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`, `0x69e280`; the leg
+    // that force-writes 1.0 is `0x69e36b`). Lane history: the `Model2.bls` SH lobe (0354/0358)
+    // → the FFP matte with a hard cutoff (the SH wrap fed warm sun onto the anti-sun side;
+    // director's call: a sunlit character's shadow side must read the SAME as the skin standing
+    // in shade, so both sit exactly at the ambient level) → the same hard cutoff on an
+    // UNCLAMPED source (0706) → the verified closed-form curve on the sun side, cutoff kept
+    // (0747, below).
     //
     // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
     // the lit-ground family (ADT doodads and every entity M2 — intensity 2.5, mixed toward 0.5 by
@@ -546,18 +548,36 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
     let intensity = select(mix(2.5, 0.5, shade_t), 1.0, mid_band);
-    // Hard sun cutoff on an UNCLAMPED source: `clamp01(ambient + I·D·max(N·L,0))` — ONE
-    // saturating clamp, at the sum (decision 0706, which keeps the earlier director ruling:
-    // the anti-sun side sits exactly at ambient, no SH wrap). The old per-channel source
-    // pre-clamp `clamp01(I·D)` was faithful to NEITHER reference leg — the FFP leg
-    // peak-NORMALIZES (`(I·D)/max(1,maxch)`, hue-preserving, glue-model-lighting §4) and the
-    // mainstream Model2.bls SH path consumes the moments unclamped — and it bleached the sun:
-    // the EK dawn diffuse (254,123,51) at I=2.5 pre-clamped to (1,1,.5), which is bug B33/B97
-    // (bone-white fences, pale-olive beams, where the reference renders both dark-warm). The
-    // unclamped sum matches the SH fidelity target's colour response to ≤10% on the sun side
-    // (equal at the pole and at μ≈0.2) while the hard cutoff stands in for the rejected wrap.
+    // The VERIFIED sun response (decision 0747): `clamp01(ambient + I·D·max(0, f(μ)))` with
+    // `f(μ) = (3 + 16μ + 15μ²)/34` — the closed form of the shipped `Model2.bls` vertex program
+    // (wow-re model2-bls-vertex-sh.md §4: three independent decodes convergent to ≤2.4e-8; the
+    // moments are consumed UNCLAMPED, so 0706's one saturating clamp at the sum stands). Peak
+    // f(1) = 1 (= the FFP `N·L` peak, the 16/17 accumulate scale exists for exactly that), and
+    // vs the previous linear `max(N·L,0)` the curve sits up to ~15% lower through the mid
+    // angles (f(0.5) = 0.434), which is where a near-saturating sun (any I·D channel > 1 — all
+    // three at night, R at dawn) stopped clipping ~15% too early. `max(0, ·)` keeps the
+    // director's anti-sun ruling (the hard-cutoff history above): f crosses zero at μ = −0.243,
+    // so the deep shadow hemisphere sits exactly at ambient — the reference's back-side wrap
+    // (f(−1) = 2/34) and its small negative dip are deliberately NOT taken, only the sun-side
+    // curve is. μ is the RAW dot (not `ndotl`): clamping first would pin the terminator band
+    // μ ∈ (−0.243, 0) at f(0) = 3/34 instead of letting it fade out.
+    let mu = dot(n_lit, L);
+    let sun_curve = max((3.0 + 16.0 * mu + 15.0 * mu * mu) / 34.0, 0.0);
+    // PEAK-NORMALIZE the committed sun (decision 0750, provisional — the byte verdict on which
+    // representation the reference's moment accumulate reads is a dispatched wow-re question):
+    // `C = I·D / max(1, max_ch(I·D))` — hue-preserving, capped at white. The raw over-gamut
+    // product (night: 2.5·[97,130,162]/255 = (0.95, 1.27, 1.59)) clips every moon-facing doodad
+    // face to flat white — the director's "day-lit fence at midnight" / "one Silverpine fence
+    // blown out at every hour" reports; the normalized form keeps the night's blue hue and
+    // softens the ×5 MCSH lit/shadowed cliff to the smooth blend the reference shows. Gain-1
+    // lanes (WMO, clutter, mid-band, shaded 0.5) never exceed white, so this touches ONLY the
+    // lit-intensity family. The client's own light encoder (`0x71ca80`) demonstrably produces
+    // exactly this peak-normalized form; whether the raw peak is re-applied on the sun's path
+    // is the open byte question — if the verdict says raw, this reverts on the record.
+    let sun_c = wow_light.light_diffuse.rgb * intensity;
+    let sun_peak = max(max(sun_c.r, sun_c.g), max(sun_c.b, 1.0));
     let lit_doodad = clamp(
-        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * intensity * ndotl,
+        wow_light.light_ambient.rgb + (sun_c / sun_peak) * sun_curve,
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

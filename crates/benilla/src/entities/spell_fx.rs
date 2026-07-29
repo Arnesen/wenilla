@@ -481,7 +481,7 @@ pub(super) fn attach_effect_visuals(
         let decal = crate::ground_fx::spawn_ground_fx_decal(
             commands,
             texture,
-            crate::particles::buffer::EffectBlend::from_model(part.blend),
+            crate::particles::buffer::EffectBlend::from_model(part.blend, part.additive),
             fog,
             part.rgb_anim.as_ref().map(|a| (a.clone(), now)),
             &quad,

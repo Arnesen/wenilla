@@ -381,6 +381,22 @@ enum Command {
         /// Case-insensitive substring of the model path (e.g. `instanceportal`).
         filter: String,
     },
+    /// Print the terrain MCSH baked-shadow bit at a world position — the per-instance
+    /// terrain-shade selector an exterior M2 doodad samples once at its base (sun intensity
+    /// 2.5 lit / 0.5 shadowed, `0x69e4ad`; decisions 0063/0747) — plus an ASCII texel
+    /// neighborhood. A doodad base near a shadow edge sits one ~0.52 yd texel from the OTHER
+    /// intensity family, so two adjacent fence pieces can land on opposite sides — the
+    /// "why is ONE of these blown out" instrument.
+    Shadeat {
+        /// Map directory name (e.g. `Azeroth`).
+        map: String,
+        /// World-space X (raw WoW yards; may be negative).
+        #[arg(allow_hyphen_values = true)]
+        x: f32,
+        /// World-space Y.
+        #[arg(allow_hyphen_values = true)]
+        y: f32,
+    },
 }
 
 /// MPQ internal paths are backslash-separated; accept `/` for convenience.
@@ -561,6 +577,7 @@ fn main() -> Result<()> {
             center_y,
             tile_radius,
         } => scan::doodadscan(&mut chain, &map, center_x, center_y, tile_radius)?,
+        Command::Shadeat { map, x, y } => scan::shadeat(&mut chain, &map, x, y)?,
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
     }
 

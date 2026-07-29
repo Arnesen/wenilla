@@ -2472,3 +2472,45 @@ pub fn fxordercensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+
+/// The terrain MCSH shadow bit at a world position + an ASCII texel neighborhood (`#` shadowed,
+/// `.` lit, `?` off-tile/no-chunk). One MCSH texel is `TILE_SIZE/1024` ≈ 0.52 yd; the grid spans
+/// ±8 texels so a doodad base sitting one texel from a shadow edge — the 2.5-vs-0.5 intensity
+/// cliff — is visible at a glance.
+pub fn shadeat(chain: &mut Chain, map: &str, x: f32, y: f32) -> Result<()> {
+    let tiles = benilla_formats::load_tiles_around(chain, map, x, y, 0)
+        .with_context(|| format!("loading the tile under ({x}, {y}) on {map}"))?;
+    let Some((_, tile)) = tiles.first() else {
+        anyhow::bail!("no tile exists under ({x}, {y}) on {map}");
+    };
+    let texel = benilla_formats::TILE_SIZE / 1024.0;
+    let word = |s: Option<bool>| match s {
+        Some(true) => "SHADOWED (doodad sun intensity 0.5)",
+        Some(false) => "lit (doodad sun intensity 2.5)",
+        None => "off-tile / no chunk",
+    };
+    println!(
+        "MCSH at ({x:.2}, {y:.2}): {}",
+        word(benilla_formats::mcsh_shadowed_at(&tile.chunks, [x, y, 0.0]))
+    );
+    println!(
+        "neighborhood, texel {texel:.3} yd — rows +X (north) up, cols +Y (west) left; center marked:"
+    );
+    for dx in (-8i32..=8).rev() {
+        let mut row = String::new();
+        for dy in (-8i32..=8).rev() {
+            let p = [x + dx as f32 * texel, y + dy as f32 * texel, 0.0];
+            let mut c = match benilla_formats::mcsh_shadowed_at(&tile.chunks, p) {
+                Some(true) => '#',
+                Some(false) => '.',
+                None => '?',
+            };
+            if dx == 0 && dy == 0 {
+                c = if c == '#' { 'S' } else { 'O' };
+            }
+            row.push(c);
+        }
+        println!("{row}");
+    }
+    Ok(())
+}
