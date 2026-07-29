@@ -109,6 +109,13 @@ impl InputFingerprint {
 /// driven through real FrameXML + Lua) is a standing probe for a missed input or a missed touch;
 /// set the env to extend that to a live run or another crate's suite. Read once; when off it
 /// costs a relaxed atomic load per resolve.
+/// `WOW_LAYOUT_PROF=1` — per-solve shape reporting (see the read site in [`UiScript::resolve_layout`]).
+/// Read once; off, it costs one relaxed atomic load per resolve and no clock reads at all.
+fn layout_prof_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_LAYOUT_PROF").as_deref() == Ok("1"))
+}
+
 fn layout_verify_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| cfg!(test) || std::env::var("WOW_LAYOUT_VERIFY").as_deref() == Ok("1"))
@@ -158,6 +165,7 @@ impl UiScript {
             layout_fingerprint,
             layout_epoch_resolved,
             layout_solves,
+            layout_rounds,
             ..
         } = model;
 
@@ -377,7 +385,16 @@ impl UiScript {
         }
 
         let round_cap = plan.len() + region_data.len() + 2;
+        // `WOW_LAYOUT_PROF=1` — the per-solve shape: rounds, the graph's size, and the split
+        // between the frame solve and the region sweep. The numbers that say whether a solve is
+        // expensive because it runs too often or because each pass walks the whole UI.
+        let prof = layout_prof_enabled();
+        let mut t_frames = std::time::Duration::ZERO;
+        let mut t_regions = std::time::Duration::ZERO;
+        let mut n_regions_swept = 0u64;
         for round in 0..round_cap {
+            *layout_rounds += 1;
+            let t_round = prof.then(std::time::Instant::now);
             let mut changed = false;
 
             // Seed the solver: the screen root, then every region rect settled so far (regions are
@@ -425,8 +442,15 @@ impl UiScript {
             //
             // `scratch` is hoisted out of the loop so the per-region `LayoutInput` refills its
             // anchors `Vec` in place instead of allocating one per region per round.
+            if let Some(t) = t_round {
+                t_frames += t.elapsed();
+            }
+            let t_reg = prof.then(std::time::Instant::now);
             let mut scratch = LayoutInput::default();
             for (&rh, data) in region_data.iter() {
+                if prof {
+                    n_regions_swept += 1;
+                }
                 if data.anchors.is_empty() {
                     continue;
                 }
@@ -499,7 +523,22 @@ impl UiScript {
                 }
             }
 
+            if let Some(t) = t_reg {
+                t_regions += t.elapsed();
+            }
             if !changed {
+                if prof {
+                    eprintln!(
+                        "[layout-prof] rounds={} frames={} regions_total={} regions_swept={} \
+                         frame_us={} region_us={}",
+                        round + 1,
+                        plan.len(),
+                        region_data.len(),
+                        n_regions_swept,
+                        t_frames.as_micros(),
+                        t_regions.as_micros()
+                    );
+                }
                 if let Some((frames_before, regions_before)) = &verify_against {
                     assert!(
                         frames_before == resolved && regions_before == region_resolved,

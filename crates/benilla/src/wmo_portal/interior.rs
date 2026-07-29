@@ -371,9 +371,36 @@ pub(crate) fn indoors_at<'a>(
     feet_world: Vec3,
 ) -> bool {
     matches!(
-        indoor_verdict_at(wmos, instances, streamer, adt_tiles, feet_world),
+        indoor_verdict_at(
+            wmos,
+            instances,
+            streamer,
+            adt_tiles,
+            feet_world,
+            LightAttach::DownRay,
+        ),
         IndoorVerdict::DayNight | IndoorVerdict::Baked { .. }
     )
+}
+
+/// Which ATTACH a light node uses to find its WMO group — the reference's `[node+0x90]` bit 13
+/// (`0x2000`), written once at node creation from the descriptor TYPEMASK (`0x613e10`/`0x670db0`)
+/// and read by the mode dispatch `0x6a86d0` (`6a8714 test ah,0x20`; `6a871c jmp 0x6a8c10` SET /
+/// `6a8721 jmp 0x6a8a20` CLEAR). **There is no subclass or vtable test anywhere in the dispatch** —
+/// the mode bit is the whole fork, so the two lanes are a property of the OBJECT KIND, not of the
+/// shading law (which stays one law for every entity M2; see [`crate::interior`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LightAttach {
+    /// Units, players, and ADT/WMO doodads — the down-ray attach `0x6a8a20`, cast from the node
+    /// POSITION (`[node+0xa8]`, the env-query position `0x6717d0` syncs at `671a48`).
+    DownRay,
+    /// GameObjects — the CONTAINMENT attach `0x6a8c10` → `0x6a8ed0`, whose segment starts at
+    /// `[node+0x5c]`: the node's world bounding-box **centre** (`0x6717d0` writes the world box to
+    /// `node+0x44` at `671973`, then `671978 call 0x621160` sums min+max and `× [0x7ffa24]=0.5`
+    /// lands the centre at `node+0x5c`). Its face query casts DOWN 1000 and, on a miss, **retries
+    /// UP 1000** (`6a908d..6a90c7`) — a GameObject may sit a hair under its own floor and still
+    /// belong to the room.
+    Containment,
 }
 
 /// A position's resolved interior LIGHT verdict — [`indoors_at`] plus, for the GameObject lane,
@@ -414,14 +441,23 @@ pub(crate) enum IndoorVerdict {
 /// `0x69e4c0` — wow-re `wmo-lit-selector.md`, trace-decisive on the abbey INNBENCH draws). The
 /// MOLR gate is the FOOTPRINT hit's group — the group whose bake the sample took (the byte
 /// plumbing between the two rays is OPEN; the abbey benches satisfy both readings).
+///
+/// `anchor_world` is **the attach's own anchor**, not "the position": the node position for
+/// [`LightAttach::DownRay`], the model's world bounding-box CENTRE for
+/// [`LightAttach::Containment`] (see the enum for the bytes). A GameObject's origin routinely sits
+/// at or under its own floor — a Stratholme portcullis spawns 15 cm below the corridor slab — and
+/// a ray from there leaves the building entirely; the reference never casts from there (0776).
+/// `Containment` also takes the reference's UPWARD retry on the footprint leg (`6a908d`), so an
+/// object resting a hair below its floor still bakes from it.
 pub(crate) fn indoor_verdict_at<'a>(
     wmos: &Assets<WmoModel>,
     instances: impl IntoIterator<Item = &'a WmoPortalInstance>,
     streamer: &TerrainStreamer,
     adt_tiles: &Assets<AdtTile>,
-    feet_world: Vec3,
+    anchor_world: Vec3,
+    attach: LightAttach,
 ) -> IndoorVerdict {
-    let probe_world = feet_world + Vec3::Y * POSITION_PROBE_LIFT;
+    let probe_world = anchor_world + Vec3::Y * POSITION_PROBE_LIFT;
     let terrain = terrain_height_under(streamer, adt_tiles, probe_world);
     let mut best: Option<(DownRayClaim, &WmoModel, &WmoPortalInstance, [f32; 3])> = None;
     for inst in instances {
@@ -455,8 +491,17 @@ pub(crate) fn indoor_verdict_at<'a>(
     if claim.outdoor {
         return IndoorVerdict::OutdoorsOnWmo;
     }
-    // Indoors — run the footprint sample on the winning placement's render mesh.
-    let Some((gi, mocv, mopy_daynight)) = footprint_sample(model, probe_local) else {
+    // Indoors — run the footprint sample on the winning placement's render mesh. The containment
+    // lane retries UPWARD on a miss (`6a908d..6a90c7`); the down-ray lane has no such leg here (its
+    // own retry is a second DOWNWARD cast from 1000 above, `6a8ab0`, which cannot reach a face
+    // above the anchor either). Bounded to the placement the claim already won: an unbounded
+    // upward claim would let a bridge deck 40 yd overhead adopt a unit standing in the open.
+    let sample = footprint_sample(model, probe_local).or_else(|| {
+        matches!(attach, LightAttach::Containment)
+            .then(|| footprint_sample_above(model, probe_local))
+            .flatten()
+    });
+    let Some((gi, mocv, mopy_daynight)) = sample else {
         return IndoorVerdict::DayNight;
     };
     if mopy_daynight {
@@ -493,6 +538,27 @@ pub(super) fn footprint_sample(
     model: &WmoModel,
     probe_local: [f32; 3],
 ) -> Option<(usize, [u8; 3], bool)> {
+    footprint_scan(model, probe_local, false)
+}
+
+/// The containment attach's **upward retry** (`6a908d`: the down leg missed, so the segment is
+/// rebuilt from the anchor to `anchor.z + 1000` and re-cast): the nearest render-mesh face ABOVE
+/// the probe, same group/MOCV/MOPY answer as [`footprint_sample`]. A GameObject whose origin — or
+/// even whose box centre — settles below its own floor is still lit by that floor.
+pub(super) fn footprint_sample_above(
+    model: &WmoModel,
+    probe_local: [f32; 3],
+) -> Option<(usize, [u8; 3], bool)> {
+    footprint_scan(model, probe_local, true)
+}
+
+/// The shared body of the two footprint legs: `up` flips which side of the probe a face must lie
+/// on and which of the candidates wins (nearest, in the cast's own direction).
+fn footprint_scan(
+    model: &WmoModel,
+    probe_local: [f32; 3],
+    up: bool,
+) -> Option<(usize, [u8; 3], bool)> {
     let (px, py, pz) = (probe_local[0], probe_local[1], probe_local[2]);
     let mut best: Option<(f32, usize, [f32; 3], bool)> = None;
     for (gi, fp) in model.group_footprints.iter().enumerate() {
@@ -504,7 +570,8 @@ pub(super) fn footprint_sample(
         // entity scanned every interior group of the whole model — the Stormwind live-frame cost
         // (decision 0364).
         if let Some(Some((min, max))) = model.group_footprint_bounds.get(gi) {
-            if px < min[0] || px > max[0] || py < min[1] || py > max[1] || min[2] > pz {
+            let past_probe = if up { max[2] < pz } else { min[2] > pz };
+            if px < min[0] || px > max[0] || py < min[1] || py > max[1] || past_probe {
                 continue;
             }
         }
@@ -534,7 +601,11 @@ pub(super) fn footprint_sample(
                 return;
             }
             let z = wa * a[2] + wb * b[2] + wc * c[2];
-            if z > pz || best.is_some_and(|(bz, ..)| z < bz) {
+            let (past_probe, farther) = match up {
+                false => (z > pz, best.is_some_and(|(bz, ..)| z < bz)),
+                true => (z < pz, best.is_some_and(|(bz, ..)| z > bz)),
+            };
+            if past_probe || farther {
                 return;
             }
             let (Some(ca), Some(cb), Some(cc)) = (
@@ -740,6 +811,45 @@ mod tests {
         assert_eq!(footprint_sample(&model, [-1.0, -1.0, -1.0]), None);
         model.group_footprint_bounds = footprint_tri_bounds(&model.group_footprints);
         assert_eq!(footprint_sample(&model, [-1.0, -1.0, -1.0]), None);
+    }
+
+    /// **The containment attach's upward retry** (`6a908d..6a90c7`): the down leg missed, so the
+    /// segment is re-cast toward `anchor.z + 1000` and the nearest face ABOVE answers — with the
+    /// same group / MOCV / MOPY it would have given from below. This is the leg a GameObject
+    /// resting a hair under its own floor needs; the down-ray lane never takes it (decision 0776).
+    #[test]
+    fn the_upward_retry_finds_the_floor_a_sunk_object_sits_under() {
+        let mut model = bare_model();
+        model.group_footprints = two_group_footprints();
+        model.group_footprint_bounds = footprint_tri_bounds(&model.group_footprints);
+
+        // Group 0's face is at z = 0, over the column (-1,-1). Sit 2 cm UNDER it, as a portcullis
+        // spawned below its own slab does.
+        let sunk = [-1.0, -1.0, -0.02];
+        assert_eq!(
+            footprint_sample(&model, sunk),
+            None,
+            "the downward leg has nothing below it — this is the whole defect"
+        );
+        assert_eq!(
+            footprint_sample_above(&model, sunk),
+            Some((0, [10, 20, 30], false)),
+            "the retry finds the slab it is sunk into, and reads the same bake"
+        );
+        // From above, the two legs swap roles — the retry must not become a second downward scan.
+        let over = [-1.0, -1.0, 2.0];
+        assert_eq!(
+            footprint_sample(&model, over),
+            Some((0, [10, 20, 30], false))
+        );
+        assert_eq!(
+            footprint_sample_above(&model, over),
+            None,
+            "nothing above the probe, so the retry declines rather than re-finding the floor"
+        );
+        // The upward leg honours the broad phase the same way: group 1's face (z = 5) sits far off
+        // in XY, so a column that misses it in XY misses it looking up too.
+        assert_eq!(footprint_sample_above(&model, [-1.0, -1.0, 1.0]), None);
     }
 
     /// The derived bounds cover only vertices a face actually references — an orphan vertex

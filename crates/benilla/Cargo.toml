@@ -10,6 +10,11 @@ description = "The Bevy app: terrain viewer -> integrated debug client"
 # hot systems) + render-pass CPU timings to a Tracy capture (decision 0026 — the dev/player seam;
 # a `docs/howto/running.md` this once cited never landed).
 tracy = ["bevy/trace_tracy"]
+# Opt-in Chrome-trace profiling: `cargo run --features trace_chrome` writes a `trace-<ts>.json` of
+# every system's per-run span next to the working dir. Tracy's offline twin — it needs no GUI and no
+# live capture, so a per-system cost question is answerable from a terminal (and from a run someone
+# else recorded). Aggregate it with `scripts/tracesum.py`.
+trace_chrome = ["bevy/trace_chrome"]
 
 [dependencies]
 anyhow.workspace = true

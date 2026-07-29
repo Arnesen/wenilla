@@ -57,9 +57,11 @@ pub(crate) fn spawn_model_entities(
     // and interior props (their lighting lanes don't read it).
     shade: ShadeSel,
     // `Some(slot)` for an INTERIOR M2 prop: its folded SH probe's table slot, carried per-instance
-    // in `MeshTag` (read by `wow_model.wgsl`'s interior-prop lane); such props never distance-fade.
-    // `None` everywhere else (exterior props fade; WMO groups use their own per-submesh interior
-    // flag + batch class).
+    // in `MeshTag` on EVERY batch of the model, billboard cards included (read by
+    // `wow_model.wgsl`'s interior-prop lane). Its ordinary batches are steady indoors; a card still
+    // distance-fades with its doodad, and the fade composes with the slot rather than clobbering it
+    // (decision 0778). `None` everywhere else (exterior props fade; WMO groups use their own
+    // per-submesh interior flag + batch class).
     interior_slot: Option<u16>,
     radius: f32,
     local_center: Vec3,
@@ -140,10 +142,21 @@ pub(crate) fn spawn_model_entities(
         // never seen — and an author who wanted one seen set `0x04` themselves: Elwynn's LampPost
         // carries a two-sided −X card AND a single-sided +X glow card, one model, both rules.
         let two_sided = sub.two_sided;
-        // A lit interior M2 prop submesh (not a WMO group, not an emissive billboard glow card): it carries
-        // its SH-probe slot in `MeshTag` and is steady (no distance fade), so the fade twin/`DoodadFade`
-        // are skipped — otherwise the fade system would overwrite the slot the shader reads from the tag.
-        let lit_interior_prop = !is_wmo && sub.billboard.is_none() && interior_slot.is_some();
+        // A lit interior M2 prop submesh (not a WMO group): it carries its SH-probe slot in
+        // `MeshTag`, so the shader evaluates the room's probe instead of the sky base. **Billboard
+        // batches are included** — a chain or glow card is a batch of the same model, and the
+        // reference shades every batch of an object through one light node (decision 0778). They
+        // were excluded here on a since-stale worry that the distance fade would overwrite the
+        // slot: true before the 0355 re-lane, when the slot lived in the alpha bits, and false
+        // after it — the fade writes through `mesh_tag::with_alpha`, which composes with the slot
+        // (`debug_panel::visibility`). Excluding them left an interior card on an interior-mode
+        // material with NO slot in its tag, which the shader decodes as slot **0** — whichever
+        // probe won the streaming race, the same wrong-probe read the 0355 note below describes.
+        let interior_probe = !is_wmo && interior_slot.is_some();
+        // …and the narrower half: only a NON-card interior prop is steady indoors. A card still
+        // distance-fades with its doodad (below — the halo must cull when the lamp does), so it
+        // keeps its fade twin and its `DoodadFade`.
+        let steady_interior_prop = interior_probe && sub.billboard.is_none();
         let cutout = model_material(
             mat_cache,
             materials,
@@ -171,7 +184,7 @@ pub(crate) fn spawn_model_entities(
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
         // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so it
         // cannot feather — the reference's instanceAlpha fade leaves it at full strength (0528).
-        let blend = if lit_interior_prop
+        let blend = if steady_interior_prop
             || matches!(
                 sub.blend,
                 ModelBlend::Blend | ModelBlend::Mod | ModelBlend::Mod2x
@@ -225,7 +238,7 @@ pub(crate) fn spawn_model_entities(
         // bits-0..=15 write through that re-lane, so every static interior prop read probe slot 0,
         // taking whichever probe won the streaming race — the director's inn-doodad regression.
         let mesh_tag = match interior_slot {
-            Some(slot) if lit_interior_prop => MeshTag(crate::mesh_tag::probe_bits(slot)),
+            Some(slot) if interior_probe => MeshTag(crate::mesh_tag::probe_bits(slot)),
             _ => MeshTag(alpha_bits(1.0)),
         };
         // A billboard batch (glow card / chain) faces the camera each frame, so its transform is owned
@@ -321,7 +334,7 @@ pub(crate) fn spawn_model_entities(
         }
         // Distance fade for everything except a lit interior prop (whose `MeshTag` carries colour, and
         // which is steady indoors). Adding `DoodadFade` is what makes the fade system drive the tag.
-        if !lit_interior_prop {
+        if !steady_interior_prop {
             commands.entity(entity).insert(DoodadFade {
                 radius,
                 local_center: fade_center,

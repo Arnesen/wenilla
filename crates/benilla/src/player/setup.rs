@@ -129,8 +129,12 @@ pub(super) fn setup_player(
 /// screen — never behind the glue screens, where the streamed world (25 tiles, tens of thousands
 /// of entities, MSAA 4×) otherwise renders unseen behind an opaque fullscreen glue scene every
 /// frame. The loading-screen case is load-bearing: that covered render is what compiles the
-/// world's pipelines at boot, so the first visible in-world frame doesn't hitch on shader builds.
+/// world's pipelines, so the first visible in-world frame doesn't hitch on shader builds.
 /// Capture runs boot straight `InWorld` (`CharSelectPlugin::start_in_world`) — always active there.
+///
+/// This gate stays deliberately WIDER than [`crate::schedule::world_is_live`], which decides
+/// whether the world is *loaded* at all (decision 0777): the camera must also render while the
+/// cover is up, which is exactly the window in which the world is streaming in.
 pub(super) fn gate_world_camera(
     state: Res<State<crate::char_select::ClientState>>,
     loading: Res<crate::loading_screen::LoadingScreen>,

@@ -29,13 +29,13 @@ use super::framing::{attachment_point, DIAG_TO_VERT};
 use super::{
     aim, body_frame, new_target_image, spawn_booth_model, Booth, BoothBillboardSpec, BoothCam,
     BoothLight, BoothMotion, BoothPart, BoothRider, Booths, PortraitImages, PortraitSource,
-    PAPERDOLL_LAYER,
+    GLUE_LAYER,
 };
 
 /// The glue booth slot token (its key in [`super::PortraitImages`] / [`Booths`]).
 pub(crate) const GLUE_SLOT: &str = "glue";
-/// The glue booth's render layer — the next past the paper doll's.
-const GLUE_LAYER: usize = PAPERDOLL_LAYER + 1;
+// `GLUE_LAYER` is defined with the rest of the booth ladder in [`super`] — defining it here, from
+// the same `PAPERDOLL_LAYER + 1` the inspect booth used, is exactly how the two collided.
 /// The scene-less fallback target resolution — with a scene up the target resizes to the window
 /// (the glue screens are fullscreen renders).
 const GLUE_SIZE: u32 = 1024;
@@ -680,15 +680,26 @@ pub(super) fn sync_glue_scene(
 /// Resize the booth's render target if it isn't already `w`×`h` (content is discarded — the next
 /// frame repaints it whole).
 fn resize_target(images: &mut Assets<Image>, target: &Handle<Image>, w: u32, h: u32) {
-    if let Some(image) = images.get_mut(target) {
-        if image.width() != w || image.height() != h {
+    // Through the house write-gate ([`crate::assets::write_gated`]), for the reason that helper
+    // exists: `Assets::get_mut` queues `AssetEvent::Modified` unconditionally — it cannot know
+    // whether the caller wrote anything — and a Modified image is re-extracted and re-uploaded
+    // whole by `prepare_assets<GpuImage>` next frame. This target is the glue scene's FULLSCREEN
+    // render target: at 3200×1800 it is 22 MB, and taking the borrow once per frame just to
+    // compare two u32s re-uploaded all 22 MB every frame on a screen where nothing moves
+    // (~1.3 GB/s; measured with `WOW_ASSET_CHURN=1`, decision 0772). This was the ONE asset write
+    // site in the tree not already behind that gate.
+    crate::assets::write_gated(
+        images,
+        target,
+        |image| image.width() != w || image.height() != h,
+        |image| {
             image.resize(Extent3d {
                 width: w,
                 height: h,
                 depth_or_array_layers: 1,
             });
-        }
-    }
+        },
+    );
 }
 
 /// Re-bake the glue booth when the assembled parts change (a dial moved, a different character
@@ -912,6 +923,62 @@ mod tests {
     use super::*;
     use benilla_assets::ModelLight;
     use benilla_formats::M2Light;
+
+    /// A same-size `resize_target` must not touch the image at all. `Assets::get_mut` queues
+    /// `AssetEvent::Modified` whether or not the caller writes, and this target is the glue
+    /// scene's fullscreen render target — one needless borrow per frame re-uploaded 22 MB per
+    /// frame at 3200×1800 while the login screen sat still (decision 0772).
+    #[test]
+    fn a_same_size_resize_does_not_mark_the_target_modified() {
+        use bevy::asset::AssetEvent;
+        use bevy::image::Image;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>();
+        let handle = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            images.add(Image::new_target_texture(
+                64,
+                64,
+                bevy::render::render_resource::TextureFormat::bevy_default(),
+                None,
+            ))
+        };
+        // Drain the Added event from the insert above.
+        app.update();
+        let drain = |app: &mut App| {
+            let world = app.world_mut();
+            let mut events = world.resource_mut::<Messages<AssetEvent<Image>>>();
+            let n = events.drain().count();
+            n
+        };
+        drain(&mut app);
+
+        // Same size, ten frames: silence.
+        for _ in 0..10 {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            resize_target(&mut images, &handle, 64, 64);
+        }
+        app.update();
+        assert_eq!(
+            drain(&mut app),
+            0,
+            "a no-op resize must not queue AssetEvent::Modified — every one of those re-uploads \
+             the whole target to the GPU"
+        );
+
+        // A real size change still lands.
+        {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            resize_target(&mut images, &handle, 128, 96);
+        }
+        app.update();
+        assert!(drain(&mut app) > 0, "a real resize must still be published");
+        let images = app.world().resource::<Assets<Image>>();
+        let image = images.get(&handle).expect("target still there");
+        assert_eq!((image.width(), image.height()), (128, 96));
+    }
 
     fn light(
         light_type: u16,

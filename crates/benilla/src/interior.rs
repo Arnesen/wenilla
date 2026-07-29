@@ -15,9 +15,19 @@
 //!   The abbey capture's flat-lit characters were this state, not a character-path law; the pair
 //!   itself is NEVER indoor-modified. [`InteriorKind::Matte`] keeps it for bake-less parts.
 //!
+//! One SHADING law, **two ATTACHES.** The law above is type-blind; how a node *finds* its group is
+//! not. `0x6a86d0` forks on `[node+0x90]` bit 13 (`6a8714 test ah,0x20`), written at node creation
+//! from the descriptor TYPEMASK — units/players/doodads take the down-ray attach `0x6a8a20` from
+//! the node POSITION, **GameObjects take the containment attach `0x6a8c10` from the node's world
+//! bounding-box CENTRE** (`[node+0x5c]`), whose face query retries UPWARD on a miss. There is no
+//! subclass test anywhere in the dispatch: the mode bit is the whole fork. We carry it as
+//! [`ContainmentAttach`] on the anchor and as [`crate::wmo_portal::LightAttach`] through the
+//! verdict. Decision 0776 — a GameObject's origin routinely sits at or below its own floor, and
+//! sharing the unit down-ray put those objects outdoors in the middle of a building.
+//!
 //! Entities move and stream independently of their building, so [`classify_entity_interior`]
 //! re-tests them against the placed WMOs. The indoor test is the client's own: a faces-only
-//! down-ray from the position onto the placed groups' geometry
+//! ray from the attach's anchor onto the placed groups' geometry
 //! ([`crate::wmo_portal::indoor_verdict_at`] — the LIGHTING-class fork `[node+0xc]`, outdoor iff
 //! the hit group's `MOGI & 0x48` — NOT the zone-text `[node+0x90]` bit-0 predicate, which keys on
 //! `0x8` alone and so calls the `0x40`-only city street groups "indoors"; decision 0475 — and an
@@ -101,6 +111,44 @@ pub(crate) enum InteriorKind {
     },
 }
 
+/// The interior-light membership of ONE M2 batch — the single place a spawn site decides whether
+/// a batch joins its model's law, and under which [`InteriorKind`]. `None` classifies the batch
+/// out entirely (a WMO-display part, which has no interior variant to swap to).
+///
+/// **Every batch of a model goes through this, cards included.** The reference has one light node
+/// per object and every batch shades through the same node fill (wow-re `unit-m2-shader-light.md`);
+/// a billboard BONE re-orients geometry, it does not re-route light. Our billboard batches spawn as
+/// world ROOTS so the facing system can own their transform (0153) — an implementation detail that
+/// must not reach the light, and which did while this policy was written out longhand at each spawn
+/// site and one of them omitted it: a Stratholme hanging sign baked from the room it hangs in while
+/// its own chain cards stayed on the exterior material and lit from the sky (decision 0778).
+///
+/// `anchor` is the model's NET ENTITY root for every caller — body mesh, held item, and card alike
+/// — so a model can never split across the two light laws ([`BodyBakeCenter`] for why an item
+/// aliases its wearer rather than folding from its own position). Each site still writes its own
+/// [`MeshTag`](bevy::mesh::MeshTag): the rig slot and the fade alpha are that site's to seed, and
+/// the classifier composes into them.
+pub(crate) fn part_interior_lit(
+    exterior: &Handle<WowModelMaterial>,
+    interior: Option<&Handle<WowModelMaterial>>,
+    bake: Option<&Handle<WowModelMaterial>>,
+    center: Vec3,
+    anchor: Entity,
+) -> Option<(InteriorLit, ClassifiedBy)> {
+    interior?;
+    let kind = match bake {
+        Some(material) => InteriorKind::Bake {
+            material: material.clone(),
+            center,
+        },
+        None => InteriorKind::Matte,
+    };
+    Some((
+        InteriorLit::new(kind, exterior.clone()),
+        ClassifiedBy(anchor),
+    ))
+}
+
 /// The law a part currently renders under (`None` until first classified).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AppliedLaw {
@@ -117,8 +165,22 @@ enum AppliedLaw {
 /// held items included. The reference has exactly one light node per unit; an equipped item M2
 /// aliases the wearer's collector by pointer (`[item+0x3b8]=[wearer+0x3b8]`, `0x718960` — wow-re
 /// `unit-light-combine-storm.md`), so an item never folds from its own carried position.
+///
+/// For a [`ContainmentAttach`] anchor it is also the **attach anchor** — the reference's
+/// `[node+0x5c]`, the same world point (decision 0776).
 #[derive(Component, Clone, Copy)]
 pub(crate) struct BodyBakeCenter(pub(crate) Vec3);
+
+/// This anchor's light node runs the **containment attach** (`0x6a8c10`), not the down-ray one —
+/// the reference's `[node+0x90]` bit 13, set at node creation from the descriptor TYPEMASK
+/// (`0x613e10`/`0x670db0`) and dispatched at `0x6a86d0`. In 1.12 exactly one object class carries
+/// it: **GameObjects**. See [`crate::wmo_portal::LightAttach`] for the two lanes at the bytes, and
+/// decision 0776 for what it corrects — a GameObject's origin is frequently at or below its own
+/// floor (a Stratholme portcullis spawns 15 cm under the corridor slab), so the down-ray this lane
+/// used to share left it outside the building on the outdoor light while its identical neighbour
+/// two doors down baked from the same floor.
+#[derive(Component)]
+pub(crate) struct ContainmentAttach;
 
 /// The part → anchor edge of the classifier's registry (0734): every [`InteriorLit`] part names
 /// its NET ENTITY root here — body parts and held/equipped items alike (module docs — the
@@ -148,6 +210,21 @@ pub(crate) struct InteriorAnchor {
     /// joining a matte-resolved anchor must force a re-resolve (the reauthor drain checks this),
     /// or it would ride the matte fallback until the anchor next moves.
     kind_bake: bool,
+}
+
+impl InteriorAnchor {
+    /// One line naming the lane this anchor's parts render under — the inspect card's light
+    /// readout (`crate::interact`). "Which lane is this object on?" was the exact question decision
+    /// 0776 was found by, and answering it took a rebuild with `WOW_INTERIOR_LOG` plus an offline
+    /// `WOW_LIGHT_AT` probe; on the card it is a hover. Reads "exterior", "interior day/night", or
+    /// "interior bake (probe N)".
+    pub(crate) fn law_label(&self) -> String {
+        match self.law {
+            AppliedLaw::Exterior => "exterior".into(),
+            AppliedLaw::Matte => "interior day/night".into(),
+            AppliedLaw::Bake(slot) => format!("interior bake (probe {slot})"),
+        }
+    }
 }
 
 /// Parts whose material/tag need re-authoring from their anchor's current law — the classifier's
@@ -307,6 +384,8 @@ pub(crate) fn classify_entity_interior(
         &GlobalTransform,
         &LitParts,
         Option<&mut InteriorAnchor>,
+        Has<ContainmentAttach>,
+        Option<&BodyBakeCenter>,
     )>,
     mut nodes: Query<&mut crate::entity_shade::GroundShade>,
     bake_states: Query<&BakeState>,
@@ -335,7 +414,7 @@ pub(crate) fn classify_entity_interior(
     // Anchors that wanted a resolve but had every part fade-excluded — the appear-fade lockout.
     let mut n_fade_blocked = 0usize;
     let mut resolve_us = 0.0f32;
-    for (anchor, anchor_t, lit_parts, mut state) in &mut anchors {
+    for (anchor, anchor_t, lit_parts, mut state, containment, bake_center) in &mut anchors {
         n_anchors += 1;
         let pos = anchor_t.translation();
         let had_state = state.is_some();
@@ -378,6 +457,7 @@ pub(crate) fn classify_entity_interior(
         let seated = seats.get(anchor).ok().map(|s| s.0);
         n_resolved += 1;
         let _r = std::time::Instant::now();
+        let (attach, attach_at) = attach_anchor(containment, bake_center, anchor_t);
         let law = resolve_anchor_law(
             &mut commands,
             &mut probes,
@@ -389,6 +469,8 @@ pub(crate) fn classify_entity_interior(
             &mut nodes,
             anchor,
             anchor_t,
+            attach,
+            attach_at,
             &kind,
             seated,
         );
@@ -421,16 +503,34 @@ pub(crate) fn classify_entity_interior(
         }
         // `WOW_INTERIOR_LOG=1`: print interior classifications — the live-probe instrument for
         // "did this entity actually classify indoors, and under which law?". Scoped to interior
-        // verdicts (plus interior→exterior flips) so the world's exterior masses stay silent.
+        // verdicts (plus interior→exterior flips) so the world's exterior masses stay silent. The
+        // ATTACH and the point it probed are printed too (0776): a line that says only "exterior"
+        // can't be read without knowing which lane produced it, and the two lanes now probe
+        // different points.
         if (law != AppliedLaw::Exterior || had_state)
             && std::env::var_os("WOW_INTERIOR_LOG").is_some()
         {
+            // The PART COUNT is load-bearing, not decoration: a lane readout says which law the
+            // model took, never which of its batches actually joined. A billboard card that
+            // silently classified out is invisible to every other reading of this line — the
+            // Stratholme sign baked correctly *and* its chains lit from the sky, and the anchor
+            // log said only "INTERIOR bake" for weeks (decision 0778). Compare it against the
+            // model's batch count (`benilla-extract m2batch <model>`).
             eprintln!(
-                "[interior] t {:.2} anchor {anchor:?} at ({:.1}, {:.1}, {:.1}) -> {}",
+                "[interior] t {:.2} anchor {anchor:?} ({} parts) at ({:.1}, {:.1}, {:.1}) {} probe \
+                 ({:.1}, {:.1}, {:.1}) -> {}",
                 time.elapsed_secs(),
+                lit_parts.len(),
                 pos.x,
                 pos.y,
                 pos.z,
+                match attach {
+                    crate::wmo_portal::LightAttach::Containment => "containment",
+                    crate::wmo_portal::LightAttach::DownRay => "down-ray",
+                },
+                attach_at.x,
+                attach_at.y,
+                attach_at.z,
                 match law {
                     AppliedLaw::Exterior => "exterior".to_string(),
                     AppliedLaw::Matte => "INTERIOR matte".to_string(),
@@ -460,7 +560,7 @@ pub(crate) fn classify_entity_interior(
         let Ok(edge) = part_anchors.get(part) else {
             continue; // despawned since enqueue
         };
-        let Ok((_, _, _, mut state)) = anchors.get_mut(edge.0) else {
+        let Ok((_, _, _, mut state, ..)) = anchors.get_mut(edge.0) else {
             continue;
         };
         let Some(state) = state.as_deref_mut() else {
@@ -555,6 +655,27 @@ fn write_part_law(
     true
 }
 
+/// The attach and its anchor point — one choice, because `0x6a86d0`'s mode fork picks both the
+/// routine and the field it reads: a GameObject attaches by CONTAINMENT from its world
+/// bounding-box centre (`[node+0x5c]`), everything else DOWN-RAYS from its position
+/// (`[node+0xa8]`). Decision 0776.
+fn attach_anchor(
+    containment: bool,
+    bake_center: Option<&BodyBakeCenter>,
+    anchor_t: &GlobalTransform,
+) -> (crate::wmo_portal::LightAttach, Vec3) {
+    use crate::wmo_portal::LightAttach;
+    match (containment, bake_center) {
+        (true, Some(BodyBakeCenter(center))) => {
+            (LightAttach::Containment, anchor_t.transform_point(*center))
+        }
+        // A containment anchor whose body model carries no bounds yet degrades to its origin — the
+        // same point the down-ray lane uses, never a wrong one.
+        (true, None) => (LightAttach::Containment, anchor_t.translation()),
+        (false, _) => (LightAttach::DownRay, anchor_t.translation()),
+    }
+}
+
 /// Resolve one anchor's indoor law: the down-ray verdict, the node's target/seed updates, and for
 /// the Bake law the footprint fold into the anchor's OWNED probe slot. (The settled ramp-only
 /// refold from the cached ray products lives in the caller's walk — this always rays.) `seated` —
@@ -576,11 +697,19 @@ fn resolve_anchor_law(
     nodes: &mut Query<&mut crate::entity_shade::GroundShade>,
     anchor: Entity,
     anchor_t: &GlobalTransform,
+    attach: crate::wmo_portal::LightAttach,
+    attach_at: Vec3,
     kind: &InteriorKind,
     seated: Option<u16>,
 ) -> AppliedLaw {
-    let pos = anchor_t.translation();
-    let verdict = indoor_verdict_at(wmos, instances.iter(), streamer, adt_tiles, pos);
+    let verdict = indoor_verdict_at(
+        wmos,
+        instances.iter(),
+        streamer,
+        adt_tiles,
+        attach_at,
+        attach,
+    );
     // Publish the outdoor GROUND kind to the node before the law resolves: standing on an
     // outdoor-class WMO surface (street/deck/porch) forces the lit 2.5 target — the WMO-linked
     // skip-shadow bit, byte-verified (0477/0480; `entity_shade` reads it).
@@ -847,6 +976,85 @@ mod tests {
         );
     }
 
+    /// Decision 0778: a model's BILLBOARD batch takes the same law as its mesh batches. The card
+    /// spawns as a world ROOT (the facing system owns its transform, 0153) rather than as a child
+    /// of the model, and that is the whole difference — it goes through the same
+    /// [`part_interior_lit`] and names the same anchor, so both converge on the same law. The bug
+    /// this pins: a Stratholme hanging sign baked from its room while its own chain cards, never
+    /// classified at all, stayed on the exterior material and lit from the sky.
+    ///
+    /// Also pins the classify-OUT arm — a WMO-display part builds no interior variant and must not
+    /// join at all, or it would be relit off a material it doesn't have.
+    #[test]
+    fn a_models_billboard_card_takes_the_same_law_as_its_mesh_parts() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let generation = world.resource::<WmoResidency>().generation;
+        let slot = world
+            .resource_mut::<PropProbes>()
+            .alloc_owned([Vec4::ZERO; 7])
+            .unwrap();
+        let anchor = world
+            .spawn((
+                GlobalTransform::default(),
+                PropProbeSlot(slot),
+                InteriorAnchor {
+                    law: AppliedLaw::Bake(slot),
+                    last_pos: Vec3::ZERO,
+                    generation,
+                    kind_bake: true,
+                },
+            ))
+            .id();
+
+        let bake = Handle::default();
+        let exterior = Handle::default();
+        let lit_for = |anchor| {
+            part_interior_lit(&exterior, Some(&exterior), Some(&bake), Vec3::ZERO, anchor)
+                .expect("an entity M2 batch always builds an interior variant")
+        };
+        // The mesh batch rides the model's tree; the card is a world root. Nothing else differs.
+        let mesh = world
+            .spawn((
+                lit_for(anchor),
+                MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+                MeshTag(0),
+            ))
+            .id();
+        world.entity_mut(anchor).add_child(mesh);
+        let card = world
+            .spawn((
+                lit_for(anchor),
+                MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+                MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+            ))
+            .id();
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        assert_eq!(
+            world.get::<InteriorLit>(card).unwrap().applied,
+            Some(AppliedLaw::Bake(slot)),
+            "the world-root card takes its model's law, not the world's"
+        );
+        assert_eq!(
+            world.get::<InteriorLit>(mesh).unwrap().applied,
+            world.get::<InteriorLit>(card).unwrap().applied,
+            "a model never splits across the two light laws at the billboard seam"
+        );
+        assert_eq!(
+            world.get::<MeshTag>(card).unwrap().0,
+            crate::mesh_tag::with_interior_probe(crate::mesh_tag::alpha_bits(1.0), slot),
+            "the law composes into the tag — the probe slot lands, the card's alpha survives"
+        );
+
+        assert!(
+            part_interior_lit(&exterior, None, None, Vec3::ZERO, anchor).is_none(),
+            "a WMO-display part has no interior variant and classifies out entirely"
+        );
+    }
+
     /// The mixed-kind hole (0734 §3): a bake-capable part joining an anchor whose law was
     /// resolved from a matte-kind part drops the anchor's record — the next run re-rays with the
     /// bake kind in reach instead of riding the matte fallback until the anchor happens to move.
@@ -1049,6 +1257,44 @@ mod tests {
             vec![part],
             "the latch is the re-entry edge"
         );
+    }
+
+    /// **The 0776 fork.** A GameObject anchor probes at its world bounding-box CENTRE, a unit at
+    /// its position — and the centre is where the difference bites: the Stratholme portcullis whose
+    /// spawn z sits 15 cm *under* the corridor slab rays into open air from its origin and into the
+    /// room from its centre (measured: `exterior` at z 125.354, `BAKE g02` at 125.40 and above).
+    /// The scale leg matters too — the centre is model-local, so a scaled placement must carry it
+    /// through the transform rather than adding a raw offset.
+    #[test]
+    fn a_gameobject_anchors_at_its_box_centre_and_a_unit_at_its_position() {
+        use crate::wmo_portal::LightAttach;
+
+        let at = GlobalTransform::from(
+            Transform::from_translation(Vec3::new(10.0, 100.0, -5.0)).with_scale(Vec3::splat(2.0)),
+        );
+        let centre = BodyBakeCenter(Vec3::new(0.0, 3.5, 0.0));
+
+        let (attach, anchor) = attach_anchor(true, Some(&centre), &at);
+        assert_eq!(attach, LightAttach::Containment);
+        assert_eq!(
+            anchor,
+            Vec3::new(10.0, 107.0, -5.0),
+            "the containment anchor is the box centre through the placement — scale included"
+        );
+
+        let (attach, anchor) = attach_anchor(false, Some(&centre), &at);
+        assert_eq!(attach, LightAttach::DownRay);
+        assert_eq!(
+            anchor,
+            at.translation(),
+            "a unit still rays from its position, box centre or not"
+        );
+
+        // No bounds yet (the model is still streaming): degrade to the origin, never to a wrong
+        // point — the containment lane's other legs still apply.
+        let (attach, anchor) = attach_anchor(true, None, &at);
+        assert_eq!(attach, LightAttach::Containment);
+        assert_eq!(anchor, at.translation());
     }
 
     /// The teardown race, both arms: a slot seated on a live anchor swaps normally; one seated

@@ -124,6 +124,63 @@ impl Plugin for SunPlugin {
             .add_systems(
                 PostUpdate,
                 (follow_sun, follow_moons, follow_stars).in_set(crate::billboard::BillboardPlace),
+            )
+            // The WMO-skybox suppression, ordered after the resolve for the same reason
+            // `crate::sky`'s dome gate is: both backdrops must agree WITHIN a frame, or a frame
+            // shows the painted sky with our stars still punched through it.
+            .add_systems(
+                Update,
+                apply_celestial_visibility.after(crate::wmo_sky::WmoSkyResolve),
             );
+    }
+}
+
+/// Hide the sky pass's own elements while a WMO skybox owns the sky ([`crate::wmo_sky`]).
+///
+/// `CSky::Render` gates its six draws on **one shared boolean** — `0x6d49cd` sets it, a filled skybox
+/// slot clears it (`0x6d49fb`/`0x6d4a2e`, once a slot's weight exceeds `[0x808aac]` = 0.99), and
+/// `0x6d4a3b test edi,edi; je` then skips **stars, sun disc, white moon, moon02, gradient band and
+/// cloud dome together**. There is no per-element gating, which is why this is one system and not
+/// five. Live-confirmed: standing in King's Square the reference's whole `[0.975, 0.98]` slice is
+/// three `count=12` draws — the skybox cube — and nothing else.
+///
+/// **The GLARES are deliberately exempt.** They are not in this pass: the reference renders them
+/// last, on their own path (`0x483740 → 0x6d48c0 → 0x7e57e0`), which the boolean never reaches — so
+/// a sun flare still blooms over the painted sky. The gradient band is [`crate::sky`]'s dome and the
+/// cloud dome is [`crate::clouds`]'s; each keeps its own authority (decision 0025) reading this same
+/// resource.
+#[allow(clippy::type_complexity)]
+fn apply_celestial_visibility(
+    wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    mut suns: Query<(&SunSprite, &mut Visibility), Without<MoonSprite>>,
+    mut moons: Query<(&MoonSprite, &mut Visibility), Without<SunSprite>>,
+    mut stars: Query<&mut Visibility, (With<StarDome>, Without<SunSprite>, Without<MoonSprite>)>,
+) {
+    let owned = wmo_skybox.0.is_some();
+    // `Inherited`, not `Visible`: these sprites hang off the celestial rig and must keep deferring to
+    // it when the skybox stands down, exactly as the cloud dome's gate does.
+    let want = |in_sky_pass: bool| {
+        if in_sky_pass && owned {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        }
+    };
+    let set = |vis: &mut Visibility, target: Visibility| {
+        if *vis != target {
+            *vis = target;
+        }
+    };
+    for (sprite, mut vis) in &mut suns {
+        set(&mut vis, want(matches!(sprite.part, SunPart::Disc)));
+    }
+    for (sprite, mut vis) in &mut moons {
+        set(
+            &mut vis,
+            want(matches!(sprite.part, MoonPart::Disc | MoonPart::Moon02)),
+        );
+    }
+    for mut vis in &mut stars {
+        set(&mut vis, want(true));
     }
 }

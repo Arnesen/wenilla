@@ -19,7 +19,6 @@ use crate::assets::{AssetSet, RenderConfig, WorldAssets};
 use crate::player::{Player, WorldCamera};
 use crate::terrain::{WdlExt, WdlMaterial};
 use crate::world_map::{CurrentMap, MapCatalogRes};
-use crate::SPAWN_XY;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_formats::WdlFile;
 
@@ -43,7 +42,13 @@ impl Plugin for WdlPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<WdlMaterial>::default())
             .add_systems(Startup, setup_wdl.after(AssetSet::Open))
-            .add_systems(Update, stream_wdl);
+            // The distant ring is world, and follows the world's lifecycle (decision 0777): it
+            // spawns only while a character is in one, and its meshes go when they leave.
+            .add_systems(Update, stream_wdl.run_if(crate::schedule::world_is_live))
+            .add_systems(
+                OnExit(crate::char_select::ClientState::InWorld),
+                release_wdl_ring,
+            );
     }
 }
 
@@ -129,42 +134,48 @@ fn stream_wdl(
     camera: Query<&Transform, With<WorldCamera>>,
     current_map: Res<CurrentMap>,
     map_catalog: Res<MapCatalogRes>,
+    roster: Option<Res<crate::char_select::Roster>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let Some(mut streamer) = streamer else {
         return;
     };
+    // The map the *focus* is on — `CurrentMap` once the snap has landed, the picked character's
+    // own map during world entry, so the ring is never built for the map we are leaving.
+    let entry = roster
+        .as_deref()
+        .and_then(crate::char_select::Roster::pending_entry);
+    let map_id = crate::terrain_stream::focus_map(Some(current_map.0), &player, entry);
 
     // Cross-map teleport: reload the new map's `.wdl` and drop the old ring.
-    if current_map.0 != streamer.map_id {
-        if let Some(dir) = map_catalog.0.directory(current_map.0) {
+    if map_id != streamer.map_id {
+        if let Some(dir) = map_catalog.0.directory(map_id) {
             match WdlFile::load(&mut assets.chain.lock_recover(), dir) {
                 Ok(wdl) => {
                     for (_, e) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
                     streamer.wdl = wdl;
-                    streamer.map_id = current_map.0;
+                    streamer.map_id = map_id;
                 }
                 // No `.wdl` for this map (instances often lack one) → just clear the ring.
                 Err(_) => {
                     for (_, e) in streamer.loaded.drain() {
                         commands.entity(e).despawn();
                     }
-                    streamer.map_id = current_map.0;
+                    streamer.map_id = map_id;
                 }
             }
         }
     }
 
-    // Same view-focus rule as terrain_stream: avatar in third-person, free-flying camera otherwise.
-    let center = if player.active && !player.detached {
-        bevy_to_wow(player.pos)
-    } else if let Ok(cam) = camera.single() {
-        bevy_to_wow(cam.translation)
-    } else {
-        [SPAWN_XY.0, SPAWN_XY.1, 0.0]
-    };
+    // The same view focus the detailed streamer uses — literally the same function now, rather
+    // than a copy under a comment claiming they agree (decision 0777).
+    let center = crate::terrain_stream::view_focus(
+        &player,
+        camera.single().ok().map(|c| c.translation),
+        entry,
+    );
     // The FULL window, the camera's own tile INCLUDED (`tiles_in_ring`'s doc is the why — at a
     // lowered view distance the own tile *is* the near horizon, and dropping it leaves a gap the sky
     // pours through). What bounds the band on the near side is the shader's near plane, never the
@@ -219,6 +230,16 @@ fn stream_wdl(
             ))
             .id();
         streamer.loaded.insert(coords, e);
+    }
+}
+
+/// Leaving the world drops the distant ring (decision 0777). The parsed `.wdl` itself stays — it is
+/// one small file, the resource `stream_wdl` needs to exist at all, and `height_under` is read by
+/// the sun's flare-occlusion march; what costs per frame is the spawned mesh set, and that goes.
+fn release_wdl_ring(mut commands: Commands, streamer: Option<ResMut<WdlStreamer>>) {
+    let Some(mut streamer) = streamer else { return };
+    for (_, e) in streamer.loaded.drain() {
+        commands.entity(e).despawn();
     }
 }
 

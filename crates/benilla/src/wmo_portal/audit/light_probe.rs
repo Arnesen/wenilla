@@ -371,6 +371,11 @@ fn inn_corridor_light_probe() {
 /// `WOW_LIGHT_AT="map,x,y,z"` in raw WoW world coords (the tele table's numbers), so a
 /// director-reported "characters look wrong HERE" becomes one command. Born from the 2026-07-18
 /// report: chars/creatures mis-lit across the city WMOs (Booty Bay / Stormwind / Orgrimmar).
+///
+/// The point is the **down-ray lane's** anchor — a unit's position. A GameObject anchors at its
+/// world bounding-box CENTRE instead (decision 0776), so to read a GameObject's lane, probe at
+/// `z + centre` (`benilla-extract m2coll <model>` prints the box; the two Stratholme portcullises
+/// that found 0776 read `exterior` at their spawn z and `BAKE g02` at their centres).
 #[test]
 #[ignore = "needs the local game data (WoW/Data); run with --ignored"]
 fn world_point_light_probe() {

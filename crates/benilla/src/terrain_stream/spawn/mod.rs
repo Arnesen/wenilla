@@ -123,6 +123,16 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         None, // world-static placement: cards bake their world pivot
                     );
+                    // ADT doodads are exterior scene: from inside a WMO they draw only through a
+                    // portal window (`0x683700`, fed solely by the per-window walk `0x682fa0` — see
+                    // `crate::exterior_cull`). Tagged per submesh because a placement has no root
+                    // entity to carry the bound; the deviation from the reference's whole-object test
+                    // is recorded in `exterior_cull`'s module doc.
+                    for e in &ents {
+                        commands
+                            .entity(*e)
+                            .insert(crate::exterior_cull::ExteriorScene);
+                    }
                     // Doodad collider (avian): a static trimesh hull baked at this placement's transform,
                     // built off-thread, as its own entity so it despawns with the placement. `None` ⇒
                     // the model has no collision hull. A world-static doodad hull also clamps the

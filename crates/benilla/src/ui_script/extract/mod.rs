@@ -103,6 +103,13 @@ pub(super) fn drive_script(
     let printing = ui_cost_enabled();
     let cost_on = printing || crate::hover_log::enabled();
     let solves_before = cost_on.then(|| script.layout_solves());
+    // The measure counters are PER FRAME: `measure_fontstrings` adds to them, and both publish
+    // sites below carry them forward so the two measure passes sum into one frame's row. Nothing
+    // else zeroes them, so without this the recorder's "re-shaped strings" column is a lifetime
+    // total wearing a per-frame label — it read a flat 219/frame on a glue screen that measures
+    // nothing after startup, and cost one wrong theory before the CSV contradicted it.
+    ui_cost.measured = 0;
+    ui_cost.measured_texts.clear();
     let mut t_mark = cost_on.then(std::time::Instant::now);
     // Marks phase boundaries under the meter: returns μs since the previous mark and re-arms.
     // With the meter off it does nothing (a run carries six no-op calls, not six clock reads).
@@ -120,9 +127,36 @@ pub(super) fn drive_script(
         script.tick(time.delta_secs());
     }
     let us_tick = lap();
+    // ── The FontString measure round-trip, BEFORE the resolve ────────────────────────────────
+    // `fontstrings_needing_measure` reads only `region_data` — each FontString's text, font, and
+    // its explicit/wrap-pinned size — and never a resolved rect; nothing in `resolve` writes a
+    // region's size either. So the answers do not need a layout pass to exist, and running them
+    // first means the frame's ONE resolve already sees them.
+    //
+    // Measuring after the resolve (the old order) cost a second FULL solve on every frame whose
+    // text changed, because answering a measure moves the anchor solve's read set. On the shipped
+    // UI that solve walks 2,164 frames and sweeps 6,297 regions per round — for a hover whose
+    // change touches ten FontStrings inside one frame. Measured on the default UI with a tooltip
+    // content change per frame (`resolve_bench`): 3.22 ms/frame at 2.00 solves → 2.37 ms at 1.00.
+    // The live shape this comes from: a hover frame that solved cost ~10 ms against ~0.2 ms for
+    // one that did not (`WOW_HOVER_LOG`, director's run).
+    let mut measured_any = false;
+    if let Some(atlas) = font_atlas.as_deref_mut() {
+        measured_any = measure_fontstrings(&mut script, atlas, s, &mut ui_cost);
+    }
     {
         let _span = bevy::log::info_span!("ui_script: resolve").entered();
         script.resolve();
+    }
+    // The backstop: only when this frame actually measured something can a fresh request exist
+    // that the pass above could not have seen. Empty on every frame in the bench — and skipping it
+    // otherwise keeps the quiet frame at ONE sweep of the 6,297-region map, not two.
+    if measured_any {
+        if let Some(atlas) = font_atlas.as_deref_mut() {
+            if measure_fontstrings(&mut script, atlas, s, &mut ui_cost) {
+                script.resolve();
+            }
+        }
     }
     let us_resolve = lap();
     let measure_span = bevy::log::info_span!("ui_script: measure").entered();
@@ -155,52 +189,6 @@ pub(super) fn drive_script(
                 script.set_digit_advances(&adv);
                 *digits_fed = true;
             }
-        }
-    }
-    // The measure round-trip (the layout↔font-engine seam): height-less FontStrings ask the host
-    // for their wrapped text size; answer from the atlas and resolve again so anchors hanging off
-    // a text's bottom (the gossip option rows → the greeting) land this same frame. The cache keys
-    // keep the request list empty on quiet frames, so the second resolve is rare.
-    if let Some(atlas) = font_atlas.as_deref_mut() {
-        let requests = script.fontstrings_needing_measure();
-        // The recorder's churn column: WHICH strings a frame had to re-shape. A steady hover that
-        // keeps asking is the whole question (`hover_log`), and the answer is a string, not a
-        // count — so the first few come along by name.
-        if crate::hover_log::enabled() {
-            ui_cost.measured = requests.len();
-            ui_cost.measured_texts = requests
-                .iter()
-                .take(3)
-                .map(|r| r.text.chars().take(40).collect::<String>())
-                .collect();
-        }
-        if !requests.is_empty() {
-            let measures: Vec<(u32, f32, f32, u64)> = requests
-                .iter()
-                .map(|r| {
-                    let (w, h) = crate::ui_text::measure_text(
-                        atlas,
-                        &r.text,
-                        r.wrap_width.map(|w| w * s),
-                        crate::ui_text::FontSpec {
-                            path: r.font.as_deref(),
-                            // The render pass's exact drawn px (two regimes × the virtual
-                            // scale) — measure == render, and Lua's GetStringWidth/Height echo
-                            // the DRAWN size (0x772890); results divide back to UI units below.
-                            height: crate::ui_text::drawn_px(r.height, r.text_height, s),
-                            // The TRUE outline: THICK biases the client's step law (+1px per
-                            // glyph — GlyphStepBase 0x5ca2b0, THICK-only per outline-bake-tint.md)
-                            // and any outline adds the +2r line pitch, so measure must see it.
-                            outline: r.outline,
-                            paint_halo: true, // measure never paints; irrelevant here
-                            alpha_gradient: None, // alpha never changes metrics
-                        },
-                    );
-                    (r.id, w / s, h / s, r.key)
-                })
-                .collect();
-            script.set_measured_text(&measures);
-            script.resolve();
         }
     }
     // The message-line half of the round-trip: chat ring lines ask for their wrapped ROW COUNT at
@@ -619,6 +607,59 @@ pub(super) fn drive_script(
             );
         }
     }
+}
+
+/// One pass of the FontString measure round-trip: hand every unmeasured FontString to the font
+/// engine and push the answers back. Returns whether anything was measured — the caller's gate for
+/// its backstop pass (see the call site for why the order matters).
+fn measure_fontstrings(
+    script: &mut UiScript,
+    atlas: &mut UiFontAtlas,
+    s: f32,
+    ui_cost: &mut crate::hover_log::UiFrameCost,
+) -> bool {
+    let requests = script.fontstrings_needing_measure();
+    // The recorder's churn column: WHICH strings a frame had to re-shape. A steady hover that
+    // keeps asking is the whole question (`hover_log`), and the answer is a string, not a count —
+    // so the first few come along by name.
+    if crate::hover_log::enabled() {
+        ui_cost.measured += requests.len();
+        ui_cost.measured_texts.extend(
+            requests
+                .iter()
+                .take(3)
+                .map(|r| r.text.chars().take(40).collect::<String>()),
+        );
+    }
+    if requests.is_empty() {
+        return false;
+    }
+    let measures: Vec<(u32, f32, f32, u64)> = requests
+        .iter()
+        .map(|r| {
+            let (w, h) = crate::ui_text::measure_text(
+                atlas,
+                &r.text,
+                r.wrap_width.map(|w| w * s),
+                crate::ui_text::FontSpec {
+                    path: r.font.as_deref(),
+                    // The render pass's exact drawn px (two regimes × the virtual scale) —
+                    // measure == render, and Lua's GetStringWidth/Height echo the DRAWN size
+                    // (0x772890); results divide back to UI units below.
+                    height: crate::ui_text::drawn_px(r.height, r.text_height, s),
+                    // The TRUE outline: THICK biases the client's step law (+1px per glyph —
+                    // GlyphStepBase 0x5ca2b0, THICK-only per outline-bake-tint.md) and any outline
+                    // adds the +2r line pitch, so measure must see it.
+                    outline: r.outline,
+                    paint_halo: true,     // measure never paints; irrelevant here
+                    alpha_gradient: None, // alpha never changes metrics
+                },
+            );
+            (r.id, w / s, h / s, r.key)
+        })
+        .collect();
+    script.set_measured_text(&measures);
+    true
 }
 
 /// The held-cursor icon quad (CAPTURE-ONLY — see the module doc): a 32×32 icon TOP-LEFT anchored

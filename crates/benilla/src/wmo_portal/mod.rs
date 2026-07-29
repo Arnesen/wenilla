@@ -37,7 +37,8 @@ mod seed;
 use fog::select_wmo_fog;
 pub use fog::{CameraWmoFog, WmoFogTarget};
 pub(crate) use interior::{
-    indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, INTERIOR_PROBE_HEIGHT,
+    indoor_verdict_at, indoors_at, terrain_z_local, IndoorVerdict, LightAttach,
+    INTERIOR_PROBE_HEIGHT,
 };
 use interior::{track_area_interior, track_current_interior, track_unit_interiors};
 pub use interior::{CurrentAreaInterior, CurrentWmoInterior, PlayerWmoRoom, UnitWmoRoom};
@@ -100,8 +101,29 @@ const MAX_ITERS: u32 = 1 << 16;
 
 /// An NDC axis-aligned rectangle `[min_x, min_y, max_x, max_y]` — the "screen frustum" carried through
 /// the flood. The full screen is `[-1, -1, 1, 1]`.
-type Rect = [f32; 4];
+pub(crate) type Rect = [f32; 4];
 const FULL_SCREEN: Rect = [-1.0, -1.0, 1.0, 1.0];
+
+/// The **deferred exterior-window worklist** — the doorways through which the outdoor world is
+/// allowed to draw this frame, as NDC rects ([`Rect`]).
+///
+/// This is the client's `[0xcbe324]` list (count `[0xcbe320]`, stride `0x14` =
+/// `{x0, y0, x1, y1, portalMaxPlaneDist}` in 0..1 screen space), which the world-scene driver
+/// `0x681070` copies into `0xc7cb7c` and then walks **once per window**, with the frustum narrowed to
+/// that window's rect. `0x682fa0` is the only producer for every exterior bucket, so no window in
+/// frame means no exterior content at all (`0x681199 jbe 0x681204` skips the whole walk on count 0).
+///
+/// [`Self::Unrestricted`] is the driver's **outside leg** (`0x6811ca`): with no containing WMO the
+/// client runs one populate walk against the literal full-screen rect, i.e. the ordinary view frustum.
+#[derive(Resource, Default, Clone, PartialEq, Debug)]
+pub enum ExteriorWindows {
+    /// The camera is not inside a WMO interior — the whole frustum is the window.
+    #[default]
+    Unrestricted,
+    /// The camera is inside. Exterior content draws only where it survives one of these sub-frusta;
+    /// **empty means nothing exterior draws**, which is the sealed-room case and is correct.
+    Windows(Vec<Rect>),
+}
 
 /// Static tag on every portal-culled WMO piece — a group render submesh, a group's MLIQ surface, a
 /// MODD prop — naming which placement instance it belongs to and which absolute group indices can
@@ -202,6 +224,7 @@ impl Plugin for WmoPortalPlugin {
             .init_resource::<CurrentAreaInterior>()
             .init_resource::<CameraWmoFog>()
             .init_resource::<CameraInteriorClaim>()
+            .init_resource::<ExteriorWindows>()
             .init_resource::<WmoCullProbe>()
             .add_systems(
                 Update,
@@ -232,6 +255,7 @@ fn compute_wmo_pvs(
     mut probe: ResMut<WmoCullProbe>,
     mut camera_fog: ResMut<CameraWmoFog>,
     mut camera_claim: ResMut<CameraInteriorClaim>,
+    mut camera_windows: ResMut<ExteriorWindows>,
 ) {
     // The world Camera3d (the egui overlay is a Camera2d). None before it spawns ⇒ leave last frame's
     // sets untouched (everything was visible, which is the safe default).
@@ -251,6 +275,8 @@ fn compute_wmo_pvs(
     // group wins both.
     let mut fog_target: Option<WmoFogTarget> = None;
     let mut claim: Option<InteriorClaim> = None;
+    // `None` here = the driver's outside leg (no containing map object): one full-screen walk.
+    let mut windows: Option<Vec<Rect>> = None;
     for (entity, mut inst) in &mut instances {
         let Some(model) = wmos.get(&inst.handle) else {
             continue;
@@ -315,6 +341,23 @@ fn compute_wmo_pvs(
                                 .zip(&inst.visible)
                                 .any(|(n, v)| *v && n.flags & 0x148 != 0),
                         });
+                        // The deferred exterior-window list is this claiming placement's alone: the
+                        // reference floods the CONTAINING map object (`[0xc7b748]`) and defers that
+                        // flood's windows. A step whose destination is EXTERIOR-flagged
+                        // (`0x148`, the same mask the weather gate uses) IS a window onto the
+                        // outdoor world, and the rect it was entered on is the accumulated clip.
+                        windows = Some(
+                            tap.entered
+                                .iter()
+                                .filter(|(to, _)| {
+                                    model
+                                        .group_nav
+                                        .get(*to)
+                                        .is_some_and(|n| n.flags & 0x148 != 0)
+                                })
+                                .map(|(_, rect)| *rect)
+                                .collect(),
+                        );
                     }
                 }
             }
@@ -326,6 +369,13 @@ fn compute_wmo_pvs(
     if camera_claim.0 != claim {
         camera_claim.0 = claim;
     }
+    let want_windows = match windows {
+        Some(rects) => ExteriorWindows::Windows(rects),
+        None => ExteriorWindows::Unrestricted,
+    };
+    if *camera_windows != want_windows {
+        *camera_windows = want_windows;
+    }
     if let Some(text) = dump_text {
         match std::fs::write(PROBE_DUMP_PATH, &text) {
             Ok(()) => info!("wmo cull trace written to {PROBE_DUMP_PATH}"),
@@ -334,15 +384,26 @@ fn compute_wmo_pvs(
     }
 }
 
-/// The per-frame [`FloodTrace`] tap: records only the down-ray's in-group seed (the camera's
-/// current group), which the interior-fog resolve reads — no duplicate down-ray.
+/// The per-frame [`FloodTrace`] tap: the down-ray's in-group seed (the camera's current group), which
+/// the interior-fog resolve reads — no duplicate down-ray — plus every portal step's *destination
+/// group and narrowed rect*, from which [`ExteriorWindows`] is built.
+///
+/// The windows come out of the flood for free: it already clips each doorway's polygon to a screen
+/// rect and intersects it with the rect it arrived on, which is precisely the accumulated
+/// screen-space AABB the reference defers per exterior window. We used to throw that rect away and
+/// keep only a boolean (`exterior_visible`, for weather).
 #[derive(Default)]
 struct SeedTap {
     in_group: Option<usize>,
+    /// `(destination group, rect it was entered on)` for every accepted portal step.
+    entered: Vec<(usize, Rect)>,
 }
 impl FloodTrace for SeedTap {
     fn seed(&mut self, seeds: DownRaySeeds) {
         self.in_group = seeds.in_group;
+    }
+    fn entered(&mut self, _from: usize, _portal: u16, to: usize, rect: Rect, _on_plane: bool) {
+        self.entered.push((to, rect));
     }
 }
 

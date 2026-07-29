@@ -114,6 +114,27 @@ const PORTRAIT_LAYER_BASE: usize = 2;
 const PAPERDOLL_LAYER: usize = PORTRAIT_LAYER_BASE + SLOTS.len();
 /// The inspect booth's render layer — the next one past the paper doll's.
 const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
+/// The glue booth's render layer — the next one past inspect's. **Every booth layer is computed
+/// HERE**, in one ladder, because they were not: the glue booth (`930b327c`) and the inspect booth
+/// (`ead3b0c9`) each defined "the next layer past the paper doll's" in a different file and landed
+/// on the same number. Two booths sharing a layer is not a cosmetic clash — `particles::sim`
+/// resolves an emitter's booth camera by *finding the first camera whose layers intersect*, so the
+/// glue scene's 28 emitters addressed the INSPECT camera, which is off at the glue screens, and the
+/// login screen's braziers simulated forever without ever being drawn (decision 0775).
+pub(super) const GLUE_LAYER: usize = INSPECT_LAYER + 1;
+
+// The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
+// and the emitter→camera match, and the failure above was silent in both.
+const _: () = assert!(
+    PAPERDOLL_LAYER != INSPECT_LAYER
+        && INSPECT_LAYER != GLUE_LAYER
+        && PAPERDOLL_LAYER != GLUE_LAYER,
+    "booth render layers must be distinct — see GLUE_LAYER"
+);
+const _: () = assert!(
+    PAPERDOLL_LAYER > PORTRAIT_LAYER_BASE + SLOTS.len() - 1,
+    "booth layers must not overlap the per-slot portrait layers"
+);
 /// The baked image is high-res (vs the ref's 64²) — the crisp modern look. Square; the UI quad
 /// shader cuts the inscribed circle at draw time (`ui_quad.wgsl`'s `circular`, the ref's stencil).
 const PORTRAIT_SIZE: u32 = 256;
@@ -336,8 +357,9 @@ struct Booths(HashMap<String, Booth>);
 
 /// Tags a booth camera with its slot token, so the model-sync pass can re-frame it per model.
 /// (`BoothCam`, not `PortraitCamera` — that name is the authored M2 rig, `benilla_assets::PortraitCamera`.)
+/// (`pub(crate)` for the particle census, which reports draws per booth token — decision 0775.)
 #[derive(Component)]
-struct BoothCam(String);
+pub(crate) struct BoothCam(pub(crate) String);
 
 /// Owns the portrait bake pipeline: the [`PortraitImages`] bridge + the per-slot off-screen booths.
 pub(crate) struct PortraitPlugin;

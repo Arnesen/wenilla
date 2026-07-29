@@ -57,6 +57,10 @@ pub(crate) struct Model {
     /// merely producing the same rects. Counts the gate's decision, so it reads the same with the
     /// `WOW_LAYOUT_VERIFY` self-check on (which re-runs skipped resolves) as with it off.
     pub(crate) layout_solves: u64,
+    /// How many fixpoint ROUNDS those solves ran in total. A solve's cost is rounds × the whole
+    /// graph, so this is what separates "the gate let too much through" from "each pass is doing
+    /// too much" — the two have different fixes.
+    pub(crate) layout_rounds: u64,
     /// Hyperlink spans per frame — `(rect, link payload, full |H…|h markup)`, rects in the
     /// engine's y-up screen space. Fed by the app each frame after it rasterizes message lines
     /// ([`super::UiScript::set_link_spans`]); consumed by the pointer's release dispatch
@@ -644,6 +648,7 @@ impl Model {
             layout_epoch: 0,
             layout_epoch_resolved: None,
             layout_solves: 0,
+            layout_rounds: 0,
             resolved: HashMap::new(),
             link_spans: HashMap::new(),
             chat_tab: false,

@@ -32,7 +32,7 @@ use bevy::prelude::*;
 use crate::billboard::BillboardCard;
 use crate::creature_anim::{HandGrip, NockLatch, NockedAmmo, VisualSheath, Wielded};
 use crate::debug_panel::{ModelKind, ModelPart};
-use crate::interior::InteriorLit;
+use crate::interior::part_interior_lit;
 use crate::items::Items;
 use crate::model_fade::{
     fade_alpha, join_unit_appear_fade, FadeMaterials, JoinedFade, PendingAppearFade, RenderFade,
@@ -874,26 +874,21 @@ pub(super) fn attach_held_items(
                     // joining the unit's appear-fade the tag carries its alpha instead — the classifier
                     // yields via its own `Without<RenderFade>`/`Without<PendingAppearFade>` filter, same
                     // as a body part.
-                    if part.material_interior.is_some() {
-                        // Anchored at the WEARER's root: an equipped item M2 aliases its wearer's
-                        // light collector by pointer (`[item+0x3b8]=[wearer+0x3b8]`, `0x718960` —
-                        // wow-re `unit-light-combine-storm.md`), so it never runs its own
-                        // classify/footprint at the carried position. The animating hand joint
-                        // once anchored these, and a swing alone could trip the resample gate and
-                        // split the shield's light from the body's (director-caught, 2026-07-13).
-                        // The fold reference is the wearer's BODY centre for the same reason.
-                        let lit_kind = match &part.material_interior_bake {
-                            Some(bake) => crate::interior::InteriorKind::Bake {
-                                material: bake.clone(),
-                                center: body_center.map_or(dm.bake_center_local, |c| c.0),
-                            },
-                            None => crate::interior::InteriorKind::Matte,
-                        };
-                        child.insert((
-                            MeshTag(crate::mesh_tag::alpha_bits(tag_alpha)),
-                            InteriorLit::new(lit_kind, part.material.clone()),
-                            crate::interior::ClassifiedBy(entity),
-                        ));
+                    // Anchored at the WEARER's root: an equipped item M2 aliases its wearer's
+                    // light collector by pointer (`[item+0x3b8]=[wearer+0x3b8]`, `0x718960` —
+                    // wow-re `unit-light-combine-storm.md`), so it never runs its own
+                    // classify/footprint at the carried position. The animating hand joint
+                    // once anchored these, and a swing alone could trip the resample gate and
+                    // split the shield's light from the body's (director-caught, 2026-07-13).
+                    // The fold reference is the wearer's BODY centre for the same reason.
+                    if let Some(lit) = part_interior_lit(
+                        &part.material,
+                        part.material_interior.as_ref(),
+                        part.material_interior_bake.as_ref(),
+                        body_center.map_or(dm.bake_center_local, |c| c.0),
+                        entity,
+                    ) {
+                        child.insert((MeshTag(crate::mesh_tag::alpha_bits(tag_alpha)), lit));
                     }
                     // `FadeMaterials` is persistent bookkeeping (self-avatar zoom fade, decision 0032's
                     // despawn-fade-out), not tied to whether *this* spawn happens to join an in-flight
@@ -926,7 +921,7 @@ pub(super) fn attach_held_items(
             // gear change, so the card's lifecycle and frame both come for free (same owner
             // contract as the item's emitters below).
             for (info, part) in billboard_parts {
-                commands.spawn((
+                let mut card = commands.spawn((
                     Mesh3d(part.mesh.clone()),
                     MeshMaterial3d(part.material.clone()),
                     Transform::default(),
@@ -936,6 +931,20 @@ pub(super) fn attach_held_items(
                     },
                     BillboardCard::following(&info, root),
                 ));
+                // Same interior-light membership the item's mesh parts get above, through the same
+                // constructor and anchored at the same WEARER (decision 0778) — so a held torch's
+                // glow card can never split from the arm holding it. Spawned at a steady alpha: a
+                // card joins no appear-fade today (it carries neither `RenderFade` nor
+                // `FadeMaterials`), and the classifier preserves the alpha field regardless.
+                if let Some(lit) = part_interior_lit(
+                    &part.material,
+                    part.material_interior.as_ref(),
+                    part.material_interior_bake.as_ref(),
+                    body_center.map_or(dm.bake_center_local, |c| c.0),
+                    entity,
+                ) {
+                    card.insert((MeshTag(crate::mesh_tag::alpha_bits(1.0)), lit));
+                }
             }
             // The item's own particle emitters — the held torch's flame (0130 phase 4: the same
             // owner-follow rider as doodad emitters). `root` sits at the attach offset under the

@@ -2771,16 +2771,22 @@ pub fn texmodescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
 /// roots author a **MOSB** skybox model, and which carry groups flagged `0x40000`
 /// ([`benilla_formats::WmoGroupInfo::show_skybox`]).
 ///
-/// This is the instrument that *identifies* the flag. `0x40000` is not documented anywhere we can
-/// cite, so its meaning is established by correlation: if the bit is set on a group **iff** that
-/// group's root names a skybox, the bit is the per-group "draw the root's skybox here" gate and
-/// nothing else. The summary prints that cross-tab, so the claim is re-checkable in one command
-/// against the shipped files rather than trusted from a decision record.
+/// This is the instrument that *identifies* the flag — and **exactly how far that identification
+/// reaches is the point**. `0x40000` is undocumented, so the cross-tab is what establishes it means
+/// anything at all: the bit never appears on a group whose root names no skybox, across all 815
+/// roots. That is a one-way implication, `flag ⇒ MOSB`, and the summary prints it so the claim is
+/// re-checkable in one command rather than trusted from a decision record.
+///
+/// **It does not, and cannot, say which group the RENDERER tests** — and reading it as if it did is
+/// the mistake decision 0767 made (superseded by 0773). The carved law is that `0x40000` is tested
+/// inside the portal flood (`0x6b42e0` in `0x6b41c0`) on the group being *visited*, so the predicate
+/// is "any flood-reached group carries the bit". A census over static asset bytes has no way to see
+/// that distinction; only the binary did.
 ///
 /// It is also the population instrument for the mechanism: which buildings in 1.12 replace the
-/// `Light.dbc` gradient dome with an authored sky, and how much of each one does it (Stratholme's
-/// city shell sets the bit on its open streets — which are authored as INTERIOR groups — but not on
-/// its enclosed rooms).
+/// `Light.dbc` gradient dome with an authored sky, and how much of each one does it. Stratholme's
+/// city shell sets the bit on 61 of its 83 groups; the only other roots that set it at all are the
+/// four Caverns of Time shells, which ship in the 5875 data with no 1.12 instance to enter.
 pub fn skyboxscan(chain: &mut Chain) -> Result<()> {
     // Roots only: a group file is `<stem>_NNN.wmo`, and only the root carries MOSB/MOGI.
     let names: Vec<String> = chain
@@ -2848,17 +2854,22 @@ pub fn skyboxscan(chain: &mut Chain) -> Result<()> {
     if flag_only == 0 {
         println!(
             "\n=> 0x40000 NEVER appears without a MOSB ({flag_only} counter-examples in {scanned} \
-             roots): the bit is the per-group 'draw this root's MOSB skybox' gate."
+             roots), and {mosb_only} root(s) name a skybox no group asks for. So the bit is real and \
+             both halves matter — but this census establishes only 'flag implies MOSB'."
         );
         println!(
-            "   The converse does NOT hold ({mosb_only} root(s) name a skybox no group asks for), \
-             so the GATE IS THE FLAG, not the chunk — a renderer keyed off MOSB alone would show \
-             skies the reference never shows."
+            "   It does NOT say WHICH group the renderer tests, and reading it as if it did is the \
+             mistake decision 0767 made (superseded by 0773). The carved law: 0x40000 is tested \
+             inside the portal flood (0x6b42e0 in 0x6b41c0) on the group being VISITED, never on the \
+             group the camera stands in — so the predicate is 'any FLOOD-REACHED group carries the \
+             bit, and the root names a MOSB'. Stratholme's King's Square is the counter-example that \
+             settles it: the camera's own group (39) is EXTERIOR and unflagged, and the reference \
+             paints the sky there anyway."
         );
     } else {
         println!(
-            "\n=> {flag_only} group(s) set 0x40000 with no MOSB to draw — the flag is NOT the \
-             skybox gate; re-derive it before building on it."
+            "\n=> {flag_only} group(s) set 0x40000 with no MOSB to draw — that would break even the \
+             weak 'flag implies MOSB' reading this census rests on; re-derive before building on it."
         );
     }
     Ok(())

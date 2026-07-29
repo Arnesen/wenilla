@@ -72,7 +72,15 @@ impl Plugin for CloudsPlugin {
         app.add_plugins(MaterialPlugin::<layer::CloudMaterial>::default())
             .init_resource::<CloudCoverage>()
             .add_systems(Startup, layer::setup_cloud_layer.after(AssetSet::Open))
-            .add_systems(Update, (tick_clouds, layer::apply_cloud_visibility))
+            .add_systems(
+                Update,
+                (
+                    tick_clouds,
+                    // After the resolve: the dome and the painted skybox must agree WITHIN a frame,
+                    // or one frame draws both (the ordering `crate::sky`'s gate already takes).
+                    layer::apply_cloud_visibility.after(crate::wmo_sky::WmoSkyResolve),
+                ),
+            )
             // Camera-anchored placement post-propagation, like the sky dome (decision 0504).
             .add_systems(
                 PostUpdate,

@@ -588,6 +588,13 @@ impl UiScript {
         self.model_ref().layout_solves
     }
 
+    /// Total fixpoint ROUNDS across every solve ([`Model::layout_rounds`]) — a solve costs
+    /// rounds × the whole graph, so the ratio against [`Self::layout_solves`] is the per-pass
+    /// depth.
+    pub fn layout_rounds(&self) -> u64 {
+        self.model_ref().layout_rounds
+    }
+
     /// A snapshot of the script errors collected so far (from `pcall`'d handlers).
     pub fn errors(&self) -> Vec<String> {
         self.model_ref().errors.clone()

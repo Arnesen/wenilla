@@ -1,22 +1,31 @@
 //! The **WMO skybox** — the authored sky a building swaps in for the `Light.dbc` gradient dome while
 //! the camera stands in one of its own groups.
 //!
-//! A WMO root can name a skybox model in its **MOSB** chunk, and each group can ask for it with group
-//! flag **`0x40000`**. Both halves matter, and the *gate is the flag*: four 1.12 roots name a skybox
-//! that no group ever asks for (DireMaul's instance shell, `Stratholme_A`, and the two Sunken Temple
-//! roots — whose MOSB isn't even a model path, it's the string "the temple of atal'hakkar"), so a
-//! renderer keyed off the chunk alone would paint skies the reference never shows.
+//! A WMO root can name a skybox model in its **MOSB** chunk, and a group can ask for it with group
+//! flag **`0x40000`**. Both halves matter, and the flag is tested **on the groups the portal flood
+//! REACHES, never on the group the camera stands in** — `0x6b42e0` sits inside the flood `0x6b41c0`
+//! with `ebx` = the group being *visited*, seeded from the containment list on the inside leg and
+//! from every frustum-visible EXTERIOR group on the outside leg (`0x6b3dd0`), recursing through
+//! portals at `0x6b4639` and re-testing at each step. The predicate is therefore
+//! *"any flood-reached group carries the bit, and the root names a MOSB"*, published to `[0xca8080]`
+//! and read once at `0x681282`.
 //!
-//! `0x40000` is undocumented, so its identity rests on a corpus correlation rather than a citation:
-//! across all 815 WMO roots in the 5875 chain the bit **never** appears on a group whose root has no
-//! MOSB (`benilla-extract skyboxscan` prints that cross-tab, so the claim is re-checkable against the
-//! shipped files rather than trusted from here). Five roots exercise both halves: the four Caverns of
-//! Time shells (unreleased in 1.12) and **`Stratholme_B`**, the burning city — which sets the bit on
-//! 61 of its 83 groups. Those 61 are the city's open streets, which the WMO authors as INTERIOR
-//! groups: standing in King's Square you are, to the client, indoors in a building whose "ceiling" is
-//! a painted sky. That is why Stratholme's sky is red and the zone light says otherwise — map 329's
-//! only reachable `Light.dbc` atmosphere (the global row 341 → `LightParams` 336) is a khaki-brown
-//! gradient with a near-black apex, and it is simply not what the reference draws in there.
+//! **That distinction is load-bearing, and getting it wrong is what shipped first.** In Stratholme's
+//! King's Square the camera stands in group 39 — the root's *only* EXTERIOR (`0x8`) group, which does
+//! **not** set `0x40000`. A containing-group test draws no skybox there; the reference draws the
+//! painted red sky, because 61 of the 83 groups its flood reaches from group 39 do carry the bit.
+//! (Checked on the asset: a BFS over `Stratholme_B`'s MOPR reaches 82 of 83 groups from group 39.)
+//! The corpus correlation that seeded the first attempt — across all 815 roots the bit never appears
+//! without a MOSB, 0 counter-examples (`benilla-extract skyboxscan`) — was true and still is; it just
+//! never established *which* group the renderer tests, and it was over-read as if it had.
+//!
+//! Five roots exercise both halves: the four Caverns of Time shells (unreleased in 1.12) and
+//! **`Stratholme_B`**, the burning city. Four more name a skybox no group ever asks for (DireMaul's
+//! instance shell, `Stratholme_A`, and the two Sunken Temple roots — whose MOSB isn't even a model
+//! path, it's the string "the temple of atal'hakkar"), so keying off the chunk alone would still
+//! paint skies the reference never shows. This is why Stratholme's sky is red where the zone light
+//! says otherwise: map 329's only reachable `Light.dbc` atmosphere (global row 341 → `LightParams`
+//! 336) is a khaki-brown gradient with a near-black apex, and it is not what draws in there.
 //!
 //! What we draw is the model as authored: `StratholmeSkybox.m2` is a static, emissive, two-sided cube
 //! (three batches × 8 verts, one texture pair per axis), anchored at the camera with identity rotation
@@ -24,11 +33,17 @@
 //! every sky element it forces the far depth (`wmo_skybox.wgsl`; the law is in [`crate::sky_order`]),
 //! so the world paints over it and the 26-yard shell is free to sit inside the room's own geometry.
 //!
-//! **Scope.** This swaps the *backdrop* only. The celestial layer above it (sun, moon, stars, cloud
-//! dome) and everything the atmosphere drives (fog colour and distance, ambient, diffuse) are
-//! untouched — no byte law says the flag reaches them, and the reference shot shows a sun disc over
-//! the red sky. If the painted art should also suppress the procedural cloud dome, that is a separate
-//! finding and a separate change.
+//! **Scope — the skybox replaces the WHOLE celestial pass, not just the backdrop.** `CSky::Render`
+//! carries one shared boolean (`0x6d49cd` sets it, `0x6d49fb`/`0x6d4a2e` clear it once any slot's
+//! weight exceeds `[0x808aac]` = 0.99) and `0x6d4a3b test edi,edi; je` skips **all six** element
+//! draws together — stars, sun disc, both moons, gradient band and cloud dome. There is no
+//! per-element gating. Confirmed in a live GL capture of the reference standing in King's Square:
+//! the entire `[0.975, 0.98]` sky slice is three `count=12` draws (the cube's three texture pairs)
+//! and nothing else, identically in every frame. Only the **glare** quads survive — they render on
+//! their own later path (`0x483740 → 0x6d48c0 → 0x7e57e0`), outside this pass.
+//!
+//! What the atmosphere drives (fog colour and distance, ambient, diffuse) is still untouched: no byte
+//! law says the flag reaches it, and the reference fogs the world normally underneath the painted sky.
 
 use std::collections::HashSet;
 
@@ -46,7 +61,6 @@ use bevy::shader::ShaderRef;
 
 use crate::assets::{LockRecover, WorldAssets};
 use crate::player::WorldCamera;
-use crate::wmo_portal::CameraInteriorClaim;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_assets::WmoModel;
 
@@ -138,22 +152,46 @@ impl Plugin for WmoSkyPlugin {
     }
 }
 
-/// Which skybox does the camera's room ask for? The claim already names the room (placement + group);
-/// the group's `SHOW_SKYBOX` flag and the root's MOSB decide the rest.
+/// Which skybox does this frame ask for? **The flag is tested on the groups the portal flood
+/// REACHES, never on the group the camera stands in** (`0x6b42e0`, inside the flood `0x6b41c0`, with
+/// `ebx` = the group being visited). So the predicate is: *does any group in this placement's PVS
+/// carry `SHOW_SKYBOX`, and does its root name a MOSB?*
+///
+/// That distinction is the whole bug this replaced. Reading the **containing** group instead is
+/// wrong twice over at Stratholme's King's Square: the camera stands in group 39, the root's only
+/// EXTERIOR (`0x8`) group, which does not set `SHOW_SKYBOX` — and [`CameraInteriorClaim`] is
+/// deliberately `None` over an EXTERIOR group's floor, so the old resolve could not even see the
+/// placement. The reference draws the painted sky there regardless, because 61 of the 83 groups the
+/// flood reaches from group 39 do carry the bit. (Verified on the asset: BFS over `Stratholme_B`'s
+/// MOPR reaches 82 of 83 groups from group 39, 61 of them flagged.)
 fn resolve_camera_skybox(
-    claim: Res<CameraInteriorClaim>,
     instances: Query<&crate::wmo_portal::WmoPortalInstance>,
     wmos: Res<Assets<WmoModel>>,
     mut want: ResMut<CameraWmoSkybox>,
 ) {
-    let resolved = claim.0.and_then(|c| {
-        let inst = instances.get(c.room.instance).ok()?;
-        let model = wmos.get(&inst.handle)?;
-        let nav = model.group_nav.get(c.room.group as usize)?;
-        (nav.flags & SHOW_SKYBOX != 0)
-            .then(|| model.skybox.clone())
-            .flatten()
-    });
+    // `min()` rather than "first match": `Query` iteration order is not stable across frames, and a
+    // tie would otherwise alternate two backdrops frame to frame. Only one 1.12 root can qualify
+    // (Stratholme_B — the four Caverns of Time shells are unreleased), so this never actually picks.
+    let resolved = instances
+        .iter()
+        .filter_map(|inst| {
+            let model = wmos.get(&inst.handle)?;
+            // The MOSB test comes first and exits ~every instance in one deref: 810 of the chain's
+            // 815 roots name no skybox, so the group scan below is effectively never reached.
+            let sky = model.skybox.as_deref()?;
+            model
+                .group_nav
+                .iter()
+                .enumerate()
+                .any(|(i, nav)| {
+                    // NOT the fail-open `unwrap_or(true)` the rest of the cull takes
+                    // ([`WmoGroupVis::drawn_by`]): there a lookup miss must never blank a building,
+                    // whereas here it would paint a full-screen sky over the entire world.
+                    nav.flags & SHOW_SKYBOX != 0 && inst.visible.get(i).copied().unwrap_or(false)
+                })
+                .then(|| sky.to_owned())
+        })
+        .min();
     if want.0 != resolved {
         want.0 = resolved;
     }
@@ -259,10 +297,21 @@ fn apply_skybox_visibility(
 ///
 /// The art is drawn at **authored scale** and that is deliberate. Every other shell here scales to a
 /// fraction of the far plane, but those radii were only ever standing in for occlusion, and the forced
-/// far depth ([`crate::sky_order`], "The depth law") retired that job. What is left for a
-/// camera-anchored box to get wrong is the near plane — and Stratholme's is ~26 yd of half-extent
-/// against a near plane three orders of magnitude smaller. Scaling it would change nothing on screen
-/// (a camera-centred box has no parallax) while quietly making a radius load-bearing again.
+/// far depth ([`crate::sky_order`], "The depth law") retired that job. Scale is genuinely free here:
+/// the eye's offset inside the box scales with the box, so the *angles* the faces subtend — which is
+/// all a camera-anchored backdrop can show — are scale-invariant.
+///
+/// **The ANCHOR POINT is not free — and it is the model's ORIGIN, VERIFIED.** `CM2Model+0xbc` stays
+/// identity and `0x707680` is called with a **zeroed** recentre vector (`0x6d4b3a`–`0x6d4b48`) where
+/// the world M2 scene gets the live camera position — so the model's local origin sits exactly at the
+/// eye, with camera rotation and zero translation. (The capture agrees: the skybox's matrix is
+/// orthonormal with translation `(0,0,0)` while the very next model's carries a real offset.)
+///
+/// It matters because `StratholmeSkybox` is *not* centred on its origin: its 52.87 yd cube sits at
+/// z ∈ [−14.67, +38.20], leaving the eye 11.76 yd BELOW the box's centre. That asymmetry is authored,
+/// not incidental — the near-black ±Z pair covers only a **34.7°** cone about the zenith rather than
+/// a symmetric 45°, and the side pairs' painted horizon lands three-quarters down their gradient
+/// (v ≈ 0.72). Re-centring the box on the eye would be a visible change and a wrong one.
 #[allow(clippy::type_complexity)]
 fn follow_camera(
     cam: Query<&GlobalTransform, With<WorldCamera>>,

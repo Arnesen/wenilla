@@ -10,8 +10,11 @@
 //! In parallel a background thread ([`net`]) logs in (`$WOW_USER`/`$WOW_PASS`/`$WOW_HOST`, default
 //! `one`/`pone`/`localhost`), enters the world, and streams object updates. NPCs and GameObjects
 //! render as their real models (resolved from the display id via the creature/GameObject catalogs); other
-//! players stay cyan cubes, and our own avatar is blue until we take third-person control of it. If the
-//! server is down, the world still renders.
+//! players stay cyan cubes, and our own avatar is blue until we take third-person control of it.
+//! **The world is loaded when a character enters it, and released when they leave** — the glue
+//! screens have no world behind them (decision 0777). With no server there is no world: the client
+//! sits at the login screen, which is what the real one does. The scene harness (`$WOW_CAPTURE`)
+//! boots straight in-world and is unaffected.
 //!
 //! Controls: WASD walks the avatar (Ctrl sprints); right-drag turns it, left-drag orbits the camera
 //! (both hide/freeze the cursor while held), scroll wheel zooms; `F` toggles free-fly (then WASD flies
@@ -19,6 +22,7 @@
 
 mod area;
 mod area_trigger;
+mod asset_churn;
 mod assets;
 mod bgwin;
 mod billboard;
@@ -42,6 +46,7 @@ mod decal;
 mod doodad_anim;
 mod entities;
 mod entity_shade;
+mod exterior_cull;
 mod ffx_glow;
 mod glue;
 mod glue_strings;
@@ -455,6 +460,8 @@ fn main() -> AppExit {
     // After DebugPanelPlugin so the egui plugin/context it sets up already exists. Toggle: P.
     .add_plugins(PerfPlugin)
     .add_plugins(hover_log::HoverLogPlugin)
+    .add_plugins(asset_churn::AssetChurnPlugin)
+    .add_plugins(particles::census::plugin)
     // Foundation: opens the patch chain + inserts WorldAssets/RenderConfig (AssetSet::Open), which
     // every other subsystem's startup runs after.
     .add_plugins(AssetPlugin)
@@ -483,6 +490,9 @@ fn main() -> AppExit {
     // portals from the camera's group, so the Stormwind cathedral culls from the Trade District. Only
     // computes the PVS; the Visibility authority (DebugPanelPlugin) applies it (decisions 0025/0031).
     .add_plugins(WmoPortalPlugin)
+    // The exterior scene draws only through portal windows the flood left behind (decision 0774):
+    // from inside a building, terrain and ADT doodads are gated on the deferred window worklist.
+    .add_plugins(exterior_cull::ExteriorCullPlugin)
     // Streamed world entities: cube assets + display catalogs at startup, sync each frame.
     .add_plugins(EntitiesPlugin)
     // Creature animation: pick Stand/Walk/Run from each creature's movement state each frame (Milestone C).

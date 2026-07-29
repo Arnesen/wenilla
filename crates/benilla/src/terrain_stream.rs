@@ -25,6 +25,7 @@ use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
 use crate::assets::RenderConfig;
+use crate::char_select::{ClientState, Roster};
 use crate::clutter::{scatter_tile_clutter, ClutterConfig, GroundClutter};
 use crate::collision::{GroundDecalSurface, PickOccluder};
 use crate::interior::WmoResidency;
@@ -229,6 +230,60 @@ pub(crate) fn fold_interior_probe(
     crate::lighting::prop_probe_coeffs(ambient, &lobes)
 }
 
+/// **Where the world streams from**, in WoW coordinates — one rule, shared by the detailed
+/// streamer and the distant WDL ring (which used to carry its own copy under a comment promising
+/// they agreed).
+///
+/// The order is a ladder of decreasing certainty:
+///
+/// 1. **The avatar**, once it is in the world and we are behind it — the answer for all of play.
+/// 2. **The character you picked**, from its own roster row, while the world is loading and the
+///    server has not yet sent the destination snap. This window is short (~265 ms measured on a
+///    local server) but it is precisely the window in which the entry's IO budget is scarcest, and
+///    without this leg the streamer spends it on [`SPAWN_XY`] — Northshire — for a character who
+///    may be in Stratholme (decision 0777).
+/// 3. **The camera**, which is the focus while free-flying (`detached`) and the only focus a
+///    server-less capture run has.
+/// 4. [`SPAWN_XY`], if there is not even a camera.
+///
+/// `entry` is [`Roster::pending_entry`] — passed as plain data rather than the roster itself, so
+/// the ladder is a pure function of the four things that decide it, and testable as one.
+pub(crate) fn view_focus(
+    player: &Player,
+    camera: Option<Vec3>,
+    entry: Option<(u32, [f32; 3])>,
+) -> [f32; 3] {
+    if player.active && !player.detached {
+        return bevy_to_wow(player.pos);
+    }
+    if !player.active {
+        if let Some((_, pos)) = entry {
+            return pos;
+        }
+    }
+    match camera {
+        Some(t) => bevy_to_wow(t),
+        None => [SPAWN_XY.0, SPAWN_XY.1, 0.0],
+    }
+}
+
+/// **Which map** the streamers should be loading — [`CurrentMap`] once the server has told us,
+/// and the picked character's own map for the entry window before that (the [`view_focus`] ladder's
+/// second rung, and it must agree with it: a position from one map against the tile grid of
+/// another names tiles that exist but are somewhere else entirely).
+pub(crate) fn focus_map(
+    current: Option<u32>,
+    player: &Player,
+    entry: Option<(u32, [f32; 3])>,
+) -> u32 {
+    if !player.active {
+        if let Some((map, _)) = entry {
+            return map;
+        }
+    }
+    current.unwrap_or(0)
+}
+
 /// A placement's model asset handle — an M2 doodad or a WMO building. Keeps the asset resident.
 enum ModelHandle {
     M2(Handle<M2Model>),
@@ -261,8 +316,17 @@ impl Plugin for TerrainPlugin {
                     sync_interior_volumes,
                 )
                     .chain()
-                    .in_set(WorldStage::Stream),
+                    .in_set(WorldStage::Stream)
+                    // **No world until a character is in one** (decision 0777). The whole chain,
+                    // not just the request side: with nothing streamed there is nothing to spawn,
+                    // no collider to finish and no WMO volume to mirror, and gating the head alone
+                    // would leave three systems walking empty queries to prove it every frame.
+                    .run_if(crate::schedule::world_is_live),
             )
+            // Leaving the world releases it. Without this, a `/logout` back to character select
+            // would leave the whole streamed world resident and unowned — the gate above stops it
+            // being *maintained*, which is precisely what makes an abandoned world immortal.
+            .add_systems(OnExit(ClientState::InWorld), release_world)
             .add_systems(
                 Update,
                 // After the interior claim so the leaf override reads THIS frame's claim —
@@ -304,18 +368,29 @@ fn stream_terrain(
     camera: Query<&Transform, With<WorldCamera>>,
     shared_light: Option<Res<SharedLightBuffer>>,
     cfg: Option<Res<RenderConfig>>,
-    current_map: Option<Res<CurrentMap>>,
-    map_catalog: Option<Res<MapCatalogRes>>,
+    // "Where are we" — the server's map, the catalog that names its directory, and the roster row
+    // of a pick still in flight (the entry window's focus). Bundled for the same param-limit
+    // reason as `asset_stores`.
+    location: (
+        Option<Res<CurrentMap>>,
+        Option<Res<MapCatalogRes>>,
+        Option<Res<Roster>>,
+    ),
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
 ) {
     let (mut materials, mut meshes, wdts, time) = asset_stores;
+    let (current_map, map_catalog, roster) = location;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
     // there's nothing to stream against, so idle.
     let (Some(shared_light), Some(map_catalog)) = (shared_light, map_catalog) else {
         return;
     };
     let placements = placements.into_inner();
-    let map_id = current_map.map(|m| m.0).unwrap_or(0);
+    let map_id = focus_map(
+        current_map.map(|m| m.0),
+        &player,
+        roster.as_deref().and_then(Roster::pending_entry),
+    );
     let Some(dir) = map_catalog.0.directory(map_id).map(str::to_string) else {
         return;
     };
@@ -324,20 +399,15 @@ fn stream_terrain(
     // handles + placements) so the new map streams in fresh, and request the new map's WDT (the
     // tile-existence index every ADT request below consults).
     if state.map_dir.as_deref() != Some(dir.as_str()) {
-        for ((_tx, _ty), t) in state.tiles.drain() {
-            despawn_tile_owned(&mut commands, &t);
-            for uid in t.placements {
-                release_placement(&mut commands, placements, uid);
-            }
-        }
-        if std::mem::take(&mut state.global_wmo) {
-            release_placement(&mut commands, placements, GLOBAL_WMO_UID);
-        }
-        // The material dedup goes with the placements it deduped for — its strong handles are
-        // what kept every previous map's materials (and their textures) resident forever (the
-        // #bugs teleport leak). Cleared here, not on `world_map::MapChange`, so it shares the
-        // exact trigger of the teardown it belongs to.
-        placements.materials.clear();
+        // Say which map's tiles we are about to spend the IO budget on, and how many we are
+        // throwing away to do it. Silent before, which is exactly why nobody noticed that every
+        // world entry began by streaming Northshire regardless of where the character was.
+        info!(
+            "terrain: streaming map {dir} (was {:?}, {} tiles released)",
+            state.map_dir,
+            state.tiles.len()
+        );
+        drop_streamed_world(&mut commands, &mut state, placements);
         state.map_dir = Some(dir.clone());
         state.wdt = Some(asset_server.load(format!("mpq://World/Maps/{dir}/{dir}.wdt")));
         state.wdt_ungated = false;
@@ -385,15 +455,12 @@ fn stream_terrain(
         }
     }
 
-    // Stream around the *view focus*: the avatar in third-person, but the free-flying camera itself
-    // while detached or before we've connected — so the world loads around wherever you look.
-    let center = if player.active && !player.detached {
-        bevy_to_wow(player.pos)
-    } else if let Ok(cam) = camera.single() {
-        bevy_to_wow(cam.translation)
-    } else {
-        [SPAWN_XY.0, SPAWN_XY.1, 0.0]
-    };
+    // Stream around the *view focus* — see [`view_focus`] for the ladder.
+    let center = view_focus(
+        &player,
+        camera.single().ok().map(|c| c.translation),
+        roster.as_deref().and_then(Roster::pending_entry),
+    );
     let radius = cfg.as_ref().map(|c| c.tile_radius as i32).unwrap_or(2);
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = world_to_tile(center[0], center[1]);
@@ -479,6 +546,9 @@ fn stream_terrain(
             Mesh3d(adt.mesh.clone()),
             MeshMaterial3d(material),
             Transform::IDENTITY, // the merged mesh is already in absolute world coords
+            // ADT terrain is exterior scene: from inside a WMO it draws only through a portal window
+            // (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see `crate::exterior_cull`).
+            crate::exterior_cull::ExteriorScene,
         ));
         if let Some((verts, tris)) = collider_data {
             // `GroundDecalSurface`: terrain receives the selection ring (see `crate::collision`).
@@ -693,6 +763,60 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
 /// Despawn a tile's exclusively-owned entities — the terrain mesh, water surfaces, and per-chunk
 /// `ClutterChunk`s (whose built meshes are children, so the despawn cascades). Shared doodad/WMO
 /// placements are NOT touched here; they're refcount-released separately.
+/// Drop every streamed tile and the placements they reference — the world, released.
+///
+/// One body, two triggers, because they are the same event seen from different sides: a cross-map
+/// teleport ends the world you were in, and so does leaving for character select. The material
+/// dedup goes with the placements it deduped for — its strong handles are what kept every
+/// previous map's materials (and their textures) resident forever (the #bugs teleport leak), so it
+/// is cleared *here*, sharing the exact trigger of the teardown it belongs to, rather than hanging
+/// off `world_map::MapChange`.
+fn drop_streamed_world(
+    commands: &mut Commands,
+    state: &mut TerrainStreamer,
+    placements: &mut Placements,
+) {
+    for ((_tx, _ty), t) in state.tiles.drain() {
+        despawn_tile_owned(commands, &t);
+        for uid in t.placements {
+            release_placement(commands, placements, uid);
+        }
+    }
+    if std::mem::take(&mut state.global_wmo) {
+        release_placement(commands, placements, GLOBAL_WMO_UID);
+    }
+    placements.materials.clear();
+}
+
+/// Leaving `InWorld` (a `/logout` back to character select): release the world.
+///
+/// `map_dir`/`wdt` are cleared too, so the next entry reads as a fresh map rather than a resumed
+/// one — otherwise a re-entry on the SAME map would take the "nothing changed" path and stream
+/// against a `TerrainStreamer` whose tiles have all been despawned.
+fn release_world(
+    mut commands: Commands,
+    mut state: ResMut<TerrainStreamer>,
+    mut placements: ResMut<Placements>,
+    mut progress: Option<ResMut<WorldLoadProgress>>,
+) {
+    if state.tiles.is_empty() && state.map_dir.is_none() {
+        return;
+    }
+    info!(
+        "terrain: leaving the world — releasing {} tiles",
+        state.tiles.len()
+    );
+    drop_streamed_world(&mut commands, &mut state, &mut placements);
+    state.map_dir = None;
+    state.wdt = None;
+    state.wdt_ungated = false;
+    // The residency the loading screen reads is about a world that no longer exists; leaving it
+    // standing would let the next entry clear its cover against the previous world's counts.
+    if let Some(p) = progress.as_mut() {
+        **p = WorldLoadProgress::default();
+    }
+}
+
 fn despawn_tile_owned(commands: &mut Commands, t: &TileState) {
     if let Some(e) = t.entity {
         commands.entity(e).try_despawn();
@@ -745,5 +869,65 @@ fn terrain_base_material() -> StandardMaterial {
         double_sided: true,
         cull_mode: None,
         ..default()
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    /// Stratholme's coordinates, and a camera parked where `player::setup` leaves it at boot.
+    const PICK: (u32, [f32; 3]) = (329, [3398.9, -3381.8, 142.7]);
+    fn cam_at_northshire() -> Option<Vec3> {
+        Some(wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]))
+    }
+
+    #[test]
+    fn the_pick_outranks_the_camera_until_the_avatar_exists() {
+        // The regression this guards is invisible and expensive: with the camera winning, world
+        // entry spends its scarcest IO on Northshire tiles for a character in Stratholme, then
+        // throws them away when the snap lands (decision 0777).
+        let idle = Player::default();
+        assert_eq!(
+            focus_map(Some(0), &idle, Some(PICK)),
+            329,
+            "the map must be the picked character's, not the boot default"
+        );
+        assert_eq!(view_focus(&idle, cam_at_northshire(), Some(PICK)), PICK.1);
+    }
+
+    #[test]
+    fn the_avatar_outranks_the_pick_once_it_is_in_the_world() {
+        // `pending_pick` deliberately survives world entry (0065's seamless reconnect re-answers
+        // with it), so a stale entry row must never pull the focus off a walking avatar.
+        let mut walking = Player::default();
+        walking.active = true;
+        walking.pos = wow_to_bevy([100.0, 200.0, 30.0]);
+        assert_eq!(focus_map(Some(1), &walking, Some(PICK)), 1);
+        let f = view_focus(&walking, cam_at_northshire(), Some(PICK));
+        assert!(
+            (f[0] - 100.0).abs() < 0.01 && (f[1] - 200.0).abs() < 0.01,
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn free_flight_follows_the_camera_and_a_server_less_run_still_has_one() {
+        let mut flying = Player::default();
+        flying.active = true;
+        flying.detached = true;
+        flying.pos = wow_to_bevy([100.0, 200.0, 30.0]);
+        let f = view_focus(&flying, cam_at_northshire(), None);
+        assert!((f[0] - SPAWN_XY.0).abs() < 0.01, "{f:?}");
+        // A capture run: no roster, no avatar — the camera is the only answer, and the last-ditch
+        // fallback must still be the anchor rather than the origin.
+        assert!(
+            (view_focus(&Player::default(), cam_at_northshire(), None)[0] - SPAWN_XY.0).abs()
+                < 0.01
+        );
+        assert_eq!(
+            view_focus(&Player::default(), None, None),
+            [SPAWN_XY.0, SPAWN_XY.1, 0.0]
+        );
     }
 }

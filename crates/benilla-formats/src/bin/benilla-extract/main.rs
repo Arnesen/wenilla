@@ -294,11 +294,12 @@ enum Command {
         prefix: Option<String>,
     },
     /// Sweep every WMO ROOT and cross-tab the two halves of the skybox mechanism: the root's
-    /// **MOSB** skybox model against its groups' `0x40000` flag. `0x40000` is undocumented, so
-    /// this is what *identifies* it — the bit turning out to be set on a group iff its root names
-    /// a skybox is the whole argument that it means "draw this root's skybox here". Also the
-    /// population instrument: which 1.12 buildings replace the `Light.dbc` gradient dome with an
-    /// authored sky (Stratholme's burning city is the headline), and how much of each does it
+    /// **MOSB** skybox model against its groups' `0x40000` flag. `0x40000` is undocumented, so this
+    /// is what *identifies* it — across all 815 roots the bit never appears without a MOSB. Note
+    /// what that does and does NOT buy: it establishes `flag => MOSB`, never which group the
+    /// renderer tests (the carved law is the flood-VISITED group, decision 0773 correcting 0767).
+    /// Also the population instrument: which 1.12 buildings replace the `Light.dbc` gradient dome
+    /// with an authored sky (Stratholme's burning city is the only one reachable), and how much
     Skyboxscan,
     /// Dump all 18 `LightIntBand` rows of the `Light.dbc` entry covering a world position at a
     /// time of day — the band-semantics instrument (which row holds which colour at which hour;

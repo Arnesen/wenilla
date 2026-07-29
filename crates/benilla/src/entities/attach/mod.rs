@@ -23,7 +23,7 @@ use bevy::animation::transition::AnimationTransitions;
 use crate::creature_anim::AnimDriver;
 use crate::debug_panel::{ModelKind, ModelPart};
 use crate::interact::WorldObject;
-use crate::interior::{InteriorKind, InteriorLit};
+use crate::interior::part_interior_lit;
 use crate::lighting::SharedLightBuffer;
 use crate::model_fade::{FadeMaterials, PendingAppearFade};
 use crate::net::{NetEntity, ObjectStore};
@@ -463,6 +463,24 @@ pub(super) fn attach_entity_visuals(
             commands
                 .entity(entity)
                 .insert(crate::interior::BodyBakeCenter(bake_center));
+            // The light node's ATTACH MODE — the reference's `[node+0x90]` bit 13, written once at
+            // node creation from the descriptor TYPEMASK (`0x613e10`/`0x670db0`) and dispatched at
+            // `0x6a86d0`: a GameObject attaches by CONTAINMENT (`0x6a8c10`), anchored at the world
+            // bounding-box centre; a unit/player by DOWN-RAY (`0x6a8a20`), anchored at the position.
+            // The kind can't change under a live display-id swap, but the remove arm keeps the two
+            // mutually exclusive by construction rather than by that argument (decision 0776).
+            match net.kind {
+                EntityKind::GameObject => {
+                    commands
+                        .entity(entity)
+                        .insert(crate::interior::ContainmentAttach);
+                }
+                _ => {
+                    commands
+                        .entity(entity)
+                        .remove::<crate::interior::ContainmentAttach>();
+                }
+            }
             // Identity for the mouseover inspector (and, later, hover tooltips / targeting).
             let object = WorldObject {
                 kind,
@@ -821,28 +839,19 @@ pub(super) fn attach_entity_visuals(
                     // and the classifier yields ([`RenderFade`]); once the fade latches the
                     // classifier reclaims the tag and the steady material. `mat_interior` (the
                     // interior-capable build) stays the gate for which parts classify at all.
-                    if mat_interior.is_some() {
+                    // Anchored at the unit root: every part shares the root's verdict, so a body
+                    // never splits across the interior/exterior light laws. The indoor LAW is one
+                    // for every entity M2 — unit, player, GameObject alike take the footprint-MOCV
+                    // bake (the reference registers each with the same entity-node fill, wow-re
+                    // `unit-m2-shader-light.md`, superseding 0315's class split); the matte ×1.0
+                    // stays as the bake's miss fallback.
+                    if let Some(lit) =
+                        part_interior_lit(mat, mat_interior, mat_bake, bake_center, entity)
+                    {
                         // `rig_tag` rides every whole-tag write here and below (decision 0720).
                         let tag =
                             rig_tag | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 });
-                        // Anchored at the unit root: every part shares the root's verdict, so a
-                        // body never splits across the interior/exterior light laws. The indoor
-                        // LAW is one for every entity M2 — unit, player, GameObject alike take the
-                        // footprint-MOCV bake (the reference registers each with the same
-                        // entity-node fill, wow-re `unit-m2-shader-light.md`, superseding 0315's
-                        // class split); the matte ×1.0 stays as the bake's miss fallback.
-                        let lit_kind = match mat_bake {
-                            Some(bake) => InteriorKind::Bake {
-                                material: bake.clone(),
-                                center: bake_center,
-                            },
-                            None => InteriorKind::Matte,
-                        };
-                        child.insert((
-                            MeshTag(tag),
-                            InteriorLit::new(lit_kind, mat.clone()),
-                            crate::interior::ClassifiedBy(entity),
-                        ));
+                        child.insert((MeshTag(tag), lit));
                     }
                     // The batch's **animated material alpha** (the verified combine's runtime half,
                     // wow-re `m2-alpha-combine-cull.md`): a creature's colour-alpha/transparency
@@ -903,15 +912,31 @@ pub(super) fn attach_entity_visuals(
                     object.clone(),
                     card_follow,
                 ));
+                // A card takes its MODEL's indoor law, through the same constructor as the sibling
+                // meshes it was split out of (decision 0778). No char-slot variants are consulted:
+                // a body/hair/cape/skin-extra batch is never a billboard batch, so the slot lookup
+                // living past the `continue` above costs a card nothing. The rig field stays 0 —
+                // a card draws the static mesh whatever its host.
+                if let Some(lit) = part_interior_lit(
+                    &part.material,
+                    part.material_interior.as_ref(),
+                    part.material_interior_bake.as_ref(),
+                    bake_center,
+                    entity,
+                ) {
+                    card.insert((MeshTag(crate::mesh_tag::alpha_bits(1.0)), lit));
+                }
                 // A card shares its batch's per-sequence alpha loops (the billboard split copies
                 // them onto every group), sampled off the same unit clock as the mesh parts — a
                 // creature's eye glow is authored to vanish in the sequences that hide its eyes.
-                // A world-root card is not interior-classified, so its tag has one writer.
+                // The classifier composes into the same tag rather than stomping it
+                // (`write_part_law` rewrites only the interior bits), so the tag is seeded here
+                // just for the batches that classified out above.
                 if let Some(anim) = &part.alpha_anim {
-                    card.insert((
-                        crate::doodad_anim::MatAnim::following(anim.clone(), entity),
-                        MeshTag(crate::mesh_tag::alpha_bits(1.0)),
-                    ));
+                    card.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
+                    if part.material_interior.is_none() {
+                        card.insert(MeshTag(crate::mesh_tag::alpha_bits(1.0)));
+                    }
                 }
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item

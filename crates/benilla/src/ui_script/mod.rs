@@ -738,6 +738,8 @@ mod chat_tests;
 
 #[cfg(test)]
 mod bag_tests;
+#[cfg(test)]
+mod resolve_bench;
 
 #[cfg(test)]
 mod tooltip_anchor_tests;

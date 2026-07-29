@@ -37,6 +37,10 @@ pub(super) struct WorldReadout<'w, 's> {
     area: Res<'w, crate::terrain_stream::CurrentArea>,
     areas: Option<Res<'w, crate::area::AreaTableRes>>,
     interior: Res<'w, crate::wmo_portal::CurrentAreaInterior>,
+    /// The camera's own WMO room claim + the exterior-window worklist it produces — the two inputs
+    /// [`crate::exterior_cull`] runs on. See the readout below for why they are worth a line.
+    room: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
+    windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
     skybox: Res<'w, crate::wmo_sky::CameraWmoSkybox>,
     streamer: Res<'w, crate::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
@@ -107,6 +111,39 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
         ui.label(line);
         ui.label(egui::RichText::new(format!("leaf area {leaf}")).color(OVERLAY_TEXT_DIM));
     }
+
+    // The exterior-scene gate, in the two terms that decide it (decision 0774): which WMO ROOM the
+    // camera's own down-ray claims, and how many portal windows that room's flood left onto the
+    // outdoor world. Terrain draws iff a window admits it, so "why can I still see the ground from
+    // in here?" has exactly three answers and this line says which:
+    //   * `room —` — no claim at all. We are on the OUTSIDE leg and draw the whole exterior, which
+    //     is correct *if* the reference is too (a `0x8`-flagged group claims nothing — Stratholme's
+    //     entrance hall is EXTERIOR, and the reference draws the world there as well).
+    //   * `windows N` with N large, or a window covering most of the screen — we are indoors and the
+    //     doorway rects are too generous.
+    //   * `windows 0` — sealed, nothing exterior may draw; terrain visible anyway means something
+    //     is reaching the screen that is not tagged `ExteriorScene` (world WMO placements and
+    //     open-world liquid are knowingly not gated yet).
+    // Two numbers is the whole diagnosis, and neither was readable from the chair before.
+    let room_line = match world.room.0 {
+        Some(claim) => format!("room g{:02}", claim.room.group),
+        None => "room —".to_string(),
+    };
+    let window_line = match &*world.windows {
+        crate::wmo_portal::ExteriorWindows::Unrestricted => "exterior unrestricted".to_string(),
+        crate::wmo_portal::ExteriorWindows::Windows(rects) => {
+            let widest = rects
+                .iter()
+                .map(|[x0, y0, x1, y1]| ((x1 - x0) * (y1 - y0)).max(0.0))
+                .fold(0.0f32, f32::max);
+            format!(
+                "exterior {} window(s) · widest {:.0}% of screen",
+                rects.len(),
+                widest / 4.0 * 100.0
+            )
+        }
+    };
+    ui.label(egui::RichText::new(format!("{room_line}  ·  {window_line}")).color(OVERLAY_TEXT_DIM));
 
     // Position + facing, raw WoW coords (what the wire and every probe speak); the tile the
     // feet are on and how much of the stream window is spawned.

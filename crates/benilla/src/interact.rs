@@ -179,6 +179,15 @@ type GoCollisionReadout = (
     Option<&'static crate::go_anim::GoAnim>,
 );
 
+/// The inspector's entity LIGHT readout (decision 0776): the lane this object's parts render
+/// under, and which attach found the room — "two identical GameObjects a few yards apart, one lit
+/// like the room and one like the street" is the report that made this a card line rather than a
+/// rebuild with `WOW_INTERIOR_LOG`.
+type EntityLightReadout = (
+    &'static crate::interior::InteriorAnchor,
+    Has<crate::interior::ContainmentAttach>,
+);
+
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
@@ -199,6 +208,7 @@ fn inspect_ui(
         // The GameObject collision readout (decision 0763): whether a hull exists, whether it is
         // currently disabled, and the client's stored state the gate reads.
         Query<GoCollisionReadout>,
+        Query<EntityLightReadout>,
     ),
     guids: Query<&crate::net::Guid>,
     castings: Query<&crate::creature_anim::Casting>,
@@ -255,7 +265,7 @@ fn inspect_ui(
         .entity
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
-    let (stores, kinds, collision) = (&stores.0, &stores.1, &stores.2);
+    let (stores, kinds, collision, lit) = (&stores.0, &stores.1, &stores.2, &stores.3);
     let store = net_entity.and_then(|p| stores.get(p).ok());
     // The unit's server name through the query cache — asks on first hover, fills on a later frame
     // (the same ask-once path the unit frames use).
@@ -372,6 +382,21 @@ fn inspect_ui(
             None => format!("anim {base}"),
         }
     });
+    // The light lane + the attach that found it (decision 0776). Absent until the classifier has
+    // resolved the anchor once — a freshly streamed object shows no line rather than a wrong one.
+    let light_line = net_entity
+        .and_then(|p| lit.get(p).ok())
+        .map(|(anchor, containment)| {
+            format!(
+                "light {} · {} attach",
+                anchor.law_label(),
+                if containment {
+                    "containment"
+                } else {
+                    "down-ray"
+                }
+            )
+        });
 
     // The lines shown in the card — also exactly what a left-click copies to the clipboard.
     let mut lines = vec![format!("{:?}", obj.kind), obj.label.clone()];
@@ -400,6 +425,9 @@ fn inspect_ui(
         lines.push(line.clone());
     }
     if let Some(line) = &anim_line {
+        lines.push(line.clone());
+    }
+    if let Some(line) = &light_line {
         lines.push(line.clone());
     }
     lines.push(format!("{:.1} yd away", mouseover.distance));
@@ -447,6 +475,9 @@ fn inspect_ui(
                         ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
                     }
                     if let Some(line) = &anim_line {
+                        ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
+                    }
+                    if let Some(line) = &light_line {
                         ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
                     }
                     ui.label(

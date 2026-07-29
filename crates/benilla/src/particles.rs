@@ -28,6 +28,7 @@ use benilla_formats::ParticleEmitterDef;
 use bevy::prelude::*;
 
 pub mod buffer;
+pub(crate) mod census;
 mod depthdump;
 mod emit;
 mod model;

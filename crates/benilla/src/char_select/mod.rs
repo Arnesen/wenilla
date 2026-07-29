@@ -146,9 +146,25 @@ impl Roster {
     /// roster at the entry edge, before the server's `SMSG_LOGIN_VERIFY_WORLD` snap lands
     /// (decision 0737).
     pub(crate) fn pending_map(&self) -> Option<u32> {
+        self.pending_row().map(|c| c.map)
+    }
+
+    /// The picked character's `(map, wow xyz)` — **where the world we are about to load actually
+    /// is**, known from the roster row a whole server round-trip before `SMSG_LOGIN_VERIFY_WORLD`
+    /// says so. The streamers aim at this during world entry (decision 0777); without it the only
+    /// answer available before the snap is the hardcoded Northshire anchor
+    /// ([`crate::SPAWN_XY`]), which is a guess that is wrong for every character who isn't a fresh
+    /// human — and a wrong guess here does not merely idle, it spends the entry's IO budget
+    /// decoding tiles that are dropped a moment later.
+    pub(crate) fn pending_entry(&self) -> Option<(u32, [f32; 3])> {
+        self.pending_row()
+            .map(|c| (c.map, [c.position.x, c.position.y, c.position.z]))
+    }
+
+    /// The roster row for the pick in flight.
+    fn pending_row(&self) -> Option<&Character> {
         self.pending_pick
             .and_then(|g| self.chars.iter().find(|c| c.guid == g))
-            .map(|c| c.map)
     }
 }
 
@@ -306,12 +322,21 @@ fn debug_glue_roundtrip(
 /// The logout-boundary smoke (`WOW_LOGOUT_SMOKE=1`, meant with the `WOW_CHAR` fast path): once
 /// seated in the world, linger, request the `/logout` round-trip, confirm the return to
 /// CharSelect, linger again (the glue theme should be the only thing audible over the logs'
-/// world-teardown lines), and exit — the world-audio boundary is provable end-to-end without a
-/// hand on the keyboard. Inert without the env.
+/// world-teardown lines), **enter the world a second time**, and exit. Inert without the env.
+///
+/// The re-entry leg is not decoration. Since decision 0777 the world is *released* on the way out
+/// (`terrain_stream::release_world`), so the second entry is a materially different code path from
+/// the first — it streams a map the streamer has already torn down once — and a teardown that
+/// forgets to reset its own bookkeeping fails exactly here and nowhere else. The world-audio
+/// boundary this smoke was written for is still checked on the way through.
+#[allow(clippy::too_many_arguments)] // a smoke test that drives the whole round trip
 fn debug_logout_smoke(
     state: Res<State<ClientState>>,
     player: Res<crate::player::Player>,
     commands: Res<crate::net::NetCommands>,
+    mut roster: ResMut<Roster>,
+    pick: Res<CharPick>,
+    streamer: Res<crate::terrain_stream::TerrainStreamer>,
     time: Res<Time>,
     mut exit: MessageWriter<AppExit>,
     mut phase: Local<u8>,
@@ -332,13 +357,34 @@ fn debug_logout_smoke(
             *phase = 2;
         }
         2 if *state.get() == ClientState::CharSelect => {
-            info!("logout-smoke: back at character select — lingering");
+            info!(
+                "logout-smoke: back at character select — {} tiles resident (must be 0)",
+                streamer.residency().1
+            );
             (*phase, *mark) = (3, now);
         }
-        3 if now - *mark > 4.0 => {
+        3 if now - *mark > 4.0 => match roster.chars.first().map(|c| (c.guid, c.name.clone())) {
+            Some((guid, name)) => {
+                info!("logout-smoke: re-entering the world as {name}");
+                send_pick(&mut roster, &pick, guid);
+                (*phase, *mark) = (4, now);
+            }
+            None => {
+                warn!("logout-smoke: empty roster — cannot test re-entry");
+                *phase = 5;
+            }
+        },
+        4 if *state.get() == ClientState::InWorld && player.active && now - *mark > 3.0 => {
+            info!(
+                "logout-smoke: re-entered — {} tiles resident, done",
+                streamer.residency().1
+            );
+            *phase = 5;
+        }
+        5 => {
             info!("logout-smoke: done");
             exit.write(AppExit::Success);
-            *phase = 4;
+            *phase = 6;
         }
         _ => {}
     }

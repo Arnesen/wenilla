@@ -17,8 +17,10 @@
 //! rises at the explicit edges — the character pick's `Connected` edge (before the glue tears
 //! down), `SMSG_TRANSFER_PENDING` (the portal walk-in), the worldport snap — all observed *here*,
 //! from the messages/resources the net bridge already publishes; a residency backstop catches any
-//! path with no edge (and covers boot, which is what warms the world pipelines behind the glue —
-//! decision 0540). It clears when the destination is **scene-presentable** ([`WorldLoadProgress`],
+//! path with no edge, **in world only** — it used to fire at boot too, and that is what warmed the
+//! world's pipelines behind the glue (0540), which only worked while a world was being streamed
+//! there at all. Since 0777 none is, and the warm-up rides the entry cover instead. It clears when
+//! the destination is **scene-presentable** ([`WorldLoadProgress`],
 //! published by `terrain_stream` + the collider queue): every wanted tile spawned, the focus
 //! neighbourhood's placements up, colliders quiet, the snap no longer awaited. Never anything
 //! about the *body* — feet-on-ground is not a load condition (the flying-teleport hang, 0737).
@@ -424,10 +426,20 @@ fn drive_loading_screen(
     }
 
     // --- Backstop trigger: the ground under the view focus isn't resident and nothing raised us
-    // (a far same-map `.tele`, boot — which is what warms the world pipelines behind the glue,
-    // decision 0540 — or any path with no edge). Normal streaming keeps the focus tile resident,
-    // so this never fires while walking. ---
-    if !screen.active && !progress.focus_resident {
+    // (a far same-map `.tele`, or any path with no edge). Normal streaming keeps the focus tile
+    // resident, so this never fires while walking.
+    //
+    // **In world only** (decision 0777). It used to fire at boot as well, and that was load-bearing
+    // by accident: a raised screen keeps the world camera active (0540), which is what compiled the
+    // world's pipelines behind the glue. But it only worked because the world was being streamed
+    // behind the glue in the first place — with no world to load there, the same trigger would put
+    // an invisible screen up forever against residency that never arrives. The warm-up is not lost,
+    // it MOVED: the world now loads under the cover this same function raises on world entry, which
+    // is where a warm-up belongs. ---
+    if !screen.active
+        && !progress.focus_resident
+        && *state.get() == crate::char_select::ClientState::InWorld
+    {
         screen.raise("focus not resident", false, None, now);
     }
 
