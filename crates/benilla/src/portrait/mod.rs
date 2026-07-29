@@ -248,6 +248,57 @@ struct Booth {
 /// command-applied spawn, the billboard re-face's one-frame lag, and GPU upload of fresh meshes.
 const BOOTH_SETTLE_FRAMES: u32 = 4;
 
+/// `WOW_BOOTH_LOG=1` — is the booth instrument armed? (Read once.)
+fn booth_log() -> bool {
+    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LOG.get_or_init(|| std::env::var_os("WOW_BOOTH_LOG").is_some())
+}
+
+/// `WOW_BOOTH_LOG=1` — one line per BAKE DECISION, which is the half the gate timeline cannot
+/// show: the gate says a camera *drew*, never *what it drew*. B106's first-login shot is a
+/// portrait wearing no armour beside a fully-equipped character, so the question is exactly "how
+/// many parts/riders did the bake see, and did it ever re-bake when the rest arrived".
+/// `verb`: `bake` committed · `wait` abandoned (a source material was not resident, 0744) ·
+/// `stand-in` the 2D fallback while no parts are attached · `empty` the booth was cleared.
+fn log_bake(token: &str, verb: &str, parts: usize, riders: usize, billboards: usize) {
+    if booth_log() {
+        eprintln!("[booth] {token} {verb} parts={parts} riders={riders} billboards={billboards}");
+    }
+}
+
+/// The framing anchors for a bake — **`None` means "not ready, come back next frame", never
+/// "this display has no anchors".**
+///
+/// `Creatures::display_anchors` returns `None` in exactly two states, both transient: the display
+/// is not in the cache yet, or its `parts` are *"not yet built"* (its own comment). Once built it
+/// always answers `Some`; a display that genuinely has no authored portrait camera answers `Some`
+/// with `camera: None` inside, which the framing heuristics are built to handle.
+///
+/// Both bake sites used to paper over that with `unwrap_or(PortraitAnchors { .., pivot_height: 0.0,
+/// .. })`. That is not a neutral default: [`framing::body_frame`] floors the head signal at `0.1`
+/// for "a hypothetical bounds-less display", so zero anchors aim the camera at a 0.1-unit-tall
+/// subject — the paper doll "zoomed into the max" and the wrong-size portrait of `#bugs` B106. And
+/// it latches: the camera is aimed once per bake, and the parts key cannot change afterwards
+/// (handle ids are stable from `load()`, so mesh/model arrival is invisible to it), so the frame
+/// stays wrong until some unrelated content edge forces a re-bake.
+///
+/// A display id of `None` is a different case — there is nothing to wait for — and keeps the
+/// bounds-less anchors it always had.
+fn booth_anchors(
+    creatures: Option<&Creatures>,
+    display_id: Option<u32>,
+) -> Option<PortraitAnchors> {
+    let Some(display_id) = display_id else {
+        return Some(PortraitAnchors {
+            camera: None,
+            head: None,
+            pivot_height: 0.0,
+            ground_radius: 0.0,
+        });
+    };
+    creatures?.display_anchors(display_id)
+}
+
 /// Arm `booth` after a content edge: render the settle window, plus every frame until each twin
 /// material's texture is resident. `twins` = the material handles the bake just installed.
 fn wake_booth<'a>(
@@ -673,6 +724,20 @@ fn sync_portraits(
             // The look changed — re-bake: studio-lit twins of the exact dressed materials, posed
             // at Stand on the booth's own throwaway skeleton (the ref bake — riders ride their
             // bone's joint, exactly like the world instance).
+            // Resolve the framing anchors FIRST — before anything is despawned or spawned. A
+            // `None` here means the display is still loading (see `booth_anchors`), and a bake
+            // committed now would aim the camera at fabricated zero bounds and never re-aim.
+            let Some(anchors) = booth_anchors(creatures.as_deref(), display_id) else {
+                booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
+                log_bake(
+                    token,
+                    "wait-anchors",
+                    parts.len(),
+                    riders.len(),
+                    billboards.len(),
+                );
+                continue;
+            };
             let rig = creatures
                 .as_deref()
                 .zip(display_id)
@@ -705,6 +770,15 @@ fn sync_portraits(
                     kind: b.kind,
                 })
                 .collect();
+            // A source material was not resident, so at least one "twin" above is the WORLD
+            // material — bound to the world light buffer, which this booth's whole point is to
+            // avoid ("would render a night portrait pitch black", `light.rs`). Abandon the bake:
+            // `booth.baked` stays untouched, so the parts-key compare re-fires next frame and we
+            // retry once the material lands. The previous bake stays on screen meanwhile.
+            if booth_light.studio.take_unready() {
+                booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
+                continue;
+            }
             commands.entity(booth.root).despawn_related::<Children>();
             spawn_booth_model(
                 &mut commands,
@@ -724,18 +798,9 @@ fn sync_portraits(
                 &booth_billboards,
             );
             // Frame through the display's authored portrait camera (heuristic anchors for the
-            // camera-less few; generic humanoid framing when the display cache has nothing).
-            let anchors = creatures
-                .as_deref()
-                .zip(display_id)
-                .and_then(|(c, d)| c.display_anchors(d))
-                .unwrap_or(PortraitAnchors {
-                    camera: None,
-                    head: None,
-                    pivot_height: 0.0,
-                    ground_radius: 0.0,
-                });
+            // camera-less few), resolved above before anything was torn down.
             aim(&mut cams, token, &frame(&anchors));
+            log_bake(token, "bake", parts.len(), riders.len(), billboards.len());
             wake_booth(
                 booth,
                 &wow_mats,
@@ -907,6 +972,19 @@ fn sync_body_booth(
     let parts_changed = booth.baked.as_ref() != Some(&key);
     if parts_changed {
         let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
+        // Anchors first, before any teardown — a still-loading display must not be framed from
+        // fabricated zero bounds (see the portrait site, and `booth_anchors`).
+        let Some(anchors) = booth_anchors(creatures, display_id) else {
+            booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
+            log_bake(
+                slot,
+                "wait-anchors",
+                parts.len(),
+                riders.len(),
+                billboards.len(),
+            );
+            return;
+        };
         let rig = creatures
             .zip(display_id)
             .and_then(|(c, d)| c.display_rig(d));
@@ -938,6 +1016,12 @@ fn sync_body_booth(
                 kind: b.kind,
             })
             .collect();
+        // Same law as the portrait bake: never latch a world-lane material into the pane. Leave
+        // `booth.baked` alone and retry next frame (see the portrait site for the full note).
+        if booth_light.pane.take_unready() {
+            booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
+            return;
+        }
         commands.entity(booth.root).despawn_related::<Children>();
         spawn_booth_model(
             commands,
@@ -957,16 +1041,9 @@ fn sync_body_booth(
             &booth_billboards,
         );
         // Body framing from the display's bounds — the full standing figure, feet-to-crown.
-        let anchors = creatures
-            .zip(display_id)
-            .and_then(|(c, d)| c.display_anchors(d))
-            .unwrap_or(PortraitAnchors {
-                camera: None,
-                head: None,
-                pivot_height: 0.0,
-                ground_radius: 0.0,
-            });
+        // Resolved before the teardown above; see the portrait site for why it cannot be faked.
         aim(cams, slot, &body_frame(&anchors));
+        log_bake(slot, "bake", parts.len(), riders.len(), billboards.len());
         wake_booth(
             booth,
             wow_mats,
@@ -1002,6 +1079,7 @@ fn gate_booth_cameras(
     mut booths: ResMut<Booths>,
     preview: Res<GluePreview>,
     images: Res<Assets<Image>>,
+    time: Res<Time<bevy::time::Real>>,
     mut cams: Query<(&BoothCam, &mut Camera)>,
     mut env_cache: Local<Option<bool>>,
 ) {
@@ -1025,7 +1103,8 @@ fn gate_booth_cameras(
             && (cam.is_active != active || active)
         {
             eprintln!(
-                "[booth] {} active={} wake={} pending={}",
+                "[booth] t={:7.2} {} active={} wake={} pending={}",
+                time.elapsed_secs(),
                 token.as_str(),
                 active,
                 booth.wake,

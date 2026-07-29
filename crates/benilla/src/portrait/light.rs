@@ -24,20 +24,47 @@ use crate::terrain::WowModelMaterial;
 pub(super) struct BoothRig {
     pub(super) buffer: Option<bevy::render::render_resource::Buffer>,
     variants: HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
+    /// Set by [`Self::variant`] when it could NOT build a real booth twin because the source
+    /// material was not resident yet — see [`Self::take_unready`].
+    unready: bool,
 }
 
 impl BoothRig {
     /// The booth twin of a world-built material: same everything, this rig's light buffer. Cached
     /// per source material so twins dedup exactly like their sources.
+    ///
+    /// **A caller that is about to COMMIT a bake must consult [`Self::take_unready`] first.** When
+    /// the source material is not resident this returns the world material itself, which is bound
+    /// to the WORLD light buffer — and per this module's own header that is what "would render a
+    /// night portrait pitch black". Latching one into a booth is never right: the bake is stored
+    /// in a `MeshMaterial3d` and the booth then sleeps (0540), so a single unlucky frame freezes a
+    /// world-lit — or unlit — pane until something else forces a re-bake.
     pub(super) fn variant(
         &mut self,
         world: &Handle<WowModelMaterial>,
         materials: &mut Assets<WowModelMaterial>,
     ) -> Handle<WowModelMaterial> {
         let Some(buffer) = self.buffer.clone() else {
-            return world.clone(); // no booth buffer (headless tests) — fall back to the world light
+            // No booth buffer at all (headless tests) — there is nothing to wait FOR, so this
+            // stays a plain fallback rather than an unready signal.
+            return world.clone();
         };
-        material_variant(&mut self.variants, &buffer, world, materials, false)
+        match material_variant(&mut self.variants, &buffer, world, materials, false) {
+            Some(twin) => twin,
+            None => {
+                self.unready = true;
+                world.clone()
+            }
+        }
+    }
+
+    /// Take the "a twin could not be built" flag accumulated since the last call. A bake site
+    /// checks this after collecting its parts and, if set, **abandons the bake for this frame**
+    /// without touching `Booth::baked` — the parts-key compare then re-fires next frame and the
+    /// bake retries once the material lands. This is the same law `Booth::pending` already applies
+    /// to not-yet-resident textures, moved one level up to the material itself.
+    pub(super) fn take_unready(&mut self) -> bool {
+        std::mem::take(&mut self.unready)
     }
 }
 
@@ -85,19 +112,21 @@ pub(super) fn reap_dead_variants(
 /// stages none, its collector fog stays zeroed — wow-re `glue-model-lighting.md §5`; the
 /// background scene model, built by `sync_create_scene` with its own fog policy, keeps the
 /// `CharModelFogInfo` fog).
+///
+/// **`None` means the source material is not resident yet** — there is no twin to hand back, and
+/// the world material is NOT an acceptable substitute in a booth (wrong light buffer; see
+/// [`BoothRig::variant`]). Callers wait and retry rather than baking something wrong.
 pub(super) fn material_variant(
     variants: &mut HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
     buffer: &bevy::render::render_resource::Buffer,
     world: &Handle<WowModelMaterial>,
     materials: &mut Assets<WowModelMaterial>,
     rig: bool,
-) -> Handle<WowModelMaterial> {
+) -> Option<Handle<WowModelMaterial>> {
     if let Some(twin) = variants.get(&world.id()) {
-        return twin.clone();
+        return Some(twin.clone());
     }
-    let Some(mat) = materials.get(world) else {
-        return world.clone();
-    };
+    let mat = materials.get(world)?;
     let mut twin = mat.clone();
     twin.extension.light_buf = buffer.clone();
     if rig {
@@ -113,7 +142,7 @@ pub(super) fn material_variant(
     }
     let handle = materials.add(twin);
     variants.insert(world.id(), handle.clone());
-    handle
+    Some(handle)
 }
 
 /// The **model pane's** light rows — the reference's own, for the `<PlayerModel>` panes (the

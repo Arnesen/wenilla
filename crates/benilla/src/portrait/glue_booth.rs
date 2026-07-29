@@ -761,8 +761,12 @@ pub(super) fn sync_glue_booth(
                        booth_light: &mut BoothLight,
                        materials: &mut Assets<WowModelMaterial>| {
             match (&scene_buf, scene.as_deref_mut()) {
+                // The glue screens keep the old fallback deliberately: the create/select scene has
+                // its own lifecycle (no map-scope teardown under it) and no parts-key retry to
+                // ride, so waiting here would leave the pane empty instead of merely mislit.
                 (Some(buf), Some(s)) => {
                     super::material_variant(&mut s.variants, buf, material, materials, true)
+                        .unwrap_or_else(|| material.clone())
                 }
                 _ => booth_light.studio.variant(material, materials),
             }

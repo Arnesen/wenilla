@@ -221,12 +221,32 @@ fn bake_test(
 /// named booth's render target (e.g. `paperdoll`) to `path`. A probe run can then look at the
 /// pane a live session would see under the character window — without a UI click path (the
 /// first-login black-pane hunt). One shot per run; inert without the env.
+///
+/// **It must WAKE the booth before it shoots, and that is the whole subtlety.** Bevy's
+/// `Screenshot::image` does not read the target texture's existing contents: it substitutes a
+/// fresh `screenshot-capture-rendertarget` as that target's output attachment and hands back
+/// whatever is *rendered into it during the capture frame* (`bevy_render`'s
+/// `prepare_screenshots`). Under the 0540 demand gate a settled booth's camera is inactive and
+/// its target simply "keeps the last render" — so shooting it while it sleeps renders nothing
+/// into the substituted attachment and the PNG comes back a uniform `RGBA(0,0,0,0)`, which is
+/// exactly the `Image::new_fill` pattern in `new_target_image` and exactly what this
+/// instrument produced for its entire first life (every leg of the B106 hunt, control included,
+/// byte-identical). So: arm `Booth::wake` first, hold it armed, and take the shot a few frames
+/// later while the camera is still rendering. A dump that ever comes back uniformly transparent
+/// again means the wake is not reaching the gate — treat it as a broken instrument, not a black
+/// pane.
 pub(super) fn dump_booth_target(
     mut commands: Commands,
-    booths: Res<Booths>,
+    mut booths: ResMut<Booths>,
     time: Res<Time<bevy::time::Real>>,
-    mut fired: Local<bool>,
+    mut phase: Local<u32>,
 ) {
+    /// Frames to hold the booth awake before taking the shot: the gate reads `wake` and flips
+    /// `Camera::is_active` in the same frame, so one would do — a small margin covers the
+    /// command-applied camera flip and the render-app extract behind it.
+    const WAKE_LEAD: u32 = 3;
+    const DONE: u32 = u32::MAX;
+
     static SPEC: std::sync::OnceLock<Option<(String, String, f32)>> = std::sync::OnceLock::new();
     let Some((token, path, secs)) = SPEC.get_or_init(|| {
         let v = std::env::var("WOW_BOOTH_DUMP").ok()?;
@@ -239,14 +259,24 @@ pub(super) fn dump_booth_target(
     }) else {
         return;
     };
-    if *fired || time.elapsed_secs() < *secs {
+    if *phase == DONE || (*phase == 0 && time.elapsed_secs() < *secs) {
         return;
     }
-    *fired = true;
-    let Some(booth) = booths.0.get(token.as_str()) else {
+    let Some(booth) = booths.0.get_mut(token.as_str()) else {
         warn!("WOW_BOOTH_DUMP: no booth named {token:?}");
+        *phase = DONE;
         return;
     };
+    // Hold the gate open across the lead AND the capture frame itself.
+    booth.wake = booth.wake.max(super::BOOTH_SETTLE_FRAMES);
+    if *phase < WAKE_LEAD {
+        if *phase == 0 {
+            info!("WOW_BOOTH_DUMP: waking booth {token:?} for the shot");
+        }
+        *phase += 1;
+        return;
+    }
+    *phase = DONE;
     use bevy::render::view::window::screenshot::{Screenshot, ScreenshotCaptured};
     info!("WOW_BOOTH_DUMP: shooting booth {token:?} -> {path}");
     let out = std::path::PathBuf::from(path.clone());
