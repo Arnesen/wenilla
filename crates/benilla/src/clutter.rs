@@ -359,6 +359,7 @@ fn build_chunk_clutter(
                 Some(fade_far),  // detail-doodad distance fade (≈70 yd horizon — opacity, dc30e1f)
                 false,           // clutter is not WMO (keeps its ground-normal N·L path)
                 false, // not a doodad fade twin (clutter's own clutter_fade path handles it)
+                (sub.wrap_x, sub.wrap_y), // the M2 texture record's own address mode (0763)
                 images,
                 materials,
             );

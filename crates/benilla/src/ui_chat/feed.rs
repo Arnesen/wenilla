@@ -321,11 +321,22 @@ pub(super) fn feed_chat(
                         None => c,
                     })
                     .unwrap_or_default();
-                // `$`-macro expansion (decision 0754): the reference runs its one server-text
-                // expander over monster + BG-system chat and nothing else, against the guid the
-                // line is ADDRESSED to. Every other type reaches the frame verbatim.
-                let text = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
-                    // The addressee where the shape carries one, else the only guid it has.
+                // `$`-macro expansion (decision 0754, corrected by 0759): the reference runs its one
+                // server-text expander over the monster/boss + BG-system types and nothing else,
+                // against the guid the line is ADDRESSED to. Every other type reaches the frame
+                // verbatim.
+                //
+                // The FAILURE arms are the reference's, and they are not what a panel does: the chat
+                // path never puts a `$` on screen. VERIFIED `0x49dac2-0x49db1e` (mirrored at
+                // `0x49d9c9`): expanded → show; failed with a zero subject → **drop the line**;
+                // failed with the name already known → **drop** (a known name means retrying cannot
+                // help); failed with the name still unknown → hold the RAW text, let the name query
+                // run, and re-expand when it answers — only a second failure there shows the raw
+                // text. Our bounded `tries` retry IS that hold, and exhausting it is that second
+                // failure.
+                let expanded = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
+                    // The addressee where the shape carries one, else the only guid it has (the
+                    // `default:`-shaped BG_SYSTEM lines have no target slot at all).
                     let subject_guid = if msg.target_guid != 0 {
                         msg.target_guid
                     } else {
@@ -338,16 +349,36 @@ pub(super) fn feed_chat(
                         &mut names,
                         &commands,
                     );
-                    crate::npc_text::substitute(
+                    let (text, clean) = crate::npc_text::substitute_checked(
                         &msg.text,
                         &crate::npc_text::MacroContext {
                             subject: subject.as_ref(),
                             states: &states,
                         },
-                    )
+                    );
+                    if clean {
+                        Some(text)
+                    } else if subject_guid == 0 || names.peek(subject_guid).is_some() {
+                        debug!(
+                            "chat: dropping unexpandable [{:#04x}] {:?} (subject {subject_guid:#x})",
+                            msg.chat_type, msg.text
+                        );
+                        continue; // the reference drops it — no line at all
+                    } else if tries < NAME_MAX_TRIES {
+                        // Name query is already in flight (`subject_for_guid` issued it); hold the
+                        // raw line and re-expand when it lands.
+                        still.push(Pending::Wire {
+                            msg,
+                            tries: tries + 1,
+                        });
+                        continue;
+                    } else {
+                        None // the post-query second failure: show the raw text verbatim
+                    }
                 } else {
-                    msg.text.clone()
+                    None
                 };
+                let text = expanded.unwrap_or_else(|| msg.text.clone());
                 let event = ChatEvent {
                     kind,
                     text: text.clone(),

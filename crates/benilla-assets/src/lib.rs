@@ -68,9 +68,13 @@ impl MpqAssetReader {
 
 impl AssetReader for MpqAssetReader {
     async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
-        let internal = path
+        let raw = path
             .to_str()
             .ok_or_else(|| AssetReaderError::NotFound(path.to_path_buf()))?;
+        // Strip the sampler-mode marker ([`texture_url`]) before the archive lookup — it is part of
+        // the ASSET identity, not of the file name.
+        let stripped = strip_sampler_marker(raw);
+        let internal = stripped.as_deref().unwrap_or(raw);
         if !self.chain.contains(internal) {
             return Err(AssetReaderError::NotFound(path.to_path_buf()));
         }
@@ -97,6 +101,58 @@ impl AssetReader for MpqAssetReader {
     async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
         Ok(false)
     }
+}
+
+/// The sampler-mode marker separator in an `mpq://` texture URL (see [`texture_url`]).
+const SAMPLER_MARKER: char = '@';
+
+/// Build the `mpq://` URL for a model texture at a given sampler address mode.
+///
+/// The address mode lives on the GPU sampler, which in Bevy rides the `Image`, which is keyed by
+/// asset path — so two modes of one `.blp` need two asset paths. **243 of the corpus's 4677 texture
+/// paths are asked for more than one mode** (`benilla-extract texmodescan`), so this is not a
+/// hypothetical: without it, whichever model loaded a shared sheet first would decide the mode for
+/// every later one.
+///
+/// Repeat/repeat — the overwhelming majority — keeps the bare path, so the common case is one upload
+/// and every pre-existing URL is unchanged. Any other mode gets a marker **before the extension**
+/// (`…\leaves01@cc.blp`), because Bevy selects the loader by extension and a trailing marker would
+/// stop `.blp` resolving. [`MpqAssetReader::read`] strips it back off for the archive lookup.
+/// Decision 0763.
+pub fn texture_url(internal: &str, wrap: (bool, bool)) -> String {
+    let path = internal.replace('\\', "/").to_ascii_lowercase();
+    if wrap == (true, true) {
+        return format!("mpq://{path}");
+    }
+    let tag = match wrap {
+        (true, false) => "rc",
+        (false, true) => "cr",
+        _ => "cc",
+    };
+    match path.rsplit_once('.') {
+        Some((stem, ext)) => format!("mpq://{stem}{SAMPLER_MARKER}{tag}.{ext}"),
+        None => format!("mpq://{path}{SAMPLER_MARKER}{tag}"),
+    }
+}
+
+/// The address mode encoded in an asset path by [`texture_url`]; repeat/repeat when unmarked.
+pub fn sampler_mode_of(path: &str) -> (bool, bool) {
+    let Some((stem, _)) = path.rsplit_once('.') else {
+        return (true, true);
+    };
+    match stem.rsplit_once(SAMPLER_MARKER) {
+        Some((_, "rc")) => (true, false),
+        Some((_, "cr")) => (false, true),
+        Some((_, "cc")) => (false, false),
+        _ => (true, true),
+    }
+}
+
+/// Remove a [`texture_url`] marker, yielding the real archive path. `None` when there is none.
+fn strip_sampler_marker(path: &str) -> Option<String> {
+    let (stem, ext) = path.rsplit_once('.')?;
+    let (base, tag) = stem.rsplit_once(SAMPLER_MARKER)?;
+    matches!(tag, "rc" | "cr" | "cc").then(|| format!("{base}.{ext}"))
 }
 
 /// Register the `mpq://` asset source on `app`, backed by the patch chain at `data_dir`.
@@ -135,6 +191,36 @@ mod tests {
     /// crates/benilla-assets -> repo root -> WoW/Data (gitignored; test skips when absent).
     fn vanilla_data_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
+    }
+
+    /// The sampler-mode URL round-trips, and repeat/repeat stays byte-identical to the old bare
+    /// path — so the common case keeps ONE upload and no pre-existing URL changed (decision 0763).
+    #[test]
+    fn sampler_mode_rides_the_asset_path_and_round_trips() {
+        let tex = "World\\KhazModan\\Ironforge\\PassiveDoodads\\Trees\\IronForgeleaves01.blp";
+        // The default is the bare path — unchanged from before this scheme existed.
+        let repeat = texture_url(tex, (true, true));
+        assert_eq!(
+            repeat,
+            "mpq://world/khazmodan/ironforge/passivedoodads/trees/ironforgeleaves01.blp"
+        );
+        assert_eq!(sampler_mode_of(&repeat), (true, true));
+        // Every other mode marks the STEM, so the `.blp` extension still selects the loader.
+        for wrap in [(false, false), (true, false), (false, true)] {
+            let url = texture_url(tex, wrap);
+            assert!(url.ends_with(".blp"), "extension must survive: {url}");
+            assert_ne!(url, repeat, "a marked mode is a distinct asset path");
+            assert_eq!(sampler_mode_of(&url), wrap, "round-trip {wrap:?}");
+            // ...and the marker comes back off for the archive lookup.
+            assert_eq!(
+                strip_sampler_marker(url.strip_prefix("mpq://").unwrap()).as_deref(),
+                Some("world/khazmodan/ironforge/passivedoodads/trees/ironforgeleaves01.blp"),
+            );
+        }
+        // A bare path has nothing to strip, and an unrelated `@` is not a marker.
+        assert_eq!(strip_sampler_marker("world/foo.blp"), None);
+        assert_eq!(strip_sampler_marker("world/foo@bar.blp"), None);
+        assert_eq!(sampler_mode_of("world/foo@bar.blp"), (true, true));
     }
 
     #[test]

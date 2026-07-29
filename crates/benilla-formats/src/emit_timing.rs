@@ -254,4 +254,61 @@ mod tests {
         assert!(!t.emitting(None, 0.8), "first pass: past it");
         assert!(t.emitting(None, 1.1), "second pass: the window re-fires");
     }
+
+    /// **The dead-slot-0 shape** — `BlastedLandsLightningbolt01.m2`'s emitter 2, synthesized
+    /// (decision 0760, bug B63). Two sequences, both anim id 0: a variation chain. Slot 0 keys a
+    /// single 0 — a flat silence for its whole band — while the strike itself, `0 → 30 → 0`, is
+    /// keyed only in slot 1, which the arm's frequency-weighted roll reaches ~5 % of the time.
+    ///
+    /// A consumer that PINS slot 0 therefore emits **nothing at all, for ever**, on every
+    /// placement: the emitter builds, pools and ticks, and never births a particle. That is what
+    /// the placed-doodad lane did until it started passing the slot its own arm actually rolled.
+    /// `peak_rate()` folding across all slots is why such an emitter survives the spawn cull — it
+    /// looks alive to the build and is dead to the clock. `partslotscan` counts 947 of these.
+    #[test]
+    fn a_burst_keyed_only_in_a_later_variation_is_silent_in_slot_0() {
+        // Absolute timeline: slot 0's band 0..1333, slot 1's band 1367..2667 (the real model's).
+        let rate = track(
+            1,
+            &[
+                (0, 0.0),
+                (1633, 0.0),
+                (1667, 30.0),
+                (1800, 30.0),
+                (1833, 0.0),
+            ],
+            &[],
+        );
+        let t = EmitTiming::bake(
+            &rate,
+            &M2ScalarTrack::default(),
+            &slots(&[(0, 1333), (1367, 2667)]),
+            vec![true, true],
+            &[],
+        );
+        // Slot 0 — what the old pinned consumer sampled. Silent across its whole band.
+        for s in [0.0, 0.3, 0.6, 0.9, 1.2] {
+            assert_eq!(t.rate(Some(0), s), 0.0, "slot 0 is a flat zero at {s}s");
+        }
+        assert_eq!(
+            t.rate(None, 0.5),
+            0.0,
+            "`None` degrades to slot 0 — also silent"
+        );
+        // Slot 1 — what the arm actually rolled. The strike is here, and only here.
+        assert_eq!(t.rate(Some(1), 0.0), 0.0, "slot 1 opens closed");
+        assert_eq!(t.rate(Some(1), 0.316), 30.0, "the burst fires mid-band");
+        assert_eq!(t.rate(Some(1), 0.5), 0.0, "and self-closes");
+        // The trap that hid it: the build-time cull sees a live emitter either way.
+        assert_eq!(
+            t.peak_rate(),
+            30.0,
+            "peak folds ACROSS slots — never culled"
+        );
+        assert_eq!(
+            t.constant_rate(),
+            None,
+            "and it is not a constant-rate emitter"
+        );
+    }
 }

@@ -25,9 +25,14 @@
 //!
 //! [`drain_quest_log_abandons`] maps the confirmed abandon's 1-based Lua entry index back to its
 //! descriptor slot (this frame's push order, kept on [`QuestLog`]) and sends
-//! `CMSG_QUESTLOG_REMOVE_QUEST`. [`QuestLog::contains`] also answers decision 0088's other deferred
-//! item — the questgiver greeting's active/available split, now the log's real membership instead
-//! of an icon guess (see [`crate::ui_quest`]).
+//! `CMSG_QUESTLOG_REMOVE_QUEST`.
+//!
+//! This module used to also answer the questgiver greeting's active/available split, via a
+//! `contains` membership test over the live descriptor slots. **It doesn't any more, and must not
+//! again** — the reference splits that list on the wire icon alone and never consults its quest log
+//! there ([`crate::ui_quest::row_is_active`], decision 0758). Membership was wrong for exactly the
+//! quests that are never in the log: auto-complete turn-ins. The state that backed it is gone
+//! rather than left dead, so the retired law can't be reached for by accident.
 
 use std::collections::{HashMap, HashSet};
 
@@ -66,10 +71,6 @@ struct Row {
 ///
 /// - `templates`/`pending` — the `SMSG_QUEST_QUERY_RESPONSE` cache, ask-once by quest id (the exact
 ///   twin of [`Items`]'s item-template cache).
-/// - `active_quest_ids` — which quest ids occupy a descriptor slot *this frame*, refreshed every
-///   [`feed_quest_log`] call. [`Self::contains`] is decision 0088's deferred greeting-split fix
-///   ([`crate::ui_quest`]): a row is ACTIVE iff it's really in our log, not however the wire
-///   `QUEST_LIST` icon happened to read.
 /// - `entry_slots` — this frame's pushed entry order → descriptor slot, so
 ///   [`drain_quest_log_abandons`] can turn a confirmed abandon's 1-based Lua index back into the
 ///   `CMSG_QUESTLOG_REMOVE_QUEST` slot it came from (slots aren't contiguous — an abandoned/turned-in
@@ -78,7 +79,6 @@ struct Row {
 pub(crate) struct QuestLog {
     templates: HashMap<u32, QuestTemplate>,
     pending: HashSet<u32>,
-    active_quest_ids: HashSet<u32>,
     entry_slots: Vec<Option<u8>>,
     /// Collapsed section headers, keyed by header TITLE (two zones sharing a name share a header
     /// row, so the fold state naturally shares too). Owned here — the engine only reports the
@@ -116,20 +116,6 @@ impl QuestLog {
         self.templates.insert(template.quest_id, template);
     }
 
-    /// Refresh which quest ids currently occupy a descriptor slot — called once per
-    /// [`feed_quest_log`] frame; also the hook a unit test seeds directly (no ECS needed) to exercise
-    /// [`Self::contains`].
-    pub(crate) fn set_active_quests(&mut self, ids: impl IntoIterator<Item = u32>) {
-        self.active_quest_ids = ids.into_iter().collect();
-    }
-
-    /// Whether `quest_id` occupies one of our quest-log descriptor slots right now — the greeting
-    /// active/available split's real predicate (decision 0088's deferred item; see
-    /// [`crate::ui_quest::is_active_quest`]).
-    pub(crate) fn contains(&self, quest_id: u32) -> bool {
-        self.active_quest_ids.contains(&quest_id)
-    }
-
     /// Disconnect: drop everything, including the templates. Unlike item templates (which persist —
     /// decision: static, stable across sessions), a stale log slice carried across a reconnect would
     /// pair fresh descriptor slots (possibly renumbered) with old titles; templates are cheap enough
@@ -137,7 +123,6 @@ impl QuestLog {
     pub(crate) fn clear_session(&mut self) {
         self.templates.clear();
         self.pending.clear();
-        self.active_quest_ids.clear();
         self.entry_slots.clear();
         self.collapsed.clear();
         self.header_keys.clear();
@@ -437,7 +422,6 @@ fn feed_quest_log(
         }
         *prior_quest_ids = Some(current);
     }
-    quest_log.set_active_quests(rows.iter().map(|r| r.quest_id));
 
     // ── Section headers (the ref's zone/sort groups) ────────────────────────────────────────────
     // Group rows by their template's ZoneOrSort NAME (positive → AreaTable zone, negative →
@@ -1091,21 +1075,5 @@ mod tests {
         assert!(quests_with_progressed_objectives(&grown, &with_entry).is_empty());
         // A turn-in/abandon that removes the quest fires nothing either.
         assert!(quests_with_progressed_objectives(&with_entry, &empty).is_empty());
-    }
-
-    // ── QuestLog::contains — the greeting split's real predicate ────────────────────────────────────
-
-    #[test]
-    fn quest_log_contains_reflects_the_last_set_active_ids() {
-        let mut log = QuestLog::default();
-        assert!(!log.contains(100));
-        log.set_active_quests([100, 200]);
-        assert!(log.contains(100));
-        assert!(log.contains(200));
-        assert!(!log.contains(300));
-        // A later refresh replaces, not accumulates.
-        log.set_active_quests([300]);
-        assert!(!log.contains(100));
-        assert!(log.contains(300));
     }
 }

@@ -30,7 +30,6 @@ use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{ui_error_text, UiError};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
-use crate::ui_quest_log::QuestLog;
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -265,13 +264,48 @@ impl NpcSession for QuestGiver {
 }
 
 /// The greeting panel's active-vs-available split — decision 0088's deferred item, now resolved by
-/// the quest-log slice ([`crate::ui_quest_log`]): a row is ACTIVE iff its quest id currently occupies
-/// a `PLAYER_QUEST_LOG` descriptor slot, read live off [`QuestLog`] — never derived from the wire
-/// `QUEST_LIST` icon (the old icon-derived guess misclassified an auto-complete AVAILABLE quest
-/// carrying a REWARD_REP icon). One helper so the snapshot and the drain's re-walk can't diverge.
-pub(crate) fn is_active_quest(quest_id: u32, quest_log: &QuestLog) -> bool {
-    quest_log.contains(quest_id)
+/// the **wire icon**, which is the reference's own and only predicate.
+///
+/// VERIFIED at the bytes (wow-re `system/ui/scratch/questgiver-quest-pool.md`, dispatched for this;
+/// the split is `0x5dbbfe-0x5dbc08`): `icon == 3 || icon == 4` → ACTIVE, and **every other `u32`** →
+/// AVAILABLE. A flat two-way `cmp`/`je`, no range test and no third arm — and the client never
+/// consults its own quest log on this path. The values are vmangos's `__QuestGiverStatus`
+/// (`QuestDef.h:118-130`): 3 = `DIALOG_STATUS_INCOMPLETE` (held, unfinished), 4 =
+/// `DIALOG_STATUS_REWARD_REP` (hand it in). The gossip packet's quest rows use the identical test,
+/// applied lazily (`0x4e2430`/`0x4e2580`), so both seams share this helper.
+///
+/// **This reverses an earlier call of ours, and the reversal is the whole point.** benilla used to
+/// read the icon, saw an auto-complete quest arrive carrying REWARD_REP while absent from the quest
+/// log, read that as a misclassification, and switched to log membership. It was not a
+/// misclassification: an auto-complete quest is *never* in the log — that is what auto-complete
+/// means — and `Player::PrepareQuestMenu` (vmangos `Objects/Player.cpp:12501`) marks it REWARD_REP
+/// deliberately, so the client sends COMPLETE_QUEST and gets the request-items panel. Deriving the
+/// pool from the log instead made every such quest permanently un-turn-in-able and rendered its
+/// (empty) detail text as a blank window — ledger B95, decision 0758.
+pub(crate) fn row_is_active(icon: u32) -> bool {
+    matches!(icon, 3 | 4)
 }
+
+/// An AVAILABLE row's **one-click** flag: `icon == 0` makes the *available* select send
+/// COMPLETE_QUEST rather than QUERY_QUEST.
+///
+/// VERIFIED: `test ebx,ebx; sete cl` at `0x5dbc13` stores it into the pool record's `+0x48`, which
+/// `SelectAvailableQuest` (`0x5012a0`) reads at `0x5012db` to pick opcode `0x18a` over `0x186`. (The
+/// ACTIVE pool's `+0x48` is written literal `0` and read nowhere in the binary — `SelectActiveQuest`
+/// always sends `0x18a`.)
+///
+/// wow-re flags exactly one thing here as open: whether a real 1.12 server ever emitted `icon == 0`
+/// on this packet at all — vmangos emits only 2..=5, and its `DIALOG_STATUS_NONE` belongs to the
+/// separate `SMSG_QUESTGIVER_STATUS` path. The arm is byte-verified and correctly wired; only its
+/// live *reachability* is unknown, and the client predicate is total over `u32`, so implementing it
+/// as written is faithful either way.
+pub(crate) fn row_is_one_click(icon: u32) -> bool {
+    icon == 0
+}
+
+/// One greeting pool as the drain re-walks it: `(quest_id, wire icon)` per row. The icon rides along
+/// because the AVAILABLE arm needs it a second time, for [`row_is_one_click`].
+type Pool = Vec<(u32, u32)>;
 
 /// Resolve one wire reward/required triple into a Lua-facing [`QuestItemView`]: icon from the wire
 /// display id (immediate), name + quality from the ask-once item-template cache (`None`/white while
@@ -317,7 +351,6 @@ fn snapshot(
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
-    quest_log: &QuestLog,
     macros: &crate::npc_text::MacroContext,
 ) -> Option<QuestState> {
     let sub = |t: &str| crate::npc_text::substitute(t, macros);
@@ -326,7 +359,7 @@ fn snapshot(
             let mut active_titles = Vec::new();
             let mut available_titles = Vec::new();
             for q in &l.quests {
-                if is_active_quest(q.quest_id, quest_log) {
+                if row_is_active(q.icon) {
                     active_titles.push(q.title.clone());
                 } else {
                     available_titles.push(q.title.clone());
@@ -393,7 +426,6 @@ fn feed_quest(
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     mut names: ResMut<NameCache>,
-    quest_log: Res<QuestLog>,
     states: Res<crate::world_state::WorldStates>,
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut chat: ResMut<ChatLog>,
@@ -440,7 +472,6 @@ fn feed_quest(
         &mut items,
         icons.as_deref(),
         &commands,
-        &quest_log,
         &crate::npc_text::MacroContext {
             subject: player.as_ref(),
             states: &states,
@@ -495,7 +526,6 @@ fn drain_quest(
     script: Option<NonSendMut<UiScript>>,
     mut giver: ResMut<QuestGiver>,
     commands: Res<NetCommands>,
-    quest_log: Res<QuestLog>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -512,24 +542,25 @@ fn drain_quest(
         let Some(QuestView::Greeting(list)) = giver.view.as_ref() else {
             continue;
         };
-        // Re-walk the same active/available split the snapshot used (`is_active_quest`, backed by
-        // the live quest log — not the wire icon), keeping quest ids this time.
-        let (mut active, mut available): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        // Re-walk the same split the snapshot used (`row_is_active`, off the wire icon), keeping the
+        // id AND the icon this time — the available arm needs the icon again for its one-click flag.
+        let (mut active, mut available): (Pool, Pool) = (Vec::new(), Vec::new());
         for q in &list.quests {
-            if is_active_quest(q.quest_id, &quest_log) {
-                active.push(q.quest_id);
+            if row_is_active(q.icon) {
+                active.push((q.quest_id, q.icon));
             } else {
-                available.push(q.quest_id);
+                available.push((q.quest_id, q.icon));
             }
         }
         let pool = if sel.active { &active } else { &available };
-        let Some(&quest) = sel.index.checked_sub(1).and_then(|i| pool.get(i as usize)) else {
+        let Some(&(quest, icon)) = sel.index.checked_sub(1).and_then(|i| pool.get(i as usize))
+        else {
             debug!("ui_quest: greeting select {sel:?} out of range — ignored");
             continue;
         };
-        // Active quest = a turn-in (COMPLETE_QUEST → progress); available = a new quest to look at
-        // (QUERY_QUEST → details).
-        let cmd = if sel.active {
+        // `SelectActiveQuest` (`0x501320`) sends COMPLETE_QUEST unconditionally. `SelectAvailableQuest`
+        // (`0x5012a0`) picks by the row's one-click flag: COMPLETE_QUEST when set, else QUERY_QUEST.
+        let cmd = if sel.active || row_is_one_click(icon) {
             ClientCommand::QuestgiverComplete { npc, quest }
         } else {
             ClientCommand::QuestgiverQuery { npc, quest }
@@ -595,16 +626,48 @@ mod tests {
         }
     }
 
+    /// The greeting split is the reference's flat two-way test on the WIRE ICON — `{3,4}` ACTIVE,
+    /// everything else AVAILABLE (`0x5dbbfe-0x5dbc08`, decision 0758). Pinned because this reverses
+    /// an earlier call that read the same icon and concluded the opposite.
     #[test]
-    fn greeting_split_by_quest_log() {
-        // The real semantics (decision 0088's deferred item, resolved): membership in our quest
-        // log, not the wire icon. A quest in the log is ACTIVE regardless of which dialog-status
-        // icon the greeting carried for it (the icon-derived guess this replaces misclassified an
-        // auto-complete AVAILABLE quest carrying a REWARD_REP icon).
-        let mut quest_log = QuestLog::default();
-        quest_log.set_active_quests([100]);
-        assert!(is_active_quest(100, &quest_log));
-        assert!(!is_active_quest(200, &quest_log));
+    fn greeting_split_reads_the_wire_icon() {
+        // 3 = DIALOG_STATUS_INCOMPLETE, 4 = DIALOG_STATUS_REWARD_REP.
+        assert!(row_is_active(3));
+        assert!(row_is_active(4));
+        // 5 = DIALOG_STATUS_AVAILABLE (a genuinely new quest), 2 = DIALOG_STATUS_CHAT.
+        assert!(!row_is_active(5));
+        assert!(!row_is_active(2));
+        // No range test and no third arm: every other u32 is AVAILABLE, including 0, the ones
+        // vmangos never emits, and anything a future server invents.
+        for icon in [0, 1, 6, 7, 100, u32::MAX] {
+            assert!(!row_is_active(icon), "icon {icon} must fall to AVAILABLE");
+        }
+    }
+
+    /// **The B95 case.** An auto-complete quest (`QuestMethod == 0`) is never in the player's quest
+    /// log, and vmangos marks its greeting row `DIALOG_STATUS_REWARD_REP` anyway
+    /// (`Objects/Player.cpp:12501`) precisely so the client treats it as a turn-in. Binning that row
+    /// off log membership sent `QUERY_QUEST`, which vmangos answers with DETAILS unconditionally —
+    /// and quest 7793 "A Donation of Silk" has empty `Details`/`Objectives`, so the window came up
+    /// blank. The row must be ACTIVE on the icon alone.
+    #[test]
+    fn an_autocomplete_row_is_active_though_it_is_not_in_the_log() {
+        const REWARD_REP: u32 = 4;
+        assert!(
+            row_is_active(REWARD_REP),
+            "an auto-complete turn-in must bin ACTIVE without ever entering the quest log"
+        );
+        assert!(!row_is_one_click(REWARD_REP), "it is active, not one-click");
+    }
+
+    /// The AVAILABLE pool's one-click flag: `icon == 0` alone (`test ebx,ebx; sete cl` @ `0x5dbc13`),
+    /// which makes the *available* select send COMPLETE_QUEST instead of QUERY_QUEST.
+    #[test]
+    fn the_one_click_flag_is_icon_zero_alone() {
+        assert!(row_is_one_click(0));
+        for icon in [1, 2, 3, 4, 5, u32::MAX] {
+            assert!(!row_is_one_click(icon));
+        }
     }
 
     /// An item-sourced quest window (decision 0664) reports **no** NPC to the session face, so the
@@ -658,7 +721,6 @@ mod tests {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
-        let quest_log = QuestLog::default();
         let player = crate::npc_text::Subject {
             name: "Tri".into(),
             race: 1,
@@ -670,7 +732,6 @@ mod tests {
             &mut items,
             None,
             &commands,
-            &quest_log,
             &crate::npc_text::MacroContext {
                 subject: Some(&player),
                 states: &crate::world_state::WorldStates::default(),
@@ -710,13 +771,11 @@ mod tests {
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
-        let quest_log = QuestLog::default();
         let snap = snapshot(
             &giver,
             &mut items,
             None,
             &commands,
-            &quest_log,
             &crate::npc_text::MacroContext {
                 subject: None,
                 states: &crate::world_state::WorldStates::default(),

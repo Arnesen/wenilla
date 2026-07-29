@@ -215,10 +215,10 @@ pub(super) fn setup_sun(
         // across patches with different weights. Base-colour alpha is driven per-frame.
         let tex_white = world_assets
             .as_mut()
-            .and_then(|a| a.texture("Environments\\Stars\\Stars.blp", &mut images));
+            .and_then(|a| a.texture("Environments\\Stars\\Stars.blp", (true, true), &mut images));
         let tex_blue = world_assets
             .as_mut()
-            .and_then(|a| a.texture("Environments\\Stars\\Stars2.blp", &mut images));
+            .and_then(|a| a.texture("Environments\\Stars\\Stars2.blp", (true, true), &mut images));
         for sub in &subs {
             let positions: Vec<[f32; 3]> = sub
                 .positions

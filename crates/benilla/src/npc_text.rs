@@ -56,7 +56,22 @@ pub(crate) struct MacroContext<'a> {
 /// `$` and leaves the rest of the text literal — so an un-landed player name shows `$N` for the
 /// moment rather than a hole, and the feeds re-substitute when it arrives.
 pub(crate) fn substitute(text: &str, ctx: &MacroContext) -> String {
+    substitute_checked(text, ctx).0
+}
+
+/// [`substitute`], plus the reference driver's **return flag**: `true` when no token failed.
+///
+/// The reference's `0x506f70` returns exactly this — "no unrecognized token was hit" — and its
+/// callers branch on it. The panel seams ignore it (they show the `$`-preserving text either way,
+/// which is what [`substitute`] hands back); the **chat** seam must not, because the reference's
+/// chat path never displays a `$` — it drops or defers the line instead. See
+/// `ui_chat::feed`'s use, decision 0759.
+///
+/// Note what the flag does NOT mean: it says nothing about truncation, and a `false` can come
+/// either from an unresolvable subject or from a token outside the accepted set.
+pub(crate) fn substitute_checked(text: &str, ctx: &MacroContext) -> (String, bool) {
     let subject = ctx.subject;
+    let mut clean = true;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -158,9 +173,10 @@ pub(crate) fn substitute(text: &str, ctx: &MacroContext) -> String {
         if fail {
             out.push('$');
             i = j;
+            clean = false;
         }
     }
-    out
+    (out, clean)
 }
 
 /// Parse a `$G`/`$T` branch body `first:second;` starting at `start` (already past the marker and
@@ -246,7 +262,7 @@ pub(crate) fn subject_for_guid(
 
 #[cfg(test)]
 mod tests {
-    use super::{substitute, MacroContext, Subject};
+    use super::{substitute, substitute_checked, MacroContext, Subject};
     use crate::world_state::WorldStates;
 
     /// Thrall the night-elf priest — race 4 / class 5, so both table lookups are real rows.
@@ -269,6 +285,45 @@ mod tests {
                 states: &WorldStates::default(),
             },
         )
+    }
+
+    /// The driver's return flag ([`substitute_checked`]) — `true` only when no token failed. The
+    /// chat seam branches on it (drop / defer / show raw), so a wrong flag silently loses chat lines
+    /// rather than merely showing a stray `$`. Decision 0759.
+    #[test]
+    fn the_return_flag_reports_whether_any_token_failed() {
+        let s = subject(0);
+        let states = WorldStates::default();
+        let ctx = |subject| MacroContext {
+            subject,
+            states: &states,
+        };
+
+        // No `$` at all, and a token that resolves: clean.
+        assert_eq!(
+            substitute_checked("plain text", &ctx(None)),
+            ("plain text".to_string(), true)
+        );
+        assert_eq!(
+            substitute_checked("hi $N", &ctx(Some(&s))),
+            ("hi Thrall".to_string(), true)
+        );
+        // No subject: the person-token fails, the `$` comes back, flag false.
+        assert_eq!(
+            substitute_checked("hi $N", &ctx(None)),
+            ("hi $N".to_string(), false)
+        );
+        // Outside the accepted set: fails even WITH a subject — the case the chat path drops
+        // outright rather than deferring, because no name query can fix it.
+        assert_eq!(
+            substitute_checked("hi $X", &ctx(Some(&s))),
+            ("hi $X".to_string(), false)
+        );
+        // One failure anywhere poisons the flag, though the rest still expands.
+        assert_eq!(
+            substitute_checked("$N and $X", &ctx(Some(&s))),
+            ("Thrall and $X".to_string(), false)
+        );
     }
 
     #[test]

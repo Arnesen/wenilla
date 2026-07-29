@@ -382,17 +382,23 @@ fn random_roll_broadcast_decodes() {
 
 /// The `$`-macro gate is a byte-level fact, not a design choice — pin it.
 ///
-/// VERIFIED in `WoW.exe` (build 5875) at `0x49cf36-0x49cf5d`: the `cmp`-chain guarding the
-/// `call 0x506f70` at `0x49cf70` tests exactly `0x0b 0x0c 0x0d 0x1a 0x52 0x53 0x54`. Two things
-/// this guards against, both of which read as plausible and are wrong: adding the RAID_BOSS pair
-/// (0x59/0x5A) because they look like boss text, and dropping the BG_SYSTEM trio (0x52-0x54)
-/// because they look like plain system lines. Player chat is never expanded.
+/// **The reference has TWO gates, and we want the WIRE one** (decision 0759 corrects 0754). The
+/// `SMSG_MESSAGECHAT` parser `0x49d560` routes `0x0B 0x0C 0x0D 0x1A 0x5A` into the expanding branch
+/// at `0x49da3d` (`0x49d5e4-0x49d606`) and `0x52 0x53 0x54` into the one at `0x49d961` — **eight**.
+/// The seven-value chain at `0x49cf36-0x49cf5d` is the *pending-chat re-expansion* gate and omits
+/// `0x5A`; 0754 cited that one by mistake, leaving boss emotes unexpanded.
+///
+/// Three plausible-and-wrong edits this guards against: dropping `RAID_BOSS_EMOTE` (0x5A) because
+/// the other gate omits it, adding `RAID_BOSS_WHISPER` (0x59) because it looks like its sibling, and
+/// dropping the BG_SYSTEM trio (0x52-0x54) because they look like plain system lines. Player chat is
+/// never expanded.
 #[test]
-fn the_macro_expanded_chat_types_are_the_reference_seven() {
-    assert_eq!(
-        messages::MACRO_EXPANDED_TYPES,
-        [0x0B, 0x0C, 0x0D, 0x1A, 0x52, 0x53, 0x54]
-    );
+fn the_macro_expanded_chat_types_are_the_reference_wire_gate() {
+    let mut got = messages::MACRO_EXPANDED_TYPES;
+    got.sort_unstable();
+    assert_eq!(got, [0x0B, 0x0C, 0x0D, 0x1A, 0x52, 0x53, 0x54, 0x5A]);
+    // 0x59 RAID_BOSS_WHISPER takes its own branch (`0x49d610`), never expands, and is remapped to a
+    // plain whisper — it must never creep in alongside 0x5A.
     for t in [
         messages::CHAT_MSG_SAY,
         messages::CHAT_MSG_YELL,
@@ -401,7 +407,6 @@ fn the_macro_expanded_chat_types_are_the_reference_seven() {
         messages::CHAT_MSG_CHANNEL,
         messages::CHAT_MSG_SYSTEM,
         messages::CHAT_MSG_RAID_BOSS_WHISPER,
-        messages::CHAT_MSG_RAID_BOSS_EMOTE,
     ] {
         assert!(
             !messages::MACRO_EXPANDED_TYPES.contains(&t),

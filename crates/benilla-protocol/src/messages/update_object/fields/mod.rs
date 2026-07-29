@@ -23,6 +23,9 @@ const FIELD_GAMEOBJECT_FACING: u16 = 18;
 // vmangos' `UpdateFields_1_5_1.h` inserts a stray `GAMEOBJECT_TIMESTAMP` that would shift this to 20,
 // but that header is not the 5875 layout — STATE@14 / TYPE_ID@21 both work against this same server).
 const FIELD_GAMEOBJECT_DYN_FLAGS: u16 = 19;
+// GAMEOBJECT_FACTION = OBJECT_END(6) + field 14 — the slot between DYN_FLAGS(13) and TYPE_ID(15),
+// i.e. the binary's `[go+0x110]+0x38` (wow-re cursor-system §4a's faction term, decision 0764).
+const FIELD_GAMEOBJECT_FACTION: u16 = 20;
 const FIELD_GAMEOBJECT_TYPE_ID: u16 = 21;
 // GAMEOBJECT_LEVEL = OBJECT_END(6) + 0x10 (vmangos UpdateFields_1_12_1.h:317).
 const FIELD_GAMEOBJECT_LEVEL: u16 = 22;

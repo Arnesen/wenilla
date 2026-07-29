@@ -250,7 +250,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 }
                 slot
             });
-            let (ents, joints) = spawn_model_entities(
+            let (ents, host) = spawn_model_entities(
                 &mut commands,
                 &mut entity_mats.0,
                 &mut materials,
@@ -304,8 +304,9 @@ pub(super) fn spawn_wmo_gameobject_props(
                     // ride as a terrain doodad — an unanimated chain reproduces the static path
                     // exactly); a boneless prop follows its root. Either owner's propagated
                     // global composes the moving hull.
-                    let owner = joints
-                        .as_deref()
+                    let owner = host
+                        .as_ref()
+                        .map(|h| h.joints.as_slice())
                         .and_then(|js| js.get(em.def.bone as usize))
                         .map_or((root, [0.0; 3]), |&j| (j, em.bone_pivot));
                     if let Some(e) = particles::spawn_emitter(
@@ -318,7 +319,13 @@ pub(super) fn spawn_wmo_gameobject_props(
                         // reference re-anchors every cloud to the emitter's live position), while
                         // an animated bone still never drags it.
                         Some(root),
-                        particles::EmitClock::Pinned, // a placed prop: the doodad law
+                        // A placed prop: the doodad law — one arm, spawn clock, but at the slot
+                        // that arm's variation roll landed on (decision 0760; pinning slot 0 here
+                        // killed every emitter keyed only in a later variation, silently).
+                        match host.as_ref().and_then(|h| h.seq) {
+                            Some(s) => particles::EmitClock::PinnedSeq(s),
+                            None => particles::EmitClock::Pinned,
+                        },
                     ) {
                         // Parented: the off-map hide reaches the flame, and despawn cascades
                         // (the sim's direct GlobalTransform write runs post-propagation, so the
@@ -329,8 +336,9 @@ pub(super) fn spawn_wmo_gameobject_props(
                 }
                 // Ribbon trails — the same host-bone ride; a trail self-despawns with its owner.
                 for rb in &m.ribbons {
-                    let (owner, use_pivot) = joints
-                        .as_deref()
+                    let (owner, use_pivot) = host
+                        .as_ref()
+                        .map(|h| h.joints.as_slice())
                         .and_then(|js| js.get(rb.def.bone as usize))
                         .map_or((root, false), |&j| (j, true));
                     if crate::ribbons::spawn_ribbon(

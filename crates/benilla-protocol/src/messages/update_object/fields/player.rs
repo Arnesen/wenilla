@@ -442,6 +442,13 @@ impl ObjectFields {
     pub fn gameobject_flags(&self) -> u32 {
         self.get_u32(FIELD_GAMEOBJECT_FLAGS).unwrap_or(0)
     }
+    /// `GAMEOBJECT_FACTION` — the object's `FactionTemplate.dbc` id, or `0` for "no faction"
+    /// (which the reference resolves as NEUTRAL). The highlightable predicate's faction term reads
+    /// exactly this (`[go+0x110]+0x38`, decision 0764): a GameObject whose template is **hostile to
+    /// the player** is not highlightable, so it shows no cursor, no tooltip and no hover brighten.
+    pub fn gameobject_faction(&self) -> u32 {
+        self.get_u32(FIELD_GAMEOBJECT_FACTION).unwrap_or(0)
+    }
     /// `GAMEOBJECT_DYN_FLAGS` — the **per-player** dynamic flags; bit `0x1` = `GO_DYNFLAG_LO_ACTIVATE`
     /// (the sparkle / "usable for me now"), which the server sets from `GameObject::ActivateToQuest`.
     /// Consulted only when `GAMEOBJECT_FLAGS & INTERACT_COND` is set (decision 0243).

@@ -617,6 +617,37 @@ mod tests {
         assert_eq!(Reaction::from_rank(7), Reaction::Friendly);
     }
 
+    /// The GameObject faction term (decision 0764), pinned on the real `FactionTemplate.dbc`: the
+    /// factions that shipped GameObjects actually carry, resolved **GO → player** (the direction
+    /// `0x606640` uses). A column slip here would silently blank ~7,563 shipped GO spawns, or fail
+    /// to blank them — so the two decisive rows are asserted by value. Skips without client data.
+    #[test]
+    fn real_gameobject_factions_resolve_toward_both_player_templates() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_faction_catalog(&mut chain).expect("load factions");
+        let (alliance, horde) = (
+            cat.template(1).expect("Alliance player template"),
+            cat.template(2).expect("Horde player template"),
+        );
+
+        // 114 "monster" — what Deadmines' Factory Door and Stratholme's scenery portcullises carry.
+        // Hostile to BOTH sides, so `> 1` fails and the object is not highlightable for anyone.
+        let monster = cat.template(114).expect("FactionTemplate 114");
+        assert_eq!(monster.reaction_toward(alliance), Reaction::Hostile);
+        assert_eq!(monster.reaction_toward(horde), Reaction::Hostile);
+
+        // 35 — the levers/torches, and (the reason this matters) Arathi Basin's capture banners.
+        // FRIENDLY to both, so the faction gate must never touch them.
+        let usable = cat.template(35).expect("FactionTemplate 35");
+        assert_eq!(usable.reaction_toward(alliance), Reaction::Friendly);
+        assert_eq!(usable.reaction_toward(horde), Reaction::Friendly);
+    }
+
     /// The real 5875 FactionGroup table: the territory-line names resolve by mask bit — Alliance
     /// mask 2, Horde mask 4, nothing for an unowned 0 (the `GetZonePVPInfo` lookup, wow-re ui
     /// `zonetext-pvpinfo.md`). Skips without client data.

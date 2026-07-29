@@ -33,7 +33,7 @@ pub(crate) fn color_texture_format() -> TextureFormat {
 /// coverage-correct, leaf-coloured downsample, so we lay them in as-is under the alpha test — no
 /// re-filter, no alpha-to-coverage (1.12 does neither). Mips + anisotropy give the no-shimmer look
 /// at distance without softening the up-close art.
-pub(crate) fn repeat_texture_authored(chain: BlpMipChain) -> Image {
+pub(crate) fn repeat_texture_authored(chain: BlpMipChain, wrap: (bool, bool)) -> Image {
     let levels = chain.mips.len() as u32;
     let mip0 = chain.mips[0].clone(); // satisfies Image::new's length assert; full chain set below
     let mut data = Vec::with_capacity(chain.mips.iter().map(Vec::len).sum());
@@ -53,9 +53,23 @@ pub(crate) fn repeat_texture_authored(chain: BlpMipChain) -> Image {
     );
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;
+    // The address mode is the M2 texture record's own (`flags & 0x1/0x2`), not a blanket Repeat.
+    // On a cutout sheet it decides the SILHOUETTE: content authors a card's UVs past `0..1` so the
+    // margin clamps to the transparent border and the card ends there — repeat instead folds that
+    // margin into the opposite edge, drawing the sheet's opaque middle as solid geometry with a hard
+    // seam at the crossing. 1250 batches across 775 models author clamp and sample outside the unit
+    // square (`benilla-extract uvwrapscan`); 802 are cutout/blend, where it changes shape and not
+    // merely colour. Decision 0763 (bugs B52/B96 — Dun Morogh's snow-firs, the Plaguelands bush).
+    let mode = |repeat: bool| {
+        if repeat {
+            ImageAddressMode::Repeat
+        } else {
+            ImageAddressMode::ClampToEdge
+        }
+    };
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_u: mode(wrap.0),
+        address_mode_v: mode(wrap.1),
         // Trilinear + anisotropic: smooth, sharp-where-it-should-be, no shimmer — the vanilla look.
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,

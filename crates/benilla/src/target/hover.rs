@@ -319,6 +319,11 @@ pub(super) fn update_hovered_object(
     child_of: Query<&ChildOf>,
     guids: Query<&Guid>,
     stores: Query<&ObjectStore>,
+    // GENERIC's eligibility is its template's `data[1]` (decision 0762) — the ask-once cache.
+    go_templates: Res<crate::go_templates::GameObjectTemplates>,
+    // The faction term of eligibility (decision 0764): the GO's own template reaction toward us.
+    factions: Option<Res<super::ring::Factions>>,
+    self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
     mut ray_cast: MeshRayCast,
 ) {
     hovered.target = None;
@@ -375,6 +380,34 @@ pub(super) fn update_hovered_object(
     let Ok(guid) = guids.get(net_entity) else {
         return;
     };
+    // **The mouseover-eligibility gate** (`[obj->vtbl+0x54]` at `0x482982`, decision 0762): an
+    // ineligible object publishes the NULL mouseover, so it gets no tooltip, no +64 brighten and no
+    // cursor — nothing. Applied here, at the one place the GO mouseover is published, so all three
+    // consumers fall out together exactly as they do in the reference (which reaches `0x492890`,
+    // `0x52aa20` and `0x4945e0` only past this gate).
+    //
+    // KNOWN RESIDUAL: the reference nulls the **whole** mouseover, so a unit standing behind an
+    // ineligible portcullis is not hoverable through it either. benilla picks unit and GameObject
+    // separately and arbitrates by distance, so here the unit behind it stays hoverable. Narrower
+    // than the old behaviour (which tooltipped the portcullis itself) and documented rather than
+    // silently accepted; closing it wants the single-pick arbitration, which is its own slice.
+    if let Ok(store) = stores.get(net_entity) {
+        let generic_highlight = go_templates.get(guid.0).map(|t| t.generic_highlight);
+        let reaction = crate::target::cursor_mode::go_reaction(
+            factions.as_deref(),
+            store.0.gameobject_faction(),
+            self_q.single().ok(),
+        );
+        if !crate::target::cursor_mode::mouseover_eligible(
+            store.0.gameobject_type_id(),
+            store.0.gameobject_flags(),
+            store.0.gameobject_dynamic_flags(),
+            generic_highlight,
+            reaction,
+        ) {
+            return;
+        }
+    }
     hovered.target = Some(net_entity);
     hovered.guid = Some(guid.0);
     hovered.distance = distance;

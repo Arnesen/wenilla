@@ -82,6 +82,10 @@ fn remap_submesh(
             geoset_id: 0, // set by the caller per batch (the M2 path; WMO leaves it 0)
             char_slot: None, // set by the caller per batch (M2 only)
             blend,
+            // Repeat is the pre-0763 behaviour and stays WMO's; the M2 batch loop overrides both
+            // from the texture record's own flags.
+            wrap_x: true,
+            wrap_y: true,
             two_sided,
             vertex_colors,
             joints: Vec::new(), // M2 path fills these from `globals`; WMO leaves them empty

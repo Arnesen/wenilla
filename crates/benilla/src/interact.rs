@@ -170,6 +170,15 @@ fn kind_color(kind: ModelKind) -> egui::Color32 {
     }
 }
 
+/// The inspector's GameObject collision readout (decision 0763): does a hull exist, is it disabled
+/// right now, and what stored state does the passability gate see. Named so the bundled `stores`
+/// param stays readable.
+type GoCollisionReadout = (
+    Has<avian3d::prelude::Collider>,
+    Has<avian3d::prelude::ColliderDisabled>,
+    Option<&'static crate::go_anim::GoAnim>,
+);
+
 /// The inspector overlay, drawn only while armed: a weak top-centre "armed" pill (so it's obvious the
 /// mode is on and how to leave it) and, whenever the cursor is over an identified object, a compact
 /// identity card pinned to the cursor. No chrome, no panel — its own lightweight surface.
@@ -184,7 +193,13 @@ fn inspect_ui(
     parents: Query<&ChildOf>,
     // Bundled into one param (the same arity ceiling as `click_input` below): the descriptor
     // store + the coarse kind the line gates go by.
-    stores: (Query<&ObjectStore>, Query<&crate::net::NetEntity>),
+    stores: (
+        Query<&ObjectStore>,
+        Query<&crate::net::NetEntity>,
+        // The GameObject collision readout (decision 0763): whether a hull exists, whether it is
+        // currently disabled, and the client's stored state the gate reads.
+        Query<GoCollisionReadout>,
+    ),
     guids: Query<&crate::net::Guid>,
     castings: Query<&crate::creature_anim::Casting>,
     drivers: Query<&crate::creature_anim::AnimDriver>,
@@ -240,7 +255,7 @@ fn inspect_ui(
         .entity
         .and_then(|e| parents.get(e).ok())
         .map(|c| c.parent());
-    let (stores, kinds) = (&stores.0, &stores.1);
+    let (stores, kinds, collision) = (&stores.0, &stores.1, &stores.2);
     let store = net_entity.and_then(|p| stores.get(p).ok());
     // The unit's server name through the query cache — asks on first hover, fills on a later frame
     // (the same ask-once path the unit frames use).
@@ -257,6 +272,52 @@ fn inspect_ui(
         Some(benilla_protocol::EntityKind::Unit | benilla_protocol::EntityKind::Player)
     );
     let is_player = kind == Some(benilla_protocol::EntityKind::Player);
+    // The GameObject collision + state readout (decision 0763) — the line that closes the loop on
+    // "this door is drawn open but I can't walk through it". It answers, for the object under the
+    // cursor, the three facts the passability gate turns on: the client's stored `GAMEOBJECT_STATE`
+    // (`go_anim::go_state`, i.e. what we believe open/closed is), whether a collision hull exists at
+    // all, and whether it is currently disabled. A door reading `state 0 open · SOLID` is the bug
+    // live on screen; `state 0 open · passable` says the gate ran and something else is blocking.
+    let go_line = store
+        .filter(|_| kind == Some(benilla_protocol::EntityKind::GameObject))
+        .map(|s| {
+            let (has_hull, disabled, anim) = net_entity
+                .and_then(|p| collision.get(p).ok())
+                .unwrap_or((false, false, None));
+            let state = crate::go_anim::go_state(anim, s);
+            let word = match state {
+                0 => "open(ACTIVE)",
+                1 => "closed(READY)",
+                2 => "alt(DESTROYED)",
+                _ => "?",
+            };
+            let solidity = match (has_hull, disabled) {
+                (false, _) => "no hull",
+                (true, true) => "passable",
+                (true, false) => "SOLID",
+            };
+            let flags = s.0.gameobject_flags();
+            let mut named = Vec::new();
+            for (bit, name) in [
+                (0x1, "IN_USE"),
+                (0x2, "LOCKED"),
+                (0x4, "INTERACT_COND"),
+                (0x10, "NO_INTERACT"),
+            ] {
+                if flags & bit != 0 {
+                    named.push(name);
+                }
+            }
+            let flag_text = if named.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", named.join("|"))
+            };
+            format!(
+                "go type {} · state {state} {word} · {solidity} · flags {flags:#x}{flag_text}",
+                s.0.gameobject_type_id()
+            )
+        });
     let vitals_line = store.filter(|_| is_unit).map(|s| {
         format!(
             "hp {}/{} · level {}",
@@ -323,6 +384,9 @@ fn inspect_ui(
     if !obj.detail.is_empty() {
         lines.push(obj.detail.clone());
     }
+    if let Some(line) = &go_line {
+        lines.push(line.clone());
+    }
     if let Some(line) = &vitals_line {
         lines.push(line.clone());
     }
@@ -366,6 +430,9 @@ fn inspect_ui(
                     }
                     if !obj.detail.is_empty() {
                         ui.label(egui::RichText::new(&obj.detail).color(OVERLAY_TEXT_DIM));
+                    }
+                    if let Some(line) = &go_line {
+                        ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));
                     }
                     if let Some(line) = &vitals_line {
                         ui.label(egui::RichText::new(line).color(OVERLAY_TEXT_DIM));

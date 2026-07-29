@@ -38,6 +38,11 @@ pub(crate) struct GoTemplate {
     pub(crate) lock_id: u32,
     /// The display name — the hover tooltip's gold first line (decision 0276's GO law).
     pub(crate) name: String,
+    /// GENERIC (type 5) only: the template's `data[1]`, the vanilla **highlight** column, nonzero
+    /// on 1387 of the 1870 shipped type-5 templates. It is GENERIC's whole mouseover-eligibility
+    /// answer (`0x5f4830`, decision 0762) — a road signpost hovers because this is 1, and its
+    /// neighbours with 0 are scenery the reference never lets you hover at all.
+    pub(crate) generic_highlight: bool,
     /// MO_TRANSPORT (type 15) path parameters — `Some` only for boats/zeppelins (decision 0438):
     /// the template's `data0..2` = (taxiPathId, moveSpeed, accelRate), the inputs the transport
     /// timetable is built from.
@@ -86,6 +91,7 @@ impl GameObjectTemplates {
             .unwrap_or(0);
         // MO_TRANSPORT (15): data0..2 = taxiPathId / moveSpeed / accelRate (vmangos
         // `GameObjectInfo::moTransport`; decision 0438).
+        let generic_highlight = type_id == 5 && data[1] != 0;
         let mo_transport = (type_id == 15).then(|| MoTransport {
             taxi_path_id: data[0].max(0) as u32,
             move_speed: data[1].max(0) as f32,
@@ -96,6 +102,7 @@ impl GameObjectTemplates {
             GoTemplate {
                 lock_id,
                 name,
+                generic_highlight,
                 mo_transport,
             },
         );

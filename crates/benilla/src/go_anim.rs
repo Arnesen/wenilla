@@ -425,14 +425,28 @@ fn drive_go_anim(
 /// the client's only option, and the faithful one. Keyed off the **wire** state (a door's real
 /// passability is the server's, and it holds for an animation-less door too — no [`GoAnim`] required), and
 /// scoped to the door/button types ([`collision_follows_state`]); a chest keeps its collider whatever its
-/// state. Reconciles on any `ObjectStore` change (idempotent), so a door that streams in open starts
-/// passable and one that streams in closed starts solid.
+/// state.
+///
+/// **Reconciles on an `ObjectStore` change OR on the collider's arrival** (idempotent either way).
+/// The `Added<Collider>` half is load-bearing, not belt-and-braces (decision 0763): a streamed
+/// GameObject's descriptor lands with the create block, but its `Collider` is baked from the M2
+/// hull and inserted by `entities::attach` only when the **asset finishes loading**, frames later.
+/// Watching `Changed<ObjectStore>` alone meant the two conditions were never true in the same frame
+/// for a freshly streamed object — the descriptor changed while there was no collider, the collider
+/// arrived while the descriptor was quiet — so the reconcile never ran at all, and every door kept
+/// the enabled collider it was born with. A *closed* door is solid by default and looked correct;
+/// an **open** one stayed solid, which is the entire reported symptom. It also explains the
+/// reporter's workaround exactly: toggling the object from the GM panel changes the descriptor
+/// *after* the collider exists, so the reconcile finally fires.
+///
+/// Same shape as [`sync_wire_go_state`]'s `Or<(Changed<ObjectStore>, Added<GoAnim>)>` — the
+/// seed-plus-delta pair this file already uses for every other state consumer.
 #[allow(clippy::type_complexity)]
 fn drive_go_collision(
     mut commands: Commands,
     gos: Query<
         (Entity, &ObjectStore, Has<ColliderDisabled>),
-        (With<Collider>, Changed<ObjectStore>),
+        (With<Collider>, Or<(Changed<ObjectStore>, Added<Collider>)>),
     >,
 ) {
     for (entity, store, disabled) in &gos {

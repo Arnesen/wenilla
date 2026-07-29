@@ -77,6 +77,16 @@ pub(crate) struct AnimHostSpawn {
     pub slot: u16,
     /// The looping first-sequence node + duration, `None` on the gseq-only tier.
     pub clip: Option<(AnimationNodeIndex, f32)>,
+    /// The **file sequence slot** this placement's arm actually rolled ([`AnimClip::seq_index`]) —
+    /// the axis every per-sequence bake is keyed on, and what the placement's particle emitters
+    /// must sample their rate/gate tracks against. `None` on the gseq-only tier (no arm).
+    ///
+    /// This exists because the variation roll below is a *per-placement* decision that more than
+    /// one consumer depends on. The emitters used to pin slot 0 regardless, which silently killed
+    /// every emitter whose rate is keyed only in a later variation — 947 of them across 184 models
+    /// (`benilla-extract partslotscan`), including the Blasted Lands lightning strike that keys
+    /// its whole burst in slot 1 and therefore never fired once (decision 0760, bug B63).
+    pub seq: Option<usize>,
 }
 
 /// Spawn the animation host for one placed M2, if [`classify`] says it animates: an anim-root entity
@@ -128,6 +138,7 @@ pub(crate) fn spawn_anim_host(
         commands.entity(root).insert(bb);
     }
     let mut clip_info = None;
+    let mut armed_seq = None;
     if let DoodadAnimTier::FirstSeq(head) = tier {
         // The effective load arm rolls `variationIdx = −1` — a frequency-weighted pick over the
         // first sequence's variation chain (wow-re `doodad-anim-host.md` §4a: the holder setup
@@ -154,6 +165,9 @@ pub(crate) fn spawn_anim_host(
                 .insert((bone_target_id(i as u16), AnimatedBy(root)));
         }
         clip_info = Some((clip.node, clip.duration));
+        // The slot the roll landed on — not necessarily 0, and every per-sequence bake the
+        // placement's other consumers read is keyed on it (see [`AnimHostSpawn::seq`]).
+        armed_seq = Some(clip.seq_index);
     }
     if let Some(drive) = GlobalSeqDrive::new(&anims.global_bones, &joints) {
         commands.entity(root).insert(drive);
@@ -164,6 +178,7 @@ pub(crate) fn spawn_anim_host(
         inverse_bindposes: m.inverse_bindposes.clone(),
         slot,
         clip: clip_info,
+        seq: armed_seq,
     })
 }
 

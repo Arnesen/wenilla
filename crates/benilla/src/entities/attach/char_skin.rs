@@ -360,7 +360,7 @@ pub(super) fn build_char_skin_materials(
                             worn,
                         )
                         .ok()??;
-                    let handle = images.add(repeat_texture_authored(composed));
+                    let handle = images.add(repeat_texture_authored(composed, (true, true)));
                     skin_cache.insert(key, handle.clone());
                     Some(handle)
                 }

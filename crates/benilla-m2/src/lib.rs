@@ -218,6 +218,14 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     for i in 0..textures.0 as usize {
         let t = get(textures.1 as usize + i * 16, 16)?;
         let ttype = M2TextureType::from_u32(t.u32_at(0).ok_or(Error::Truncated)?);
+        // `+0x04` — the ADDRESS MODE, and it decides silhouettes, not just tiling. Bit 0 = repeat U,
+        // bit 1 = repeat V; clear = clamp to edge. Content authors a cutout card's UVs *outside*
+        // `0..1` deliberately, so the border clamps to the texture's transparent edge and the card
+        // fades out to nothing — sampled with repeat instead, those margins wrap around into the
+        // opaque middle of the sheet and draw as solid geometry, with a hard seam where u crosses
+        // the wrap. This field was documented in this very comment and read by nobody until B52
+        // (the Dun Morogh snow-firs) was traced to it; decision 0763.
+        let tflags = t.u32_at(4).ok_or(Error::Truncated)?;
         let (fcount, fofs) = (
             t.u32_at(8).ok_or(Error::Truncated)? as usize,
             t.u32_at(12).ok_or(Error::Truncated)? as usize,
@@ -227,6 +235,8 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
         let string = CString::new(&raw[..end]).unwrap_or_default();
         texs.push(M2Texture {
             texture_type: ttype,
+            wrap_x: tflags & 0x1 != 0,
+            wrap_y: tflags & 0x2 != 0,
             filename: M2ArrayString { string },
         });
     }

@@ -2514,3 +2514,255 @@ pub fn shadeat(chain: &mut Chain, map: &str, x: f32, y: f32) -> Result<()> {
     }
     Ok(())
 }
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the emitters whose **file slot 0 is
+/// dead while another slot is alive** — the shape that makes a pinned-slot-0 consumer silently
+/// render nothing (decision 0760, found on `BlastedLandsLightningbolt01.m2`, B63).
+///
+/// The reference samples the **playing** sequence's rate window every frame (wow-re
+/// `part-emission-rate-animated.md` §2); a consumer that pins slot 0 instead is only correct while
+/// slot 0 carries the emitter's whole story. When an author keys the burst in a *later* variation —
+/// a lightning strike that fires on 5 % of arms, an ambient prop with a rare flourish — slot 0 is a
+/// flat zero and the pinned consumer emits nothing, for ever, on every placement. That is invisible
+/// from the outside: the emitter is built, pooled, and ticking; it just never births a particle.
+///
+/// `peak0` is slot 0's own peak rate, `peakN` the best any other slot reaches. A listed emitter has
+/// `peak0 <= 0 < peakN`. `slots` counts FILE sequence slots (the axis `EmitTiming` bakes on).
+pub fn partslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut with_emitters, mut emitters, mut dead0) = (0u32, 0u32, 0u32, 0u32);
+    let mut models = 0u32;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let Ok(defs) = benilla_formats::parse_m2_particle_emitters(&bytes) else {
+            continue;
+        };
+        if defs.is_empty() {
+            continue;
+        }
+        with_emitters += 1;
+        let mut lines = Vec::new();
+        for (i, d) in defs.iter().enumerate() {
+            emitters += 1;
+            let views = d.timing.slot_views();
+            if views.len() < 2 {
+                continue; // one slot ⇒ nothing for a slot pick to get wrong
+            }
+            // Peak of a slot's baked rate keys; an unkeyed slot emits nothing (`None` ⇒ rate 0).
+            let peak = |s: usize| -> f32 {
+                views
+                    .get(s)
+                    .and_then(|v| v.1)
+                    .map(|keys| keys.iter().map(|&(_, v)| v).fold(0.0, f32::max))
+                    .unwrap_or(0.0)
+            };
+            let peak0 = peak(0);
+            let (mut best, mut best_slot) = (0.0f32, 0usize);
+            for s in 1..views.len() {
+                if peak(s) > best {
+                    best = peak(s);
+                    best_slot = s;
+                }
+            }
+            if peak0 <= 0.0 && best > 0.0 {
+                dead0 += 1;
+                lines.push(format!(
+                    "    emitter {i:>2}: slots {:>2}  peak0 {peak0:>7.1}  peakN {best:>7.1} \
+                     @ slot {best_slot}  tex {}",
+                    views.len(),
+                    d.texture.as_deref().unwrap_or("NONE"),
+                ));
+            }
+        }
+        if !lines.is_empty() {
+            models += 1;
+            println!("{name}");
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {with_emitters} with emitters, {emitters} emitter(s): \
+         {dead0} DEAD-IN-SLOT-0 across {models} model(s) — these emit nothing at all under a \
+         pinned-slot-0 consumer"
+    );
+    Ok(())
+}
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the batches whose texture is
+/// authored **CLAMP** (`M2Texture.flags` bit 0/1 clear) while the batch's own UVs run **outside
+/// `0..1`** — the exact population a repeat-sampling renderer draws wrong (decision 0763, B52/B96).
+///
+/// The margin outside `0..1` is deliberate authoring: clamped, it samples the texture's transparent
+/// border and the card fades out to nothing. Sampled with repeat it wraps into the opposite edge —
+/// on a cutout sheet, the opaque middle — so the margin draws as solid geometry with a hard seam
+/// where u or v crosses the wrap. That is why a snow-fir grows pale plates with a crease down each
+/// bough, and why the artefact never looked like an extra primitive: it is the *same* card,
+/// sampling the wrong texels.
+///
+/// `over` is how far past the edge the batch reaches, in UV units — the width of the wrongly-drawn
+/// margin as a fraction of the sheet.
+pub fn uvwrapscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut batches, mut hits, mut models) = (0u32, 0u32, 0u32, 0u32);
+    let mut cutout_hits = 0u32;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        let mut lines = Vec::new();
+        for (i, s) in subs.iter().enumerate() {
+            if s.uvs.is_empty() {
+                continue;
+            }
+            batches += 1;
+            let ext = |axis: usize| {
+                s.uvs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
+                    (lo.min(t[axis]), hi.max(t[axis]))
+                })
+            };
+            let (u, v) = (ext(0), ext(1));
+            // Only an axis authored CLAMP can be drawn wrong by repeat; a wrapping axis is meant
+            // to tile. A hair of float slop past the edge is not a margin — require 1/512 of a
+            // sheet, well under the thinnest authored border and well over rounding.
+            const SLOP: f32 = 1.0 / 512.0;
+            let bad_u = !s.wrap_x && (u.0 < -SLOP || u.1 > 1.0 + SLOP);
+            let bad_v = !s.wrap_y && (v.0 < -SLOP || v.1 > 1.0 + SLOP);
+            if !bad_u && !bad_v {
+                continue;
+            }
+            hits += 1;
+            let cutout = matches!(
+                s.blend,
+                benilla_formats::ModelBlend::AlphaTest | benilla_formats::ModelBlend::Blend
+            );
+            if cutout {
+                cutout_hits += 1;
+            }
+            let over = [
+                (-u.0).max(0.0),
+                (u.1 - 1.0).max(0.0),
+                (-v.0).max(0.0),
+                (v.1 - 1.0).max(0.0),
+            ]
+            .into_iter()
+            .fold(0.0f32, f32::max);
+            lines.push(format!(
+                "    batch {i:>3}: {:?} {} verts  u[{:+.3}..{:+.3}] v[{:+.3}..{:+.3}]  \
+                 over {over:.3}  {}{}  tex {}",
+                s.blend,
+                s.positions.len(),
+                u.0,
+                u.1,
+                v.0,
+                v.1,
+                if bad_u { "U" } else { "-" },
+                if bad_v { "V" } else { "-" },
+                s.texture.as_deref().unwrap_or("NONE"),
+            ));
+        }
+        if !lines.is_empty() {
+            models += 1;
+            println!("{name}");
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {batches} textured batch(es): {hits} CLAMP-AUTHORED BATCHES \
+         SAMPLING OUTSIDE 0..1 across {models} model(s) — {cutout_hits} of them cutout/blend, \
+         where wrapping changes the silhouette rather than just the colour"
+    );
+    Ok(())
+}
+
+/// Sweep every `.m2` and report, per texture path, which sampler ADDRESS MODES the corpus asks of
+/// it — and how many paths are asked for **more than one** (decision 0763).
+///
+/// The design question behind it: the address mode lives on the GPU sampler, which in our asset
+/// layer is a property of the loaded `Image`, which is keyed by path. If a `.blp` is only ever
+/// asked for one mode, path-keying stays correct and the mode can simply ride the load. Every path
+/// asked for two needs two uploads, or one of its users renders wrong.
+pub fn texmodescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    // texture path -> set of (wrap_x, wrap_y) asked for, as a 4-bit mask
+    let mut modes: std::collections::BTreeMap<String, u8> = std::collections::BTreeMap::new();
+    let mut scanned = 0u32;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let dir = name.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+        let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]) else {
+            continue;
+        };
+        for s in &subs {
+            let Some(tex) = s.texture.as_deref() else {
+                continue;
+            };
+            let bit = 1u8 << ((s.wrap_x as u8) | ((s.wrap_y as u8) << 1));
+            *modes.entry(tex.to_ascii_lowercase()).or_default() |= bit;
+        }
+    }
+    let mut conflicted = 0u32;
+    for (path, mask) in &modes {
+        if mask.count_ones() > 1 {
+            conflicted += 1;
+            let want = |b: u8, s: &'static str| if mask & (1 << b) != 0 { s } else { "" };
+            println!(
+                "CONFLICT {path}  asked as: {}{}{}{}",
+                want(0, "[clamp,clamp] "),
+                want(1, "[repeat,clamp] "),
+                want(2, "[clamp,repeat] "),
+                want(3, "[repeat,repeat] "),
+            );
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {} distinct texture path(s): {conflicted} asked for MORE THAN \
+         ONE address mode (each needs its own upload, or one of its users renders wrong)",
+        modes.len()
+    );
+    Ok(())
+}

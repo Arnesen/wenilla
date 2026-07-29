@@ -111,12 +111,23 @@ pub(super) fn spawn_wmo_lights_for(
 /// candle flames swing with it. Riding is unconditional given a joint set: for a bone whose chain
 /// never animates the joint holds its telescoped rest pivot, so `joint · (position − pivot)` is
 /// byte-for-byte the static `placement · position` — no per-emitter classification needed.
+///
+/// `armed_seq` is the FILE sequence slot this placement's own arm rolled, and the emitters sample
+/// their rate/gate tracks against **that** slot. This site used to pass `EmitClock::Pinned` — slot 0,
+/// unconditionally — on the reasoning that a placed doodad arms once, so slot 0 is all it can ever
+/// play. The arm has rolled a frequency-weighted *variation* since 0130, so that stopped being true
+/// and nothing noticed: an emitter whose rate is keyed only in a later variation sampled a flat zero
+/// for ever and emitted nothing, on every placement, while still building, pooling and ticking.
+/// `benilla-extract partslotscan` counts **947** such emitters across **184** models; the one that
+/// surfaced it is the Blasted Lands lightning strike, whose whole burst lives in slot 1
+/// (decision 0760, bug B63).
 #[allow(clippy::too_many_arguments)] // a spawn plumbing fn: every arg is a distinct resource
 pub(super) fn spawn_emitters_for(
     commands: &mut Commands,
     emitters: &[ModelEmitter],
     transform: Transform,
     joints: Option<&[Entity]>,
+    armed_seq: Option<usize>,
     fade: (f32, Vec3),
     out: &mut Vec<Entity>,
 ) {
@@ -136,9 +147,14 @@ pub(super) fn spawn_emitters_for(
             em,
             transform,
             owner,
-            None,                         // placed doodads/props are never attached models
+            None, // placed doodads/props are never attached models
             None, // anchor at the placement: an animated bone never drags the risen cloud
-            particles::EmitClock::Pinned, // a placed doodad's one-time arm: slot 0, spawn clock
+            // A placed doodad's one-time arm, on the spawn clock — but at the slot the arm's
+            // variation roll actually landed on, not slot 0. No host: the arm never changes.
+            match armed_seq {
+                Some(s) => particles::EmitClock::PinnedSeq(s),
+                None => particles::EmitClock::Pinned,
+            },
         ) {
             commands.entity(e).insert(particles::EmitterFade {
                 radius: fade_radius,

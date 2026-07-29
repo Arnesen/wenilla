@@ -306,11 +306,14 @@ pub fn parse_m2_render_submeshes(
         if global_indices.is_empty() {
             continue;
         }
-        let (texture, skin_slot, char_slot) = model
+        let tex_record = model
             .raw_data
             .texture_lookup_table
             .get(batch.texture_combo_index as usize)
-            .and_then(|&ti| model.textures.get(ti as usize))
+            .and_then(|&ti| model.textures.get(ti as usize));
+        // The record's address mode (`flags & 0x1/0x2`). Absent record ⇒ repeat, the old default.
+        let (wrap_x, wrap_y) = tex_record.map_or((true, true), |t| (t.wrap_x, t.wrap_y));
+        let (texture, skin_slot, char_slot) = tex_record
             .map(|t| resolve_texture(t, dir, skins))
             .unwrap_or((None, None, None));
         let material = model.materials.get(batch.material_index as usize);
@@ -516,6 +519,8 @@ pub fn parse_m2_render_submeshes(
             sub.fog_policy = fog_policy; // render flag 0x02 / the per-blend fog table
             sub.skin_slot = skin_slot; // so a skin-less load can fill this batch at spawn
             sub.geoset_id = section.id; // the skinSectionId — character geoset selection keys on it
+            sub.wrap_x = wrap_x; // texture record flags 0x1/0x2 — clamp is a silhouette decision
+            sub.wrap_y = wrap_y;
             sub.char_slot = char_slot; // character runtime slot (body/hair) — filled per-player at spawn
                                        // Skeletal skin binding (decision 0019), per local vertex in `globals` order: the M2
                                        // vertex's 4 bone indices (global bone-array indices → joint indices directly) + their

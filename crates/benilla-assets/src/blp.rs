@@ -56,13 +56,18 @@ impl AssetLoader for BlpImageLoader {
         &self,
         reader: &mut dyn Reader,
         settings: &Self::Settings,
-        _ctx: &mut LoadContext<'_>,
+        ctx: &mut LoadContext<'_>,
     ) -> Result<Image, Self::Error> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
         Ok(match settings.variant {
-            BlpVariant::WorldArt => world_art_image(blp_bytes_to_mip_chain(&bytes).map_err(to_io)?),
+            BlpVariant::WorldArt => world_art_image(
+                blp_bytes_to_mip_chain(&bytes).map_err(to_io)?,
+                // The address mode rides the asset path (`crate::texture_url`, decision 0763): the
+                // sampler is a property of this upload, and one `.blp` legitimately has two.
+                crate::sampler_mode_of(&ctx.path().to_string()),
+            ),
             BlpVariant::Sprite => {
                 let (w, h, rgba) = blp_to_rgba(&bytes).map_err(to_io)?;
                 sprite_image(w, h, rgba)
@@ -91,7 +96,7 @@ fn color_format() -> TextureFormat {
 
 /// World/model albedo: the BLP's authored mip pyramid laid in verbatim, repeat + trilinear +
 /// anisotropic. (Port of the old `repeat_texture_authored`.)
-fn world_art_image(chain: BlpMipChain) -> Image {
+fn world_art_image(chain: BlpMipChain, wrap: (bool, bool)) -> Image {
     let levels = chain.mips.len() as u32;
     let mip0 = chain.mips[0].clone(); // satisfies Image::new's length assert; full chain set below
     let mut data = Vec::with_capacity(chain.mips.iter().map(Vec::len).sum());
@@ -111,9 +116,16 @@ fn world_art_image(chain: BlpMipChain) -> Image {
     );
     image.data = Some(data);
     image.texture_descriptor.mip_level_count = levels;
+    let mode = |repeat: bool| {
+        if repeat {
+            ImageAddressMode::Repeat
+        } else {
+            ImageAddressMode::ClampToEdge
+        }
+    };
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_u: mode(wrap.0),
+        address_mode_v: mode(wrap.1),
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,

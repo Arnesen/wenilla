@@ -277,12 +277,12 @@ impl AssetLoader for M2ModelLoader {
             // (the `BlpImageLoader` registers `blp`), so an uppercase extension silently falls back to
             // type-based resolution — which is ambiguous with Bevy's built-in image loader and spams a
             // "Multiple AssetLoaders found" warning per texture. Lowercasing also dedupes case variants.
-            let texture = sub.texture.as_deref().map(|t| {
-                ctx.load::<Image>(format!(
-                    "mpq://{}",
-                    t.replace('\\', "/").to_ascii_lowercase()
-                ))
-            });
+            // The URL carries the batch's authored sampler address mode, because two modes of one
+            // `.blp` are two different `Image` uploads (decision 0763 — `crate::texture_url`).
+            let texture = sub
+                .texture
+                .as_deref()
+                .map(|t| ctx.load::<Image>(crate::texture_url(t, (sub.wrap_x, sub.wrap_y))));
             submeshes.push(ModelSubmesh {
                 mesh,
                 skinned_mesh,

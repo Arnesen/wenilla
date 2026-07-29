@@ -59,13 +59,25 @@ pub const CHAT_MSG_BATTLEGROUND_LEADER: u8 = 0x5D;
 /// The chat types the real client runs its `$`-macro expander over, and the **only** ones — every
 /// other type, player chat included, reaches the frame verbatim.
 ///
-/// VERIFIED at the bytes in `WoW.exe` (build 5875), `0x49cf36-0x49cf5d`: a `cmp`-chain on exactly
-/// these seven values guards the `call 0x506f70` at `0x49cf70`. Note what the set is and isn't —
-/// the four monster shapes plus the three **battleground system** lines (`BG_SYSTEM_NEUTRAL`/
-/// `_ALLIANCE`/`_HORDE`, vmangos `SharedDefines.h:1279-1281`), which is where lines like
-/// "$n has taken the flag!" come from. `RAID_BOSS_WHISPER`/`_EMOTE` (0x59/0x5A) are **not** in it,
-/// despite reading as boss text.
-pub const MACRO_EXPANDED_TYPES: [u8; 7] = [
+/// **There are two gates in the reference, and this is the WIRE one** (decision 0759 corrects 0754,
+/// which shipped the other). VERIFIED in `WoW.exe` (5875):
+///
+/// - the **wire** path — `0x49d5e4-0x49d606` in the `SMSG_MESSAGECHAT` parser `0x49d560` — routes
+///   `0x0B 0x0C 0x0D 0x1A` **and `0x5A`** into the expanding branch at `0x49da3d`, plus
+///   `0x52 0x53 0x54` into the one at `0x49d961`. **Eight types.**
+/// - the **pending-chat** path — `0x49cf36-0x49cf5d`, guarding `0x49cf70` — is the *re*-expansion
+///   after a name query answers, and its chain is seven: it omits `0x5A`.
+///
+/// benilla decodes the wire, so the wire set is the one that applies. 0754 cited the pending gate
+/// and so dropped `RAID_BOSS_EMOTE` (`0x5A`) — a boss emote's `$n` would have stayed literal.
+///
+/// Note what the set is and isn't: the four monster shapes and `RAID_BOSS_EMOTE`, plus the three
+/// **battleground system** lines (`BG_SYSTEM_NEUTRAL`/`_ALLIANCE`/`_HORDE`, vmangos
+/// `SharedDefines.h:1279-1281`) — which is where "$n has taken the flag!" comes from, and why
+/// "the monster/boss family" is the wrong name for it. `RAID_BOSS_WHISPER` (`0x59`) is **not** in
+/// either gate: it takes its own branch at `0x49d610`, never expands, and is remapped to a plain
+/// whisper (`mov byte [ebp+0xf],0x6` @ `0x49d67e`).
+pub const MACRO_EXPANDED_TYPES: [u8; 8] = [
     CHAT_MSG_MONSTER_SAY,        // 0x0B
     CHAT_MSG_MONSTER_YELL,       // 0x0C
     CHAT_MSG_MONSTER_EMOTE,      // 0x0D
@@ -73,6 +85,7 @@ pub const MACRO_EXPANDED_TYPES: [u8; 7] = [
     CHAT_MSG_BG_SYSTEM_NEUTRAL,  // 0x52
     CHAT_MSG_BG_SYSTEM_ALLIANCE, // 0x53
     CHAT_MSG_BG_SYSTEM_HORDE,    // 0x54
+    CHAT_MSG_RAID_BOSS_EMOTE,    // 0x5A — wire gate only; absent from the pending-chat gate
 ];
 
 /// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_6_1` — active for 5875. The battleground system

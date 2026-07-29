@@ -206,32 +206,26 @@ fn calculate_u(client_public_key: &PublicKey, server_public_key: &PublicKey) -> 
     ])
 }
 
-/// Fold the shared secret `S` (32 LE bytes) into the 40-byte session key: split the even / odd bytes
-/// (after trimming an even count of low-order zero bytes), SHA-1 each half, then interleave the two
-/// digests. This is WoW's specific `SHA1_Interleave`.
+/// Fold the shared secret `S` (32 LE bytes) into the 40-byte session key: split the even / odd bytes,
+/// SHA-1 each half, then interleave the two digests. This is WoW's specific `SHA1_Interleave`.
+///
+/// The SRP-6 RFC strips low-order zero bytes of `S` before the split; WoW's does **not** — it hashes
+/// all 32 bytes unconditionally (`SRP6::HashSessionKey`, vmangos `src/shared/Crypto/Authentication/
+/// SRP6.cpp:127`). Trimming derives a different `K` — and so a different `M1` — for the ~1-in-256
+/// handshake whose `S` happens to end in a zero low byte, which the server answers with
+/// `WOW_FAIL_UNKNOWN_ACCOUNT` (0x04): an intermittent "wrong password" on a correct one.
 fn calculate_interleaved(s: &[u8; 32]) -> [u8; 40] {
-    // Trim leading (low-order) zero bytes, keeping the offset even so the even/odd split is stable.
-    let mut lead = 0;
-    while s[lead] == 0 {
-        lead += 1;
-    }
-    if lead % 2 != 0 {
-        lead += 1;
-    }
-    let s = &s[lead..];
-    let half = s.len() / 2;
-
     let mut e = [0u8; 16];
     for (i, b) in s.iter().step_by(2).enumerate() {
         e[i] = *b;
     }
-    let g = sha1(&[&e[..half]]);
+    let g = sha1(&[&e]);
 
     let mut f = [0u8; 16];
     for (i, b) in s.iter().skip(1).step_by(2).enumerate() {
         f[i] = *b;
     }
-    let h = sha1(&[&f[..half]]);
+    let h = sha1(&[&f]);
 
     let mut out = [0u8; 40];
     for (i, (gi, hi)) in g.iter().zip(h.iter()).enumerate() {
@@ -442,6 +436,39 @@ mod tests {
             let s: [u8; 32] = hx(s_hex).try_into().unwrap();
             assert_eq!(calculate_interleaved(&s).to_vec(), hx(key_hex), "S={s_hex}");
         }
+    }
+
+    /// A low-order zero byte in `S` must *not* shorten the split: WoW hashes all 32 bytes, so `S`
+    /// and `S` with its low byte zeroed differ only in that byte, never in length. (Trimming — the
+    /// SRP-6 RFC behaviour — is what made ~1 login in 256 come back as "wrong password".)
+    #[test]
+    fn interleave_does_not_trim_low_order_zero_bytes() {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&hx(
+            "8F4CEBD60DFC34E5C007E51BD4F3A4FF2BC1D930E2D3EA770D8D3EEDFF2DCCFC",
+        ));
+        let mut zeroed = s;
+        zeroed[0] = 0;
+        zeroed[1] = 0;
+
+        // Even halves: byte 0 is the only difference; odd halves: byte 1. Both must change, and the
+        // trimming implementation would instead have re-split the remaining 30 bytes wholesale.
+        let mut expect_even = [0u8; 16];
+        let mut expect_odd = [0u8; 16];
+        for i in 0..16 {
+            expect_even[i] = zeroed[i * 2];
+            expect_odd[i] = zeroed[i * 2 + 1];
+        }
+        let g = sha1(&[&expect_even]);
+        let h = sha1(&[&expect_odd]);
+        let mut expected = [0u8; 40];
+        for (i, (gi, hi)) in g.iter().zip(h.iter()).enumerate() {
+            expected[i * 2] = *gi;
+            expected[i * 2 + 1] = *hi;
+        }
+
+        assert_eq!(calculate_interleaved(&zeroed), expected);
+        assert_ne!(calculate_interleaved(&zeroed), calculate_interleaved(&s));
     }
 
     #[test]

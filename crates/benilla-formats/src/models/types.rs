@@ -222,6 +222,15 @@ pub struct RenderSubmesh {
     /// material onto this batch. `None` for everything that carries its own texture (most M2s, all WMOs).
     pub char_slot: Option<CharSkinSlot>,
     pub blend: ModelBlend,
+    /// Sampler address mode from the M2 texture record's `flags` (`0x1` = repeat U, `0x2` = repeat V;
+    /// clear = **clamp to edge**). Not a tiling detail — a *silhouette* one. Content authors a cutout
+    /// card's UVs deliberately outside `0..1` so the margin clamps to the texture's transparent border
+    /// and the card fades to nothing; sampled with repeat instead, that margin wraps into the opaque
+    /// middle of the sheet and draws as solid geometry with a hard seam at the wrap (decision 0763,
+    /// bugs B52/B96). `true`/`true` for WMO, which carries its own material flags and keeps today's
+    /// behaviour.
+    pub wrap_x: bool,
+    pub wrap_y: bool,
     /// Render both faces (no backface culling)? From the M2 material's `0x04` flag (WMO: kept `true`
     /// for now). When `false` the batch is single-sided like the real client — visible from one side.
     pub two_sided: bool,

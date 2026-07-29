@@ -228,6 +228,34 @@ enum Command {
         /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and list the particle emitters whose
+    /// **file slot 0 is dead while a later slot is alive** (`peak0 <= 0 < peakN`). The reference
+    /// samples the PLAYING sequence's rate window every frame, so an emitter whose burst is keyed
+    /// in a later variation is ordinary content — but a consumer that PINS slot 0 renders it as
+    /// nothing at all, for ever, on every placement, while the emitter still builds, pools and
+    /// ticks. The population instrument for that silent class (decision 0760; found on
+    /// `BlastedLandsLightningbolt01.m2`, the Blasted Lands strike that never fires).
+    Partslotscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every `.m2` (optionally under a path prefix) and list batches whose texture is authored
+    /// **CLAMP** (`M2Texture.flags` bit 0/1 clear) while the batch's UVs run **outside `0..1`** — the
+    /// population a repeat-sampling renderer draws wrong. That margin is deliberate: clamped it
+    /// samples the sheet's transparent border and the card fades to nothing; wrapped it folds into
+    /// the opposite edge and draws as solid geometry with a seam at the crossing (decision 0763,
+    /// bugs B52/B96 — the Dun Morogh snow-firs and the Plaguelands bush).
+    Uvwrapscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every `.m2` and report which sampler ADDRESS MODES the corpus asks of each texture
+    /// path, and how many paths are asked for more than one — the design check behind decision
+    /// 0763 (the mode lives on the sampler, which rides the `Image`, which is keyed by path).
+    Texmodescan {
+        /// Internal-path prefix filter, case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and count the two halves of the
     /// **owner-last draw-order** law per model: the EFFECTS it authors (particle emitters +
     /// ribbon trails) and the TRANSPARENT-pass batches of its own body those effects must draw
@@ -518,6 +546,9 @@ fn main() -> Result<()> {
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
+        Command::Partslotscan { prefix } => scan::partslotscan(&mut chain, prefix.as_deref())?,
+        Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
+        Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)

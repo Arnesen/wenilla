@@ -218,11 +218,25 @@ const GO_DYNFLAG_ACTIVATE: u32 = 0x1;
 /// ordinary door (no INTERACT_COND) is always highlightable regardless of its (zero) activate bit. The
 /// client's faction-reaction>1 term is INFERRED and not the quest gate, so it is not modeled here;
 /// `usable` (lock / range / player-state → the grayed twin) rides on top and is a later refinement.
-fn highlightable_flags(type_id: i32, flags: u32, dyn_flags: u32) -> bool {
+fn highlightable_flags(type_id: i32, flags: u32, dyn_flags: u32, reaction: Option<u8>) -> bool {
     if matches!(
         type_id,
         GO_TYPE_GENERIC | GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT
     ) {
+        return false;
+    }
+    // The FACTION term (`0x5f2f80` @ `0x5f3026/29`, decision 0764). `reaction` is the GameObject's
+    // reaction **toward us** ([`go_reaction`]); the ordinary test is `> 1`, i.e. anything but
+    // hostile. `None` = unresolvable (no faction catalog / our store not streamed) and passes, so a
+    // data gap never blanks the world.
+    let ordinary_faction_ok = |r: Option<u8>| r.is_none_or(|r| r > 1);
+    if type_id == GO_TYPE_TRAP {
+        // TRAP alone INVERTS it (`0x5f2fc6/c9: cmp eax,1; jg` — reject when greater): a trap is
+        // highlightable only to whoever it is hostile to. Everything below still applies.
+        if !reaction.is_none_or(|r| r == 1) {
+            return false;
+        }
+    } else if !ordinary_faction_ok(reaction) {
         return false;
     }
     if flags & GO_FLAG_IN_USE_OR_NO_INTERACT != 0 {
@@ -234,6 +248,86 @@ fn highlightable_flags(type_id: i32, flags: u32, dyn_flags: u32) -> bool {
     true
 }
 
+/// `GAMEOBJECT_TYPE_TRAP` (6) — the one type whose faction term is inverted.
+const GO_TYPE_TRAP: i32 = 6;
+
+/// A GameObject's reaction **toward us** — the reference's `0x5f7fd0` → `0x606530` → `0x606640`
+/// chain, whose direction is GO→player (`this` = the GO's own `FactionTemplate` row, the argument =
+/// the player; `0x606640` tests `self.enemyGroupMask & other.ourMask`). On the client's 1/3/4 scale.
+///
+/// `None` when it cannot be resolved (no catalog, our store not streamed, either template missing) —
+/// callers treat that as "no opinion" and pass. A GameObject with **no** faction resolves NEUTRAL(3),
+/// which is the binary's own default (`0x5f8025: mov eax,3`).
+///
+/// INTERIM, and narrower than the unit path on purpose: the reference's `0x606530` also has a
+/// player-controlled/reputation arm, but every GameObject faction that ships (114 monster, 35
+/// friendly-to-players, 14, 1375) resolves through the plain template comparator, so the
+/// reputation branch is not modelled here. `GAMEOBJECT_CREATED_BY` (a player-summoned object taking
+/// its creator's reaction) is likewise not modelled.
+pub(crate) fn go_reaction(
+    factions: Option<&Factions>,
+    go_faction: u32,
+    self_store: Option<&ObjectStore>,
+) -> Option<u8> {
+    if go_faction == 0 {
+        return Some(benilla_formats::Reaction::Neutral as u8);
+    }
+    let catalog = factions?.catalog();
+    let go_tpl = catalog.template(go_faction)?;
+    let self_tpl = catalog.template(self_store?.0.unit_faction_template()?)?;
+    Some(go_tpl.reaction_toward(self_tpl) as u8)
+}
+
+/// The **mouseover-eligibility** virtual `[obj->vtbl+0x54]` — the gate that decides whether a picked
+/// object becomes the mouseover **at all** (wow-re `tooltip-content-law.md` §2-GAMEOBJECT, rewritten
+/// 2026-07-29; decision 0762).
+///
+/// This sits one level above everything the tooltip law used to be reasoned from. The per-frame
+/// classifier `CGWorldFrame::UpdateMouseoverCursor 0x4828d0` calls it on the picked object and, when
+/// it answers false, publishes the **null** mouseover GUID (`0x482985 test eax,eax; je 0x4829ed` →
+/// `0x482090(0,0)` + `ResetCursor 0x523d30`). The publisher `0x492890`, the tooltip builder
+/// `0x52aa20` and the +64 brighten `0x4945e0` are then never reached: **no tooltip, no highlight, no
+/// cursor — nothing.** That is the "some GameObjects show nothing at all on hover" report.
+///
+/// For a GameObject, slot `+0x54` is `0x5f8620`, which tail-calls the **per-GO-TYPE strategy slot
+/// `+0xc`** — and that slot is *not* uniform:
+///
+/// | `[strat_vtbl+0xc]` | types |
+/// |---|---|
+/// | `0x5f9db0` = `jmp [+0x14]` = **[`highlightable_flags`] itself** | 0 DOOR · 1 BUTTON · 2 QUESTGIVER · 3 CHEST · 4 BINDER · 6 TRAP · 7 CHAIR · 9 TEXT · 10 GOOBER · 12 AREADAMAGE · 13 CAMERA · 17 FISHINGNODE · 18 RITUAL · 19 MAILBOX · 20 AUCTIONHOUSE · 22 SPELLCASTER · 23 MEETINGSTONE · 24 FLAGSTAND · 26 FLAGDROP · 27 MINI_GAME · 28 LOTTERY_KIOSK · + the default |
+/// | `0x5f4830` = **`template.data[1] != 0`** (the vanilla "highlight" column) | 5 GENERIC |
+/// | `mov al,1` — always | 8 SPELL_FOCUS · 16 DUEL_ARBITER · 25 FISHINGHOLE |
+/// | `xor al,al` — never | 11 TRANSPORT · 14 MAP_OBJECT · 15 MO_TRANSPORT |
+///
+/// **This refutes the old "the tooltip is not gated by highlightable" reading** — that note verified
+/// the publisher correctly and then generalised **GENERIC's** behaviour to all 31 types. The
+/// signpost half survives (GENERIC really does answer from `data[1]`, and 1387 of 1870 shipped
+/// type-5 templates carry `data1 = 1`); the chest / IN_USE / INTERACT_COND half is wrong, and this
+/// is why a pre-quest Stone of Binding or a Stratholme portcullis shows nothing in the reference.
+///
+/// `generic_highlight` is GENERIC's `data[1]`; `None` = its ask-once template hasn't answered, which
+/// reads as eligible so a signpost isn't blank for the first frames of its query.
+pub(crate) fn mouseover_eligible(
+    type_id: i32,
+    flags: u32,
+    dyn_flags: u32,
+    generic_highlight: Option<bool>,
+    reaction: Option<u8>,
+) -> bool {
+    match type_id {
+        GO_TYPE_TRANSPORT | GO_TYPE_MAP_OBJECT | GO_TYPE_MO_TRANSPORT => false,
+        GO_TYPE_SPELL_FOCUS | GO_TYPE_DUEL_ARBITER | GO_TYPE_FISHINGHOLE => true,
+        GO_TYPE_GENERIC => generic_highlight.unwrap_or(true),
+        _ => highlightable_flags(type_id, flags, dyn_flags, reaction),
+    }
+}
+
+/// The three types whose eligibility slot is a constant `mov al,1` — always the mouseover, whatever
+/// their flags say.
+const GO_TYPE_SPELL_FOCUS: i32 = 8;
+const GO_TYPE_DUEL_ARBITER: i32 = 16;
+const GO_TYPE_FISHINGHOLE: i32 = 25;
+
 /// [`highlightable_flags`] read off a hovered GameObject's descriptor store. An absent
 /// `GAMEOBJECT_TYPE_ID` is the wire default `0` = DOOR (vmangos omits the zero field), so a door
 /// resolves to a highlightable type rather than being wrongly rejected as "unknown". Gates the
@@ -241,11 +335,12 @@ fn highlightable_flags(type_id: i32, flags: u32, dyn_flags: u32) -> bool {
 /// (§5-VERIFIED, wow-re 2026-07-20): the pick registers every GO regardless of highlightable and
 /// the publisher dispatches the tooltip by kind, so a GENERIC(5) signpost tooltips (0349's
 /// reference close-up) while showing no cursor.
-fn go_highlightable(store: &ObjectStore) -> bool {
+fn go_highlightable(store: &ObjectStore, reaction: Option<u8>) -> bool {
     highlightable_flags(
         store.0.gameobject_type_id(),
         store.0.gameobject_flags(),
         store.0.gameobject_dynamic_flags(),
+        reaction,
     )
 }
 
@@ -397,7 +492,12 @@ pub(super) fn classify_cursor(
         let (go_tf, store, _, anim) = units.get(hovered_object.target?).ok()?;
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
-        if !go_highlightable(store) {
+        let reaction = go_reaction(
+            factions.as_deref(),
+            store.0.gameobject_faction(),
+            Some(self_store),
+        );
+        if !go_highlightable(store, reaction) {
             return None;
         }
         // The type's own cursor wins; a base type reads its lock's data-named cursor (needs the
@@ -530,28 +630,89 @@ mod tests {
         assert_eq!(point.stem(), "Point");
     }
 
+    /// The mouseover-eligibility table (decision 0762) — the gate that decides whether an object
+    /// becomes the mouseover at all, so a false here is "no tooltip, no brighten, no cursor".
+    #[test]
+    fn mouseover_eligibility_matches_the_per_type_slot_table() {
+        // The three constant-TRUE slots (`mov al,1`) ignore their flags entirely.
+        for t in [
+            GO_TYPE_SPELL_FOCUS,
+            GO_TYPE_DUEL_ARBITER,
+            GO_TYPE_FISHINGHOLE,
+        ] {
+            assert!(mouseover_eligible(t, GO_FLAG_INTERACT_COND, 0, None, None));
+            assert!(mouseover_eligible(t, 0x10, 0, None, None));
+        }
+        // The three constant-FALSE slots (`xor al,al`) — the transport family is never a mouseover.
+        for t in [GO_TYPE_TRANSPORT, GO_TYPE_MAP_OBJECT, GO_TYPE_MO_TRANSPORT] {
+            assert!(!mouseover_eligible(t, 0, GO_DYNFLAG_ACTIVATE, None, None));
+        }
+        // GENERIC answers from its template's `data[1]` alone — the signpost that hovers vs the
+        // scenery beside it that does not. Not from `highlightable_flags`, which rejects GENERIC.
+        assert!(mouseover_eligible(GO_TYPE_GENERIC, 0, 0, Some(true), None));
+        assert!(!mouseover_eligible(
+            GO_TYPE_GENERIC,
+            0,
+            0,
+            Some(false),
+            None
+        ));
+        assert!(
+            mouseover_eligible(GO_TYPE_GENERIC, 0, 0, None, None),
+            "template not answered yet reads eligible, so a signpost isn't blank while it queries"
+        );
+        // Everything else IS highlightable — which is the whole correction. A pre-quest
+        // INTERACT_COND object (the Stone of Binding, a Stratholme portcullis at flags 0x24) and an
+        // IN_USE / NO_INTERACT object show NOTHING, where we used to tooltip them.
+        assert!(!mouseover_eligible(0, GO_FLAG_INTERACT_COND, 0, None, None));
+        assert!(mouseover_eligible(
+            0,
+            GO_FLAG_INTERACT_COND,
+            GO_DYNFLAG_ACTIVATE,
+            None,
+            None
+        ));
+        assert!(!mouseover_eligible(3, 0x10, 0, None, None)); // NO_INTERACT chest
+        assert!(!mouseover_eligible(3, 0x1, 0, None, None)); // IN_USE chest
+                                                             // The FACTION term (decision 0764): a door whose template is hostile to us is not
+                                                             // eligible — no cursor, no tooltip, no brighten. This is Deadmines' Factory Door
+                                                             // (faction 114, flags 0x20), which the director could still hover and open.
+        assert!(!mouseover_eligible(0, 0x20, 0, None, Some(1)));
+        assert!(mouseover_eligible(0, 0x20, 0, None, Some(3)));
+        assert!(mouseover_eligible(0, 0x20, 0, None, Some(4)));
+        // TRAP inverts it: hostile-to-us is exactly the case a trap DOES highlight for.
+        assert!(mouseover_eligible(GO_TYPE_TRAP, 0, 0, None, Some(1)));
+        assert!(!mouseover_eligible(GO_TYPE_TRAP, 0, 0, None, Some(3)));
+        // An unresolvable reaction never blanks the world.
+        assert!(mouseover_eligible(0, 0x20, 0, None, None));
+        // A plain door is still eligible — the everyday case must not regress.
+        assert!(mouseover_eligible(0, 0, 0, None, None));
+        assert!(mouseover_eligible(19, 0, 0, None, None)); // mailbox
+    }
+
     #[test]
     fn highlightable_gates_the_quest_object_but_not_the_plain_door() {
         // An ordinary unlocked door (no INTERACT_COND) is highlightable regardless of its zero activate
         // bit — plain doors must never gray out.
-        assert!(highlightable_flags(0, 0, 0)); // DOOR, no flags
-                                               // A GENERIC decoration is never highlightable.
-        assert!(!highlightable_flags(GO_TYPE_GENERIC, 0, 0));
+        assert!(highlightable_flags(0, 0, 0, None)); // DOOR, no flags
+                                                     // A GENERIC decoration is never highlightable.
+        assert!(!highlightable_flags(GO_TYPE_GENERIC, 0, 0, None));
         // Neither is the transport family (the byte-dumped constant-false +0x14 slots): no gear,
         // no tooltip, no USE on a boat / elevator / map object — flags can't make them so.
         for t in [GO_TYPE_TRANSPORT, GO_TYPE_MAP_OBJECT, GO_TYPE_MO_TRANSPORT] {
-            assert!(!highlightable_flags(t, 0, GO_DYNFLAG_ACTIVATE));
+            assert!(!highlightable_flags(t, 0, GO_DYNFLAG_ACTIVATE, None));
         }
         // A busy (IN_USE) or NO_INTERACT object is not highlightable.
-        assert!(!highlightable_flags(3, 0x1, 0)); // CHEST, IN_USE
-        assert!(!highlightable_flags(3, 0x10, 0)); // CHEST, NO_INTERACT
-                                                   // The quest gate: an INTERACT_COND object is highlightable only with the activate bit set — the
-                                                   // exact bug, a quest chest without the quest.
-        assert!(!highlightable_flags(3, GO_FLAG_INTERACT_COND, 0)); // quest chest, no quest → clear
+        assert!(!highlightable_flags(3, 0x1, 0, None)); // CHEST, IN_USE
+        assert!(!highlightable_flags(3, 0x10, 0, None)); // CHEST, NO_INTERACT
+                                                         // The quest gate: an INTERACT_COND object is highlightable only with the activate bit set — the
+                                                         // exact bug, a quest chest without the quest.
+        assert!(!highlightable_flags(3, GO_FLAG_INTERACT_COND, 0, None)); // quest chest, no quest → clear
         assert!(highlightable_flags(
             3,
             GO_FLAG_INTERACT_COND,
-            GO_DYNFLAG_ACTIVATE
+            GO_DYNFLAG_ACTIVATE,
+            None
         )); // quest chest, quest held → usable
     }
 

@@ -40,7 +40,12 @@ pub(crate) struct WorldAssets {
     /// startup the only main-thread reads are the occasional map-change WDL load + lazy clutter M2s.
     pub(crate) chain: Arc<Mutex<Chain>>,
     /// Decoded GPU textures by normalized path.
-    pub(crate) textures: HashMap<String, Handle<Image>>,
+    /// Keyed by `(normalized path, wrap_u, wrap_v)`: the SAME BLP is legitimately sampled both
+    /// ways by different models (a sheet that tiles on a wall and clamps on a cutout card), and the
+    /// address mode lives on the Bevy `Image`'s sampler — so each mode needs its own upload
+    /// (decision 0763). Before that key existed, whichever model loaded the texture first decided
+    /// the mode for every later one.
+    pub(crate) textures: HashMap<(String, bool, bool), Handle<Image>>,
     /// Decoded UI sprite textures by resolved path (`None` = a miss, cached so a bad path never
     /// re-walks the chain per frame). Separate from `textures`: sprites are sRGB/clamped, world
     /// art is Unorm/repeat — the same BLP can legitimately live in both.
@@ -72,8 +77,10 @@ pub(crate) struct WorldAssets {
 /// alpha ref + a distance fade) doesn't collide with a tree sharing the same texture.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum MaterialKey {
-    /// `(texture, blend, two_sided, alpha_key_u8, fade_far_yd_u16, is_wmo, is_fade_variant)`.
-    Textured(String, ModelBlend, bool, u8, u16, bool, bool),
+    /// `(texture, blend, two_sided, alpha_key_u8, fade_far_yd_u16, is_wmo, is_fade_variant,
+    /// wrap_u, wrap_v)` — the address mode is part of the identity because it selects a different
+    /// `Image` upload (decision 0763).
+    Textured(String, ModelBlend, bool, u8, u16, bool, bool, bool, bool),
     Fallback(bool),
 }
 
@@ -146,14 +153,15 @@ impl WorldAssets {
     pub(crate) fn texture(
         &mut self,
         path: &str,
+        wrap: (bool, bool),
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        let key = normalize_path(path);
+        let key = (normalize_path(path), wrap.0, wrap.1);
         if let Some(handle) = self.textures.get(&key) {
             return Some(handle.clone());
         }
-        let chain = read_texture_mip_chain(&mut self.chain.lock_recover(), &key).ok()?;
-        let handle = images.add(repeat_texture_authored(chain));
+        let chain = read_texture_mip_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
+        let handle = images.add(repeat_texture_authored(chain, wrap));
         self.textures.insert(key, handle.clone());
         Some(handle)
     }
@@ -299,6 +307,8 @@ impl WorldAssets {
         fade_far: Option<f32>,
         is_wmo: bool,
         is_fade_variant: bool,
+        // The batch's authored sampler address mode (`RenderSubmesh::wrap_x/wrap_y`).
+        wrap: (bool, bool),
         images: &mut Assets<Image>,
         materials: &mut Assets<WowModelMaterial>,
     ) -> Handle<WowModelMaterial> {
@@ -310,8 +320,10 @@ impl WorldAssets {
             Some(far) => Vec4::new(far * 0.75, far, 0.0, 1.0),
             None => Vec4::ZERO,
         };
-        let resolved =
-            texture.and_then(|t| self.texture(t, images).map(|h| (normalize_path(t), h)));
+        let resolved = texture.and_then(|t| {
+            self.texture(t, wrap, images)
+                .map(|h| (normalize_path(t), h))
+        });
         // Only AlphaTest consumes the cutoff, so don't fragment opaque/blend materials by it.
         let key_alpha = if blend == ModelBlend::AlphaTest {
             (cutoff * 255.0).round() as u8
@@ -328,6 +340,8 @@ impl WorldAssets {
                 key_fade,
                 is_wmo,
                 is_fade_variant,
+                wrap.0,
+                wrap.1,
             ),
             None => MaterialKey::Fallback(is_wmo),
         };

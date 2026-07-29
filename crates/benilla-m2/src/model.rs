@@ -52,6 +52,10 @@ pub struct M2ArrayString {
 /// One M2 texture definition.
 pub struct M2Texture {
     pub texture_type: M2TextureType,
+    /// Address mode on U (`flags & 0x1`): set = the sampler REPEATS, clear = it CLAMPS to edge.
+    pub wrap_x: bool,
+    /// Address mode on V (`flags & 0x2`).
+    pub wrap_y: bool,
     pub filename: M2ArrayString,
 }
 

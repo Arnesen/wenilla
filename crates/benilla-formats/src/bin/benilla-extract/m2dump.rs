@@ -785,6 +785,41 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
             flags.join(" "),
             tex,
         );
+        // The batch's UV extent, and the texel-per-yard density it implies. Two questions this
+        // answers that nothing else did: does the batch tile (range outside 0..1 — the sampler
+        // repeats, and a wrap discontinuity across a triangle blows up the derivative and drags
+        // the sampled mip to the coarsest level), and is the authored density so far above the
+        // screen's that even mip 0 is a minification? A cutout batch is where either shows up
+        // first, because a coarser mip does not merely soften it — it dissolves the silhouette
+        // the alpha key cuts (the Dun Morogh snow-fir report, B52).
+        if !s.uvs.is_empty() && !s.positions.is_empty() {
+            let uext = |axis: usize| {
+                s.uvs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
+                    (lo.min(t[axis]), hi.max(t[axis]))
+                })
+            };
+            let (u, v) = (uext(0), uext(1));
+            let (du, dv) = (u.1 - u.0, v.1 - v.0);
+            // Model-space diagonal of the batch, as the yard scale the UV span stretches over.
+            let diag = {
+                let (x, y, z) = (ext(0), ext(1), ext(2));
+                ((x.1 - x.0).powi(2) + (y.1 - y.0).powi(2) + (z.1 - z.0).powi(2)).sqrt()
+            };
+            let tiles = if du > 1.001 || dv > 1.001 {
+                " TILES"
+            } else {
+                ""
+            };
+            println!(
+                "      uv u[{:+.3}..{:+.3}] v[{:+.3}..{:+.3}]  span {du:.3}x{dv:.3}{tiles}  \
+                 uv-per-yard {:.4}",
+                u.0,
+                u.1,
+                v.0,
+                v.1,
+                if diag > 1e-6 { du.max(dv) / diag } else { 0.0 },
+            );
+        }
         // Which way the geometry FACES, in model space — the question a single-sided batch that
         // renders when it shouldn't (or doesn't when it should) turns on. `facet` is the winding
         // normal of the first triangle (`(p1−p0)×(p2−p0)`, WoW model axes); `vnorm` is the mean

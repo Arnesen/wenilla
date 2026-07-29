@@ -20,8 +20,7 @@ use benilla_ui::script::{GossipMenu, GossipOptionView, GossipQuestRow, ScriptVal
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_quest::is_active_quest;
-use crate::ui_quest_log::QuestLog;
+use crate::ui_quest::{row_is_active, row_is_one_click};
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, npc_switched, NpcSession};
 
@@ -151,18 +150,20 @@ fn gossip_icon_type(icon: u8) -> &'static str {
 }
 
 /// Build the Lua-facing snapshot from [`GossipState`] — `None` when no menu is open.
-fn snapshot(state: &GossipState, quest_log: &QuestLog) -> Option<GossipMenu> {
+fn snapshot(state: &GossipState) -> Option<GossipMenu> {
     state.npc?;
     Some(GossipMenu {
         greeting: state.greeting.clone(),
         // Quest rows riding the gossip packet (decision 0088): split active-vs-available by the same
-        // real predicate the quest window's greeting panel uses — log membership, not the wire icon.
+        // predicate the quest window's greeting panel uses — the WIRE ICON. The reference runs the
+        // identical `{3,4}` test here, just lazily (`0x4e2430`/`0x4e2580`, behind
+        // `GetGossipAvailableQuests`/`GetGossipActiveQuests`) rather than at parse time. Decision 0758.
         quests: state
             .quests
             .iter()
-            .map(|(id, _icon, title)| GossipQuestRow {
+            .map(|(_id, icon, title)| GossipQuestRow {
                 title: title.clone(),
-                active: is_active_quest(*id, quest_log),
+                active: row_is_active(*icon),
             })
             .collect(),
         options: state
@@ -187,7 +188,6 @@ fn feed_gossip(
     self_q: Query<(&ObjectStore, &Guid), With<SelfPlayer>>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
-    quest_log: Res<QuestLog>,
     states: Res<crate::world_state::WorldStates>,
     mut last: Local<Option<GossipMenu>>,
     mut last_name: Local<Option<String>>,
@@ -196,7 +196,7 @@ fn feed_gossip(
     let Some(mut script) = script else {
         return;
     };
-    let mut fresh = snapshot(&state, &quest_log);
+    let mut fresh = snapshot(&state);
     // Expand the greeting's chat-text macros ($N/$B/$G/$<n>w) client-side, as the real client does.
     if let Some(greeting) = fresh.as_mut().and_then(|m| m.greeting.as_mut()) {
         let player = crate::npc_text::player_identity(&self_q, &mut names, &commands);
@@ -253,7 +253,6 @@ fn drain_gossip(
     script: Option<NonSendMut<UiScript>>,
     mut state: ResMut<GossipState>,
     commands: Res<NetCommands>,
-    quest_log: Res<QuestLog>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -284,15 +283,17 @@ fn drain_gossip(
             .checked_sub(1)
             .and_then(|i| state.quests.get(i as usize))
         {
-            Some((quest_id, _icon, _title)) => {
-                let quest = *quest_id;
-                let active = is_active_quest(quest, &quest_log);
-                let cmd = if active {
+            Some((quest_id, icon, _title)) => {
+                let (quest, icon) = (*quest_id, *icon);
+                let active = row_is_active(icon);
+                // Same opcode law as the greeting panel: an active row is always a turn-in; an
+                // available row turns into one only when its one-click flag is set.
+                let cmd = if active || row_is_one_click(icon) {
                     ClientCommand::QuestgiverComplete { npc, quest }
                 } else {
                     ClientCommand::QuestgiverQuery { npc, quest }
                 };
-                debug!("ui_gossip: quest row {pos} (quest {quest}, active {active})");
+                debug!("ui_gossip: quest row {pos} (quest {quest}, icon {icon}, active {active})");
                 let _ = commands.0.send(cmd);
             }
             None => debug!("ui_gossip: SelectGossipQuest({pos}) out of range — ignored"),
@@ -322,8 +323,7 @@ mod tests {
     #[test]
     fn snapshot_is_none_until_a_menu_opens() {
         let mut state = GossipState::default();
-        let quest_log = QuestLog::default();
-        assert!(snapshot(&state, &quest_log).is_none());
+        assert!(snapshot(&state).is_none());
         state.npc = Some(0x42);
         state.greeting = Some("Hello".into());
         state.options = vec![GossipOption {
@@ -332,7 +332,7 @@ mod tests {
             coded: false,
             message: "Browse".into(),
         }];
-        let menu = snapshot(&state, &quest_log).expect("open");
+        let menu = snapshot(&state).expect("open");
         assert_eq!(menu.greeting.as_deref(), Some("Hello"));
         assert_eq!(menu.options.len(), 1);
         assert_eq!(menu.options[0].icon_type, "vendor");

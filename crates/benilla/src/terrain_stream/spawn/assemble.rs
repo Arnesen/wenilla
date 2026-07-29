@@ -18,6 +18,17 @@ use crate::model_fade::DoodadFade;
 use crate::model_render::{model_material, MaterialCache, ShadeSel};
 use crate::terrain::WowModelMaterial;
 
+/// What one placement's animation host armed, for the consumers that spawn alongside its submeshes.
+/// Both fields are *per placement*, not per model: the joint set is this instance's, and `seq` is
+/// the slot this instance's own frequency-weighted variation roll landed on.
+pub(crate) struct PlacementHost {
+    /// Bone-indexed joint entities — an emitter or ribbon rides its host bone's joint off this.
+    pub joints: Vec<Entity>,
+    /// The armed FILE sequence slot ([`crate::doodad_anim::AnimHostSpawn::seq`]); `None` on the
+    /// gseq-only tier, where nothing was armed and slot 0 is the honest answer.
+    pub seq: Option<usize>,
+}
+
 /// Spawn a model's submeshes at `transform` with the full doodad/WMO component set. Returns the spawned
 /// entities (for refcounted despawn).
 ///
@@ -65,9 +76,11 @@ pub(crate) fn spawn_model_entities(
     // parents that list, and a card is a world root the billboard pass writes absolutely).
     // `None` for world-static placements (terrain), whose pivots never move.
     card_owner: Option<Entity>,
-    // Returns the spawned entities + the anim host's joint set (bone-indexed) when the model
-    // animates — the emitter spawn rides its host bone's joint off it (0130 phase 4).
-) -> (Vec<Entity>, Option<Vec<Entity>>) {
+    // Returns the spawned entities + what the anim host armed for this placement, when the model
+    // animates: the joint set (bone-indexed) the emitter spawn rides its host bone off (0130 phase
+    // 4), and the FILE sequence slot its variation roll landed on, which the emitters' rate/gate
+    // tracks must be sampled against (decision 0760).
+) -> (Vec<Entity>, Option<PlacementHost>) {
     let kind = if is_wmo {
         ModelKind::Wmo
     } else {
@@ -320,6 +333,7 @@ pub(crate) fn spawn_model_entities(
     // Arm the draw gate: animation runs iff any of these submeshes is drawn (`doodad_anim`) —
     // or, for a meshless (particles-only) host, iff the placement's fade sphere is in the draw
     // set (the same 0171 law its emitters gate on).
+    let armed_seq = host.as_ref().and_then(|h| h.seq);
     if let Some(h) = host {
         commands.entity(h.root).insert(DoodadAnimHost {
             meshes: skinned_meshes,
@@ -329,5 +343,11 @@ pub(crate) fn spawn_model_entities(
             active: true,
         });
     }
-    (out, skin.map(|(joints, _)| joints))
+    (
+        out,
+        skin.map(|(joints, _)| PlacementHost {
+            joints,
+            seq: armed_seq,
+        }),
+    )
 }

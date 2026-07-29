@@ -105,7 +105,7 @@ pub(super) fn spawn_loaded_placements(
                             ShadeResolve::Pending => continue,
                         };
                     let (radius, center) = m2_fade(&m.bounds, p.transform.scale.x);
-                    let (mut ents, joints) = spawn_model_entities(
+                    let (mut ents, host) = spawn_model_entities(
                         &mut commands,
                         mat_cache,
                         materials,
@@ -148,7 +148,8 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         &m.emitters,
                         p.transform,
-                        joints.as_deref(),
+                        host.as_ref().map(|h| h.joints.as_slice()),
+                        host.as_ref().and_then(|h| h.seq),
                         (radius, center),
                         &mut ents,
                     );
@@ -156,7 +157,7 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         &m.ribbons,
                         p.transform,
-                        joints.as_deref(),
+                        host.as_ref().map(|h| h.joints.as_slice()),
                         ents.first().copied(),
                     );
                     spawn_lights_for(&mut commands, &m.lights, p.transform, &mut ents);
@@ -401,7 +402,7 @@ pub(super) fn spawn_loaded_placements(
                     slot
                 }
             };
-            let (mut ents, joints) = spawn_model_entities(
+            let (mut ents, host) = spawn_model_entities(
                 &mut commands,
                 mat_cache,
                 materials,
@@ -458,7 +459,8 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 &m.emitters,
                 d.transform,
-                joints.as_deref(),
+                host.as_ref().map(|h| h.joints.as_slice()),
+                host.as_ref().and_then(|h| h.seq),
                 (radius, center),
                 &mut ents,
             );
@@ -466,7 +468,7 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 &m.ribbons,
                 d.transform,
-                joints.as_deref(),
+                host.as_ref().map(|h| h.joints.as_slice()),
                 ents.first().copied(),
             );
             spawn_lights_for(&mut commands, &m.lights, d.transform, &mut ents);
