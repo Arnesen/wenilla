@@ -47,6 +47,10 @@ fn message_chat_decodes_every_wire_shape() {
         ServerPacket::MessageChat(m) => {
             assert_eq!(m.chat_type, messages::CHAT_MSG_MONSTER_SAY);
             assert_eq!(m.sender_guid, 0xAABB_CCDD);
+            // The addressee — the guid slot between the name and the message. It is the subject
+            // the real client's `$`-macro expander resolves this line against (decision 0754), so
+            // it has to survive the parse instead of being read and dropped.
+            assert_eq!(m.target_guid, 0x9988_7766);
             assert_eq!(m.sender_name.as_deref(), Some("Timmy the Wolf"));
             assert_eq!(m.channel, None);
             assert_eq!(m.text, "Grr!");
@@ -78,6 +82,7 @@ fn message_chat_decodes_every_wire_shape() {
         ServerPacket::MessageChat(m) => {
             assert_eq!(m.chat_type, messages::CHAT_MSG_MONSTER_WHISPER);
             assert_eq!(m.sender_guid, 0, "no leading guid on this shape");
+            assert_eq!(m.target_guid, 0x55, "the whispered-at player");
             assert_eq!(m.sender_name.as_deref(), Some("Innkeeper Bob"));
             assert_eq!(m.text, "Welcome, weary traveler!");
         }
@@ -373,4 +378,34 @@ fn random_roll_broadcast_decodes() {
             guid: 0x9999,
         }]
     ));
+}
+
+/// The `$`-macro gate is a byte-level fact, not a design choice — pin it.
+///
+/// VERIFIED in `WoW.exe` (build 5875) at `0x49cf36-0x49cf5d`: the `cmp`-chain guarding the
+/// `call 0x506f70` at `0x49cf70` tests exactly `0x0b 0x0c 0x0d 0x1a 0x52 0x53 0x54`. Two things
+/// this guards against, both of which read as plausible and are wrong: adding the RAID_BOSS pair
+/// (0x59/0x5A) because they look like boss text, and dropping the BG_SYSTEM trio (0x52-0x54)
+/// because they look like plain system lines. Player chat is never expanded.
+#[test]
+fn the_macro_expanded_chat_types_are_the_reference_seven() {
+    assert_eq!(
+        messages::MACRO_EXPANDED_TYPES,
+        [0x0B, 0x0C, 0x0D, 0x1A, 0x52, 0x53, 0x54]
+    );
+    for t in [
+        messages::CHAT_MSG_SAY,
+        messages::CHAT_MSG_YELL,
+        messages::CHAT_MSG_WHISPER,
+        messages::CHAT_MSG_GUILD,
+        messages::CHAT_MSG_CHANNEL,
+        messages::CHAT_MSG_SYSTEM,
+        messages::CHAT_MSG_RAID_BOSS_WHISPER,
+        messages::CHAT_MSG_RAID_BOSS_EMOTE,
+    ] {
+        assert!(
+            !messages::MACRO_EXPANDED_TYPES.contains(&t),
+            "type {t:#04x} must reach the frame verbatim"
+        );
+    }
 }

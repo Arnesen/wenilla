@@ -107,7 +107,8 @@ struct WowLight {
     sh_c13_g: vec4<f32>,
     sh_c13_b: vec4<f32>,
     // xyz = the true c16 quad band (x²−y², per channel); w = a free lane (the eval never reads
-    // a c16.w; the retired point-light gain dial used to ride it).
+    // a c16.w; the retired point-light gain dial rode it, then the 0750/0751 sun calibration
+    // dial, retired by the 0753 trace law).
     sh_c16: vec4<f32>,
     _water: array<vec4<f32>, 4>, // rows 13-16: the liquid swatches — unread by models.
     // x = SIDN night fraction (1 overnight, 0 by day — scales m.sidn.rgb).
@@ -527,57 +528,36 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let n1 = vec4<f32>(n_lit, 1.0);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
-    // Exterior world doodad/entity: the VERIFIED `Model2.bls` sun response, scaled by the
-    // per-instance INTENSITY, the byte-verified `[node+0xa4]`: 2.5 on lit ground / 0.5 on
-    // MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`, `0x69e280`; the leg
-    // that force-writes 1.0 is `0x69e36b`). Lane history: the `Model2.bls` SH lobe (0354/0358)
-    // → the FFP matte with a hard cutoff (the SH wrap fed warm sun onto the anti-sun side;
-    // director's call: a sunlit character's shadow side must read the SAME as the skin standing
-    // in shade, so both sit exactly at the ambient level) → the same hard cutoff on an
-    // UNCLAMPED source (0706) → the verified closed-form curve on the sun side, cutoff kept
-    // (0747, below).
+    // Exterior world doodad/entity: the TRACE-VERIFIED committed-sun law (decision 0753).
+    // The CPU light animator targets the per-instance intensity `[node+0xa4]` — 2.5 on lit
+    // ground / 0.5 on MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`,
+    // `0x69e280`; the force-1.0 leg is `0x69e36b`) — but the reference AS THE DIRECTOR RUNS IT
+    // (WoW.exe D3D → wined3d; apitrace of their own client, 2026-07-29) commits the sun to the
+    // device at `D · min(I, 1)`: the lit 2.5 rung arrives at ×1, the shadowed rung at ×0.5, hue
+    // exact, never over-gamut (the Silverpine direct commits with max channel 254/255 — both
+    // peak-normalization and the raw ×2.5 product are refuted by that one byte). The light
+    // reaches the GPU as an FFP light slot (no SH constants anywhere in the trace), so the
+    // response is the FFP `max(N·L, 0)` — 0747's shader-lane f(μ) curve is superseded on this
+    // lane, and 0706's "the reference runs the shader path" premise is refuted for the
+    // reference-as-run. Lane history: `Model2.bls` SH lobe (0354/0358) → FFP matte, hard cutoff
+    // (director's call: the shadow side sits exactly at ambient) → unclamped source (0706) →
+    // verified curve (0747) → peak-norm (0750) → calibration dial (0751) → this trace law
+    // (0753), which retires the curve, the peak-norm and the dial here.
     //
     // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
-    // the lit-ground family (ADT doodads and every entity M2 — intensity 2.5, mixed toward 0.5 by
-    // the per-instance tag shade byte, which units/players/GameObjects ramp CPU-side like the
-    // binary's `0x69e770`; statics leave it 0), 0.5..0.85 = fixed intensity 1.0 (an exterior WMO
-    // MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
-    // MCSH-shadowed (0.5).
+    // the lit-ground family (ADT doodads and every entity M2 — animator target 2.5, mixed toward
+    // 0.5 by the per-instance tag shade byte, which units/players/GameObjects ramp CPU-side like
+    // the binary's `0x69e770`; statics leave it 0), 0.5..0.85 = fixed intensity 1.0 (an exterior
+    // WMO MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
+    // MCSH-shadowed (0.5). The ramp runs in animator units and the COMMIT clamps, like the
+    // reference: a lit↔shadowed transition holds ×1 until the ramp crosses 1.0.
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
-    let intensity = select(mix(2.5, 0.5, shade_t), 1.0, mid_band);
-    // The VERIFIED sun response (decision 0747): `clamp01(ambient + I·D·max(0, f(μ)))` with
-    // `f(μ) = (3 + 16μ + 15μ²)/34` — the closed form of the shipped `Model2.bls` vertex program
-    // (wow-re model2-bls-vertex-sh.md §4: three independent decodes convergent to ≤2.4e-8; the
-    // moments are consumed UNCLAMPED, so 0706's one saturating clamp at the sum stands). Peak
-    // f(1) = 1 (= the FFP `N·L` peak, the 16/17 accumulate scale exists for exactly that), and
-    // vs the previous linear `max(N·L,0)` the curve sits up to ~15% lower through the mid
-    // angles (f(0.5) = 0.434), which is where a near-saturating sun (any I·D channel > 1 — all
-    // three at night, R at dawn) stopped clipping ~15% too early. `max(0, ·)` keeps the
-    // director's anti-sun ruling (the hard-cutoff history above): f crosses zero at μ = −0.243,
-    // so the deep shadow hemisphere sits exactly at ambient — the reference's back-side wrap
-    // (f(−1) = 2/34) and its small negative dip are deliberately NOT taken, only the sun-side
-    // curve is. μ is the RAW dot (not `ndotl`): clamping first would pin the terminator band
-    // μ ∈ (−0.243, 0) at f(0) = 3/34 instead of letting it fade out.
-    let mu = dot(n_lit, L);
-    let sun_curve = max((3.0 + 16.0 * mu + 15.0 * mu * mu) / 34.0, 0.0);
-    // PEAK-NORMALIZE the committed sun (decision 0750, provisional — the byte verdict on which
-    // representation the reference's moment accumulate reads is a dispatched wow-re question):
-    // `C = I·D / max(1, max_ch(I·D))` — hue-preserving, capped at white. The raw over-gamut
-    // product (night: 2.5·[97,130,162]/255 = (0.95, 1.27, 1.59)) clips every moon-facing doodad
-    // face to flat white — the director's "day-lit fence at midnight" / "one Silverpine fence
-    // blown out at every hour" reports; the normalized form keeps the night's blue hue and
-    // softens the ×5 MCSH lit/shadowed cliff to the smooth blend the reference shows. Gain-1
-    // lanes (WMO, clutter, mid-band, shaded 0.5) never exceed white, so this touches ONLY the
-    // lit-intensity family. The client's own light encoder (`0x71ca80`) demonstrably produces
-    // exactly this peak-normalized form; whether the raw peak is re-applied on the sun's path
-    // is the open byte question — if the verdict says raw, this reverts on the record.
-    let sun_c = wow_light.light_diffuse.rgb * intensity;
-    let sun_peak = max(max(sun_c.r, sun_c.g), max(sun_c.b, 1.0));
+    let intensity = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
     let lit_doodad = clamp(
-        wow_light.light_ambient.rgb + (sun_c / sun_peak) * sun_curve,
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (intensity * ndotl),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

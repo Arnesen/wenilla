@@ -56,6 +56,32 @@ pub const CHAT_MSG_RAID_BOSS_EMOTE: u8 = 0x5A;
 pub const CHAT_MSG_BATTLEGROUND: u8 = 0x5C;
 pub const CHAT_MSG_BATTLEGROUND_LEADER: u8 = 0x5D;
 
+/// The chat types the real client runs its `$`-macro expander over, and the **only** ones — every
+/// other type, player chat included, reaches the frame verbatim.
+///
+/// VERIFIED at the bytes in `WoW.exe` (build 5875), `0x49cf36-0x49cf5d`: a `cmp`-chain on exactly
+/// these seven values guards the `call 0x506f70` at `0x49cf70`. Note what the set is and isn't —
+/// the four monster shapes plus the three **battleground system** lines (`BG_SYSTEM_NEUTRAL`/
+/// `_ALLIANCE`/`_HORDE`, vmangos `SharedDefines.h:1279-1281`), which is where lines like
+/// "$n has taken the flag!" come from. `RAID_BOSS_WHISPER`/`_EMOTE` (0x59/0x5A) are **not** in it,
+/// despite reading as boss text.
+pub const MACRO_EXPANDED_TYPES: [u8; 7] = [
+    CHAT_MSG_MONSTER_SAY,        // 0x0B
+    CHAT_MSG_MONSTER_YELL,       // 0x0C
+    CHAT_MSG_MONSTER_EMOTE,      // 0x0D
+    CHAT_MSG_MONSTER_WHISPER,    // 0x1A
+    CHAT_MSG_BG_SYSTEM_NEUTRAL,  // 0x52
+    CHAT_MSG_BG_SYSTEM_ALLIANCE, // 0x53
+    CHAT_MSG_BG_SYSTEM_HORDE,    // 0x54
+];
+
+/// `#if SUPPORTED_CLIENT_BUILD > CLIENT_BUILD_1_6_1` — active for 5875. The battleground system
+/// lines; they take `BuildChatPacket`'s `default:` branch, so their single guid slot IS the macro
+/// subject.
+pub const CHAT_MSG_BG_SYSTEM_NEUTRAL: u8 = 0x52;
+pub const CHAT_MSG_BG_SYSTEM_ALLIANCE: u8 = 0x53;
+pub const CHAT_MSG_BG_SYSTEM_HORDE: u8 = 0x54;
+
 /// `PlayerChatTag` (VERIFIED vmangos `Chat/Chat.h:86-92`) — [`ChatMessage::chat_tag`]'s values.
 /// `Player::GetChatTag` (`Objects/Player.cpp:1757-1767`) picks GM over DND over AFK over none.
 pub mod chat_tag {
@@ -74,6 +100,11 @@ pub struct ChatMessage {
     pub language: u32,
     /// The speaker, when the type carries a guid (0 for system messages / name-only shapes).
     pub sender_guid: u64,
+    /// The **addressee** — the trailing guid slot the monster shapes carry (`0` for the shapes that
+    /// have none). Not display state: this is the subject the real client's `$`-macro expander
+    /// resolves monster chat against, which is why it is kept rather than dropped. See
+    /// [`MACRO_EXPANDED_TYPES`].
+    pub target_guid: u64,
     /// The speaker's name, for the monster shapes that carry it inline (`None` elsewhere —
     /// player names resolve via the name query, exactly like the real client).
     pub sender_name: Option<String>,
@@ -106,6 +137,10 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
     let chat_type = read_u8(r)?;
     let language = read_u32_le(r)?;
     let mut sender_guid = 0u64;
+    // The trailing "addressee" slot. Only the monster shapes carry one; it stays 0 elsewhere, and
+    // the macro expander then falls back to `sender_guid` (which is all the `default:` shapes — the
+    // BG system lines included — have).
+    let mut target_guid = 0u64;
     let mut sender_name = None;
     let mut channel = None;
     match chat_type {
@@ -114,16 +149,17 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
         | CHAT_MSG_RAID_BOSS_EMOTE
         | CHAT_MSG_MONSTER_EMOTE => {
             sender_name = Some(read_len_string(r)?);
-            let _target = read_u64_le(r)?;
+            target_guid = read_u64_le(r)?;
         }
         CHAT_MSG_SAY | CHAT_MSG_PARTY | CHAT_MSG_YELL => {
             sender_guid = read_u64_le(r)?;
-            let _sender_again = read_u64_le(r)?;
+            // vmangos writes the sender's guid into both slots for these three.
+            target_guid = read_u64_le(r)?;
         }
         CHAT_MSG_MONSTER_SAY | CHAT_MSG_MONSTER_YELL => {
             sender_guid = read_u64_le(r)?;
             sender_name = Some(read_len_string(r)?);
-            let _target = read_u64_le(r)?;
+            target_guid = read_u64_le(r)?;
         }
         CHAT_MSG_CHANNEL => {
             channel = Some(read_cstring(r)?);
@@ -143,6 +179,7 @@ pub(super) fn read_message_chat(r: &mut &[u8]) -> io::Result<ChatMessage> {
         chat_type,
         language,
         sender_guid,
+        target_guid,
         sender_name,
         channel,
         text,

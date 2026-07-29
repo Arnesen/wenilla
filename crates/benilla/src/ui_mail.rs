@@ -263,6 +263,7 @@ pub(crate) fn mail_error_text(error: u32) -> String {
 /// item-template cache + `ItemDisplayInfo.dbc`, the body from the cache, the stationery basename
 /// from `Stationery.dbc`. `None`s stay `None` while a query is in flight — the row shows a
 /// placeholder and fills in when the answer lands (the merchant/loot pattern).
+#[allow(clippy::too_many_arguments)] // one resolve per ask-once cache the row reads
 fn resolve_row(
     entry: &MailListEntry,
     bodies: &HashMap<u32, String>,
@@ -271,6 +272,7 @@ fn resolve_row(
     stationery: Option<&Stationery>,
     names: &mut NameCache,
     commands: &NetCommands,
+    macros: &crate::npc_text::MacroContext,
 ) -> MailInboxRow {
     let is_gm = entry.stationery == STATIONERY_GM;
     let returned = entry.checked & CHECKED_RETURNED != 0;
@@ -328,9 +330,13 @@ fn resolve_row(
         text_created: entry.checked & CHECKED_COPIED != 0,
         can_reply,
         is_gm,
+        // The letter body is server-authored text, so it runs the `$`-macro expander — the
+        // reference does it from two sites in `GetInboxText` (decision 0754). Subject is the
+        // local player, as it is for every panel seam.
         body: (entry.item_text_id != 0)
             .then(|| bodies.get(&entry.item_text_id).cloned())
-            .flatten(),
+            .flatten()
+            .map(|b| crate::npc_text::substitute(&b, macros)),
         stationery_texture,
         is_invoice: entry.message_type == mail_message_type::AUCTION,
         has_body: entry.item_text_id != 0,
@@ -343,6 +349,7 @@ fn resolve_row(
 }
 
 /// Build the Lua-facing snapshot from [`MailOpen`] — `None` when no mailbox is open.
+#[allow(clippy::too_many_arguments)] // mirrors `resolve_row`'s cache set
 fn snapshot(
     mail: &MailOpen,
     items: &mut Items,
@@ -350,13 +357,25 @@ fn snapshot(
     stationery: Option<&Stationery>,
     names: &mut NameCache,
     commands: &NetCommands,
+    macros: &crate::npc_text::MacroContext,
 ) -> Option<MailState> {
     mail.mailbox?;
     Some(MailState {
         inbox: mail
             .mails
             .iter()
-            .map(|e| resolve_row(e, &mail.bodies, items, icons, stationery, names, commands))
+            .map(|e| {
+                resolve_row(
+                    e,
+                    &mail.bodies,
+                    items,
+                    icons,
+                    stationery,
+                    names,
+                    commands,
+                    macros,
+                )
+            })
             .collect(),
     })
 }
@@ -378,6 +397,9 @@ fn feed_mail(
     mut last: Local<Option<MailState>>,
     mut last_mailbox: Local<Option<u64>>,
     mut last_has_new_mail: Local<bool>,
+    // The `$`-macro subject for the letter body: the local player, as at every panel seam.
+    self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
+    states: Res<crate::world_state::WorldStates>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -399,6 +421,14 @@ fn feed_mail(
         }
     }
 
+    // The macro subject, resolved before the row walk borrows the name cache again. `None` until
+    // the player is streamed and named — the feed diffs on the substituted text, so a letter opened
+    // that early re-substitutes as soon as it lands.
+    let subject = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let macros = crate::npc_text::MacroContext {
+        subject: subject.as_ref(),
+        states: &states,
+    };
     let fresh = snapshot(
         &mail,
         &mut items,
@@ -406,6 +436,7 @@ fn feed_mail(
         stationery.as_deref(),
         &mut names,
         &commands,
+        &macros,
     );
     let opened = last_mailbox.is_none() && mail.mailbox.is_some();
     let closed = last_mailbox.is_some() && mail.mailbox.is_none();
@@ -583,6 +614,16 @@ mod tests {
     use super::*;
     use benilla_protocol::messages::MailAttachment;
 
+    /// The no-subject macro context these row tests run under: none of them exercises a `$` token,
+    /// and a subject-less context leaves plain text untouched (the expander only rewrites at a `$`).
+    /// The macro path's own behaviour is covered in [`crate::npc_text`]'s tests.
+    fn no_macros(states: &crate::world_state::WorldStates) -> crate::npc_text::MacroContext<'_> {
+        crate::npc_text::MacroContext {
+            subject: None,
+            states,
+        }
+    }
+
     fn entry(
         message_id: u32,
         sender_guid: Option<u64>,
@@ -656,6 +697,7 @@ mod tests {
 
     #[test]
     fn resolve_row_derives_the_reply_and_delete_law() {
+        let states = crate::world_state::WorldStates::default();
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -672,6 +714,7 @@ mod tests {
             None,
             &mut names,
             &commands,
+            &no_macros(&states),
         );
         assert!(row.can_reply);
         assert!(row.can_delete);
@@ -689,6 +732,7 @@ mod tests {
             None,
             &mut names,
             &commands,
+            &no_macros(&states),
         );
         assert!(row.can_reply);
         assert!(!row.can_delete);
@@ -696,7 +740,14 @@ mod tests {
         // A returned mail → not replyable, deletable.
         let returned = entry(2, Some(0xA), CHECKED_RETURNED, 30.0);
         let row = resolve_row(
-            &returned, &bodies, &mut items, None, None, &mut names, &commands,
+            &returned,
+            &bodies,
+            &mut items,
+            None,
+            None,
+            &mut names,
+            &commands,
+            &no_macros(&states),
         );
         assert!(!row.can_reply);
         assert!(row.can_delete);
@@ -704,13 +755,21 @@ mod tests {
         // A system mail (no sender guid) → deletable.
         let system = entry(3, None, 0, 30.0);
         let row = resolve_row(
-            &system, &bodies, &mut items, None, None, &mut names, &commands,
+            &system,
+            &bodies,
+            &mut items,
+            None,
+            None,
+            &mut names,
+            &commands,
+            &no_macros(&states),
         );
         assert!(row.can_delete);
     }
 
     #[test]
     fn resolve_row_reads_the_item_and_body_caches() {
+        let states = crate::world_state::WorldStates::default();
         let mut items = Items::default();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let commands = NetCommands(tx);
@@ -730,7 +789,16 @@ mod tests {
             durability_max: 0,
             durability: 0,
         });
-        let row = resolve_row(&e, &bodies, &mut items, None, None, &mut names, &commands);
+        let row = resolve_row(
+            &e,
+            &bodies,
+            &mut items,
+            None,
+            None,
+            &mut names,
+            &commands,
+            &no_macros(&states),
+        );
         assert_eq!(row.item_id, 2589);
         assert_eq!(row.item_count, 5);
         assert_eq!(row.body.as_deref(), Some("the letter body"));

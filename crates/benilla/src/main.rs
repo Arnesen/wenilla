@@ -291,7 +291,21 @@ fn main() -> AppExit {
                         }
                         .into()
                     } else {
-                        UVec2::new(1600, 900).into()
+                        // `$WOW_WIN=WxH` (logical px): override the world capture/window size —
+                        // the resolution-A/B instrument. The FFXGlow blur geometry is byte-pinned
+                        // in TEXELS, so its angular footprint shrinks as resolution grows and
+                        // thin bright features (fence rails) self-amplify at 4K where the
+                        // 1024-era reference diluted them; matching the era's pixel density
+                        // (e.g. `WOW_WIN=512x288` on a 2× display → 1024×576 physical) isolates
+                        // that term. Also the knob for any future era-resolution comparison.
+                        std::env::var("WOW_WIN")
+                            .ok()
+                            .and_then(|v| {
+                                let (w, h) = v.split_once('x')?;
+                                Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+                            })
+                            .unwrap_or(UVec2::new(1600, 900))
+                            .into()
                     },
                     // `$WOW_NOVSYNC=1`: uncap presentation so a headless FPS-journal run measures
                     // true frame cost, not the vsync ceiling — the same uncap the capture probe

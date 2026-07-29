@@ -7,11 +7,11 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    channel_notice, ChannelNoticeTail, ChatMessage, LevelUpInfo, XpGain,
+    channel_notice, ChannelNoticeTail, ChatMessage, LevelUpInfo, XpGain, MACRO_EXPANDED_TYPES,
 };
 
 use crate::names::NameCache;
-use crate::net::NetCommands;
+use crate::net::{GuidIndex, NetCommands, ObjectStore};
 
 use super::edit::ChannelState;
 use super::event::{flag_of_tag, kind_of_wire, language_name, ChatEvent, ChatEventKind};
@@ -244,6 +244,11 @@ pub(super) fn feed_chat(
     mut bubbles: ResMut<crate::chat_bubble::BubbleQueue>,
     commands: Res<NetCommands>,
     time: Res<Time>,
+    // The `$`-macro subject seam: monster/BG lines expand against the guid the line is ADDRESSED to,
+    // which needs the object index + the streamed unit's descriptors. See [`macro_subject`].
+    guids: Res<GuidIndex>,
+    stores: Query<&ObjectStore>,
+    states: Res<crate::world_state::WorldStates>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -316,9 +321,36 @@ pub(super) fn feed_chat(
                         None => c,
                     })
                     .unwrap_or_default();
+                // `$`-macro expansion (decision 0754): the reference runs its one server-text
+                // expander over monster + BG-system chat and nothing else, against the guid the
+                // line is ADDRESSED to. Every other type reaches the frame verbatim.
+                let text = if MACRO_EXPANDED_TYPES.contains(&msg.chat_type) {
+                    // The addressee where the shape carries one, else the only guid it has.
+                    let subject_guid = if msg.target_guid != 0 {
+                        msg.target_guid
+                    } else {
+                        msg.sender_guid
+                    };
+                    let subject = crate::npc_text::subject_for_guid(
+                        subject_guid,
+                        &guids,
+                        &stores,
+                        &mut names,
+                        &commands,
+                    );
+                    crate::npc_text::substitute(
+                        &msg.text,
+                        &crate::npc_text::MacroContext {
+                            subject: subject.as_ref(),
+                            states: &states,
+                        },
+                    )
+                } else {
+                    msg.text.clone()
+                };
                 let event = ChatEvent {
                     kind,
-                    text: msg.text.clone(),
+                    text: text.clone(),
                     sender: name.unwrap_or_else(|| {
                         if needs_name(msg.chat_type) && msg.sender_guid != 0 {
                             "Unknown".to_string()
@@ -340,7 +372,10 @@ pub(super) fn feed_chat(
                 // The speech bubble spawns the moment the line routes — the reference's
                 // `0x49acd9` sits in the same SMSG display path ([`crate::chat_bubble`]).
                 if let Some(kind) = event.kind {
-                    bubbles.push(msg.sender_guid, kind, &msg.text);
+                    // The bubble shows the same expanded line the feed does — the reference's
+                    // bubble spawn sits inside this same SMSG display path, downstream of the
+                    // expander, so a `$n` must never survive into it either.
+                    bubbles.push(msg.sender_guid, kind, &text);
                 }
             }
             Pending::Notice {

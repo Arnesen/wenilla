@@ -528,7 +528,6 @@ pub(super) fn sync_glue_scene(
         let fog_w = if fog { 1.0 } else { 0.0 };
         rows[4] = [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_w]; // fog color, w = enabled
         rows[5] = [0.0, fog_far, 0.0, 10_000.0]; // start 0, the ref's far; farclip wall inert
-        rows[12][3] = 1.0; // point gain: the rig's authored point lights at the committed base
         rows[19] = [0.0, 0.0, 0.0, 1.0]; // rig lane ignores the intensity dial; 1.0 = byte levels
         rows[20] = [rig.points.len() as f32, 0.0, 0.0, 0.0]; // point-table count
                                                              // Header rows + the point table are contiguous in the std430 layout — one write covers

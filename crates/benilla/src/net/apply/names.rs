@@ -5,10 +5,18 @@
 
 use crate::names::{CreatureRecord, NameCache};
 
-/// `SMSG_NAME_QUERY_RESPONSE` — a player's name. Race/gender/class ride the same answer but have no
-/// consumer yet, so the cache stays name-only until one does.
-pub(super) fn player_name(guid: u64, name: String, names: &mut NameCache) {
-    names.insert_player(guid, name);
+/// `SMSG_NAME_QUERY_RESPONSE` — a player's name, plus the race/gender/class that ride the same
+/// answer. Those three now have a consumer: the `$`-macro expander's subject fallback for a player
+/// who isn't streamed ([`crate::npc_text::subject_for_guid`]).
+pub(super) fn player_name(
+    guid: u64,
+    name: String,
+    race: u32,
+    class: u32,
+    gender: u32,
+    names: &mut NameCache,
+) {
+    names.insert_player(guid, name, Some((race as u8, class as u8, gender as u8)));
 }
 
 /// `SMSG_PET_NAME_QUERY_RESPONSE` — keyed by pet *number*, not by template entry.

@@ -85,6 +85,9 @@ fn feed_item_text(
     mut items: ResMut<Items>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
+    // The `$`-macro subject for the page body: the local player, as at every panel seam.
+    self_q: Query<(&crate::net::ObjectStore, &crate::net::Guid), With<crate::net::SelfPlayer>>,
+    states: Res<crate::world_state::WorldStates>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -144,6 +147,16 @@ fn feed_item_text(
     let Some(text) = body else {
         return; // body query in flight
     };
+    // Page/book text is server-authored, so it runs the `$`-macro expander — the reference does it
+    // from two sites in `ItemTextFrame.cpp` (decision 0754), subject = the local player.
+    let subject = crate::npc_text::player_identity(&self_q, &mut names, &commands);
+    let text = crate::npc_text::substitute(
+        &text,
+        &crate::npc_text::MacroContext {
+            subject: subject.as_ref(),
+            states: &states,
+        },
+    );
     script.set_item_text(Some(ItemTextState {
         item: title,
         creator,

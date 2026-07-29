@@ -23,7 +23,7 @@
 use bevy::prelude::*;
 
 use crate::names::NameCache;
-use crate::net::{Guid, NetCommands, ObjectStore, SelfPlayer};
+use crate::net::{Guid, GuidIndex, NetCommands, ObjectStore, SelfPlayer};
 
 /// The unit a `$`-macro expands against. Every seam we have passes the **self player** (the
 /// reference resolves the subject from the GUID its call site hands over, and only its four chat
@@ -202,6 +202,45 @@ pub(crate) fn player_identity(
         race: store.0.unit_race().unwrap_or(0),
         class: store.0.unit_class().unwrap_or(0),
         gender: store.0.unit_gender().unwrap_or(0),
+    })
+}
+
+/// A macro [`Subject`] for an **arbitrary** guid — the chat feed's subject, where every other seam
+/// passes the local player.
+///
+/// This is the reference's own two-step (`questtext-macro-expander.md` §1): look the guid up in the
+/// object manager first and read the unit's descriptors, and only when it isn't streamed fall back
+/// to the **name-cache** record. `None` means the subject could not be resolved at all — the
+/// reference's no-subject case, which fails every person-token and re-emits a literal `$`; that is
+/// also what an untargeted line (guid 0) gets, deliberately.
+pub(crate) fn subject_for_guid(
+    guid: u64,
+    index: &GuidIndex,
+    stores: &Query<&ObjectStore>,
+    names: &mut NameCache,
+    commands: &NetCommands,
+) -> Option<Subject> {
+    if guid == 0 {
+        return None;
+    }
+    let name = names.resolve(guid, commands)?.to_string();
+    if let Some(store) = index.0.get(&guid).and_then(|e| stores.get(*e).ok()) {
+        return Some(Subject {
+            name,
+            race: store.0.unit_race().unwrap_or(0),
+            class: store.0.unit_class().unwrap_or(0),
+            gender: store.0.unit_gender().unwrap_or(0),
+        });
+    }
+    // Not streamed: the name answer's own race/class/gender. A creature guid has no such record and
+    // lands on zeros — which is right, because the reference's non-player arm never reads a
+    // race/class for `$R`/`$C` either; it emits the unit's name instead (§3, orchestrator ruling).
+    let (race, class, gender) = names.player_traits(guid).unwrap_or((0, 0, 0));
+    Some(Subject {
+        name,
+        race,
+        class,
+        gender,
     })
 }
 

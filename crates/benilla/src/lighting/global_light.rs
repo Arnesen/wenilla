@@ -266,8 +266,8 @@ fn build_light_data(
                                            // `.yzw` is the core packer's below.
     rows[17][0] = l.sidn_night;
     // 18/19 — the INTERIOR fog triple (see the layout doc above). 19.zw (and 12.w) are free
-    // lanes: they carried the 0273/0354-era A/B dials until those investigations byte-closed
-    // (0285/0358) and the knobs retired — the shaders read the faithful path unconditionally now.
+    // lanes: they carried retired dials (the 0273/0354-era A/Bs, the point gain, the 0750/0751
+    // sun calibration) — the shaders read the faithful path unconditionally now (0753).
     rows[18] = [
         l.wmo_fog_color[0],
         l.wmo_fog_color[1],

@@ -539,9 +539,13 @@ pub(super) fn apply_net_updates(
             } => {
                 proficiencies.0.insert(item_class, subclass_mask);
             }
-            SessionEvent::PlayerName { guid, name, .. } => {
-                names::player_name(guid, name, &mut names)
-            }
+            SessionEvent::PlayerName {
+                guid,
+                name,
+                race,
+                class,
+                gender,
+            } => names::player_name(guid, name, race, class, gender, &mut names),
             SessionEvent::PetName { pet_number, name } => {
                 names::pet_name(pet_number, name, &mut names)
             }

@@ -27,6 +27,13 @@ pub(crate) struct NameCache {
     /// Player names by guid. `Some(None)`-shaped answers are stored as `None`: the server was asked
     /// and didn't know (an empty wire name) — cached so we never re-ask a dead guid.
     players: HashMap<u64, Option<String>>,
+    /// `(race, class, gender)` from the same `SMSG_NAME_QUERY_RESPONSE` that carried the name — the
+    /// wire has always sent these three and we used to drop them. They exist for one reason: the
+    /// `$`-macro expander's non-player-subject path. The reference resolves a macro subject from the
+    /// object manager first and falls back to **this** cache record when the unit isn't streamed
+    /// (`questtext-macro-expander.md` §1), so without them `$R`/`$C`/`$G` against an off-screen
+    /// player would silently read race 0.
+    player_traits: HashMap<u64, (u8, u8, u8)>,
     /// Creature template records by entry; the outer `None` = the server flagged the entry
     /// unknown. The subname is the overhead/tooltip title line ("Stable Master", …); the type is
     /// the `CreatureType.dbc` id the TAB-target critter filter reads; rank/civilian feed the
@@ -146,12 +153,28 @@ impl NameCache {
         }
     }
 
-    /// Record a player-name answer (`SMSG_NAME_QUERY_RESPONSE`). An empty wire name means the server
-    /// doesn't know the guid — cached as a negative answer.
-    pub(crate) fn insert_player(&mut self, guid: u64, name: String) {
+    /// Record a player-name answer. An empty wire name means the server doesn't know the guid —
+    /// cached as a negative answer.
+    ///
+    /// `traits` is the `(race, class, gender)` triple that rides `SMSG_NAME_QUERY_RESPONSE`, kept
+    /// for [`Self::player_traits`]. It is `None` for the seams that learn a name **without** that
+    /// packet — the login-time seed of our own name, and the capture fixtures — rather than having
+    /// them invent a zero triple that would read as a real (and wrong) race.
+    pub(crate) fn insert_player(&mut self, guid: u64, name: String, traits: Option<(u8, u8, u8)>) {
         self.pending_players.remove(&guid);
+        if !name.is_empty() {
+            if let Some(t) = traits {
+                self.player_traits.insert(guid, t);
+            }
+        }
         self.players
             .insert(guid, (!name.is_empty()).then_some(name));
+    }
+
+    /// `(race, class, gender)` for a player guid the name query has answered for — the macro
+    /// expander's fallback when the unit isn't streamed. See [`NameCache::player_traits`].
+    pub(crate) fn player_traits(&self, guid: u64) -> Option<(u8, u8, u8)> {
+        self.player_traits.get(&guid).copied()
     }
 
     /// Record a pet-name answer (`SMSG_PET_NAME_QUERY_RESPONSE`), keyed by pet number.
@@ -290,7 +313,7 @@ mod tests {
             rx.try_recv(),
             Ok(ClientCommand::NameQuery { guid }) if guid == g
         ));
-        cache.insert_player(g, String::new()); // server: unknown guid
+        cache.insert_player(g, String::new(), None); // server: unknown guid
         assert_eq!(cache.resolve(g, &cmds), None);
         // …and no re-ask.
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));

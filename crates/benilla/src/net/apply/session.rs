@@ -105,7 +105,7 @@ pub(super) fn connected(
     status.last_reason = None;
     info!("net: in world as {name} (guid {guid})");
     // Our own name came with the login — seed the cache so "player" never queries.
-    names.insert_player(guid, name);
+    names.insert_player(guid, name, None);
     entered_world.write(EnteredWorldMessage);
 }
 

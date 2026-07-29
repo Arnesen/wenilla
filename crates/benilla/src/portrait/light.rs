@@ -191,7 +191,7 @@ pub(super) fn model_pane_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADE
     rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; w = terrain shininess convention)
     rows[4] = [0.0, 0.0, 0.0, 0.0]; // fog color, w = 0: fog OFF in the booth
     rows[5] = [0.0, 10_000.0, 0.0, 10_000.0]; // fog params (inert; farclip wall far away)
-    rows[19] = [0.0, 0.0, 0.0, 0.4]; // exterior-intensity dial → 1.0 (see `studio_light_rows`)
+    rows[19] = [0.0, 0.0, 0.0, 0.4]; // STALE dial (see `studio_light_rows` — no shader reads 19.w)
     rows
 }
 
@@ -219,10 +219,12 @@ pub(super) fn studio_light_rows() -> [[f32; 4]; crate::lighting::LIGHT_HEADER_RO
     rows[3] = [0.0, 0.0, 0.0, 20.0]; // spec (unused by models; w = terrain shininess convention)
     rows[4] = [0.0, 0.0, 0.0, 0.0]; // fog color, w = 0: fog OFF in the booth
     rows[5] = [0.0, 10_000.0, 0.0, 10_000.0]; // fog params (inert; farclip wall far away)
-                                              // 19.w = the exterior-intensity dial: booth parts are untagged (shade byte 0), so the exterior
-                                              // lane lands them on the lit 2.5 rung — 0.4 brings the studio to intensity 1.0, the neutral
-                                              // front-lit portrait rather than the noon-saturated outdoor rung. Rows 12.w (point gain) and
-                                              // 17.x (SIDN night) stay 0: no scene hot-spots, no night emissive in the booth.
+                                              // 12.w / 17.x (SIDN night) stay 0: no dial lanes, no night emissive in the booth.
+                                              // 19.w — STALE: this was the retired exterior-intensity A/B dial ("0.4 brings the untagged
+                                              // booth parts from the lit 2.5 rung to intensity 1.0"), but NO shader reads 19.w today.
+                                              // Under the 0753 trace law the exterior lane commits the sun at ×1 regardless, which is the
+                                              // very level this dial once aimed for — the drift resolved itself; comment kept until a
+                                              // portrait-light pass confirms the booth look.
     rows[19] = [0.0, 0.0, 0.0, 0.4];
     rows
 }

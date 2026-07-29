@@ -296,7 +296,7 @@ pub(super) fn seed_ui_fixture(
                 (612, G_BANKBAG as u32), // BANK_BAG_SLOT_1 — bag button 1's icon
                 (1176, 123_456),         // PLAYER_FIELD_COINAGE
             ]);
-            names.insert_player(PLAYER_GUID, "Benilla".into());
+            names.insert_player(PLAYER_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(fields),
                 crate::net::SelfPlayer,
@@ -545,7 +545,7 @@ pub(super) fn seed_ui_fixture(
             // A player guid + cached name ride along — the feeds resolve the player identity
             // (chat-macro substitution) through the same (ObjectStore, Guid) self query as live.
             const PLAYER_GUID: u64 = 0x51;
-            names.insert_player(PLAYER_GUID, "Benilla".into());
+            names.insert_player(PLAYER_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(fields),
                 crate::net::SelfPlayer,
@@ -816,7 +816,7 @@ pub(super) fn seed_ui_fixture(
             arrows.display_info_id = DISP_STONE;
             items.insert_template(93_012, Some(arrows));
 
-            names.insert_player(PLAYER_GUID, "Benilla".into());
+            names.insert_player(PLAYER_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(fields),
                 crate::net::SelfPlayer,
@@ -836,7 +836,7 @@ pub(super) fn seed_ui_fixture(
             // The synthetic self player, at the camera eye (the 20 yd plate gate measures from
             // here): level 2 human — the wolf cons YELLOW, the reference screenshot's digit.
             const PLAYER_GUID: u64 = 0x51;
-            names.insert_player(PLAYER_GUID, "Benilla".into());
+            names.insert_player(PLAYER_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(ObjectFields::from_pairs(&[
                     (34, 2),      // UNIT_FIELD_LEVEL
@@ -900,7 +900,7 @@ pub(super) fn seed_ui_fixture(
             use benilla_protocol::messages::ObjectFields;
             const PLAYER_GUID: u64 = 0x51;
             const G_SWORD: u64 = 0x1002;
-            names.insert_player(PLAYER_GUID, "Benilla".into());
+            names.insert_player(PLAYER_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(ObjectFields::from_pairs(&[
                     (34, 12),              // UNIT_FIELD_LEVEL
@@ -987,7 +987,7 @@ pub(super) fn seed_ui_fixture(
             // The synthetic self player at the eye (the reaction lookup reads its store, and the
             // name colour is that verdict).
             const SELF_GUID: u64 = 0x51;
-            names.insert_player(SELF_GUID, "Benilla".into());
+            names.insert_player(SELF_GUID, "Benilla".into(), None);
             commands.spawn((
                 crate::net::ObjectStore(ObjectFields::from_pairs(&[
                     (34, 2),      // UNIT_FIELD_LEVEL
