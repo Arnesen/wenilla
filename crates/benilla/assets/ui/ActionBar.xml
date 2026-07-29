@@ -43,8 +43,12 @@
           right-hand cluster is otherwise complete — the backpack toggle + four bag slots live in
           BagFrame.xml and the eight micro buttons in MicroMenu.xml (both anchored into
           BenillaActionBarArtFrame and seated over the art by BenillaActionBarArt_SeatAbove below),
-          and the performance meter is at the foot of this file. Only the KEYRING is still out, with
-          the keyring container itself (the ref hides that button by default anyway).
+          and the performance meter is at the foot of this file. The KEYRING landed with decision
+          0765: its button and container live in BagFrame.xml (the ref's own split —
+          MainMenuBarBagButtons.xml / ContainerFrame.lua), and the bar's half of it — swapping the
+          two right-hand strips to the keyring art and sliding the performance meter over to make
+          room — is BenillaMainMenuBar_UpdateKeyRing below, exactly where the ref keeps it
+          (MainMenuBar.lua l.174-183).
     -->
     <Script><![CDATA[
         BENILLA_FALLBACK_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -86,6 +90,69 @@
         function BenillaActionBarArt_SeatAbove(frame)
             local art = getglobal("BenillaActionBarArtFrame")
             if art then frame:SetFrameLevel(art:GetFrameLevel() + 1) end
+        end
+
+        -- ── The keyring's half of the bar (ref MainMenuBar_UpdateKeyRing, MainMenuBar.lua
+        -- l.174-183; decision 0765) ──────────────────────────────────────────────────────────────
+        -- The keyring is not just a button bolted onto the bar: the bar's two RIGHT-hand strips are
+        -- re-textured to a variant plate that has a socket for it, and the performance meter slides
+        -- 8px further left out of the way. Both atlases are 256-wide 43px strips at the same on-
+        -- screen size and anchors, so only the file + TexCoords change (UI-MainMenuBar-KeyRing is
+        -- 256x128 and holds exactly the two bands the ref names: 0.3359375 * 128 = 43px each).
+        --
+        -- Called by BenillaKeyRingButton's own OnEvent (BagFrame.xml). Everything is nil-guarded:
+        -- this file loads without BagFrame.xml in several harnesses, and BagFrame.xml loads without
+        -- this one in ~25 bag/bank/escape/merchant tests — either way the missing half no-ops.
+        --
+        -- DIVERGENCE (decision 0765): the ref latches this ON forever the first time HasKey() is
+        -- true, via the saved variable SHOW_KEYRING (and pulses the button for 60s to announce it).
+        -- This engine has no saved variables, and a session-scoped latch would leak across a
+        -- character switch — showing a keyring on a character with no key — so the state is derived
+        -- from HasKey() on every BAG_UPDATE instead, in BOTH directions. Observably identical
+        -- unless you destroy your last key, which then un-shows the keyring rather than leaving an
+        -- empty one behind. The 60s pulse is out, consistently with decision 0304's "no button
+        -- pulse" for the micro buttons.
+        function BenillaMainMenuBar_UpdateKeyRing()
+            local show = HasKey and HasKey()
+            -- The two right-hand strips (BenillaActionBarTexture2 at x=+128, Texture3 at x=+384),
+            -- keyring plate or the ordinary dwarf plate. The dwarf coords are this file's own
+            -- authored ones (see the strips below) — restated here because this is the only code
+            -- that ever changes them back.
+            local strips = {
+                { name = "BenillaActionBarTexture2",
+                  keyring = 0.6640625, keyringBottom = 1.0,
+                  dwarf = 0.33203125, dwarfBottom = 0.5 },
+                { name = "BenillaActionBarTexture3",
+                  keyring = 0.1640625, keyringBottom = 0.5,
+                  dwarf = 0.08203125, dwarfBottom = 0.25 },
+            }
+            for _, strip in ipairs(strips) do
+                local tex = getglobal(strip.name)
+                if tex then
+                    if show then
+                        tex:SetTexture("Interface\\MainMenuBar\\UI-MainMenuBar-KeyRing")
+                        tex:SetTexCoord(0, 1, strip.keyring, strip.keyringBottom)
+                    else
+                        tex:SetTexture("Interface\\MainMenuBar\\UI-MainMenuBar-Dwarf")
+                        tex:SetTexCoord(0, 1, strip.dwarf, strip.dwarfBottom)
+                    end
+                end
+            end
+            -- The performance meter's recess moves with the plate: -227 without the keyring,
+            -- -235 with it (ref l.180). Its own comment at the foot of this file has the geometry.
+            local perf = getglobal("BenillaPerformanceBarFrame")
+            local bar = getglobal("BenillaActionBar")
+            if perf and bar then
+                perf:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", (show and -235) or -227, -10)
+            end
+            local button = getglobal("BenillaKeyRingButton")
+            if button then
+                if show then button:Show() else button:Hide() end
+            end
+            -- Losing the last key with the keyring open would strand an orphan window; the ref
+            -- can't reach this state (its latch is one-way), so this is ours to decide.
+            local frame = getglobal("BenillaKeyRingFrame")
+            if frame and not show and frame:IsShown() then frame:Hide() end
         end
 
         -- The wire/API action id the MAIN bar's button i displays (the vanilla page formula).
@@ -861,9 +928,9 @@
                  tree, and its explicit strata survives the parent's LOW subtree-force (attributes
                  apply before nested <Frames> are built).
 
-                 SCOPE: the ref's MainMenuBar_UpdateKeyRing shifts this frame to -235 when the keyring
-                 is shown. No keyring here (see the header's OUT list), so the un-shifted -227 is the
-                 only position. -->
+                 The -227 authored here is the NO-keyring position; BenillaMainMenuBar_UpdateKeyRing
+                 (top of this file) re-points it to -235 while the keyring is shown, the ref's own
+                 shift (MainMenuBar.lua l.180). Both offsets live in that one function. -->
             <Frame name="BenillaPerformanceBarFrame" frameStrata="LOW">
                 <Size><AbsDimension x="16" y="64"/></Size>
                 <Anchors>

@@ -27,12 +27,19 @@ impl WorldWriter {
     }
 
     /// Use an item by bag position (`CMSG_USE_ITEM`, layout in [`messages::use_item`]) — eat the
-    /// food, drink the potion, hearthstone home. The server answers with the effect (values
+    /// food, drink the potion, hearthstone home. `go_target` aims the use at a GameObject, which is
+    /// how a KEY opens a locked door (decision 0769). The server answers with the effect (values
     /// deltas, a stack decrement/destroy) or `SMSG_CAST_RESULT` on refusal.
-    pub fn use_item(&mut self, bag_index: u8, slot: u8, spell_slot: u8) -> Result<()> {
+    pub fn use_item(
+        &mut self,
+        bag_index: u8,
+        slot: u8,
+        spell_slot: u8,
+        go_target: Option<u64>,
+    ) -> Result<()> {
         self.send(
             opcode::CMSG_USE_ITEM,
-            &messages::use_item(bag_index, slot, spell_slot),
+            &messages::use_item(bag_index, slot, spell_slot, go_target),
         )
     }
 

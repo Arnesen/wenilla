@@ -436,11 +436,21 @@ pub(super) fn update_time_lighting(
     // instrument for comparing our resolved pair against a reference-trace decode (which reports the
     // committed GL pair in 0..255 bytes). Throttled on the whole minute so a 60 s probe logs a handful
     // of lines, not one per frame (`sun_dir` wobbles continuously).
+    //
+    // It leads with the **`map` + eye position it sampled at**, because those are the two inputs that
+    // decide everything after them and neither is visible from the chair. Every colour below is
+    // `sample_blended(map, wow_pos, …)`, and `benilla-extract lightblend <map> <x> <y> <z> <minute>`
+    // recomputes the same call offline — so a line from a live run can be replayed against the DBC
+    // instead of argued about. Without the map printed, "is this the atmosphere the zone actually
+    // authored, or the one next door?" costs a session (Stratholme, 2026-07-29).
     if *last_dump != Some(minute) && std::env::var_os("WOW_LIGHT_DUMP").is_some() {
         *last_dump = Some(minute);
         let b = |c: [f32; 3]| [c[0] * 255.0, c[1] * 255.0, c[2] * 255.0].map(|v| v.round() as i32);
         eprintln!(
-            "[light] minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0}",
+            "[light] map {map} at ({:.1}, {:.1}, {:.1}) minute {minute} ({source:?}) ambient {:?} diffuse {:?} spec {:?} sun_dir {:.3} fog {:?} start/end {:.0}/{:.0}",
+            wow_pos[0],
+            wow_pos[1],
+            wow_pos[2],
             b(resolved.ambient),
             b(resolved.diffuse),
             b(resolved.spec),

@@ -391,6 +391,13 @@
         -- (It was three identical inline copies until the game menu needed a fourth.)
         local BAG_WINDOWS = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
                               "BenillaBagFrame3", "BenillaBagFrame4" }
+        -- ESC closes the KEYRING too, but nothing else here does. The ref's split, exactly: its
+        -- CloseAllWindows loops every ContainerFrame and hides whatever is shown (the keyring
+        -- included), while CloseAllBags/OpenBackpack/CloseBackpack are id-driven over the real bags
+        -- and never see container -2 (decision 0765). So the keyring is appended for the ESC path
+        -- alone — a vendor opening your bags must not open your keyring with them.
+        local ESC_CLOSES = { "BenillaBagFrame", "BenillaBagFrame1", "BenillaBagFrame2",
+                             "BenillaBagFrame3", "BenillaBagFrame4", "BenillaKeyRingFrame" }
 
         function CloseAllWindows(ignoreCenter)
             local bagsVisible = nil
@@ -398,7 +405,7 @@
             -- BenillaBagToggle_OnClick), ESC must close all of them, not just the backpack. The bag
             -- windows are NOT UIPanels (no slot registration) — they must be closed here explicitly,
             -- exactly as the real client closes its ContainerFrames outside the slot system.
-            for _, name in ipairs(BAG_WINDOWS) do
+            for _, name in ipairs(ESC_CLOSES) do
                 local bag = getglobal(name)
                 if bag and bag:IsShown() then
                     bag:Hide()

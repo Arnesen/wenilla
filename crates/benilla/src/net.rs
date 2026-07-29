@@ -588,10 +588,16 @@ pub(crate) enum ClientCommand {
     /// Lua `(bagID, slot)` space before sending. `spell_index` is the template block ordinal the
     /// server should cast (`ItemInfo::use_spell_index`) — 0 for every item whose on-use spell is
     /// its first block, which is nearly all of them.
+    ///
+    /// `go_target` aims the use at a GameObject. That is the **key-in-a-lock** packet (decision
+    /// 0769): opening a locked door with a key is "use the key at the door", not a bare cast of the
+    /// key's spell — and `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot only when the cast
+    /// carries `m_CastItem`, which only this packet supplies. `None` for every ordinary use.
     UseItem {
         bag_index: u8,
         slot: u8,
         spell_index: u8,
+        go_target: Option<u64>,
     },
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, same bag addressing) — the drain's fork for an
     /// *equippable* click, mirroring the real client's equip-vs-use decision. Refusals come back

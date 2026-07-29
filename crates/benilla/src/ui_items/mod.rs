@@ -3,7 +3,8 @@
 //!
 //! Each frame, the player's own descriptor names the bag layout (the PRIVATE `PACK_SLOT` array =
 //! the backpack; `INV_SLOT` 19–22 = the equipped bags, each a container object with its own
-//! `CONTAINER_FIELD_SLOT` array), the item store ([`crate::items::Items`]) resolves slot guids to
+//! `CONTAINER_FIELD_SLOT` array; `KEYRING_SLOT` 81.. = the keyring, decision 0765 — a container
+//! with no container *object*, exactly like the bank), the item store ([`crate::items::Items`]) resolves slot guids to
 //! instances (entry, stack count), the template cache resolves entries to name/quality (ask-once
 //! `ITEM_QUERY_SINGLE` — a slot whose answer is in flight shows as an unresolved occupied slot and
 //! fills in when it lands), and `ItemDisplayInfo.dbc` turns the template's display id into the
@@ -41,7 +42,7 @@ use benilla_ui::script::EQUIPMENT_BAG;
 use bevy::prelude::*;
 
 use crate::items::Items;
-use crate::net::ObjectStore;
+use crate::net::{NetCommands, ObjectStore};
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -80,6 +81,40 @@ pub(crate) const BANK_CONTAINER: i64 = -1;
 /// The first bank-bag live-API container id (bank bags are containers 5..=10, the reference id
 /// space: `NUM_BAG_SLOTS + 1 ..`).
 pub(crate) const BANK_BAG_ID_FIRST: i64 = 5;
+/// The keyring's live-API container id (`KEYRING_CONTAINER`, the reference
+/// `MainMenuBarBagButtons.lua:1`; decision 0765).
+pub(crate) const KEYRING_CONTAINER: i64 = -2;
+/// The first keyring slot in the player array (vmangos `KEYRING_SLOT_START`).
+pub(super) const KEYRING_SLOT_FIRST: u8 = 81;
+/// Addressable keyring positions on this wire — vmangos `KEYRING_SLOT_END 97`, i.e. slots 81..96.
+/// The descriptor *array* is 32 guids wide and the client's inventory walker scans all 32 (81–112,
+/// `player_keyring_slot`'s note), but 97.. is not a valid position: the server's own enum comment
+/// is "32 slots (only 16 are visible/accessible in UI)". How many of the 16 a player may actually
+/// use is level-gated — [`keyring_size`].
+pub(super) const KEYRING_SLOTS: u8 = 16;
+/// `BagFamily` 9 = `BAG_FAMILY_KEYS` — the enum value that makes an item a *key*: what the server
+/// routes into the keyring (`Player::_CanStoreItem`'s `pProto->BagFamily == BAG_FAMILY_KEYS` arm)
+/// and what the reference's `HasKey` searches for ([`has_key`]).
+pub(super) const BAG_FAMILY_KEYS: u32 = 9;
+
+/// How many keyring slots a level-`level` player may use — the reference's own `GetKeyRingSize`
+/// (`ContainerFrame.lua:773`), which the server enforces with the identical ladder
+/// (`Player::GetMaxKeyringSize`, `Player.h:985`): **4** below 40, **8** at 40, **12** at 50,
+/// **16** above 60 — that last rung is unreachable at 1.12's level cap of 60, and is transcribed
+/// only because both the client and the server carry it. Both sides agreeing on the ladder is why
+/// benilla can compute this rather than being told it.
+///
+/// The reference recomputes it in Lua from `UnitLevel("player")` at every use; benilla computes it
+/// once here, feeds it as the keyring container's `num_slots`, and lets Lua's `GetKeyRingSize()`
+/// read that back — one formula, one place, the same number.
+pub(crate) fn keyring_size(level: u32) -> u32 {
+    match level {
+        61.. => 16,
+        50..=60 => 12,
+        40..=49 => 8,
+        _ => 4,
+    }
+}
 
 /// Lua (bag, 1-based slot) → wire `(bag_index, slot)` — the one mapping every drain shares
 /// (uses/moves/splits/destroys/autoequips, decision 0216 §6, extended to [`EQUIPMENT_BAG`] by
@@ -97,7 +132,14 @@ pub(crate) const BANK_BAG_ID_FIRST: i64 = 5;
 /// [`BANK_CONTAINER`] (the 24 generic slots) → `(255, 39..62)`; bank bags 5..=10 → the bag's own
 /// player-array slot 63..68 as the wire bag byte (exactly the equipped-bag rule); and the doll
 /// space grows the bank-bag *buttons* as live ids 64..69 (the same "live id − 1 = wire slot" law,
-/// so dragging a bag onto a bank bag slot routes through the existing swap drain unchanged).
+/// so dragging a bag onto a bank bag slot routes through the existing swap drain unchanged). The
+/// **keyring** ([`KEYRING_CONTAINER`], decision 0765) is the plainest case of all: its slots ARE
+/// player-array slots ([`KEYRING_SLOT_FIRST`] + the 0-based slot), so every keyring move lands on
+/// [`BAG_PLAYER_INVENTORY`] and rides the existing `CMSG_SWAP_INV_ITEM` branch to/from the
+/// backpack and the doll, or `CMSG_SWAP_ITEM` when the other end is an equipped bag — no drain
+/// changed for it. Ranged at the wire's [`KEYRING_SLOTS`] (81..96), NOT the level-gated
+/// [`keyring_size`]: a click past the unlocked count is the server's refusal to give, not ours to
+/// pre-empt (and the window never draws those slots anyway).
 /// `None` for `slot1 == 0` or a slot past the bag's/doll's range.
 pub(crate) fn wire_pos(bag: i64, slot1: u32) -> Option<(u8, u8)> {
     let slot0 = u8::try_from(slot1.checked_sub(1)?).ok()?;
@@ -109,6 +151,9 @@ pub(crate) fn wire_pos(bag: i64, slot1: u32) -> Option<(u8, u8)> {
         }
         5..=10 if slot0 < 36 => {
             Some((BANK_BAG_SLOT_FIRST + (bag - BANK_BAG_ID_FIRST) as u8, slot0))
+        }
+        KEYRING_CONTAINER if slot0 < KEYRING_SLOTS => {
+            Some((BAG_PLAYER_INVENTORY, KEYRING_SLOT_FIRST + slot0))
         }
         EQUIPMENT_BAG if (1..=23).contains(&slot1) || (64..=69).contains(&slot1) => {
             Some((BAG_PLAYER_INVENTORY, slot0))
@@ -145,6 +190,7 @@ pub(crate) fn slot_guid(store: &ObjectFields, bag: i64, slot0: u8, items: &Items
                 .filter(|g| *g != 0)
         }
         BANK_CONTAINER => store.player_bank_slot(slot0).filter(|g| *g != 0),
+        KEYRING_CONTAINER => store.player_keyring_slot(slot0).filter(|g| *g != 0),
         5..=10 => {
             let bag_guid = store
                 .player_bank_bag_slot((bag - BANK_BAG_ID_FIRST) as u8)
@@ -268,8 +314,10 @@ pub(crate) struct ItemSearch {
 /// looked at it at all, so an equipped trinket's action button was inert), and **a bag's contents
 /// come before the backpack** (the old walk had the backpack first). Bank and buyback are never
 /// searched — the walker's default mode expands to `0x47`, which omits the bank's `0x08`, and no
-/// bit exists for buyback at all. The **keyring** is the one region benilla does not model (no
-/// keyring container ships yet); it is last in the order, so nothing else shifts when it lands.
+/// bit exists for buyback at all. The **keyring** (mode bit `0x40`, in that `0x47`) is last in the
+/// order and is walked here now that benilla models it (decision 0765) — a key with an on-use
+/// spell dropped on the action bar has to find its copy somewhere, and the keyring is the only
+/// place the server ever puts one.
 pub(crate) fn find_item(
     store: &ObjectFields,
     items: &Items,
@@ -328,7 +376,77 @@ pub(crate) fn find_item(
             return Some((BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST + i, guid));
         }
     }
+    // The keyring band, last (mode bit 0x40). Walked over the ADDRESSABLE 16, not the level-gated
+    // count: a slot the level hasn't unlocked can't hold anything, so the extra reads cost nothing
+    // and the walk needs no level in hand.
+    for i in 0..KEYRING_SLOTS {
+        let guid = store.player_keyring_slot(i).unwrap_or(0);
+        if hit(guid) {
+            return Some((BAG_PLAYER_INVENTORY, KEYRING_SLOT_FIRST + i, guid));
+        }
+    }
     None
+}
+
+/// The reference's **`HasKey()`** (`0x48ae90`) — "does this player own a key at all?", the one
+/// gate that decides whether the keyring exists in the UI (decision 0765). Byte-read: it fetches
+/// the active player, then runs the same inventory walker `find_item` transcribes
+/// (`0x6223a0` → `0x622420`) with predicate `0x6223d0` — `ItemTemplate.BagFamily == 9`
+/// ([`BAG_FAMILY_KEYS`]; `template+0x1d0` is the record's last int32, and `BagFamily` is the last
+/// field of `SMSG_ITEM_QUERY_SINGLE_RESPONSE`) — and pushes `1` on a hit, `nil` otherwise.
+///
+/// **The mode is `0x4f`, not the walker's default `0x47`**: equipment `0x01` | bag slots `0x02` |
+/// backpack `0x04` | **bank + bank bags `0x08`** | keyring `0x40`. So a key sitting in the *bank*
+/// still shows the keyring — the one region the ordinary item search skips. Buyback has no bit and
+/// is never searched, here or anywhere.
+///
+/// A slot whose item template is still in flight can't be judged and reads as "not a key"; the
+/// answer lands within a frame or two and the feed re-pushes.
+pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCommands) -> bool {
+    // Every guid mode 0x4f reaches, in the walker's own order — a container is recursed into as it
+    // is passed (the depth-first rule), which is why each bag's contents follow its own slot.
+    // Collected first, then judged: the template lookup needs `items` mutably (the ask-once query).
+    fn contents(bag_guid: u64, items: &Items, out: &mut Vec<u64>) {
+        let Some(f) = items.object(bag_guid) else {
+            return;
+        };
+        let n = f.container_num_slots().unwrap_or(0).min(36) as u8;
+        out.extend((0..n).map(|j| f.container_slot(j).unwrap_or(0)));
+    }
+    let mut guids = Vec::new();
+    for i in 0..EQUIPMENT_SLOTS {
+        guids.push(store.player_inv_slot(i).unwrap_or(0));
+    }
+    for bag in 0..BAGS {
+        let bag_guid = store.player_inv_slot(BAG_SLOT_FIRST + bag).unwrap_or(0);
+        guids.push(bag_guid);
+        contents(bag_guid, items, &mut guids);
+    }
+    for i in 0..PACK_SLOTS {
+        guids.push(store.player_pack_slot(i).unwrap_or(0));
+    }
+    for i in 0..BANK_SLOTS {
+        guids.push(store.player_bank_slot(i).unwrap_or(0));
+    }
+    for bag in 0..BANK_BAGS {
+        let bag_guid = store.player_bank_bag_slot(bag).unwrap_or(0);
+        guids.push(bag_guid);
+        contents(bag_guid, items, &mut guids);
+    }
+    for i in 0..KEYRING_SLOTS {
+        guids.push(store.player_keyring_slot(i).unwrap_or(0));
+    }
+    guids.into_iter().any(|guid| {
+        if guid == 0 {
+            return false;
+        }
+        let Some(entry) = items.object(guid).and_then(|f| f.object_entry()) else {
+            return false;
+        };
+        items
+            .template(entry, guid, commands)
+            .is_some_and(|t| t.bag_family == BAG_FAMILY_KEYS)
+    })
 }
 
 /// **The item-use fork** — our `CGItem::Use` (`0x5d8d00`): the one place that decides what "using"
@@ -368,6 +486,9 @@ pub(crate) fn item_use_command(
             // The template BLOCK ordinal the server should cast, not a flag (decision 0666); the
             // callers that hold the template name it, the doll drain sends 0.
             spell_index,
+            // A bag/doll click uses the item on yourself; only the lock chain aims one at an
+            // object (decision 0769 — `target::click`'s key arm).
+            go_target: None,
         },
     }
 }
@@ -551,9 +672,40 @@ impl Plugin for UiItemsPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_equip_slot, item_use_command, wire_pos};
+    use super::{find_equip_slot, item_use_command, keyring_size, wire_pos, KEYRING_CONTAINER};
     use crate::net::ClientCommand;
     use benilla_ui::script::EQUIPMENT_BAG;
+
+    /// The keyring's level ladder, both ends of every rung — the reference's `GetKeyRingSize`
+    /// (ContainerFrame.lua:773) and vmangos `GetMaxKeyringSize` (Player.h:985) agree on it exactly,
+    /// which is what lets benilla compute the size instead of being told it. 60 is 1.12's cap, so
+    /// the 16 rung is unreachable in play — it is here because both authorities carry it.
+    #[test]
+    fn keyring_size_walks_the_reference_ladder() {
+        assert_eq!(keyring_size(1), 4);
+        assert_eq!(keyring_size(39), 4, "the rung ends at 39");
+        assert_eq!(keyring_size(40), 8, "40 opens the second rung");
+        assert_eq!(keyring_size(49), 8);
+        assert_eq!(keyring_size(50), 12);
+        assert_eq!(keyring_size(60), 12, "the level cap still sits on 12");
+        assert_eq!(keyring_size(61), 16, "> 60, unreachable in 1.12");
+    }
+
+    /// The keyring's wire mapping (decision 0765): its Lua slots are player-array slots 81.., so
+    /// every one lands on the player's own grid — which is what makes keyring↔backpack moves ride
+    /// the existing `CMSG_SWAP_INV_ITEM` branch with no drain change. Ranged at the wire's 16
+    /// addressable positions (vmangos `KEYRING_SLOT_END` 97), not the level-gated count.
+    #[test]
+    fn wire_pos_maps_the_keyring_onto_the_player_grid() {
+        assert_eq!(wire_pos(KEYRING_CONTAINER, 1), Some((255, 81)));
+        assert_eq!(wire_pos(KEYRING_CONTAINER, 16), Some((255, 96)));
+        assert_eq!(
+            wire_pos(KEYRING_CONTAINER, 17),
+            None,
+            "97 is past KEYRING_SLOT_END — not a position on this wire"
+        );
+        assert_eq!(wire_pos(KEYRING_CONTAINER, 0), None);
+    }
 
     /// The use fork ([`item_use_command`], decision 0664): a non-zero `StartQuest` diverts to
     /// `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid; everything else — including an
@@ -574,7 +726,9 @@ mod tests {
                 bag_index: 255,
                 slot: 23,
                 // The template BLOCK ordinal rides through untouched (decision 0666).
-                spell_index: 1
+                spell_index: 1,
+                // A bag click never aims at an object (decision 0769).
+                go_target: None
             }
         ));
         // No resolved instance (template still in flight): the fallback is the USE whose refusal
@@ -584,7 +738,8 @@ mod tests {
             ClientCommand::UseItem {
                 bag_index: 19,
                 slot: 4,
-                spell_index: 0
+                spell_index: 0,
+                go_target: None
             }
         ));
     }
@@ -686,18 +841,24 @@ mod find_item_tests {
     const SLOT_1: u16 = 50; // CONTAINER_FIELD_SLOT_1 (2 fields per guid)
     const INV_SLOT_HEAD: u16 = 486; // PLAYER_FIELD_INV_SLOT_HEAD (2 per guid, 23 slots)
     const PACK_SLOT_1: u16 = 532; // PLAYER_FIELD_PACK_SLOT_1 (2 per guid, 16 slots)
+    const KEYRING_SLOT_1: u16 = 648; // PLAYER_FIELD_KEYRING_SLOT_1 (2 per guid, player slots 81..)
 
     const TRINKET: u32 = 12_930;
     const BAG: u32 = 4_500;
 
-    /// A player whose slot array points at the given `(player-array index, guid)` pairs.
+    /// A player whose slot array points at the given `(player-array index, guid)` pairs. Covers the
+    /// three bands these tests use — equipment/bag buttons 0..22, backpack 23..38, keyring 81.. —
+    /// each of which is its own descriptor array; the bank/buyback bands in between have no test
+    /// that needs them.
     fn player(slots: &[(u16, u64)]) -> ObjectFields {
         let mut pairs = Vec::new();
         for &(idx, guid) in slots {
             let base = if idx < 23 {
                 INV_SLOT_HEAD + 2 * idx
-            } else {
+            } else if idx < 81 {
                 PACK_SLOT_1 + 2 * (idx - 23)
+            } else {
+                KEYRING_SLOT_1 + 2 * (idx - 81)
             };
             pairs.push((base, guid as u32));
             pairs.push((base + 1, (guid >> 32) as u32));
@@ -809,5 +970,88 @@ mod find_item_tests {
             Some((255, 24, 0xB2)),
             "with it, the spent copy is skipped"
         );
+    }
+
+    /// The keyring is the walk's LAST band (mode bit `0x40`) — a key that lives only there is still
+    /// found, and its wire pair is the player array's own `(255, 81 + n)`. Before decision 0765 the
+    /// walker stopped at the backpack, so a key on the action bar could never resolve its copy.
+    #[test]
+    fn a_key_in_the_keyring_is_found_last() {
+        const KEY: u32 = 7_146; // The Scarlet Key
+        let mut items = Items::default();
+        item(&mut items, 0xE1, KEY, None);
+        let store = player(&[(81, 0xE1)]);
+        assert_eq!(find_item(&store, &items, KEY, ALL), Some((255, 81, 0xE1)));
+
+        // ...and a copy anywhere earlier still wins: the keyring really is last, not first.
+        item(&mut items, 0xE2, KEY, None);
+        let store = player(&[(81, 0xE1), (23, 0xE2)]);
+        assert_eq!(
+            find_item(&store, &items, KEY, ALL),
+            Some((255, 23, 0xE2)),
+            "the backpack copy precedes the keyring one"
+        );
+    }
+
+    /// `HasKey()` — the gate the whole keyring UI hangs off (decision 0765), and the one place the
+    /// **bank** is searched. Byte-read from the reference's `0x48ae90`: predicate `BagFamily == 9`,
+    /// mode `0x4f` = equipment | bag slots | backpack | BANK | keyring. So: an ordinary item is not
+    /// a key wherever it sits; a key is a key wherever it sits, the bank included; and buyback —
+    /// which has no mode bit at all — is never searched.
+    #[test]
+    fn has_key_finds_a_key_anywhere_the_reference_looks() {
+        use super::{has_key, BAG_FAMILY_KEYS};
+        use crate::items::{test_template, Items};
+        use crate::net::NetCommands;
+
+        const KEY: u32 = 7_146; // The Scarlet Key (bag_family 9, live mangos.item_template)
+        const BREAD: u32 = 4_540;
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let commands = NetCommands(tx);
+
+        let mut items = Items::default();
+        let mut key_tpl = test_template("The Scarlet Key");
+        key_tpl.bag_family = BAG_FAMILY_KEYS;
+        items.insert_template(KEY, Some(key_tpl));
+        items.insert_template(BREAD, Some(test_template("Tough Hunk of Bread")));
+        item(&mut items, 0xF1, KEY, None);
+        item(&mut items, 0xF2, BREAD, None);
+
+        // Nothing at all.
+        assert!(!has_key(&player(&[]), &mut items, &commands));
+        // A non-key in the backpack is not a key.
+        assert!(!has_key(&player(&[(23, 0xF2)]), &mut items, &commands));
+        // The director's own case: the key sitting in keyring slot 1.
+        assert!(has_key(&player(&[(81, 0xF1)]), &mut items, &commands));
+        // And in the backpack, before it has been filed.
+        assert!(has_key(&player(&[(23, 0xF1)]), &mut items, &commands));
+
+        // The BANK — reachable only because HasKey passes 0x4f rather than the walker's default
+        // 0x47. `find_item` must NOT see the same copy (its mode omits 0x08).
+        let mut banked = std::collections::HashMap::new();
+        banked.insert(39u16, 0xF1u64);
+        let store = bank_player(&banked);
+        assert!(
+            has_key(&store, &mut items, &commands),
+            "a key in the bank still gives you a keyring"
+        );
+        assert_eq!(
+            find_item(&store, &items, KEY, ALL),
+            None,
+            "...while the ordinary item search never reaches the bank"
+        );
+    }
+
+    /// A player with items in the BANK band (`PLAYER_FIELD_BANK_SLOT_1`), which `player` above
+    /// deliberately does not cover.
+    fn bank_player(slots: &std::collections::HashMap<u16, u64>) -> ObjectFields {
+        const BANK_SLOT_1: u16 = 564; // PLAYER_FIELD_BANK_SLOT_1 (2 per guid, player slots 39..62)
+        let mut pairs = Vec::new();
+        for (&idx, &guid) in slots {
+            let base = BANK_SLOT_1 + 2 * (idx - 39);
+            pairs.push((base, guid as u32));
+            pairs.push((base + 1, (guid >> 32) as u32));
+        }
+        ObjectFields::from_pairs(&pairs)
     }
 }

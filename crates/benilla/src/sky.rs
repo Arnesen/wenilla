@@ -117,7 +117,15 @@ impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_systems(Startup, setup_sky.after(AssetSet::Open))
-            .add_systems(Update, (update_sky_colors, apply_sky_visibility))
+            .add_systems(
+                Update,
+                (
+                    update_sky_colors,
+                    // The dome stands down for a WMO skybox, so its gate must read the SETTLED
+                    // resolve, not whichever side of it the executor picked (`crate::wmo_sky`).
+                    apply_sky_visibility.after(crate::wmo_sky::WmoSkyResolve),
+                ),
+            )
             // Camera-anchored placement runs post-propagation (the BillboardPlace slot) off the
             // camera's SAME-frame pose — the Update wiring read the last-frame camera (decision
             // 0504; sub-visible at the dome's far radius, but it's the same latent bug the near
@@ -234,13 +242,19 @@ fn follow_camera(
     *gt = GlobalTransform::from(*tf);
 }
 
-/// Hide/show the dome from the debug panel's "disable sky dome" toggle. With the dome hidden the
+/// Hide/show the dome from the debug panel's "disable sky dome" toggle — and stand it down entirely
+/// while a **WMO skybox** owns the backdrop ([`crate::wmo_sky`]): a building whose group asks for its
+/// MOSB model replaces this gradient, it does not layer over it. With the dome hidden the
 /// `ClearColor` backdrop (the row-7 fog colour, or black via "black backdrop") shows through.
-fn apply_sky_visibility(debug: Res<DebugState>, mut dome: Query<&mut Visibility, With<Sky>>) {
+fn apply_sky_visibility(
+    debug: Res<DebugState>,
+    wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    mut dome: Query<&mut Visibility, With<Sky>>,
+) {
     let Ok(mut vis) = dome.single_mut() else {
         return;
     };
-    let want = if debug.lighting.disable_sky_dome {
+    let want = if debug.lighting.disable_sky_dome || wmo_skybox.0.is_some() {
         Visibility::Hidden
     } else {
         Visibility::Visible

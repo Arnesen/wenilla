@@ -319,11 +319,11 @@ pub(super) fn spawn_wmo_gameobject_props(
                         // reference re-anchors every cloud to the emitter's live position), while
                         // an animated bone still never drags it.
                         Some(root),
-                        // A placed prop: the doodad law — one arm, spawn clock, but at the slot
-                        // that arm's variation roll landed on (decision 0760; pinning slot 0 here
-                        // killed every emitter keyed only in a later variation, silently).
-                        match host.as_ref().and_then(|h| h.seq) {
-                            Some(s) => particles::EmitClock::PinnedSeq(s),
+                        // A placed prop: the doodad law — which is NOT one arm for life. It re-rolls
+                        // its variation every play-window (decision 0768), so the emitter resolves
+                        // the slot + clip time off the host's live player each frame.
+                        match host.as_ref().and_then(|h| h.arm) {
+                            Some(arm) => particles::EmitClock::Host(arm),
                             None => particles::EmitClock::Pinned,
                         },
                     ) {

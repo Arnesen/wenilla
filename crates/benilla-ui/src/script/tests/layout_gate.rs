@@ -8,6 +8,14 @@
 use super::common::script;
 use crate::script::{Model, UiScript};
 
+/// The mutation epoch (tier 1's input): bumped by every write into the layout read set.
+fn epoch(s: &UiScript) -> u64 {
+    s.lua()
+        .app_data_ref::<Model>()
+        .expect("model app_data")
+        .layout_epoch
+}
+
 /// How many times the fixpoint has run.
 fn solves(s: &UiScript) -> u64 {
     s.lua()
@@ -255,6 +263,22 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
         solves(&s),
         solves_before,
         "a re-enter with identical content must not reopen the layout gate"
+    );
+    // …and it must not even reach tier 2. Tier 1 (the mutation epoch) is what makes a quiet frame
+    // FREE; tier 2 still hashes the whole UI's read set to decide "quiet" (~0.65 ms/frame measured
+    // with `WOW_UI_COST=1` on `WOW_CAPTURE=ui-tooltip`, at solves=0). The re-enter loop used to
+    // pay that on every single hover frame, because `clear_content` wiped each line's wrap pin and
+    // `append_line` re-pinned the same width — a round trip inside one frame, two epoch bumps.
+    // Idempotent content must be epoch-silent, not merely fingerprint-absorbed.
+    let epoch_before = epoch(&s);
+    for _ in 0..10 {
+        frame(&mut s);
+    }
+    assert_eq!(
+        epoch(&s),
+        epoch_before,
+        "a re-enter with identical content must not touch the layout epoch at all — tier 1 has to \
+         hold, or every hover frame pays the whole-UI fingerprint"
     );
 
     // The gate is shut because nothing MOVED — not because the tooltip went stale. Changed content

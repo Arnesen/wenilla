@@ -137,6 +137,10 @@ pub(crate) struct UiScriptPlugin;
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(UiScaleCvar(default_ui_scale()))
+            // The UI pass publishes its per-frame phase split here every frame the cost meter or
+            // the hover recorder is armed; the producer owns the resource so any minimal app that
+            // runs `drive_script` (the extract tests) has it.
+            .init_resource::<crate::hover_log::UiFrameCost>()
             .init_resource::<PointerOverUi>()
             .init_resource::<PlayerUiHover>()
             .init_resource::<UiKeyboardCapture>()

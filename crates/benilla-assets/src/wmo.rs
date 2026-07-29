@@ -70,6 +70,12 @@ pub struct WmoModel {
     /// fog resolve (`crate::wmo_portal` in the app), per wow-re `rf-weather-emission-timeline`
     /// ROUND 5 (`0x69de20`).
     pub fogs: Vec<WmoFog>,
+    /// The root's **MOSB** skybox model (`.m2`), drawn as the sky backdrop while the camera stands in
+    /// a group whose flags carry `0x40000` — see `crate::wmo_sky` in the app for the gate and
+    /// `benilla_formats::WmoGroupInfo::show_skybox` for how that bit was identified. `None` for all
+    /// but a handful of roots (`benilla-extract skyboxscan`); carrying it here costs one `Option`
+    /// per building and saves the sky lane a second root parse.
+    pub skybox: Option<String>,
     /// Per-group **walking-collision** triangles (WoW model space, indexed by absolute group index) —
     /// the Leg-A face set for the current-group **down-ray** (`crate::wmo_portal`). The faithful "which
     /// room is the camera in" test casts a ray straight down from the eye against the same face set the
@@ -666,6 +672,7 @@ impl AssetLoader for WmoModelLoader {
             portal_refs: portals.refs.clone(),
             group_nav,
             fogs: root.fogs().to_vec(),
+            skybox: root.skybox().map(str::to_owned),
             group_collision_tris,
             group_camera_only_tris,
             group_collision_bounds,
@@ -700,6 +707,7 @@ mod doodad_base_tests {
     fn grp(interior: bool) -> WmoGroupInfo {
         WmoGroupInfo {
             interior,
+            show_skybox: false,
             bbox_min: [-1.0; 3],
             bbox_max: [1.0; 3],
         }

@@ -1202,3 +1202,58 @@ fn tombstoned_paths_never_fall_through_to_the_base_copy() {
         );
     }
 }
+
+/// The WMO **skybox** pair, against the shipped Stratholme files (`crate::models::wmo`,
+/// `benilla::wmo_sky`): a root's MOSB model and the per-group `0x40000` gate that asks for it.
+///
+/// The sibling roots are the whole point of the fixture. `Stratholme_B` is the burning **city** — it
+/// names `StratholmeSkybox.m2` *and* 61 of its 83 groups set the bit, which is why the reference's
+/// sky in King's Square is a painted red sky and not map 329's khaki `Light.dbc` gradient.
+/// `Stratholme.wmo` is the **dungeon** next door: no MOSB, and not one of its 92 groups sets the bit.
+/// A regression that drops either half (the chunk parse, or the flag) shows up here as one of the two
+/// halves going quiet, and the two together are what keeps the gate off the chunk alone — four 1.12
+/// roots name a skybox no group ever asks for (`benilla-extract skyboxscan`).
+#[test]
+fn reads_the_wmo_skybox_and_its_per_group_gate() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+
+    let city = chain
+        .read_file("World\\wmo\\Dungeon\\LD_Stratholme\\Stratholme_B.wmo")
+        .expect("read the Stratholme city WMO root");
+    let city = benilla_formats::parse_wmo_root(&city).expect("parse the city root");
+    assert_eq!(
+        city.skybox(),
+        Some("environments\\stars\\stratholmeskybox.m2"),
+        "the city root's MOSB names the painted sky (normalized .mdx -> .m2)"
+    );
+    let asking = city.group_infos().iter().filter(|g| g.show_skybox).count();
+    assert_eq!(
+        (asking, city.group_infos().len()),
+        (61, 83),
+        "the city's open streets ask for the skybox; its enclosed rooms don't"
+    );
+
+    let dungeon = chain
+        .read_file("World\\wmo\\Dungeon\\LD_Stratholme\\Stratholme.wmo")
+        .expect("read the Stratholme dungeon WMO root");
+    let dungeon = benilla_formats::parse_wmo_root(&dungeon).expect("parse the dungeon root");
+    assert_eq!(
+        dungeon.skybox(),
+        None,
+        "the dungeon root's MOSB is the empty string — no skybox"
+    );
+    assert_eq!(
+        dungeon
+            .group_infos()
+            .iter()
+            .filter(|g| g.show_skybox)
+            .count(),
+        0,
+        "and not one of its groups asks for one"
+    );
+}

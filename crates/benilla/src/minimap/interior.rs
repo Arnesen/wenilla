@@ -222,6 +222,7 @@ mod tests {
                 nav(0.0, 3.0, 0.0, 5, 1),    // g3 overlaps XY, reachable only through g2
             ],
             fogs: Vec::new(),
+            skybox: None,
             group_collision_tris: Vec::new(),
             group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),
@@ -306,6 +307,7 @@ mod tests {
             ],
             group_nav: vec![nav(0.0, 3.0, 0, 1), nav(-303.0, -300.0, 1, 1)],
             fogs: Vec::new(),
+            skybox: None,
             group_collision_tris: Vec::new(),
             group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),

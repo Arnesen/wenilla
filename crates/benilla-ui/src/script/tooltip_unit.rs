@@ -39,6 +39,8 @@ use crate::widget::FrameHandle;
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 const RED: [f32; 4] = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
+/// `0xc0d420` = `0xff40c040` — the satisfiable-lock green (see [`TooltipTint::LockOpen`]).
+const LOCK_OPEN: [f32; 4] = [64.0 / 255.0, 192.0 / 255.0, 64.0 / 255.0, 1.0];
 /// Unit names render gold (byte-verified `0xffffd200`); FrameXML recolors line 1 by reaction.
 const GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 
@@ -49,8 +51,16 @@ const GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 pub enum TooltipTint {
     /// `0xc0cf60` — the requirement line's normal colour (the key-item "Requires %s").
     White,
-    /// The "Locked" line's unmet colour, and the unknown-skill "Requires %s" (`0xffff0000`).
+    /// The "Locked" line's UNMET colour `0xc0d3a8` = `0xffff2020`, and the unknown-skill
+    /// "Requires %s" (whose own red is `0xffff0000` — a difference of 32/255 in G and B that no
+    /// eye resolves, so one slot serves both).
     Red,
+    /// The "Locked" line when the lock **is** satisfiable — `0xc0d420` = `0xff40c040`
+    /// (64,192,64). Deliberately NOT the tooltip's ordinary green `0xc0d3ac` = `0xff00ff00`: this
+    /// is the second rung of the skill-difficulty ramp `0x529fa0` (grey/green/yellow/orange/red,
+    /// static-init writers at `0x5290d0` &c.), which the lock line borrows wholesale, and it is a
+    /// visibly softer green than the one every other tooltip line uses.
+    LockOpen,
 }
 
 /// The rank word table — byte-verified `0x854158[]`: rare-elite prints ELITE, rare prints
@@ -333,12 +343,18 @@ impl super::UiScript {
     /// (decisions 0276 / **0756**): the NAME (gold) followed by the lock lines the caller
     /// resolved, each with its own tint.
     ///
-    /// **Seated at the FrameXML default anchor — the bottom-right corner — exactly like the unit
-    /// flow.** This restores 0281's "units + GOs → corner" law and retires the 2026-07-13 interim
-    /// that seated the GO plate at the pointer: the director's 07-29 reference shot of the Searing
-    /// Gorge door shows the engine plate in the corner, not following the cursor, and their eye is
-    /// the ground truth the interim was resting on in the first place. The pointer-follow
-    /// ([`Self::world_tooltip_move`]) stays for the minimap blip, which really is cursor-seated.
+    /// **The anchor FORKS per object — it is not uniform** (decision 0766, correcting 0756). The
+    /// publisher's GameObject leg calls the picked object's `[obj->vtbl+0x5c]` and branches:
+    ///
+    /// - **true** (`0x492a01`) → `0x52ffe0(owner, 6, 0, 0)` — anchor-state **6**, the *cursor*
+    ///   anchor. Corroborated by the loss path: `0x530ae0` hides an anchor-state-6 tooltip
+    ///   **immediately** instead of arming the fade, which is how a pointer-following label behaves.
+    /// - **false** (`0x492a42`) → no `SetOwner` at all; the plate keeps its default corner seat.
+    ///
+    /// The **unit** leg (`0x492983`) never consults `+0x5c` — units are always corner-seated, which
+    /// is why the fork went unnoticed when 0756 made every GameObject corner-seated too. `cursor`
+    /// carries the caller's verdict: `Some(ui_xy)` = the cursor arm (and then
+    /// [`Self::world_tooltip_move`] follows the pointer), `None` = the corner.
     ///
     /// Same fade lifecycle as the unit flow (no `UPDATE_MOUSEOVER_UNIT` — that recolor is the
     /// unit line's).
@@ -346,21 +362,44 @@ impl super::UiScript {
         &mut self,
         name: &str,
         lines: &[(String, TooltipTint)],
+        cursor: Option<(f32, f32)>,
     ) -> bool {
-        let (h, id) = {
+        let (h, id, root_id) = {
             let mut model = self.model_mut();
             let Some(h) = model.arena.lookup("GameTooltip") else {
                 return false;
             };
-            let id = model.frame_id(h);
-            (h, id)
+            let Some(root) = model.arena.lookup("UIParent") else {
+                return false;
+            };
+            let (id, root_id) = (model.frame_id(h), model.frame_id(root));
+            (h, id, root_id)
         };
-        // The same default-anchor handler the unit flow fires — FrameXML seats the plate at the
-        // bottom-right of UIParent.
-        if let Err(e) =
-            super::event::fire_widget_handler(&self.lua, id, "OnTooltipSetDefaultAnchor", vec![])
-        {
-            self.push_error(e);
+        match cursor {
+            // The cursor arm: seated centred above the pointer, clamped by the tooltip frame's own
+            // flag. Compare-then-touch so a still pointer never re-layouts.
+            Some((ui_x, ui_y)) => {
+                let mut model = self.model_mut();
+                let input = model.layout_inputs.entry(h).or_default();
+                let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
+                let same = input.anchors.len() == 1
+                    && super::object::anchor_bits_eq(&input.anchors[0], &new);
+                if !same {
+                    input.anchors = vec![new];
+                    model.touch_layout();
+                }
+            }
+            // The corner arm: the same default-anchor handler the unit flow fires.
+            None => {
+                if let Err(e) = super::event::fire_widget_handler(
+                    &self.lua,
+                    id,
+                    "OnTooltipSetDefaultAnchor",
+                    vec![],
+                ) {
+                    self.push_error(e);
+                }
+            }
         }
         let wrapper = match super::object::frame_wrapper(&self.lua, id) {
             Ok(w) => w,
@@ -380,6 +419,7 @@ impl super::UiScript {
                 let colour = match tint {
                     TooltipTint::White => WHITE,
                     TooltipTint::Red => RED,
+                    TooltipTint::LockOpen => LOCK_OPEN,
                 };
                 append_line(&self.lua, &wrapper, (text.clone(), colour), None, false)?;
             }

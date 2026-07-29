@@ -68,10 +68,16 @@ pub struct AnimClip {
     /// (wow-re `anim-id-resolution.md`, op4 `0x71248a..`) — [`ModelAnimations::pick_variation`].
     pub frequency: u16,
     /// The sequence's `(minReplay, maxReplay)` range (`M2Sequence` +0x18/+0x1c): the client rolls a
-    /// play count `R` at every arm and multiplies it into the play window, so a clamp-flag one-shot
-    /// runs `R` times before freezing (wow-re `loop-replay-fidget.md`; a loop-flag sequence ignores
-    /// it). Benilla expresses the same window as a `RepeatAnimation::Count(R)` on the one-shot play.
+    /// play count `R = max(1, min + ((rand()·(max−min)) >> 15))` at every arm and multiplies it into
+    /// the play window (`windowHi = now + span·R`), so a clamp-flag one-shot runs `R` times before
+    /// freezing. Benilla expresses that as a `RepeatAnimation::Count(R)` on the one-shot play.
     /// `(0, 0)` — the overwhelming majority — rolls to `R = 1`.
+    ///
+    /// **A loop-flag sequence does NOT ignore it** (this doc said so, sourced from
+    /// `loop-replay-fidget.md`'s unit-lane reading, and decision 0768 corrected it): the window still
+    /// governs, and for a *placed doodad* its expiry is what fires the re-arm that rolls a fresh
+    /// variation — `(0, 0)` ⇒ `R = 1` ⇒ a re-roll every single loop. That is the whole mechanism
+    /// behind the Blasted Lands lightning wandering instead of strobing from one fixed spot.
     pub replay: (u32, u32),
 }
 

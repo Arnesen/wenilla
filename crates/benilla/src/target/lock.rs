@@ -39,32 +39,34 @@ use crate::net::ObjectStore;
 /// item-template cache (key-item names for the "Requires \<key\>" toast, and the key's own ON_USE
 /// spell). The `Option` members are absent without client data.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct GoLockInputs<'w> {
-    pub(super) templates: Res<'w, crate::go_templates::GameObjectTemplates>,
-    pub(super) locks: Option<Res<'w, crate::go_templates::Locks>>,
-    pub(super) lock_types: Option<Res<'w, crate::go_templates::LockTypes>>,
-    pub(super) spells: Option<Res<'w, crate::ui_action::Spells>>,
-    pub(super) items: ResMut<'w, crate::items::Items>,
+pub(crate) struct GoLockInputs<'w> {
+    // ResMut, not Res: the tooltip arm of this bundle drives the ask-once template
+    // request on a miss (the click arm only reads).
+    pub(crate) templates: ResMut<'w, crate::go_templates::GameObjectTemplates>,
+    pub(crate) locks: Option<Res<'w, crate::go_templates::Locks>>,
+    pub(crate) lock_types: Option<Res<'w, crate::go_templates::LockTypes>>,
+    pub(crate) spells: Option<Res<'w, crate::ui_action::Spells>>,
+    pub(crate) items: ResMut<'w, crate::items::Items>,
 }
 
 /// The GameObject facts the Action gate and the requirement fallback read off the wire — gathered
 /// once by the caller so the resolver stays pure.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct GoFacts {
+pub(crate) struct GoFacts {
     /// The client's stored `GAMEOBJECT_STATE` (`go+0x27c`) — [`crate::go_anim::go_state`].
-    pub(super) state: u32,
+    pub(crate) state: u32,
     /// `GAMEOBJECT_FLAGS & GO_FLAG_LOCKED (0x2)`.
-    pub(super) flag_locked: bool,
+    pub(crate) flag_locked: bool,
     /// `GAMEOBJECT_LEVEL` — the `Skill[i] == 0` requirement fallback's `× 5` base. vmangos leaves
     /// it 0 on everything but transports, so on this server the fallback resolves to "no
     /// requirement" and the server does the real gating; the client law is modelled regardless.
-    pub(super) level: u32,
+    pub(crate) level: u32,
 }
 
 /// What the resolver says about a GameObject's lock — the reference's return plus its spell-id
 /// out-param, made explicit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LockOutcome {
+pub(crate) enum LockOutcome {
     /// No `Lock.dbc` row, or every slot empty — `0x5f8180` null / `[ebp-1]` never set. The object
     /// opens by `CMSG_GAMEOBJ_USE`.
     Unlocked,
@@ -90,7 +92,7 @@ impl LockOutcome {
 /// Read the Action gate's inputs off a hovered GameObject — its store plus the stored state the
 /// caller already resolved ([`crate::go_anim::go_state`]). `None` (nothing hovered / no store yet)
 /// answers with the wire defaults, which make every gated slot inapplicable rather than free.
-pub(super) fn go_facts(go: Option<(&ObjectStore, u32)>) -> GoFacts {
+pub(crate) fn go_facts(go: Option<(&ObjectStore, u32)>) -> GoFacts {
     match go {
         Some((store, state)) => GoFacts {
             state,
@@ -131,7 +133,7 @@ pub(crate) const GO_FLAG_LOCKED: u32 = 0x2;
 /// `known` is a set. That only decides *which* of several equally-matching spells lands in
 /// `matched_spell` (a miner knows four Mining ranks, all `LockType 3`), never the outcome — the
 /// scan keeps going past an insufficient one, so the best-valued opener still wins.
-pub(super) fn resolve_lock(
+pub(crate) fn resolve_lock(
     slots: &[LockSlot],
     known: &HashSet<u32>,
     spells: Option<&crate::ui_action::Spells>,
@@ -189,7 +191,7 @@ pub(super) fn resolve_lock(
 /// (`0x5f84be..0x5f84ca` — the resolver; `0x5f3490..0x5f349f` recomputes the same value for the
 /// `0xe0` toast's `%d`). A zero `Skill` is *not* "no requirement": every gathering node in the game
 /// stores 0 there and leans on the object's level.
-pub(super) fn required_skill(slot: &LockSlot, go_level: u32) -> i32 {
+pub(crate) fn required_skill(slot: &LockSlot, go_level: u32) -> i32 {
     if slot.skill != 0 {
         slot.skill as i32
     } else {
@@ -197,25 +199,19 @@ pub(super) fn required_skill(slot: &LockSlot, go_level: u32) -> i32 {
     }
 }
 
-/// Whether we carry item `entry` — the key-slot scan's inventory walk (`0x622270` over the
-/// inventory manager). Bags **and the keyring**, which is where dungeon keys actually live; the
-/// bank is not walked because benilla only streams its contents while the bank window is open.
+/// Whether we carry item `entry` — the key-slot scan's inventory walk. This IS the reference's own
+/// walker (`0x622270` → `0x622420`, mode 0 ⇒ `0x47` = equipment | bags | backpack | keyring), which
+/// benilla already transcribes once as [`crate::ui_items::find_item`]; it used to be a second,
+/// hand-rolled walk here that missed the equipment slots and read 32 keyring slots where the wire
+/// has 16. One walker, one answer — and the caller needs the POSITION it returns anyway, to address
+/// `CMSG_USE_ITEM` (decision 0769).
 fn holds_item(
     store: &benilla_protocol::messages::ObjectFields,
     items: &crate::items::Items,
     entry: u32,
 ) -> bool {
-    if crate::ui_items::count_of(store, items, entry) > 0 {
-        return true;
-    }
-    (0..32).any(|i| {
-        store
-            .player_keyring_slot(i)
-            .filter(|&g| g != 0)
-            .and_then(|g| items.object(g))
-            .and_then(|f| f.object_entry())
-            == Some(entry)
-    })
+    crate::ui_items::find_item(store, items, entry, crate::ui_items::ItemSearch::default())
+        .is_some()
 }
 
 #[cfg(test)]

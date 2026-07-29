@@ -53,6 +53,23 @@
         -- unused tail via BenillaBagSlot_Update's physIndex-past-size branch, same as the backpack.
         BENILLA_BAG_WINDOW_MAX_SLOTS = 20
 
+        -- The keyring's container id (ref MainMenuBarBagButtons.lua:1) — decision 0765. It is an
+        -- ordinary container in every respect the seam cares about: the app feeds it like any other
+        -- bag (its slots are the player descriptor's own 81.., no container object), and every
+        -- C_Container verb, the cursor, the pending-op lock and the wire drains take it unchanged.
+        -- What makes it special is only what the reference makes special: the window's art, its
+        -- open/close sound, and the fact that its capacity is not a wire field.
+        KEYRING_CONTAINER = -2
+
+        -- The keyring's usable slot count (ref GetKeyRingSize, ContainerFrame.lua:773). The
+        -- reference recomputes a level ladder in Lua (4 / 8 at 40 / 12 at 50 / 16 above 60) that the
+        -- server enforces identically (Player::GetMaxKeyringSize); benilla computes it once app-side
+        -- and feeds it as the container's own size, so this reads it back rather than keeping a
+        -- second copy of the ladder that could drift from the one the feed uses.
+        function GetKeyRingSize()
+            return C_Container.GetContainerNumSlots(KEYRING_CONTAINER)
+        end
+
         -- BenillaBagSlot_OnLoad(button, physIndex): physIndex is the button's CHAIN position (1 =
         -- bottom-right, growing up-and-left — the anchor order below), not the game slot. The ref's
         -- own formula (index = size - j + 1, ContainerFrame.lua:426/446) maps chain position → game
@@ -251,9 +268,27 @@
                 if button then BenillaBagSlot_Update(button) end
             end
             local title = getglobal(frame:GetName() .. "Name")
-            if title then title:SetText(C_Container.GetBagName(bagId) or "") end
+            if title then
+                -- The keyring is titled from the localized KEYRING string, not GetBagName — it has
+                -- no bag ITEM to be named after (ref ContainerFrame.lua l.418).
+                if bagId == KEYRING_CONTAINER then
+                    title:SetText(KEYRING)
+                else
+                    title:SetText(C_Container.GetBagName(bagId) or "")
+                end
+            end
             if bagId == 0 then
                 BenillaMoney_Set("BenillaBagMoney", GetMoney())
+            elseif bagId == KEYRING_CONTAINER then
+                -- Fixed art, again because there is no bag item: the keyring's own portrait
+                -- (ref ContainerFrame.lua l.419) and its own background variant, snug-fitted to the
+                -- level-gated slot count exactly like an equipped bag.
+                local portrait = getglobal(frame:GetName() .. "Portrait")
+                if portrait then
+                    portrait:SetPortraitToTexture("Interface\\ContainerFrame\\KeyRing-Bag-Icon")
+                end
+                local size = C_Container.GetContainerNumSlots(bagId)
+                if size > 0 then BenillaBagWindow_FitBackground(frame, size) end
             else
                 -- The window's portrait is the bag's OWN item icon (the real client's
                 -- C-side SetBagPortaitTexture), not the default backpack art. An equipped bag
@@ -293,12 +328,35 @@
         -- well row; the MIDDLE tiles the remaining rows; the BOTTOM is the frame's bottom rim. The
         -- slot buttons anchor UP from the frame's BOTTOMRIGHT (first at -12,9) and hide past `size`
         -- (BenillaBagSlot_Update), so nothing here touches them — only the art + the frame height.
+        -- Which UI-Bag-Components variant a window is stitched from — the ref's own `bagTextureSuffix`
+        -- (ContainerFrame_GenerateFrame, ContainerFrame.lua l.326-334): the bank bags get the
+        -- tinted "-Bank" plate, the keyring the "-Keyring" one, an equipped bag the plain sheet.
+        -- All three atlases are 256x512 with the same band layout, so FitBackground's tex-coords
+        -- are shared verbatim and only the file differs. (Ours ALSO applies the "-Bank" arm, which
+        -- benilla had been quietly skipping — the bank popouts have been drawing ordinary bag art
+        -- since decision 0604.)
+        function BenillaBagWindow_BgTexture(bagId)
+            local suffix = ""
+            if bagId >= 5 then
+                suffix = "-Bank"
+            elseif bagId == KEYRING_CONTAINER then
+                suffix = "-Keyring"
+            end
+            return "Interface\\ContainerFrame\\UI-Bag-Components" .. suffix
+        end
+
         function BenillaBagWindow_FitBackground(frame, size)
             local name = frame:GetName()
             local top = getglobal(name .. "BgTop")
             local middle = getglobal(name .. "BgMiddle")
             local bottom = getglobal(name .. "BgBottom")
             if not (top and middle and bottom) then return end
+            -- Re-set every fit, as the ref does at every generate: the template authors the plain
+            -- sheet, and a window's kind is only known from its id.
+            local bg = BenillaBagWindow_BgTexture(frame:GetID())
+            top:SetTexture(bg)
+            middle:SetTexture(bg)
+            bottom:SetTexture(bg)
             local rowH = 41 -- rowHeight
             local rows = math.ceil(size / 4)
             if rows < 1 then rows = 1 end
@@ -324,9 +382,9 @@
             local middleH = 0
             bottom:ClearAllPoints()
             if rows > 1 then
-                -- A single middle piece spans at most ROWS_IN_BG_TEXTURE (6) rows; the reference cycles
-                -- up to MAX_BG_TEXTURES for bank bags / the keyring, which we don't render. Our largest
-                -- window is a 20-slot bag (4 middle rows), so one piece always suffices.
+                -- A single middle piece spans at most ROWS_IN_BG_TEXTURE (6) rows; the reference
+                -- cycles up to MAX_BG_TEXTURES for windows taller than that. Our largest window is a
+                -- 20-slot bag (4 middle rows) and the keyring caps at 16 (3), so one always suffices.
                 middleH = (rows - 1) * rowH - 9
                 middle:SetHeight(middleH)
                 middle:SetTexCoord(0, 1, 0.353515625, middleH / 512 + 0.353515625)
@@ -466,6 +524,7 @@
         -- MainMenuBarBackpackButton, bags 1..4 → CharacterBag(N-1)Slot).
         function BenillaBagWindow_BarButton(frame)
             local name = frame:GetName()
+            if name == "BenillaKeyRingFrame" then return getglobal("BenillaKeyRingButton") end
             for bagId = 0, 4 do
                 if name == BENILLA_BAG_WINDOWS[bagId + 1] then
                     if bagId == 0 then return getglobal("BenillaBagToggle") end
@@ -478,18 +537,22 @@
         -- Benilla<Window>Frame_OnShow/_OnHide fn (used when the handler is more than the bare
         -- PlaySound, or — as here — to carry the cite). Kits quoted from the real ContainerFrame.lua
         -- ContainerFrame_OnShow/OnHide (l.124-142 / l.100-122), reused VERBATIM by every window
-        -- (backpack included) — the real fn's keyring fork (KeyRingOpen/Close) never applies, since
-        -- benilla ships no keyring window; every one of our five windows plays the plain
-        -- igBackPackOpen/igBackPackClose pair. Fired on every visibility transition (a Show/Hide from
-        -- a toggle button, the 'B' binding, a close button, or ESC), never at load (every window is
-        -- authored hidden="true", so none ever transitions on startup).
+        -- (backpack included), INCLUDING the real fn's keyring fork: the keyring has its own
+        -- jingling KeyRingOpen/KeyRingClose pair (both real SoundEntries kits), every other window
+        -- the plain igBackPackOpen/igBackPackClose. Fired on every visibility transition (a Show/Hide
+        -- from a toggle button, the 'B' binding, a close button, or ESC), never at load (every window
+        -- is authored hidden="true", so none ever transitions on startup).
         --
         -- The `this` legacy global (RF-0025, script/event.rs) names the window that just
         -- shown/hidden — used here for the open-window STACK the layout law below reads, rather
         -- than a per-window OnShow/OnHide body (which would defeat the whole point of sharing one
         -- handler across five windows).
         function BenillaBagFrame_OnShow()
-            PlaySound("igBackPackOpen")
+            if this:GetID() == KEYRING_CONTAINER then
+                PlaySound("KeyRingOpen")
+            else
+                PlaySound("igBackPackOpen")
+            end
             -- The bar lights the open bag's button (ref ContainerFrame_OnShow l.124-131,
             -- SetChecked(1)) — the window side is the source of truth, so a bag opened by any
             -- path (the B key, a bar click, open-all at a vendor) lights its button.
@@ -499,7 +562,11 @@
         end
 
         function BenillaBagFrame_OnHide()
-            PlaySound("igBackPackClose")
+            if this:GetID() == KEYRING_CONTAINER then
+                PlaySound("KeyRingClose")
+            else
+                PlaySound("igBackPackClose")
+            end
             -- ...and clears it on any close (ref ContainerFrame_OnHide l.84-95, SetChecked(0)).
             local barButton = BenillaBagWindow_BarButton(this)
             if barButton then barButton:SetChecked(0) end
@@ -642,6 +709,10 @@
         -- fill in for the harnesses that load no patch chain.
         BACKPACK_TOOLTIP = BACKPACK_TOOLTIP or "Backpack"
         EQUIP_CONTAINER = EQUIP_CONTAINER or "Equip Container"
+        -- ref GlobalStrings.lua l.2472 / l.2810 — the keyring's window title + button tooltip, and
+        -- the full-keyring refusal.
+        KEYRING = KEYRING or "Keyring"
+        NO_EMPTY_KEYRING_SLOTS_ERROR = NO_EMPTY_KEYRING_SLOTS_ERROR or "Your keyring is full."
 
         -- Both are PLAIN tooltips — the reference calls GameTooltip:SetText here, not
         -- GameTooltip_AddNewbieTip, so unlike the micro buttons next door (0661) there is no second
@@ -677,6 +748,86 @@
         -- half of the split BenillaUnitFrame_OnLeave's comment describes.
         function BenillaBagBarButton_OnLeave()
             if GameTooltip then GameTooltip:Hide() end
+        end
+
+        -- ── The keyring (decision 0765) ──────────────────────────────────────────────────────────
+        -- ref ToggleKeyRing (ContainerFrame.lua:757-771). The reference generates the window on
+        -- demand from a pool of generic ContainerFrames sized to GetKeyRingSize(); ours is a fixed
+        -- window like the other six, so the toggle is the bag bar's own show/hide shape and the
+        -- size arrives through the feed. The ref's IsOptionFrameOpen() guard has no analogue here
+        -- (our bag-bar buttons carry none either — the game menu greys the row instead, 0674), and
+        -- its SetButtonPulse stop is moot with no pulse to stop (0304).
+        function ToggleKeyRing()
+            local frame = getglobal("BenillaKeyRingFrame")
+            if not frame then return end
+            if frame:IsShown() then
+                frame:Hide()
+            else
+                BenillaBagWindow_Update(frame)
+                frame:Show()
+            end
+        end
+
+        -- ref PutKeyInKeyRing (ContainerFrame.lua:740-755) — dropping a held key onto the keyring
+        -- BUTTON files it in the first free slot. "Pick up" from an empty slot IS the place gesture
+        -- (PickupContainerItem is the one entry point: empty cursor picks up, a held cursor places),
+        -- which is why the reference's own line reads as a pickup.
+        --
+        -- One deliberate un-quirking: the ref passes `NO_EMPTY_KEYRING_SLOTS`, but GlobalStrings
+        -- only ever defined `NO_EMPTY_KEYRING_SLOTS_ERROR` — so the real client silently prints
+        -- nothing when your keyring is full. We print the string that exists.
+        function PutKeyInKeyRing()
+            for i = 1, GetKeyRingSize() do
+                if not C_Container.GetContainerItemInfo(KEYRING_CONTAINER, i) then
+                    C_Container.PickupContainerItem(KEYRING_CONTAINER, i)
+                    return
+                end
+            end
+            if BenillaErrorsFrame_AddMessage then
+                BenillaErrorsFrame_AddMessage(NO_EMPTY_KEYRING_SLOTS_ERROR, 1.0, 0.1, 0.1)
+            end
+        end
+
+        -- ref KeyRingButton's OnLoad/OnClick/OnReceiveDrag (MainMenuBarBagButtons.xml l.142-199).
+        -- The button is authored HIDDEN and only ever revealed by BenillaMainMenuBar_UpdateKeyRing
+        -- (ActionBar.xml), which is where the whole show/hide law and its divergence note live.
+        function BenillaKeyRingButton_OnLoad(button)
+            button:SetID(KEYRING_CONTAINER)
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            button:RegisterForDrag("LeftButton")
+            -- The ref watches PLAYER_ENTERING_WORLD / VARIABLES_LOADED / BAG_UPDATE on the bar's art
+            -- frame; with no saved variable there is nothing for VARIABLES_LOADED to restore, and
+            -- BAG_UPDATE is what actually carries "a key just arrived".
+            button:RegisterEvent("PLAYER_ENTERING_WORLD")
+            button:RegisterEvent("BAG_UPDATE")
+            if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(button) end
+            BenillaKeyRingButton_OnEvent()
+        end
+
+        function BenillaKeyRingButton_OnEvent()
+            if BenillaMainMenuBar_UpdateKeyRing then BenillaMainMenuBar_UpdateKeyRing() end
+        end
+
+        function BenillaKeyRingButton_OnClick(button)
+            -- Holding something ⇒ file it; empty-handed ⇒ open/close the keyring (ref l.166-173).
+            if CursorHasItem() then
+                PutKeyInKeyRing()
+            else
+                ToggleKeyRing()
+            end
+            -- Re-derive the lit ring from the window, the same provisional-toggle tail every other
+            -- bag-bar button uses.
+            local frame = getglobal("BenillaKeyRingFrame")
+            button:SetChecked(frame and frame:IsShown())
+        end
+
+        -- ref l.180-184: the plain KEYRING title plus the ref's own empty AddLine (which reserves
+        -- the second row the binding key would print into — we ship no TOGGLEKEYRING binding, the
+        -- same gap the bag slots' "(F1)".."(F4)" suffixes have).
+        function BenillaKeyRingButton_OnEnter(button)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+            GameTooltip:SetText(KEYRING, 1.0, 1.0, 1.0)
         end
 
         function BenillaBagBarSlot_Update(button)
@@ -1231,6 +1382,28 @@
     </Frame>
 
     <!--
+        The keyring window (decision 0765) — id = KEYRING_CONTAINER. Structurally just a seventh
+        container window on the SAME template as the four equipped bags and the six bank popouts;
+        everything that makes it a keyring (the "-Keyring" plate, the KeyRing-Bag-Icon portrait, the
+        KEYRING title, the jingling open/close pair) is the id-keyed fork inside the shared handlers,
+        exactly as ContainerFrame.lua does it. Its 20 template buttons cover the keyring's 16-slot
+        ceiling; the level-gated remainder hides through the ordinary physIndex-past-size branch.
+
+        It is deliberately NOT in BENILLA_BAG_WINDOWS: the keyring is not one of "your bags", so 'B'
+        / the backpack toggle / a vendor's auto-open never touch it, which is the reference's own
+        arrangement (OpenAllBags counts it out, and CloseAllBags is id-driven over 1..4). ESC still
+        closes it — UiPanels.xml's CloseAllWindows hides every open container, the ref's own loop.
+    -->
+    <Frame name="BenillaKeyRingFrame" id="-2" inherits="BenillaBagWindowTemplate">
+        <Scripts>
+            <OnLoad>BenillaBagFrame_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaBagFrame_OnEvent(self)</OnEvent>
+            <OnShow>BenillaBagFrame_OnShow()</OnShow>
+            <OnHide>BenillaBagFrame_OnHide()</OnHide>
+        </Scripts>
+    </Frame>
+
+    <!--
         The backpack toggle, RELOCATED onto the main action bar's right side so the bar reads whole
         (the real client's MainMenuBarBackpackButton, ref-MainMenuBarBagButtons.xml l.54-64): a 37x37
         button parented/anchored to the bar art frame at BOTTOMRIGHT (-6,2). Its behavior (toggle the
@@ -1428,6 +1601,50 @@
                  bag places), mirroring the paper-doll/bag-slot drag routing. -->
             <OnDragStart>BenillaBagBarSlot_Place(self)</OnDragStart>
             <OnReceiveDrag>BenillaBagBarSlot_Place(self)</OnReceiveDrag>
+        </Scripts>
+    </CheckButton>
+
+    <!--
+        The keyring button (decision 0765) — ref KeyRingButton, MainMenuBarBagButtons.xml l.142-199.
+        Sits at the FAR left of the bag row, past BenillaBagBarSlot4 (the ref's CharacterBag3Slot),
+        and is authored HIDDEN: nothing reveals it but BenillaMainMenuBar_UpdateKeyRing, and only
+        while HasKey() — the point being that a character with no key has no keyring at all, and the
+        bar's plate has no socket for one.
+
+        18x39 and the TexCoords are the ref's exactly, and they are not arbitrary: the three state
+        atlases are 32x64 holding one 18x39 button, so 18/32 = 0.5625 and 39/64 = 0.609375 crop it
+        1:1. The chain gap is OUR row's -6 rather than the ref's -5, so the button seats evenly
+        against the 36px slots this bar scaled its own row to.
+
+        Unlike the five bag buttons it is NOT in BENILLA_BAG_BUTTONS: its art is a state texture, not
+        an $parentIcon layer, so Disable_BagButtons' SetDesaturation(b.icon) has nothing to grey —
+        and the ref leaves it out of its own Disable_BagButtons for the same reason.
+    -->
+    <CheckButton name="BenillaKeyRingButton" hidden="true">
+        <Size><AbsDimension x="18" y="39"/></Size>
+        <Anchors>
+            <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot4" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
+        </Anchors>
+        <NormalTexture file="Interface\Buttons\UI-Button-KeyRing">
+            <TexCoords left="0" right="0.5625" top="0" bottom="0.609375"/>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Button-KeyRing-Down">
+            <TexCoords left="0" right="0.5625" top="0" bottom="0.609375"/>
+        </PushedTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Button-KeyRing-Highlight" alphaMode="ADD">
+            <TexCoords left="0" right="0.5625" top="0" bottom="0.609375"/>
+        </HighlightTexture>
+        <!-- The lit ring while the keyring window is open — the bag row's own convention
+             (the ref drives the same state through UpdateMicroButtons' SetButtonState). -->
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnLoad>BenillaKeyRingButton_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaKeyRingButton_OnEvent()</OnEvent>
+            <OnClick>BenillaKeyRingButton_OnClick(self)</OnClick>
+            <OnEnter>BenillaKeyRingButton_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaBagBarButton_OnLeave()</OnLeave>
+            <!-- A key dragged onto the button files itself, the ref's own OnReceiveDrag (l.174-178). -->
+            <OnReceiveDrag>PutKeyInKeyRing()</OnReceiveDrag>
         </Scripts>
     </CheckButton>
 </Ui>

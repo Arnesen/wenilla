@@ -346,7 +346,7 @@ impl WorldSession {
     pub fn use_item(&mut self, bag_index: u8, slot: u8, spell_slot: u8) -> Result<()> {
         self.send(
             opcode::CMSG_USE_ITEM,
-            &messages::use_item(bag_index, slot, spell_slot),
+            &messages::use_item(bag_index, slot, spell_slot, None),
         )
     }
 

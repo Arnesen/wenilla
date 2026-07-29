@@ -17,7 +17,27 @@ fn item_query_wire() {
 
     // CMSG_USE_ITEM (vmangos UseItem::ReadFromWorldPacket): bagIndex, slot, spellSlot, then a
     // self-shaped target block (u16 mask 0). Backpack slot 1 = bag 255 + player-array slot 23.
-    assert_eq!(messages::use_item(255, 23, 0), hx("ff17000000"));
+    assert_eq!(messages::use_item(255, 23, 0, None), hx("ff17000000"));
+
+    // The KEY-IN-A-LOCK form (decision 0769): the same three bytes, then a SpellCastTargets with
+    // mask TARGET_FLAG_GAMEOBJECT|TARGET_FLAG_LOCKED (0x0800|0x4000 = 0x4800) and the object's
+    // PACKED guid. This is the packet the real client sends for a key (wow-re cursor-system.md
+    // §8.4: sender 0x6e54f0's item arm -> 0x6e57d8 push 0xab) and the only one vmangos will open a
+    // KEY-slot lock for (Spell::CanOpenLock requires m_CastItem, Spell.cpp:7892).
+    //
+    // Keyring slot 1 = bag 255 + player-array slot 81 (0x51). The guid 0xF110000C1F00A3B2 has two
+    // zero bytes (indices 2 and 5), so it packs to mask 0xDB + the other six, low byte first.
+    assert_eq!(
+        messages::use_item(255, 81, 0, Some(0xF110_000C_1F00_A3B2)),
+        hx("ff51000048dbb2a31f0c10f1"),
+    );
+
+    // The packed form really does drop zero bytes: guid 1 is mask 0x01 + a single byte, and the
+    // spellSlot ordinal rides in the third byte.
+    assert_eq!(
+        messages::use_item(255, 81, 2, Some(1)),
+        hx("ff510200480101")
+    );
 
     // CMSG_AUTOEQUIP_ITEM (vmangos AutoEquipItem::ReadFromWorldPacket): bagIndex, slot.
     assert_eq!(messages::auto_equip_item(255, 25), hx("ff19"));

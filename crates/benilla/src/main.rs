@@ -48,6 +48,7 @@ mod glue_strings;
 mod go_anim;
 mod go_templates;
 mod ground_fx;
+mod hover_log;
 mod interact;
 mod interior;
 mod items;
@@ -132,6 +133,7 @@ mod water_fx;
 mod wdl;
 mod weather;
 mod wmo_portal;
+mod wmo_sky;
 mod world_map;
 mod world_state;
 
@@ -215,6 +217,12 @@ const SPAWN_XY: (f32, f32) = (-8949.95, -132.49);
 fn main() -> AppExit {
     // `WOW_CAPTURE=list` just prints the harness scenario names (the source of truth `scripts/visual.sh`
     // reads) and exits before any window/asset setup.
+    // `WOW_HOVER_LOG_REPORT=<csv>` re-reads a recorded run and prints its report, then exits —
+    // no window, no game. New analysis lands on runs already captured (see `hover_log`).
+    if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
+        hover_log::report_recorded_file(&path);
+        return AppExit::Success;
+    }
     if std::env::var("WOW_CAPTURE").as_deref() == Ok("list") {
         capture::print_scenario_names();
         return AppExit::Success;
@@ -446,6 +454,7 @@ fn main() -> AppExit {
     // Frame-time HUD + diagnostics — the performance standard.
     // After DebugPanelPlugin so the egui plugin/context it sets up already exists. Toggle: P.
     .add_plugins(PerfPlugin)
+    .add_plugins(hover_log::HoverLogPlugin)
     // Foundation: opens the patch chain + inserts WorldAssets/RenderConfig (AssetSet::Open), which
     // every other subsystem's startup runs after.
     .add_plugins(AssetPlugin)
@@ -456,6 +465,9 @@ fn main() -> AppExit {
     .add_plugins(LightingPlugin)
     // Sky dome: the Light.dbc gradient backdrop (camera-centred), driven by the same lighting.
     .add_plugins(SkyPlugin)
+    // WMO skybox: the authored sky a building's `0x40000` group swaps in for that gradient
+    // (Stratholme's burning city) — registered after SkyPlugin, whose dome it stands down.
+    .add_plugins(wmo_sky::WmoSkyPlugin)
     // Cloud coverage: the reference's procedural field — glare occlusion (occ1) + the visible layer.
     .add_plugins(CloudsPlugin)
     // Weather: the SMSG_WEATHER state machine driving the storm light-blend + precipitation

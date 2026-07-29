@@ -29,6 +29,16 @@ fn ui_cost_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("WOW_UI_COST").as_deref() == Ok("1"))
 }
 
+/// Last frame's extract-gate inputs (decision 0740), held together as one `Local` — the gate
+/// compares all four or none, and a Bevy system has a hard param budget this was eating.
+#[derive(Default)]
+pub(super) struct GateInputs {
+    extracted: Vec<benilla_ui::script::ExtractedQuad>,
+    text_ui: Option<benilla_ui::script::EditBoxTextUi>,
+    dims: Option<(u32, u32, u32)>,
+    portraits: std::collections::HashMap<String, crate::portrait::PortraitSource>,
+}
+
 /// Per frame: screen size → `tick` (OnUpdate) → `resolve` → `extract` → [`UiQuads`]. Script errors
 /// drain to the log (throttled by being drained — each fires once).
 #[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
@@ -66,10 +76,9 @@ pub(super) fn drive_script(
     // caches are monotone path→handle, so equal inputs reproduce the same `UiQuads` the diff
     // would then discard. Capture mode never skips (the harness wants exact per-frame output,
     // including the cursor-icon quad's live mouse position).
-    mut prev_extracted: Local<Vec<benilla_ui::script::ExtractedQuad>>,
-    mut prev_text_ui: Local<Option<benilla_ui::script::EditBoxTextUi>>,
-    mut prev_dims: Local<Option<(u32, u32, u32)>>,
-    mut prev_portraits: Local<std::collections::HashMap<String, crate::portrait::PortraitSource>>,
+    mut prev: Local<GateInputs>,
+    // This frame's phase split, published for the hover recorder (`hover_log`).
+    mut ui_cost: ResMut<crate::hover_log::UiFrameCost>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -89,7 +98,10 @@ pub(super) fn drive_script(
     // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
     // on an idle frame, and the ledger can only rank what has a name — tick (Lua OnUpdate),
     // resolve (layout), measure (the text round-trips), extract (tree walk + rasterize), diff.
-    let cost_on = ui_cost_enabled();
+    // The phase marks feed two consumers now: the `[ui-cost]` line and the hover recorder
+    // (`hover_log`), which writes the same split per frame to a file. Either one arms them.
+    let printing = ui_cost_enabled();
+    let cost_on = printing || crate::hover_log::enabled();
     let solves_before = cost_on.then(|| script.layout_solves());
     let mut t_mark = cost_on.then(std::time::Instant::now);
     // Marks phase boundaries under the meter: returns μs since the previous mark and re-arms.
@@ -151,6 +163,17 @@ pub(super) fn drive_script(
     // keep the request list empty on quiet frames, so the second resolve is rare.
     if let Some(atlas) = font_atlas.as_deref_mut() {
         let requests = script.fontstrings_needing_measure();
+        // The recorder's churn column: WHICH strings a frame had to re-shape. A steady hover that
+        // keeps asking is the whole question (`hover_log`), and the answer is a string, not a
+        // count — so the first few come along by name.
+        if crate::hover_log::enabled() {
+            ui_cost.measured = requests.len();
+            ui_cost.measured_texts = requests
+                .iter()
+                .take(3)
+                .map(|r| r.text.chars().take(40).collect::<String>())
+                .collect();
+        }
         if !requests.is_empty() {
             let measures: Vec<(u32, f32, f32, u64)> = requests
                 .iter()
@@ -277,14 +300,30 @@ pub(super) fn drive_script(
     // last frame's values, which the equal inputs prove are this frame's values too.
     let dims = (w.to_bits(), h.to_bits(), s.to_bits());
     let settled = capture.is_none()
-        && *prev_dims == Some(dims)
-        && text_ui == *prev_text_ui
-        && portraits.0 == *prev_portraits
-        && extracted == *prev_extracted;
+        && prev.dims == Some(dims)
+        && text_ui == prev.text_ui
+        && portraits.0 == prev.portraits
+        && extracted == prev.extracted;
     if settled {
         drop(extract_span);
         let us_cmp = lap();
         if cost_on {
+            let solves = script.layout_solves() - solves_before.unwrap_or(0);
+            *ui_cost = crate::hover_log::UiFrameCost {
+                measured: ui_cost.measured,
+                measured_texts: std::mem::take(&mut ui_cost.measured_texts),
+                tick: us_tick,
+                resolve: us_resolve,
+                measure: us_measure,
+                extract: us_exm,
+                convert: us_cmp,
+                diff: 0,
+                quads: quads.quads.len(),
+                solves,
+                skipped: true,
+            };
+        }
+        if printing {
             let solves = script.layout_solves() - solves_before.unwrap_or(0);
             eprintln!(
                 "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
@@ -295,10 +334,10 @@ pub(super) fn drive_script(
         }
         return;
     }
-    *prev_dims = Some(dims);
-    *prev_text_ui = text_ui.clone();
-    *prev_portraits = portraits.0.clone();
-    *prev_extracted = extracted.clone();
+    prev.dims = Some(dims);
+    prev.text_ui = text_ui.clone();
+    prev.portraits = portraits.0.clone();
+    prev.extracted = extracted.clone();
     for eq in extracted {
         let Some(r) = eq.rect else { continue };
         // WoW UI space is y-up from the bottom-left in 768-virtual units; the quad pass is
@@ -558,12 +597,27 @@ pub(super) fn drive_script(
     if cost_on {
         let us_diff = lap();
         let solves = script.layout_solves() - solves_before.unwrap_or(0);
-        eprintln!(
-            "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
-             exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
-             solves={solves} changed={} skip=0",
-            u8::from(changed)
-        );
+        *ui_cost = crate::hover_log::UiFrameCost {
+            measured: ui_cost.measured,
+            measured_texts: std::mem::take(&mut ui_cost.measured_texts),
+            tick: us_tick,
+            resolve: us_resolve,
+            measure: us_measure,
+            extract: us_exm,
+            convert: us_exa,
+            diff: us_diff,
+            quads: n_quads,
+            solves,
+            skipped: false,
+        };
+        if printing {
+            eprintln!(
+                "[ui-cost] tick={us_tick} resolve={us_resolve} measure={us_measure} \
+                 exm={us_exm} exa={us_exa} diff={us_diff} eq={n_extracted} quads={n_quads} \
+                 solves={solves} changed={} skip=0",
+                u8::from(changed)
+            );
+        }
     }
 }
 
@@ -652,6 +706,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::minimap::MinimapWidget>();
+        app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         // The uiScale dial at its identity Default (1.0) — tests pin the byte-identity base;
@@ -733,6 +788,7 @@ mod clip_plumb_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::minimap::MinimapWidget>();
+        app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
@@ -787,6 +843,7 @@ mod extract_gate_tests {
         app.init_resource::<Assets<Image>>();
         app.init_resource::<PortraitImages>();
         app.init_resource::<crate::minimap::MinimapWidget>();
+        app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();

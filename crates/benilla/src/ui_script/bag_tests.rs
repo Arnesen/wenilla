@@ -1229,3 +1229,293 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// One keyring container fed as the app feeds it: container −2 sized by the level ladder, with a
+/// key in the first slot. `size` is the count `keyring_size(level)` would give.
+fn keyring(size: u32, occupied: bool) -> ContainerState {
+    let mut slots = std::collections::HashMap::new();
+    if occupied {
+        slots.insert(
+            1,
+            ContainerSlot {
+                // The Scarlet Key — the item the director's own character carries in keyring slot 1.
+                item_id: 7146,
+                count: 1,
+                quality: Some(1),
+                texture: Some("Interface\\Icons\\INV_Misc_Key_07".into()),
+                link: Some("|cffffffff|Hitem:7146:0:0:0|h[The Scarlet Key]|h|r".into()),
+                ..Default::default()
+            },
+        );
+    }
+    ContainerState {
+        name: Some("Keyring".into()),
+        num_slots: size,
+        slots,
+    }
+}
+
+/// How many drawn quads carry a texture path containing `needle`. The engine exposes no
+/// `GetTexture`, so "which art is this frame wearing" is asked of the resolved draw list — which is
+/// the stronger question anyway (it answers what would actually be on screen).
+fn drawn_with(s: &mut UiScript, needle: &str) -> usize {
+    s.resolve();
+    s.extract()
+        .iter()
+        .filter(|q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p.contains(needle)))
+        .count()
+}
+
+/// Load the whole bar+bag surface the keyring spans (its button seats on the action bar and its
+/// window is a BagFrame container, so both files are load-bearing).
+fn keyring_surface(s: &UiScript) {
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "MerchantFrame.xml",
+        "Cooldown.xml",
+        "ErrorsFrame.xml",
+        "ActionBar.xml",
+        "BagFrame.xml",
+    ] {
+        load_xml(s, file);
+    }
+}
+
+/// **The gate** (decision 0765): no key ⇒ no keyring anywhere on the bar — the button is hidden and
+/// the bar's two right-hand strips wear the ordinary dwarf plate. The first key flips all of it:
+/// the button appears, both strips swap to the keyring plate with the reference's own TexCoords,
+/// and the performance meter slides from −227 to −235 to clear the new socket
+/// (ref MainMenuBar_UpdateKeyRing, MainMenuBar.lua l.174-183).
+///
+/// This is the director-reported symptom itself: a character holding a key saw no keyring at all.
+#[test]
+fn the_first_key_puts_the_keyring_on_the_bar() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    keyring_surface(&s);
+    s.set_money(0);
+
+    // Keyless: the button is hidden and the plate is the dwarf one.
+    s.set_has_key(false);
+    s.run("BenillaMainMenuBar_UpdateKeyRing()").unwrap();
+    assert!(
+        !s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
+            .unwrap(),
+        "no key ⇒ no keyring button"
+    );
+    assert_eq!(
+        drawn_with(&mut s, "UI-MainMenuBar-KeyRing"),
+        0,
+        "no key ⇒ every bar strip wears the ordinary dwarf plate"
+    );
+
+    // A key lands. The app pushes HasKey and the wire's BAG_UPDATE reaches the button's OnEvent —
+    // the exact runtime path, not a direct call.
+    s.set_has_key(true);
+    s.set_container(-2, Some(keyring(8, true)));
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
+    assert!(
+        s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
+            .unwrap(),
+        "the first key reveals the keyring button"
+    );
+    assert_eq!(
+        drawn_with(&mut s, "UI-MainMenuBar-KeyRing"),
+        2,
+        "exactly the two RIGHT-hand strips swap to the keyring plate"
+    );
+    for (strip, top, bottom) in [
+        ("BenillaActionBarTexture2", 0.6640625, 1.0),
+        ("BenillaActionBarTexture3", 0.1640625, 0.5),
+    ] {
+        let (t, b) = s
+            .eval::<(f64, f64)>(&format!(
+                "local _, _, top, bottom = {strip}:GetTexCoord() return top, bottom"
+            ))
+            .unwrap();
+        assert!(
+            (t - top).abs() < 1e-9 && (b - bottom).abs() < 1e-9,
+            "{strip} keeps the reference's own band — got {t}..{b}, want {top}..{bottom}"
+        );
+    }
+    // Geometry cross-check against the reference's own chain. The ref seats its backpack button at
+    // BOTTOMRIGHT (-6, 2) and steps 37px buttons left with -5 gaps, putting KeyRingButton's left
+    // edge at -234 from the bar's right; ours steps 36px buttons with -6 gaps and lands at -235.
+    // Within a pixel of the real bar — which is the check that matters, because the socket the
+    // button sits in is PAINTED INTO the keyring plate and cannot be nudged to meet it.
+    let bar_right = s.eval::<f64>("return BenillaActionBar:GetRight()").unwrap();
+    let button_left = s
+        .eval::<f64>("return BenillaKeyRingButton:GetLeft()")
+        .unwrap();
+    assert!(
+        (bar_right - button_left - 235.0).abs() < 1.5,
+        "the keyring button must land in the plate's painted socket — the ref's own -234, got {}",
+        bar_right - button_left
+    );
+
+    // The performance meter clears the new socket (ref l.180: -227 → -235).
+    let perf_right = s
+        .eval::<f64>("return BenillaPerformanceBarFrame:GetRight()")
+        .unwrap();
+    let bar_right = s.eval::<f64>("return BenillaActionBar:GetRight()").unwrap();
+    assert!(
+        (bar_right - perf_right - 235.0).abs() < 0.01,
+        "the meter slid to -235 with the keyring up (got {})",
+        bar_right - perf_right
+    );
+
+    // And it reverts: destroying the last key takes the keyring back off the bar (our divergence
+    // from the ref's one-way saved-variable latch — see BenillaMainMenuBar_UpdateKeyRing).
+    s.set_has_key(false);
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
+    assert!(
+        !s.eval::<bool>("return BenillaKeyRingButton:IsShown()")
+            .unwrap(),
+        "losing the last key takes the button away again"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The window itself: clicking the button opens a container titled "Keyring", stitched from the
+/// `-Keyring` plate, showing exactly the level-gated slot count — and it jingles rather than
+/// rustling (KeyRingOpen/KeyRingClose, ref ContainerFrame.lua l.116-138).
+#[test]
+fn the_keyring_button_opens_a_keyring_window() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    keyring_surface(&s);
+    s.set_money(0);
+    s.set_has_key(true);
+    // A level-44 character: 8 usable slots (the ladder's 40..49 rung).
+    s.set_container(-2, Some(keyring(8, true)));
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
+    let _ = s.take_sounds();
+
+    assert!(!s
+        .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
+        .unwrap());
+    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+        .unwrap();
+    assert!(
+        s.eval::<bool>("return BenillaKeyRingFrame:IsShown()")
+            .unwrap(),
+        "the button opens the keyring"
+    );
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("KeyRingOpen".into())],
+        "the keyring has its own open kit, not the backpack's"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaKeyRingFrameName:GetText()")
+            .unwrap(),
+        "Keyring",
+        "titled from the KEYRING string, not a bag item's name"
+    );
+    assert!(
+        drawn_with(&mut s, "UI-Bag-Components-Keyring") > 0,
+        "stitched from the keyring plate, not the ordinary bag sheet"
+    );
+    // 8 usable slots: buttons 1..8 shown, the template's remaining 12 hidden — the ordinary
+    // physIndex-past-size branch, no keyring-specific code.
+    let shown = s
+        .eval::<i64>(
+            "local n = 0 for i = 1, 20 do \
+             if getglobal('BenillaKeyRingFrameSlot' .. i):IsShown() then n = n + 1 end end return n",
+        )
+        .unwrap();
+    assert_eq!(shown, 8, "only the level-unlocked keyring slots are drawn");
+    // The key is in the window (slot 1 of 8 is the LAST chain button — size - physIndex + 1).
+    assert_eq!(
+        s.eval::<i64>("return C_Container.GetContainerItemID(KEYRING_CONTAINER, 1)")
+            .unwrap(),
+        7146
+    );
+
+    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>("return BenillaKeyRingFrame:IsShown()")
+        .unwrap());
+    assert_eq!(
+        s.take_sounds(),
+        vec![SoundRequest::KitName("KeyRingClose".into())],
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Dropping a held key on the button files it in the first free slot (ref PutKeyInKeyRing), and a
+/// full keyring refuses out loud — where the reference prints nothing at all, having passed a
+/// GlobalStrings name that was never defined.
+#[test]
+fn a_key_dropped_on_the_button_files_itself() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    keyring_surface(&s);
+    s.set_money(0);
+    s.set_has_key(true);
+
+    // A 4-slot keyring with slot 1 taken, and the key on the cursor (picked out of the backpack).
+    s.set_container(-2, Some(keyring(4, true)));
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots: std::collections::HashMap::from([(
+                3,
+                ContainerSlot {
+                    item_id: 7146,
+                    count: 1,
+                    ..Default::default()
+                },
+            )]),
+        }),
+    );
+    s.fire_event("BAG_UPDATE", vec![benilla_ui::script::ScriptValue::Int(-2)]);
+    s.run("C_Container.PickupContainerItem(0, 3)").unwrap();
+    assert!(s.eval::<bool>("return CursorHasItem()").unwrap());
+
+    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+        .unwrap();
+    assert_eq!(
+        s.take_container_moves(),
+        vec![ContainerMove {
+            src_bag: 0,
+            src_slot: 3,
+            dst_bag: -2,
+            dst_slot: 2,
+            count: None,
+        }],
+        "filed into the FIRST FREE keyring slot (1 is taken), not the backpack"
+    );
+
+    // Now full: the click refuses with the error line instead of queueing anything.
+    let mut full = keyring(4, true);
+    for slot in 2..=4 {
+        full.slots.insert(
+            slot,
+            ContainerSlot {
+                item_id: 7146,
+                count: 1,
+                ..Default::default()
+            },
+        );
+    }
+    s.set_container(-2, Some(full));
+    s.run("C_Container.PickupContainerItem(0, 3)").unwrap();
+    s.run("BenillaKeyRingButton_OnClick(BenillaKeyRingButton)")
+        .unwrap();
+    assert!(
+        s.take_container_moves().is_empty(),
+        "a full keyring queues no move"
+    );
+    assert_eq!(
+        s.eval::<String>("return BenillaErrorsFrameLine1:GetText()")
+            .unwrap(),
+        "Your keyring is full.",
+        "and says so — the reference's own dangling string name prints nothing"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

@@ -92,10 +92,15 @@ impl ObjectFields {
     pub fn player_bank_bag_slot(&self, i: u8) -> Option<u64> {
         (i < 6).then(|| self.get_guid(FIELD_PLAYER_BANK_BAG_SLOT_1 + 2 * u16::from(i)))?
     }
-    /// `PLAYER_FIELD_KEYRING_SLOT_1 + 2i` — the keyring's 32 item guids (absolute inventory slots
-    /// 81–112). benilla ships no keyring *container* (see `ui_items`'s slot-order note), but the
-    /// guids stream like every other slot array and the GameObject lock chain needs them: dungeon
-    /// keys live here, and the reference's key-slot resolver scans the keyring alongside the bags
+    /// `PLAYER_FIELD_KEYRING_SLOT_1 + 2i` — the keyring's item guids. The **field array is 32
+    /// guids** (`UpdateFields_1_12_1.h`: size 64 dwords; vmangos `MAX_KEYRING_SLOTS 32`) and the
+    /// client's inventory walker treats all 32 as its keyring band (absolute slots 81–112, mode
+    /// bit `0x40` — wow-re `action-item-slot.md` §8.2), but only the **first 16 are addressable
+    /// positions** on this wire (vmangos `KEYRING_SLOT_START 81`, `KEYRING_SLOT_END 97`, whose own
+    /// comment reads "32 slots (only 16 are visible/accessible in UI)"), and only as many of those
+    /// as the player's level unlocks are usable (4/8/12/16 — `ui_items::keyring_size`). Feeds the
+    /// keyring container (decision 0765) and the
+    /// GameObject lock chain's key-slot resolver, which scans the keyring alongside the bags
     /// (wow-re `cursor-system.md` §8.4; decision 0752). `Some(0)` = empty.
     pub fn player_keyring_slot(&self, i: u8) -> Option<u64> {
         (i < 32).then(|| self.get_guid(FIELD_PLAYER_KEYRING_SLOT_1 + 2 * u16::from(i)))?

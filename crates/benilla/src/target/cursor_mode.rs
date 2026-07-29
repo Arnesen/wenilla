@@ -177,7 +177,7 @@ const MELEE_FLOOR: f32 = 5.0;
 
 /// `GAMEOBJECT_TYPE_GENERIC` (vmangos `SharedDefines.h`) — world decoration whose highlightable
 /// predicate is constant-false, so it never shows an interact cursor (wow-re cursor-system §4a).
-const GO_TYPE_GENERIC: i32 = 5;
+pub(crate) const GO_TYPE_GENERIC: i32 = 5;
 /// The transport family — TRANSPORT(11), MAP_OBJECT(14), MO_TRANSPORT(15): their strategy vtables'
 /// highlightable slot (+0x14) is constant-false too (`32 c0 c3` — vtable dump from the 5875 binary:
 /// `0x80ba58+0x14`→`0x5f5c70`, `0x80b710`/`0x80b798+0x14`→`0x5f48b0`), so a boat / zeppelin /

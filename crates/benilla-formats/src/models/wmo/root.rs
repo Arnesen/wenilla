@@ -53,6 +53,13 @@ pub struct WmoGroupInfo {
     /// `groupFlags & 0x48 == 0` — neither EXTERIOR (`0x8`) nor exterior-lit (`0x40`): a true interior
     /// group. The same test the client branches on at `0x6b3f90` and that [`crate::models::RenderSubmesh::interior`] uses.
     pub interior: bool,
+    /// `groupFlags & 0x40000` — **SHOW_SKYBOX**: this group draws the root's [`WmoRoot::skybox`] model
+    /// in place of the `Light.dbc` gradient dome. The bit's identity is a corpus correlation
+    /// (`benilla-extract skyboxscan`): across the 5875 chain it appears on a group **iff** its root
+    /// carries a non-empty MOSB — Stratholme's city shell sets it on 61 of 83 groups (its open streets,
+    /// which are authored as INTERIOR groups), while the sibling dungeon `Stratholme.wmo` (MOSB empty)
+    /// sets it on none of 92.
+    pub show_skybox: bool,
     /// Group bounding-box min, WMO model space (WoW axes).
     pub bbox_min: [f32; 3],
     /// Group bounding-box max, WMO model space (WoW axes).
@@ -71,6 +78,7 @@ pub struct WmoRoot {
     group_infos: Vec<WmoGroupInfo>,
     portals: WmoPortals,
     fogs: Vec<WmoFog>,
+    skybox: Option<String>,
 }
 
 impl WmoRoot {
@@ -109,6 +117,13 @@ impl WmoRoot {
     pub fn fogs(&self) -> &[WmoFog] {
         &self.fogs
     }
+
+    /// The root's **MOSB** skybox model — the M2 a [`WmoGroupInfo::show_skybox`] group draws instead of
+    /// the `Light.dbc` gradient dome. `None` when the chunk is absent or holds only the empty string
+    /// (the overwhelming majority: five roots in the whole 5875 chain author one).
+    pub fn skybox(&self) -> Option<&str> {
+        self.skybox.as_deref()
+    }
 }
 
 /// Parse a WMO **root** file from bytes. `Err` if the bytes aren't a WMO root.
@@ -122,6 +137,7 @@ pub fn parse_wmo_root(bytes: &[u8]) -> Result<WmoRoot> {
     let group_infos = parse_wmo_group_infos(bytes);
     let portals = parse_wmo_portals(bytes);
     let fogs = parse_wmo_fogs(bytes);
+    let skybox = parse_wmo_skybox(bytes);
     Ok(WmoRoot {
         parsed,
         doodads,
@@ -129,7 +145,21 @@ pub fn parse_wmo_root(bytes: &[u8]) -> Result<WmoRoot> {
         group_infos,
         portals,
         fogs,
+        skybox,
     })
+}
+
+/// Parse the root's **MOSB** chunk — a single null-terminated model path, or the 4 zero bytes that
+/// stand for "no skybox" (which is what almost every root carries). Returned normalized to `.m2`, the
+/// extension the loaders take; the chunk itself names the authoring-time `.mdx`.
+fn parse_wmo_skybox(bytes: &[u8]) -> Option<String> {
+    let mosb = find_wmo_chunk(bytes, b"BSOM")?;
+    let end = mosb.iter().position(|&b| b == 0).unwrap_or(mosb.len());
+    let raw = std::str::from_utf8(&mosb[..end]).ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(crate::models::model_path(raw))
 }
 
 /// Parse the root's **MOGI** group table (`[flags:u32][bbox:6×f32][nameOff:i32]`, stride 32) into the
@@ -145,6 +175,7 @@ fn parse_wmo_group_infos(bytes: &[u8]) -> Vec<WmoGroupInfo> {
             let flags = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
             WmoGroupInfo {
                 interior: (flags & 0x48) == 0,
+                show_skybox: (flags & 0x40000) != 0,
                 bbox_min: [f(4), f(8), f(12)],
                 bbox_max: [f(16), f(20), f(24)],
             }

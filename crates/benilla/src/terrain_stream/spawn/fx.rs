@@ -127,7 +127,7 @@ pub(super) fn spawn_emitters_for(
     emitters: &[ModelEmitter],
     transform: Transform,
     joints: Option<&[Entity]>,
-    armed_seq: Option<usize>,
+    arm: Option<Entity>,
     fade: (f32, Vec3),
     out: &mut Vec<Entity>,
 ) {
@@ -149,10 +149,13 @@ pub(super) fn spawn_emitters_for(
             owner,
             None, // placed doodads/props are never attached models
             None, // anchor at the placement: an animated bone never drags the risen cloud
-            // A placed doodad's one-time arm, on the spawn clock — but at the slot the arm's
-            // variation roll actually landed on, not slot 0. No host: the arm never changes.
-            match armed_seq {
-                Some(s) => particles::EmitClock::PinnedSeq(s),
+            // A placed doodad's arm is NOT one-time: it re-rolls its variation every play-window
+            // (decision 0768), so the emitters read the slot AND the clip time off the host's live
+            // player each frame — the same lane units and GameObjects use, and what the reference's
+            // `m2_animate` does for every model without distinction. A pinned slot was right only
+            // under the superseded "armed once at load" contract.
+            match arm {
+                Some(root) => particles::EmitClock::Host(root),
                 None => particles::EmitClock::Pinned,
             },
         ) {

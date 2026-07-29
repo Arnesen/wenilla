@@ -274,10 +274,8 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
         Some(KindState::Tooltip(t)) => (t.left_lines.clone(), t.right_lines.clone()),
         _ => return,
     };
-    let mut any_size_dropped = false;
     for rh in lefts.into_iter().chain(rights) {
         if let Some(d) = model.region_data.get_mut(&rh) {
-            any_size_dropped |= d.size.is_some();
             d.text = None;
             d.hidden = true;
             // `measured` is deliberately KEPT. It is a cache whose validity gate is its own
@@ -294,17 +292,17 @@ pub(super) fn clear_content(model: &mut Model, h: FrameHandle) {
             // `WOW_CAPTURE=ui-bag` vs `ui-tooltip`); the gate is
             // `layout_gate::the_hover_re_enter_loop_neither_re_measures_nor_re_solves`.
             //
-            // A wrap-pinned width (the layout pass's wrap consumer) is per-content — the next
-            // content re-derives it. It feeds the measure key, so `append_line`'s wrap re-pin is
-            // what keeps a wrap-flagged line's key stable across the clear (gated by the same
-            // test, whose stack carries one).
-            d.size = None;
+            // The wrap pin (`size`) is likewise KEPT, and for the stronger reason: wiping it here
+            // was the last write that made the hover re-enter loop differ from itself. The wipe
+            // and `append_line`'s re-pin are a round trip inside ONE frame — same cell, same
+            // width, no observable state between them — but each half bumped the layout epoch, so
+            // tier 1 went dirty every hover frame and tier 2 hashed the whole UI to conclude
+            // nothing had moved (~0.65 ms/frame, `WOW_UI_COST=1` on `WOW_CAPTURE=ui-tooltip`, at
+            // solves=0). The pin is now written from the line's own wrap flag at append time —
+            // set for a wrap line, cleared for a plain one — which covers the case this wipe
+            // existed for (a cell whose new content doesn't wrap) without a write per frame.
+            // A hidden, textless cell contributes nothing to layout in between either way.
         }
-    }
-    if any_size_dropped {
-        // The size wipes above are gate-read-set writes; in the hover re-enter loop this fires
-        // every frame and tier 2 (the fingerprint) absorbs the burst — see the epoch's doc.
-        model.touch_layout();
     }
     if let Ok(t) = tip_mut(model, h) {
         t.num_lines = 0;
@@ -490,12 +488,16 @@ pub(super) fn append_line(
     // round-trip that the bag re-enter loop's per-frame content clear kept wiping out: wrapped
     // lines never converged live (the plate under-counted their rows forever — the bread/
     // hearthstone spill). One step, no oscillation.
-    if wrap {
-        if let Some(d) = model.region_data.get_mut(&lh) {
-            d.size = Some((crate::widget::TOOLTIP_WRAP_WIDTH, 0.0));
-            // A size write straight into the gate's read set. In the bag-hover re-enter loop
-            // this re-pins every frame after clear_content's wipe — tier 1 goes dirty and the
-            // FINGERPRINT (tier 2) absorbs the idempotent burst, exactly the pre-epoch behavior.
+    // The wrap pin is written from the LINE's own flag every append — set for a wrap line,
+    // cleared for a plain one — so a cell that changes role can never keep a stale pin, and
+    // `clear_content` needs no wipe of its own (which is what used to make this write differ
+    // every frame). The epoch bump is gated on a REAL change: in the hover re-enter loop the
+    // rebuilt line pins the same width it already carried, so tier 1 stays clean and the
+    // whole-UI fingerprint (tier 2) never runs — see `clear_content`'s note.
+    let pin = wrap.then_some((crate::widget::TOOLTIP_WRAP_WIDTH, 0.0));
+    if let Some(d) = model.region_data.get_mut(&lh) {
+        if d.size != pin {
+            d.size = pin;
             model.touch_layout();
         }
     }

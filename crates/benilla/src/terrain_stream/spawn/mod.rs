@@ -149,7 +149,7 @@ pub(super) fn spawn_loaded_placements(
                         &m.emitters,
                         p.transform,
                         host.as_ref().map(|h| h.joints.as_slice()),
-                        host.as_ref().and_then(|h| h.seq),
+                        host.as_ref().and_then(|h| h.arm),
                         (radius, center),
                         &mut ents,
                     );
@@ -460,7 +460,7 @@ pub(super) fn spawn_loaded_placements(
                 &m.emitters,
                 d.transform,
                 host.as_ref().map(|h| h.joints.as_slice()),
-                host.as_ref().and_then(|h| h.seq),
+                host.as_ref().and_then(|h| h.arm),
                 (radius, center),
                 &mut ents,
             );

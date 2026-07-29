@@ -37,6 +37,7 @@ pub(super) struct WorldReadout<'w, 's> {
     area: Res<'w, crate::terrain_stream::CurrentArea>,
     areas: Option<Res<'w, crate::area::AreaTableRes>>,
     interior: Res<'w, crate::wmo_portal::CurrentAreaInterior>,
+    skybox: Res<'w, crate::wmo_sky::CameraWmoSkybox>,
     streamer: Res<'w, crate::terrain_stream::TerrainStreamer>,
     self_guid: Res<'w, crate::net::SelfGuid>,
     names: ResMut<'w, crate::names::NameCache>,
@@ -91,6 +92,17 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
         };
         if world.interior.0.is_some() {
             line.push_str("  ·  indoors");
+        }
+        // The WMO skybox engagement, right beside the interior claim it derives from: both come off
+        // the camera's down-ray seed, so when the backdrop flips between the building's painted sky
+        // and the Light.dbc gradient, this is the line that says which — and whether the claim moved
+        // under it. From the chair the two are only distinguishable by colour.
+        match world.skybox.0.as_deref() {
+            Some(path) => {
+                let leaf = path.rsplit('\\').next().unwrap_or(path);
+                line.push_str(&format!("  ·  skybox {leaf}"));
+            }
+            None => line.push_str("  ·  sky gradient"),
         }
         ui.label(line);
         ui.label(egui::RichText::new(format!("leaf area {leaf}")).color(OVERLAY_TEXT_DIM));

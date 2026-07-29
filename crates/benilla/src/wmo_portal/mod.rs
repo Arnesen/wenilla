@@ -823,6 +823,7 @@ mod tests {
             portal_refs: Vec::new(),
             group_nav: Vec::new(),
             fogs: Vec::new(),
+            skybox: None,
             group_collision_tris: Vec::new(),
             group_camera_only_tris: Vec::new(),
             group_collision_bounds: Vec::new(),

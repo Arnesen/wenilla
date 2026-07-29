@@ -158,7 +158,12 @@ pub struct ItemInfo {
     pub area: u32,
     /// `Map` — id from `Map.dbc`; a map-bound item's required map (0 = anywhere).
     pub map: u32,
-    /// `BagFamily` — a bag's accepted-item-type bitmask (soul bag, herb bag, …; 0 = a normal bag).
+    /// `BagFamily` — which specialised container an item belongs in (quiver 1, ammo pouch 2, soul
+    /// bag 3, herb 6, enchanting 7, engineering 8, **keys 9**; 0 = an ordinary item / ordinary bag).
+    /// An **enum, not a bitmask**, on this wire: 1.12 tests it for equality (vmangos
+    /// `ItemPrototype.h`'s `enum BagFamily`, and the reference's own `HasKey` `0x48ae90` compares
+    /// `template+0x1d0 == 9`) — it only became a mask in 2.x. `9` is what routes an item into the
+    /// keyring, and what [`crate::ObjectFields::player_keyring_slot`]'s slots hold.
     pub bag_family: u32,
 }
 
@@ -466,17 +471,40 @@ pub const SLOT_PACK_FIRST: u8 = 23;
 /// The first equipped-bag player-array slot (`INVENTORY_SLOT_BAG_START`; bags occupy 19–22).
 pub const SLOT_BAG_FIRST: u8 = 19;
 
+/// `TARGET_FLAG_GAMEOBJECT` — the cast-target bit that carries a GO guid (vmangos
+/// `SpellDefines.h`; its `SpellCastTargets::read` is the only bit here that consumes bytes).
+const TARGET_FLAG_GAMEOBJECT: u16 = 0x0800;
+/// `TARGET_FLAG_LOCKED` — "this cast is opening a lock". Consumes **no** bytes on the read side
+/// (vmangos `SpellCastTargets::read` tests only `TARGET_FLAG_GAMEOBJECT` for the GO guid), but the
+/// real client ORs it into every OPEN_LOCK cast's mask (`0x6e44d9`/`0x6e44e1`, wow-re
+/// `cursor-system.md` §8.4), so the mask we write is the mask it writes.
+const TARGET_FLAG_LOCKED: u16 = 0x4000;
+
 /// Body of `CMSG_USE_ITEM` (VERIFIED vmangos `UseItem::ReadFromWorldPacket` + opcode 171
 /// `Opcodes_1_12_1.h`): `bagIndex` (a bag's player-array slot 19–22, or [`BAG_PLAYER_INVENTORY`]
 /// with an absolute `slot`), `slot` (0-based within the bag), `spellSlot` (which of the template's
-/// 5 spell effects — 0, the "use" effect, for a plain use), then a self-shaped cast-target block
-/// (mask 0 — consumables resolve their own implicit target server-side).
-pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8) -> Vec<u8> {
+/// 5 spell effects — 0, the "use" effect, for a plain use), then a `SpellCastTargets` block.
+///
+/// `go_target` is the **key-in-a-lock** case (decision 0769): opening a locked door or chest with a
+/// key is not a spell cast, it is *using the key at the object*, and the packet is this one with
+/// `TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED` and the object's packed guid (wow-re
+/// `cursor-system.md` §8.4, byte-read: the sender `0x6e54f0` discriminates on cast-item-vs-caster
+/// and the item arm falls to `0x6e57d8 push 0xab`). It matters that this is USE_ITEM and not a bare
+/// cast: `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot **only** when `m_CastItem` is set
+/// (`Spell.cpp:7892`), which only this packet supplies. `None` writes mask 0 — the self-shaped
+/// block a consumable sends, whose implicit target the server resolves itself.
+pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, go_target: Option<u64>) -> Vec<u8> {
     let mut body = Vec::with_capacity(5);
     body.push(bag_index);
     body.push(slot);
     body.push(spell_slot);
-    body.extend_from_slice(&0u16.to_le_bytes());
+    match go_target {
+        None => body.extend_from_slice(&0u16.to_le_bytes()),
+        Some(guid) => {
+            body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
+            crate::wire::write_packed_guid(guid, &mut body).expect("write to Vec cannot fail");
+        }
+    }
     body
 }
 

@@ -16,8 +16,9 @@ use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 
 use super::equip_error::equip_error_key;
 use super::{
-    find_equip_slot, quality_color, slot_guid_count, EquipErrors, BAGS, BAG_SLOT_FIRST, BANK_BAGS,
-    BANK_BAG_ID_FIRST, BANK_CONTAINER, BANK_SLOTS, PACK_SLOTS,
+    find_equip_slot, has_key, keyring_size, quality_color, slot_guid_count, EquipErrors, BAGS,
+    BAG_SLOT_FIRST, BANK_BAGS, BANK_BAG_ID_FIRST, BANK_CONTAINER, BANK_SLOTS, KEYRING_CONTAINER,
+    KEYRING_SLOTS, PACK_SLOTS,
 };
 
 /// The feed's memory of what it last pushed, for per-bag change events. No cooldown-churn gate:
@@ -25,11 +26,25 @@ use super::{
 #[derive(Default)]
 pub(super) struct FeedMemory {
     pushed: HashMap<i64, ContainerState>,
+    /// The last `HasKey()` pushed — kept only so the transition can be logged once instead of
+    /// every frame. It is the gate the entire keyring UI hangs off, and "the keyring never
+    /// appeared" is otherwise indistinguishable from "the button is mis-anchored".
+    had_key: bool,
 }
 
 /// A spell's tooltip text: the $-substituted description (the real "Use: Restores 392 to 653
-/// health over 21 sec" shape), falling back to the bare name while it has none. Shared by the
-/// item trigger lines and the set-bonus lines.
+/// health over 21 sec" shape). Shared by the item trigger lines and the set-bonus lines.
+///
+/// **An empty description yields `None`, and the caller drops the whole line** — byte-verified at
+/// the item builder `0x52d8a0`: it runs the $-expander into a buffer (`0x52da24` → `0x5075f0`),
+/// tests the FIRST BYTE of the result (`0x52da29 mov al,[ebp-0x4f0]` / `0x52da2f test al,al`) and
+/// on zero **jumps clean past the entire trigger block** (`0x52da31 je 0x52dd3d`) — past the
+/// ONUSE/ONEQUIP/ONPROC prefix select and the `"%s %s"` join alike. No prefix, no line.
+///
+/// This used to fall back to the spell's bare NAME, which is where "Use: Opening" on a dungeon key
+/// came from (director-reported): `Opening` (3365/3366/6247/6477) carries no description in
+/// Spell.dbc, so the real client prints nothing and we printed the name. The fallback was an
+/// invention, not a transcription — no such branch exists in the builder.
 fn spell_desc_text(
     spells: Option<&crate::ui_action::Spells>,
     id: u32,
@@ -38,6 +53,8 @@ fn spell_desc_text(
     let sp = spells?;
     let d = sp.catalog.get(id)?;
     match d.description.as_deref().filter(|t| !t.is_empty()) {
+        // The $-expander can still yield an empty string from a non-empty template; the builder's
+        // test is on the EXPANDED text, so ours is too.
         Some(desc) => {
             let ctx = benilla_formats::TokenContext {
                 durations: &sp.durations,
@@ -45,9 +62,9 @@ fn spell_desc_text(
                 lookup: &|i| sp.catalog.get(i),
                 home_area,
             };
-            Some(benilla_formats::substitute(desc, d, &ctx))
+            Some(benilla_formats::substitute(desc, d, &ctx)).filter(|t| !t.is_empty())
         }
-        None => Some(d.name.clone()),
+        None => None,
     }
 }
 
@@ -697,6 +714,54 @@ pub(super) fn feed_containers(
                 },
             );
         }
+
+        // The keyring (decision 0765): container −2, the player array's slots 81.., no container
+        // object of its own — structurally the bank's twin. Its capacity is NOT a wire field: both
+        // the reference (`GetKeyRingSize`) and the server (`GetMaxKeyringSize`) derive it from the
+        // player's level with the same ladder, so [`keyring_size`] computes it here and Lua's
+        // `GetKeyRingSize()` reads it back off this snapshot. Slots past that count are never fed
+        // (they can't hold anything — the server refuses to store there), so the window's own
+        // physIndex-past-size branch hides exactly the right buttons with no keyring-specific code.
+        let size = keyring_size(store.0.unit_level().unwrap_or(1));
+        let mut slots = HashMap::new();
+        for i in 0..size.min(u32::from(KEYRING_SLOTS)) as u8 {
+            let guid = store.0.player_keyring_slot(i).unwrap_or(0);
+            if let Some(mut slot) = resolve_slot(
+                guid,
+                &mut items,
+                icons.as_deref(),
+                &commands,
+                &cooldowns,
+                spell_catalog,
+                &mut names,
+                now,
+                ui_now,
+            ) {
+                slot.locked = pending.contains(KEYRING_CONTAINER, u32::from(i) + 1);
+                slots.insert(u32::from(i) + 1, slot);
+            }
+        }
+        fresh.insert(
+            KEYRING_CONTAINER,
+            ContainerState {
+                name: Some("Keyring".into()),
+                num_slots: size,
+                slots,
+            },
+        );
+
+        // `HasKey()` — the gate that decides whether the keyring exists in the UI at all. Pushed
+        // beside the containers because it is the same knowledge (item templates) read over the
+        // same slot arrays, and it must be fresh on exactly the frames a BAG_UPDATE fires.
+        let key = has_key(&store.0, &mut items, &commands);
+        if key != memory.had_key {
+            debug!(
+                "ui_items: HasKey() -> {key} (keyring {})",
+                if key { "shown" } else { "hidden" }
+            );
+            memory.had_key = key;
+        }
+        script.set_has_key(key);
     }
 
     // Diff whole bags; push + fire BAG_UPDATE per transition, one BAG_UPDATE_DELAYED per batch. A
@@ -715,7 +780,17 @@ pub(super) fn feed_containers(
         for &bag in &changed {
             script.set_container(bag, fresh.get(&bag).cloned());
         }
-        debug!("ui_items: fed {} changed bag(s)", changed.len());
+        // Name the bags, not just the count: "3 changed" can't tell you WHICH container moved, and
+        // the negative ids (−1 bank, −2 keyring) are exactly the ones you go looking for.
+        debug!(
+            "ui_items: fed {} changed bag(s) — {}",
+            changed.len(),
+            changed
+                .iter()
+                .map(|b| format!("{b}:{}", fresh.get(b).map_or(0, |c| c.slots.len())))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         for &bag in &changed {
             // The vault fires the reference's own event, per changed slot with the slot id
             // (`PLAYERBANKSLOTS_CHANGED(slot)` — BankFrame repaints the one button); everything
@@ -786,5 +861,58 @@ mod tests {
         assert_eq!(charges_count(&[]), 0);
         // The election walks slots: a leading sentinel slot doesn't mask a later pool.
         assert_eq!(charges_count(&[slot(433, -1), slot(4057, -10)]), 10);
+    }
+
+    /// The trigger line's **empty-description law**, byte-verified at the item builder
+    /// (`0x52da29`-`0x52da31`: test the expanded text's first byte, jump past the whole block on
+    /// zero) — checked against the REAL 5875 Spell.dbc, because the whole point is what the actual
+    /// data holds.
+    ///
+    /// The director's report: a dungeon key's tooltip read "Use: Opening". `Opening` is a real
+    /// spell with a real name and NO description, and the old code fell back to the name.
+    #[test]
+    fn an_undescribed_spell_prints_no_trigger_line_on_real_data() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let spells = crate::ui_action::Spells {
+            catalog: benilla_formats::load_spell_catalog(&mut chain).expect("Spell.dbc"),
+            forms: benilla_formats::load_shapeshift_forms(&mut chain)
+                .expect("SpellShapeshiftForm.dbc"),
+            ranges: benilla_formats::load_spell_ranges(&mut chain).expect("SpellRange.dbc"),
+            cast_times: benilla_formats::load_spell_cast_times(&mut chain)
+                .expect("SpellCastTimes.dbc"),
+            durations: benilla_formats::load_spell_durations(&mut chain)
+                .expect("SpellDuration.dbc"),
+            radii: benilla_formats::load_spell_radii(&mut chain).expect("SpellRadius.dbc"),
+        };
+
+        // Every "Opening"/"Closing" the lock chain can reach — the key spells (3365/3366/6247/6477
+        // are all literally named "Opening") carry no description, so NO Use: line may be built.
+        for id in [3365u32, 3366, 6246, 6247, 6477, 21651] {
+            let d = spells.catalog.get(id).expect("a real Spell.dbc row");
+            assert!(
+                !d.name.is_empty(),
+                "spell {id} has a name — which is exactly what must NOT leak into the tooltip"
+            );
+            assert_eq!(
+                super::spell_desc_text(Some(&spells), id, None),
+                None,
+                "spell {id} ({:?}) has no description, so the reference prints no trigger line",
+                d.name
+            );
+        }
+
+        // The control: a described spell still produces its line, so this is a law about EMPTY
+        // descriptions and not a blanket mute. Fireball (133) is the tooltip suite's own anchor.
+        let fireball = super::spell_desc_text(Some(&spells), 133, None)
+            .expect("a described spell still yields its line");
+        assert!(
+            fireball.contains("damage"),
+            "expected the substituted Fireball description, got {fireball:?}"
+        );
     }
 }

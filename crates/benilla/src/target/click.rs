@@ -218,7 +218,7 @@ pub(super) fn act_on_right_click(
                     &net,
                 ) {
                     GoAction::Use if cursor.unable => {}
-                    GoAction::OpenLock(_) if cursor.unable => {}
+                    GoAction::OpenLock(_) | GoAction::OpenByKey { .. } if cursor.unable => {}
                     GoAction::Use => {
                         debug!("right-click gameobject use: {guid:#x}");
                         let _ = net.0.send(ClientCommand::GameObjUse { guid });
@@ -245,6 +245,24 @@ pub(super) fn act_on_right_click(
                         let _ = net.0.send(ClientCommand::CastSpellGameObject {
                             spell_id,
                             go_guid: guid,
+                        });
+                    }
+                    GoAction::OpenByKey {
+                        bag_index,
+                        slot,
+                        spell_index,
+                    } => {
+                        // No reagent/totem pre-check here, unlike the skill arm above: that gate is
+                        // about a Mining cast without a pick, and a key has no reagents — the ref's
+                        // `0x6e4000` would pass every key trivially.
+                        debug!(
+                            "right-click gameobject open-by-key: use item ({bag_index},{slot}) blk {spell_index} at {guid:#x}"
+                        );
+                        let _ = net.0.send(ClientCommand::UseItem {
+                            bag_index,
+                            slot,
+                            spell_index,
+                            go_target: Some(guid),
                         });
                     }
                     GoAction::Refuse(err) => {
@@ -377,9 +395,19 @@ enum GoAction {
     /// No lock (or no lock data): `CMSG_GAMEOBJ_USE` — door / lever / quest object / mailbox /
     /// unlocked chest.
     Use,
-    /// A lock we can open: cast this spell at the object — a known `OPEN_LOCK` (chest / vein / herb
-    /// / a picked lock), or a carried key item's own ON_USE spell.
+    /// A lock we can open with a **known skill spell**: cast it at the object — a known
+    /// `OPEN_LOCK` (chest / vein / herb / a picked lock). `CMSG_CAST_SPELL`.
     OpenLock(u32),
+    /// A lock whose **KEY** slot we satisfy: *use the key at the object* — `CMSG_USE_ITEM` with the
+    /// key's wire position and `TARGET_FLAG_GAMEOBJECT`, NOT a bare cast of the key's spell
+    /// (decision 0769; wow-re `cursor-system.md` §8.4 — "the client never sends a bare
+    /// CMSG_CAST_SPELL for a key lock"). The distinction is the whole ballgame: `Spell::CanOpenLock`
+    /// honours a `Lock.dbc` KEY slot only when `m_CastItem` is set, which only USE_ITEM supplies.
+    OpenByKey {
+        bag_index: u8,
+        slot: u8,
+        spell_index: u8,
+    },
     /// A lock present that we cannot open — the client-local refusal (§8.4: `DisplayError`, **no
     /// packet**). `Some` = the red toast to queue; `None` = the ref is silent for this case too.
     Refuse(Option<crate::ui_action::UiError>),
@@ -403,13 +431,17 @@ enum KeyFact {
 ///
 /// The satisfaction decision itself lives in [`super::lock::resolve_lock`] so the cursor's `usable`
 /// asks exactly the same question (§4a/§8.7 — the icon and the click agree by construction). Here
-/// we only turn its answer into a packet: a satisfied **skill** slot casts the matched opener; a
-/// satisfied **key** slot casts that key item's ON_USE spell (the reference's `0x5d8c80` → `CastSpell`
-/// path — note that vmangos's `CanOpenLock` only honours a key when the cast carries `m_CastItem`,
-/// i.e. came in as `CMSG_USE_ITEM`, so on this server the faithful cast is answered with a refusal
-/// rather than an open; that gap is the server's, and it is better than the silent dead click the
-/// deferral used to give a player holding the right key); an unmet lock takes §8.8's toast routing
-/// and sends nothing.
+/// we only turn its answer into a packet, and the lock split has **three** arms, not two (wow-re
+/// `cursor-system.md` §8.4, VERIFIED): lockless → `CMSG_GAMEOBJ_USE`; a satisfied **skill** slot →
+/// `CMSG_CAST_SPELL` of the matched opener; a satisfied **key** slot → `CMSG_USE_ITEM` carrying the
+/// key's position and the GO as its cast target ([`GoAction::OpenByKey`]). An unmet lock takes
+/// §8.8's toast routing and sends nothing.
+///
+/// The key arm sent a bare cast until decision 0769, which is why keys never opened anything: the
+/// server honours a KEY slot only when the cast carries `m_CastItem` (`Spell::CanOpenLock`,
+/// `Spell.cpp:7892`), and only `CMSG_USE_ITEM` supplies it. That was recorded here as the server's
+/// gap; it was ours, and wow-re's note says so in the same breath — "the client never sends a bare
+/// CMSG_CAST_SPELL for a key lock".
 fn resolve_go_action(
     guid: u64,
     inputs: &mut GoLockInputs,
@@ -468,14 +500,37 @@ fn resolve_go_action(
             ));
         }
     };
-    // A key we carry: cast its ON_USE spell at the object (`0x5f85aa`). The template is ask-once —
-    // a miss queries and does nothing this click, exactly like the toast's own name miss.
+    // A key we carry: **use it at the object**. The resolver `0x5f85aa` only hands the caller the
+    // key's ON_USE spell id AND the item object itself; it is the sender `0x6e54f0` that then
+    // discriminates on cast-item-vs-caster and takes the item arm — `0x6e57d8 push 0xab`,
+    // CMSG_USE_ITEM carrying `u8 bag · u8 slot · u8 spellSlot · SpellCastTargets(GO)`, with no raw
+    // spell id at all (the server re-resolves the Item* from bag+slot). Decision 0769.
+    //
+    // So what the wire needs is the key's POSITION, which the same walker that found it gives us.
+    let Some(store) = me_store else {
+        return GoAction::Refuse(None);
+    };
+    let Some((bag_index, slot, _)) = crate::ui_items::find_item(
+        &store.0,
+        &inputs.items,
+        key_entry,
+        crate::ui_items::ItemSearch::default(),
+    ) else {
+        // Held a moment ago (the resolver said so) and gone now — nothing to send.
+        return GoAction::Refuse(None);
+    };
+    // The template is ask-once — a miss queries and does nothing this click, exactly like the
+    // toast's own name miss. `use_spell_index` is the BLOCK ordinal, the packet's third byte.
     match inputs
         .items
         .template(key_entry, 0, net)
-        .and_then(|i| i.use_spell.as_ref().map(|s| s.spell_id))
+        .and_then(|i| i.use_spell_index())
     {
-        Some(spell_id) => GoAction::OpenLock(spell_id),
+        Some(spell_index) => GoAction::OpenByKey {
+            bag_index,
+            slot,
+            spell_index,
+        },
         None => GoAction::Refuse(None),
     }
 }

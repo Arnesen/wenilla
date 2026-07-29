@@ -2766,3 +2766,100 @@ pub fn texmodescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     );
     Ok(())
 }
+
+/// Sweep every WMO **root** in the chain and report the two halves of the skybox mechanism: which
+/// roots author a **MOSB** skybox model, and which carry groups flagged `0x40000`
+/// ([`benilla_formats::WmoGroupInfo::show_skybox`]).
+///
+/// This is the instrument that *identifies* the flag. `0x40000` is not documented anywhere we can
+/// cite, so its meaning is established by correlation: if the bit is set on a group **iff** that
+/// group's root names a skybox, the bit is the per-group "draw the root's skybox here" gate and
+/// nothing else. The summary prints that cross-tab, so the claim is re-checkable in one command
+/// against the shipped files rather than trusted from a decision record.
+///
+/// It is also the population instrument for the mechanism: which buildings in 1.12 replace the
+/// `Light.dbc` gradient dome with an authored sky, and how much of each one does it (Stratholme's
+/// city shell sets the bit on its open streets — which are authored as INTERIOR groups — but not on
+/// its enclosed rooms).
+pub fn skyboxscan(chain: &mut Chain) -> Result<()> {
+    // Roots only: a group file is `<stem>_NNN.wmo`, and only the root carries MOSB/MOGI.
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".wmo")
+                && !l
+                    .strip_suffix(".wmo")
+                    .and_then(|s| s.rsplit('_').next())
+                    .is_some_and(|tail| tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect();
+
+    // The cross-tab that identifies the flag: roots with/without a MOSB × groups with/without 0x40000.
+    let (mut both, mut mosb_only, mut flag_only, mut neither) = (0u32, 0u32, 0u32, 0u32);
+    let mut scanned = 0u32;
+    let mut hits: Vec<(String, String, usize, usize)> = Vec::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let Ok(root) = benilla_formats::parse_wmo_root(&bytes) else {
+            continue; // a group file that slipped the name filter, or a truncated root
+        };
+        scanned += 1;
+        let groups = root.group_infos();
+        let flagged = groups.iter().filter(|g| g.show_skybox).count();
+        match (root.skybox(), flagged > 0) {
+            (Some(sky), true) => {
+                both += 1;
+                hits.push((name, sky.to_string(), flagged, groups.len()));
+            }
+            (Some(sky), false) => {
+                mosb_only += 1;
+                hits.push((
+                    name,
+                    format!("{sky}  (NO group sets 0x40000)"),
+                    0,
+                    groups.len(),
+                ));
+            }
+            (None, true) => {
+                flag_only += 1;
+                hits.push((name, "(no MOSB)".into(), flagged, groups.len()));
+            }
+            (None, false) => neither += 1,
+        }
+    }
+
+    hits.sort();
+    println!("{:<62} {:>7}  skybox model", "WMO root", "groups");
+    for (name, sky, flagged, total) in &hits {
+        println!("{name:<62} {flagged:>3}/{total:<3}  {sky}");
+    }
+    println!();
+    println!("{scanned} WMO root(s) scanned");
+    println!("  MOSB skybox AND >=1 group with 0x40000 : {both}");
+    println!("  MOSB skybox but NO group with 0x40000  : {mosb_only}");
+    println!("  group(s) with 0x40000 but NO MOSB      : {flag_only}");
+    println!("  neither                                : {neither}");
+    if flag_only == 0 {
+        println!(
+            "\n=> 0x40000 NEVER appears without a MOSB ({flag_only} counter-examples in {scanned} \
+             roots): the bit is the per-group 'draw this root's MOSB skybox' gate."
+        );
+        println!(
+            "   The converse does NOT hold ({mosb_only} root(s) name a skybox no group asks for), \
+             so the GATE IS THE FLAG, not the chunk — a renderer keyed off MOSB alone would show \
+             skies the reference never shows."
+        );
+    } else {
+        println!(
+            "\n=> {flag_only} group(s) set 0x40000 with no MOSB to draw — the flag is NOT the \
+             skybox gate; re-derive it before building on it."
+        );
+    }
+    Ok(())
+}

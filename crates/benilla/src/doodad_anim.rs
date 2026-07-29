@@ -2,22 +2,28 @@
 //! props) animate: flags wave, windmills turn, flame bones jiggle.
 //!
 //! Byte ground (wow-5875-re `system/animation/scratch/doodad-anim-host.md`, VERIFIED): a doodad's M2
-//! instance is armed **once at load** — bone 0, the model's file-order-first sequence
-//! (`animations[0].id`), `linkFlag=1` — and the kernel loops it forever via its own modulo-wrap;
-//! **global sequences loop with zero arming**, clock-driven; and the kernel ticks as a **draw-time
-//! side effect**, so a culled model is simply not evaluated. Because sampling is clock-indexed
-//! (`cursor = clock − startOffset`), a re-appearing model shows the pose the shared clock dictates —
-//! pausing costs nothing and drifts nothing.
+//! instance is armed at load — bone 0, animation id 0, `linkFlag=1` — and then **re-arms itself every
+//! play-window, for ever**, rolling a fresh frequency-weighted variation each time (§5, decision
+//! 0768: the watchdog `0x719370` fires on `now ≥ windowHi`, enqueues the doodad-only completion
+//! callback `0x6951b0` that `0x695100` installed at `[model+0x70]`, and that callback re-runs op4
+//! with `variationIdx = -1`, which writes the next `windowHi` and clears the latch — self-sustaining).
+//! **Global sequences loop with zero arming**, clock-driven. The cycle is gated on **linkage** — the
+//! per-frame walk `0x7074b0` only advances models spliced into the scene list, which the doodad drain
+//! `0x683f80` does per **in-range** doodad — not on the draw, so a doodad behind the camera keeps
+//! cycling. Because sampling is clock-indexed (`cursor = clock − startOffset`), a re-appearing model
+//! shows the pose the shared clock dictates — pausing costs nothing and drifts nothing.
 //!
 //! benilla's translation: the spawn site ([`crate::terrain_stream`]) classifies each placed model by
 //! [`classify`] — the ~90% with no animated channel stay on today's static path (measured,
 //! `benilla-extract doodadscan`) — and an animated one spawns the skinned twin + a joint hierarchy
-//! under an anim-root entity carrying [`DoodadAnimHost`]: an `AnimationPlayer` looping the
-//! first-sequence clip (the one-time arm), and/or a [`GlobalSeqDrive`] for the free-running channels.
-//! [`gate_doodad_anim`] here is the draw-time tick made explicit: animation runs iff any of the
-//! doodad's submeshes is actually drawn (the `Visibility` verdict the debug-panel authority composes
-//! from far-clip + the size-bucketed distance fade + the WMO portal cull), and a resume seeks to
-//! `(now − spawned_at) mod duration` — the ref's shared-clock phase, exactly.
+//! under an anim-root entity carrying [`DoodadAnimHost`]: an `AnimationPlayer` on the armed clip,
+//! re-rolled every window by [`reroll_doodad_variation`], and/or a [`GlobalSeqDrive`] for the
+//! free-running channels. [`gate_doodad_anim`] here is the draw-time tick made explicit: animation
+//! runs iff any of the doodad's submeshes is actually drawn (the `Visibility` verdict the debug-panel
+//! authority composes from far-clip + the size-bucketed distance fade + the WMO portal cull), and a
+//! resume seeks to `(now − armed_at) mod duration` — the ref's shared-clock phase, measured from the
+//! current arm. Note the two gates are deliberately different: the *draw* gates the pose, the
+//! *linkage* (here: residency) gates the variation cycle.
 
 use bevy::animation::graph::AnimationNodeIndex;
 use bevy::animation::AnimatedBy;
@@ -28,6 +34,44 @@ use bevy::prelude::*;
 use benilla_assets::{bone_target_id, AnimClip, M2Model, ModelAnimations, ModelSkeleton};
 
 use crate::creature_anim::GlobalSeqDrive;
+
+/// The client's single global `rand()` stream — the MSVC LCG at `0x7400e5`, returning `[0, 32767]`
+/// (wow-re `doodad-anim-host.md` §5, decision 0768). Every doodad's variation roll draws from **one**
+/// shared stream, which is what de-syncs a stand of identical props: not a per-placement seed, just
+/// consecutive draws off one sequence.
+///
+/// This replaced a position-derived hash. The hash de-synced instances correctly but was *permanent* —
+/// the same placement rolled the same variation on every re-stream and every run — which is exactly
+/// how the Blasted Lands lightning ended up striking from one fixed spot for ever instead of wandering
+/// the Tainted Scar (bug B63's residual). Captures are unaffected: [`spawn_anim_host`] returns `None`
+/// under a capture scenario, so no doodad animates in a golden frame and determinism is untouched.
+#[derive(Resource)]
+pub(crate) struct AnimRng(u32);
+
+impl Default for AnimRng {
+    fn default() -> Self {
+        Self(1) // the CRT's own initial seed
+    }
+}
+
+impl AnimRng {
+    /// One `rand()` draw: `seed = seed·214013 + 2531011`, result `(seed >> 16) & 0x7fff`.
+    fn draw(&mut self) -> u16 {
+        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
+        ((self.0 >> 16) & 0x7fff) as u16
+    }
+
+    /// The play-window's replay count `R = max(1, min + ((rand()·(max−min)) >> 15))` — the reference's
+    /// `windowHi = now + span·R` (wow-re §5). `replay = (0, 0)`, the overwhelming majority and the
+    /// lightning's own value, always yields `R = 1`: one loop per window, so the variation re-rolls
+    /// every single pass. The draw is taken unconditionally — it is one sub-expression of the
+    /// reference's formula, so the shared stream advances the same way whatever the span.
+    fn replay_count(&mut self, replay: (u32, u32)) -> u32 {
+        let (lo, hi) = replay;
+        let r = lo + ((u32::from(self.draw()) * hi.saturating_sub(lo)) >> 15);
+        r.max(1)
+    }
+}
 
 /// What a placed doodad model animates — decision 0130's content gate, decided per model at spawn.
 pub(crate) enum DoodadAnimTier<'a> {
@@ -77,16 +121,20 @@ pub(crate) struct AnimHostSpawn {
     pub slot: u16,
     /// The looping first-sequence node + duration, `None` on the gseq-only tier.
     pub clip: Option<(AnimationNodeIndex, f32)>,
-    /// The **file sequence slot** this placement's arm actually rolled ([`AnimClip::seq_index`]) —
-    /// the axis every per-sequence bake is keyed on, and what the placement's particle emitters
-    /// must sample their rate/gate tracks against. `None` on the gseq-only tier (no arm).
+    /// The **file sequence slot** the load arm seeded ([`AnimClip::seq_index`]) — the axis every
+    /// per-sequence bake is keyed on. `None` on the gseq-only tier (no arm).
     ///
-    /// This exists because the variation roll below is a *per-placement* decision that more than
-    /// one consumer depends on. The emitters used to pin slot 0 regardless, which silently killed
-    /// every emitter whose rate is keyed only in a later variation — 947 of them across 184 models
-    /// (`benilla-extract partslotscan`), including the Blasted Lands lightning strike that keys
-    /// its whole burst in slot 1 and therefore never fired once (decision 0760, bug B63).
+    /// This is the *loader's* var-0 seed only. It is no longer what the placement ends up playing:
+    /// [`reroll_doodad_variation`] overrides it on the first frame with a real weighted roll and
+    /// keeps re-rolling every play-window (decision 0768), exactly as the reference's holder setup
+    /// `0x695100` lands its `variationIdx = -1` arm after the loader's var-0 one. Consumers that
+    /// must track the *current* slot therefore read the host's live player instead — the emitters
+    /// ride [`crate::particles::EmitClock::Host`].
     pub seq: Option<usize>,
+    /// The animation id the arm rolls its variation over (id 0 — the loader-idle seed's id, resolved
+    /// through the model's own `playableAnimationLookup`). `None` on the gseq-only tier: nothing was
+    /// armed, so there is no play-window and nothing to re-roll.
+    pub anim_id: Option<u16>,
 }
 
 /// Spawn the animation host for one placed M2, if [`classify`] says it animates: an anim-root entity
@@ -139,35 +187,33 @@ pub(crate) fn spawn_anim_host(
     }
     let mut clip_info = None;
     let mut armed_seq = None;
+    let mut arm_id = None;
     if let DoodadAnimTier::FirstSeq(head) = tier {
-        // The effective load arm rolls `variationIdx = −1` — a frequency-weighted pick over the
-        // first sequence's variation chain (wow-re `doodad-anim-host.md` §4a: the holder setup
-        // `0x695100` re-arms over the loader's var-0 seed, byte-cited; §5 pair still to close).
-        // Seeded off the placement position, not a global RNG: deterministic per placement (a
-        // re-streamed tile re-picks the same variation — the reference re-rolls, invisible either
-        // way), and instances de-sync exactly like the reference (14 gryphon roosts stop fidgeting
-        // in lockstep). Single-variation chains (the overwhelming majority) pick the head — today's
-        // behavior, so the roll costs nothing there.
-        let t = transform.translation;
-        let roll = ((t.x.to_bits() ^ t.y.to_bits().rotate_left(11) ^ t.z.to_bits().rotate_left(22))
-            .wrapping_mul(0x9E37_79B9)
-            >> 17) as u16
-            & 0x7fff;
-        let clip = anims.pick_variation(head.anim_id, roll).unwrap_or(head);
+        // The **loader's** seed only — `0x70ebd0`'s var-0 arm on the head of the chain. The real
+        // pick is the holder setup's second op4 call (`0x695100`, `variationIdx = -1`), which lands
+        // *after* it and is the effective arm (wow-re §4a); here that second arm is
+        // [`reroll_doodad_variation`]'s first pass, which fires the same frame because the host is
+        // born with an already-expired window. Splitting it that way is not a convenience: it is
+        // the one code path the reference has, since every later re-arm is byte-identical to the
+        // holder's first one.
         let mut player = AnimationPlayer::default();
-        player.play(clip.node).repeat();
-        commands
-            .entity(root)
-            .insert((player, AnimationGraphHandle(anims.graph.clone())));
+        player.play(head.node).repeat();
+        commands.entity(root).insert((
+            player,
+            AnimationGraphHandle(anims.graph.clone()),
+            // The re-roll needs the variation chain, and — now that a placed doodad's played
+            // sequence CHANGES — so does every per-sequence consumer that resolves off this host
+            // (`playing_seq`): the emitters' rate/enable tracks, the material-alpha sampler.
+            anims.clone(),
+        ));
         for (i, &j) in joints.iter().enumerate() {
             commands
                 .entity(j)
                 .insert((bone_target_id(i as u16), AnimatedBy(root)));
         }
-        clip_info = Some((clip.node, clip.duration));
-        // The slot the roll landed on — not necessarily 0, and every per-sequence bake the
-        // placement's other consumers read is keyed on it (see [`AnimHostSpawn::seq`]).
-        armed_seq = Some(clip.seq_index);
+        clip_info = Some((head.node, head.duration));
+        armed_seq = Some(head.seq_index);
+        arm_id = Some(head.anim_id);
     }
     if let Some(drive) = GlobalSeqDrive::new(&anims.global_bones, &joints) {
         commands.entity(root).insert(drive);
@@ -179,6 +225,7 @@ pub(crate) fn spawn_anim_host(
         slot,
         clip: clip_info,
         seq: armed_seq,
+        anim_id: arm_id,
     })
 }
 
@@ -199,12 +246,82 @@ pub(crate) struct DoodadAnimHost {
     pub fade: (f32, Vec3),
     /// The looping first-sequence graph node + its duration (secs); `None` on the gseq-only tier.
     pub clip: Option<(AnimationNodeIndex, f32)>,
-    /// `Time::elapsed_secs` at spawn — the clock origin. A resume seeks the player to
-    /// `(now − spawned_at) mod duration` and re-seats the [`GlobalSeqDrive`] clock, so phase is a
-    /// pure function of the shared clock (the ref's arm-time cursor), not of pause history.
+    /// `Time::elapsed_secs` at spawn — the [`GlobalSeqDrive`]'s clock origin. Global sequences run
+    /// on the free shared clock with no arm at all, so a resume re-seats them from this and phase
+    /// stays a pure function of the shared clock, never of pause history.
     pub spawned_at: f32,
+    /// `Time::elapsed_secs` at the current **arm** — the player's clock origin, which is NOT
+    /// `spawned_at` any more: the variation re-arms every play-window, and a resume must seek to
+    /// `(now − armed_at) mod duration` or it lands at the phase of a clip this host stopped playing
+    /// several windows ago.
+    pub armed_at: f32,
+    /// When the armed play-window ends, on the shared clock — the reference's `windowHi`
+    /// (`[model+0xac]`), rewritten by every arm. `now ≥ window_hi` ⇒ re-roll. A host is born with
+    /// this at `NEG_INFINITY` so the first frame performs the holder's `variationIdx = -1` arm.
+    pub window_hi: f32,
+    /// The animation id to re-roll over ([`AnimHostSpawn::anim_id`]); `None` on the gseq-only tier,
+    /// which has no arm and therefore no window.
+    pub anim_id: Option<u16>,
     /// Whether the host was ticking last frame (edge-triggered pause/resume).
     pub active: bool,
+}
+
+/// The doodad's self-sustaining re-arm (decision 0768, wow-re `doodad-anim-host.md` §5): when the
+/// armed play-window ends, roll a fresh frequency-weighted variation of the same animation id, snap
+/// to it, and write the next window. This is the whole of bug B63's residual — the Blasted Lands
+/// lightning keys its entire burst in a 5.0 %-weighted variation (`frequency` 1638 of 32767), so
+/// with a once-at-load pick ~1.5 of the Tainted Scar's 31 placements strobed from a *fixed* spot
+/// every 1.3 s for ever, while the reference re-rolls all 31 every window and the strike wanders.
+///
+/// Two details that are easy to get wrong, both byte-pinned:
+/// - **The re-arm is a snap, not a blend** (`blendFlag = 0` at `0x6951c8`) — hence `stop_all` before
+///   the play rather than a cross-fade.
+/// - **The window advances on linkage, not on the draw.** The reference's per-frame walk covers
+///   every model spliced into the scene list, which the doodad drain does per *in-range* doodad, so
+///   a doodad behind the camera keeps cycling. This system therefore runs over ALL hosts and never
+///   consults [`DoodadAnimHost::active`] — gating it on the draw instead would freeze the whole
+///   field while you looked away and then re-roll all 31 placements on the same frame you turned
+///   back, a burst of simultaneous strikes that the reference cannot produce.
+///
+/// A host that is not currently drawn still re-rolls; it just updates [`DoodadAnimHost::clip`] and
+/// leaves the (stopped) player alone, so [`gate_doodad_anim`]'s resume arms whatever the latest
+/// window rolled.
+fn reroll_doodad_variation(
+    time: Res<Time>,
+    mut rng: ResMut<AnimRng>,
+    mut hosts: Query<(
+        &mut DoodadAnimHost,
+        &ModelAnimations,
+        Option<&mut AnimationPlayer>,
+    )>,
+) {
+    let now = time.elapsed_secs();
+    for (mut host, anims, player) in &mut hosts {
+        let Some(anim_id) = host.anim_id else {
+            continue; // gseq-only: free-clock loops, never armed (§1)
+        };
+        if now < host.window_hi {
+            continue;
+        }
+        let Some(clip) = anims.pick_variation(anim_id, rng.draw()) else {
+            // No chain for this id (a model whose sequence set changed under us): stop asking.
+            host.anim_id = None;
+            continue;
+        };
+        let (node, duration) = (clip.node, clip.duration);
+        let replay = rng.replay_count(clip.replay);
+        host.armed_at = now;
+        // `span · R` — for `replay = (0, 0)` that is exactly one loop, so the roll repeats every
+        // pass. A zero-duration clip would make this a busy loop, so it costs one window minimum.
+        host.window_hi = now + (duration * replay as f32).max(f32::EPSILON);
+        host.clip = Some((node, duration));
+        if host.active {
+            if let Some(mut p) = player {
+                p.stop_all(); // the snap
+                p.play(node).repeat();
+            }
+        }
+    }
 }
 
 /// The draw gate: pause a doodad's animation when none of its submeshes is drawn, resume — seeking
@@ -277,7 +394,10 @@ fn gate_doodad_anim(
                     let anim = p.start(node);
                     anim.repeat();
                     if duration > 0.0 {
-                        anim.seek_to(t.rem_euclid(duration));
+                        // Phase from the current ARM, not from spawn: the variation re-arms every
+                        // play-window, so `spawned_at` names a clip this host may have stopped
+                        // playing many windows ago (decision 0768).
+                        anim.seek_to((now - host.armed_at).rem_euclid(duration));
                     }
                 }
             } else {
@@ -532,7 +652,16 @@ impl Plugin for DoodadAnimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UvAnimMaterials>();
         app.init_resource::<TintAnimMaterials>();
-        app.add_systems(PostUpdate, gate_doodad_anim.before(AnimationSystems));
+        app.init_resource::<AnimRng>();
+        // The re-roll runs BEFORE the draw gate: a window that expires this frame must arm its new
+        // clip before the gate decides what to resume, or a host re-appearing on the same frame
+        // resumes the previous window's variation for one frame.
+        app.add_systems(
+            PostUpdate,
+            (reroll_doodad_variation, gate_doodad_anim)
+                .chain()
+                .before(AnimationSystems),
+        );
         // Before the visibility authority (`ModelVisSet`): it composes `MatAnim::current` into the
         // render-alpha tag the same frame.
         app.add_systems(
@@ -751,6 +880,221 @@ mod tests {
         ));
     }
 
+    /// The client's `rand()` is the MSVC LCG, and its seed-1 stream is the textbook one. Pinning the
+    /// first draws keeps the weighted roll on the reference's actual sequence rather than on "some
+    /// uniform generator" (wow-re `_rand 0x7400e5`, decision 0768).
+    #[test]
+    fn the_anim_rng_is_the_reference_msvc_stream() {
+        let mut rng = AnimRng::default();
+        let first: Vec<u16> = (0..6).map(|_| rng.draw()).collect();
+        assert_eq!(first, vec![41, 18467, 6334, 26500, 19169, 15724]);
+        assert!(first.iter().all(|&v| v <= 0x7fff), "range is [0, 32767]");
+    }
+
+    /// `R = max(1, min + ((rand()·(max−min)) >> 15))`. `(0, 0)` — the overwhelming majority, and the
+    /// lightning's own value — pins to 1, so the window is exactly one loop and the variation
+    /// re-rolls every pass.
+    #[test]
+    fn the_replay_window_is_one_loop_for_the_common_case() {
+        let mut rng = AnimRng::default();
+        for _ in 0..32 {
+            assert_eq!(rng.replay_count((0, 0)), 1);
+        }
+        // A real range stays inside it, and never degenerates to 0 windows.
+        for _ in 0..64 {
+            let r = rng.replay_count((2, 5));
+            assert!((2..=5).contains(&r), "R = {r} outside [2, 5]");
+        }
+    }
+
+    /// The lightning's own chain, read off the bytes (`benilla-extract m2seq` on
+    /// `World\Generic\PassiveDoodads\ParticleEmitters\BlastedLandsLightningbolt01.M2`): two
+    /// variations of animation id 0, weights 31129 / 1638 — so slot 1, which is where all four
+    /// emitters key their entire burst, carries exactly 5.0 %.
+    fn lightning_anims() -> ModelAnimations {
+        let mut a = anims(vec![seq_clip(0, 0, 1), seq_clip(0, 1, 2)], Some(0), false);
+        a.clips[0].frequency = 31129;
+        a.clips[0].duration = 1.333;
+        a.clips[1].frequency = 1638;
+        a.clips[1].duration = 1.300;
+        a
+    }
+
+    fn reroll_app() -> App {
+        // Deliberately NOT MinimalPlugins: `TimePlugin` drives `Time` off the real clock, which
+        // would clobber the manual advance these tests need to step whole play-windows.
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.init_resource::<AnimRng>();
+        app.add_systems(Update, reroll_doodad_variation);
+        app
+    }
+
+    fn lightning_host(app: &mut App) -> Entity {
+        app.world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: Vec::new(),
+                    fade: (1.0, Vec3::ZERO),
+                    clip: None,
+                    spawned_at: 0.0,
+                    armed_at: 0.0,
+                    window_hi: f32::NEG_INFINITY,
+                    anim_id: Some(0),
+                    active: true,
+                },
+                lightning_anims(),
+                AnimationPlayer::default(),
+            ))
+            .id()
+    }
+
+    /// **Bug B63's residual, and the whole of decision 0768.** A placed doodad re-rolls its
+    /// frequency-weighted variation every play-window, for ever — it does NOT hold the one it
+    /// picked at load.
+    ///
+    /// Under the superseded contract the pick was once-at-load *and* seeded off the placement's
+    /// world position, so a Tainted Scar bolt that rolled slot 0 was silent for the life of the
+    /// session and one that rolled slot 1 strobed from that same fixed spot every 1.3 s for ever.
+    /// The reference re-rolls all 31 placements every window, which is why its strikes wander.
+    #[test]
+    fn a_placed_doodad_rerolls_its_variation_every_play_window() {
+        let mut app = reroll_app();
+        let host = lightning_host(&mut app);
+
+        // Frame 1: born with an expired window ⇒ the holder's `variationIdx = -1` arm lands at once.
+        app.update();
+        let armed = |app: &App| {
+            app.world()
+                .entity(host)
+                .get::<DoodadAnimHost>()
+                .unwrap()
+                .clip
+        };
+        assert!(armed(&app).is_some(), "the first frame arms");
+
+        // Step whole windows and record which variation each one landed on.
+        let mut seen = std::collections::HashMap::new();
+        for _ in 0..400 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(1400));
+            app.update();
+            let h = app.world().entity(host).get::<DoodadAnimHost>().unwrap();
+            let (node, duration) = h.clip.expect("a window always leaves something armed");
+            // R = 1 for `replay = (0, 0)`, so the window is exactly the armed clip's own length.
+            assert!(
+                (h.window_hi - h.armed_at - duration).abs() < 1e-3,
+                "window {} != clip duration {duration}",
+                h.window_hi - h.armed_at
+            );
+            *seen.entry(node).or_insert(0u32) += 1;
+        }
+
+        let slot0 = seen.get(&AnimationNodeIndex::new(1)).copied().unwrap_or(0);
+        let slot1 = seen.get(&AnimationNodeIndex::new(2)).copied().unwrap_or(0);
+        assert_eq!(slot0 + slot1, 400, "every window arms one of the two");
+        // The bug was a placement stuck on ONE variation for ever. Both must occur.
+        assert!(
+            slot1 > 0,
+            "the 5 % strike variation never came up in 400 windows — the bolt is stuck again"
+        );
+        assert!(slot0 > 0, "the 95 % silent variation never came up");
+        // A sanity band, not a distribution test — 400 windows off one fixed seed is far too few
+        // for that (it lands on 10, ~2.3σ under the mean, unremarkable). The weighting itself was
+        // measured separately over 200 000 draws: **4.9665 %** taken at the real
+        // two-draws-per-window stride, against the authored 1638/32768 = 4.9988 %. MSVC's LCG shows
+        // no stride bias here, which is worth having checked: the variation roll and the replay
+        // count come off the same stream, and a strided LCG is exactly where a rare variation could
+        // quietly under-fire and leave the field half as active as the reference's.
+        assert!(
+            (2..=60).contains(&slot1),
+            "slot 1 came up {slot1}/400 — far enough off its authored 5 % to suspect the roll"
+        );
+    }
+
+    /// The gseq-only tier has no arm, so it has no play-window and nothing to re-roll: its channels
+    /// are free-clock loops the reference drives with zero arming (§1).
+    #[test]
+    fn a_gseq_only_host_never_rerolls() {
+        let mut app = reroll_app();
+        let host = app
+            .world_mut()
+            .spawn((
+                DoodadAnimHost {
+                    meshes: Vec::new(),
+                    fade: (1.0, Vec3::ZERO),
+                    clip: None,
+                    spawned_at: 0.0,
+                    armed_at: 0.0,
+                    window_hi: f32::NEG_INFINITY,
+                    anim_id: None,
+                    active: true,
+                },
+                anims(Vec::new(), None, true),
+                AnimationPlayer::default(),
+            ))
+            .id();
+        for _ in 0..8 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(1400));
+            app.update();
+        }
+        let h = app.world().entity(host).get::<DoodadAnimHost>().unwrap();
+        assert!(h.clip.is_none(), "nothing was ever armed");
+        assert_eq!(h.window_hi, f32::NEG_INFINITY, "no window was ever opened");
+    }
+
+    /// A host that is not currently drawn still advances its window — the reference gates the cycle
+    /// on **linkage** (the in-range doodad drain), not on the draw. Gating on the draw would freeze
+    /// the field while the camera looks away and then re-roll every placement on the one frame it
+    /// turns back: a burst of simultaneous strikes the reference cannot produce. The undrawn host
+    /// keeps its stopped player and just updates what a resume will arm.
+    #[test]
+    fn an_undrawn_host_keeps_cycling() {
+        let mut app = reroll_app();
+        let host = lightning_host(&mut app);
+        app.world_mut()
+            .entity_mut(host)
+            .get_mut::<DoodadAnimHost>()
+            .unwrap()
+            .active = false;
+
+        app.update();
+        let first = app
+            .world()
+            .entity(host)
+            .get::<DoodadAnimHost>()
+            .unwrap()
+            .window_hi;
+        for _ in 0..3 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(1400));
+            app.update();
+        }
+        let h = app.world().entity(host).get::<DoodadAnimHost>().unwrap();
+        assert!(
+            h.window_hi > first,
+            "an undrawn host still opened new windows"
+        );
+        assert!(
+            h.clip.is_some(),
+            "and still has something for the resume to arm"
+        );
+        assert_eq!(
+            app.world()
+                .entity(host)
+                .get::<AnimationPlayer>()
+                .unwrap()
+                .playing_animations()
+                .count(),
+            0,
+            "but its stopped player was left alone"
+        );
+    }
+
     /// The draw gate stops the player + pauses the gseq drive when every submesh is hidden, and on
     /// re-appearing re-arms at the shared-clock position (`(now − spawned_at) mod duration`) — the
     /// ref's clock-indexed pose, so pause history never desyncs phase.
@@ -781,6 +1125,11 @@ mod tests {
                     fade: (1.0, Vec3::ZERO),
                     clip: Some((node, 2.0)),
                     spawned_at: 0.0,
+                    armed_at: 0.0,
+                    // Far future: this test exercises the DRAW gate, so no window may expire
+                    // under it and change the armed clip mid-assertion.
+                    window_hi: f32::INFINITY,
+                    anim_id: Some(0),
                     active: true,
                 },
                 player,

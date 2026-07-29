@@ -455,10 +455,12 @@ fn shipped_bag_frame_drives_end_to_end() {
         report.errors
     );
     assert_eq!(
-        report.frames, 210,
+        report.frames, 253,
         "backpack (window + 16 slots × 2 [button + Cooldown child] + 3 money coins \
          + close = 37) + 4 equipped-bag windows (window + 20 slots × 2 + close = 42 each = 168) \
-         + the bag-bar toggle (1) + its 4 bar slots (4) — 0216 slice 2 + the slot Cooldown children"
+         + the KEYRING window (another 42 — the same template, decision 0765) \
+         + the bag-bar toggle (1) + its 4 bar slots (4) + the keyring button (1) \
+         — 0216 slice 2 + the slot Cooldown children"
     );
     // The re-skinned bag purse reuses BenillaMoney_Set/_Clear (they live in MerchantFrame.xml); load
     // it too so the shared helper is defined when BenillaBagFrame_Update runs (the same reuse the loot

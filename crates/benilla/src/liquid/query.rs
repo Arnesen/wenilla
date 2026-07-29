@@ -1166,6 +1166,7 @@ mod tests {
     fn the_floor_follows_the_placement_transform() {
         let bounds = benilla_formats::WmoGroupInfo {
             interior: true,
+            show_skybox: false,
             bbox_min: [-10.0, -10.0, 0.0],
             bbox_max: [10.0, 10.0, 4.0],
         };

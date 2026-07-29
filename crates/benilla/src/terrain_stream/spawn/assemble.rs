@@ -19,14 +19,19 @@ use crate::model_render::{model_material, MaterialCache, ShadeSel};
 use crate::terrain::WowModelMaterial;
 
 /// What one placement's animation host armed, for the consumers that spawn alongside its submeshes.
-/// Both fields are *per placement*, not per model: the joint set is this instance's, and `seq` is
-/// the slot this instance's own frequency-weighted variation roll landed on.
+/// Both fields are *per placement*, not per model: the joint set is this instance's, and `arm` is
+/// this instance's own anim root, whose live player names the sequence it is currently playing.
 pub(crate) struct PlacementHost {
     /// Bone-indexed joint entities — an emitter or ribbon rides its host bone's joint off this.
     pub joints: Vec<Entity>,
-    /// The armed FILE sequence slot ([`crate::doodad_anim::AnimHostSpawn::seq`]); `None` on the
-    /// gseq-only tier, where nothing was armed and slot 0 is the honest answer.
-    pub seq: Option<usize>,
+    /// The anim-root entity IF this placement armed a sequence; `None` on the gseq-only tier, where
+    /// nothing was armed and slot 0 is the honest answer.
+    ///
+    /// This used to be the armed slot as a plain `usize`, captured once at spawn. That was right
+    /// only while a placed doodad kept one variation for life — it re-rolls every play-window
+    /// (decision 0768), so a captured slot goes stale within about a second and the consumer has to
+    /// resolve against the live player instead.
+    pub arm: Option<Entity>,
 }
 
 /// Spawn a model's submeshes at `transform` with the full doodad/WMO component set. Returns the spawned
@@ -333,21 +338,21 @@ pub(crate) fn spawn_model_entities(
     // Arm the draw gate: animation runs iff any of these submeshes is drawn (`doodad_anim`) —
     // or, for a meshless (particles-only) host, iff the placement's fade sphere is in the draw
     // set (the same 0171 law its emitters gate on).
-    let armed_seq = host.as_ref().and_then(|h| h.seq);
+    let arm = host.as_ref().and_then(|h| h.seq.map(|_| h.root));
     if let Some(h) = host {
+        let now = m2.map(|(_, now)| now).unwrap_or_default();
         commands.entity(h.root).insert(DoodadAnimHost {
             meshes: skinned_meshes,
             fade: (radius, transform.transform_point(local_center)),
             clip: h.clip,
-            spawned_at: m2.map(|(_, now)| now).unwrap_or_default(),
+            spawned_at: now,
+            armed_at: now,
+            // Born already expired, so the first frame runs the holder setup's `variationIdx = -1`
+            // arm over the loader's var-0 seed — the reference's own two-stage load (decision 0768).
+            window_hi: f32::NEG_INFINITY,
+            anim_id: h.anim_id,
             active: true,
         });
     }
-    (
-        out,
-        skin.map(|(joints, _)| PlacementHost {
-            joints,
-            seq: armed_seq,
-        }),
-    )
+    (out, skin.map(|(joints, _)| PlacementHost { joints, arm }))
 }

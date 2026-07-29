@@ -73,6 +73,10 @@
 
 /// Stars — the first celestial draw (`0x6d4a3f`): everything else in the sky paints over them, so
 /// theirs is the ladder's LOWEST rung (see the sign law above).
+///
+/// The WMO skybox ([`crate::wmo_sky`]) takes no rung: like the gradient dome it replaces, it is an
+/// **opaque** backdrop, so it draws in the opaque pass and needs no transparent-sort bias — its
+/// forced far depth (the depth law below) is the whole of its ordering, and the two never coexist.
 pub(crate) const STARS_BIAS: f32 = -1.0e6;
 /// The sun disc — second (`0x7e5b90` via `0x6d4a47`).
 pub(crate) const SUN_DISC_BIAS: f32 = -8.2e5;
@@ -116,6 +120,10 @@ fn every_sky_shader_forces_the_far_depth() {
         (
             "celestial.wgsl",
             include_str!("../assets/shaders/celestial.wgsl"),
+        ),
+        (
+            "wmo_skybox.wgsl",
+            include_str!("../assets/shaders/wmo_skybox.wgsl"),
         ),
     ] {
         assert!(

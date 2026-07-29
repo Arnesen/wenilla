@@ -12,15 +12,15 @@
 //! `0x52aa20` law. The standalone-corpse builder joins when corpse objects stream.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use benilla_ui::script::{TooltipTint, UiScript, UnitState};
 
-use crate::go_templates::{GameObjectTemplates, Locks};
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::{
-    go_is_nearest, ring_reaction, Factions, Hovered, HoveredObject, GO_FLAG_LOCKED,
+    go_is_nearest, ring_reaction, Factions, Hovered, HoveredObject, GO_FLAG_LOCKED, GO_TYPE_GENERIC,
 };
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
@@ -500,11 +500,37 @@ fn lock_type_word(index: u32) -> Option<&'static str> {
     })
 }
 
+/// The **"Locked" line's colour** (`0x52ab03`-`0x52ab43`, decision 0770).
+///
+/// The builder seats red `0xc0d3a8` as the default *before* it calls the resolver, then re-colours
+/// on the answer. Every non-`Unmet` answer lands on the same green `0xc0d420`, by two separate
+/// branches that agree: an opener was found with **no item** and no matched spell (`0x52ab22 je`
+/// — the no-requirement case), or an opener was found **with** an item, i.e. a KEY (`0x52ab29
+/// jne`). Only a lock nothing can open keeps the red.
+///
+/// `None` = a flag-locked object with no `Lock.dbc` row at all, which is the reference's
+/// no-requirement arm and therefore green — the flag alone is not a refusal.
+///
+/// **Not modelled:** the third branch, where a *skill* opener satisfied the lock and the colour
+/// becomes the difficulty ramp `0x529fa0` (grey `0xc0cf50` / green `0xc0d420` / yellow `0xc0cf18`
+/// / orange `0xc0d3a4` / red `0xc0d3a8`, banded at the requirement +0/25/50/100 — the trade-skill
+/// ladder). Green is that ramp's comfortable rung, so a well-skilled opener already reads right
+/// and only a marginal one reads too green. Pinned in decision 0770; deliberately left for its own
+/// change, since it needs the resolver to hand back the margin it currently discards.
+fn locked_line_tint(outcome: Option<crate::target::lock::LockOutcome>) -> TooltipTint {
+    match outcome {
+        Some(crate::target::lock::LockOutcome::Unmet) => TooltipTint::Red,
+        _ => TooltipTint::LockOpen,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive_mouseover_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hovered: Res<Hovered>,
     hovered_go: Res<HoveredObject>,
+    // The cursor-arm seat of the GO anchor fork (decision 0766).
+    window: Query<&Window, With<PrimaryWindow>>,
     stores: Query<&ObjectStore>,
     // The stored GAMEOBJECT_STATE the lock lines' Action gate reads (decision 0752).
     anims: Query<&crate::go_anim::GoAnim>,
@@ -513,9 +539,13 @@ fn drive_mouseover_tooltip(
     commands: Res<NetCommands>,
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
-    mut go_templates: ResMut<GameObjectTemplates>,
-    locks: Option<Res<Locks>>,
-    mut items: ResMut<Items>,
+    // The lock chain's own data set, shared verbatim with the click router (`target::lock`) so the
+    // hover and the click can never disagree about whether a lock is satisfiable — the same reason
+    // `usable` and the click share one resolver (0752). Carries the go-template, Lock.dbc and
+    // item caches this system used to take as three separate params.
+    mut go_inputs: crate::target::lock::GoLockInputs,
+    // The known-spell set the resolver's SKILL arm scans.
+    player_actions: Res<crate::ui_action::PlayerActions>,
     mut last: Local<LastHover>,
     mut last_lines: Local<Option<UnitState>>,
 ) {
@@ -564,13 +594,40 @@ fn drive_mouseover_tooltip(
         return;
     }
     if let Some((entity, guid)) = go {
+        // Which arm of the anchor fork this object takes (decision 0766). The reference asks the
+        // object's own `[obj->vtbl+0x5c]`; what selects it is not pinned, so we key on the one
+        // distinction the director's two reference observations agree on — a **GENERIC(5)**
+        // signpost follows the cursor, an interactable GameObject sits in the corner.
+        //
+        // Not merely a guess-shaped proxy: after 0762 the only objects that are eligible for a
+        // tooltip *and* never highlightable are GENERIC ones, so "GENERIC" and "not interactable"
+        // pick out the same set here. They diverge only for the three always-eligible types
+        // (SPELL_FOCUS 8 / DUEL_ARBITER 16 / FISHINGHOLE 25), which is exactly where a pin would
+        // settle it. Flagged INTERIM in 0766 rather than presented as verified.
+        let cursor_seated =
+            stores.get(entity).map(|s| s.0.gameobject_type_id()) == Ok(GO_TYPE_GENERIC);
+        let cursor_ui = cursor_seated
+            .then(|| {
+                window
+                    .iter()
+                    .next()
+                    .and_then(|w| w.cursor_position().map(|c| (c.x, w.height() - c.y)))
+            })
+            .flatten();
         if *last == LastHover::Go(guid) {
-            return; // corner-seated: a pointer moving over the same object re-renders nothing
+            // The cursor arm follows the pointer; the corner arm has nothing to re-seat.
+            if let Some((x, y)) = cursor_ui {
+                script.world_tooltip_move(x, y);
+            }
+            return;
         }
-        let Some(template) = go_templates.get(guid).cloned() else {
+        if cursor_seated && cursor_ui.is_none() {
+            return; // cursor off-window: nothing to seat the pointer-anchored plate against
+        }
+        let Some(template) = go_inputs.templates.get(guid).cloned() else {
             // Template in flight: ask once and retry next frame (`last` stays, so the show
             // fires the moment the name lands).
-            go_templates.request(guid, &commands);
+            go_inputs.templates.request(guid, &commands);
             return;
         };
         // The lock lines, transcribed from the builder `0x52aa20` (decision 0756). Two blocks, in
@@ -597,27 +654,54 @@ fn drive_mouseover_tooltip(
         let state = go_store.map_or(benilla_formats::GO_STATE_ACTIVE, |s| {
             crate::go_anim::go_state(anims.get(entity).ok(), s)
         });
-        let mut lines: Vec<(String, TooltipTint)> = Vec::new();
-        if flag_locked {
-            lines.push(("Locked".to_string(), TooltipTint::Red));
-        }
-        if let Some(slot0) = locks
+        let slots = go_inputs
+            .locks
             .as_ref()
             .filter(|_| template.lock_id != 0)
-            .and_then(|l| l.0.slots(template.lock_id))
+            .and_then(|l| l.0.slots(template.lock_id));
+        let mut lines: Vec<(String, TooltipTint)> = Vec::new();
+        if flag_locked {
+            // **The "Locked" line is coloured by whether you can actually open it** (director-
+            // reported: a door you hold the key for read red). The builder sets red `0xc0d3a8` as
+            // the default (`0x52ab03`), calls the SAME resolver the click uses (`0x52ab14` →
+            // `0x5f83d0`) and re-colours on its answer (`0x52ab19`-`0x52ab43`):
+            //   · resolver says NO opener   -> keep red
+            //   · a KEY item satisfied it   -> `0xc0d420` green (spell out-param set AND item
+            //     out-param set: `0x52ab29 jne` takes the green arm)
+            //   · no lock requirement at all-> the same green (`0x52ab22 je`)
+            //   · a SKILL opener satisfied it -> the difficulty ramp `0x529fa0` — NOT modelled;
+            //     see this line's follow-up note in decision 0770. Green is its second rung, so a
+            //     comfortably-skilled opener already reads correctly; a marginal one reads too
+            //     green rather than yellow/orange.
+            let facts = crate::target::lock::go_facts(go_store.map(|s| (s, state)));
+            let mut matched = None;
+            let outcome = slots.map(|slots| {
+                crate::target::lock::resolve_lock(
+                    slots,
+                    &player_actions.spells,
+                    go_inputs.spells.as_deref(),
+                    self_store,
+                    &go_inputs.items,
+                    facts,
+                    &mut matched,
+                )
+            });
+            lines.push(("Locked".to_string(), locked_line_tint(outcome)));
+        }
+        if let Some(slot0) = slots
             .map(|s| s[0])
             .filter(|s| s.available(state, flag_locked))
         {
             match slot0.key_type {
                 benilla_formats::LOCK_KEY_ITEM => {
-                    if let Some(t) = items.template(slot0.index, 0, &commands) {
+                    if let Some(t) = go_inputs.items.template(slot0.index, 0, &commands) {
                         lines.push((format!("Requires {}", t.name), TooltipTint::White));
                     }
                 }
                 // The opener-*known* arm additionally wants the reference's skill-margin colour
-                // ramp (`0x529fa0`), which is not pinned — so what we model is the unknown arm,
-                // which is what a hovering player almost always is. A flagged object stays silent
-                // there, exactly as the binary does.
+                // ramp (`0x529fa0`) — now pinned (decision 0770) but not modelled here; what we
+                // model is the unknown arm, which is what a hovering player almost always is. A
+                // flagged object stays silent there, exactly as the binary does.
                 benilla_formats::LOCK_KEY_SKILL if !flag_locked => {
                     if let Some(word) = lock_type_word(slot0.index) {
                         lines.push((format!("Requires {word}"), TooltipTint::Red));
@@ -626,7 +710,7 @@ fn drive_mouseover_tooltip(
                 _ => {}
             }
         }
-        script.world_tooltip_gameobject(&template.name, &lines);
+        script.world_tooltip_gameobject(&template.name, &lines, cursor_ui);
         *last = LastHover::Go(guid);
         return;
     }
@@ -857,5 +941,42 @@ mod tests {
             Some("Reagents: |cffff2020Light Feather|r"),
             "count 1 prints no (N); unowned wraps in the builder's inline red"
         );
+    }
+
+    /// The "Locked" line's colour law (decision 0770) — the director's report: a door they held
+    /// the key for read RED, where the reference reads green.
+    ///
+    /// The builder's own shape is "red unless the resolver found an opener", and *every* kind of
+    /// opener lands on the same green — so the mapping is a one-way test on `Unmet`, not a
+    /// per-arm table. A flag-locked object with no `Lock.dbc` row is the reference's
+    /// no-requirement arm and is green too: the flag alone never means "you can't".
+    #[test]
+    fn the_locked_line_greens_when_the_lock_can_be_opened() {
+        use crate::target::lock::LockOutcome;
+
+        // The report: the Scarlet Key in hand, the Armory Door in front of you.
+        assert_eq!(
+            locked_line_tint(Some(LockOutcome::OpenByKey(7146))),
+            TooltipTint::LockOpen,
+            "holding the key must read green"
+        );
+        // The same door without the key — unchanged, and the control for the fix.
+        assert_eq!(
+            locked_line_tint(Some(LockOutcome::Unmet)),
+            TooltipTint::Red,
+            "no key still reads red"
+        );
+        // A skill opener you know: green. (The reference would ramp this by margin; green is that
+        // ramp's comfortable rung — see `locked_line_tint`'s note.)
+        assert_eq!(
+            locked_line_tint(Some(LockOutcome::OpenBySpell(2575))),
+            TooltipTint::LockOpen
+        );
+        // A lock row that imposes nothing, and a flag-locked object with no row at all.
+        assert_eq!(
+            locked_line_tint(Some(LockOutcome::Unlocked)),
+            TooltipTint::LockOpen
+        );
+        assert_eq!(locked_line_tint(None), TooltipTint::LockOpen);
     }
 }

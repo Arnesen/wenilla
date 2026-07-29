@@ -120,6 +120,12 @@ impl super::UiScript {
         }
     }
 
+    /// Push the app's answer to `HasKey()` — whether the player owns any `BagFamily` KEYS item
+    /// anywhere the reference's own search reaches. The keyring UI's one gate (decision 0765).
+    pub fn set_has_key(&mut self, has_key: bool) {
+        self.model_mut().has_key = has_key;
+    }
+
     /// Drain the `(bag, slot)` pairs queued by `UseContainerItem` since the last call.
     pub fn take_container_uses(&mut self) -> Vec<(i64, u32)> {
         std::mem::take(&mut self.model_mut().container_uses)
@@ -496,6 +502,22 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .expect("model app_data")
                 .ui_cursor = Some(UiCursorMode::Inspect);
             Ok(())
+        })?,
+    )?;
+    // HasKey() — "does this player own a key at all?" (5875 `0x48ae90`), the gate the main bar
+    // reads to decide whether the keyring exists in the UI. The reference pushes the NUMBER 1 on a
+    // hit and nil otherwise, not a boolean, and FrameXML only ever tests it for truth — so the
+    // shape is reproduced exactly rather than normalized to a bool. The search itself (BagFamily
+    // == 9 across equipment/bags/backpack/bank/keyring) is the app's, like every other item fact.
+    lua.globals().set(
+        "HasKey",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            Ok(if model.has_key {
+                Value::Integer(1)
+            } else {
+                Value::Nil
+            })
         })?,
     )?;
     // ResetCursor — displayed mode back to the base (the world classifier's) mode (5875

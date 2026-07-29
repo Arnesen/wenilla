@@ -661,7 +661,8 @@ fn writer_loop(
                         bag_index,
                         slot,
                         spell_index,
-                    } => w.use_item(bag_index, slot, spell_index),
+                        go_target,
+                    } => w.use_item(bag_index, slot, spell_index, go_target),
                     ClientCommand::AutoEquipItem { bag_index, slot } => {
                         w.auto_equip_item(bag_index, slot)
                     }

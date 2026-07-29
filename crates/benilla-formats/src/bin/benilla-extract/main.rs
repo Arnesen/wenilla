@@ -293,6 +293,13 @@ enum Command {
         /// models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every WMO ROOT and cross-tab the two halves of the skybox mechanism: the root's
+    /// **MOSB** skybox model against its groups' `0x40000` flag. `0x40000` is undocumented, so
+    /// this is what *identifies* it — the bit turning out to be set on a group iff its root names
+    /// a skybox is the whole argument that it means "draw this root's skybox here". Also the
+    /// population instrument: which 1.12 buildings replace the `Light.dbc` gradient dome with an
+    /// authored sky (Stratholme's burning city is the headline), and how much of each does it
+    Skyboxscan,
     /// Dump all 18 `LightIntBand` rows of the `Light.dbc` entry covering a world position at a
     /// time of day — the band-semantics instrument (which row holds which colour at which hour;
     /// the celestial-diffuse band question, decision 0485). ⚠ This is ONE params record RAW —
@@ -556,6 +563,7 @@ fn main() -> Result<()> {
             scan::partscan(&mut chain, mask, prefix.as_deref())?;
         }
         Command::M2lightscan { prefix } => scan::m2lightscan(&mut chain, prefix.as_deref())?,
+        Command::Skyboxscan => scan::skyboxscan(&mut chain)?,
         Command::Lightbands {
             map,
             x,

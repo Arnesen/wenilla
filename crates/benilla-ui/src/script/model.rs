@@ -38,9 +38,12 @@ pub(crate) struct Model {
     /// The layout mutation epoch — tier 1 of the resolve change gate (the fingerprint is tier 2).
     /// Bumped by [`Model::touch_layout`] at every write path that can move the anchor solve's
     /// read set; `resolve` returns immediately while it still equals [`Self::layout_epoch_resolved`],
-    /// paying a `u64` compare instead of fingerprinting ~2k inputs. An idempotent-write burst (the
-    /// bag-hover re-enter loop) bumps this every frame and falls through to the fingerprint, which
-    /// absorbs it exactly as before — the tiers are complementary, not redundant.
+    /// paying a `u64` compare instead of fingerprinting ~2k inputs. Tier 2 remains the correctness
+    /// backstop for a write that bumps this without moving anything; it is not a licence to bump
+    /// per frame, because *reaching* it costs the whole-UI hash. The bag-hover re-enter loop used
+    /// to do exactly that (~0.65 ms/frame at solves=0) until its wrap-pin round trip was made
+    /// change-gated — `tooltip::append_line`, and the gate
+    /// `layout_gate::the_hover_re_enter_loop_neither_re_measures_nor_re_solves`.
     pub(crate) layout_epoch: u64,
     /// The [`Self::layout_epoch`] value the last SETTLED resolve closed on — one whose
     /// fingerprint matched, proving the input set (seeds included) has stopped moving. `None`
@@ -252,6 +255,11 @@ pub(crate) struct Model {
     /// at `set_container` push time (the action-state pattern), read by
     /// `GetContainerItemCooldown`.
     pub(crate) container_cooldowns: HashMap<(i64, u32), (f64, f64, bool)>,
+    /// `HasKey()` — whether the player owns any item of `BagFamily` KEYS, anywhere the reference's
+    /// own search reaches (equipment, bags, backpack, **bank**, keyring). App-resolved like every
+    /// other item fact; the engine holds no item knowledge of its own. Gates the whole keyring UI
+    /// (decision 0765).
+    pub(crate) has_key: bool,
     /// What the cursor carries (`PickupContainerItem`/`SplitContainerItem`/… set it; `None` =
     /// empty cursor) — the real client's transient drag state, typed by payload arm
     /// ([`cursor::CursorPayload`], decision 0216). Purely visual + intent-routing: no item moves
@@ -692,6 +700,7 @@ impl Model {
             containers: HashMap::new(),
             container_uses: Vec::new(),
             container_cooldowns: HashMap::new(),
+            has_key: false,
             cursor: None,
             cursor_grid_shown: false,
             world_pick: cursor::WorldPick::default(),
