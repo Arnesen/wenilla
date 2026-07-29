@@ -88,6 +88,17 @@ pub(crate) struct GoAnim {
     last_wire: Option<u32>,
 }
 
+/// The GameObject's **stored** state — the binary's `go+0x27c`, which is what every consumer reads
+/// (the §243 animation, `usable`'s state pre-gate, and the lock chain's per-slot Action gate,
+/// decision 0752). [`GoAnim::state`] when the object is on the animation machine (it carries the
+/// client-side predictions the wire never sends — a chest's lid), else the wire field, else the
+/// wire default `0` = ACTIVE for a field vmangos omitted because it was zero.
+pub(crate) fn go_state(anim: Option<&GoAnim>, store: &ObjectStore) -> u32 {
+    anim.and_then(|a| a.state)
+        .or_else(|| store.0.gameobject_state())
+        .unwrap_or(GO_STATE_ACTIVE)
+}
+
 /// Which GameObject types get the state-driven **animated** instance (skinned lid/door + §243
 /// sequences) — **the byte-verified type census**, not a guess (wow-re `gameobject-anim-arm.md` §2f).
 ///
@@ -131,6 +142,21 @@ pub(crate) fn go_animates(type_id: i32) -> bool {
 /// though it now animates.
 fn collision_follows_state(type_id: i32) -> bool {
     matches!(type_id, 0 | 1)
+}
+
+/// Whether a door/button's collider is solid, from its **wire** `GAMEOBJECT_STATE` (decision 0757).
+///
+/// The load-bearing case is `None`. An absent field is not "unknown" — it is the wire default `0`
+/// = `GO_STATE_ACTIVE` = **open**, because vmangos omits zero-valued fields from the create block
+/// (the same law `go_templates` already documents for an absent `GAMEOBJECT_TYPE_ID` meaning
+/// DOOR). Treating it as unknown and bailing left the collider enabled on **every door that spawns
+/// open**, which is the whole of "GameObjects that block passage while visually open": Zul'Gurub's
+/// Forcefield (180497) and Stratholme's `Doodad_SmallPortcullis03/04/08/09` are all `type 0`,
+/// `startOpen = 1`, spawned at `state = 0`. It also explains the GM workaround the reporter found
+/// — toggling the object twice un-sticks it — because the first toggle sends a *non-zero* state,
+/// so the field finally exists on the wire, and the trip back to `0` then reads as a real value.
+fn collider_is_solid(wire_state: Option<u32>) -> bool {
+    wire_state.unwrap_or(GO_STATE_ACTIVE) == GO_STATE_READY
 }
 
 /// A cast launched at a GameObject (`SMSG_SPELL_GO` carrying a `TARGET_FLAG_GAMEOBJECT`), bridged from the
@@ -265,7 +291,12 @@ fn sync_wire_go_state(
     mut gos: Query<(&ObjectStore, &mut GoAnim), Or<(Changed<ObjectStore>, Added<GoAnim>)>>,
 ) {
     for (store, mut anim) in &mut gos {
-        let wire = store.0.gameobject_state();
+        // Absent ⇒ the wire default `0` = ACTIVE (decision 0757) — vmangos omits zero fields, so a
+        // door that spawns OPEN sends none. Reading that as "unknown" left `state` at `None`, and
+        // the object rested at its loader pose instead of Opened. The `last_wire` guard is
+        // unaffected: a constant wire state (a chest's `Some(1)`) still compares equal frame to
+        // frame, so the client-predicted lid is still never re-closed by an unrelated delta.
+        let wire = Some(store.0.gameobject_state().unwrap_or(GO_STATE_ACTIVE));
         if wire == anim.last_wire {
             continue; // an unrelated field changed (position, flags, dyn-flags) — not our transition
         }
@@ -291,7 +322,7 @@ fn open_go_lid(
         let is_open_lock = spells
             .as_deref()
             .and_then(|s| s.catalog.get(spell_id))
-            .is_some_and(|d| d.open_lock_type.is_some());
+            .is_some_and(|d| d.open_lock.is_some());
         if !is_open_lock {
             continue;
         }
@@ -408,10 +439,7 @@ fn drive_go_collision(
         if !collision_follows_state(store.0.gameobject_type_id()) {
             continue;
         }
-        let Some(state) = store.0.gameobject_state() else {
-            continue;
-        };
-        let solid = state == GO_STATE_READY;
+        let solid = collider_is_solid(store.0.gameobject_state());
         if solid && disabled {
             commands.entity(entity).remove::<ColliderDisabled>();
         } else if !solid && !disabled {
@@ -438,6 +466,18 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire default that let open doors block (decision 0757). `None` must read ACTIVE/open,
+    /// never "unknown" — vmangos omits the zero-valued field, so `None` IS the open state for
+    /// every door that spawns open (ZG's Forcefield, Stratholme's small portcullises).
+    #[test]
+    fn an_absent_wire_state_is_open_not_unknown() {
+        assert!(!collider_is_solid(None), "absent == ACTIVE(0) == passable");
+        assert!(!collider_is_solid(Some(GO_STATE_ACTIVE)));
+        assert!(collider_is_solid(Some(GO_STATE_READY)));
+        // ALTERNATIVE (destroyed) is passable too — only READY is solid.
+        assert!(!collider_is_solid(Some(2)));
+    }
 
     #[test]
     fn rest_poses_match_the_verified_table() {

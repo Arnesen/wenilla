@@ -96,9 +96,13 @@ pub fn doodad_fade_alpha(radius: f32, horiz_dist: f32) -> f32 {
 /// *distance* fade: both drive the **same** per-instance render-alpha channel (the `MeshTag` the shader
 /// reads, with a cutout↔blend material swap while `α < 1`), matching the reference's single render-alpha
 /// slot (`CM2Model+0x19c`) written by separate sources for disjoint object categories (map doodads →
-/// distance fade; CGObjects → appear fade). [`apply_render_fade`] drives it; [`crate::interior`]'s
-/// classifier yields the channel while a fade is live and reclaims it (floor colour / steady material)
-/// once the fade latches — so a fading entity uses its exterior look, then settles into its room.
+/// distance fade; CGObjects → appear fade). [`apply_render_fade`] drives it.
+///
+/// It owns the part's **alpha** and its **material** while it lives; [`crate::interior`]'s
+/// classifier keeps owning the part's **light law** right through the ramp (decision 0755), and
+/// the fade reads that law each frame to pick the blend twin of the right family
+/// ([`FadeMaterials::material_for`]) — so an entity that streams in indoors ramps up already lit by
+/// its room instead of appearing under exterior light and snapping to the room's when it latches.
 ///
 /// Built general (`from`/`to`/`duration`) so the **despawn fade-out** (our stream-out look — the
 /// binary has no teardown fade, see [`DespawnFade`]) is a `{from: α, to: 0}` instance + a
@@ -110,13 +114,9 @@ pub struct RenderFade {
     pub started: f32,
     /// Fade length in seconds. Appear = [`APPEAR_FADE_SECS`].
     pub duration: f32,
-    /// Cubic ramp endpoints. Appear `0 → 1`; despawn (future) `α → 0`.
+    /// Cubic ramp endpoints. Appear `0 → 1`; despawn `α → 0`.
     pub from: f32,
     pub to: f32,
-    /// The steady (opaque/alpha-test) material and its `AlphaMode::Blend` twin — swapped while `α < 1`,
-    /// exactly as [`DoodadFade`] does (the blend twin is what the shader feathers; the cutout ignores `α`).
-    pub cutout: Handle<WowModelMaterial>,
-    pub blend: Handle<WowModelMaterial>,
 }
 
 /// The reference's appear-fade duration — `FadeTo(1.0, 2000 ms)` (`wow-5875-re` object-layer/`appear-fade`:
@@ -125,18 +125,12 @@ pub const APPEAR_FADE_SECS: f32 = 2.0;
 
 impl RenderFade {
     /// A spawn appear-fade armed at `now`: `α = t³` from 0 → 1 over [`APPEAR_FADE_SECS`].
-    pub fn appear(
-        now: f32,
-        cutout: Handle<WowModelMaterial>,
-        blend: Handle<WowModelMaterial>,
-    ) -> Self {
+    pub fn appear(now: f32) -> Self {
         Self {
             started: now,
             duration: APPEAR_FADE_SECS,
             from: 0.0,
             to: 1.0,
-            cutout,
-            blend,
         }
     }
 }
@@ -178,10 +172,17 @@ pub fn self_model_fade_alpha(dist: f32, nearclip: f32, window: f32) -> f32 {
     0.5 * (1.0 - (std::f32::consts::PI * d / window).cos())
 }
 
-/// Drive every live [`RenderFade`]: ramp the cubic alpha into the per-instance `MeshTag`, swap to the
-/// blend material while feathering (the cutout ignores `α`), and drop the component once an appear fade
-/// latches opaque (handing the channel back to [`crate::interior`]). Only freshly-streamed entities carry
-/// a `RenderFade` — it's removed after [`APPEAR_FADE_SECS`] — so the steady-state cost is nil.
+/// Drive every live [`RenderFade`]: ramp the cubic alpha into the per-instance `MeshTag`, ride the
+/// blend twin of the part's **current light law** while feathering (the cutout ignores `α`), and
+/// drop the component once an appear fade latches opaque (handing the material back to
+/// [`crate::interior`] on the law's steady variant). Only freshly-streamed or streaming-out
+/// entities carry a `RenderFade` — it's removed after [`APPEAR_FADE_SECS`] — so the steady-state
+/// cost is nil.
+///
+/// The material is resolved from [`FadeMaterials`] + the live [`crate::interior::InteriorLit`]
+/// every frame rather than from a pair latched at arm time (decision 0755), so a part that
+/// classifies (or re-classifies) *during* its ramp follows its room's light immediately instead of
+/// finishing the ramp on whichever law happened to hold when the fade armed.
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply_render_fade(
     time: Res<Time>,
@@ -192,10 +193,12 @@ pub(crate) fn apply_render_fade(
         &mut MeshTag,
         &mut MeshMaterial3d<WowModelMaterial>,
         Option<&crate::doodad_anim::MatAnim>,
+        Option<&FadeMaterials>,
+        Option<&crate::interior::InteriorLit>,
     )>,
 ) {
     let now = time.elapsed_secs();
-    for (entity, fade, mut tag, mut mat, anim) in &mut q {
+    for (entity, fade, mut tag, mut mat, anim, fm, lit) in &mut q {
         let t = if fade.duration > 0.0 {
             (now - fade.started) / fade.duration
         } else {
@@ -215,13 +218,15 @@ pub(crate) fn apply_render_fade(
             tag.0 = bits;
         }
         // Feather on the blend twin while translucent; the cutout (opaque/alpha-test) ignores `α`.
-        let want = if alpha < 1.0 {
-            &fade.blend
-        } else {
-            &fade.cutout
-        };
-        if mat.0 != *want {
-            mat.0 = want.clone();
+        // Both come from the part's CURRENT law — an indoor part feathers probe-lit and settles on
+        // the probe-lit steady material, with no law change at the latch. A part without
+        // `FadeMaterials` has no twin to swap to (it never fades in practice — every arming site
+        // pairs the two); its alpha still ramps, so it can never hang invisible.
+        if let Some(fm) = fm {
+            let want = fm.material_for(lit, alpha < 1.0);
+            if mat.0 != *want {
+                mat.0 = want.clone();
+            }
         }
         // Appear fade reached opaque: latch and release the channel back to the interior classifier.
         // `try_remove`: wire-owned entity — see the lifetime contract in `arm_appear_fade`.
@@ -239,9 +244,6 @@ pub(crate) fn apply_render_fade(
 /// (Decision 0032.)
 #[derive(Component, Clone)]
 pub struct PendingAppearFade {
-    /// The steady (opaque/alpha-test) material + its `AlphaMode::Blend` twin — handed to the [`RenderFade`].
-    pub cutout: Handle<WowModelMaterial>,
-    pub blend: Handle<WowModelMaterial>,
     /// `Time::elapsed_secs` at attach — the backstop-timeout origin.
     pub since: f32,
 }
@@ -317,8 +319,10 @@ pub(crate) fn arm_appear_fade(
 ) {
     let now = time.elapsed_secs();
     let shown = !screen.covering();
+    let mut armed = 0usize;
     for (entity, pending) in &q {
         if shown || now - pending.since > PENDING_TIMEOUT_SECS {
+            armed += 1;
             // `try_*`, like every fade command here: these entities are **wire-owned** — a net
             // destroy can apply at any sync point between this system's query and its own
             // commands, so fade bookkeeping on an already-dead entity is a no-op, never an error.
@@ -326,11 +330,7 @@ pub(crate) fn arm_appear_fade(
             // and a same-frame wire despawn beat this insert — decision 0200.)
             commands
                 .entity(entity)
-                .try_insert(RenderFade::appear(
-                    now,
-                    pending.cutout.clone(),
-                    pending.blend.clone(),
-                ))
+                .try_insert(RenderFade::appear(now))
                 .try_remove::<PendingAppearFade>();
         }
     }
@@ -340,6 +340,13 @@ pub(crate) fn arm_appear_fade(
                 *unit_fade = UnitAppearFade::Live { started: now };
             }
         }
+    }
+    // `WOW_INTERIOR_LOG=1`: the appear-fade's arming instant — the reference time the interior
+    // classifier's `[interior]` lines are read against. The seam between the two is where an
+    // indoor entity's light law used to land only AFTER the ramp latched (2 s of exterior light,
+    // then a pop); a run where the two instants coincide is the observable that closes it.
+    if armed > 0 && std::env::var_os("WOW_INTERIOR_LOG").is_some() {
+        eprintln!("[fade-arm] t {now:.2} armed {armed} parts (world shown: {shown})");
     }
 }
 
@@ -363,9 +370,15 @@ pub(crate) fn retire_unit_appear_fade(
     }
 }
 
-/// Persistent per-submesh fade material pair, so the **despawn** fade-out can re-arm a [`RenderFade`]
-/// after the appear fade removed itself: `cutout` = the steady opaque/alpha-test material, `blend` = its
-/// `AlphaMode::Blend` twin. Attached to every fadeable entity submesh at spawn.
+/// Persistent per-submesh fade material set — **the** source of truth for which material a part
+/// draws with, across every fade in the client: `cutout` = the steady opaque/alpha-test material,
+/// `blend` = its `AlphaMode::Blend` twin. Attached to every fadeable entity submesh at spawn.
+///
+/// Held persistently rather than copied into each fade (decision 0755): a latched pair is a
+/// snapshot of the part's light law at arm time, and a law that changes mid-ramp — a streamed
+/// indoor unit classifying while it appears, an NPC crossing a doorway as it fades out — cannot be
+/// expressed by one. Every fade instead resolves its material *per frame* through
+/// [`Self::material_for`].
 #[derive(Component, Clone)]
 pub struct FadeMaterials {
     pub cutout: Handle<WowModelMaterial>,
@@ -374,6 +387,31 @@ pub struct FadeMaterials {
     /// this so its light stays the room's probe through the feather instead of jumping to the
     /// exterior twin's lit-outdoor intensity (0355). `None` for parts without a bake variant.
     pub bake_blend: Option<Handle<WowModelMaterial>>,
+}
+
+impl FadeMaterials {
+    /// The material a part should draw with, given its current interior law (`lit` — `None` for a
+    /// part the classifier doesn't light) and whether it is still `feathering` (`α < 1`).
+    ///
+    /// The two axes are independent and this is the one place they compose, so every fade writer —
+    /// the appear/despawn ramp ([`apply_render_fade`]) and the self-avatar zoom feather
+    /// ([`crate::player::apply_self_model_fade`]) — agrees on the answer regardless of which runs
+    /// last in the frame. Feathering picks the law's **blend** twin (the probe-lit one indoors, so
+    /// the room's light rides the fade rather than jumping to the exterior twin's outdoor
+    /// intensity — 0355); settled hands back the law's **steady** material, which is the
+    /// classifier's own choice ([`crate::interior::InteriorLit::steady_material`]).
+    pub fn material_for<'a>(
+        &'a self,
+        lit: Option<&'a crate::interior::InteriorLit>,
+        feathering: bool,
+    ) -> &'a Handle<WowModelMaterial> {
+        match (feathering, lit) {
+            (true, Some(l)) if l.is_bake() => self.bake_blend.as_ref().unwrap_or(&self.blend),
+            (true, _) => &self.blend,
+            (false, Some(l)) => l.steady_material(),
+            (false, None) => &self.cutout,
+        }
+    }
 }
 
 /// Marks a streamed entity (the parent) that went out of range: instead of popping it out,
@@ -406,7 +444,7 @@ pub(crate) fn apply_despawn_fade(
     mut commands: Commands,
     mut q: Query<(Entity, &mut DespawnFade)>,
     children_of: Query<&Children>,
-    fm: Query<(&FadeMaterials, Option<&crate::interior::InteriorLit>)>,
+    fm: Query<(), With<FadeMaterials>>,
 ) {
     let now = time.elapsed_secs();
     for (parent, mut df) in &mut q {
@@ -432,17 +470,14 @@ fn arm_despawn_descendants(
     now: f32,
     commands: &mut Commands,
     children_of: &Query<&Children>,
-    fm: &Query<(&FadeMaterials, Option<&crate::interior::InteriorLit>)>,
+    fm: &Query<(), With<FadeMaterials>>,
     any: &mut bool,
 ) {
-    if let Ok((m, lit)) = fm.get(entity) {
+    if fm.contains(entity) {
         *any = true;
-        // A bake-classified part fades out on the probe-lit blend twin — its room light rides the
-        // feather instead of jumping to the exterior twin's outdoor intensity (0355).
-        let blend = match (&m.bake_blend, lit) {
-            (Some(bake), Some(lit)) if lit.is_bake() => bake.clone(),
-            _ => m.blend.clone(),
-        };
+        // No material is chosen here: `apply_render_fade` resolves it per frame from the part's
+        // live law (0755), so a bake-classified part fades out probe-lit — and keeps doing so if
+        // it re-classifies mid-ramp, which a pair latched at this instant could not express.
         // `try_*`: a child (a held item mid-re-resolve, a gear swap) can be despawned by its own
         // owner in the same frame — the lifetime contract in `arm_appear_fade`.
         commands
@@ -452,8 +487,6 @@ fn arm_despawn_descendants(
                 duration: APPEAR_FADE_SECS,
                 from: 1.0,
                 to: 0.0,
-                cutout: m.cutout.clone(),
-                blend,
             })
             .try_remove::<PendingAppearFade>();
     }
@@ -481,13 +514,7 @@ mod tests {
         world.init_resource::<Time>();
         // Default screen = not covering = "world shown" — every pending fade arms this frame.
         world.init_resource::<crate::loading_screen::LoadingScreen>();
-        let doomed = world
-            .spawn(PendingAppearFade {
-                cutout: Handle::default(),
-                blend: Handle::default(),
-                since: 0.0,
-            })
-            .id();
+        let doomed = world.spawn(PendingAppearFade { since: 0.0 }).id();
 
         let mut state: SystemState<(
             Res<Time>,
@@ -503,6 +530,57 @@ mod tests {
         world.despawn(doomed);
         state.apply(&mut world); // would panic without the `try_*` contract
         assert!(world.get_entity(doomed).is_err(), "stays despawned");
+    }
+
+    /// Decision 0755: one law-aware material rule, shared by every fade writer. A bake-classified
+    /// part feathers probe-lit and settles probe-lit; everything else rides the exterior pair. The
+    /// pair is resolved per frame from the part's LIVE law, so a part that classifies during its
+    /// ramp is lit by its room for the rest of it instead of finishing on the law that happened to
+    /// hold when the fade armed.
+    #[test]
+    fn the_material_rule_follows_the_law_not_the_arm_instant() {
+        use crate::interior::{InteriorKind, InteriorLit};
+
+        let cutout: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("c0000000-0000-4000-8000-000000000001");
+        let blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("b1000000-0000-4000-8000-000000000002");
+        let bake: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("ba000000-0000-4000-8000-000000000003");
+        let bake_blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("bb000000-0000-4000-8000-000000000004");
+        let fm = FadeMaterials {
+            cutout: cutout.clone(),
+            blend: blend.clone(),
+            bake_blend: Some(bake_blend.clone()),
+        };
+
+        // Unclassified (no `InteriorLit` at all — a WMO-display part): the exterior pair.
+        assert_eq!(*fm.material_for(None, true), blend);
+        assert_eq!(*fm.material_for(None, false), cutout);
+
+        // Bake-CAPABLE but not yet resolved indoors (the state a part spawns in): exterior pair.
+        let kind = InteriorKind::Bake {
+            material: bake.clone(),
+            center: Vec3::ZERO,
+        };
+        let unresolved = InteriorLit::new(kind.clone(), cutout.clone());
+        assert_eq!(*fm.material_for(Some(&unresolved), true), blend);
+        assert_eq!(*fm.material_for(Some(&unresolved), false), cutout);
+
+        // The law flips to the room's bake MID-RAMP: the very next frame feathers probe-lit, and
+        // the latch settles on the bake variant — no law change, and so no pop, at the latch.
+        let lit = InteriorLit::applied_bake_for_test(kind, cutout.clone());
+        assert_eq!(*fm.material_for(Some(&lit), true), bake_blend);
+        assert_eq!(*fm.material_for(Some(&lit), false), bake);
+
+        // A part with no bake blend twin authored falls back to the exterior blend rather than
+        // dropping the feather.
+        let no_twin = FadeMaterials {
+            bake_blend: None,
+            ..fm.clone()
+        };
+        assert_eq!(*no_twin.material_for(Some(&lit), true), blend);
     }
 
     #[test]

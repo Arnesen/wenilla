@@ -134,11 +134,70 @@ impl Spells {
     }
 }
 
+/// The client's **learned-ability latches** — `[0xb700e4]` and `[0xb700e8]`, mirrored (decision
+/// 0752). The reference does not scan the spell book to answer "can this player skin?": it caches
+/// the answer at *learn* time. `0x4b25e0`, right after setting the known-spell bit, tests the
+/// freshly-learned spell's `Effect[0]` and stores the spell id into a dedicated global —
+/// `0x5f` (`SPELL_EFFECT_SKINNING`) → `[0xb700e4]`, `0x74` (`SPELL_EFFECT_SKIN_PLAYER_CORPSE`) →
+/// `[0xb700e8]` — and the unlearn path `0x4b2c50` zeroes whichever global named that spell.
+///
+/// The world cursor's skin leg then reads `[0xb700e4 + 4×isPlayerTarget]` as a hard precondition
+/// (wow-re `cursor-system.md` §3, the skin/insignia row): **a corpse flagged `UNIT_FLAG_SKINNABLE`
+/// shows no skin cursor at all to a player who never learned Skinning.** Without it the ladder
+/// offers the knife to everyone, which is what the channel reported.
+#[derive(Resource, Default)]
+pub(crate) struct LearnedAbilities {
+    /// `[0xb700e4]` — our known `SPELL_EFFECT_SKINNING` spell (creature skinning), `None` if we
+    /// never learned one. It is also the spell the skin click casts, so there is one lookup here,
+    /// not a second scan at the click.
+    pub(crate) skinning: Option<u32>,
+    /// `[0xb700e8]` — our known `SPELL_EFFECT_SKIN_PLAYER_CORPSE` spell (the PvP insignia). Kept
+    /// for symmetry with the reference's pair; the insignia arm of the cursor isn't modelled yet.
+    pub(crate) skin_player_corpse: Option<u32>,
+}
+
+/// `SpellEffects` value `0x74` — `SPELL_EFFECT_SKIN_PLAYER_CORPSE` (the "Remove Insignia" family),
+/// the second of the two effects `0x4b25e0` latches.
+const SPELL_EFFECT_SKIN_PLAYER_CORPSE: u32 = 0x74;
+
+/// Re-derive [`LearnedAbilities`] whenever the spell book changes — our stand-in for the
+/// reference's learn/unlearn write sites. Change-detected, so it is a no-op on almost every frame;
+/// rescanning the book beats threading a hook through every spell-arrival path, and it cannot
+/// drift from the book the way an incrementally-maintained latch could.
+fn track_learned_abilities(
+    actions: Res<PlayerActions>,
+    spells: Option<Res<Spells>>,
+    mut learned: ResMut<LearnedAbilities>,
+) {
+    let Some(spells) = spells else { return };
+    if !actions.is_changed() && !spells.is_changed() {
+        return;
+    }
+    let first_with = |effect: u32| {
+        actions
+            .spells
+            .iter()
+            .copied()
+            .find(|&id| spells.catalog.get(id).is_some_and(|d| d.effect_1 == effect))
+    };
+    let (skinning, skin_player_corpse) = (
+        first_with(benilla_formats::SPELL_EFFECT_SKINNING),
+        first_with(SPELL_EFFECT_SKIN_PLAYER_CORPSE),
+    );
+    if (skinning, skin_player_corpse) != (learned.skinning, learned.skin_player_corpse) {
+        *learned = LearnedAbilities {
+            skinning,
+            skin_player_corpse,
+        };
+    }
+}
+
 pub(crate) struct UiActionPlugin;
 
 impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerActions>()
+            .init_resource::<LearnedAbilities>()
             .init_resource::<CastErrors>()
             .init_resource::<MountErrors>()
             .init_resource::<UiErrorKeys>()
@@ -162,6 +221,12 @@ impl Plugin for UiActionPlugin {
                         .before(UiInput),
                     drain::drain_action_sets.after(UiInput),
                     drain::drain_action_uses.after(UiInput),
+                    // The learned-ability latches must be current before the target chain's
+                    // cursor classifier reads them; the book feed runs in `UnitFeed`, so sitting
+                    // right after it is enough.
+                    track_learned_abilities
+                        .in_set(UnitFeed)
+                        .after(feed::feed_actions),
                 ),
             );
     }

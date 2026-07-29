@@ -597,23 +597,26 @@ fn apply_self_fade_to_descendants(
     if let Ok((fm, mut tag, mut mat, mut vis, lit)) = parts.get_mut(entity) {
         if alpha >= 1.0 {
             // The release edge (runs once, on the frame the fade ends — decision 0213): un-hide,
-            // and hand the material/tag channel back. A part the classifier lights is enqueued so
-            // it re-authors the correct interior/exterior state next classifier run (0734's
-            // convergence queue); a part without a classifier (some attach models) gets the
-            // direct restore — the same completion write `apply_render_fade` uses.
+            // restore the alpha field this system owns, and hand the material back to the part's
+            // law. The alpha restore is unconditional: the classifier's payload writes carry the
+            // tag's alpha through since 0755 (that is what lets a part re-lane mid-fade), so
+            // leaning on its re-author to *also* re-opaque the avatar — as this used to — would
+            // leave it stuck translucent, the exact 0213 bug.
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
             }
+            let bits = crate::mesh_tag::with_alpha(tag.0, 1.0);
+            if tag.0 != bits {
+                tag.0 = bits;
+            }
+            let want = fm.material_for(lit, false);
+            if mat.0 != *want {
+                mat.0 = want.clone();
+            }
+            // A classifier-lit part is still enqueued so the next run re-asserts its full payload
+            // (probe slot / fog bit) over whatever this feather episode wrote — 0734's queue.
             if lit.is_some() {
                 reauthor.0.push(entity);
-            } else {
-                let bits = crate::mesh_tag::with_alpha(tag.0, 1.0);
-                if tag.0 != bits {
-                    tag.0 = bits;
-                }
-                if mat.0 != fm.cutout {
-                    mat.0 = fm.cutout.clone();
-                }
             }
         } else if alpha <= 0.0 {
             // First-person: hide outright. Leave tag/material to the classifier (not drawn anyway).
@@ -634,11 +637,9 @@ fn apply_self_fade_to_descendants(
             // A bake-classified part feathers on the PROBE-lit blend twin — the room light
             // rides the fade (the tag re-lane keeps the slot alongside the alpha, 0355); the
             // exterior twin at shade byte 0 read as full outdoor intensity deep indoors
-            // (director-caught, 2026-07-13).
-            let want = match (&fm.bake_blend, &lit) {
-                (Some(bake), Some(l)) if l.is_bake() => bake,
-                _ => &fm.blend,
-            };
+            // (director-caught, 2026-07-13). Shared with the appear/despawn ramp since 0755, so
+            // the two can never disagree about which twin a law wants.
+            let want = fm.material_for(lit, true);
             if mat.0 != *want {
                 mat.0 = want.clone();
             }

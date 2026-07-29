@@ -5,6 +5,7 @@
 //! resources and the plugin) along the state-vs-input seam; the systems here are registered by
 //! [`super::TargetPlugin`] in the target chain after the hover picks and the cursor classifier.
 
+use super::lock::GoLockInputs;
 use super::*;
 
 /// The **right-click cursor-payload leg** — the reference's WorldFrame click router (`0x481f60`
@@ -141,11 +142,15 @@ pub(super) fn act_on_right_click(
     mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
     mut emote: MessageWriter<crate::creature_anim::EmoteAnim>,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
-    // The GameObject lock-routing inputs (decisions 0239 + 0545) as one [`GoLockInputs`]
+    // The GameObject lock-routing inputs (decisions 0239 / 0545 / 0752) as one [`GoLockInputs`]
     // (the 16-SystemParam ceiling).
     mut go_inputs: GoLockInputs,
     player_actions: Res<crate::ui_action::PlayerActions>,
-    stores: Query<&ObjectStore>,
+    // `[0xb700e4]`'s mirror — the skin leg's spell, already gated by the classifier (0752).
+    learned: Res<crate::ui_action::LearnedAbilities>,
+    // The GO leg needs the object's stored state too (the Action gate, decision 0752); the unit
+    // legs ignore the second member.
+    stores: Query<(&ObjectStore, Option<&crate::go_anim::GoAnim>)>,
     // One tuple param (the 16-SystemParam ceiling): the red-error keys + the reason-coded cast
     // line (the opener cast's local totem refusal, decision 0552) + the loot-target latch
     // the loot branch arms (decision 0515), and the mailbox session the mailbox branch opens
@@ -163,47 +168,57 @@ pub(super) fn act_on_right_click(
     }
     // A GameObject is the nearest thing under the cursor → use it (decision 0236), and never fall
     // through to unit handling: a GO is not selectable, and a right-click on it acts on the GO or
-    // does nothing (out of range / not usable). `classify_cursor` already resolved highlightable +
-    // usable into the cursor — **any** non-Point GO cursor that isn't grayed (the Interact gear, or a
-    // data-named Mail / Mine / GatherHerbs / PickLock) means highlightable AND usable (wow-re cursor-
-    // system §4a: mode 0 ⇔ not highlightable, Unable* ⇔ not usable); Point or unable ⇒ don't send.
-    // The action itself is the lock split ([`resolve_go_action`]), independent of the cursor shape —
-    // which is exactly why the gate can no longer key on the Interact gear alone (that coupling was
-    // decision 0243's known interim). The USE is verified for the right button (wow-re
-    // cursor-system.md §6); a left-click USE folds in with the dispatched RE verdict.
+    // does nothing. The reference's `OnUse 0x5f8660` gates on the same two predicates the cursor
+    // computes (§4a/§8.7): **highlightable** first — false is a silent no-op, which for us is
+    // `cursor.kind == Point` — then **usable**, whose failure toasts an error and sends nothing.
+    //
+    // `usable`'s two arms we model land in different places, so the routing is split accordingly
+    // (decision 0752): the **lock** arm comes back out of [`resolve_go_action`] as
+    // `GoAction::Refuse`, which carries §8.8's toast; the **range** arm is `cursor.unable`, which
+    // suppresses the send with no toast (the reference auto-walks there instead — `0x610300`, also
+    // no packet). The lock arm runs first in `0x5f3130`, and it does here too: a `Refuse` toasts
+    // even when we are also out of range.
     if go_is_nearest(&hovered, &hovered_object) {
-        if cursor.kind != cursor_mode::CursorKind::Point && !cursor.unable {
+        if cursor.kind != cursor_mode::CursorKind::Point {
             if let Some(guid) = hovered_object.guid {
+                let go = hovered_object
+                    .target
+                    .and_then(|e| stores.get(e).ok())
+                    .map(|(s, anim)| (s, crate::go_anim::go_state(anim, s)));
                 // Mailbox (GO type 19): open the mail window client-side (decision 0544), BEFORE the
                 // lock fork (a mailbox is never locked). The wow-re §5 confirms the MAILBOX use
                 // handler overrides the shared use-sender to a LOCAL open — it sends NO packet (no
                 // CMSG_GAMEOBJ_USE); the window's own MAIL_SHOW → CheckInbox drives the first
                 // CMSG_GET_MAIL_LIST. Re-clicking just re-shows (the session is already set).
-                let go_store = hovered_object.target.and_then(|e| stores.get(e).ok());
-                if go_store
-                    .is_some_and(|s| s.0.gameobject_type_id() == cursor_mode::GO_TYPE_MAILBOX)
+                if go.is_some_and(|(s, _)| s.0.gameobject_type_id() == cursor_mode::GO_TYPE_MAILBOX)
                 {
-                    debug!("right-click mailbox: open mail window {guid:#x}");
-                    mail.click(guid);
+                    if !cursor.unable {
+                        debug!("right-click mailbox: open mail window {guid:#x}");
+                        mail.click(guid);
+                    }
                     return;
                 }
-                // Branch on the lock (decisions 0239 + 0545): a lockless GameObject is USEd; a
-                // lockable one casts a known OPEN_LOCK spell at it; an unopenable lock shows the
-                // client-local red toast — "Requires Herbalism", "Requires Mining 100", "Requires
-                // <key item>" — and sends nothing (the ref's validate/error block `0x5f3427..`
-                // fires `DisplayError` with no packet; wow-re cursor-system.md §8.4/§8.8).
+                // Branch on the lock (decisions 0239 / 0545 / 0752): a lockless GameObject is USEd;
+                // a lockable one casts the opener (a known OPEN_LOCK spell, or a carried key's own
+                // ON_USE) at it; an unopenable lock shows the client-local red toast — "The door is
+                // locked.", "Requires Herbalism", "Requires Mining 100", "Requires <key item>" —
+                // and sends nothing (the ref's validate/error block `0x5f3427..` fires
+                // `DisplayError` with no packet; wow-re cursor-system.md §8.4/§8.8).
                 let me_store = self_player
                     .single()
                     .ok()
-                    .and_then(|(e, _, _)| stores.get(e).ok());
+                    .and_then(|(e, _, _)| stores.get(e).ok())
+                    .map(|(s, _)| s);
                 match resolve_go_action(
                     guid,
                     &mut go_inputs,
                     &player_actions.spells,
-                    go_store,
+                    go,
                     me_store,
                     &net,
                 ) {
+                    GoAction::Use if cursor.unable => {}
+                    GoAction::OpenLock(_) if cursor.unable => {}
                     GoAction::Use => {
                         debug!("right-click gameobject use: {guid:#x}");
                         let _ = net.0.send(ClientCommand::GameObjUse { guid });
@@ -255,7 +270,7 @@ pub(super) fn act_on_right_click(
     // base mode is Pickup(8), which a live vendor also shows, so the kind alone can't name loot.
     let loot = stores
         .get(entity)
-        .is_ok_and(|s| s.0.unit_is_dead() && s.0.unit_lootable());
+        .is_ok_and(|(s, _)| s.0.unit_is_dead() && s.0.unit_lootable());
     let me = self_player.single().ok();
     // The one SetSelection law ([`scan::commit`]): dedup + selection + the engaged-switch
     // stop→select→re-swing. The Attack cursor kind is Attack `0x5ecb70`'s new-target validation
@@ -276,7 +291,7 @@ pub(super) fn act_on_right_click(
         // order — but the melee auto-draw and the swing never happen; the red
         // ERR_ATTACK_MOUNTED line shows instead.
         if crate::ui_action::attack_mounted_refusal(
-            me.and_then(|(e, _, _)| stores.get(e).ok()),
+            me.and_then(|(e, _, _)| stores.get(e).ok()).map(|(s, _)| s),
             &mut ui_error_keys,
         ) {
             // refused — selection stands, no swing
@@ -317,31 +332,17 @@ pub(super) fn act_on_right_click(
     } else if cursor.kind == cursor_mode::CursorKind::Skin {
         // A dead, unlootable, SKINNABLE corpse (the classifier's own gate): cast our known
         // Skinning spell at it — the unit-side mirror of the GO lock split (0239; decision 0437's
-        // gathering finish). The spell is discovered from the known set (`Effect[0] ==
-        // SPELL_EFFECT_SKINNING`), never hardcoded — the same no-literal law as the OPEN_LOCK
-        // scan; a player without Skinning sends nothing (the "requires" toast is 0239's own
-        // later-polish note). Range rides the cursor's melee-reach gray, like loot.
+        // gathering finish). The spell comes from the reference's own learn-time latch
+        // ([`crate::ui_action::LearnedAbilities`] = `[0xb700e4]`, decision 0752), which is the same
+        // thing the classifier gated the Skin cursor on — so reaching here at all means we know it.
+        // Range rides the cursor's melee-reach gray, like loot.
         if !cursor.unable {
-            let skinner = go_inputs.spells.as_ref().and_then(|s| {
-                player_actions
-                    .spells
-                    .iter()
-                    .find(|&&id| {
-                        s.catalog
-                            .get(id)
-                            .is_some_and(|d| d.effect_1 == benilla_formats::SPELL_EFFECT_SKINNING)
-                    })
-                    .copied()
-            });
-            match skinner {
-                Some(spell_id) => {
-                    debug!("right-click skin: {guid:#x} (spell {spell_id})");
-                    let _ = net.0.send(ClientCommand::CastSpell {
-                        spell_id,
-                        target: Some(guid),
-                    });
-                }
-                None => debug!("right-click skin: {guid:#x} — no known skinning spell"),
+            if let Some(spell_id) = learned.skinning {
+                debug!("right-click skin: {guid:#x} (spell {spell_id})");
+                let _ = net.0.send(ClientCommand::CastSpell {
+                    spell_id,
+                    target: Some(guid),
+                });
             }
         }
     } else if !cursor.unable {
@@ -352,7 +353,7 @@ pub(super) fn act_on_right_click(
         // the NPC's own flags to split them (decision 0604).
         let npc_flags = stores
             .get(entity)
-            .map(|s| s.0.unit_npc_flags())
+            .map(|(s, _)| s.0.unit_npc_flags())
             .unwrap_or(0);
         if let Some(cmd) = interact_command(cursor.kind, guid, npc_flags) {
             debug!("right-click interact: {guid:#x} ({:?})", cursor.kind);
@@ -370,28 +371,14 @@ pub(super) fn act_on_right_click(
     }
 }
 
-/// The GameObject lock chain's full data set, as ONE [`SystemParam`] (decisions 0239 + 0545):
-/// the ask-once GO-template cache, Lock.dbc + LockType.dbc, the spell + skill-line catalogs, and
-/// the ask-once item-template cache (key-item names for the "Requires <key>" toast). The Option
-/// members are absent without client data.
-#[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct GoLockInputs<'w> {
-    templates: Res<'w, crate::go_templates::GameObjectTemplates>,
-    locks: Option<Res<'w, crate::go_templates::Locks>>,
-    lock_types: Option<Res<'w, crate::go_templates::LockTypes>>,
-    spells: Option<Res<'w, crate::ui_action::Spells>>,
-    skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
-    items: ResMut<'w, crate::items::Items>,
-}
-
-/// The right-click action a hovered GameObject resolves to (decisions 0239 + 0545) — chosen by
-/// its lock.
+/// The right-click action a hovered GameObject resolves to (decisions 0239 / 0545 / 0752) — chosen
+/// by its lock, through the shared chain in [`super::lock`].
 enum GoAction {
     /// No lock (or no lock data): `CMSG_GAMEOBJ_USE` — door / lever / quest object / mailbox /
     /// unlocked chest.
     Use,
-    /// A lock we can open: cast this known `OPEN_LOCK` spell at the object (chest / vein / herb / a
-    /// picked lock).
+    /// A lock we can open: cast this spell at the object — a known `OPEN_LOCK` (chest / vein / herb
+    /// / a picked lock), or a carried key item's own ON_USE spell.
     OpenLock(u32),
     /// A lock present that we cannot open — the client-local refusal (§8.4: `DisplayError`, **no
     /// packet**). `Some` = the red toast to queue; `None` = the ref is silent for this case too.
@@ -400,9 +387,6 @@ enum GoAction {
 
 /// What we know about a key-item lock slot's key when routing a refusal ([`route_lock_refusal`]).
 enum KeyFact {
-    /// The key is in our bags — the ref would open with it (the key-item ON_USE cast, deferred);
-    /// never toast "Requires <key>" at a player holding the key.
-    Held,
     /// Not held; the item template names it ("Requires Shadowforge Key").
     Named(String),
     /// Not held and the template isn't cached yet — the ref's `GetRecord` miss is silent (§8.8
@@ -410,109 +394,90 @@ enum KeyFact {
     Unknown,
 }
 
-/// Resolve a hovered GameObject's right-click action from its lock (decision 0239). Not-yet-queried
-/// or no `Lock.dbc` → treat as lockless (`Use`): the stream-in query makes "not cached" a rare race,
-/// and `Use` is both the correct lockless action and a harmless no-op on a chest whose template is
-/// still in flight. A lockable object matches the lock's **skill** slots against the player's
-/// **known** spells (an `OPEN_LOCK` whose `EffectMiscValue` is the slot's `LockType`) — "Opening"
-/// for keyless chests, Mining / Herb Gathering / Pick Lock for skill locks — then rank-gates the
-/// cast exactly as the ref's resolver does (`0x5f850f`): a known-but-under-rank opener refuses
-/// **client-side** (the "Requires Mining 100" toast), it never reaches the wire. An unresolvable
-/// rank (skill lines / self store not streamed yet) fails OPEN — cast and let the server re-check
-/// (vmangos answers `LOW_CASTLEVEL`), never a wrongly-refused click. The effective rank is
-/// value + both bonuses (vmangos `GetSkillValue`; the ref compare `0x6e3760`'s exact bonus
-/// handling is unpinned — INTERIM, decision 0545). Item-key locks aren't openable yet (the
-/// key-item ON_USE cast is deferred), but a missing key names itself ([`KeyFact`]).
+/// Resolve a hovered GameObject's right-click action from its lock — the reference's USE sender
+/// `0x5f33e0` over the shared resolver (decisions 0239 / 0545 / **0752**).
+///
+/// Not-yet-queried or no `Lock.dbc` → treat as lockless (`Use`): the stream-in query makes "not
+/// cached" a rare race, and `Use` is both the correct lockless action and a harmless no-op on a
+/// chest whose template is still in flight.
+///
+/// The satisfaction decision itself lives in [`super::lock::resolve_lock`] so the cursor's `usable`
+/// asks exactly the same question (§4a/§8.7 — the icon and the click agree by construction). Here
+/// we only turn its answer into a packet: a satisfied **skill** slot casts the matched opener; a
+/// satisfied **key** slot casts that key item's ON_USE spell (the reference's `0x5d8c80` → `CastSpell`
+/// path — note that vmangos's `CanOpenLock` only honours a key when the cast carries `m_CastItem`,
+/// i.e. came in as `CMSG_USE_ITEM`, so on this server the faithful cast is answered with a refusal
+/// rather than an open; that gap is the server's, and it is better than the silent dead click the
+/// deferral used to give a player holding the right key); an unmet lock takes §8.8's toast routing
+/// and sends nothing.
 fn resolve_go_action(
     guid: u64,
     inputs: &mut GoLockInputs,
     known: &std::collections::HashSet<u32>,
-    go_store: Option<&ObjectStore>,
+    go: Option<(&ObjectStore, u32)>,
     me_store: Option<&ObjectStore>,
     net: &NetCommands,
 ) -> GoAction {
-    let (spells, skill_lines, lock_types) = (
-        inputs.spells.as_deref(),
-        inputs.skill_lines.as_deref(),
-        inputs.lock_types.as_deref(),
-    );
-    let items = &mut *inputs.items;
     let Some(tmpl) = inputs.templates.get(guid) else {
         return GoAction::Use;
     };
     let Some(locks) = inputs.locks.as_deref() else {
         return GoAction::Use;
     };
-    // A lockId whose row is missing (or all-empty) is "no lock" — the ref resolver's `0x5f8180`
-    // null → FALSE with spell 0 → `CMSG_GAMEOBJ_USE` (§8.4 C6).
-    if !locks.0.is_locked(tmpl.lock_id) {
-        return GoAction::Use;
-    }
-    let Some(slots) = locks.0.slots(tmpl.lock_id) else {
+    // A lockId whose row is missing is "no lock" — the ref resolver's `0x5f8180` null → FALSE with
+    // spell 0 → `CMSG_GAMEOBJ_USE` (§8.4 C6).
+    let Some(slots) = locks.0.slots(tmpl.lock_id).filter(|_| tmpl.lock_id != 0) else {
         return GoAction::Use;
     };
-    // The resolver scan (§8.4 `0x5f83d0`, §8.8's timing): remember the FIRST known matching
-    // opener unconditionally — the ref writes the spell-id out-param at `0x5f84f8` BEFORE the
-    // rank test, and that nonzero-ness is the "Requires Herbalism" (0xdf) vs "Requires Mining
-    // 100" (0xe0) discriminator — then rank-gate the actual cast.
-    let mut matched: Option<u32> = None;
-    if let Some(spells) = spells {
-        for slot in slots
-            .iter()
-            .filter(|s| s.key_type == benilla_formats::LOCK_KEY_SKILL)
-        {
-            let Some(&spell_id) = known.iter().find(|&&id| {
-                spells.catalog.get(id).and_then(|d| d.open_lock_type) == Some(slot.index)
-            }) else {
-                continue;
+    let facts = super::lock::go_facts(go);
+    let mut matched = None;
+    let outcome = super::lock::resolve_lock(
+        slots,
+        known,
+        inputs.spells.as_deref(),
+        me_store,
+        &inputs.items,
+        facts,
+        &mut matched,
+    );
+    let key_entry = match outcome {
+        super::lock::LockOutcome::Unlocked => return GoAction::Use,
+        super::lock::LockOutcome::OpenBySpell(spell_id) => return GoAction::OpenLock(spell_id),
+        super::lock::LockOutcome::OpenByKey(entry) => entry,
+        super::lock::LockOutcome::Unmet => {
+            // Unopenable — §8.8's routing, which keys off Lock.dbc **slot 0** regardless of which
+            // slot the resolver walked.
+            let slot0 = slots[0];
+            let key = if slot0.key_type == benilla_formats::LOCK_KEY_ITEM {
+                match inputs.items.template(slot0.index, 0, net) {
+                    Some(info) => KeyFact::Named(info.name.clone()),
+                    None => KeyFact::Unknown,
+                }
+            } else {
+                KeyFact::Unknown
             };
-            matched.get_or_insert(spell_id);
-            let rank = skill_lines
-                .and_then(|sl| sl.catalog.spell_to_line(spell_id))
-                .and_then(|line| me_store.map(|s| effective_skill_rank(s, line)))
-                .unwrap_or(u32::MAX);
-            if rank >= slot.skill {
-                return GoAction::OpenLock(spell_id);
-            }
+            let lock_types = inputs.lock_types.as_deref();
+            return GoAction::Refuse(route_lock_refusal(
+                &slot0,
+                matched.is_some(),
+                facts.flag_locked,
+                go.map_or(-1, |(s, _)| s.0.gameobject_type_id()),
+                facts.level,
+                lock_types.and_then(|lt| lt.0.name(slot0.index)),
+                key,
+            ));
         }
-    }
-    // Unopenable — gather the facts the toast routing reads (§8.8 keys off Lock.dbc slot 0).
-    let slot0 = slots[0];
-    let key = if slot0.key_type == benilla_formats::LOCK_KEY_ITEM {
-        if me_store.is_some_and(|s| crate::ui_items::count_of(&s.0, items, slot0.index) > 0) {
-            KeyFact::Held
-        } else if let Some(info) = items.template(slot0.index, 0, net) {
-            KeyFact::Named(info.name.clone())
-        } else {
-            KeyFact::Unknown
-        }
-    } else {
-        KeyFact::Unknown
     };
-    GoAction::Refuse(route_lock_refusal(
-        &slot0,
-        matched.is_some(),
-        go_store.is_some_and(|s| s.0.gameobject_flags() & 0x2 != 0),
-        go_store.map_or(-1, |s| s.0.gameobject_type_id()),
-        go_store.map_or(0, |s| s.0.gameobject_level()),
-        lock_types.and_then(|lt| lt.0.name(slot0.index)),
-        key,
-    ))
-}
-
-/// The player's effective rank on a skill line — descriptor value + both bonuses, floored at 0
-/// (vmangos `Player::GetSkillValue`'s sum; the ref's `0x6e3760` bonus handling is unpinned —
-/// INTERIM, decision 0545). `0` when the line isn't in the skill block.
-fn effective_skill_rank(store: &ObjectStore, line: u32) -> u32 {
-    for i in 0..benilla_protocol::messages::PLAYER_SKILL_SLOTS {
-        if let Some(s) = store.0.player_skill(i) {
-            if u32::from(s.skill_id) == line {
-                let v = i32::from(s.value) + i32::from(s.temp_bonus) + i32::from(s.perm_bonus);
-                return v.max(0) as u32;
-            }
-        }
+    // A key we carry: cast its ON_USE spell at the object (`0x5f85aa`). The template is ask-once —
+    // a miss queries and does nothing this click, exactly like the toast's own name miss.
+    match inputs
+        .items
+        .template(key_entry, 0, net)
+        .and_then(|i| i.use_spell.as_ref().map(|s| s.spell_id))
+    {
+        Some(spell_id) => GoAction::OpenLock(spell_id),
+        None => GoAction::Refuse(None),
     }
-    0
 }
 
 /// The client-local toast for an unopenable lock — the ref's routing, transcribed (wow-re
@@ -548,7 +513,7 @@ fn route_lock_refusal(
     }
     match slot0.key_type {
         benilla_formats::LOCK_KEY_ITEM => match key {
-            KeyFact::Held | KeyFact::Unknown => None,
+            KeyFact::Unknown => None,
             KeyFact::Named(name) => Some(UiError {
                 key: "ERR_USE_LOCKED_WITH_ITEM_S",
                 fill_s: Some(name),
@@ -558,11 +523,7 @@ fn route_lock_refusal(
         benilla_formats::LOCK_KEY_SKILL => {
             let name = lock_type_name.unwrap_or("UNKNOWN").to_string();
             if opener_known {
-                let required = if slot0.skill != 0 {
-                    slot0.skill
-                } else {
-                    go_level * 5
-                };
+                let required = super::lock::required_skill(slot0, go_level).max(0) as u32;
                 Some(UiError {
                     key: "ERR_USE_LOCKED_WITH_SPELL_KNOWN_SI",
                     fill_s: Some(name),
@@ -729,6 +690,7 @@ mod tests {
             key_type: LOCK_KEY_SKILL,
             index,
             skill,
+            action: 0,
         };
         // Herb, Herbalism unknown → 0xdf "Requires %s" filled with the LockType name.
         let e = route_lock_refusal(
@@ -789,11 +751,13 @@ mod tests {
         .unwrap();
         assert_eq!(e.fill_s.as_deref(), Some("UNKNOWN"));
         // Key lock, key absent + named → 0xde "Requires %s" with the item name; the template
-        // miss and the key-in-hand (deferred open) cases are silent, like the ref.
+        // miss is silent, like the ref (a key we DO hold never reaches the toast at all — the
+        // resolver returns `OpenByKey` and the click casts it, decision 0752).
         let key_slot = LockSlot {
             key_type: LOCK_KEY_ITEM,
             index: 11000,
             skill: 0,
+            action: 1,
         };
         let e = route_lock_refusal(
             &key_slot,
@@ -809,7 +773,6 @@ mod tests {
             (e.key, e.fill_s.as_deref()),
             ("ERR_USE_LOCKED_WITH_ITEM_S", Some("Shadowforge Key"))
         );
-        assert!(route_lock_refusal(&key_slot, false, false, 0, 0, None, KeyFact::Held).is_none());
         assert!(
             route_lock_refusal(&key_slot, false, false, 0, 0, None, KeyFact::Unknown).is_none()
         );
@@ -838,6 +801,7 @@ mod tests {
             key_type: 7,
             index: 0,
             skill: 0,
+            action: 0,
         };
         let e = route_lock_refusal(&odd, false, false, 3, 0, None, KeyFact::Unknown).unwrap();
         assert_eq!(e.key, "ERR_USE_CANT_OPEN");

@@ -42,6 +42,17 @@ const RED: [f32; 4] = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
 /// Unit names render gold (byte-verified `0xffffd200`); FrameXML recolors line 1 by reaction.
 const GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 
+/// A GameObject tooltip line's colour, as the builder `0x52aa20` picks it (decision 0756). The
+/// app half decides *which* line gets which tint from the lock law; this enum is only the
+/// crate-boundary spelling, so the colour constants stay private to the UI engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TooltipTint {
+    /// `0xc0cf60` — the requirement line's normal colour (the key-item "Requires %s").
+    White,
+    /// The "Locked" line's unmet colour, and the unknown-skill "Requires %s" (`0xffff0000`).
+    Red,
+}
+
 /// The rank word table — byte-verified `0x854158[]`: rare-elite prints ELITE, rare prints
 /// nothing (there is no distinct "Rare Elite" word in 1.12's builder).
 fn rank_word(rank: u32) -> Option<&'static str> {
@@ -319,46 +330,37 @@ impl super::UiScript {
     }
 
     /// Show the world-mouseover GAMEOBJECT tooltip — the byte-verified GO builder `0x52aa20`
-    /// (decision 0276): the NAME (gold) + the red lock-requirement lines ("Requires <key>",
-    /// the Lock.dbc chain) when the object is flag-locked. Seated centred ABOVE the cursor and
-    /// clamped to the screen, like the minimap blip tooltip — the reference's signpost hover
-    /// shows the engine plate AT the pointer, not the FrameXML corner (director's reference
-    /// shot, 2026-07-13, superseding 0281's "units + GOs → corner" row for the GO half; the
-    /// exact engine anchor law is INTERIM pending its pin). Follows the pointer via
-    /// [`Self::world_tooltip_move`]. Same fade lifecycle as the unit flow (no
-    /// `UPDATE_MOUSEOVER_UNIT` — that recolor is the unit line's).
+    /// (decisions 0276 / **0756**): the NAME (gold) followed by the lock lines the caller
+    /// resolved, each with its own tint.
+    ///
+    /// **Seated at the FrameXML default anchor — the bottom-right corner — exactly like the unit
+    /// flow.** This restores 0281's "units + GOs → corner" law and retires the 2026-07-13 interim
+    /// that seated the GO plate at the pointer: the director's 07-29 reference shot of the Searing
+    /// Gorge door shows the engine plate in the corner, not following the cursor, and their eye is
+    /// the ground truth the interim was resting on in the first place. The pointer-follow
+    /// ([`Self::world_tooltip_move`]) stays for the minimap blip, which really is cursor-seated.
+    ///
+    /// Same fade lifecycle as the unit flow (no `UPDATE_MOUSEOVER_UNIT` — that recolor is the
+    /// unit line's).
     pub fn world_tooltip_gameobject(
         &mut self,
         name: &str,
-        requirements: &[String],
-        ui_x: f32,
-        ui_y: f32,
+        lines: &[(String, TooltipTint)],
     ) -> bool {
-        let (h, id, root_id) = {
+        let (h, id) = {
             let mut model = self.model_mut();
             let Some(h) = model.arena.lookup("GameTooltip") else {
                 return false;
             };
-            let Some(root) = model.arena.lookup("UIParent") else {
-                return false;
-            };
-            let (id, root_id) = (model.frame_id(h), model.frame_id(root));
-            (h, id, root_id)
+            let id = model.frame_id(h);
+            (h, id)
         };
+        // The same default-anchor handler the unit flow fires — FrameXML seats the plate at the
+        // bottom-right of UIParent.
+        if let Err(e) =
+            super::event::fire_widget_handler(&self.lua, id, "OnTooltipSetDefaultAnchor", vec![])
         {
-            let mut model = self.model_mut();
-            let input = model.layout_inputs.entry(h).or_default();
-            // Anchor only — the screen clamp is the tooltip FRAME's own flag
-            // (`Frame::clamped_to_screen`), synced with live extents at every resolve.
-            let new = Anchor::new(Point::Bottom, root_id, Point::BottomLeft, ui_x, ui_y);
-            // Compare-then-touch: a still cursor re-seats the plate at the same point every
-            // frame — tier 1 of the layout gate stays quiet unless the pointer actually moved.
-            let same =
-                input.anchors.len() == 1 && super::object::anchor_bits_eq(&input.anchors[0], &new);
-            if !same {
-                input.anchors = vec![new];
-                model.touch_layout();
-            }
+            self.push_error(e);
         }
         let wrapper = match super::object::frame_wrapper(&self.lua, id) {
             Ok(w) => w,
@@ -374,8 +376,12 @@ impl super::UiScript {
             }
             fire_cleared(&self.lua, h);
             append_line(&self.lua, &wrapper, (name.to_string(), GOLD), None, false)?;
-            for req in requirements {
-                append_line(&self.lua, &wrapper, (req.clone(), RED), None, false)?;
+            for (text, tint) in lines {
+                let colour = match tint {
+                    TooltipTint::White => WHITE,
+                    TooltipTint::Red => RED,
+                };
+                append_line(&self.lua, &wrapper, (text.clone(), colour), None, false)?;
             }
             Ok(())
         };

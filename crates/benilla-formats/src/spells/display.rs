@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// A spell's `SPELL_EFFECT_OPEN_LOCK` effect (decision 0752) — which `LockType` it opens, and
+/// which of the three effect slots carries it (so the value walk reads the right column of the
+/// per-effect arrays).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenLock {
+    /// `EffectMiscValue` — the `LockType.dbc` index this spell opens (pick-lock 1, herbalism 2,
+    /// mining 3, "Quick Open" 10, "Open Kneeling" 13, blasting 16 …).
+    pub lock_type: u32,
+    /// Which of `Effect[0..3]` is the OPEN_LOCK one.
+    pub effect: usize,
+}
+
 /// One spell's display identity.
 pub struct SpellDisplay {
     pub name: String,
@@ -45,12 +57,14 @@ pub struct SpellDisplay {
     /// `Effect[0]` (column 61, module docs) — the first effect type. Only
     /// [`Self::is_melee_auto_attack`] consumes it (`== SPELL_EFFECT_ATTACK`).
     pub effect_1: u32,
-    /// The `LockType` index this spell can open — its `EffectMiscValue` at whichever of the three
-    /// effects is `SPELL_EFFECT_OPEN_LOCK` — or `None` if it opens no lock. The GameObject
-    /// interact-cast (decision 0239) matches this against a lock slot's `LockType` index across the
-    /// player's known spells: "Opening" for keyless chests, "Mining"/"Herb Gathering"/"Pick Lock"
-    /// for skill locks.
-    pub open_lock_type: Option<u32>,
+    /// This spell's `SPELL_EFFECT_OPEN_LOCK` effect, or `None` if it opens no lock. The GameObject
+    /// interact-cast (decisions 0239/0752) matches it against a lock slot across the player's known
+    /// spells: "Opening" for keyless chests, "Mining"/"Herb Gathering"/"Pick Lock" for skill locks.
+    /// The skill it *provides* is [`Self::open_lock_skill`].
+    pub open_lock: Option<OpenLock>,
+    /// `spellLevel` (column 28, `SpellRec+0x70`) — the level this spell's effect values are quoted
+    /// at; the effect-value walk scales by `casterLevel − spellLevel`, floored at 0 (`0x6e3854`).
+    pub spell_level: u32,
     /// `Dispel` (column 4, `SpellRec+0x10`) — the `SpellDispelType.dbc` id. The reference client
     /// reads exactly this field for `GetPlayerBuffDispelType` / `UnitDebuff`'s third return
     /// (byte-verified, decision 0257). Name it through [`crate::SpellCatalog::dispel_name`] — the
@@ -180,9 +194,16 @@ pub struct SpellDisplay {
     /// misc payload. For an effect-47 opener, slot 0 is the **window routing key** (wow-re
     /// `tradeskill` node, VERIFIED at `0x6e4bd7`: `!= 0` → the CraftFrame — Enchanting 3, Beast
     /// Training 1 — else the TradeSkillFrame). The OPEN_LOCK/shapeshift slots are already
-    /// exposed derived ([`Self::open_lock_type`]/[`Self::shapeshift_form`]); this is the raw
+    /// exposed derived ([`Self::open_lock`]/[`Self::shapeshift_form`]); this is the raw
     /// array.
     pub effect_misc_value: [i32; 3],
+    /// `EffectDicePerLevel[3]` ([`COL_EFFECT_DICE_PER_LEVEL_1`]) — the integer per-level term of
+    /// the effect-value walk (`0x6e3871`); `0` on every 5875 opener.
+    pub effect_dice_per_level: [i32; 3],
+    /// `EffectRealPointsPerLevel[3]` ([`COL_EFFECT_REAL_POINTS_PER_LEVEL_1`]) — the float
+    /// per-level term (`0x6e3889`). `5.0` on Pick Lock / Mining / Herb Gathering, which is what
+    /// makes their provided lock skill track the 5×level profession cap.
+    pub effect_real_points_per_level: [f32; 3],
 }
 
 /// Hand-rolled so `equipped_item_class` defaults to the data's own "no requirement" (`-1`) —
@@ -203,7 +224,8 @@ impl Default for SpellDisplay {
             passive: false,
             cast_ui: 0,
             effect_1: 0,
-            open_lock_type: None,
+            open_lock: None,
+            spell_level: 0,
             dispel: 0,
             category: 0,
             recovery_ms: 0,
@@ -238,6 +260,8 @@ impl Default for SpellDisplay {
             effect_base_points: [0; 3],
             effect_die_sides: [0; 3],
             effect_base_dice: [0; 3],
+            effect_dice_per_level: [0; 3],
+            effect_real_points_per_level: [0.0; 3],
             effect_amplitude: [0; 3],
             effect_apply_aura: [0; 3],
             effect_radius_index: [0; 3],
@@ -256,6 +280,39 @@ impl Default for SpellDisplay {
 // the catalog that loads that file — [`crate::SpellCatalog::dispel_name`].
 
 impl SpellDisplay {
+    /// The `LockType` this spell opens, if any — [`Self::open_lock`]'s index alone.
+    pub fn open_lock_type(&self) -> Option<u32> {
+        self.open_lock.map(|o| o.lock_type)
+    }
+
+    /// The **skill value this spell provides** to a lock at `caster_level` — the client's
+    /// effect-value *min* (`0x6e3800`) put through its caller's rounding (`0x6e3760`:
+    /// `round(2x ∓ 0.5) >> 1`), and the left-hand side of the lock resolver's satisfaction test
+    /// (`0x5f850f`: `cmp eax,esi; jge`). `None` when the spell opens no lock.
+    ///
+    /// The client compares **this**, never the player's skill block — and that is faithful,
+    /// because the DBC encodes the same number: Pick Lock 1804 at 60 → `4 + 1 + 5.0·(60−1)` =
+    /// **300**, a rogue's Lockpicking cap; Mining 2575 at 60 → `−1 + 1 + 5.0·60` = **300**; and
+    /// Small Seaforium Charge 4056 → `149 + 1` = **150**, exactly the `Blasting 150` its lock
+    /// (id 92) asks for. The universally-known "Opening" spells are flat 100.
+    pub fn open_lock_skill(&self, caster_level: u32) -> Option<i32> {
+        let e = self.open_lock?.effect;
+        // `0x6e3826`: level delta, floored at 0, and only subtracted when spellLevel > 0.
+        let delta = caster_level.saturating_sub(self.spell_level) as f32;
+        let v = self.effect_base_points[e] as f32
+            + self.effect_base_dice[e] as f32
+            + self.effect_dice_per_level[e] as f32 * delta
+            + self.effect_real_points_per_level[e] * delta;
+        // `0x6e3760`'s rounding verbatim: double, bias away from zero by a half, round-to-nearest
+        // (x87 `fistp`), then arithmetic-halve.
+        let doubled = if v >= 0.0 {
+            v * 2.0 - 0.5
+        } else {
+            v * 2.0 + 0.5
+        };
+        Some((doubled.round_ties_even() as i32) >> 1)
+    }
+
     /// The client's ranged-stance gate, verbatim: `AttributesEx2 & 0x20` (auto-repeat: Auto Shot,
     /// wand Shoot) **or** `Attributes & 0x2` (uses the ranged slot: every Shoot variant, Throw).
     /// Byte-verified in wow-re (`SpellRec+0x20&0x20 || +0x18&0x2` — the test every ranged trigger

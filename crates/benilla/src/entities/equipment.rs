@@ -908,11 +908,7 @@ pub(super) fn attach_held_items(
                     match effective {
                         PartFade::Steady => {}
                         PartFade::Pending(since) => {
-                            child.insert(PendingAppearFade {
-                                cutout: part.material.clone(),
-                                blend: part.fade_blend.clone().unwrap(),
-                                since,
-                            });
+                            child.insert(PendingAppearFade { since });
                         }
                         PartFade::Live(started) => {
                             child.insert(RenderFade {
@@ -920,8 +916,6 @@ pub(super) fn attach_held_items(
                                 duration: APPEAR_FADE_SECS,
                                 from: 0.0,
                                 to: 1.0,
-                                cutout: part.material.clone(),
-                                blend: part.fade_blend.clone().unwrap(),
                             });
                         }
                     }

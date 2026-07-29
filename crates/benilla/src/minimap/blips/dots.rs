@@ -358,12 +358,14 @@ mod tests {
             key_type: LOCK_KEY_SKILL,
             index: 3,
             skill: 0,
+            action: 0,
         };
         let mut keyed = [LockSlot::default(); MAX_LOCK_SLOTS];
         keyed[0] = LockSlot {
             key_type: LOCK_KEY_ITEM,
             index: 3,
             skill: 0,
+            action: 0,
         };
         let locks = LockCatalog::from_rows([(38, vein), (40, keyed)]);
         assert!(tracked_resource(1 << 2, 38, &locks), "mining bit lights it");

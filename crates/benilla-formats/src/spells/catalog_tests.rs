@@ -247,23 +247,23 @@ fn real_spell_catalog_reads_open_lock_types() {
     // The gathering/lockpick openers carry SPELL_EFFECT_OPEN_LOCK; `open_lock_type` is the
     // LockType they open — the same indices Lock.dbc's skill slots name (mining vein → 3).
     assert_eq!(
-        cat.get(2575).unwrap().open_lock_type,
+        cat.get(2575).unwrap().open_lock_type(),
         Some(3),
         "Mining opens LockType 3"
     );
     assert_eq!(
-        cat.get(2366).unwrap().open_lock_type,
+        cat.get(2366).unwrap().open_lock_type(),
         Some(2),
         "Herb Gathering opens LockType 2"
     );
     assert_eq!(
-        cat.get(1804).unwrap().open_lock_type,
+        cat.get(1804).unwrap().open_lock_type(),
         Some(1),
         "Pick Lock opens LockType 1"
     );
     // A plain damage spell opens no lock (Effect[0] is not OPEN_LOCK).
     assert_eq!(
-        cat.get(133).unwrap().open_lock_type,
+        cat.get(133).unwrap().open_lock_type(),
         None,
         "Fireball opens no lock"
     );
@@ -288,6 +288,83 @@ fn real_spell_catalog_reads_open_lock_types() {
         "Slow Fall consumes one Light Feather (17056)"
     );
     assert_eq!(cat.get(133).unwrap().totems, [0, 0]);
+}
+
+/// The two `Effect[0]` values the client latches at spell-learn time (`0x4b25e0` → `[0xb700e4]` /
+/// `[0xb700e8]`, decision 0752), pinned against the shipped file: the cursor's skin leg refuses to
+/// show the knife unless one of them is present in the book, so a wrong constant would silently
+/// re-open the "everyone sees the skinning cursor" report — or, worse, hide it from skinners.
+/// Skips without client data.
+#[test]
+fn real_spell_catalog_pins_the_skin_latch_effects() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // Skinning (8613) — `0x4b2623: cmp [esi+0xf4], 0x5f`.
+    assert_eq!(
+        cat.get(8613).unwrap().effect_1,
+        crate::SPELL_EFFECT_SKINNING,
+        "Skinning carries SPELL_EFFECT_SKINNING (95 == 0x5f)"
+    );
+    // Remove Insignia (22027) — the `[0xb700e8]` half, `0x4b2632: cmp [esi+0xf4], 0x74`.
+    assert_eq!(
+        cat.get(22027).unwrap().effect_1,
+        0x74,
+        "Remove Insignia carries SPELL_EFFECT_SKIN_PLAYER_CORPSE (116 == 0x74)"
+    );
+    // Nothing an ordinary caster starts with does — the latch stays empty for a non-skinner.
+    assert_ne!(cat.get(133).unwrap().effect_1, crate::SPELL_EFFECT_SKINNING);
+    assert_ne!(
+        cat.get(6247).unwrap().effect_1,
+        crate::SPELL_EFFECT_SKINNING
+    );
+}
+
+/// The **skill an opener provides** on the real Spell.dbc — the left-hand side of the client's lock
+/// satisfaction test (`0x5f850f`; decision 0752). This walk decides whether a right-click opens a
+/// lock at all, so its inputs (spellLevel 28 · EffectDieSides 64 · EffectBaseDice 67 ·
+/// EffectDicePerLevel 70 · EffectRealPointsPerLevel 73 · EffectBasePoints 76) are pinned by
+/// *result*, against anchors whose right answers are known from the game rather than the file.
+/// Skips without client data.
+#[test]
+fn real_spell_catalog_computes_the_lock_skill_an_opener_provides() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // Pick Lock (1804): `4 + 1 + 5.0×(level − 1)` — a rogue's Lockpicking cap, 5×level, exactly.
+    assert_eq!(cat.get(1804).unwrap().open_lock_skill(60), Some(300));
+    assert_eq!(cat.get(1804).unwrap().open_lock_skill(45), Some(225));
+    // Mining (2575) / Herb Gathering (2366): `−1 + 1 + 5.0×level` — the same profession cap, but
+    // quoted at spellLevel 0, so they do not lose the first level the way Pick Lock does.
+    assert_eq!(cat.get(2575).unwrap().open_lock_skill(60), Some(300));
+    assert_eq!(cat.get(2366).unwrap().open_lock_skill(60), Some(300));
+    // Small / Large Seaforium Charge (4056 / 4075): flat `149 + 1` = 150 and `249 + 1` = 250 — and
+    // lock 92 asks for `Blasting 150`. The charge exists to open exactly that door, so the equality
+    // is the cross-check: a column slip anywhere in the walk breaks it.
+    assert_eq!(cat.get(4056).unwrap().open_lock_skill(1), Some(150));
+    assert_eq!(cat.get(4075).unwrap().open_lock_skill(1), Some(250));
+    // The universally-known "Opening"/"Closing" family is flat 100 at every level — which is why
+    // the Action gate, not the value test, is what keeps them off a padlocked door (decision 0752).
+    for id in [3365, 6233, 6246, 6247, 6477, 6478, 21651, 21652] {
+        assert_eq!(
+            cat.get(id).unwrap().open_lock_skill(1),
+            Some(100),
+            "spell {id} is a flat-100 opener"
+        );
+        assert_eq!(cat.get(id).unwrap().open_lock_skill(60), Some(100));
+    }
+    // A spell with no OPEN_LOCK effect provides nothing.
+    assert_eq!(cat.get(133).unwrap().open_lock_skill(60), None);
 }
 
 /// The cooldown/cost/range columns on the real build-5875 `Spell.dbc`, pinned 2026-07-10

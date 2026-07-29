@@ -122,7 +122,7 @@ mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
 pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
-pub use display::SpellDisplay;
+pub use display::{OpenLock, SpellDisplay};
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
@@ -251,6 +251,10 @@ const SPELL_EFFECT_LEARN_SPELL: u32 = 36;
 /// interact-cast matches (decision 0239; RE `cursor-system.md` §8, the client's
 /// `cmp [SpellRec+0xf4], 0x21`). A spell carrying it opens the `LockType` its `EffectMiscValue` names.
 const SPELL_EFFECT_OPEN_LOCK: u32 = 0x21;
+/// `spellLevel` — column 28 (`SpellRec+0x70`, the level the effect-value walk subtracts at
+/// `0x6e3854`). Pinned by value on the extracted 5875 file: Pick Lock 1804 and Fireball rank 1
+/// read `1`, the professions' openers `0`.
+const COL_SPELL_LEVEL: usize = 28;
 /// `EffectApplyAuraName[0]` (column 91, `61 + 10×3` — tenth of the effect-`[3]` blocks; pinned on
 /// the extracted 5875 file: every form spell — Battle Stance 2457, Bear 5487, Cat 768, Stealth
 /// 1784, Moonkin 24858 — carries `36` here, and columns 94-96 don't). The stance bar's
@@ -295,6 +299,12 @@ const COL_PROC_CHANCE: usize = 25;
 /// Feign Death); the rest are their natural unsigned/float DBC type.
 const COL_EFFECT_DIE_SIDES_1: usize = 64;
 const COL_EFFECT_BASE_DICE_1: usize = 67;
+/// `EffectDicePerLevel[0]` — column 70 (`SpellRec+0x118`), the integer per-level term of the
+/// effect-value walk (decision 0752).
+const COL_EFFECT_DICE_PER_LEVEL_1: usize = 70;
+/// `EffectRealPointsPerLevel[0]` — column 73 (`SpellRec+0x124`), the **float** per-level term:
+/// 5.0 on every profession opener, 0.6 on Fireball rank 1 — the two anchors that pin the column.
+const COL_EFFECT_REAL_POINTS_PER_LEVEL_1: usize = 73;
 const COL_EFFECT_BASE_POINTS_1: usize = 76;
 const COL_EFFECT_RADIUS_INDEX_1: usize = 88;
 const COL_EFFECT_AMPLITUDE_1: usize = 94;
@@ -416,7 +426,10 @@ pub const SPELL_EFFECT_TRADE_SKILL: u32 = 47;
 pub const SPELL_EFFECT_CREATE_ITEM: u32 = 24;
 /// `SpellEffects` value `95` — `SPELL_EFFECT_SKINNING` (vmangos `SharedDefines.h`,
 /// `Spell::EffectSkinning`): the corpse-gathering cast the Skin cursor's right-click resolves
-/// through (0437's gathering finish).
+/// through (0437's gathering finish). Byte-confirmed as the client's own discriminator: the
+/// spell-learn path latches a spell with this `Effect[0]` into `[0xb700e4]`
+/// (`0x4b2623: cmp [esi+0xf4], 0x5f` — `0x5f == 95`), and the cursor's skin leg requires that latch
+/// (decision 0752).
 pub const SPELL_EFFECT_SKINNING: u32 = 95;
 /// `SpellEffects` values `53`/`54` — `SPELL_EFFECT_ENCHANT_ITEM` (permanent) /
 /// `SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY` (vmangos `SharedDefines.h`): the item-targeted craft
@@ -499,6 +512,16 @@ fn spell_schema() -> Schema {
             s.add_field(SchemaField::new("AuraDescriptionEnUs", FieldType::String));
         } else if i == COL_SPEED {
             s.add_field(SchemaField::new("Speed", FieldType::Float32));
+        } else if (COL_EFFECT_REAL_POINTS_PER_LEVEL_1..COL_EFFECT_REAL_POINTS_PER_LEVEL_1 + 3)
+            .contains(&i)
+        {
+            s.add_field(SchemaField::new(
+                format!(
+                    "EffectRealPointsPerLevel{}",
+                    i - COL_EFFECT_REAL_POINTS_PER_LEVEL_1
+                ),
+                FieldType::Float32,
+            ));
         } else if (COL_EFFECT_MULTIPLE_VALUE_1..COL_EFFECT_MULTIPLE_VALUE_1 + 3).contains(&i) {
             s.add_field(SchemaField::new(
                 format!("EffectMultipleValue{}", i - COL_EFFECT_MULTIPLE_VALUE_1),
@@ -562,11 +585,16 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 passive: attributes & ATTR_PASSIVE != 0,
                 cast_ui: u32_at(r, COL_CAST_UI).unwrap_or(0),
                 effect_1: u32_at(r, COL_EFFECT_1).unwrap_or(0),
+                spell_level: u32_at(r, COL_SPELL_LEVEL).unwrap_or(0),
                 // Scan the three effects for OPEN_LOCK and take that effect's LockType (its
-                // EffectMiscValue). Most openers carry it on Effect[0], but the scan is cheap.
-                open_lock_type: (0..3).find_map(|i| {
-                    (u32_at(r, COL_EFFECT_1 + i)? == SPELL_EFFECT_OPEN_LOCK)
-                        .then(|| u32_at(r, COL_EFFECT_MISC_1 + i).unwrap_or(0))
+                // EffectMiscValue) together with the value inputs the lock resolver compares
+                // against the slot's requirement (decision 0752). Most openers carry it on
+                // Effect[0], but the scan is cheap.
+                open_lock: (0..3).find_map(|i| {
+                    (u32_at(r, COL_EFFECT_1 + i)? == SPELL_EFFECT_OPEN_LOCK).then(|| OpenLock {
+                        lock_type: u32_at(r, COL_EFFECT_MISC_1 + i).unwrap_or(0),
+                        effect: i,
+                    })
                 }),
                 dispel: u32_at(r, COL_DISPEL).unwrap_or(0),
                 category: u32_at(r, COL_CATEGORY).unwrap_or(0),
@@ -620,6 +648,12 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 }),
                 effect_base_dice: std::array::from_fn(|i| {
                     i32_at(r, COL_EFFECT_BASE_DICE_1 + i).unwrap_or(0)
+                }),
+                effect_dice_per_level: std::array::from_fn(|i| {
+                    i32_at(r, COL_EFFECT_DICE_PER_LEVEL_1 + i).unwrap_or(0)
+                }),
+                effect_real_points_per_level: std::array::from_fn(|i| {
+                    f32_at(r, COL_EFFECT_REAL_POINTS_PER_LEVEL_1 + i).unwrap_or(0.0)
                 }),
                 effect_amplitude: std::array::from_fn(|i| {
                     u32_at(r, COL_EFFECT_AMPLITUDE_1 + i).unwrap_or(0)

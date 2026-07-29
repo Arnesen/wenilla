@@ -872,11 +872,7 @@ pub(super) fn attach_entity_visuals(
                     if let (Some(blend), false) = (fade_blend, reattached) {
                         unit_will_fade = true;
                         child.insert((
-                            PendingAppearFade {
-                                cutout: mat.clone(),
-                                blend: blend.clone(),
-                                since: now,
-                            },
+                            PendingAppearFade { since: now },
                             FadeMaterials {
                                 cutout: mat.clone(),
                                 blend: blend.clone(),

@@ -48,8 +48,8 @@ mod stationery;
 pub use stationery::{load_stationery_catalog, StationeryCatalog, STATIONERY_DEFAULT};
 mod lock;
 pub use lock::{
-    load_lock_catalog, LockCatalog, LockSlot, LOCK_KEY_ITEM, LOCK_KEY_NONE, LOCK_KEY_SKILL,
-    MAX_LOCK_SLOTS,
+    load_lock_catalog, LockCatalog, LockSlot, GO_STATE_ACTIVE, GO_STATE_ACTIVE_ALTERNATIVE,
+    GO_STATE_READY, LOCK_KEY_ITEM, LOCK_KEY_NONE, LOCK_KEY_SKILL, MAX_LOCK_SLOTS,
 };
 mod lock_type;
 pub use lock_type::{load_lock_type_catalog, LockTypeCatalog};
@@ -109,9 +109,9 @@ pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;
 pub use spells::{
     load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_dispel_types,
-    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, ShapeshiftForm,
-    SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes, SpellDisplay,
-    SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
+    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, OpenLock,
+    ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
+    SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
     ATTR_ONLY_STEALTHED, SPELL_EFFECT_CREATE_ITEM, SPELL_EFFECT_ENCHANT_ITEM,
     SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY, SPELL_EFFECT_SKINNING, SPELL_EFFECT_TRADE_SKILL,

@@ -260,6 +260,9 @@ const FIELD_PLAYER_BANK_BAG_SLOT_1: u16 = 612; // 564 + 24×2; 6 bag slots × 2 
                                                // anchors (ui/scratch/buyback-data-path.md: playerBlock +0x1038/+0x1068) rebased through the
                                                // tested COINAGE anchor: block base = 1176 − 0xf70/4 = 188 → 188+1038 = 1226, 188+1050 = 1238).
 const FIELD_PLAYER_VENDORBUYBACK_SLOT_1: u16 = 624; // 12 slots × 2 (item guids)
+                                                    // PLAYER_FIELD_KEYRING_SLOT_1 — the next link of the same chain the buyback comment walks
+                                                    // (624 + 12×2 = 648; +32×2 = 712 = FARSIGHT ✓, which the chain's far end already pins).
+const FIELD_PLAYER_KEYRING_SLOT_1: u16 = 648; // 32 slots × 2 (item guids), wire slots 81–112
 const FIELD_PLAYER_BUYBACK_PRICE_1: u16 = 1226; // 12 × u32 copper, indexed slot−69
 const FIELD_PLAYER_BUYBACK_TIMESTAMP_1: u16 = 1238; // 12 × u32 — the client's sort key only
                                                     // PLAYER_FIELD_COINAGE, our purse in copper (INT, PRIVATE — sent only for our own player, the exact

@@ -186,11 +186,42 @@ impl InteriorLit {
         matches!(self.applied, Some(AppliedLaw::Bake(_)))
     }
 
+    /// The steady (non-feathering) material for the part's CURRENT law — the classifier's own
+    /// choice, exposed so the fade writers settle a part onto exactly what the classifier would
+    /// have written rather than onto a `cutout` latched before the law was known (decision 0755).
+    ///
+    /// The exterior and day/night (Matte) states share the exterior material: since 0354 the
+    /// difference between them is the node's intensity target (the tag byte `entity_shade` ramps),
+    /// not a separate material. Only the footprint bake swaps the variant — and a matte-KIND part
+    /// under a bake-law anchor has no bake variant to swap to, so it keeps the exterior one.
+    pub(crate) fn steady_material(&self) -> &Handle<WowModelMaterial> {
+        match (self.applied, &self.kind) {
+            (Some(AppliedLaw::Bake(_)), InteriorKind::Bake { material, .. }) => material,
+            _ => &self.exterior,
+        }
+    }
+
     pub(crate) fn new(kind: InteriorKind, exterior: Handle<WowModelMaterial>) -> Self {
         Self {
             kind,
             exterior,
             applied: None,
+        }
+    }
+
+    /// Test-only: a part already recorded as riding the Bake law, so
+    /// [`crate::model_fade::FadeMaterials::material_for`] can be exercised over every law without
+    /// driving a full classifier run from another module ([`AppliedLaw`] is this module's business
+    /// and stays private).
+    #[cfg(test)]
+    pub(crate) fn applied_bake_for_test(
+        kind: InteriorKind,
+        exterior: Handle<WowModelMaterial>,
+    ) -> Self {
+        Self {
+            kind,
+            exterior,
+            applied: Some(AppliedLaw::Bake(0)),
         }
     }
 }
@@ -204,11 +235,14 @@ fn enqueue_new_part(mut world: DeferredWorld, ctx: HookContext) {
     }
 }
 
-/// Fade latch: the appear-fade owned this part's material/tag while it lived (the classifier's
-/// write query excludes fading parts entirely), so the moment `RenderFade` leaves, the part
-/// re-authors from its anchor's law — the event-driven replacement for the old settled-path
-/// stale-slot repair (the "unit stays black indoors" bug: a slot freed while its part sat
-/// excluded). Removal on despawn also lands here; the drain drops dead entries.
+/// Fade latch: re-author the part from its anchor's law the moment `RenderFade` leaves.
+///
+/// Since 0755 this is a **backstop**, not the convergence path it once was — the classifier now
+/// tracks a part's law right through its ramp, and `apply_render_fade` settles the material onto
+/// that law itself at the latch, so the forced re-author is normally a no-op. It stays because its
+/// failure mode is the "unit stays black indoors" bug (a probe slot freed while its part sat
+/// unauthored), which has cost us twice, and one forced write per part at the end of a ramp is
+/// nothing. Removal on despawn also lands here; the drain drops dead entries.
 fn enqueue_on_fade_latch(
     fade_end: On<Remove, RenderFade>,
     parts: Query<(), With<InteriorLit>>,
@@ -260,6 +294,7 @@ pub(crate) struct BakeState {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn classify_entity_interior(
     mut commands: Commands,
+    time: Res<Time>,
     residency: Res<WmoResidency>,
     wmos: Res<Assets<WmoModel>>,
     instances: Query<&WmoPortalInstance>,
@@ -278,22 +313,27 @@ pub(crate) fn classify_entity_interior(
     seats: Query<&PropProbeSlot>,
     mut queue: ResMut<InteriorReauthor>,
     part_anchors: Query<&ClassifiedBy>,
-    // Skip an entity whose appear-fade is **pending or live**: it must stay invisible (on its blend twin
-    // at α≈0) until armed, and while ramping `apply_render_fade` owns its material + `MeshTag` (the fade
-    // alpha). We reclaim the channel (steady material) only once both are gone — i.e. the fade has
-    // latched (the latch observer re-enqueues). Without this the classifier would fight the fade for
-    // the tag (and force the pending entity opaque).
-    mut parts: Query<
-        (
-            &mut InteriorLit,
-            &mut MeshMaterial3d<WowModelMaterial>,
-            &mut MeshTag,
-        ),
-        (Without<RenderFade>, Without<PendingAppearFade>),
-    >,
+    // Fading parts are **included** (decision 0755). The light law and the fade alpha are
+    // orthogonal, and they are deconflicted by field, not by lockout: the classifier's payload
+    // writes carry the tag's alpha field through (`mesh_tag::with_interior_probe` /
+    // `with_exterior_reset`), and a fading part takes the BLEND twin of its law from the very
+    // rule the ramp itself applies (`FadeMaterials::material_for`) — same handle, either order,
+    // no fight. Excluding them is what left a streamed indoor entity with no law at all for the
+    // whole 2 s ramp, so it appeared under exterior light and swapped to its room's in one frame
+    // at the latch.
+    mut parts: Query<(
+        &mut InteriorLit,
+        &mut MeshMaterial3d<WowModelMaterial>,
+        &mut MeshTag,
+        Option<&crate::model_fade::FadeMaterials>,
+        Has<RenderFade>,
+        Has<PendingAppearFade>,
+    )>,
 ) {
     let _t0 = std::time::Instant::now();
     let (mut n_anchors, mut n_resolved, mut n_written) = (0usize, 0usize, 0usize);
+    // Anchors that wanted a resolve but had every part fade-excluded — the appear-fade lockout.
+    let mut n_fade_blocked = 0usize;
     let mut resolve_us = 0.0f32;
     for (anchor, anchor_t, lit_parts, mut state) in &mut anchors {
         n_anchors += 1;
@@ -324,13 +364,15 @@ pub(crate) fn classify_entity_interior(
                 continue;
             }
         }
-        // Re-resolving: the kind comes from the anchor's first classifiable part. Every part
-        // excluded (a whole-model appear-fade, pending or live) ⇒ no resolve at all — the fade
-        // owns the channel, and the latch observer brings the parts back through the queue.
+        // Re-resolving: the kind comes from the anchor's first classifiable part. Since 0755 a
+        // fading part is classifiable, so this only bails on an anchor whose parts have all been
+        // despawned (a teardown mid-frame) — `fade_blocked` is kept as the tripwire that the
+        // lockout has not crept back in.
         let Some(kind) = lit_parts
             .iter()
-            .find_map(|part| parts.get(part).ok().map(|(lit, _, _)| lit.kind.clone()))
+            .find_map(|part| parts.get(part).ok().map(|(lit, ..)| lit.kind.clone()))
         else {
+            n_fade_blocked += 1;
             continue;
         };
         let seated = seats.get(anchor).ok().map(|s| s.0);
@@ -384,7 +426,8 @@ pub(crate) fn classify_entity_interior(
             && std::env::var_os("WOW_INTERIOR_LOG").is_some()
         {
             eprintln!(
-                "[interior] anchor {anchor:?} at ({:.1}, {:.1}, {:.1}) -> {}",
+                "[interior] t {:.2} anchor {anchor:?} at ({:.1}, {:.1}, {:.1}) -> {}",
+                time.elapsed_secs(),
                 pos.x,
                 pos.y,
                 pos.z,
@@ -396,13 +439,16 @@ pub(crate) fn classify_entity_interior(
             );
         }
         for part in lit_parts.iter() {
-            if let Ok((mut lit, mut material, mut tag)) = parts.get_mut(part) {
+            if let Ok((mut lit, mut material, mut tag, fm, ramping, pending)) = parts.get_mut(part)
+            {
+                let fade = fm.filter(|_| ramping || pending);
                 n_written += usize::from(write_part_law(
                     law,
                     &mut lit,
                     &mut material,
                     &mut tag,
                     false,
+                    fade,
                 ));
             }
         }
@@ -420,9 +466,10 @@ pub(crate) fn classify_entity_interior(
         let Some(state) = state.as_deref_mut() else {
             continue; // law not resolved yet — the anchor's first resolve writes every part
         };
-        let Ok((mut lit, mut material, mut tag)) = parts.get_mut(part) else {
-            continue; // still fade-excluded — the latch re-enqueues
+        let Ok((mut lit, mut material, mut tag, fm, ramping, pending)) = parts.get_mut(part) else {
+            continue; // despawned between the enqueue and the drain
         };
+        let fade = fm.filter(|_| ramping || pending);
         // The mixed-kind hole: a bake-capable part joining an anchor whose law was resolved from
         // a matte-kind part must force a re-resolve (drop the record; next frame re-rays) — the
         // standing law can't say Bake. Written with the standing law this frame regardless, so
@@ -436,6 +483,7 @@ pub(crate) fn classify_entity_interior(
             &mut material,
             &mut tag,
             true,
+            fade,
         ));
     }
     // `WOW_INTERIOR_COST=1`: this lane's per-frame cost, in the terms that diagnose it — how many
@@ -446,7 +494,7 @@ pub(crate) fn classify_entity_interior(
     static COST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *COST.get_or_init(|| std::env::var_os("WOW_INTERIOR_COST").is_some()) {
         eprintln!(
-            "[interior-cost] anchors={n_anchors} resolved={n_resolved} parts_written={n_written} resolve_ms={:.2} total_ms={:.2}",
+            "[interior-cost] anchors={n_anchors} resolved={n_resolved} fade_blocked={n_fade_blocked} parts_written={n_written} resolve_ms={:.2} total_ms={:.2}",
             resolve_us / 1000.0,
             _t0.elapsed().as_secs_f32() * 1000.0
         );
@@ -454,38 +502,49 @@ pub(crate) fn classify_entity_interior(
 }
 
 /// Write one part's material + tag for `law` — the single place a part's channel is authored.
-/// Change-gated on the part's last-written record unless `force` (a transient author — fade,
-/// zoom feather — overwrote the channel while `applied` stayed current). Returns whether it wrote.
+/// Change-gated on the part's last-written record unless `force` (a transient author — the zoom
+/// feather — overwrote the channel while `applied` stayed current). Returns whether it wrote.
 ///
-/// The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field plus an
-/// opaque alpha field (a fade feather composes through `with_alpha` without clobbering the
-/// slot); the other laws reset to the opaque exterior payload (shade byte 0 — `entity_shade`
-/// runs after the classifier and re-asserts the ramped intensity byte the same frame; it skips
-/// only Bake parts). BOTH indoor laws carry the INTERIOR_FOG_BIT (Bake bakes it in): the
-/// reference fogs a unit by the unit's OWN interior classification, so an indoor day/night
-/// character keeps the room's fog — never the storm's near veil — while the exterior law returns
-/// it to the scene fog (wow-re `m2-unit-interior-fog.md`; the director's corridor-vs-porch
-/// walk-out). Every arm carries the part's rig field through (decision 0720): a skinned part
-/// keeps its palette across the indoor/outdoor transition.
+/// The tag: the Bake law's payload carries the probe SLOT in its bits-6..=18 field; the other laws
+/// reset to the plain exterior payload (shade byte 0 — `entity_shade` runs after the classifier and
+/// re-asserts the ramped intensity byte the same frame; it skips only Bake parts). Both writes
+/// carry the tag's **alpha** field through, so a law change lands cleanly mid-fade. BOTH indoor
+/// laws carry the INTERIOR_FOG_BIT (Bake bakes it in): the reference fogs a unit by the unit's OWN
+/// interior classification, so an indoor day/night character keeps the room's fog — never the
+/// storm's near veil — while the exterior law returns it to the scene fog (wow-re
+/// `m2-unit-interior-fog.md`; the director's corridor-vs-porch walk-out). Every arm carries the
+/// part's rig field through (decision 0720): a skinned part keeps its palette across the
+/// indoor/outdoor transition.
+///
+/// `fade` is `Some` only while an appear/despawn ramp owns the part (live **or** pending), and it
+/// selects the law's BLEND twin instead of its steady material (decision 0755). It is the same
+/// [`crate::model_fade::FadeMaterials::material_for`] rule the ramp itself applies every frame, so
+/// the two writers produce the identical handle and can never fight, in either order.
+///
+/// Writing the material here rather than leaving it entirely to the ramp is what keeps the
+/// **material mode and the tag payload mode naming the same law at every instant** — the invariant
+/// `mesh_tag::describe` exists to catch a violation of (0355 broke exactly this way). Skipping it
+/// would leave a part that classifies indoors while still *pending* carrying a probe slot on the
+/// exterior material, where the shader decodes those bits as a ground-shade byte.
 fn write_part_law(
     law: AppliedLaw,
     lit: &mut InteriorLit,
     material: &mut MeshMaterial3d<WowModelMaterial>,
     tag: &mut MeshTag,
     force: bool,
+    fade: Option<&crate::model_fade::FadeMaterials>,
 ) -> bool {
     if lit.applied == Some(law) && !force {
         return false;
     }
-    material.0 = match law {
-        // The exterior AND day/night states share the exterior material — the difference is
-        // the node's intensity target (the tag byte `entity_shade` ramps; 0354).
-        AppliedLaw::Exterior | AppliedLaw::Matte => lit.exterior.clone(),
-        AppliedLaw::Bake(_) => match &lit.kind {
-            InteriorKind::Bake { material, .. } => material.clone(),
-            InteriorKind::Matte => lit.exterior.clone(), // a matte part under a bake-law anchor
-        },
+    lit.applied = Some(law);
+    let want = match fade {
+        Some(fm) => fm.material_for(Some(&*lit), true).clone(),
+        None => lit.steady_material().clone(),
     };
+    if material.0 != want {
+        material.0 = want;
+    }
     tag.0 = match law {
         AppliedLaw::Bake(slot) => crate::mesh_tag::with_interior_probe(tag.0, slot),
         AppliedLaw::Matte => {
@@ -493,7 +552,6 @@ fn write_part_law(
         }
         AppliedLaw::Exterior => crate::mesh_tag::with_exterior_reset(tag.0),
     };
-    lit.applied = Some(law);
     true
 }
 
@@ -662,6 +720,7 @@ mod tests {
 
     fn classifier_world() -> World {
         let mut world = World::new();
+        world.init_resource::<Time>();
         world.init_resource::<WmoResidency>();
         world.init_resource::<Assets<WmoModel>>();
         world.init_resource::<Assets<AdtTile>>();
@@ -829,6 +888,140 @@ mod tests {
         );
     }
 
+    /// The 0755 regression, at the anchor walk: an anchor whose parts are ALL mid-appear-fade
+    /// still resolves its law. Pre-0755 the classifier's write query excluded fading parts, so
+    /// such an anchor was skipped outright — a freshly-streamed indoor entity had no light law for
+    /// the whole 2 s ramp, appeared under the exterior lane, and swapped laws in a single frame the
+    /// instant the ramp latched (director-reported: "it swaps lighting in an instant once it's
+    /// fully faded in", measured at 2.02 s after the fade armed).
+    #[test]
+    fn an_anchor_whose_parts_are_all_fading_still_resolves() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let anchor = world.spawn(GlobalTransform::default()).id();
+        let part = world
+            .spawn((
+                InteriorLit::new(InteriorKind::Matte, Handle::default()),
+                ClassifiedBy(anchor),
+                MeshMaterial3d::<WowModelMaterial>(Handle::default()),
+                MeshTag(crate::mesh_tag::alpha_bits(0.125)),
+                crate::model_fade::RenderFade {
+                    started: 0.0,
+                    duration: 2.0,
+                    from: 0.0,
+                    to: 1.0,
+                },
+            ))
+            .id();
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        assert!(
+            world.get::<InteriorAnchor>(anchor).is_some(),
+            "the anchor resolves during the ramp, not two seconds after it"
+        );
+        assert!(
+            world.get::<InteriorLit>(part).unwrap().applied.is_some(),
+            "and the part records the law it resolved to"
+        );
+    }
+
+    /// The other half of 0755: writing a law onto a part whose ramp is live must carry the ramp's
+    /// alpha through the payload rewrite (the classifier used to hardcode opaque, which is exactly
+    /// why it had to be locked out), and must land the part on that law's BLEND twin — so the
+    /// material mode and the tag payload mode name the same law at every instant, mid-ramp
+    /// included.
+    #[test]
+    fn a_law_written_mid_ramp_keeps_the_alpha_and_takes_the_laws_blend_twin() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = classifier_world();
+        let slot = world
+            .resource_mut::<PropProbes>()
+            .alloc_owned([Vec4::ZERO; 7])
+            .unwrap();
+        let generation = world.resource::<WmoResidency>().generation;
+        let anchor = world
+            .spawn((
+                GlobalTransform::default(),
+                PropProbeSlot(slot),
+                InteriorAnchor {
+                    law: AppliedLaw::Bake(slot),
+                    last_pos: Vec3::ZERO, // settled: the walk skips the ray, the drain does the work
+                    generation,
+                    kind_bake: true,
+                },
+            ))
+            .id();
+
+        // The steady bake variant, and the probe-lit blend twin the ramp must feather on.
+        let bake: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("ba000000-0000-4000-8000-00000000ba1e");
+        let bake_blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("bb000000-0000-4000-8000-00000000b1e4");
+        let exterior_blend: Handle<WowModelMaterial> =
+            bevy::asset::uuid_handle!("e0000000-0000-4000-8000-00000000b1e4");
+        let mid_ramp = crate::mesh_tag::alpha_bits(0.25);
+        let part = world
+            .spawn((
+                InteriorLit::new(
+                    InteriorKind::Bake {
+                        material: bake.clone(),
+                        center: Vec3::ZERO,
+                    },
+                    Handle::default(),
+                ),
+                ClassifiedBy(anchor),
+                // Spawned on the EXTERIOR blend twin, as a streamed part is before it classifies.
+                MeshMaterial3d::<WowModelMaterial>(exterior_blend.clone()),
+                MeshTag(mid_ramp),
+                crate::model_fade::FadeMaterials {
+                    cutout: Handle::default(),
+                    blend: exterior_blend.clone(),
+                    bake_blend: Some(bake_blend.clone()),
+                },
+                crate::model_fade::RenderFade {
+                    started: 0.0,
+                    duration: 2.0,
+                    from: 0.0,
+                    to: 1.0,
+                },
+            ))
+            .id();
+
+        world.run_system_once(classify_entity_interior).unwrap();
+
+        let tag = world.get::<MeshTag>(part).unwrap().0;
+        assert!(
+            world.get::<InteriorLit>(part).unwrap().is_bake(),
+            "the ramping part takes the room's bake law"
+        );
+        assert_eq!(
+            tag,
+            crate::mesh_tag::with_interior_probe(mid_ramp, slot),
+            "the probe slot lands on top of the ramp's alpha, not over it"
+        );
+        assert_ne!(
+            tag,
+            crate::mesh_tag::probe_bits(slot),
+            "the payload must not force a mid-ramp part opaque (the pre-0755 write)"
+        );
+        let material = world
+            .get::<MeshMaterial3d<WowModelMaterial>>(part)
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            material, bake_blend,
+            "a ramping part takes the law's PROBE-LIT blend twin — not the exterior one it \
+             spawned on (its light would read as full outdoor intensity), and not the steady bake \
+             variant (the ramp would stop feathering)"
+        );
+        assert_ne!(material, exterior_blend);
+        assert_ne!(material, bake);
+    }
+
     /// The fade-latch edge: removing a part's `RenderFade` re-enqueues it for authoring — the
     /// event that closes every fade-exclusion window (0734 §3; the old settled-path sweep is
     /// gone, so this observer IS the convergence path).
@@ -847,8 +1040,6 @@ mod tests {
                 duration: 1.0,
                 from: 0.0,
                 to: 1.0,
-                cutout: Handle::default(),
-                blend: Handle::default(),
             });
         world
             .entity_mut(part)

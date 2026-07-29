@@ -44,21 +44,30 @@
 //!
 //! **Who writes it** — five systems share the channel, deconflicted *by design*, not by luck:
 //!
-//! 1. `model_fade::apply_render_fade` (appear/despawn ramps) owns an entity's **alpha field** (and
-//!    material) while a `RenderFade` lives on it; the other alpha writers filter those entities out
-//!    (`Without<RenderFade>`, `Without<PendingAppearFade>`). It writes through [`with_alpha`], so
-//!    the shade and rig fields survive a fade.
-//! 2. `interior::classify_entity_interior` is the steady-state owner for interior-capable parts
-//!    (`InteriorLit` holders) — and of [`INTERIOR_FOG_BIT`]: probe slot + fog bit on the Bake law,
-//!    fog bit alone on the Matte law, plain opaque payload outdoors (dropping the shade byte —
-//!    the shade writer below re-asserts it the same frame, ordered after). Its whole-payload
-//!    writes go through [`with_interior_probe`] / [`with_exterior_reset`], which carry the rig
-//!    field.
+//! 1. `model_fade::apply_render_fade` (appear/despawn ramps) owns an entity's **alpha field**, and
+//!    its **material**, while a `RenderFade` lives on it; the other *alpha* writers filter those
+//!    entities out (`Without<RenderFade>`, `Without<PendingAppearFade>`). It writes through
+//!    [`with_alpha`], so the shade, probe-slot and rig fields survive a fade.
+//! 2. `interior::classify_entity_interior` is the owner of the **light law** for interior-capable
+//!    parts (`InteriorLit` holders) — the payload's non-alpha fields and [`INTERIOR_FOG_BIT`]:
+//!    probe slot + fog bit on the Bake law, fog bit alone on the Matte law, plain payload outdoors
+//!    (dropping the shade byte — the shade writer below re-asserts it the same frame, ordered
+//!    after). Its whole-payload writes go through [`with_interior_probe`] /
+//!    [`with_exterior_reset`], which carry the rig **and alpha** fields.
+//!
+//!    It is **not** filtered by fade state (decision 0755): the light law and the fade alpha are
+//!    orthogonal, so 1 and 2 are deconflicted by *field*, not by lockout — the law follows a part
+//!    through its appear/despawn ramp, and only the *material* defers to 1 while a fade is live
+//!    (the fade picks the blend twin **of the law's family**, `FadeMaterials::material_for`). The
+//!    old lockout is what made a streamed indoor unit ramp in under exterior light and then swap
+//!    laws in a single frame the instant the ramp latched.
 //! 3. `debug_panel::apply_model_visibility` drives the small-prop distance fade (`DoodadFade`
 //!    holders) + glow-card dimming; `DoodadFade` is **never attached** to a lit interior prop
 //!    (spawn-time exclusion in `terrain_stream`), so 2 and 3 are disjoint.
 //! 4. `player::apply_self_model_fade` (the zoom-to-first-person feather) runs **after** 1–3 and wins
-//!    on the self body submeshes' alpha while feathering; at α ≥ 1 it yields the channel back to 2.
+//!    on the self body submeshes' alpha while feathering; on the frame it ends it restores the
+//!    alpha field itself and hands the material back to the part's law (it cannot lean on 2 to
+//!    re-opaque it — since 0755 that writer carries alpha through rather than forcing it).
 //! 5. `entity_shade::update_ground_shade` owns the **shade field** on entity M2 parts (decision
 //!    0173): read-modify-write via [`with_shade`], never touching alpha — so it composes with 1–4
 //!    instead of racing them. It skips interior-classified parts (their payload is a colour) and
@@ -108,22 +117,40 @@ pub(crate) const MAX_RIG_SLOTS: usize = 1 << 11;
 /// An interior-probe payload constructor for RIG-LESS spawns (the static-prop spawner): the slot
 /// in bits 6..=18 + an opaque alpha field + the [`INTERIOR_FOG_BIT`] (a probe payload always
 /// means the model stands indoors). Rig-carrying writers (the entity classifier) go through
-/// [`with_interior_probe`] instead, which preserves the rig field.
+/// [`with_interior_probe`] instead, which preserves the rig and alpha fields.
 pub(crate) fn probe_bits(slot: u16) -> u32 {
     INTERIOR_FOG_BIT | (u32::from(slot) << PROBE_SHIFT) | alpha_bits(1.0)
 }
 
-/// Rewrite a tag as an interior-probe payload, preserving the rig field (and nothing else — the
-/// classifier owns the rest of the payload when it fires): the entity classifier's Bake-law write
-/// for skinned unit parts, whose rig slot must ride through the indoor/outdoor transitions.
-pub(crate) fn with_interior_probe(tag: u32, slot: u16) -> u32 {
-    (tag & RIG_MASK) | probe_bits(slot)
+/// The alpha field a whole-payload rewrite carries through, with the whole-payload-`0`
+/// *untagged ⇒ opaque* sentinel materialized as opaque (the field is never legitimately `0` —
+/// [`alpha_bits`] floors at `1`, so a `0` here can only be the sentinel).
+///
+/// This is what lets the interior classifier **re-lane a part while a fade owns its alpha**: the
+/// law rewrites the payload, the ramp's alpha rides through untouched (decision 0755). Before it,
+/// the classifier's payload writes hardcoded opaque, which is why it had to be locked out of
+/// fading parts entirely — and why a freshly-streamed indoor entity spent its whole 2 s appear
+/// ramp on the exterior lane and swapped light laws in one frame when the ramp latched.
+fn carried_alpha(tag: u32) -> u32 {
+    match tag & ALPHA_MASK {
+        0 => ALPHA_MASK,
+        a => a,
+    }
 }
 
-/// Rewrite a tag as a fresh opaque exterior payload, preserving the rig field: the classifier's
-/// outdoor reclaim (the shade writer re-asserts the shade byte the same frame, ordered after).
+/// Rewrite a tag as an interior-probe payload, preserving the rig and alpha fields (and nothing
+/// else — the classifier owns the rest of the payload when it fires): the entity classifier's
+/// Bake-law write for skinned unit parts, whose rig slot must ride through the indoor/outdoor
+/// transitions and whose fade alpha must ride through a mid-ramp re-lane.
+pub(crate) fn with_interior_probe(tag: u32, slot: u16) -> u32 {
+    INTERIOR_FOG_BIT | (tag & RIG_MASK) | (u32::from(slot) << PROBE_SHIFT) | carried_alpha(tag)
+}
+
+/// Rewrite a tag as a fresh exterior payload, preserving the rig and alpha fields: the
+/// classifier's outdoor reclaim (the shade writer re-asserts the shade byte the same frame,
+/// ordered after).
 pub(crate) fn with_exterior_reset(tag: u32) -> u32 {
-    (tag & RIG_MASK) | alpha_bits(1.0)
+    (tag & RIG_MASK) | carried_alpha(tag)
 }
 
 /// The rig field of a part's spawn tag (decision 0720): the skin-palette rig slot, written once
@@ -165,11 +192,7 @@ pub(crate) fn with_alpha(tag: u32, alpha: f32) -> u32 {
 /// [`alpha_bits`] floors at `1`), so materialize it as opaque — otherwise a non-zero shade byte
 /// would defeat the sentinel and the instance would decode alpha 0 (invisible).
 pub(crate) fn with_shade(tag: u32, shade: u8) -> u32 {
-    let alpha = match tag & ALPHA_MASK {
-        0 => ALPHA_MASK,
-        a => a,
-    };
-    (tag & !(ALPHA_MASK | SHADE_MASK)) | alpha | (u32::from(shade) << SHADE_SHIFT)
+    (tag & !(ALPHA_MASK | SHADE_MASK)) | carried_alpha(tag) | (u32::from(shade) << SHADE_SHIFT)
 }
 
 /// Read back the shade byte of an exterior-payload tag (the shade writer's change gate).
@@ -324,6 +347,39 @@ mod tests {
         assert_eq!(t & ALPHA_MASK, ALPHA_MASK);
         // A probe payload keeps its slot decode with the flag set.
         assert_eq!((probe_bits(6660) & PROBE_MASK) >> PROBE_SHIFT, 6660);
+    }
+
+    /// Decision 0755: the classifier's whole-payload rewrites carry the tag's ALPHA field, which
+    /// is what lets a part change light law while a fade owns its ramp. Before this they wrote
+    /// `alpha_bits(1.0)`, so the classifier had to be locked out of fading parts entirely — and a
+    /// streamed indoor entity therefore had no interior law until its 2 s appear ramp latched.
+    #[test]
+    fn a_law_rewrite_carries_the_fade_alpha() {
+        let mid_ramp = alpha_bits(0.25);
+        // Into the interior lane and back out again, at a quarter alpha the whole way.
+        let indoor = with_interior_probe(rig_bits(7) | mid_ramp, 1234);
+        assert_eq!(
+            indoor & ALPHA_MASK,
+            mid_ramp,
+            "the ramp survives the re-lane"
+        );
+        assert_eq!((indoor & PROBE_MASK) >> PROBE_SHIFT, 1234);
+        assert_eq!(rig_of(indoor), 7);
+        assert_eq!(indoor & INTERIOR_FOG_BIT, INTERIOR_FOG_BIT);
+        let outdoor = with_exterior_reset(indoor);
+        assert_eq!(outdoor & ALPHA_MASK, mid_ramp, "and the reclaim too");
+        assert_eq!(rig_of(outdoor), 7);
+        assert_eq!(outdoor & (PROBE_MASK | INTERIOR_FOG_BIT), 0);
+        // A settled (opaque) part is unaffected — the steady state still reads exactly as before.
+        assert_eq!(
+            with_interior_probe(alpha_bits(1.0), 1234),
+            probe_bits(1234),
+            "an opaque part's Bake payload is unchanged"
+        );
+        assert_eq!(with_exterior_reset(probe_bits(1234)), alpha_bits(1.0));
+        // The untagged-⇒-opaque sentinel is materialized, never propagated as alpha 0 (invisible).
+        assert_eq!(with_interior_probe(0, 1234) & ALPHA_MASK, ALPHA_MASK);
+        assert_eq!(with_exterior_reset(0) & ALPHA_MASK, ALPHA_MASK);
     }
 
     #[test]

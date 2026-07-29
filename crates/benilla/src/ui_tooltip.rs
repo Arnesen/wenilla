@@ -12,15 +12,16 @@
 //! `0x52aa20` law. The standalone-corpse builder joins when corpse objects stream.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
-use benilla_ui::script::{UiScript, UnitState};
+use benilla_ui::script::{TooltipTint, UiScript, UnitState};
 
 use crate::go_templates::{GameObjectTemplates, Locks};
 use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{NetCommands, ObjectStore, Reputations, SelfPlayer};
-use crate::target::{go_is_nearest, ring_reaction, Factions, Hovered, HoveredObject};
+use crate::target::{
+    go_is_nearest, ring_reaction, Factions, Hovered, HoveredObject, GO_FLAG_LOCKED,
+};
 use crate::ui_action::{PlayerActions, Spells};
 use crate::ui_script::UiInput;
 use crate::ui_unit::{enrich_unit, snapshot, UnitFeed};
@@ -504,8 +505,9 @@ fn drive_mouseover_tooltip(
     script: Option<NonSendMut<UiScript>>,
     hovered: Res<Hovered>,
     hovered_go: Res<HoveredObject>,
-    window: Query<&Window, With<PrimaryWindow>>,
     stores: Query<&ObjectStore>,
+    // The stored GAMEOBJECT_STATE the lock lines' Action gate reads (decision 0752).
+    anims: Query<&crate::go_anim::GoAnim>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
@@ -562,17 +564,8 @@ fn drive_mouseover_tooltip(
         return;
     }
     if let Some((entity, guid)) = go {
-        // The GO plate rides the cursor (the reference's signpost hover — engine-seated at
-        // the pointer, following it; 0281's corner law stays the UNIT flow's).
-        let cursor_ui = window.iter().next().and_then(|w| {
-            w.cursor_position()
-                .map(|c| Vec2::new(c.x, w.height() - c.y))
-        });
         if *last == LastHover::Go(guid) {
-            if let Some(p) = cursor_ui {
-                script.world_tooltip_move(p.x, p.y);
-            }
-            return;
+            return; // corner-seated: a pointer moving over the same object re-renders nothing
         }
         let Some(template) = go_templates.get(guid).cloned() else {
             // Template in flight: ask once and retry next frame (`last` stays, so the show
@@ -580,41 +573,60 @@ fn drive_mouseover_tooltip(
             go_templates.request(guid, &commands);
             return;
         };
-        // The red requirement lines — flag-locked (GAMEOBJECT_FLAGS bit 0x2, vmangos
-        // GO_FLAG_LOCKED) resolves the Lock.dbc slots: item keys name the key item (ask-once
-        // through the template cache), skill locks name the profession.
-        let mut requirements = Vec::new();
-        let locked = stores
-            .get(entity)
-            .map(|s| s.0.gameobject_flags() & 0x2 != 0)
-            .unwrap_or(false);
-        if locked && template.lock_id != 0 {
-            if let Some(slots) = locks.as_ref().and_then(|l| l.0.slots(template.lock_id)) {
-                for slot in slots {
-                    match slot.key_type {
-                        benilla_formats::LOCK_KEY_ITEM => {
-                            if let Some(t) = items.template(slot.index, 0, &commands) {
-                                requirements.push(format!("Requires {}", t.name));
-                            }
-                        }
-                        benilla_formats::LOCK_KEY_SKILL => {
-                            if let Some(word) = lock_type_word(slot.index) {
-                                if slot.skill > 0 {
-                                    requirements.push(format!("Requires {word} ({})", slot.skill));
-                                } else {
-                                    requirements.push(format!("Requires {word}"));
-                                }
-                            }
-                        }
-                        _ => {}
+        // The lock lines, transcribed from the builder `0x52aa20` (decision 0756). Two blocks, in
+        // the binary's order, and both are narrower than the sweep we used to print:
+        //
+        //  A) **"Locked"** — emitted iff `GAMEOBJECT_FLAGS & GO_FLAG_LOCKED` (`0x52aae5`:
+        //     `shr 1; test dl,1`). That flag gates this line and nothing else.
+        //  B) **ONE requirement line, from Lock.dbc SLOT 0 ONLY** (`[lockRow+4]` / `[lockRow+0x24]`
+        //     — the builder never walks the other seven), and only when slot 0 passes the same
+        //     per-slot Action gate the resolver uses (`0x52ab7e` → `0x5f81d0`, decision 0752):
+        //       · KEY → **white** `LOCKED_WITH_ITEM` "Requires <item>" (`0x854988`; `0x52acd9`
+        //         pushes `0xc0cf60` = white)
+        //       · SKILL, opener unknown **and** the object is flag-locked → **nothing at all**
+        //         (`0x52abf7: jne done`) — a padlocked door says "Locked" and names its key, never
+        //         its lockpicking rank
+        //       · SKILL, opener unknown, not flagged → **red** "Requires <word>" (the herb node)
+        //
+        // That is why the reference shows *"Locked" + "Requires Key to Searing Gorge"* on the
+        // Searing Gorge door and not the `Requires Lockpicking (225)` line we used to add: the
+        // Pick Lock requirement is that lock's slot **1**, and the builder never looks past 0.
+        let go_store = stores.get(entity).ok();
+        let flags = go_store.map_or(0, |s| s.0.gameobject_flags());
+        let flag_locked = flags & GO_FLAG_LOCKED != 0;
+        let state = go_store.map_or(benilla_formats::GO_STATE_ACTIVE, |s| {
+            crate::go_anim::go_state(anims.get(entity).ok(), s)
+        });
+        let mut lines: Vec<(String, TooltipTint)> = Vec::new();
+        if flag_locked {
+            lines.push(("Locked".to_string(), TooltipTint::Red));
+        }
+        if let Some(slot0) = locks
+            .as_ref()
+            .filter(|_| template.lock_id != 0)
+            .and_then(|l| l.0.slots(template.lock_id))
+            .map(|s| s[0])
+            .filter(|s| s.available(state, flag_locked))
+        {
+            match slot0.key_type {
+                benilla_formats::LOCK_KEY_ITEM => {
+                    if let Some(t) = items.template(slot0.index, 0, &commands) {
+                        lines.push((format!("Requires {}", t.name), TooltipTint::White));
                     }
                 }
+                // The opener-*known* arm additionally wants the reference's skill-margin colour
+                // ramp (`0x529fa0`), which is not pinned — so what we model is the unknown arm,
+                // which is what a hovering player almost always is. A flagged object stays silent
+                // there, exactly as the binary does.
+                benilla_formats::LOCK_KEY_SKILL if !flag_locked => {
+                    if let Some(word) = lock_type_word(slot0.index) {
+                        lines.push((format!("Requires {word}"), TooltipTint::Red));
+                    }
+                }
+                _ => {}
             }
         }
-        let Some(p) = cursor_ui else {
-            return; // cursor off-window: nothing to seat against this frame
-        };
-        script.world_tooltip_gameobject(&template.name, &requirements, p.x, p.y);
+        script.world_tooltip_gameobject(&template.name, &lines);
         *last = LastHover::Go(guid);
         return;
     }

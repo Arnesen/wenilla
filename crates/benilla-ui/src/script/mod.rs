@@ -90,6 +90,7 @@ mod tooltip;
 mod tooltip_item;
 mod tooltip_spell;
 mod tooltip_unit;
+pub use tooltip_unit::TooltipTint;
 mod trade;
 mod tradeskill;
 mod trainer;

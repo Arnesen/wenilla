@@ -49,10 +49,13 @@ mod cursor_mode;
 mod flash;
 mod highlight;
 mod hover;
+mod lock;
 mod ring;
 mod scan;
 
 pub(crate) use cursor_mode::{CursorKind, WorldCursor, SERVICE_RANGE_SQ};
+/// `GO_FLAG_LOCKED` — the wire bit the lock chain and the GO tooltip's "Locked" line both read.
+pub(crate) use lock::GO_FLAG_LOCKED;
 // This frame's combat-flash verdict — read by the ring's material pick (in `ring`) and by the
 // nameplate colour gate (`crate::nameplates`), the flash's only two consumers (byte-verified).
 pub(crate) use flash::CombatFlash;

@@ -365,14 +365,22 @@ pub(super) fn classify_cursor(
     factions: Option<Res<Factions>>,
     reputations: Res<Reputations>,
     mut cursor: ResMut<WorldCursor>,
-    units: Query<(&Transform, Option<&ObjectStore>, Option<&NetEntity>)>,
+    units: Query<(
+        &Transform,
+        Option<&ObjectStore>,
+        Option<&NetEntity>,
+        Option<&crate::go_anim::GoAnim>,
+    )>,
     self_q: Query<(&Transform, &ObjectStore), With<SelfPlayer>>,
     // The GameObject cursor is data-driven (decision 0236, wow-re cursor-system §4): the ask-once
     // template (its `lockId`) + Lock.dbc + LockType.dbc name the cursor. All absent without client
     // data or before a hovered GO's template answers — a lock-bearing GO then reads as the gear.
-    go_templates: Res<crate::go_templates::GameObjectTemplates>,
-    locks: Option<Res<crate::go_templates::Locks>>,
-    lock_types: Option<Res<crate::go_templates::LockTypes>>,
+    // The same param carries the lock chain `usable` consults (decision 0752) — one
+    // [`super::lock::GoLockInputs`], so the cursor and the click ask literally the same question.
+    go_inputs: super::lock::GoLockInputs,
+    player_actions: Res<crate::ui_action::PlayerActions>,
+    // `[0xb700e4]`/`[0xb700e8]` — the skin leg's learned-ability precondition (decision 0752).
+    learned: Res<crate::ui_action::LearnedAbilities>,
     // The QUESTGIVER leg's gate reads the per-guid `SMSG_QUESTGIVER_STATUS` store — see
     // [`questgiver_has_quest`].
     quest: Res<crate::ui_quest::QuestGiver>,
@@ -386,27 +394,53 @@ pub(super) fn classify_cursor(
     // grayed twin is still the interim distance gate (decision 0243); the client's fuller `usable`
     // (lock satisfaction, player-state) is later.
     let resolve_go = || {
-        let (go_tf, store, _) = units.get(hovered_object.target?).ok()?;
+        let (go_tf, store, _, anim) = units.get(hovered_object.target?).ok()?;
         let store = store?;
-        let (self_tf, _) = self_q.single().ok()?;
+        let (self_tf, self_store) = self_q.single().ok()?;
         if !go_highlightable(store) {
             return None;
         }
         // The type's own cursor wins; a base type reads its lock's data-named cursor (needs the
         // ask-once template — a not-yet-answered GO falls back to the gear until it arrives).
-        let lock_cursor = hovered_object
-            .guid
-            .and_then(|g| go_templates.get(g))
-            .and_then(|t| go_lock_cursor(t.lock_id, locks.as_deref(), lock_types.as_deref()));
+        let tmpl = hovered_object.guid.and_then(|g| go_inputs.templates.get(g));
+        let lock_id = tmpl.map_or(0, |t| t.lock_id);
+        let lock_cursor = go_lock_cursor(
+            lock_id,
+            go_inputs.locks.as_deref(),
+            go_inputs.lock_types.as_deref(),
+        );
         let kind = go_cursor_kind(store.0.gameobject_type_id(), lock_cursor);
         let dist_sq = go_tf.translation.distance_squared(self_tf.translation);
-        let unable = kind != CursorKind::PickLock && dist_sq > GO_INTERACT_RANGE_SQ;
+        // `usable 0x5f3130`, the two arms we model — the LOCK arm first, as the binary orders
+        // them (`0x5f32a6` before the range check at `0x5f330c`), then the interim range gray.
+        // The lock arm runs **only when `GO_FLAG_LOCKED` is set** (§8.8): that is why an
+        // ungatherable herb node keeps its lit GatherHerbs cursor and only refuses on the click,
+        // while a padlocked door grays. `PickLock` never grays (§4: `LockType.Id == 1` skips the
+        // usable gate), so the rogue's affordance still reads as available.
+        let facts = super::lock::go_facts(Some((store, crate::go_anim::go_state(anim, store))));
+        let lock_unmet = go_inputs
+            .locks
+            .as_deref()
+            .and_then(|l| l.0.slots(lock_id).filter(|_| lock_id != 0))
+            .is_some_and(|slots| {
+                super::lock::resolve_lock(
+                    slots,
+                    &player_actions.spells,
+                    go_inputs.spells.as_deref(),
+                    Some(self_store),
+                    &go_inputs.items,
+                    facts,
+                    &mut None,
+                )
+                .blocks_usable(facts.flag_locked)
+            });
+        let unable = kind != CursorKind::PickLock && (lock_unmet || dist_sq > GO_INTERACT_RANGE_SQ);
         Some((kind, unable))
     };
     // The reference makes one pick over all CGObjects and switches on type; benilla picks unit and
     // GameObject separately, then classifies whichever is nearer under the cursor.
     let resolve_unit = || {
-        let (unit_tf, store, net) = units.get(hovered.target?).ok()?;
+        let (unit_tf, store, net, _) = units.get(hovered.target?).ok()?;
         let store = store?;
         let (self_tf, self_store) = self_q.single().ok()?;
         let dist_sq = unit_tf.translation.distance_squared(self_tf.translation);
@@ -425,7 +459,12 @@ pub(super) fn classify_cursor(
                 // normal mob (director-measured, confirmed).
                 return Some((CursorKind::Pickup, !in_melee));
             }
-            if store.0.unit_flags() & UNIT_FLAG_SKINNABLE != 0 {
+            // The skin leg's SECOND precondition, byte-verified: the flag alone is not enough —
+            // the reference also requires the learn-time latch `[0xb700e4 + 4×isPlayerTarget]` to
+            // be non-null (wow-re cursor-system.md §3, `0x482589`), i.e. **the player must have
+            // learned a Skinning spell**. A non-skinner gets no knife on a skinnable corpse; the
+            // corpse falls through to Point like any other unlootable one (decision 0752).
+            if store.0.unit_flags() & UNIT_FLAG_SKINNABLE != 0 && learned.skinning.is_some() {
                 return Some((CursorKind::Skin, !in_melee));
             }
             return None; // a plain corpse: Point

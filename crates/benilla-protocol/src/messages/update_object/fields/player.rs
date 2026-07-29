@@ -92,6 +92,14 @@ impl ObjectFields {
     pub fn player_bank_bag_slot(&self, i: u8) -> Option<u64> {
         (i < 6).then(|| self.get_guid(FIELD_PLAYER_BANK_BAG_SLOT_1 + 2 * u16::from(i)))?
     }
+    /// `PLAYER_FIELD_KEYRING_SLOT_1 + 2i` — the keyring's 32 item guids (absolute inventory slots
+    /// 81–112). benilla ships no keyring *container* (see `ui_items`'s slot-order note), but the
+    /// guids stream like every other slot array and the GameObject lock chain needs them: dungeon
+    /// keys live here, and the reference's key-slot resolver scans the keyring alongside the bags
+    /// (wow-re `cursor-system.md` §8.4; decision 0752). `Some(0)` = empty.
+    pub fn player_keyring_slot(&self, i: u8) -> Option<u64> {
+        (i < 32).then(|| self.get_guid(FIELD_PLAYER_KEYRING_SLOT_1 + 2 * u16::from(i)))?
+    }
     /// `PLAYER_FIELD_VENDORBUYBACK_SLOT_1 + 2i` — the item guid parked in buyback slot `i` (0–11;
     /// the wire's absolute inventory slot is `69 + i`). `Some(0)` = empty.
     pub fn player_buyback_slot(&self, i: u8) -> Option<u64> {
