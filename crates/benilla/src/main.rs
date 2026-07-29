@@ -212,12 +212,12 @@ use world_map::WorldMapPlugin;
 /// logs in — so the player sits in the middle of the block instead of Stormwind's edge.
 const SPAWN_XY: (f32, f32) = (-8949.95, -132.49);
 
-fn main() {
+fn main() -> AppExit {
     // `WOW_CAPTURE=list` just prints the harness scenario names (the source of truth `scripts/visual.sh`
     // reads) and exits before any window/asset setup.
     if std::env::var("WOW_CAPTURE").as_deref() == Ok("list") {
         capture::print_scenario_names();
-        return;
+        return AppExit::Success;
     }
 
     let mut app = App::new();
@@ -779,5 +779,8 @@ fn main() {
         app.add_plugins(perf::FpsJournalPlugin);
     }
 
-    app.run();
+    // Return the app's own exit status instead of dropping it: a failed capture writes
+    // `AppExit::error()` (see `capture::drive_capture`), and discarding it made the process exit 0
+    // with no PNG on disk — which is how a sweep carried on around a missing shot (decision 0743).
+    app.run()
 }

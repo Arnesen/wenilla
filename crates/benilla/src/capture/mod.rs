@@ -376,7 +376,8 @@ impl Plugin for CapturePlugin {
             .init_resource::<FxViewState>();
             Scenario {
                 name: "fxview",
-                eye: GROUND_EYE, // overridden per frame by the orbit in `pin_scene`
+                map: scenarios::MAP_AZEROTH, // the fixture spawns over the Northshire slope
+                eye: GROUND_EYE,             // overridden per frame by the orbit in `pin_scene`
                 look: FXVIEW_POS,
                 minute: 720,
                 ui: None,
@@ -418,6 +419,7 @@ impl Plugin for CapturePlugin {
             .init_resource::<FxViewState>();
             Scenario {
                 name: "waterfx",
+                map: scenarios::MAP_AZEROTH, // the synthetic lattice sits over the Northshire slope
                 eye,
                 look: center,
                 minute: 720,
@@ -459,6 +461,12 @@ impl Plugin for CapturePlugin {
             let d = 500.0_f32;
             Scenario {
                 name: "vista",
+                // The arbitrary-viewpoint instrument goes anywhere, so its map is a knob: a
+                // horizon report from Kalimdor is `WOW_MAP=1` (a `Map.dbc` id).
+                map: std::env::var("WOW_MAP")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(scenarios::MAP_AZEROTH),
                 eye,
                 look: [
                     eye[0] + d * pitch.cos() * face.cos(),
@@ -487,6 +495,14 @@ impl Plugin for CapturePlugin {
             );
             std::process::exit(2);
         };
+        // Seed the continent the scenario names, BEFORE `world_map::load_world_map` reads it at
+        // `Startup` — that is the single place `CurrentMap` is set for a server-less run, and the
+        // terrain/WDL streamers and per-map lighting all key off it. Raw WoW coords repeat on every
+        // continent, so a scenario that could not say which map it meant would stream the wrong
+        // world's tiles and photograph a void (Felwood's tile `33_24` exists in Azeroth, empty).
+        // Written back for `vista` too, which is where the value came from — a harmless no-op that
+        // keeps one path for "which map is this run on" (decision 0743).
+        std::env::set_var("WOW_MAP", scenario.map.to_string());
         let out = std::env::var("WOW_CAPTURE_OUT")
             .unwrap_or_else(|_| format!("target/visual/{}.png", scenario.name));
         if let Some(parent) = Path::new(&out).parent() {
@@ -850,8 +866,23 @@ fn drive_capture(
         }
         Phase::Done(n) => {
             if n + 1 >= EXIT_GRACE_FRAMES {
-                info!("capture: saved {}, exiting", ctx.out);
-                exit.write(AppExit::Success);
+                // Exit on what is ON DISK, not on having reached this phase. The save is async and
+                // the `Saving` phase gives up after `SAVE_TIMEOUT_FRAMES` so a missed `Capturing`
+                // marker can't hang the harness — but "gave up" used to exit Success anyway, so a
+                // capture that wrote nothing reported success and the sweep carried on around the
+                // hole (2026-07-28: one `water-night` run left no PNG, and `selfcheck` passed on
+                // the remaining eight). A missing file is a FAILED capture and says so, so
+                // `scripts/visual.sh`'s `set -e` stops the sweep at it (decision 0743).
+                if Path::new(&ctx.out).is_file() {
+                    info!("capture: saved {}, exiting", ctx.out);
+                    exit.write(AppExit::Success);
+                } else {
+                    error!(
+                        "capture: FAILED — no file at {} after the save window; exiting nonzero",
+                        ctx.out
+                    );
+                    exit.write(AppExit::error());
+                }
                 Phase::Done(n)
             } else {
                 Phase::Done(n + 1)

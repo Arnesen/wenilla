@@ -93,6 +93,10 @@ fn load_world_map(mut commands: Commands, world_assets: Option<Res<WorldAssets>>
             // `player::wire_in` overwrites this from the server's world-verify the moment it says
             // where we are. Without it every headless capture is stuck in Eastern Kingdoms, and a
             // horizon report from anywhere else cannot be reproduced.
+            //
+            // A named capture scenario carries its own map (`capture::scenarios::Scenario::map`)
+            // and writes it here before this runs, so the golden sweep's Kalimdor shots need no env
+            // at all — see `capture::CapturePlugin::build` (decision 0743).
             let map = std::env::var("WOW_MAP")
                 .ok()
                 .and_then(|v| v.parse().ok())

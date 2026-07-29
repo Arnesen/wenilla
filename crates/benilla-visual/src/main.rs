@@ -140,12 +140,22 @@ fn main() -> Result<()> {
         }
         "diff-dir" => {
             let [da, db] = two(rest, "diff-dir")?;
-            let worst = diff_dir(
+            let DirDiff { worst, unpaired } = diff_dir(
                 Path::new(da),
                 Path::new(db),
                 opts.out.as_deref(),
                 opts.amplify,
             )?;
+            // Under `--fail` this is a gate, and a shot that never landed must sink it — see the
+            // note in `diff_dir` (decision 0743).
+            if opts.fail.is_some() && !unpaired.is_empty() {
+                bail!(
+                    "{} unpaired image(s) — a shot is missing from one side, so this comparison is \
+                     incomplete: {}",
+                    unpaired.len(),
+                    unpaired.join(", ")
+                );
+            }
             if let Some((name, m)) = worst {
                 if over_fail(&m, opts.fail) {
                     bail!(
@@ -679,19 +689,35 @@ fn diff_one(a: &Path, b: &Path, out: Option<&Path>, amplify: u32) -> Result<Metr
 }
 
 /// Compare every `*.png` present in both dirs (by file name). Returns the worst (highest-MAE) result.
-fn diff_dir(
-    da: &Path,
-    db: &Path,
-    out: Option<&Path>,
-    amplify: u32,
-) -> Result<Option<(String, Metrics)>> {
-    let names: BTreeSet<String> = pngs(da)?.intersection(&pngs(db)?).cloned().collect();
+/// What one `diff-dir` run found: the worst pair by MAE, and every image present on only ONE side.
+struct DirDiff {
+    worst: Option<(String, Metrics)>,
+    /// Files with no counterpart, so not diffed at all — see the note in [`diff_dir`].
+    unpaired: Vec<String>,
+}
+
+fn diff_dir(da: &Path, db: &Path, out: Option<&Path>, amplify: u32) -> Result<DirDiff> {
+    let (a, b) = (pngs(da)?, pngs(db)?);
+    let names: BTreeSet<String> = a.intersection(&b).cloned().collect();
     if names.is_empty() {
         bail!(
             "no common *.png files between {} and {}",
             da.display(),
             db.display()
         );
+    }
+    // UNPAIRED shots are ANNOUNCED, never skipped in silence. Pairing on the intersection alone is
+    // how a sweep reports all-green with a shot missing: on 2026-07-28 one `water-night` capture
+    // exited 0 without writing its PNG, and `selfcheck` diffed the other eight and passed clean. A
+    // gate that quietly narrows its own scope is worse than no gate. Reported always; fatal to the
+    // CALLER when `--fail` is in force, i.e. whenever this is being used as a gate (decision 0743).
+    let unpaired: Vec<String> = a
+        .difference(&b)
+        .map(|n| format!("{}/{n}", da.display()))
+        .chain(b.difference(&a).map(|n| format!("{}/{n}", db.display())))
+        .collect();
+    for u in &unpaired {
+        eprintln!("UNPAIRED (no counterpart — NOT diffed): {u}");
     }
     if let Some(out) = out {
         std::fs::create_dir_all(out).ok();
@@ -708,7 +734,7 @@ fn diff_dir(
     if let Some((name, m)) = &worst {
         println!("worst: {name} (MAE {:.3})", m.mae);
     }
-    Ok(worst)
+    Ok(DirDiff { worst, unpaired })
 }
 
 fn pngs(dir: &Path) -> Result<BTreeSet<String>> {

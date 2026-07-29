@@ -7,6 +7,11 @@
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
     pub(super) name: &'static str,
+    /// `Map.dbc` id the eye/look coords belong to. Raw WoW coords repeat on every continent — the
+    /// Felwood spot's tile (`33_24`) exists in Azeroth too, empty — so a scenario that could not
+    /// name its map silently photographed the wrong world. The harness seeds
+    /// [`crate::world_map::CurrentMap`] from this before streaming starts (decision 0743).
+    pub(super) map: u32,
     /// Camera eye, raw WoW coords `(x, y, z)`.
     pub(super) eye: [f32; 3],
     /// Camera look-at target, raw WoW coords.
@@ -110,11 +115,16 @@ pub(super) const SKY_LOOK: [f32; 3] = [-8740.0, 80.0, 168.0]; // up + out: horiz
 // Abbey, one of the few buildings immune to it. Baselines must cover ordinary buildings too.
 pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 
-/// THE golden baseline: three spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
+/// `Map.dbc` ids the golden spots stand on.
+pub(super) const MAP_AZEROTH: u32 = 0;
+pub(super) const MAP_KALIMDOR: u32 = 1;
+
+/// THE golden baseline: five spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
 /// numbers below verbatim from their `~/.benilla/shots.txt`) — the Northshire overlook toward the
-/// Abbey, a Stormwind canal view, and Elwynn water — each at noon and at night.
+/// Abbey, a Stormwind canal view, Elwynn water, the Lion's Pride Inn common room, and a Felwood
+/// hollow — each at noon and at night, except the inn (which the clock barely reaches; see below).
 ///
-/// Six shots of maximal mutual difference. The old set was thirty, and the director judged the
+/// Nine shots of maximal mutual difference. The old set was thirty, and the director judged the
 /// design bad: low-value repetition (four compass looks at one farmhouse, five frames from one
 /// Northshire camera, sixteen UI windows over the same backdrop), each one a real window popping
 /// open on their screen while they worked. The law is **a few spots chosen with the director, times
@@ -122,9 +132,17 @@ pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 /// blessed sweep. (Decision 0632; ported from the sibling `substrate` fork's `notes/0025`, where the
 /// redesign was made and where it caught a real determinism bug — see `liquid::animate_liquid` — on
 /// its first run.)
+///
+/// The first six were all EXTERIOR, all Azeroth, all Elwynn/Stormwind. The two spots added in
+/// decision 0743 are the two things that set of six could not photograph at all: the inside of a
+/// building (portal culling, the INT vertex bake, MOCV self-illum, MOLT point pools, props) and a
+/// second continent (a different tileset, fog palette, liquid type and horizon). Both were framed
+/// by the director after the agent's own framings of the same two subjects were judged bad — which
+/// is 0632's rule working exactly as intended.
 pub(super) const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "overlook-noon",
+        map: MAP_AZEROTH,
         eye: OVERLOOK_EYE,
         look: OVERLOOK_LOOK,
         minute: 720,
@@ -132,6 +150,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "overlook-night",
+        map: MAP_AZEROTH,
         eye: OVERLOOK_EYE,
         look: OVERLOOK_LOOK,
         minute: 0,
@@ -139,6 +158,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "canal-noon",
+        map: MAP_AZEROTH,
         eye: CANAL_EYE,
         look: CANAL_LOOK,
         minute: 720,
@@ -146,6 +166,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "canal-night",
+        map: MAP_AZEROTH,
         eye: CANAL_EYE,
         look: CANAL_LOOK,
         minute: 0,
@@ -153,6 +174,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "water-noon",
+        map: MAP_AZEROTH,
         eye: WATER_EYE,
         look: WATER_LOOK,
         minute: 720,
@@ -160,8 +182,38 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     },
     Scenario {
         name: "water-night",
+        map: MAP_AZEROTH,
         eye: WATER_EYE,
         look: WATER_LOOK,
+        minute: 0,
+        ui: None,
+    },
+    Scenario {
+        name: "inn-noon",
+        map: MAP_AZEROTH,
+        eye: INN_EYE,
+        look: INN_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    // No `inn-night`: MEASURED at MAE 0.198 against `inn-noon`, 0.82 % of pixels — the room is lit
+    // by its hearth and candles, and the clock barely reaches it (the outdoor spots' own noon/night
+    // pairs differ by MAE 38-83 across ~100 % of the frame). A second window for 0.8 % of one shot
+    // is the low-value repetition 0632 exists to prevent, and noon is the richer of the two anyway:
+    // it has the daylight window AND the fire. Re-add it the day the interior light path earns it.
+    Scenario {
+        name: "felwood-noon",
+        map: MAP_KALIMDOR,
+        eye: FELWOOD_EYE,
+        look: FELWOOD_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "felwood-night",
+        map: MAP_KALIMDOR,
+        eye: FELWOOD_EYE,
+        look: FELWOOD_LOOK,
         minute: 0,
         ui: None,
     },
@@ -178,10 +230,36 @@ pub(super) const CANAL_EYE: [f32; 3] = [-8871.7, 724.6, 110.7];
 pub(super) const CANAL_LOOK: [f32; 3] = [-8836.7, 760.3, 112.3];
 
 /// Director shot 3 — Elwynn river, south-east of Northshire: open water dominant, shoreline blend,
-/// murloc camp, fog. Chosen by the director over the Goldshire inn interior, which stays in
-/// [`ON_DEMAND`] as the interior-path fixture.
+/// murloc camp, fog.
 pub(super) const WATER_EYE: [f32; 3] = [-9527.0, -310.6, 70.8];
 pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
+
+/// Director shot 4 (decision 0743) — INSIDE the Lion's Pride Inn at Goldshire, standing in the
+/// common room: the hearth (the MOCV-alpha self-illum bake), a daylight window, the lit chandelier,
+/// the stair run, floor boards and ceiling beams, and a room full of props. The sweep's only
+/// interior, and the only shot that exercises portal culling, the INT bake, the MOLT point pools
+/// and WMO props at all — the surface the ledger's dungeon reports live on, and the one B101's
+/// prop-cull regression (which hid the Blackrock lava falls) crossed unseen.
+///
+/// The agent's own interior framing (`inn-interior`, a tight crop of the kitchen hearth) was judged
+/// badly framed and stays in [`ON_DEMAND`]; this is the director's, and it frames the ROOM.
+///
+/// NB the camera must stand over a FLOOR FACE: over a floorless pocket the portal cull's down-ray
+/// reads "outside" and faithfully culls the containing group, which vanishes the room.
+pub(super) const INN_EYE: [f32; 3] = [-9471.4, 39.4, 59.9];
+pub(super) const INN_LOOK: [f32; 3] = [-9458.8, -7.5, 48.2];
+
+/// Director shot 5 (decision 0743) — a Felwood hollow on **Kalimdor** (`MAP_KALIMDOR`): the
+/// corrupted forest floor's root mat, a stand of emissive `felwoodmushroom` doodads, a pool of
+/// green sludge (a liquid type no other golden shot contains), the vast trunks behind, and the
+/// zone's sick-green fog and light palette.
+///
+/// The sweep's only shot outside Azeroth and outside the Elwynn/Stormwind palette — until this one
+/// landed, a fog, tileset, WDL-horizon or per-map lighting regression anywhere else in the world
+/// had nowhere to show up. It is also what forced [`Scenario::map`]: this spot's ADT tile
+/// (`33_24`) exists in Azeroth too, empty, so on the old table it would have photographed a void.
+pub(super) const FELWOOD_EYE: [f32; 3] = [4060.9, -944.3, 256.8];
+pub(super) const FELWOOD_LOOK: [f32; 3] = [4014.0, -954.4, 242.9];
 
 /// Every remaining named viewpoint — the UI look-pass fixtures, the sun/moon/sky regression
 /// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
@@ -189,6 +267,7 @@ pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
 pub(super) const ON_DEMAND: &[Scenario] = &[
     Scenario {
         name: "house-north",
+        map: MAP_AZEROTH,
         eye: HOUSE_EYE,
         look: [-9389.1, 71.2, 58.0],
         minute: 720,
@@ -196,6 +275,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-south",
+        map: MAP_AZEROTH,
         eye: HOUSE_EYE,
         look: [-9489.1, 71.2, 58.0],
         minute: 720,
@@ -203,6 +283,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-west",
+        map: MAP_AZEROTH,
         eye: HOUSE_EYE,
         look: [-9439.1, 121.2, 58.0],
         minute: 720,
@@ -210,6 +291,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "house-east",
+        map: MAP_AZEROTH,
         eye: HOUSE_EYE,
         look: [-9439.1, 21.2, 58.0],
         minute: 720,
@@ -225,6 +307,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // client does the same — the audit's "faithful-cull residue"), which vanishes the room.
     Scenario {
         name: "inn-interior",
+        map: MAP_AZEROTH,
         eye: [-9463.3, 4.4, 58.8],
         look: [-9462.1, -5.6, 58.5],
         minute: 720,
@@ -235,6 +318,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // stays as the warm-light/fog fixture.
     Scenario {
         name: "northshire-dusk",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 1170, // 19:30 — warm dusk light + fog
@@ -242,6 +326,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "northshire-sky-noon",
+        map: MAP_AZEROTH,
         eye: SKY_EYE,
         look: SKY_LOOK,
         minute: 720, // day sky-dome gradient + fog horizon
@@ -249,6 +334,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "northshire-sky-dusk",
+        map: MAP_AZEROTH,
         eye: SKY_EYE,
         look: SKY_LOOK,
         minute: 1170, // dusk dome warp + low sun + stars emerging
@@ -262,6 +348,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // was cut along a giant faceted circle).
     Scenario {
         name: "northshire-sun-flare",
+        map: MAP_AZEROTH,
         eye: SKY_EYE,
         look: [-8797.0, 23.0, 264.0], // eye + 300·(elev 30°, az 45°) — the sun's spot at 17:30
         minute: 1050,
@@ -276,6 +363,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // unit tests (`flare_ray_*`) and the sun fixtures.
     Scenario {
         name: "northshire-moonrise",
+        map: MAP_AZEROTH,
         eye: SKY_EYE,
         look: [-8775.0, 45.0, 190.0], // eye + 300·(elev 15°, az 45°) — the moon's spot at 22:44
         minute: 1364,
@@ -287,6 +375,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // the moonrise fixture above proves its absence early, this one its presence at depth of night.
     Scenario {
         name: "northshire-moon-halo",
+        map: MAP_AZEROTH,
         eye: SKY_EYE,
         look: [-8858.0, -38.0, 358.0], // eye + 300·(elev 55°, az 45°) — the moon's spot at 00:00
         minute: 0,
@@ -298,6 +387,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // load is resident here; Northshire scenes never exercise that scale.
     Scenario {
         name: "stormwind",
+        map: MAP_AZEROTH,
         eye: [-8833.38, 628.63, 96.0],
         look: [-8809.1, 672.3, 94.0],
         minute: 720,
@@ -309,6 +399,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // director look pass, so "looks like shit" gets caught in-loop, not on the director's screen.
     Scenario {
         name: "ui-merchant",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -316,6 +407,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-gossip",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -323,6 +415,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-bank",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -330,6 +423,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-quest",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -337,6 +431,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-questgreeting",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -344,6 +439,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-questlog",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -351,6 +447,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-loot",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -358,6 +455,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     Scenario {
         name: "ui-bag",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -367,6 +465,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip`.
     Scenario {
         name: "ui-tooltip",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -376,6 +475,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // seeded hostile wolf. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-tooltip-world`.
     Scenario {
         name: "ui-tooltip-world",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -385,6 +485,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-char`.
     Scenario {
         name: "ui-char",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -395,6 +496,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-unitframes`.
     Scenario {
         name: "ui-unitframes",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -407,6 +509,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-actionbar`.
     Scenario {
         name: "ui-actionbar",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -418,6 +521,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE=vplates` (main.rs sizes this window 1024×768 — the 1:1 gx window).
     Scenario {
         name: "vplates",
+        map: MAP_AZEROTH,
         eye: [-8956.5, -137.5, 85.6],
         look: [-8949.95, -132.49, 84.8],
         minute: 720,
@@ -428,6 +532,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-worldmap`.
     Scenario {
         name: "ui-worldmap",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -436,6 +541,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // The spellbook over a seeded mage book. Run with `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-spellbook`.
     Scenario {
         name: "ui-spellbook",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -445,6 +551,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-chatedit`.
     Scenario {
         name: "ui-chatedit",
+        map: MAP_AZEROTH,
         eye: GROUND_EYE,
         look: GROUND_LOOK,
         minute: 720,
@@ -455,6 +562,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // out in the water. Run with `WOW_CAPTURE=name-water`.
     Scenario {
         name: "name-water",
+        map: MAP_AZEROTH,
         eye: WATER_EYE,
         look: WATER_LOOK,
         minute: 720,
