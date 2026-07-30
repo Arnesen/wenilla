@@ -328,6 +328,7 @@ fn reroll_doodad_variation(
 /// both clocks to the shared-clock position — when one is again. Runs before [`AnimationSystems`] so
 /// a resume's seek lands the same frame. Steady state (nothing flipped) is one `Visibility` read per
 /// mesh, no writes.
+#[allow(clippy::too_many_arguments)] // one Bevy system's input set: the gate reads four authorities
 fn gate_doodad_anim(
     time: Res<Time>,
     mut hosts: Query<(
@@ -337,12 +338,20 @@ fn gate_doodad_anim(
     )>,
     vis: Query<&Visibility>,
     cam: Query<
-        (&GlobalTransform, &bevy::camera::primitives::Frustum),
+        (
+            &GlobalTransform,
+            &bevy::camera::primitives::Frustum,
+            &bevy::camera::Projection,
+        ),
         With<crate::player::WorldCamera>,
     >,
     // The far-clip wall — the meshless host's draw-set gate needs the same depth bound the
-    // emitters and the doodad meshes use.
+    // emitters and the doodad meshes use…
     view: Res<crate::view::ViewDistance>,
+    // …and the same exterior-window term, for the same reason: a meshless prop OUTSIDE, seen from a
+    // WMO interior, is not in the frame's worklist and must not tick its bones either (0786).
+    exterior_windows: Res<crate::wmo_portal::ExteriorWindows>,
+    camera_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     mut logged: Local<bool>,
 ) {
     // One breadcrumb per session, the first frame any host exists — the machine-readable "doodads
@@ -353,6 +362,11 @@ fn gate_doodad_anim(
     }
     let now = time.elapsed_secs();
     let world_cam = cam.single().ok();
+    let exterior_gate = crate::exterior_cull::ExteriorGate::build(
+        &exterior_windows,
+        world_cam.map(|(tf, _, proj)| (tf, proj)),
+    );
+    let camera_instance = camera_claim.0.map(|c| c.room.instance);
     for (mut host, player, drive) in &mut hosts {
         let drawn = if host.meshes.is_empty() {
             // Meshless (particles-only) host: the emitters' own draw-set law (see the `fade`
@@ -363,9 +377,16 @@ fn gate_doodad_anim(
             // term went missing here as well as in the emitters (decision 0678 / bug B39) — a
             // meshless fire prop kept animating its bones at any distance past the wall.
             let (radius, center) = host.fade;
-            world_cam.is_some_and(|(cam_tf, frustum)| {
+            world_cam.is_some_and(|(cam_tf, frustum, _)| {
                 let cam_pos = cam_tf.translation();
-                crate::particles::EmitterFade { radius, center }.in_draw_set(
+                // A meshless host is a placement's own particles-only model; it carries no building
+                // instance of its own, so the honest answer here is "test my sphere".
+                let fade = crate::particles::EmitterFade {
+                    radius,
+                    center,
+                    instance: None,
+                };
+                fade.in_draw_set(
                     cam_pos,
                     Vec3::from(cam_tf.forward()),
                     view.farclip,
@@ -376,6 +397,7 @@ fn gate_doodad_anim(
                         },
                         false,
                     ),
+                    fade.exterior_admitted(&exterior_gate, camera_instance),
                 )
             })
         } else {
@@ -572,7 +594,7 @@ fn sample_mat_anim(
 
 /// The **UV-animated materials** registry (decision 0130 phase 3, wow-re `m2-texanim-uv`): each
 /// batch material carrying a texture-transform translation loop, keyed by material asset id.
-/// [`tick_uv_anim_materials`] re-samples every entry's offset into the material's `sun_scale.zw`
+/// [`tick_anim_materials`] re-samples a *drawn* entry's offset into the material's `sun_scale.zw`
 /// each frame — one shared uniform per material, so every instance of a model batch scrolls in
 /// phase. Exactly faithful for gseq loops (the reference's free-running shared clock); a recorded,
 /// invisible divergence for seq-band loops (the reference phases those per instance at arm time —
@@ -585,20 +607,69 @@ pub(crate) struct UvAnimMaterials(
     >,
 );
 
-/// Scroll every UV-animated material's offset on the shared clock. Skipped entirely in captures
-/// (materials keep their t = 0 seed — constants still show, frames stay deterministic). Mutating
-/// the material asset re-uploads its packed uniform; the population is tiny (the corpus holds 113
-/// texanim models game-wide, a handful in residency), so this is a few uniform writes per frame.
-fn tick_uv_anim_materials(
+/// Re-sample the **drawn** animated materials on the shared clock — the UV scroll
+/// ([`UvAnimMaterials`]) and the RGB tint ([`TintAnimMaterials`]) together, because they share the
+/// draw scan below. Skipped entirely in captures (materials keep their t = 0 seed — constants still
+/// show, frames stay deterministic).
+///
+/// **The draw gate, and why it is the fix for B131.** Mutating a material asset marks it Modified,
+/// which on the Metal non-bindless path re-creates its uniform buffers *and its bind group* that
+/// frame. 0130 sized this as "a few uniform writes per frame" on the premise that the resident
+/// population is tiny (113 texanim models exist game-wide, a handful in view) — true per view,
+/// **false per map session**: the dedup caches hold every material they ever built until a
+/// `MapChange` (decision 0729), and a registry entry only evicts when its material dies, so on a
+/// single-map traverse both registries grow monotonically and every entry is re-uploaded every
+/// frame for ever. Measured on a parked same-map leg by square-waving this system:
+/// **+9.85 ms of CPU per frame at 174 resident entries (~57 µs each)** — and residency 4 → 248
+/// entries inside ten minutes, recoverable only by a restart or a map change. That is B131.
+///
+/// Gating on the draw is not a workaround for that growth, it is this lane finally obeying the
+/// module's own law: [`gate_doodad_anim`] already gates the *pose* on "any submesh actually drawn",
+/// on exactly the byte ground that makes it free — sampling is clock-indexed, so a material that
+/// re-appears is written from `now` and shows the value the shared clock dictates, with nothing to
+/// catch up (the module docs' "pausing costs nothing and drifts nothing"). A material nothing draws
+/// is a per-frame GPU rebuild with no pixel to show for it.
+///
+/// `Visibility != Hidden` is the same spelling [`gate_doodad_anim`] uses — the authority's verdict
+/// (far clip + size-bucketed fade + portal cull), written in `Update` by
+/// `debug_panel::ModelVisSet`, which this system is ordered after so the verdict is *this* frame's.
+/// It over-includes (a part left `Inherited` under a hidden ancestor counts as drawn), which is the
+/// safe direction: an extra write costs a frame's uniform upload, a missed one would freeze a
+/// visible scroll.
+fn tick_anim_materials(
     time: Res<Time>,
-    mut reg: ResMut<UvAnimMaterials>,
+    real: Res<Time<bevy::time::Real>>,
+    mut uv_reg: ResMut<UvAnimMaterials>,
+    mut tint_reg: ResMut<TintAnimMaterials>,
     mut materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
+    parts: Query<(
+        &MeshMaterial3d<crate::terrain::WowModelMaterial>,
+        &Visibility,
+    )>,
+    mut drawn: Local<
+        bevy::platform::collections::HashSet<AssetId<crate::terrain::WowModelMaterial>>,
+    >,
 ) {
-    if reg.0.is_empty() || crate::capture::scenario_active() {
+    if (uv_reg.0.is_empty() && tint_reg.0.is_empty())
+        || crate::capture::scenario_active()
+        || matanim_off(&real)
+    {
         return;
     }
+    drawn.clear();
+    for (mat, vis) in &parts {
+        if *vis != Visibility::Hidden {
+            drawn.insert(mat.id());
+        }
+    }
     let now = time.elapsed_secs();
-    reg.0.retain(|id, anim| {
+    // `contains` on the skip path, never `get_mut`: the entry must survive while its material does
+    // (that is the eviction predicate — an entry dies with its material, not with its visibility),
+    // and an immutable probe is what keeps a skipped material *un*-Modified.
+    uv_reg.0.retain(|id, anim| {
+        if !drawn.contains(id) {
+            return materials.contains(*id);
+        }
         let Some(mat) = materials.get_mut(*id) else {
             return false; // material unloaded with its cache — drop the entry
         };
@@ -607,12 +678,52 @@ fn tick_uv_anim_materials(
         mat.extension.sun_scale.w = uv[1];
         true
     });
+    tint_reg.0.retain(|id, anim| {
+        if !drawn.contains(id) {
+            return materials.contains(*id);
+        }
+        let Some(mat) = materials.get_mut(*id) else {
+            return false;
+        };
+        let rgb = anim.sample(now);
+        mat.extension.tint = bevy::math::Vec4::new(rgb[0], rgb[1], rgb[2], 1.0);
+        true
+    });
+}
+
+/// **The price-this-system knob** (`WOW_MATANIM_DUTY=<start_s>:<period_s>`, decision 0785): alternate
+/// [`tick_anim_materials`] off/on every `period` seconds from `start`. Park at one pin, square-wave
+/// it, and the difference between the ON and OFF buckets **is** this system's per-frame cost, with
+/// residency, scene, entity count and camera all held identical — a measurement, not an argument.
+/// It is how B131's ratchet was priced (+9.85 ms/frame over 174 resident entries) and how the draw
+/// gate above was then shown to remove it (+0.22 ms). Kept, not deleted: the ~10 ms-floor ledger
+/// (0729's residuals) has more per-frame systems queued for exactly this treatment.
+///
+/// A **square wave** rather than one flip, because this machine's frame cost drifts on its own —
+/// a single before/after pair cannot tell the drift from the signal, and both legs of the verifying
+/// run climbed ~10 ms while their ON/OFF difference stayed flat.
+///
+/// **`Time<Real>`, deliberately:** virtual time is clamped to `max_delta` (250 ms), so on a leg that
+/// hitches it lags real time badly. That is what smeared the first attempt at this measurement into
+/// nonsense — the probe-chat schedule reads virtual time, so once the leg hitched its hops drifted
+/// 40 s → 75 s apart and windows labelled "parked, ticks off" in fact held a teleport and live ticks.
+fn matanim_off(time: &Time<bevy::time::Real>) -> bool {
+    static SPEC: std::sync::OnceLock<Option<(f32, f32)>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        let v = std::env::var("WOW_MATANIM_DUTY").ok()?;
+        let (start, period) = v.split_once(':')?;
+        Some((start.trim().parse().ok()?, period.trim().parse().ok()?))
+    });
+    spec.is_some_and(|(start, period)| {
+        let t = time.elapsed_secs() - start;
+        t >= 0.0 && period > 0.0 && ((t / period) as u32) % 2 == 1
+    })
 }
 
 /// The **tint-animated materials** registry — the M2Color-RGB twin of [`UvAnimMaterials`]: each
 /// batch material whose colour track animates (the vertex bake is skipped for those —
-/// `benilla-formats` `m2_batches`), keyed by material asset id. [`tick_tint_anim_materials`]
-/// re-samples the tint into the material's `tint` uniform each frame on the same shared clock
+/// `benilla-formats` `m2_batches`), keyed by material asset id. [`tick_anim_materials`]
+/// re-samples the tint into the material's `tint` uniform on the same shared clock, for the drawn
 /// (the same recorded seq-band phase divergence as the UV scroll — invisible for a placed
 /// doodad's ambient loop). Spell-effect instances need real per-instance phase instead (one cast
 /// = one 0.9 s pulse), so the effect lane clones its materials and ticks them on the instance
@@ -624,27 +735,6 @@ pub(crate) struct TintAnimMaterials(
         std::sync::Arc<benilla_formats::RgbAnim>,
     >,
 );
-
-/// Re-sample every tint-animated material's RGB on the shared clock (see [`TintAnimMaterials`]).
-/// Skipped in captures like the UV scroll (materials keep their first-key seed).
-fn tick_tint_anim_materials(
-    time: Res<Time>,
-    mut reg: ResMut<TintAnimMaterials>,
-    mut materials: ResMut<Assets<crate::terrain::WowModelMaterial>>,
-) {
-    if reg.0.is_empty() || crate::capture::scenario_active() {
-        return;
-    }
-    let now = time.elapsed_secs();
-    reg.0.retain(|id, anim| {
-        let Some(mat) = materials.get_mut(*id) else {
-            return false; // material unloaded with its cache — drop the entry
-        };
-        let rgb = anim.sample(now);
-        mat.extension.tint = bevy::math::Vec4::new(rgb[0], rgb[1], rgb[2], 1.0);
-        true
-    });
-}
 
 pub struct DoodadAnimPlugin;
 
@@ -662,14 +752,15 @@ impl Plugin for DoodadAnimPlugin {
                 .chain()
                 .before(AnimationSystems),
         );
-        // Before the visibility authority (`ModelVisSet`): it composes `MatAnim::current` into the
-        // render-alpha tag the same frame.
+        // `sample_mat_anim` runs before the visibility authority (`ModelVisSet`): it composes
+        // `MatAnim::current` into the render-alpha tag the same frame. The material tick runs
+        // *after* it, because its draw gate reads the verdict that authority writes — one frame
+        // later would freeze a scroll for a frame on every doodad that comes into view.
         app.add_systems(
             Update,
             (
                 sample_mat_anim.before(crate::debug_panel::ModelVisSet),
-                tick_uv_anim_materials,
-                tick_tint_anim_materials,
+                tick_anim_materials.after(crate::debug_panel::ModelVisSet),
             ),
         );
     }
@@ -1105,6 +1196,11 @@ mod tests {
                                          // The gate reads the far-clip wall (0678) — this host is mesh-BACKED, so it takes the
                                          // `Visibility` branch and never consults it, but the system still needs the resource.
         app.init_resource::<crate::view::ViewDistance>();
+        // …and the exterior-window gate's two terms (0786), for the same reason: this host is
+        // mesh-BACKED so it never consults them, but the system's params must resolve. Their
+        // defaults are the outdoor case (`Unrestricted`, no room claimed).
+        app.init_resource::<crate::wmo_portal::ExteriorWindows>();
+        app.init_resource::<crate::wmo_portal::CameraInteriorClaim>();
         app.add_systems(Update, gate_doodad_anim);
 
         let mesh = app.world_mut().spawn(Visibility::Inherited).id();

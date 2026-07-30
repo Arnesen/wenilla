@@ -201,7 +201,9 @@ pub struct EffectDraw {
     /// The rasterizer `DepthBiasState` constant for this draw's pipeline (0733 §4): the
     /// coplanar decals keep the depth-offset half their materials carried (projected verts are
     /// exact sub-pieces of drawn ground — clip-interpolated vertices land within ULPs of it);
-    /// everything free-floating passes 0.
+    /// everything free-floating passes 0. Nonzero ALSO selects the decal transform (0781):
+    /// the draw's verts skip the cam-relative rebase and run the world-mesh `clip_from_world`,
+    /// so the depth tie the bias settles is against the same arithmetic.
     pub raster_bias: i32,
     /// Vertex range in [`EffectQuads::verts`] (a multiple of 4 for quads, 3 for tris).
     pub range: Range<u32>,

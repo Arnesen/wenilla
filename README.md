@@ -49,9 +49,8 @@ You need a **1.12.1 (build 5875) client install** for game data, a
 WOW_DATA=/path/to/WoW/Data cargo run --release -p benilla
 ```
 
-The server defaults to `localhost` — point `WOW_HOST` at any IP or hostname, with an optional
-auth port: `WOW_HOST=play.example.com:3724`. A bare host uses port 13724 (this project's own dev
-deploy); a stock vmangos `realmd` listens on 3724, so you'll usually want the explicit port.
+The server defaults to `localhost:3724`, where a stock vmangos `realmd` listens — point `WOW_HOST`
+at any IP or hostname, and append an auth port if yours is remapped: `WOW_HOST=play.example.com:5000`.
 Credentials go in at the login screen, or set `WOW_USER` / `WOW_PASS` to skip it.
 
 ## Contributing

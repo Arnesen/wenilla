@@ -327,6 +327,11 @@ impl Plugin for TerrainPlugin {
             // would leave the whole streamed world resident and unowned — the gate above stops it
             // being *maintained*, which is precisely what makes an abandoned world immortal.
             .add_systems(OnExit(ClientState::InWorld), release_world)
+            // Within-map art residency (decision 0793): the placement material dedup expires by
+            // distance, so a long flight on one continent stops ratcheting. Ungated by
+            // `world_is_live` on purpose — a cache still holding the last world's art is exactly
+            // what should be draining while you sit at character select.
+            .add_systems(Update, scope_placement_art)
             .add_systems(
                 Update,
                 // After the interior claim so the leaf override reads THIS frame's claim —
@@ -537,19 +542,30 @@ fn stream_terrain(
                 light_buf: shared_light.0.clone(),
             },
         });
-        // Terrain collider (decision 0009): a static trimesh from the SAME merged world-space verts that
-        // are drawn (so you stand on the visible ground), built off-thread (attached by
-        // `finish_colliders`) so a tile streaming in never hitches the frame. It rides the tile entity's
-        // lifecycle — gone when the tile despawns, no separate bookkeeping.
-        let collider_data = meshes.get(&adt.mesh).and_then(terrain_collider_data);
-        let mut tile_ent = commands.spawn((
-            Mesh3d(adt.mesh.clone()),
-            MeshMaterial3d(material),
-            Transform::IDENTITY, // the merged mesh is already in absolute world coords
-            // ADT terrain is exterior scene: from inside a WMO it draws only through a portal window
-            // (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see `crate::exterior_cull`).
-            crate::exterior_cull::ExteriorScene,
-        ));
+        // Terrain collider (decision 0009): ONE static trimesh per tile, welded from the same decoded
+        // chunks the drawn cells are built from (so you stand on the visible ground), built off-thread
+        // (attached by `finish_colliders`) so a tile streaming in never hitches the frame. It rides the
+        // tile root's lifecycle — gone when the tile despawns, no separate bookkeeping.
+        let collider_data = terrain_collider_data(&adt.chunks);
+        // The tile ROOT draws nothing: it carries the collider and the surface roles, and its MCNK
+        // cells hang off it as children — one drawn object per 33.333 yd chunk. That is the unit the
+        // exterior-scene cull needs (decision 0780; a 533 yd slab the camera stands on intersects
+        // every portal window, so it could never be hidden), and it also gives Bevy's own frustum cull
+        // something smaller than half a kilometre to reject. Despawning the root takes the cells.
+        let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
+        tile_ent.with_children(|cells| {
+            for mesh in &adt.chunk_meshes {
+                cells.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY, // chunk meshes are already in absolute world coords
+                    // ADT terrain is exterior scene: from inside a WMO a cell draws only through a
+                    // portal window (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see
+                    // `crate::exterior_cull`).
+                    crate::exterior_cull::ExteriorScene,
+                ));
+            }
+        });
         if let Some((verts, tris)) = collider_data {
             // `GroundDecalSurface`: terrain receives the selection ring (see `crate::collision`).
             // `PickOccluder`: terrain clamps the mouse pick (the reference's world trace).
@@ -786,6 +802,18 @@ fn drop_streamed_world(
         release_placement(commands, placements, GLOBAL_WMO_UID);
     }
     placements.materials.clear();
+}
+
+/// Expire the placement material dedup by **distance** (decision 0793) — the within-map half of
+/// [`drop_streamed_world`]'s clear. This is the big one: `mats` 2603 → 26786 over ten minutes on a
+/// same-map tour (decision 0785) is overwhelmingly submesh materials of doodads and buildings whose
+/// tiles unloaded thousands of yards ago. The placements themselves are already refcount-released;
+/// only the dedup kept their materials — and through them their textures — alive.
+fn scope_placement_art(mut scope: crate::art_scope::ArtScope, mut placements: ResMut<Placements>) {
+    scope.apply(
+        &mut placements.materials,
+        crate::art_scope::ArtSlot::PlaceMats,
+    );
 }
 
 /// Leaving `InWorld` (a `/logout` back to character select): release the world.

@@ -26,10 +26,9 @@ use std::net::TcpStream;
 use anyhow::{anyhow, Context, Result};
 use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_LENGTH};
 
-/// The realmd (auth/login) server port. Our vmangos deploy maps realmd to host port 13724 —
-/// moved off the classic 3724, which the WOA dev server owns on this machine (the compose file at
-/// `vmangos-deploy` carries the matching mapping).
-pub const AUTH_PORT: u16 = 13724;
+/// The realmd (auth/login) server port — the stock one a vmangos `realmd` listens on, which our
+/// deploy maps straight through (`3724:3724` in the compose file at `vmangos-deploy`).
+pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the server.
 pub const CLIENT_BUILD: u16 = 5875;
 
@@ -126,19 +125,20 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
 
 #[cfg(test)]
 mod host_port_tests {
-    use super::host_port;
+    use super::{host_port, AUTH_PORT};
 
     #[test]
     fn explicit_port_splits() {
+        // Explicit port beats the default — they differ so the assert can tell them apart.
         assert_eq!(
-            host_port("play.example.com:3724", 13724),
-            ("play.example.com", 3724)
+            host_port("play.example.com:5000", AUTH_PORT),
+            ("play.example.com", 5000)
         );
     }
 
     #[test]
     fn bare_host_gets_default() {
-        assert_eq!(host_port("localhost", 13724), ("localhost", 13724));
+        assert_eq!(host_port("localhost", AUTH_PORT), ("localhost", AUTH_PORT));
     }
 
     #[test]

@@ -34,6 +34,10 @@
 //! one line per world entry when everything is fine, and it re-fires on every re-entry (a relog, a
 //! `.character race` forced logout, a reconnect) because the state can have changed.
 //!
+//! The same audience — the reader of the log — is why [`crate::build_id::banner`] is registered
+//! here: **which build produced this log** is the first thing a report from someone else's machine
+//! has to establish, and one startup line puts it in the output they already paste.
+//!
 //! The other half is [`account_guard`] — the pre-connect check that a session running inside a
 //! worktree pool slot is logging in as **its own** probe account. A vmangos login kicks whoever
 //! holds the account, so the default `one` credentials fire the director out of their live session
@@ -94,7 +98,7 @@ pub(crate) struct PreflightPlugin;
 impl Plugin for PreflightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Preflight>()
-            .add_systems(Startup, offline_notice)
+            .add_systems(Startup, (crate::build_id::banner, offline_notice))
             .add_systems(
                 Update,
                 report_session.after(crate::schedule::WorldStage::Net),

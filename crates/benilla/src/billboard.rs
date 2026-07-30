@@ -411,6 +411,8 @@ fn face_billboards(
             &mut Transform,
             &mut GlobalTransform,
             &mut Visibility,
+            // Whether the exterior-scene cull owns this card's `Visibility` — see the mirror below.
+            Has<crate::exterior_cull::ExteriorScene>,
         ),
         Without<WorldCamera>,
     >,
@@ -422,7 +424,7 @@ fn face_billboards(
     // for every billboard; never a per-pivot aim).
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
-    for (entity, mut card, mut tf, mut global, mut visibility) in &mut cards {
+    for (entity, mut card, mut tf, mut global, mut visibility, gated) in &mut cards {
         if let Some(owner) = card.follow {
             match owners.get(owner) {
                 Ok((gt, vis)) => {
@@ -434,12 +436,24 @@ fn face_billboards(
                     // the mirror a deck lantern's glow keeps rendering at the other continent's
                     // coordinates. (The owner's inherited visibility is last propagate's — one
                     // frame of lag on a minutes-long hide.)
-                    let want = match vis {
-                        Some(v) if !v.get() => Visibility::Hidden,
-                        _ => Visibility::Inherited,
-                    };
-                    if *visibility != want {
-                        *visibility = want;
+                    //
+                    // **Not on a card the exterior-scene cull owns** (decision 0784). One component,
+                    // one authority (0025): a world-placement card is tagged
+                    // [`crate::exterior_cull::ExteriorScene`] with the rest of its model, and both
+                    // systems run in the same unordered post-propagation window — so this write
+                    // silently undid the cull's `Hidden` and the card drew straight through a sealed
+                    // room's wall. Nothing is lost by standing down: such a card's owner is a joint of
+                    // its own placement rig, which is never hidden apart from the model the cull is
+                    // already hiding whole. The transport case above is an entity-lane card, untagged,
+                    // and still mirrors.
+                    if !gated {
+                        let want = match vis {
+                            Some(v) if !v.get() => Visibility::Hidden,
+                            _ => Visibility::Inherited,
+                        };
+                        if *visibility != want {
+                            *visibility = want;
+                        }
                     }
                 }
                 Err(_) => {
@@ -568,6 +582,66 @@ mod tests {
         assert!(
             app.world().get_entity(card).is_err(),
             "card despawns with its owner"
+        );
+    }
+
+    /// A card the **exterior-scene cull** owns must not have its `Visibility` written here
+    /// (decision 0784). One component, one authority (0025): a world-placement card is tagged
+    /// with the rest of its model, both systems run in the same unordered post-propagation
+    /// window, and this mirror silently undid the cull's `Hidden` — a lamp glow drawing through
+    /// a sealed room's wall while every other submesh of the same lamp was correctly gone.
+    ///
+    /// The card must still be *placed* (its transform is this system's job either way), and an
+    /// untagged card must still mirror — that half is the test above.
+    #[test]
+    fn the_exterior_cull_owns_a_tagged_cards_visibility() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        app.world_mut().spawn((
+            crate::player::WorldCamera,
+            GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
+        ));
+        // A VISIBLE owner — the mirror's "show it" arm, which is the one that did the damage.
+        let owner = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_translation(Vec3::new(5.0, 0.0, 0.0)),
+                InheritedVisibility::VISIBLE,
+            ))
+            .id();
+        let info = BillboardInfo {
+            bone: 0,
+            pivot: Vec3::new(0.0, 1.7, 0.0),
+            normal: Vec3::Z,
+            kind: BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: vec![],
+        };
+        let card = app
+            .world_mut()
+            .spawn((
+                BillboardCard::following(&info, owner),
+                Transform::IDENTITY,
+                // …and the cull has already hidden it: no window admits this model.
+                Visibility::Hidden,
+                crate::exterior_cull::ExteriorScene,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().entity(card).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "the cull's verdict must survive the owner mirror"
+        );
+        assert_eq!(
+            app.world()
+                .entity(card)
+                .get::<Transform>()
+                .unwrap()
+                .translation,
+            Vec3::new(5.0, 1.7, 0.0),
+            "standing down from the visibility write must not stop the card being PLACED"
         );
     }
 

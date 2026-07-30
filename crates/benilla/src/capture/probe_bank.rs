@@ -46,6 +46,7 @@ use benilla_protocol::messages::{BAG_PLAYER_INVENTORY, SLOT_PACK_FIRST};
 use benilla_protocol::EntityKind;
 use benilla_ui::script::UiScript;
 
+use super::probes::ProbeClock;
 use crate::net::{ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::ui_bank::{BankOpen, BankPrices};
@@ -203,7 +204,7 @@ fn find_bank_slot(store: &ObjectStore, guid: u64) -> Option<u8> {
 
 #[allow(clippy::too_many_arguments)]
 fn bank_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut probe: ResMut<BankProbe>,
     open: Res<BankOpen>,
     prices: Option<Res<BankPrices>>,

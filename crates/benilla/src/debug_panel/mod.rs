@@ -207,35 +207,42 @@ impl Plugin for DebugPanelPlugin {
             egui.enable_cursor_icon_updates = false;
         }
 
-        app.init_resource::<DebugState>()
-            .init_resource::<EguiPointerOver>()
-            .add_systems(Startup, spawn_egui_camera)
-            // Keep Tab out of egui: it's a bound game key, never focus-navigation for our overlays.
-            // Runs after bevy_egui fills `EguiInput` and before egui's pass consumes it (the seam
-            // bevy_egui documents for input edits).
-            .add_systems(
-                PreUpdate,
-                strip_egui_tab_focus
-                    .after(EguiPreUpdateSet::ProcessInput)
-                    .before(EguiPreUpdateSet::BeginPass),
-            )
-            .add_systems(
-                EguiPrimaryContextPass,
-                (debug_panel_ui, track_pointer_over_ui),
-            )
-            // `apply_model_visibility` reads the WMO portal PVS, so it runs after the compute that
-            // fills it (`crate::wmo_portal::WmoPvsSet`).
-            .add_systems(
-                Update,
-                (
-                    // After the UI keyboard feed so a backtick typed into a focused EditBox never
-                    // toggles the panel.
-                    toggle_panel.after(crate::ui_script::UiInput),
-                    apply_model_visibility
-                        .after(crate::wmo_portal::WmoPvsSet)
-                        .in_set(ModelVisSet),
-                ),
-            );
+        app.insert_resource(DebugState {
+            // `$WOW_PANEL=1` — start with the panel **open**, which is how a headless capture run
+            // gets it into the frame. Without it a panel change (a new footer line, a section that
+            // grew past the scroll reserve) can only be checked in the director's own window, and
+            // clipping is exactly the failure a capture catches for free.
+            open: std::env::var_os("WOW_PANEL").is_some(),
+            ..default()
+        })
+        .init_resource::<EguiPointerOver>()
+        .add_systems(Startup, spawn_egui_camera)
+        // Keep Tab out of egui: it's a bound game key, never focus-navigation for our overlays.
+        // Runs after bevy_egui fills `EguiInput` and before egui's pass consumes it (the seam
+        // bevy_egui documents for input edits).
+        .add_systems(
+            PreUpdate,
+            strip_egui_tab_focus
+                .after(EguiPreUpdateSet::ProcessInput)
+                .before(EguiPreUpdateSet::BeginPass),
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            (debug_panel_ui, track_pointer_over_ui),
+        )
+        // `apply_model_visibility` reads the WMO portal PVS, so it runs after the compute that
+        // fills it (`crate::wmo_portal::WmoPvsSet`).
+        .add_systems(
+            Update,
+            (
+                // After the UI keyboard feed so a backtick typed into a focused EditBox never
+                // toggles the panel.
+                toggle_panel.after(crate::ui_script::UiInput),
+                apply_model_visibility
+                    .after(crate::wmo_portal::WmoPvsSet)
+                    .in_set(ModelVisSet),
+            ),
+        );
     }
 }
 
@@ -350,10 +357,11 @@ fn debug_panel_ui(
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                // Leave room under the scroll for the pinned hotkey footer below. Two lines' worth:
-                // the footer keeps the panel's default wrapping, so a font whose metrics run wider
-                // than ours reflows it instead of having its second line clipped away.
-                .max_height(panel_h - 40.0)
+                // Leave room under the scroll for the pinned footer below (hotkey map + build id).
+                // Three lines' worth: the footer keeps the panel's default wrapping, so a font
+                // whose metrics run wider than ours reflows the hotkey map instead of having its
+                // second line clipped away.
+                .max_height(panel_h - 56.0)
                 .show(ui, |ui| {
                     // Disjoint borrows of the sections so each can drive its own widgets.
                     let DebugState {
@@ -651,6 +659,24 @@ fn debug_panel_ui(
                     .small()
                     .color(OVERLAY_TEXT_DIM),
             );
+            // …and which build this is (`crate::build_id`). Bottom line of the surface a reader is
+            // already on when something looks wrong: a click copies the full sha, so "it looks like
+            // this here" can name the code it happened on.
+            let build = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("build {}", crate::build_id::summary()))
+                        .small()
+                        .color(OVERLAY_TEXT_DIM),
+                )
+                .sense(egui::Sense::click()),
+            );
+            if !crate::build_id::SHA.is_empty()
+                && build
+                    .on_hover_text(format!("{}\n(click to copy)", crate::build_id::SHA))
+                    .clicked()
+            {
+                ui.ctx().copy_text(crate::build_id::SHA.to_string());
+            }
         });
     Ok(())
 }

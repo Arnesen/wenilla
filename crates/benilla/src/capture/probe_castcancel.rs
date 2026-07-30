@@ -19,6 +19,7 @@
 
 use bevy::prelude::*;
 
+use super::probes::ProbeClock;
 use crate::net::SelfPlayer;
 
 pub(crate) struct ProbeCastCancelPlugin;
@@ -49,7 +50,7 @@ const BAR_PHASE_CHUNK: &str = "return (function()\n\
 /// ~5 flash + ~20 fade ticks normalized to `CASTING_BAR_REF_TICK` 30 Hz ≈ 0.83 s). The deltas
 /// between the logged `hold` → `burst` → `fade` → `hidden` lines ARE the verdict; no eyeballing.
 fn bar_timeline(
-    time: Res<Time>,
+    time: ProbeClock,
     script: Option<NonSend<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<SelfPlayer>>,
     mut last: Local<String>,
@@ -100,7 +101,7 @@ const USE_HEARTH_CHUNK: &str = "return (function()\n\
 /// into the 10 s cast** press `W`; **+0.3 s** release it. Every phase logs, so a stalled run
 /// shows where it stopped.
 fn cast_cancel_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut probe: ResMut<ProbeCastCancel>,
     self_player: Query<(), With<SelfPlayer>>,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,

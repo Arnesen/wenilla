@@ -11,6 +11,7 @@
 
 use bevy::prelude::*;
 
+use super::probes::ProbeClock;
 use crate::net::SelfPlayer;
 use crate::target::AttackNearestRequest;
 
@@ -26,7 +27,7 @@ impl Plugin for ProbeMeleePlugin {
 /// already auto-attacking; covers the auto-acquired-attacker case the acquire core skips); with
 /// none, run the acquire core. Re-acquires the next victim after a kill clears the selection.
 fn melee_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut last: Local<f64>,
     self_player: Query<(), With<SelfPlayer>>,
     selection: Res<crate::target::Selection>,

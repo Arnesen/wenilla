@@ -33,7 +33,14 @@ pub(crate) struct ClutterPlugin;
 impl Plugin for ClutterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_clutter.after(AssetSet::Open))
-            .add_systems(Update, (stream_chunk_clutter, evict_clutter_geometry));
+            .add_systems(
+                Update,
+                (
+                    stream_chunk_clutter,
+                    evict_clutter_geometry,
+                    scope_clutter_geometry,
+                ),
+            );
     }
 }
 
@@ -50,6 +57,20 @@ fn evict_clutter_geometry(
     changes.clear();
     if let Some(mut g) = geometry {
         g.0.clear();
+    }
+}
+
+/// Expire the decoded clutter geometry by **distance** (decision 0793) — the within-map half of
+/// [`evict_clutter_geometry`]. Clutter models are map-*flavoured*: the handful a zone uses is decoded
+/// on its first chunk build and then held for the process, so a continent tour accumulates every
+/// zone's set. Re-approaching re-decodes one M2 off the chain, inside the same lazy per-chunk build
+/// that would rebuild the meshes anyway.
+fn scope_clutter_geometry(
+    mut scope: crate::art_scope::ArtScope,
+    geometry: Option<ResMut<ClutterGeometry>>,
+) {
+    if let Some(mut g) = geometry {
+        scope.apply(&mut g.0, crate::art_scope::ArtSlot::ClutterGeo);
     }
 }
 
@@ -132,7 +153,9 @@ impl Default for ClutterConfig {
 /// so the lazy per-chunk build system can reach it independently of `WorldAssets`. Replaces the
 /// streamer's old per-tile `clutter_cache`.
 #[derive(Resource, Default)]
-pub(crate) struct ClutterGeometry(pub(crate) HashMap<String, Vec<RenderSubmesh>>);
+pub(crate) struct ClutterGeometry(
+    pub(crate) crate::art_scope::SpatialCache<String, Vec<RenderSubmesh>>,
+);
 
 /// One MCNK chunk's ground clutter as a **lazily-built** unit — the faithful per-chunk `CDetailDoodadInst`
 /// lifecycle (`ground-effects.md` §7): scattered + MCSH/normal-baked at tile-load, but its meshes are
@@ -301,7 +324,7 @@ fn build_chunk_clutter(
 ) -> Vec<Entity> {
     let mut out = Vec::new();
     for (model_path, placements) in models {
-        let subs = geometry.0.entry(model_path.clone()).or_insert_with(|| {
+        let subs = geometry.0.or_insert_with(model_path.clone(), || {
             load_m2_mesh(&mut assets.chain.lock_recover(), model_path).unwrap_or_default()
         });
         if subs.is_empty() {

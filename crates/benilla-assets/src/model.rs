@@ -163,10 +163,23 @@ pub(crate) fn build_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, sub.vertex_colors.clone());
     }
     if sub.normals.len() == sub.positions.len() {
+        // A billboard CARD is lit on the face it PRESENTS (decision 0788): a card authored
+        // back-to-front against the law's `+X`-at-the-viewer gets its plane's normals turned round
+        // here, so its shading stops swinging with the camera (the shape, the reference's own
+        // behaviour and the 279-batch population are on
+        // [`RenderSubmesh::billboard_card_faces_away`]).
+        //
+        // **Normals only — never the winding.** The 177 away-facing SINGLE-sided cards are
+        // authored placeholder geometry the reference backface-culls from every angle
+        // (`bbfacescan`), and our `cull_mode` reproduces that; re-winding them would reveal it.
+        let flip = sub.billboard_card_faces_away();
         let normals: Vec<[f32; 3]> = sub
             .normals
             .iter()
-            .map(|n| wow_to_bevy(*n).to_array())
+            .map(|n| {
+                let b = wow_to_bevy(*n);
+                if flip { -b } else { b }.to_array()
+            })
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     } else {

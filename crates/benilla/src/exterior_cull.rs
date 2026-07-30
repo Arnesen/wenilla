@@ -49,9 +49,15 @@
 //!
 //! ## What is gated so far, and what is knowingly not
 //!
-//! **Gated:** ADT terrain tiles (`0x683bf0`) and ADT doodad placements (`0x683700`) — the two buckets
-//! that produce the reported symptom, and the two whose entities have no other `Visibility` writer, so
-//! this is their sole authority (decision 0025).
+//! **Gated:** ADT terrain (`0x683bf0`), ADT doodad placements (`0x683700`) and the WDL far band
+//! (`0x683040`) — the buckets that produce the reported symptom, and the ones whose entities have no
+//! other `Visibility` writer, so this is their sole authority (decision 0025).
+//!
+//! **The unit is the drawn object, and for terrain that is the 33.333 yd MCNK cell, not the 533 yd
+//! tile** (decision 0780). This is a property of the *spawner*, not of anything here — but the cull is
+//! where it bites: a tile-sized box always contains the camera's own ground, so it intersects every
+//! window and is admitted whichever way the doorway faces. The cull was correct and looked broken.
+//! The far band keeps its whole-tile box, which is the reference's own far-tier granularity.
 //!
 //! **NOT yet gated, deliberately:** world **WMO placements** (`0x6856c0`) and open-world **liquid**
 //! (`0x683ab0`). Both already have a visibility authority — WMO group submeshes are written by the
@@ -77,7 +83,9 @@ use crate::wmo_portal::{ExteriorWindows, Rect, WmoPvsSet};
 const MIN_WINDOW_NDC: f32 = 0.02;
 
 /// Tag for a piece of the **exterior scene** — the content the window worklist gates. Put this on ADT
-/// terrain tiles, ADT doodad placements, world WMO placements and open-world liquid.
+/// terrain **chunks**, ADT doodad placements, the WDL far band, world WMO placements and open-world
+/// liquid. Tag the object that is *drawn*: this is tested per entity, so tagging a container whose box
+/// spans far more than any one draw admits the lot (decision 0780).
 ///
 /// **Never on units, players, or anything parented to a WMO group**: the former are exempt by the
 /// carved law above, and the latter are already culled by the portal PVS
@@ -89,11 +97,31 @@ pub struct ExteriorScene;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExteriorCullSet;
 
+/// What the cull actually did on its last run — the instrument that makes a "why is that still
+/// drawn?" report answerable without guessing. `windows` is the worklist it read (`None` =
+/// [`ExteriorWindows::Unrestricted`], the stand-down leg), `frusta` how many survived
+/// [`MIN_WINDOW_NDC`], and `tested`/`hidden` how many tagged objects it reached and rejected.
+///
+/// Its whole point is that `tested` is the number no other instrument can see: an object drawn
+/// through a wall while `hidden == tested` is an object the cull **never reached**, which is a
+/// different defect from one it reached and admitted.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ExteriorCullVerdict {
+    pub windows: Option<usize>,
+    pub frusta: usize,
+    pub tested: usize,
+    pub hidden: usize,
+    /// Tagged objects with **no `Aabb`**, which the fail-open arm below admits unconditionally.
+    /// Non-zero is not automatically a defect (a tagged non-drawing entity has no bound and draws
+    /// nothing), but it is the one number that says how much of the scene the cull is not deciding.
+    pub unbounded: usize,
+}
+
 pub(crate) struct ExteriorCullPlugin;
 
 impl Plugin for ExteriorCullPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<ExteriorCullVerdict>().add_systems(
             PostUpdate,
             apply_exterior_cull
                 .in_set(ExteriorCullSet)
@@ -131,53 +159,117 @@ fn window_frustum(rect: Rect, clip_from_world: &Mat4) -> Option<Frustum> {
     ))
 }
 
-/// Hide every [`ExteriorScene`] object that no window admits.
+/// This frame's exterior gate — the window worklist turned into clip volumes, built once and asked
+/// per object. **Two systems ask it**, which is the whole point of it being a value rather than a
+/// loop: [`apply_exterior_cull`] owns the exterior objects nothing else writes (terrain cells, the
+/// far band), and [`crate::debug_panel`]'s model-visibility authority folds the same answer into its
+/// own AND for every model submesh, because those already have an owner (decision 0784).
+pub(crate) enum ExteriorGate {
+    /// Outdoors — the driver's outside leg (`0x6811ca`): the ordinary frustum is the window, so the
+    /// gate admits everything and each object goes back to whatever else owns it.
+    Open,
+    /// Indoors: an object draws only where one of these sub-frusta admits it. **Empty admits
+    /// nothing** — the sealed-room case (`0x681199`'s skip), and the one branch that must not fail
+    /// open, because failing open here is the bug this whole module exists to fix.
+    Windows(Vec<Frustum>),
+}
+
+impl ExteriorGate {
+    /// Build from the worklist + the world camera. No camera yet ⇒ [`Self::Open`]: nothing is on
+    /// screen to leak, and a verdict taken without a view matrix would be arbitrary.
+    pub(crate) fn build(
+        windows: &ExteriorWindows,
+        cam: Option<(&GlobalTransform, &Projection)>,
+    ) -> Self {
+        let ExteriorWindows::Windows(rects) = windows else {
+            return Self::Open;
+        };
+        let Some((cam_t, proj)) = cam else {
+            return Self::Open;
+        };
+        let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
+        Self::Windows(
+            rects
+                .iter()
+                .filter_map(|r| window_frustum(*r, &clip_from_world))
+                .collect(),
+        )
+    }
+
+    /// Whole-AABB, per object — the reference's `0x682f40`. Not per primitive: a doodad straddling
+    /// the doorway edge draws whole, and the interior geometry cuts its silhouette.
+    ///
+    /// No `Aabb` (mesh still loading, or an entity that draws nothing) ⇒ admitted. A missing bound
+    /// is a *timing* gap, not a visibility verdict, and blanking on it would flicker the world as
+    /// tiles stream in.
+    pub(crate) fn admits(&self, gt: &GlobalTransform, aabb: Option<&Aabb>) -> bool {
+        match (self, aabb) {
+            (Self::Open, _) | (_, None) => true,
+            (Self::Windows(frusta), Some(aabb)) => {
+                let world_from_local = gt.affine();
+                frusta
+                    .iter()
+                    .any(|f| f.intersects_obb(aabb, &world_from_local, true, true))
+            }
+        }
+    }
+
+    /// The same test against a WORLD-space bounding **sphere** — the form the particle lane speaks
+    /// (`EmitterFade`'s `[rec+0x68]` fade sphere is the owner doodad's bound, and an emitter has no
+    /// mesh of its own to carry an `Aabb`). The sphere's axis-aligned box is what gets tested, which
+    /// is looser than the sphere and therefore never hides something a sphere test would admit.
+    pub(crate) fn admits_sphere(&self, center: Vec3, radius: f32) -> bool {
+        let aabb = Aabb::from_min_max(center - Vec3::splat(radius), center + Vec3::splat(radius));
+        self.admits(&GlobalTransform::IDENTITY, Some(&aabb))
+    }
+
+    fn frusta(&self) -> usize {
+        match self {
+            Self::Open => 0,
+            Self::Windows(f) => f.len(),
+        }
+    }
+}
+
+/// What [`apply_exterior_cull`] reads per object.
+type UnownedScene = (
+    &'static GlobalTransform,
+    Option<&'static Aabb>,
+    &'static mut Visibility,
+);
+
+/// …and the objects it is allowed to write: exterior scene that nothing else owns. `ModelPart` and
+/// `WmoGroupVis` both mean "the model-visibility authority writes this one".
+type UnownedSceneFilter = (
+    With<ExteriorScene>,
+    Without<crate::debug_panel::ModelPart>,
+    Without<crate::wmo_portal::WmoGroupVis>,
+);
+
+/// Hide every [`ExteriorScene`] object that no window admits — **only those with no other
+/// `Visibility` owner**. A model submesh (`ModelPart`) and a WMO group piece (`WmoGroupVis`) are
+/// written by [`crate::debug_panel`]'s model-visibility authority, which composes the toggles, the
+/// far-clip wall, the distance fade and the portal PVS; a second writer here does not "also cull"
+/// them, it *overwrites* all of that every frame (decision 0784). So this system now owns exactly
+/// what it is the sole authority for: terrain cells and the WDL far band.
 fn apply_exterior_cull(
     windows: Res<ExteriorWindows>,
     cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
-    mut scene: Query<(&GlobalTransform, Option<&Aabb>, &mut Visibility), With<ExteriorScene>>,
+    mut scene: Query<UnownedScene, UnownedSceneFilter>,
+    mut verdict: ResMut<ExteriorCullVerdict>,
 ) {
     let set = |vis: &mut Visibility, target: Visibility| {
         if *vis != target {
             *vis = target;
         }
     };
-    let rects = match &*windows {
-        // Outside leg: the ordinary frustum is the window, so stand down entirely and let Bevy's own
-        // frustum cull do its job. Writing `Inherited` (not `Visible`) hands each object back to
-        // whatever else owns it.
-        ExteriorWindows::Unrestricted => {
-            for (_, _, mut vis) in &mut scene {
-                set(&mut vis, Visibility::Inherited);
-            }
-            return;
-        }
-        ExteriorWindows::Windows(rects) => rects,
-    };
-    let Some((cam_t, proj)) = cam.iter().next() else {
-        return; // no camera yet — leave last frame's verdict rather than blanking the world
-    };
-    let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
-    let frusta: Vec<Frustum> = rects
-        .iter()
-        .filter_map(|r| window_frustum(*r, &clip_from_world))
-        .collect();
-    // Zero surviving windows is the sealed-room case and draws nothing — `0x681199`'s skip. This is
-    // the one branch that must NOT fail open: failing open here is the bug being fixed.
+    let gate = ExteriorGate::build(&windows, cam.iter().next());
+    let (mut tested, mut hidden, mut unbounded) = (0usize, 0usize, 0usize);
     for (gt, aabb, mut vis) in &mut scene {
-        let admitted = match aabb {
-            // Whole-AABB, per object — the reference's `0x682f40`. Not per primitive: a doodad
-            // straddling the doorway edge draws whole, and the interior geometry cuts its silhouette.
-            Some(aabb) => {
-                let world_from_local = gt.affine();
-                frusta
-                    .iter()
-                    .any(|f| f.intersects_obb(aabb, &world_from_local, true, true))
-            }
-            // No Aabb yet (mesh still loading): admit it. A missing bound is a *timing* gap, not a
-            // visibility verdict, and blanking on it would flicker the world as tiles stream in.
-            None => true,
-        };
+        tested += 1;
+        unbounded += usize::from(aabb.is_none());
+        let admitted = gate.admits(gt, aabb);
+        hidden += usize::from(!admitted);
         set(
             &mut vis,
             if admitted {
@@ -187,6 +279,16 @@ fn apply_exterior_cull(
             },
         );
     }
+    *verdict = ExteriorCullVerdict {
+        windows: match &*windows {
+            ExteriorWindows::Unrestricted => None,
+            ExteriorWindows::Windows(rects) => Some(rects.len()),
+        },
+        frusta: gate.frusta(),
+        tested,
+        hidden,
+        unbounded,
+    };
 }
 
 #[cfg(test)]
@@ -235,6 +337,40 @@ mod tests {
         assert!(
             !admits(&f, Vec3::new(-5.0, 0.0, -10.0)),
             "left: must be rejected — the window is on the right"
+        );
+    }
+
+    /// **The granularity of the tagged object is half the cull** (decision 0780). This test is the
+    /// same patch of ground twice: once as the 33.333 yd MCNK cell it is drawn as now, once as the
+    /// 533.333 yd ADT tile it used to be merged into. The cell is rejected; the tile is admitted,
+    /// because a tile is drawn around the camera and so reaches the doorway's side of the view no
+    /// matter which side the ground is on. Nothing in `apply_exterior_cull` can fix that — it is
+    /// decided by what the spawner tags — which is why re-merging terrain into a per-tile mesh
+    /// would silently restore "I can see the hillside through the wall" with every test still green.
+    #[test]
+    fn a_narrow_window_rejects_a_chunk_of_ground_but_never_a_whole_tile_of_it() {
+        // A doorway on the RIGHT of the view; the ground of interest is 200 yd to the LEFT.
+        let f = window_frustum([0.6, -1.0, 1.0, 1.0], &clip_from_world()).expect("a right doorway");
+        let ground = Vec3::new(-200.0, -2.0, -200.0);
+
+        const CELL: f32 = 33.333 / 2.0;
+        let cell = Aabb::from_min_max(
+            ground - Vec3::new(CELL, 0.5, CELL),
+            ground + Vec3::new(CELL, 0.5, CELL),
+        );
+        assert!(
+            !f.intersects_obb(&cell, &Affine3A::IDENTITY, true, true),
+            "an MCNK cell to the left must not come in through a doorway on the right"
+        );
+
+        // The ADT tile that CONTAINS that cell. The camera stands on it, so it spans both sides of
+        // the view — half a kilometre of ground admitted by a doorway that shows a hundredth of it.
+        const TILE: f32 = 533.333 / 2.0;
+        let tile = Aabb::from_min_max(Vec3::new(-TILE, -2.5, -TILE), Vec3::new(TILE, -1.5, TILE));
+        assert!(
+            f.intersects_obb(&tile, &Affine3A::IDENTITY, true, true),
+            "a tile-sized box reaches the doorway's side of the view — it can never be culled, and \
+             that is exactly why terrain is spawned per chunk"
         );
     }
 

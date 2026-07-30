@@ -1,11 +1,12 @@
 //! ADT → terrain-tile asset loader.
 //!
-//! Decodes one vanilla ADT tile into an [`AdtTile`]: the **merged** splat-blended terrain `Mesh`
-//! (all 256 MCNK chunks in one mesh, Bevy space) plus its three `texture_2d_array`s — ground layers,
-//! per-chunk alpha (blend) maps, per-chunk MCSH shadow maps — and the raw doodad/WMO placement lists
-//! (for the spawn system to load as `M2Model`/`WmoModel`). Per-chunk array indices ride the merged
-//! mesh's vertex `COLOR` (4 layer indices) and `UV1` (alpha index `.x`, shadow index `.y`, `-1` =
-//! none); the app's terrain material reads them.
+//! Decodes one vanilla ADT tile into an [`AdtTile`]: **one splat-blended `Mesh` per MCNK chunk**
+//! (Bevy space, absolute world coords) plus its three `texture_2d_array`s — ground layers, per-chunk
+//! alpha (blend) maps, per-chunk MCSH shadow maps — and the raw doodad/WMO placement lists (for the
+//! spawn system to load as `M2Model`/`WmoModel`). Each chunk mesh carries its array indices on every
+//! one of its vertices — `COLOR` (4 layer indices) and `UV1` (alpha index `.x`, shadow index `.y`,
+//! `-1` = none) — which is why all 256 chunks of a tile still share **one** material; the app's
+//! terrain material reads them.
 //!
 //! Layer textures are read via [`LoadContext::read_asset_bytes`] (raw bytes, dependency-tracked) and
 //! packed by [`crate::terrain`] — the BLP's authored mips verbatim (the C2 fidelity invariant).
@@ -30,13 +31,20 @@ use crate::terrain::{
     LayerTexture, LAYER_TEX_SIZE,
 };
 
-/// A loaded ADT terrain tile: the merged splat mesh + its three texture arrays, plus the raw
+/// A loaded ADT terrain tile: one splat mesh per MCNK chunk + its three texture arrays, plus the raw
 /// doodad/WMO placements (which the spawn system resolves to `M2Model`/`WmoModel` handles).
 #[derive(Asset, TypePath)]
 pub struct AdtTile {
-    /// Merged terrain mesh (Bevy space). Per-chunk layer indices ride vertex `COLOR`; the alpha and
-    /// shadow array indices ride `UV1.x` / `UV1.y`.
-    pub mesh: Handle<Mesh>,
+    /// One terrain mesh per drawn MCNK chunk (Bevy space, absolute world coords) — the tile's 256
+    /// cells, less any that a hole mask emptied. Layer indices ride vertex `COLOR`; the alpha and
+    /// shadow array indices ride `UV1.x` / `UV1.y`, uniform across a chunk's own vertices.
+    ///
+    /// **Per chunk, not per tile, because the cull's unit is the chunk** (decision 0780): the
+    /// exterior-scene cull tests one AABB per drawn object, and the reference's object there is the
+    /// 33.333 yd cell (`0x683bf0`), never the 533 yd tile — a slab the camera stands on intersects
+    /// every portal window, so it could never be hidden from inside a building. Nothing is duplicated
+    /// by the split: the merged form never shared a vertex across a chunk boundary either.
+    pub chunk_meshes: Vec<Handle<Mesh>>,
     /// `texture_2d_array` of the tile's ground textures (the C2-faithful authored mip chains).
     pub layer_array: Handle<Image>,
     /// `texture_2d_array` of per-chunk alpha (blend-weight) maps.
@@ -47,8 +55,9 @@ pub struct AdtTile {
     pub doodads: Vec<Doodad>,
     /// WMO building placements (raw WoW coords).
     pub wmos: Vec<WmoInstance>,
-    /// The tile's decoded per-MCNK chunks — the source the merged `mesh` + arrays were built from,
-    /// kept resident so the app can derive what those forms drop: the MCLQ liquid surfaces (each
+    /// The tile's decoded per-MCNK chunks — the source the `chunk_meshes` + arrays were built from,
+    /// kept resident so the app can derive what those forms drop: the terrain collider, the MCLQ
+    /// liquid surfaces (each
     /// `ChunkMesh.liquid`) and the ground-clutter scatter (per-chunk layers/normals/MCSH + the
     /// app-side ground-effect catalog). Bounded by the loaded-tile count; the heaviest field on the
     /// asset, carried because clutter/liquid are app concerns (the loader stays catalog-independent).
@@ -87,27 +96,31 @@ impl AssetLoader for AdtLoader {
         let mut shadow_buf: Vec<u8> = Vec::new();
         let mut shadow_count = 0u32;
 
-        // Merged-mesh accumulators: COLOR carries each vertex's 4 layer indices, UV1 the alpha/shadow.
-        let mut m_pos: Vec<[f32; 3]> = Vec::new();
-        let mut m_norm: Vec<[f32; 3]> = Vec::new();
-        let mut m_uv: Vec<[f32; 2]> = Vec::new();
-        let mut m_col: Vec<[f32; 4]> = Vec::new();
-        let mut m_uv1: Vec<[f32; 2]> = Vec::new();
-        let mut m_idx: Vec<u32> = Vec::new();
+        // One mesh per drawn chunk. COLOR carries the chunk's 4 layer indices, UV1 its alpha/shadow —
+        // uniform over the chunk's own vertices, which is what keeps ONE material per tile.
+        let mut chunk_meshes: Vec<Handle<Mesh>> = Vec::with_capacity(tile.chunks.len());
 
-        for chunk in &tile.chunks {
-            let base = m_pos.len() as u32;
+        for (i, chunk) in tile.chunks.iter().enumerate() {
+            // A chunk the hole mask emptied draws nothing: no mesh, no entity, and no alpha/shadow
+            // array slot either (the indices below are running counters, so skipping here is free).
+            if chunk.indices.len() < 3 {
+                continue;
+            }
             let positions: Vec<[f32; 3]> = chunk
                 .positions
                 .iter()
                 .map(|p| wow_to_bevy(*p).to_array())
                 .collect();
             // Prefer authored MCNR normals (continuous across MCNK borders — no seams); else flat.
-            if chunk.normals.len() == chunk.positions.len() {
-                m_norm.extend(chunk.normals.iter().map(|n| wow_to_bevy(*n).to_array()));
+            let normals: Vec<[f32; 3]> = if chunk.normals.len() == chunk.positions.len() {
+                chunk
+                    .normals
+                    .iter()
+                    .map(|n| wow_to_bevy(*n).to_array())
+                    .collect()
             } else {
-                m_norm.extend(computed_normals(&positions, &chunk.indices));
-            }
+                computed_normals(&positions, &chunk.indices)
+            };
 
             // Resolve up to 4 layer textures to array indices (appending new ones). Missing slots
             // reuse layer 0 (its alpha weight is 0, so it never shows).
@@ -148,13 +161,18 @@ impl AssetLoader for AdtLoader {
 
             let col = [li[0] as f32, li[1] as f32, li[2] as f32, li[3] as f32];
             let uv1 = [ai as f32, si];
-            for _ in 0..positions.len() {
-                m_col.push(col);
-                m_uv1.push(uv1);
-            }
-            m_uv.extend_from_slice(&chunk.uvs);
-            m_idx.extend(chunk.indices.iter().map(|i| base + i));
-            m_pos.extend(positions);
+            let n = positions.len();
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, chunk.uvs.clone());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, vec![uv1; n]);
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![col; n]);
+            mesh.insert_indices(Indices::U32(chunk.indices.clone()));
+            chunk_meshes.push(ctx.add_labeled_asset(format!("chunk{i}"), mesh));
         }
 
         // A `texture_2d_array` needs ≥1 layer even when a tile carries no alpha / shadow maps.
@@ -167,23 +185,12 @@ impl AssetLoader for AdtLoader {
             shadow_count = 1;
         }
 
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, m_pos);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, m_norm);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, m_uv);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, m_uv1);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, m_col);
-        mesh.insert_indices(Indices::U32(m_idx));
-
         let layer_array = layer_array_image(LAYER_TEX_SIZE, layer_count, layer_mips, layer_buf);
         let alpha_array = alpha_array_image(ALPHA_MAP_SIZE, alpha_count, alpha_buf);
         let shadow_array = shadow_array_image(SHADOW_MAP_SIZE, shadow_count, shadow_buf);
 
         Ok(AdtTile {
-            mesh: ctx.add_labeled_asset("mesh".to_string(), mesh),
+            chunk_meshes,
             layer_array: ctx.add_labeled_asset("layer_array".to_string(), layer_array),
             alpha_array: ctx.add_labeled_asset("alpha_array".to_string(), alpha_array),
             shadow_array: ctx.add_labeled_asset("shadow_array".to_string(), shadow_array),

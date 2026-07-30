@@ -32,6 +32,7 @@ use bevy::render::sync_world::MainEntity;
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
+use super::probes::ProbeClock;
 use crate::interact::WorldObject;
 use crate::terrain::WowModelMaterial;
 
@@ -140,7 +141,7 @@ type WatchedBatch = (
 /// watch list itself a moving part of the measurement.
 fn collect_batches(
     mut watch: ResMut<PhaseWatch>,
-    time: Res<Time>,
+    time: ProbeClock,
     // `WorldObject` rides on **each submesh entity**, not on a parent that holds them as children —
     // the same shape `WOW_PICK` relies on, where a single ray hit carries both its object identity
     // and its batch. So the watch list is a filter over those entities, not a child walk.
@@ -206,7 +207,7 @@ fn collect_batches(
 /// the subject instead of to a wall-clock guess.
 fn collect_emitters(
     mut watch: ResMut<PhaseWatch>,
-    time: Res<Time>,
+    time: ProbeClock,
     emitters: Query<(Entity, &crate::particles::ParticleEmitter)>,
     trails: Query<(Entity, &crate::ribbons::RibbonTrail, &GlobalTransform)>,
     parts: Query<(Entity, &crate::debug_panel::ModelPart, &GlobalTransform)>,

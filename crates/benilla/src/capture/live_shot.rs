@@ -9,6 +9,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use benilla_protocol::guid;
 
+use super::probes::ProbeClock;
 use crate::names::NameCache;
 use crate::net::{Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::WorldCamera;
@@ -128,7 +129,7 @@ fn burst_path(out: &str, index: u32, count: u32) -> String {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 fn fire_live_shot(
     mut shot: ResMut<LiveShot>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut commands: Commands,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     subjects: Query<(&Guid, &Transform), (With<NetEntity>, Without<SelfPlayer>)>,

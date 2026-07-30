@@ -6,8 +6,6 @@
 //! ([`WornEquip`], decision 0074), and the per-appearance material quints over the composited body
 //! atlas / hair / cape textures ([`build_char_skin_materials`], decisions 0044 / 0045).
 
-use std::collections::HashMap;
-
 use benilla_formats::{CharSkinSlot, ModelBlend};
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
@@ -304,7 +302,7 @@ pub(super) fn build_char_skin_materials(
     light: Option<&SharedLightBuffer>,
     parts: &[EntityPart],
     images: &mut Assets<Image>,
-    skin_cache: &mut HashMap<SkinKey, Handle<Image>>,
+    skin_cache: &mut crate::art_scope::SpatialCache<SkinKey, Handle<Image>>,
     asset_server: &AssetServer,
     materials: &mut Assets<WowModelMaterial>,
     cache: &mut MaterialCache,
@@ -331,8 +329,8 @@ pub(super) fn build_char_skin_materials(
                 hair_color: look.hair_color,
                 equip,
             };
-            match skin_cache.get(&key) {
-                Some(handle) => Some(handle.clone()),
+            match skin_cache.fetch(&key) {
+                Some(handle) => Some(handle),
                 None => {
                     // The worn ItemDisplayInfo rows whose region textures dress the atlas
                     // (decision 0074); an unknown/zero display id contributes nothing.

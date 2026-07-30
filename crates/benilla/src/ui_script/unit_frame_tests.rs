@@ -927,3 +927,131 @@ fn flagged_friendly_player_plate_is_green() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The classification border law (decision 0782, ref-TargetFrame.lua l.205-218) end to end: the
+/// gated rank on the snapshot → `UnitClassification` → which of the three shipped border textures
+/// actually reaches the draw list. Asserting the *extracted quad* rather than a Lua getter is the
+/// point — it is the pixels, and it catches a swap that sets the path on the wrong region.
+///
+/// The two facts worth a test rather than a comment: three of the five classifications share the
+/// Elite art (1.12 ships no rare-elite border at all), and the border must repaint on
+/// UNIT_CLASSIFICATION_CHANGED alone, with no re-target.
+#[test]
+fn target_frame_border_follows_the_classification_law() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+
+    // Every TargetingFrame border path in the draw list. The player frame contributes the plain
+    // art on every frame, so the assertions below are about which *extra* border appears.
+    let borders = |s: &mut UiScript| -> Vec<String> {
+        s.resolve();
+        let mut v: Vec<String> = s
+            .extract()
+            .into_iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture { path: Some(p), .. }
+                    if p.contains("UI-TargetingFrame") && !p.contains("LevelBackground") =>
+                {
+                    Some(p.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let has = |v: &[String], suffix: &str| v.iter().any(|p| p.ends_with(suffix));
+
+    let mob = |rank: u32| UnitState {
+        exists: true,
+        name: Some("Ol' Sooty".into()),
+        health: 400,
+        max_health: 400,
+        level: 26,
+        reaction: 2,
+        can_attack: true,
+        rank,
+        ..UnitState::default()
+    };
+
+    // rank 0 — a plain mob: no elite and no rare art anywhere.
+    s.set_unit("target", Some(mob(0)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    let v = borders(&mut s);
+    assert_eq!(
+        s.eval::<String>(r#"return UnitClassification("target")"#)
+            .unwrap(),
+        "normal"
+    );
+    assert!(
+        !has(&v, "UI-TargetingFrame-Elite") && !has(&v, "UI-TargetingFrame-Rare"),
+        "rank 0 wears the plain border, got {v:?}"
+    );
+
+    // ranks 1/2/3 — elite, rare-elite and world boss ALL take the one Elite texture. 1.12 ships no
+    // UI-TargetingFrame-Rare-Elite (absent from the patch chain), which is why 2 lands here.
+    for (rank, word) in [(1, "elite"), (2, "rareelite"), (3, "worldboss")] {
+        s.set_unit("target", Some(mob(rank)));
+        s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+        let v = borders(&mut s);
+        assert_eq!(
+            s.eval::<String>(r#"return UnitClassification("target")"#)
+                .unwrap(),
+            word
+        );
+        assert!(
+            has(&v, "UI-TargetingFrame-Elite") && !has(&v, "UI-TargetingFrame-Rare"),
+            "rank {rank} ({word}) takes the Elite border, got {v:?}"
+        );
+    }
+
+    // rank 4 — rare (the silver dragon), the only classification with art of its own.
+    s.set_unit("target", Some(mob(4)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    let v = borders(&mut s);
+    assert_eq!(
+        s.eval::<String>(r#"return UnitClassification("target")"#)
+            .unwrap(),
+        "rare"
+    );
+    assert!(
+        has(&v, "UI-TargetingFrame-Rare") && !has(&v, "UI-TargetingFrame-Elite"),
+        "rank 4 takes the Rare border, got {v:?}"
+    );
+
+    // The repaint wire: the creature query landing on an already-targeted mob raises its rank, and
+    // UNIT_CLASSIFICATION_CHANGED alone must swap the border — no PLAYER_TARGET_CHANGED.
+    s.set_unit("target", Some(mob(0)));
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    assert!(
+        !has(&borders(&mut s), "UI-TargetingFrame-Elite"),
+        "precondition: plain border before the query lands"
+    );
+    s.set_unit("target", Some(mob(1)));
+    s.fire_event(
+        "UNIT_CLASSIFICATION_CHANGED",
+        vec![ScriptValue::Str("target".into())],
+    );
+    assert!(
+        has(&borders(&mut s), "UI-TargetingFrame-Elite"),
+        "the event alone repaints the border"
+    );
+
+    // The player frame never reclassifies: its own art stays plain with an elite target up.
+    let plain_on_player: bool = s
+        .eval(
+            r#"
+            local p = getglobal("BenillaPlayerFrameTextureFrameTexture")
+            return p ~= nil and BenillaPlayerFrame.frameTexture == nil
+        "#,
+        )
+        .unwrap();
+    assert!(
+        plain_on_player,
+        "the player frame has the region but caches no handle, so nothing can swap it"
+    );
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

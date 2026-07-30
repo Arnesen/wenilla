@@ -42,6 +42,7 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use super::probes::ProbeClock;
 use crate::interact::WorldObject;
 use crate::player::WorldCamera;
 use crate::terrain::WowModelMaterial;
@@ -168,7 +169,7 @@ struct HitNames<'w, 's> {
 
 fn fire_pick(
     mut probe: ResMut<PickProbe>,
-    time: Res<Time>,
+    time: ProbeClock,
     window: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     objects: Query<Entity, With<WorldObject>>,

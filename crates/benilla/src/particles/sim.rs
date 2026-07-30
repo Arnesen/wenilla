@@ -170,6 +170,11 @@ pub(super) fn simulate_particles(
     tuning: Res<ParticleTuning>,
     // The far-clip wall — the emitter draw-set gate's depth bound (see the gate below).
     view: Res<crate::view::ViewDistance>,
+    // …and the gate's exterior-window term (0786): from inside a WMO, a doodad outside is not in
+    // the frame's worklist, so its emitter must not tick. `camera_claim` carries the one exemption —
+    // a prop of the building the camera is standing in.
+    exterior_windows: Res<crate::wmo_portal::ExteriorWindows>,
+    camera_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     mut commands: Commands,
     cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
@@ -241,6 +246,11 @@ pub(super) fn simulate_particles(
     // The far-clip wall's axis — the SAME forward `debug_panel::visibility` measures the owner
     // doodad's own cull along, so an emitter and its owner cross the wall together.
     let cam_fwd = Vec3::from(cam_tf.forward());
+    // The exterior gate, built once for the whole emitter walk — the same value the model
+    // visibility authority and `exterior_cull` ask (0784/0786: one spelling of the window test).
+    let exterior_gate =
+        crate::exterior_cull::ExteriorGate::build(&exterior_windows, Some((cam_tf, projection)));
+    let camera_instance = camera_claim.0.map(|c| c.room.instance);
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
 
@@ -296,6 +306,10 @@ pub(super) fn simulate_particles(
                     },
                     false,
                 ),
+                // …and the exterior-window term (0786): standing in a WMO interior, a doodad
+                // outside is not in the worklist at all, so its emitter neither ticks nor draws —
+                // which the mesh gate already knew and this one did not.
+                f.exterior_admitted(&exterior_gate, camera_instance),
             );
             if !in_set {
                 // Frozen: the pool writes no quads this frame (the shared stream is cleared

@@ -6,9 +6,30 @@
 //! sibling [`super::live_shot`]. Each is env-gated and registered by `main`; compose them for
 //! unattended "park, act, observe" probes.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::PROBE_WARMUP_FRAMES;
+
+/// The clock **every probe schedule reads** — real time, never the virtual clock (decision 0789).
+///
+/// A probe knob is a wall-clock instruction: "send this at 20 s", "sample 300 frames from 25 s",
+/// "resize at 12 s", "exit at 480 s". `Time<Virtual>` cannot honour one — it clamps every frame delta
+/// to `max_delta` (250 ms, `bevy_time`'s default), so on any leg that hitches (a streaming burst, an
+/// occluded window, a loaded machine) it falls behind real time and drags the whole schedule with it.
+/// The knob then means something the operator never asked for, *silently*.
+///
+/// **Third time this clock has cost us a measurement.** 0615 moved the relayed-move replay off it
+/// (and cites the UI script clock as the same lesson before that); then B131's first causal leg was
+/// destroyed by it here — the probe-chat hops drifted 40 s → 75 s apart, so windows labelled
+/// "parked, ticks off" in fact contained a teleport and live ticks, and an eight-minute leg had to be
+/// thrown away (decision 0785's discarded run). A named alias is what makes the next probe get it
+/// right without knowing the story: type this, and the mistake is unavailable.
+///
+/// The one deliberate virtual clock in the harness is the fixture **age** in
+/// [`super::drive_capture`] — an age on the clock the effect animates on (and which the capture
+/// freezes at save time), which is not a schedule at all.
+pub(crate) type ProbeClock<'w> = Res<'w, Time<bevy::time::Real>>;
 
 /// The PROBE CHAT one-shot (`WOW_PROBE_CHAT="<line>[;<line>…]"`, delay via `WOW_PROBE_CHAT_AT`
 /// seconds, default 8): send each `;`-separated line as Say once we are in-world — the "park the
@@ -124,6 +145,12 @@ fn probe_key_by_name(name: &str) -> Option<KeyCode> {
         "X" => KeyCode::KeyX,
         "Z" => KeyCode::KeyZ,
         "Tab" => KeyCode::Tab,
+        // The detached free-fly toggle (`player.rs`) and its Ctrl speed boost (`camera.rs`, ×5).
+        // Added because the harness could not reach the leg that broke decision 0793: the director's
+        // first real run was a boosted free-fly, whose camera crosses the art radius in ~5 s, and
+        // reproducing it needed a held `Ctrl` + `W` behind an `F`.
+        "F" => KeyCode::KeyF,
+        "Ctrl" => KeyCode::ControlLeft,
         _ => return None,
     })
 }
@@ -146,7 +173,7 @@ struct ProbeKeyTap {
 /// Press each due tap (in-world gated, like the chat probe) and release it after its hold window.
 fn fire_probe_key(
     mut probe: ResMut<ProbeKeys>,
-    time: Res<Time>,
+    time: ProbeClock,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
 ) {
@@ -230,7 +257,7 @@ struct ProbeExit {
 
 fn fire_probe_exit(
     mut probe: ResMut<ProbeExit>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(at) = probe.at else { return };
@@ -287,7 +314,7 @@ struct ProbeResize {
 
 fn fire_probe_resize(
     mut probe: ResMut<ProbeResize>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
 ) {
     if probe.fired || time.elapsed_secs() < probe.at {
@@ -306,7 +333,7 @@ fn fire_probe_resize(
 /// Run the probe chunk once the delay has elapsed AND the session is in-world.
 fn fire_probe_lua(
     mut probe: ResMut<ProbeLua>,
-    time: Res<Time>,
+    time: ProbeClock,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
 ) {
@@ -351,7 +378,7 @@ fn fire_probe_lua(
 /// every client-side command silently went out as public chat and did nothing (decision 0637).
 fn fire_probe_chat(
     mut probe: ResMut<ProbeChat>,
-    time: Res<Time>,
+    time: ProbeClock,
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
 ) {
@@ -567,6 +594,27 @@ impl ResidencyMeter<'_> {
     }
 }
 
+/// Where — and in what scene state — the sample was taken. Bundled because [`drive_live_fps`] sits
+/// at Bevy's 16-param ceiling, and because these four are read together or not at all.
+///
+/// The `room`/`windows` half is the exterior-scene gate's two terms (decision 0774), the same pair
+/// the debug panel's World section shows. Without them a `drawn=` reading taken indoors cannot be
+/// read at all: a big number means either "we claimed a room and the cull let everything through" or
+/// "we never claimed a room, so nothing was gated" — opposite bugs with identical numbers, and the
+/// difference cost a measurement (0780).
+#[derive(SystemParam)]
+struct SamplePin<'w> {
+    /// The map the sample landed on (0705's prove-the-run law): a probe number is evidence only once
+    /// the body is known to be at the pin, and `WOW_PROBE_CHAT`'s `.go` can silently fail (a bad map
+    /// id, a refused command) leaving the run measuring the login spot.
+    map: Option<Res<'w, crate::world_map::CurrentMap>>,
+    body: Option<Res<'w, crate::player::Player>>,
+    room: Option<Res<'w, crate::wmo_portal::CameraInteriorClaim>>,
+    windows: Option<Res<'w, crate::wmo_portal::ExteriorWindows>>,
+    /// What the cull DID, not just what it was told — see [`crate::exterior_cull::ExteriorCullVerdict`].
+    verdict: Option<Res<'w, crate::exterior_cull::ExteriorCullVerdict>>,
+}
+
 /// Wait for in-world + the delay, uncap, warm, sample, print, exit — the live twin of the
 /// harness probe's `Phase::ProbeWarmup`/`Probing` arms.
 #[allow(clippy::too_many_arguments)]
@@ -576,17 +624,16 @@ fn drive_live_fps(
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     particles: Query<&crate::particles::ParticleEmitter>,
-    parts: Query<&ViewVisibility, With<crate::debug_panel::ModelPart>>,
+    // Every spawned model submesh, with the two facts that make a visible one accountable: which
+    // subsystem it belongs to, and whether it is gated by the exterior-scene cull. See
+    // [`VisCensus`] for why "visible" alone was not enough to diagnose anything.
+    parts: Query<CensusData>,
     streamed: Query<(), With<crate::net::NetEntity>>,
     // The animation-LOD gate's effect, machine-readable per probe (decision 0448): how many
     // streamed rigs sat parked at sample end.
     parked: Query<(), With<crate::creature_anim::AnimParked>>,
     entities: Query<()>,
-    // Where the sample was actually taken (0705's prove-the-run law): a probe number is evidence
-    // only once the body is known to be at the pin, and `WOW_PROBE_CHAT`'s `.go` can silently
-    // fail (a bad map id, a refused command) leaving the run measuring the login spot.
-    map: Option<Res<crate::world_map::CurrentMap>>,
-    body: Option<Res<crate::player::Player>>,
+    pin: SamplePin,
     // The owned skin-palette occupancy (decision 0720) — `rigs=live/peak bones=live/peak` on the
     // probe line proves the palette lane is actually populated (an all-zero table renders
     // origin-collapsed rigs, which no other probe number would catch).
@@ -665,8 +712,13 @@ fn drive_live_fps(
                 .fold((0usize, 0usize, 0usize), |(e, a, l), p| {
                     (e + 1, a + usize::from(p.live() > 0), l + p.live())
                 });
-            let (submeshes, drawn) = parts.iter().fold((0usize, 0usize), |(n, d), v| {
-                (n + 1, d + usize::from(v.get()))
+            let mut census = VisCensus {
+                own_instance: pin.room.as_ref().and_then(|r| r.0).map(|c| c.room.instance),
+                ..Default::default()
+            };
+            let (submeshes, drawn) = parts.iter().fold((0usize, 0usize), |(n, d), row| {
+                census.add(row);
+                (n + 1, d + usize::from(row.0.get()))
             });
             let px = windows
                 .single()
@@ -691,13 +743,41 @@ fn drive_live_fps(
                 _ => String::new(),
             };
             // The pin the number belongs to, in the `.go xyz` order, so a probe line can be
-            // matched against the report's coordinates without a second instrument.
-            let at_pin = match (map.as_ref(), body.as_ref().filter(|b| b.active)) {
+            // matched against the report's coordinates without a second instrument — followed by
+            // the exterior-scene gate's state, which is what makes `drawn=` legible indoors.
+            let at_pin = match (pin.map.as_ref(), pin.body.as_ref().filter(|b| b.active)) {
                 (Some(m), Some(b)) => {
                     let [x, y, z] = benilla_assets::coords::bevy_to_wow(b.pos);
                     format!(" map={} pos={x:.1},{y:.1},{z:.1}", m.0)
                 }
                 _ => String::new(),
+            };
+            let gate = {
+                let room = match pin.room.as_ref().and_then(|r| r.0) {
+                    Some(claim) => format!("g{:02}", claim.room.group),
+                    None => "none".to_string(),
+                };
+                match pin.windows.as_deref() {
+                    Some(crate::wmo_portal::ExteriorWindows::Windows(rects)) => {
+                        format!(" room={room} windows={}", rects.len())
+                    }
+                    Some(crate::wmo_portal::ExteriorWindows::Unrestricted) => {
+                        format!(" room={room} windows=unrestricted")
+                    }
+                    None => String::new(),
+                }
+            };
+            let culled = match pin.verdict.as_deref() {
+                Some(v) => format!(
+                    " cull_windows={} cull_frusta={} cull_tested={} cull_hidden={} cull_unbounded={}",
+                    v.windows
+                        .map_or("unrestricted".to_string(), |n| n.to_string()),
+                    v.frusta,
+                    v.tested,
+                    v.hidden,
+                    v.unbounded
+                ),
+                None => String::new(),
             };
             let rigs = palettes
                 .map(|p| {
@@ -717,7 +797,7 @@ fn drive_live_fps(
                 residency.tint_reg.0.len(),
             );
             println!(
-                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{present} occluded_frames={}{at_pin}",
+                "FPS_PROBE scenario=live frames={} mean_ms={mean:.2} p50_ms={:.2} p95_ms={:.2} p99_ms={:.2} max_ms={:.2} fps={:.1} emitters={emitters} active={active} particles={live} submeshes={submeshes} drawn={drawn} streamed={} parked={} entities={}{rigs}{residency_line} px={}x{}{cpu}{present} occluded_frames={}{at_pin}{gate}{culled}",
                 v.len(),
                 at(0.50),
                 at(0.95),
@@ -731,6 +811,7 @@ fn drive_live_fps(
                 px.1,
                 probe.occluded_frames,
             );
+            census.print();
             // The window's Modified-event totals per asset type — a type at ~1×/frame here is a
             // per-frame re-upload ratchet (see [`ChurnCensus`]); absent means quiet.
             if !residency.churn.0.is_empty() {
@@ -752,6 +833,131 @@ fn drive_live_fps(
             probe.phase = LiveFpsPhase::Done;
             exit.write(AppExit::Success);
         }
+    }
+}
+
+/// **What is on the screen, and who is accountable for it** — the `VIS_CENSUS` line beside
+/// `FPS_PROBE`, plus a per-model breakdown under `WOW_VIS_DUMP=1`.
+///
+/// `drawn=` alone cannot answer "why can I still see that from in here?". It is one number over
+/// every model submesh, and the interesting split is not visible-vs-not: it is which *subsystem* the
+/// visible thing belongs to and whether anything is gating it at all. A tree that draws through a
+/// wall is a completely different defect depending on whether it carries
+/// [`crate::exterior_cull::ExteriorScene`] (tagged but admitted — the cull or the bound is wrong) or
+/// does not (nothing is gating it — the wrong lane spawned it). Naming which took a screenshot, an
+/// asset dig and a wrong guess; this line answers it in one run.
+///
+/// `WOW_VIS_DUMP=1` then names the models: one `VIS_DUMP` line per distinct visible label, ungated
+/// first, most-drawn first — which is the "so WHICH trees are they?" question.
+#[derive(Default)]
+struct VisCensus {
+    /// Per [`ModelKind`] index: `(visible, visible-and-gated)`.
+    kinds: [(usize, usize); 4],
+    /// `label -> (visible count, gated)`, for the dump.
+    labels: std::collections::HashMap<(String, bool), usize>,
+    /// Of every `ExteriorScene`-tagged submesh: how many the cull actually wrote `Hidden` on, and
+    /// how many carry **no `Aabb`** — the cull's fail-open arm, which admits them unconditionally.
+    /// A tagged-but-drawn object is one of those two, and they are opposite bugs.
+    gated_total: usize,
+    gated_hidden: usize,
+    gated_no_aabb: usize,
+    /// Tagged, bounded, NOT exempt, and yet NOT `Hidden` — the escapees, by `(label, is a
+    /// billboard card)`. **Exempt** means the piece belongs to the placement the camera is standing
+    /// in, which is not exterior scene to itself (decision 0784) and is *supposed* to draw; without
+    /// that subtraction this list is all room-you-are-in furniture and says nothing.
+    escaped: std::collections::HashMap<(String, bool), usize>,
+    /// The placement the camera is inside, for that subtraction.
+    own_instance: Option<Entity>,
+    /// How many tagged pieces were exempt — the number that explains the `tagged` vs `hidden` gap.
+    exempt: usize,
+}
+
+/// What [`VisCensus`] reads off every model submesh — the query shape and its fetched row.
+type CensusData = (
+    &'static ViewVisibility,
+    &'static crate::debug_panel::ModelPart,
+    Has<crate::exterior_cull::ExteriorScene>,
+    Option<&'static crate::interact::WorldObject>,
+    &'static Visibility,
+    Option<&'static bevy::camera::primitives::Aabb>,
+    Has<crate::billboard::BillboardCard>,
+    Option<&'static crate::wmo_portal::WmoGroupVis>,
+);
+
+type CensusRow<'a> = (
+    &'a ViewVisibility,
+    &'a crate::debug_panel::ModelPart,
+    bool,
+    Option<&'a crate::interact::WorldObject>,
+    &'a Visibility,
+    Option<&'a bevy::camera::primitives::Aabb>,
+    bool,
+    Option<&'a crate::wmo_portal::WmoGroupVis>,
+);
+
+impl VisCensus {
+    fn add(&mut self, (vis, part, gated, object, want, aabb, card, group): CensusRow) {
+        if gated {
+            let exempt = group.is_some_and(|g| Some(g.instance) == self.own_instance);
+            self.gated_total += 1;
+            self.gated_hidden += usize::from(*want == Visibility::Hidden);
+            self.gated_no_aabb += usize::from(aabb.is_none());
+            self.exempt += usize::from(exempt);
+            if *want != Visibility::Hidden && aabb.is_some() && !exempt {
+                let label = object.map_or("<unlabelled>", |o| o.label.as_str());
+                *self.escaped.entry((label.to_string(), card)).or_default() += 1;
+            }
+        }
+        if !vis.get() {
+            return;
+        }
+        let slot = &mut self.kinds[kind_index(part.kind)];
+        slot.0 += 1;
+        slot.1 += usize::from(gated);
+        if let Some(o) = object {
+            *self.labels.entry((o.label.clone(), gated)).or_default() += 1;
+        }
+    }
+
+    fn print(&self) {
+        let line = ["doodad", "wmo", "creature", "gameobject"]
+            .iter()
+            .zip(&self.kinds)
+            .map(|(name, (vis, gated))| format!("{name}={vis}/gated{gated}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "VIS_CENSUS visible-submeshes {line} | tagged={} hidden={} exempt={} no_aabb={}",
+            self.gated_total, self.gated_hidden, self.exempt, self.gated_no_aabb
+        );
+        // The escapees always print: a tagged, bounded object the cull left un-hidden is a defect
+        // by construction, and burying it behind a flag is how it stays unnoticed.
+        let mut escapees: Vec<_> = self.escaped.iter().collect();
+        escapees.sort_by(|a, b| b.1.cmp(a.1));
+        for ((label, card), n) in escapees {
+            let c = if *card { " BILLBOARD-CARD" } else { "" };
+            println!("VIS_ESCAPED {n}{c} {label}");
+        }
+        if std::env::var_os("WOW_VIS_DUMP").is_none() {
+            return;
+        }
+        let mut rows: Vec<_> = self.labels.iter().collect();
+        // Ungated first (the leak candidates), then most-drawn first.
+        rows.sort_by(|a, b| a.0 .1.cmp(&b.0 .1).then(b.1.cmp(a.1)));
+        for ((label, gated), n) in rows {
+            let g = if *gated { "gated" } else { "UNGATED" };
+            println!("VIS_DUMP {g} {n} {label}");
+        }
+    }
+}
+
+/// [`ModelKind`] has a private `index`; the census needs its own (and pins the column order).
+fn kind_index(kind: crate::debug_panel::ModelKind) -> usize {
+    match kind {
+        crate::debug_panel::ModelKind::Doodad => 0,
+        crate::debug_panel::ModelKind::Wmo => 1,
+        crate::debug_panel::ModelKind::Creature => 2,
+        crate::debug_panel::ModelKind::GameObject => 3,
     }
 }
 
@@ -789,7 +995,7 @@ struct ParticleCensus {
 
 fn fire_particle_census(
     mut probe: ResMut<ParticleCensus>,
-    time: Res<Time>,
+    time: ProbeClock,
     view: Res<crate::view::ViewDistance>,
     cam: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
     emitters: Query<(
@@ -1122,4 +1328,88 @@ fn fire_entity_census(world: &mut World) {
          rows={} other_n={other_n}",
         rows.len().min(ENTITY_CENSUS_ROWS),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// **The invariant, checked instead of remembered** (decision 0789).
+    ///
+    /// Naming the right clock [`ProbeClock`] makes it easy to reach for; it does not make the wrong
+    /// one unavailable, and `Res<Time>` is the shorter, prelude-blessed, obvious spelling. That
+    /// asymmetry is precisely why this same clock has now cost three lanes a correctness bug
+    /// (0615's replay clock, the UI script clock, and B131's discarded probe leg) — each time it was
+    /// fixed where it was found and left available everywhere else. So the fix is not another
+    /// convention: it is this test, in the suite the gates already run.
+    ///
+    /// Adding a virtual clock to the probe harness now means adding yourself to [`ALLOWED`] with a
+    /// reason, which is a much better conversation than discovering the drift in a thrown-away leg.
+    #[test]
+    fn probe_schedules_read_the_wall_clock() {
+        /// `(file, system, why it is genuinely an age or a delta on the animating clock)`.
+        const ALLOWED: &[(&str, &str, &str)] = &[(
+            "capture/mod.rs",
+            "drive_capture",
+            "the fixture AGE runs on the clock the effect animates on, and the capture freezes that \
+             same clock at save time — an age, not a schedule",
+        )];
+
+        // The needles are assembled at runtime so the checker does not flag **its own source** —
+        // which is exactly what it did on its first run, and is the cheapest possible proof that it
+        // has teeth.
+        let bare = format!(": Res<{}>,", "Time");
+        let bare_last = format!(": Res<{}>", "Time");
+        let explicit = format!("Res<{}<{}>>", "Time", "Virtual");
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut allowed_seen = 0usize;
+        // The probe harness: everything under `capture/`, plus the one probe that lives beside the
+        // player controller because it writes `face_yaw` directly.
+        let mut stack = vec![src.join("capture")];
+        let mut files = vec![src.join("player/probe_look.rs")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("probe harness dir is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        for path in files {
+            let rel = path
+                .strip_prefix(&src)
+                .expect("under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&path).expect("source is readable");
+            for (n, line) in text.lines().enumerate() {
+                let t = line.trim();
+                // A system param binding the virtual clock. `Time<Real>` is the whole point, and
+                // `ResMut<Time<Virtual>>` is the capture's own clock *control*, not a read of it.
+                let virtual_clock =
+                    (t.ends_with(&bare) || t.ends_with(&bare_last)) || t.contains(&explicit);
+                if !virtual_clock {
+                    continue;
+                }
+                match ALLOWED.iter().find(|(f, _, _)| *f == rel) {
+                    Some(_) => allowed_seen += 1,
+                    None => offenders.push(format!("{rel}:{}  {t}", n + 1)),
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "the probe harness must schedule on the wall clock (`ProbeClock`), not the virtual \
+             clock — it is clamped to max_delta (250 ms), so any hitching leg silently drifts every \
+             `<secs>` knob out from under the operator (decision 0789). Offenders:\n  {}",
+            offenders.join("\n  "),
+        );
+        assert!(
+            allowed_seen > 0,
+            "the ALLOWED exception list is stale — nothing matched it. If the fixture-age clock \
+             moved or went away, drop its entry rather than leaving a rule guarding nothing.",
+        );
+    }
 }

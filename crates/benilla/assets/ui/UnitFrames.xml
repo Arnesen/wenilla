@@ -50,10 +50,15 @@
           grey (l.176) is still deferred, on the tap wire. The ref gates the player
           branch on UnitPlayerControlled (which also covers pets); we resolve its player half via
           UnitIsPlayer, so a player-controlled PET takes the NPC reaction branch until that flag lands.
-        - The classification border swap (elite/rare art, ref-TargetFrame.lua l.205-218) is a named
-          gap: the creature `rank` DOES surface now (the query's record caches it — names.rs, the
-          tooltip's rank word and the plate's world-boss skull read it), but UnitClassification is
-          not yet bound and the elite/rare border art swap is unbuilt.
+        - The classification border swap (elite/rare art, ref-TargetFrame.lua l.205-218) LANDED with
+          decision 0782 — UnitClassification is bound and BenillaTargetFrame_CheckClassification
+          below runs the ref's branch table. Two things worth knowing at this altitude. The rank
+          `UnitClassification` reads is the client's GATED rank (`0x605620`): a pet or charmed unit
+          reports rank 0, so an enslaved elite wears the plain border, and because the tooltip's
+          ELITE/BOSS word and UnitLevel's world-boss skull read the same getter, the gate lives at
+          the app's single write (ui_unit.rs enrich_unit), not per reader. And UNIT_CLASSIFICATION_
+          CHANGED is the repaint wire, edge-fired on that rank — without it the border would only be
+          right on re-target, since Update is otherwise the sole caller.
         - The level slot runs the full CheckLevel law (ref-TargetFrame.lua l.119-142, transcribed in
           Update below): corpse or "can't tell" (UnitLevel ≤ 0) → the HighLevelTexture skull;
           otherwise the number, GetDifficultyColor-tinted when attackable, gold when not.
@@ -157,9 +162,16 @@
             -- and nothing else does.
             frame:RegisterEvent("UNIT_FACTION")
             frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-            -- The aura rows are target-only (ref TargetFrame_OnLoad registers UNIT_AURA).
+            -- The aura rows and the classification border are target-only (ref TargetFrame_OnLoad
+            -- registers UNIT_AURA and UNIT_CLASSIFICATION_CHANGED; PlayerFrame registers neither,
+            -- and there is no CheckClassification for the player — your own frame never wears a
+            -- dragon). The ring-art region is the one the border swap re-textures, so only the
+            -- target caches the handle: its presence is what gates the swap in Update, the same
+            -- nil-handle idiom highLevel/nameBackground use above.
             if unit == "target" then
                 frame:RegisterEvent("UNIT_AURA")
+                frame:RegisterEvent("UNIT_CLASSIFICATION_CHANGED")
+                frame.frameTexture = getglobal(tf .. "Texture")
             end
             -- The portrait hit indicator (decision 0576): only the player frame registers
             -- UNIT_COMBAT in 1.12 (ref PlayerFrame_OnLoad — the target frame has no feedback
@@ -392,6 +404,31 @@
         end
 
         -- Pull the unit's current state and repaint. A non-existent unit hides the whole frame.
+        -- The classification border art (TargetFrame_CheckClassification, ref-TargetFrame.lua
+        -- l.205-218) — transcribed branch for branch, and the shape is the surprise: 1.12 has FIVE
+        -- classifications but only THREE border textures, because elite, rareelite and worldboss all
+        -- take the same Elite art. There is no rare-elite border in this build and no rare-elite
+        -- tooltip word either (the level line's rank table is {"", ELITE, ELITE, BOSS, ""}), so
+        -- "rareelite" is a distinction the API makes and the pixels never do. Verified rather than
+        -- assumed, because later expansions DO ship UI-TargetingFrame-Rare-Elite and it would be the
+        -- natural thing to write: that path is absent from 1.12's patch chain entirely, and the ref
+        -- Lua sends rareelite to the Elite art.
+        --
+        -- SetTexture is the whole operation — no TexCoords, size or anchor changes. That is only
+        -- sound because all three BLPs are 256x128 (checked, not assumed), so the region's
+        -- XML-declared TexCoords (0.09375..1.0 x 0..0.78125 = the 232x100 crop) frame all three
+        -- identically, and our SetTexture touches only the path (it leaves tex_coords alone).
+        function BenillaTargetFrame_CheckClassification(frame)
+            local classification = UnitClassification(frame.unit)
+            if classification == "worldboss" or classification == "rareelite" or classification == "elite" then
+                frame.frameTexture:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame-Elite")
+            elseif classification == "rare" then
+                frame.frameTexture:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame-Rare")
+            else
+                frame.frameTexture:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame")
+            end
+        end
+
         function BenillaUnitFrame_Update(frame)
             local unit = frame.unit
             if not UnitExists(unit) then
@@ -481,6 +518,12 @@
                         frame.nameBackground:SetVertexColor(0.0, 0.0, 1.0)
                     end
                 end
+            end
+
+            -- The classification border (target only) — the ref's TargetFrame_Update calls
+            -- CheckClassification right here, between CheckFaction and CheckDead.
+            if frame.frameTexture then
+                BenillaTargetFrame_CheckClassification(frame)
             end
 
             -- DEAD text (target only): shown at zero health (ref TargetFrame_CheckDead). Blanked

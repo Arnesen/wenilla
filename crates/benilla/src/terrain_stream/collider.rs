@@ -167,24 +167,30 @@ pub(crate) fn placement_collider_data(
     Some((verts, tris))
 }
 
-/// The `(vertices, triangles)` for a terrain tile's static collider, pulled from its already-merged
-/// world-space render mesh (so you stand on the visible ground). `None` if the mesh lacks float
-/// positions or indices.
-pub(super) fn terrain_collider_data(mesh: &Mesh) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
-    use bevy::mesh::{Indices, VertexAttributeValues};
-    let VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)?
-    else {
-        return None;
-    };
-    let verts: Vec<Vec3> = positions.iter().map(|p| Vec3::from_array(*p)).collect();
-    let tris: Vec<[u32; 3]> = match mesh.indices()? {
-        Indices::U32(i) => i.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-        Indices::U16(i) => i
-            .chunks_exact(3)
-            .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
-            .collect(),
-    };
-    Some((verts, tris))
+/// The `(vertices, triangles)` for a terrain tile's static collider: **one** trimesh welded from the
+/// tile's decoded MCNK chunks, in the same world space they are drawn in (so you stand on the visible
+/// ground). `None` for a tile with no triangles at all.
+///
+/// Built from the decoded chunks rather than the render meshes because the tile no longer *has* one
+/// merged mesh to read (decision 0780) — and one collider per 33 yd cell would be 256 parry builds
+/// and 256 QBVHs where the ground is a single continuous surface. The mapping is the loader's,
+/// verbatim: `wow_to_bevy` per position, hole-masked indices rebased onto the running vertex count.
+pub(super) fn terrain_collider_data(
+    chunks: &[benilla_formats::ChunkMesh],
+) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for chunk in chunks {
+        let base = verts.len() as u32;
+        verts.extend(chunk.positions.iter().map(|p| wow_to_bevy(*p)));
+        tris.extend(
+            chunk
+                .indices
+                .chunks_exact(3)
+                .map(|c| [base + c[0], base + c[1], base + c[2]]),
+        );
+    }
+    (!tris.is_empty()).then_some((verts, tris))
 }
 
 /// Build a static-trimesh [`Collider`] on the **async compute pool** (parry's QBVH construction is the

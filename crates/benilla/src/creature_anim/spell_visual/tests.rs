@@ -651,6 +651,55 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
     );
 }
 
+/// **B130's crash** — the second ever reported: a release build panicked on `insert<CastHold>`
+/// while flying at high speed through the Wetlands, applying hold commands to a unit that had
+/// despawned. Both windows are exercised here, because they fail for different reasons:
+///
+/// 1. **Already gone when the edge is read.** Every despawn of an indexed unit runs inside the wire
+///    drain (`DESTROY_OBJECT`, the out-of-range stream-out, the worldport purge), and those are
+///    applied at the sync point this chain sits behind — so a START and its subject's death arrive
+///    in one batch and the edge outlives the unit.
+/// 2. **Queued this frame, no sync point between.** `model_fade::apply_despawn_fade` is
+///    Update-unordered against this chain; its despawn can be queued before ours and applied first,
+///    which a queue-time existence check structurally cannot see.
+///
+/// The pass condition is that the frame completes — and that neither window resurrects the unit.
+#[test]
+fn a_despawned_subject_never_panics_the_router() {
+    {
+        let mut app = app();
+        let unit = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(unit).despawn();
+        app.world_mut()
+            .write_message(cast_event(unit, SPELL, CastEventKind::Start));
+        app.update(); // window 1: panicked here before the fix
+        assert!(
+            app.world().get_entity(unit).is_err(),
+            "the hold write must not resurrect a dead subject"
+        );
+    }
+    {
+        // `before_ignore_deferred` is exactly the fade lane's shape — an ordering edge with no sync
+        // point on it, so both command queues flush together and the despawn applies first.
+        let mut app = app();
+        let unit = app.world_mut().spawn_empty().id();
+        app.add_systems(
+            Update,
+            (move |mut commands: Commands| {
+                commands.entity(unit).try_despawn();
+            })
+            .before_ignore_deferred(route_cast_visuals),
+        );
+        app.world_mut()
+            .write_message(cast_event(unit, SPELL, CastEventKind::Start));
+        app.update();
+        assert!(
+            app.world().get_entity(unit).is_err(),
+            "the same-frame despawn wins; the hold write is dropped"
+        );
+    }
+}
+
 /// The `0x400` weapon-visual hold (wow-re `ranged-sheath-exempt-autorepeat.md` §Q4): a RANGED
 /// spell's visual play inserts [`RangedHold`] on ANY caster — what keeps a remote shooter in
 /// the drawn Load/Hold idle between shots — and a non-ranged visual play clears it (the

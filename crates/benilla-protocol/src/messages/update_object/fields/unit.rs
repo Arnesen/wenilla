@@ -41,6 +41,22 @@ impl ObjectFields {
     pub fn unit_created_by(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_CREATEDBY).filter(|&g| g != 0)
     }
+    /// `UNIT_FIELD_PETNUMBER` — non-zero iff this unit is somebody's **pet or charm**.
+    ///
+    /// Not a count and not an index anyone displays: the client reads it as a pure boolean, as the
+    /// **second gate of the rank getter** `0x605620` (decision 0782). A creature with a cached
+    /// template but a non-zero pet number reports classification rank `0` — so an enslaved elite
+    /// loses its dragon border, its ELITE tooltip word and (at rank 3) its world-boss skull, all
+    /// three from this one read.
+    ///
+    /// What lands here is the server's call, and vmangos is narrower than the name suggests:
+    /// `CharmInfo::SetPetNumber(n, statWindow)` writes `n` only when `statWindow`, else **0**. So a
+    /// permanent pet (`Pet::IsPermanentPetFor`), a charm/mind-control apply and a player's summon
+    /// carry a non-zero number, while **guardians and totems carry 0** and therefore keep whatever
+    /// rank their template gives them.
+    pub fn unit_is_pet_or_charm(&self) -> bool {
+        self.get_u32(FIELD_UNIT_PETNUMBER).unwrap_or(0) != 0
+    }
     /// `UNIT_FIELD_HEALTH` — current hit points (0 ⇒ dead).
     pub fn unit_health(&self) -> Option<u32> {
         self.get_u32(FIELD_UNIT_HEALTH)

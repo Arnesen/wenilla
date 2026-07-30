@@ -227,6 +227,12 @@ fn stream_wdl(
                 MeshMaterial3d(streamer.material.clone()),
                 Transform::IDENTITY,
                 WdlTile,
+                // The far band is exterior scene like the detailed tiles are: the reference's far
+                // walk `0x683040` is fed by the SAME per-window populate `0x682fa0`, so from a sealed
+                // room the horizon is not drawn either (`crate::exterior_cull`). One ring tile is one
+                // drawn object here, which is already the reference's far-tier granularity — this
+                // band never needed the chunk split the near tiles did (decision 0780).
+                crate::exterior_cull::ExteriorScene,
             ))
             .id();
         streamer.loaded.insert(coords, e);

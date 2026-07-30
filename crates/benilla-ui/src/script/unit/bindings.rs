@@ -5,7 +5,9 @@
 use mlua::{Lua, Value};
 
 use super::super::Model;
-use super::{grey_band, level_reads_unknown, pick_unit_token, power_token, with_unit};
+use super::{
+    classification_word, grey_band, level_reads_unknown, pick_unit_token, power_token, with_unit,
+};
 
 /// Register the `Unit*` globals reading the per-token snapshot store (the same style/place the
 /// object model and stdlib register their globals — bare globals on `_G`, matching the live API
@@ -403,6 +405,19 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
             } else {
                 Value::Integer(i64::from(sex))
             })
+        })?,
+    )?;
+
+    // UnitClassification(unit) → "normal" | "elite" | "rareelite" | "worldboss" | "rare" (decision
+    // 0782, byte-verified `0x516d90`): a plain table index by the gated rank, and it answers a
+    // STRING for every input — never nil. An absent snapshot deliberately reports "normal" rather
+    // than nil because the binary does: its unresolved-token path loads table index 0 and pushes
+    // that, so a frame reading it gets the plain border art instead of a nil comparison.
+    g.set(
+        "UnitClassification",
+        lua.create_function(|lua, token: Option<String>| {
+            let rank = with_unit(lua, &token, 0u32, |u| u.rank);
+            Ok(classification_word(rank).to_string())
         })?,
     )?;
 

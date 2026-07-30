@@ -343,14 +343,105 @@ fn update_shadows(
             verts.0.clear();
             n_no_ground += 1;
         }
+        if census && is_self {
+            // The census's self row: where the OWN shadow's projection actually went — the
+            // "shadow missing under me" report's second question (the first is the gate line
+            // below). Y-extents vs feet split "landed on the surface I stand on" from "fell
+            // through to a receiver below" in one read.
+            let (mut y_min, mut y_max) = (f32::MAX, f32::MIN);
+            let (mut x_min, mut x_max) = (f32::MAX, f32::MIN);
+            let (mut z_min, mut z_max) = (f32::MAX, f32::MIN);
+            for v in &verts.0 {
+                y_min = y_min.min(v.pos[1]);
+                y_max = y_max.max(v.pos[1]);
+                x_min = x_min.min(v.pos[0]);
+                x_max = x_max.max(v.pos[0]);
+                z_min = z_min.min(v.pos[2]);
+                z_max = z_max.max(v.pos[2]);
+            }
+            // World-XZ extents of what was actually emitted vs the frame rect: if these disagree,
+            // the projector inflated/displaced the box (the -8844,669 hunt).
+            debug!(
+                "self shadow world span: x [{:.3}, {:.3}] ({:.3}), z [{:.3}, {:.3}] ({:.3}); \
+                 feet ({:.3}, {:.3}), yaw {:.1} deg",
+                x_min,
+                x_max,
+                x_max - x_min,
+                z_min,
+                z_max,
+                z_max - z_min,
+                unit.translation.x,
+                unit.translation.z,
+                unit.rotation
+                    .to_euler(bevy::math::EulerRot::YXZ)
+                    .0
+                    .to_degrees(),
+            );
+            debug!(
+                "self shadow: feet y {:.3}, box y [{:.3}, {:.3}], {} verts, vert y [{:.3}, \
+                 {:.3}]",
+                unit.translation.y,
+                unit.translation.y + frame.min_y,
+                unit.translation.y + frame.max_y,
+                verts.0.len(),
+                y_min,
+                y_max
+            );
+            // The -8844,669 hunt's uv probe: a span check alone can't see a DEGENERATE mapping
+            // (all uv.y at the rim still spans 0..1) — print the actual per-vert uv pairs.
+            let uvs: Vec<String> = verts
+                .0
+                .iter()
+                .map(|v| format!("({:.3},{:.3})", v.uv[0], v.uv[1]))
+                .collect();
+            debug!("self shadow uvs: {}", uvs.join(" "));
+            // And the box/rect numbers: the oracle says HumanFemale's footprint is 0.77x0.74 yd
+            // nearly centred; a bigger or offset rect indicts the box math, not the projector.
+            debug!(
+                "self shadow box: bmin {:?} bmax {:?} rect x [{:.3}, {:.3}] z [{:.3}, {:.3}] \
+                 (extent {:.3}x{:.3}, centre offset ({:.3}, {:.3}))",
+                bmin,
+                bmax,
+                min_x,
+                max_x,
+                min_z,
+                max_z,
+                max_x - min_x,
+                max_z - min_z,
+                (min_x + max_x) * 0.5,
+                (min_z + max_z) * 0.5,
+            );
+        }
     }
     if census && n_total > 0 {
-        let tex = shadow_assets.map_or("no-resource", |a| {
-            if images.contains(&a.texture) {
-                "loaded"
-            } else {
-                "MISSING"
-            }
+        // Not just "loaded": the CONTENT. A white-decoded blob multiplies to a no-op — an
+        // invisible shadow whose every draw-side reading looks healthy (the -8844,669 hunt).
+        let tex = shadow_assets.map_or("no-resource".into(), |a| {
+            images.get(&a.texture).map_or("MISSING".into(), |img| {
+                let (w, h) = (img.width(), img.height());
+                let center = img
+                    .data
+                    .as_ref()
+                    .and_then(|d| {
+                        let i = ((h / 2) * w + w / 2) as usize * 4;
+                        d.get(i..i + 4).map(|p| format!("{p:?}"))
+                    })
+                    .unwrap_or_else(|| "no-data".into());
+                // The -8844,669 hunt: the whole centre ROW, not one texel — the ink radius and
+                // alpha reach decide how much of the box the disc visibly fills.
+                if let Some(d) = img.data.as_ref() {
+                    let row: Vec<String> = (0..w as usize)
+                        .map(|x| {
+                            let i = ((h / 2) as usize * w as usize + x) * 4;
+                            d.get(i..i + 4)
+                                .map(|p| format!("{}/{}", p[0], p[3]))
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    debug!("blob row {}: {}", h / 2, row.join(" "));
+                }
+                format!("loaded {w}x{h} center {center} id {:?}", a.texture.id())
+            })
         });
         debug!(
             "blob shadows: {n_total} ({n_shown} shown, {n_no_owner} ownerless, {n_no_clip} \

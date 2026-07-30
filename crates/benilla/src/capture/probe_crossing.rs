@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 
+use super::probes::ProbeClock;
 use crate::net::{ClientCommand, Guid, SelfPlayer};
 use crate::player::Player;
 use crate::transport::{Transport, TransportAnchor};
@@ -61,7 +62,7 @@ const DROP_HEIGHT: f32 = 10.0;
 const BOARD_DEADLINE: f64 = 15.0;
 
 fn crossing_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut probe: ResMut<CrossingProbe>,
     self_player: Query<(), With<SelfPlayer>>,
     player: Res<Player>,

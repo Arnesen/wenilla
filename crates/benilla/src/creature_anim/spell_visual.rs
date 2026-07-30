@@ -493,6 +493,17 @@ pub(super) fn route_cast_visuals(
     }
 
     for ev in events.read() {
+        // **The subject may already be dead** (B130's crash, the second ever reported): every
+        // despawn of an *indexed* unit runs inside the wire drain — `DESTROY_OBJECT`, the
+        // out-of-range stream-out, the worldport purge — and those commands are applied at the sync
+        // point this chain sits behind (`.after(WorldStage::Net)`), so a SPELL_START and its
+        // subject's death drain from the same batch and the edge outlives the unit. Every arm below
+        // is *about* that unit (its hold, its sound, its effect models), so a dead subject skips
+        // whole rather than spraying the downstream lanes with edges for an entity that is gone —
+        // and rather than warning once per component removed off a corpse.
+        if commands.get_entity(ev.entity).is_err() {
+            continue;
+        }
         match ev.kind {
             CastEventKind::Start => {
                 // A replacing cast reaps the prior hold's loop before its own sound starts —
@@ -543,13 +554,19 @@ pub(super) fn route_cast_visuals(
                         .catalog
                         .get(ev.spell_id)
                         .is_some_and(|d| d.ranged_slot());
+                    // Fallible, like every hold write in this system: the skip above sees only
+                    // despawns already *applied*, and `model_fade::apply_despawn_fade` is
+                    // Update-unordered against this chain — its instant path (a stream-out unit with
+                    // no fadeable geometry, which is what a creature streamed in and back out at
+                    // flight speed *is*) can queue the despawn this frame and have it applied before
+                    // our commands. An infallible `insert` panics there; nothing can see it coming.
                     if ranged {
-                        commands.entity(ev.entity).insert(super::RangedHold);
+                        commands.entity(ev.entity).try_insert(super::RangedHold);
                     } else {
-                        commands.entity(ev.entity).remove::<super::RangedHold>();
+                        commands.entity(ev.entity).try_remove::<super::RangedHold>();
                     }
                     if let Some(anim_id) = kit.anim_id {
-                        commands.entity(ev.entity).insert(CastHold {
+                        commands.entity(ev.entity).try_insert(CastHold {
                             anim_id,
                             spell_id: ev.spell_id,
                             ranged,
@@ -580,7 +597,7 @@ pub(super) fn route_cast_visuals(
                 // Spell-id-keyed reap (the client's `0x614150(spellId, 0)`) — a proc's GO landing
                 // mid-cast never drops another spell's hold.
                 if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
-                    commands.entity(ev.entity).remove::<CastHold>();
+                    commands.entity(ev.entity).try_remove::<CastHold>();
                     pending.insert(ev.entity, None);
                 }
                 // The release reaps the precast's loop unconditionally-of-hold-state: an instant
@@ -628,9 +645,9 @@ pub(super) fn route_cast_visuals(
                         .get(ev.spell_id)
                         .is_some_and(|d| d.ranged_slot())
                     {
-                        commands.entity(ev.entity).insert(super::RangedHold);
+                        commands.entity(ev.entity).try_insert(super::RangedHold);
                     } else {
-                        commands.entity(ev.entity).remove::<super::RangedHold>();
+                        commands.entity(ev.entity).try_remove::<super::RangedHold>();
                     }
                     play_kit(
                         ev.entity,
@@ -660,7 +677,7 @@ pub(super) fn route_cast_visuals(
             }
             CastEventKind::Fail => {
                 if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
-                    commands.entity(ev.entity).remove::<CastHold>();
+                    commands.entity(ev.entity).try_remove::<CastHold>();
                     pending.insert(ev.entity, None);
                 }
                 out.sounds
@@ -776,7 +793,11 @@ pub(super) fn route_cast_visuals(
             // channels anyway.
             if let Some(kit) = resolve_kit(spells, &visuals.0, cur, |s| s.channel, || None) {
                 if let Some(anim_id) = kit.anim_id {
-                    commands.entity(entity).insert(CastHold {
+                    // Fallible for the same reason as the wire arms above — and this loop's
+                    // subjects need it *more*: a unit mid-stream-out is un-indexed but still
+                    // carries its `ObjectStore`, so it is in this very query while the fade lane
+                    // is free to despawn it out from under us this frame.
+                    commands.entity(entity).try_insert(CastHold {
                         anim_id,
                         spell_id: cur,
                         ranged: false, // no basic shot channels (the comment above)
@@ -803,7 +824,7 @@ pub(super) fn route_cast_visuals(
             if held_spell(&pending, entity) == Some(prev) {
                 // Only the ending channel's own hold is reaped — a precast for the unit's next
                 // spell (already in flight when the field clears) survives.
-                commands.entity(entity).remove::<CastHold>();
+                commands.entity(entity).try_remove::<CastHold>();
                 pending.insert(entity, None);
             }
             out.sounds.write(SpellKitSound::StopHold { entity });

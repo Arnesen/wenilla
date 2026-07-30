@@ -68,6 +68,7 @@ use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::view::{ExtractedView, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
+use super::probes::ProbeClock;
 use crate::particles::ParticleEmitter;
 use crate::player::WorldCamera;
 
@@ -325,7 +326,7 @@ struct DepthStaging {
 /// what the renderer is actually doing, not what the environment asked for.
 fn arm(
     mut watch: ResMut<DepthWatch>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut cam: Query<(Entity, &mut Camera3d, &Msaa), With<WorldCamera>>,
     mut commands: Commands,
 ) {

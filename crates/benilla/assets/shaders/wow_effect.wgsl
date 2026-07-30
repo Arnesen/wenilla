@@ -61,6 +61,8 @@ struct Vertex {
     // world_position, so the big-coordinate cancellation never reaches the matrix product —
     // absolute-coordinate verts through `clip_from_world` shear thin geometry apart far from
     // the origin (the precip module's empirically-learned law at ~9000 yd).
+    // EXCEPT under DECAL_WORLD_CLIP (decision 0781): the decal family's verts arrive ABSOLUTE
+    // (prepare skips their rebase) and take the mesh path's own matrix in the vertex stage.
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,    // raw authored gamma RGBA; α is the blend weight
@@ -70,25 +72,39 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
-    // View-space depth (+ in front of the camera) — the fog/farclip planar eye-Z, exact
-    // because the camera-relative view transform is pure rotation.
+    // View-space depth (+ in front of the camera) — the fog/farclip planar eye-Z (exact on
+    // the cam-relative path, where the view transform is pure rotation).
     @location(2) view_z: f32,
 };
 
 @vertex
 fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
-    // view_from_world = [R | −R·cam]; for a cam-relative point the translation column is
-    // exactly the subtraction prepare already did, so only the rotation remains.
+#ifdef DECAL_WORLD_CLIP
+    // The decal family (raster_bias ≠ 0): ABSOLUTE world verts through `clip_from_world` —
+    // the SAME matrix every world-mesh shader runs (`position_world_to_clip` in terrain.wgsl /
+    // wow_model.wgsl). A decal's depth must tie against the drawn ground within the small
+    // rasterizer bias; the cam-relative route below reaches the same plane through different
+    // arithmetic, and at WoW-scale coordinates the two disagree by more than the bias — the
+    // flaky/wedge-shaped blob shadow (decision 0781). Same matrix, same jitter: the decal
+    // wobbles WITH its receiver instead of against it.
+    out.clip_position = view.clip_from_world * vec4<f32>(v.position, 1.0);
+    // Fog/farclip eye-Z via the full affine transform (yards-scale — rounding is irrelevant).
+    out.view_z = -(view.view_from_world * vec4<f32>(v.position, 1.0)).z;
+#else
+    // Free-floating families: cam-relative verts (0733 §2). view_from_world = [R | −R·cam];
+    // for a cam-relative point the translation column is exactly the subtraction prepare
+    // already did, so only the rotation remains.
     let view_pos = mat3x3<f32>(
         view.view_from_world[0].xyz,
         view.view_from_world[1].xyz,
         view.view_from_world[2].xyz,
     ) * v.position;
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
+    out.view_z = -view_pos.z;
+#endif
     out.uv = v.uv;
     out.color = v.color;
-    out.view_z = -view_pos.z;
     return out;
 }
 

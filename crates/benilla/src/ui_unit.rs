@@ -384,7 +384,10 @@ pub(crate) fn enrich_unit(
     if let Some(rec) = names.creature_record(entry) {
         state.subtitle = rec.subname.clone();
         state.creature_type_name = creature_type_word(rec.creature_type).map(str::to_string);
-        state.rank = rec.rank;
+        // The client's one rank getter, both gates (`gated_rank`, decision 0782) — never `rec.rank`
+        // directly: an enslaved elite reads rank 0, so it loses its border dragon, its ELITE
+        // tooltip word and its world-boss skull together, exactly as in the reference.
+        state.rank = crate::names::gated_rank(Some(rec), Some(store));
         state.civilian = rec.civilian;
         state.racial_leader = rec.racial_leader;
         // The faction-name line ("Stormwind", between level and PvP) — the unit builder's tail
@@ -520,6 +523,15 @@ pub(crate) fn fire_transitions(
     }
     if prev.is_none_or(|p| p.name != cur.name) {
         script.fire_event("UNIT_NAME_UPDATE", vec![tok()]);
+    }
+    // UNIT_CLASSIFICATION_CHANGED (decision 0782) — the target frame's border-art repaint wire, and
+    // the only frame that registers it in the reference. Edge-fired on the gated rank, which IS the
+    // classification (`classification_word` is a pure table index), so this fires exactly when the
+    // border would change: the creature query landing on a freshly-seen elite, and a mob being
+    // enslaved or released. Without it the border would only be right on re-target, because the
+    // ref's own `TargetFrame_Update` is the sole other caller of CheckClassification.
+    if prev.is_none_or(|p| p.rank != cur.rank) {
+        script.fire_event("UNIT_CLASSIFICATION_CHANGED", vec![tok()]);
     }
     // UNIT_FACTION (decision 0646 §2) — the PvP-icon repaint wire, fired on the three fields the
     // icon law reads. Exactly the three frames that draw the icon register it in the reference
@@ -710,6 +722,61 @@ fn feed_units(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rank getter's two gates (`0x605620`, decision 0782) as they reach a snapshot. The pet
+    /// gate is the interesting half: a charmed or enslaved elite reports rank 0, so it loses its
+    /// dragon border AND its ELITE tooltip word AND (at rank 3) its world-boss skull together.
+    /// Asserted through `enrich_unit` rather than `gated_rank` directly, because the thing that
+    /// can regress is the *wiring* — a future edit reaching for `rec.rank` again.
+    #[test]
+    fn the_rank_gate_zeroes_a_pet_or_charm() {
+        use benilla_protocol::messages::ObjectFields;
+
+        const ENTRY: u32 = 12397; // Ol' Sooty, a rank-1 elite
+        const GUID: u64 = (0xF130u64 << 48) | ((ENTRY as u64) << 24) | 0x42;
+        /// `UNIT_FIELD_PETNUMBER` — absolute descriptor index (`OBJECT_END(6) + 0x85`).
+        const PETNUMBER: u16 = 139;
+
+        let mut names = NameCache::default();
+        names.insert_creature(
+            ENTRY,
+            Some(crate::names::CreatureRecord {
+                name: "Ol' Sooty".into(),
+                subname: None,
+                creature_type: 1,
+                rank: 1,
+                type_flags: 0,
+                civilian: false,
+                racial_leader: false,
+            }),
+        );
+
+        let rank_of = |fields: &[(u16, u32)]| {
+            let store = ObjectStore(ObjectFields::from_pairs(fields));
+            let mut s = UnitState::default();
+            enrich_unit(&mut s, GUID, &names, &store, None, None);
+            s.rank
+        };
+
+        assert_eq!(rank_of(&[]), 1, "a free elite keeps its template rank");
+        assert_eq!(
+            rank_of(&[(PETNUMBER, 0)]),
+            1,
+            "an explicit zero pet number is not a pet"
+        );
+        assert_eq!(
+            rank_of(&[(PETNUMBER, 7)]),
+            0,
+            "a non-zero pet number forces rank 0 — no dragon on an enslaved elite"
+        );
+
+        // The record gate, the getter's other half: no cached template at all → rank 0, and the
+        // border stays plain until the creature query answers.
+        let store = ObjectStore(ObjectFields::from_pairs(&[]));
+        let mut s = UnitState::default();
+        enrich_unit(&mut s, GUID ^ (1 << 24), &names, &store, None, None);
+        assert_eq!(s.rank, 0, "an un-queried creature has no classification");
+    }
 
     /// The PvP-preference announcement law (decision 0652), as the reference's changed-bits handler
     /// runs it: silent on first sight, one pair per real edge, and the OFF text is the one that

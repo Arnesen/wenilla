@@ -346,6 +346,44 @@ pub struct GroundQuad {
 const GROUND_FLAT_EPS: f32 = 0.01;
 
 impl RenderSubmesh {
+    /// Is this a **billboard card authored back-to-front** — one flat plane whose normal sits in the
+    /// −X half-space the billboard law points *away* from the camera?
+    ///
+    /// The billboard arm aims bone-local **+X** at the viewer (wow-re `billboard-bone-law.md` §2;
+    /// M2 bones carry no bind rotation, so bone-local == model space here), and 279 of the corpus's
+    /// 4424 billboard batches are wound and normalled the other way — the camera only ever sees the
+    /// card's back. The reference skins the normal through the same billboard-replaced palette row
+    /// as the position (`m2_vertex_skin 0x71a460`) and never flips one per face, so on those cards
+    /// its `max(N·L, 0)` runs off a normal pointing away from the viewer and the card's shading
+    /// swings with the CAMERA: bare ambient when the sun is behind you, full sun when you look into
+    /// it. Consumers light such a card off the side it presents instead (decision 0788).
+    ///
+    /// The planarity half is load-bearing: 3-D billboard geometry (the questgiver `?`'s 353 verts)
+    /// carries normals pointing every way, and flipping just its −X ones would gut its shading.
+    /// A card authored edge-on to the camera axis has no facing to correct, matching
+    /// `bbfacescan`'s away/edge-on split.
+    pub fn billboard_card_faces_away(&self) -> bool {
+        /// Cosine floor for "these two normals are the same plane" — one authored card, allowing
+        /// for unnormalised//soft-averaged authoring.
+        const SAME_PLANE_COS: f32 = 0.999;
+        /// A normal with |x| under this is edge-on to the camera axis: nothing to correct.
+        const EDGE_ON_X: f32 = 1e-3;
+        if self.billboard.is_none() {
+            return false;
+        }
+        let unit = |n: &[f32; 3]| {
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            (l > 1e-6).then(|| [n[0] / l, n[1] / l, n[2] / l])
+        };
+        let Some(n0) = self.normals.first().and_then(unit) else {
+            return false;
+        };
+        n0[0] < -EDGE_ON_X
+            && self.normals.iter().all(|n| {
+                unit(n).is_some_and(|n| n[0] * n0[0] + n[1] * n0[1] + n[2] * n0[2] > SAME_PLANE_COS)
+            })
+    }
+
     /// Detect the flat **ground-plane quad** shape ([`GroundQuad`]) — `None` for everything that
     /// isn't exactly it: more than four vertices, any vertex off the z≈0 plane, a multi-bone or
     /// partial-weight skin, or corners that don't form an axis-aligned XY rectangle. Billboard

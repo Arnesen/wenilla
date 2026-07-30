@@ -17,6 +17,7 @@ use benilla_assets::coords::bevy_to_wow;
 use benilla_formats::{load_taxi_nodes, load_taxi_path_nodes};
 use bevy::prelude::*;
 
+use super::probes::ProbeClock;
 use crate::assets::{LockRecover, WorldAssets};
 use crate::net::{ClientCommand, Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::Player;
@@ -139,7 +140,7 @@ fn load_expectations(mut probe: ResMut<TaxiProbe>, world_assets: Option<Res<Worl
 // One Bevy system's full input set (the crossing-probe shape) + its self query tuple.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn taxi_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut probe: ResMut<TaxiProbe>,
     self_player: Query<
         (

@@ -18,8 +18,13 @@
 use bevy::prelude::*;
 
 use super::Player;
+use crate::capture::ProbeClock;
 
-/// One scripted turn: `rate` (rad/s), when it starts, and how long it runs (seconds, in-world clock).
+/// One scripted turn: `rate` (rad/s), when it starts, and how long it runs — **wall-clock seconds**
+/// ([`ProbeClock`], decision 0789). Both halves want real time here, for one reason: `90°/s for 6 s`
+/// has to produce 540° of facing stream whatever the frame rate did, and the stream it feeds is
+/// itself paced on the real clock (0615). On the virtual clock the schedule would drift *and* every
+/// hitch would silently under-rotate the turn, since its delta is clamped to 250 ms.
 struct Turn {
     rate: f32,
     at: f32,
@@ -66,7 +71,7 @@ pub(super) fn from_env() -> Option<ProbeLook> {
 /// **before** the controller, so the frame that sees the new `face_yaw` is the frame that streams it.
 pub(super) fn drive_probe_look(
     probe: Res<ProbeLook>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut player: ResMut<Player>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
 ) {

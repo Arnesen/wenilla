@@ -643,8 +643,17 @@ fn winding(s: &benilla_formats::RenderSubmesh) -> Option<String> {
         (Some(f), Some(n)) => format!("{:+.2}", f[0] * n[0] + f[1] * n[1] + f[2] * n[2]),
         _ => "-".to_string(),
     };
+    // A billboard card authored back-to-front against the law's `+X`-at-the-viewer: the renderer
+    // turns its normals round so the card is lit off the face it presents (decision 0788). `vnorm`
+    // alone cannot answer this — it is the MEAN, so a batch whose normals cancel reads the same as
+    // one flat plane — hence the shape's own verdict here rather than an eyeball off the numbers.
+    let lit_face = if s.billboard_card_faces_away() {
+        "  LIT-FACE-FLIP"
+    } else {
+        ""
+    };
     Some(format!(
-        "facet {}  vnorm {}  dot {dot}",
+        "facet {}  vnorm {}  dot {dot}{lit_face}",
         fmt(facet),
         fmt(vnorm)
     ))

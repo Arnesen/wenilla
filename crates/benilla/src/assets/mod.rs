@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Buffer, Face};
 use bevy::render::renderer::RenderDevice;
 
+use crate::art_scope::{ArtScope, ArtSlot, SpatialCache};
 use crate::model_render::VANILLA_ALPHA_KEY_REF;
 use crate::terrain::{WowModelExt, WowModelMaterial};
 use benilla_formats::{open_chain, read_texture_mip_chain, read_texture_rgba, Chain, ModelBlend};
@@ -45,7 +46,7 @@ pub(crate) struct WorldAssets {
     /// address mode lives on the Bevy `Image`'s sampler — so each mode needs its own upload
     /// (decision 0763). Before that key existed, whichever model loaded the texture first decided
     /// the mode for every later one.
-    pub(crate) textures: HashMap<(String, bool, bool), Handle<Image>>,
+    pub(crate) textures: SpatialCache<(String, bool, bool), Handle<Image>>,
     /// Decoded UI sprite textures by resolved path (`None` = a miss, cached so a bad path never
     /// re-walks the chain per frame). Separate from `textures`: sprites are sRGB/clamped, world
     /// art is Unorm/repeat — the same BLP can legitimately live in both.
@@ -64,7 +65,7 @@ pub(crate) struct WorldAssets {
     /// the GPU image.
     masks: HashMap<String, Option<Handle<Image>>>,
     /// Materials deduped by their identity (texture path + blend, or the untextured fallback).
-    pub(crate) model_materials: HashMap<MaterialKey, Handle<WowModelMaterial>>,
+    pub(crate) model_materials: SpatialCache<MaterialKey, Handle<WowModelMaterial>>,
     /// The shared global-light storage buffer (`lighting::global_light`). Held here so `model_material`
     /// can clone it into every deduped model material's `light_buf` without threading a `Buffer` through
     /// the many call sites. One buffer for the whole scene, updated in place each frame.
@@ -157,8 +158,8 @@ impl WorldAssets {
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
         let key = (normalize_path(path), wrap.0, wrap.1);
-        if let Some(handle) = self.textures.get(&key) {
-            return Some(handle.clone());
+        if let Some(handle) = self.textures.fetch(&key) {
+            return Some(handle);
         }
         let chain = read_texture_mip_chain(&mut self.chain.lock_recover(), &key.0).ok()?;
         let handle = images.add(repeat_texture_authored(chain, wrap));
@@ -345,8 +346,8 @@ impl WorldAssets {
             ),
             None => MaterialKey::Fallback(is_wmo),
         };
-        if let Some(handle) = self.model_materials.get(&key) {
-            return handle.clone();
+        if let Some(handle) = self.model_materials.fetch(&key) {
+            return handle;
         }
         // Per-submesh blend (opaque trunk/wall vs alpha-cut leaves/windows). This builder serves
         // ground clutter, which never authors the multiply modes — Mod/Mod2x fall to plain Blend
@@ -430,7 +431,7 @@ pub(crate) struct AssetPlugin;
 impl Plugin for AssetPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, open_world_assets.in_set(AssetSet::Open));
-        app.add_systems(Update, evict_world_art);
+        app.add_systems(Update, (evict_world_art, scope_world_art));
     }
 }
 
@@ -450,6 +451,18 @@ fn evict_world_art(
     if let Some(mut a) = assets {
         a.textures.clear();
         a.model_materials.clear();
+    }
+}
+
+/// Expire the world-art dedup by **distance** (decision 0793) — the within-map half of the eviction
+/// above. `textures` is the one that matters for VRAM: a decoded BLP is pinned by the material that
+/// samples it, and a material by this cache, so nothing here dropping is why `images` never fell on a
+/// same-map traverse. The UI sprite caches stay unswept for the same reason they survive a map change
+/// (game-global scope, and their negative entries exist to stop per-frame chain re-walks).
+fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
+    if let Some(mut a) = assets {
+        scope.apply(&mut a.model_materials, ArtSlot::ClutterMats);
+        scope.apply(&mut a.textures, ArtSlot::Textures);
     }
 }
 
@@ -484,12 +497,12 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
     match open_chain(&data) {
         Ok(chain) => commands.insert_resource(WorldAssets {
             chain: Arc::new(Mutex::new(chain)),
-            textures: HashMap::new(),
+            textures: SpatialCache::default(),
             sprites: HashMap::new(),
             tiled_sprites: HashMap::new(),
             portraits: HashMap::new(),
             masks: HashMap::new(),
-            model_materials: HashMap::new(),
+            model_materials: SpatialCache::default(),
             shared_light: shared_light.0.clone(),
         }),
         Err(e) => error!("failed to open client data: {e:#}"),

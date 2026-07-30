@@ -31,11 +31,11 @@ pub use reader::WorldReader;
 pub use session::{WardenRequired, WorldSession};
 pub use writer::WorldWriter;
 
-/// Default `mangosd` world-server port. Our vmangos deploy maps mangosd to host port 18085 —
-/// moved off the classic 8085, which the WOA dev server owns on this machine. Normally the realm
-/// list reply carries the port (the deploy's `VMANGOS_REALMLIST_PORT=18085` matches); this
-/// constant is the fallback for probes/examples that dial the world server directly.
-pub const WORLD_PORT: u16 = 18085;
+/// Default `mangosd` world-server port — the stock one, which our vmangos deploy maps straight
+/// through. Normally the realm list reply carries the port (the deploy's
+/// `VMANGOS_REALMLIST_PORT=8085` matches); this constant is the fallback for probes/examples that
+/// dial the world server directly.
+pub const WORLD_PORT: u16 = 8085;
 
 /// Read one server packet from `stream`: decrypt the 4-byte header, read the body, parse by opcode.
 /// `decrypter` is `None` for the (single) unencrypted `SMSG_AUTH_CHALLENGE`.

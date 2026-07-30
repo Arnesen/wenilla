@@ -24,6 +24,11 @@ use crate::terrain::WowModelMaterial;
 pub(crate) struct PlacementHost {
     /// Bone-indexed joint entities — an emitter or ribbon rides its host bone's joint off this.
     pub joints: Vec<Entity>,
+    /// This placement's anim-root entity. It rides the returned entity list so it despawns with the
+    /// placement, but it is **not geometry** — a caller tagging "everything this placement draws"
+    /// has to be able to leave it out, or it lands in a cull that can only fail open on a boundless
+    /// entity (decision 0784). Distinct from `arm`, which is `None` unless a sequence was armed.
+    pub root: Entity,
     /// The anim-root entity IF this placement armed a sequence; `None` on the gseq-only tier, where
     /// nothing was armed and slot 0 is the honest answer.
     ///
@@ -70,10 +75,10 @@ pub(crate) fn spawn_model_entities(
     // group geometry.
     m2: Option<(&M2Model, f32)>,
     // UV-animated material registry (decision 0130 phase 3): a batch with a `uv_anim` loop registers
-    // its material here so `tick_uv_anim_materials` scrolls the shared offset each frame.
+    // its material here so `tick_anim_materials` scrolls the shared offset while it is drawn.
     uv_reg: &mut crate::doodad_anim::UvAnimMaterials,
     // Animated-tint material registry (the M2Color RGB twin of `uv_reg`): a batch with an
-    // `rgb_anim` loop registers its material here so `tick_tint_anim_materials` re-samples the
+    // `rgb_anim` loop registers its material here so `tick_anim_materials` re-samples the
     // shared tint each frame.
     tint_reg: &mut crate::doodad_anim::TintAnimMaterials,
     // `Some(anchor)` for a prop spawned ON a streamed entity (the WMO-gameobject path): a boneless
@@ -367,5 +372,9 @@ pub(crate) fn spawn_model_entities(
             active: true,
         });
     }
-    (out, skin.map(|(joints, _)| PlacementHost { joints, arm }))
+    (
+        out,
+        skin.zip(rig_root)
+            .map(|((joints, _), root)| PlacementHost { joints, root, arm }),
+    )
 }

@@ -86,7 +86,13 @@ pub struct UnitState {
     /// The creature TYPE display word ("Beast", "Humanoid", …) — app-resolved from
     /// `CreatureType.dbc`; the level line's class slot for hostile/neutral creatures.
     pub creature_type_name: Option<String>,
-    /// Elite rank 0..4 — the level line's rank word `{"", Elite, Elite, Boss, ""}` (0276).
+    /// Elite rank 0..4 — the creature classification every rank reader in the client shares, via
+    /// the one getter `0x605620`: the level line's rank word `{"", Elite, Elite, Boss, ""}` (0276),
+    /// `UnitLevel`'s world-boss −1 ([`level_reads_unknown`]), and `UnitClassification`
+    /// ([`classification_word`], decision 0782). **Already gated** by the app when it fills this:
+    /// the getter answers `0` unless the unit has a cached creature template *and* a zero
+    /// `UNIT_FIELD_PETNUMBER`, so a player, an un-queried creature and an enslaved elite all read
+    /// `0` here — the gate belongs at the one write, not in each of the three readers.
     pub rank: u32,
     /// The creature civilian flag — feeds the tooltip's green CIVILIAN line (shown only for a
     /// PvP-flagged HOSTILE unit that is also GREY/trivial to the player — the dishonorable-kill
@@ -196,6 +202,27 @@ pub fn level_reads_unknown(u: &UnitState, player_level: u32) -> bool {
     let much_higher_hostile =
         u.reaction != 0 && u.reaction <= 2 && u.level >= player_level.saturating_add(10);
     !u.is_player && (u.level == 0 || u.rank == 3 || much_higher_hostile)
+}
+
+/// `UnitClassification`'s return — the classification-word table, **byte-verified** at `0x850424`
+/// (decision 0782): the binding `0x516d90` is nothing but `TABLE[rank(unit)]`, indexed by the same
+/// gated rank [`UnitState::rank`] carries. The table is exactly five entries long (the sixth dword
+/// at `0x850438` is an unrelated `"UnitExists"` literal), and rank comes pre-clamped to 0..4 by
+/// `CreatureInfo+0x20`, so an out-of-range value can only be our own bug — it reads `"normal"`,
+/// which is also what the binding's unresolved-token path pushes (`0x516dc4` loads index 0).
+///
+/// Note `"rareelite"` is a real return here even though 1.12 has no rare-elite *art* and no
+/// rare-elite tooltip *word* — the reference's `TargetFrame_CheckClassification` sends it to the
+/// same Elite border as `"elite"`, and the tooltip's `{"", Elite, Elite, Boss, ""}` prints ELITE for
+/// it. The distinction exists in the API and nowhere in the pixels.
+pub fn classification_word(rank: u32) -> &'static str {
+    match rank {
+        1 => "elite",
+        2 => "rareelite",
+        3 => "worldboss",
+        4 => "rare",
+        _ => "normal",
+    }
 }
 
 /// The Era power-token string for a power-type index (`UnitPowerType`'s second return,

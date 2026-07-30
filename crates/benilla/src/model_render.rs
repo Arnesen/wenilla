@@ -3,8 +3,6 @@
 //! every M2/WMO instance: doodads, WMO buildings, creatures, and GameObjects. Deduped per owner by
 //! `(texture, blend, sidedness, kind, fade-variant)` so instances sharing a look batch into one draw.
 
-use std::collections::HashMap;
-
 use benilla_formats::{ModelBlend, WmoBatchClass};
 use bevy::asset::AssetId;
 use bevy::pbr::ExtendedMaterial;
@@ -107,8 +105,11 @@ impl ShadeSel {
 }
 
 /// A material-dedup cache. Each model-spawning subsystem (terrain doodads/WMOs, streamed entities)
-/// keeps its own so its handles drop with it.
-pub(crate) type MaterialCache = HashMap<MatKey, Handle<WowModelMaterial>>;
+/// keeps its own so its handles drop with it — and, since decision 0793, so its entries expire by
+/// **distance** ([`crate::art_scope::SpatialCache`]) instead of living until the next map change. A
+/// cache nobody sweeps (the `Local<MaterialCache>`s in the glue booth and the portrait bake) behaves
+/// exactly as it did: a plain dedup map.
+pub(crate) type MaterialCache = crate::art_scope::SpatialCache<MatKey, Handle<WowModelMaterial>>;
 
 /// Build (or fetch the deduped) [`WowModelMaterial`] for a model batch: a `StandardMaterial` base
 /// carrying the texture/alpha/cull, plus the `WowModelExt` shared-light extension. `fade_variant` is
@@ -161,8 +162,8 @@ pub(crate) fn model_material(
         sidn,
         window,
     };
-    if let Some(h) = cache.get(&key) {
-        return h.clone();
+    if let Some(h) = cache.fetch(&key) {
+        return h;
     }
     // Additive batches (M2 glow cards) ADD their colour to the framebuffer — so the warm glow isn't
     // muted by the (cool, at night) background bleeding through. They go in the transparent pass
@@ -280,7 +281,7 @@ pub(crate) fn model_material(
             // zw = the batch's live **UV-animation offset** (decision 0130 phase 3, wow-re
             // `m2-texanim-uv`: the real client adds the sampled translation to the stage UVs —
             // translation is un-pivoted, and no placed doodad uses rotation/scaling). Seeded at
-            // t = 0 here; `doodad_anim::tick_uv_anim_materials` re-samples it per frame on the
+            // t = 0 here; `doodad_anim::tick_anim_materials` re-samples it per drawn frame on the
             // shared clock (frozen in captures).
             sun_scale: {
                 let uv0 = uv_anim.map_or([0.0, 0.0], |a| a.sample(0.0));

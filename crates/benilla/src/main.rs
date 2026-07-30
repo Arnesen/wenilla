@@ -22,12 +22,14 @@
 
 mod area;
 mod area_trigger;
+mod art_scope;
 mod asset_churn;
 mod assets;
 mod bgwin;
 mod billboard;
 mod blob_shadow;
 mod bowstring;
+mod build_id;
 mod capture;
 mod char_create;
 mod char_select;
@@ -461,6 +463,10 @@ fn main() -> AppExit {
     .add_plugins(PerfPlugin)
     .add_plugins(hover_log::HoverLogPlugin)
     .add_plugins(asset_churn::AssetChurnPlugin)
+    // Within-map art residency (decision 0793): the dedup caches expire by DISTANCE, so a
+    // long flight inside one map stops ratcheting. Registered before AssetPlugin only so the
+    // census resource exists for anything that reads it at startup; it needs no ordering.
+    .add_plugins(art_scope::ArtScopePlugin)
     .add_plugins(particles::census::plugin)
     // Foundation: opens the patch chain + inserts WorldAssets/RenderConfig (AssetSet::Open), which
     // every other subsystem's startup runs after.

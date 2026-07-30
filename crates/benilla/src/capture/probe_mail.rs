@@ -51,6 +51,7 @@ use benilla_protocol::messages::MailListEntry;
 use benilla_protocol::EntityKind;
 use benilla_ui::script::UiScript;
 
+use super::probes::ProbeClock;
 use crate::net::{ChatKind, ClientCommand, Guid, NetCommands, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::Player;
 use crate::ui_mail::MailOpen;
@@ -223,7 +224,7 @@ fn last_event(script: &UiScript) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn mail_probe(
-    time: Res<Time>,
+    time: ProbeClock,
     mut probe: ResMut<MailProbe>,
     mut mail: ResMut<MailOpen>,
     script: Option<NonSendMut<UiScript>>,

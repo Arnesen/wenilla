@@ -128,7 +128,14 @@ pub(super) fn spawn_loaded_placements(
                     // `crate::exterior_cull`). Tagged per submesh because a placement has no root
                     // entity to carry the bound; the deviation from the reference's whole-object test
                     // is recorded in `exterior_cull`'s module doc.
-                    for e in &ents {
+                    //
+                    // The anim-host ROOT is skipped: it is a joint hierarchy, not geometry, so it has
+                    // no `Aabb` and lands in the cull's fail-open arm — harmless to draw (it draws
+                    // nothing) but it was 484 of the 6917 "tested" objects at one Stratholme pin,
+                    // which is exactly the kind of noise that makes the instrument stop meaning
+                    // anything. Tag what is drawn (decision 0784).
+                    let anim_root = host.as_ref().map(|h| h.root);
+                    for e in ents.iter().filter(|e| Some(**e) != anim_root) {
                         commands
                             .entity(*e)
                             .insert(crate::exterior_cull::ExteriorScene);
@@ -161,6 +168,7 @@ pub(super) fn spawn_loaded_placements(
                         host.as_ref().map(|h| h.joints.as_slice()),
                         host.as_ref().and_then(|h| h.arm),
                         (radius, center),
+                        None, // an ADT map doodad belongs to no building
                         &mut ents,
                     );
                     spawn_ribbons_for(
@@ -205,6 +213,22 @@ pub(super) fn spawn_loaded_placements(
                         &mut tint_reg,
                         None, // world-static placement: cards bake their world pivot
                     );
+                    // A world WMO placement is exterior scene too (`0x6856c0`, fed by the same
+                    // per-window populate `0x682fa0`): from inside one building, another building
+                    // draws only through a portal window. 0774 left this ungated because these
+                    // entities already had a `Visibility` authority and a second writer would have
+                    // fought it — that is fixed at the root now, with the window term folded INTO
+                    // that authority (decision 0784), so the tag is safe to add.
+                    //
+                    // Tagging is unconditional and the **exemption is dynamic**: the camera's own
+                    // containing placement is not exterior to itself, which the authority decides
+                    // per frame from `CameraInteriorClaim`. A static "is this the player's building"
+                    // could not be right — the player walks in and out of it.
+                    for e in &ents {
+                        commands
+                            .entity(*e)
+                            .insert(crate::exterior_cull::ExteriorScene);
+                    }
                     // Portal visibility + interior tracking: tie every group submesh entity (the `ents`
                     // here are exactly the submeshes, in order, before colliders/lights are appended
                     // below) back to one per-placement instance that holds the placement transform + the
@@ -283,10 +307,17 @@ pub(super) fn spawn_loaded_placements(
                         if let Some(instance) = p.portal_instance {
                             let groups: Arc<[u16]> = Arc::from([gi as u16].as_slice());
                             for &e in &ents[first..] {
-                                commands.entity(e).insert(WmoGroupVis {
-                                    instance,
-                                    groups: groups.clone(),
-                                });
+                                commands.entity(e).insert((
+                                    WmoGroupVis {
+                                        instance,
+                                        groups: groups.clone(),
+                                    },
+                                    // Another building's canal is exterior scene like its walls; the
+                                    // one you are standing in is exempted by instance (0784). Only
+                                    // tagged alongside `WmoGroupVis`, because that component is what
+                                    // carries the instance the exemption is keyed on.
+                                    crate::exterior_cull::ExteriorScene,
+                                ));
                             }
                         }
                     }
@@ -442,10 +473,17 @@ pub(super) fn spawn_loaded_placements(
             // is this one prop, so they all share the one key.
             if let (Some(instance), false) = (portal_instance, d.groups.is_empty()) {
                 for &entity in &ents {
-                    commands.entity(entity).insert(WmoGroupVis {
-                        instance,
-                        groups: d.groups.clone(),
-                    });
+                    commands.entity(entity).insert((
+                        WmoGroupVis {
+                            instance,
+                            groups: d.groups.clone(),
+                        },
+                        // Furniture is exterior scene when its building is (0784) — and exempt when
+                        // that building is the one the camera stands in. Keyed on the instance
+                        // `WmoGroupVis` carries, so a prop no group names (no key, no exemption
+                        // possible) is deliberately left untagged rather than gated blind.
+                        crate::exterior_cull::ExteriorScene,
+                    ));
                 }
             }
             // Prop collider (avian): a static trimesh from the prop's collision hull at its world
@@ -472,6 +510,7 @@ pub(super) fn spawn_loaded_placements(
                 host.as_ref().map(|h| h.joints.as_slice()),
                 host.as_ref().and_then(|h| h.arm),
                 (radius, center),
+                portal_instance, // a WMO prop rides its building's exemption
                 &mut ents,
             );
             spawn_ribbons_for(

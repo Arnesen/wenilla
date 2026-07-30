@@ -367,21 +367,34 @@ pub struct EmitterFade {
     /// The owner doodad's world bbox centre — the fade measures horizontal distance to this
     /// (matching the doodad's own gate in `debug_panel::visibility`), not the emitter position.
     pub center: Vec3,
+    /// The WMO placement whose doodad set this emitter's owner belongs to; `None` for an ADT map
+    /// doodad. Read only by the exterior-window term: a prop of the building the camera is standing
+    /// in is not exterior scene to itself, so its candle keeps burning (decision 0784's exemption,
+    /// which the owner submesh gets through `WmoGroupVis` — an emitter carries no such component,
+    /// so it carries the instance directly).
+    pub instance: Option<Entity>,
 }
 
 impl EmitterFade {
     /// The **draw-set admission rule** in one place: is the owner doodad in the frame's scene
     /// worklist, and therefore does its emitter tick and draw this frame?
     ///
-    /// Three terms, all against the owner's fade sphere (the reference's `[rec+0x68]`):
+    /// Four terms, all against the owner's fade sphere (the reference's `[rec+0x68]`):
     /// 1. the radius-tiered distance fade hasn't reached zero (`FUN_00683f80`),
     /// 2. the sphere is inside the far-clip wall ([`crate::view::within_farclip`]),
-    /// 3. `lateral_in_frustum` — the caller's frustum sphere test on the side/near planes.
+    /// 3. `lateral_in_frustum` — the caller's frustum sphere test on the side/near planes,
+    /// 4. `exterior_admitted` — the caller's exterior-window test (decision 0786).
     ///
     /// Term 2 is the one bug B39 was missing (decision 0678), and it cannot be folded into term 1:
     /// [`crate::model_fade::doodad_fade_alpha`] returns a flat `1.0` for any owner bigger than
     /// [`crate::model_fade::NEVER_FADE_RADIUS`], so for exactly the props that carry the big
     /// effects — braziers, bonfires, portal frames — term 1 admits at *every* distance.
+    ///
+    /// Term 4 is the same omission one layer out. The reference links a doodad into the worklist
+    /// through the per-window populate walk `0x683700` and ticks its particles as part of that
+    /// model's animate step — so an unlinked doodad emits nothing. We gated the doodad's *mesh* and
+    /// left its emitter running, which is a mushroom's spore cloud hanging in a sealed dungeon (the
+    /// director's report: `plaguelandmushroom01`, 3 emitters, 59.7 yd through a wall).
     ///
     /// Pure and total so the rule is pinned by tests without an ECS (the `model_fade` pattern).
     pub fn in_draw_set(
@@ -390,12 +403,28 @@ impl EmitterFade {
         cam_fwd: Vec3,
         farclip: f32,
         lateral_in_frustum: bool,
+        exterior_admitted: bool,
     ) -> bool {
         let (dx, dz) = (self.center.x - cam_pos.x, self.center.z - cam_pos.z);
         let horiz = (dx * dx + dz * dz).sqrt();
         crate::model_fade::doodad_fade_alpha(self.radius, horiz) > 0.0
             && crate::view::within_farclip(farclip, cam_pos, cam_fwd, self.center, self.radius)
             && lateral_in_frustum
+            && exterior_admitted
+    }
+
+    /// Term 4 for this emitter, given the frame's gate and the placement the camera is inside. Kept
+    /// beside the rule so both callers — the particle sim and the meshless-host anim gate — ask the
+    /// same question instead of each re-deriving the exemption.
+    pub fn exterior_admitted(
+        &self,
+        gate: &crate::exterior_cull::ExteriorGate,
+        camera_instance: Option<Entity>,
+    ) -> bool {
+        if self.instance.is_some() && self.instance == camera_instance {
+            return true; // a prop of the building the camera stands in — not exterior to itself
+        }
+        gate.admits_sphere(self.center, self.radius)
     }
 }
 
@@ -682,8 +711,9 @@ pub(crate) mod tests {
         EmitterFade {
             radius,
             center: Vec3::new(0.0, 0.0, -depth),
+            instance: None,
         }
-        .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true)
+        .in_draw_set(Vec3::ZERO, Vec3::NEG_Z, farclip, true, true)
     }
 
     /// **The owner-last rung, pinned** (decisions 0719/0721), through the wrapper the renderer
@@ -741,9 +771,52 @@ pub(crate) mod tests {
         let f = EmitterFade {
             radius: 2.0,
             center: Vec3::new(0.0, 0.0, -60.0),
+            instance: None,
         };
-        assert!(f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true));
-        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, false));
+        assert!(f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, true));
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, false, true));
+        // …and the exterior-window term is ANDed the same way (0786): a doodad no portal window
+        // admits is not in the worklist, so its emitter neither ticks nor draws.
+        assert!(!f.in_draw_set(Vec3::ZERO, Vec3::NEG_Z, 777.0, true, false));
+    }
+
+    /// **The exemption, on the emitter lane.** A sealed room (no windows) admits no exterior scene
+    /// — but the props of the building the camera is standing IN are not exterior to it, and their
+    /// flames must keep burning. Getting this wrong does not look like a cull bug; it looks like
+    /// walking into an inn snuffs its fireplace, which is why it is pinned rather than argued.
+    ///
+    /// The third case is the reported one: an ADT map doodad carries no building at all, so a
+    /// sealed room must stop it (`plaguelandmushroom01`'s spore cloud, seen through a wall).
+    #[test]
+    fn a_sealed_room_keeps_its_own_props_burning_and_stops_everything_else() {
+        use crate::exterior_cull::ExteriorGate;
+        let mut w = World::new();
+        let (here, elsewhere) = (w.spawn_empty().id(), w.spawn_empty().id());
+        let sealed = ExteriorGate::Windows(Vec::new());
+        let fade = |instance| EmitterFade {
+            radius: 2.0,
+            center: Vec3::new(0.0, 0.0, -60.0),
+            instance,
+        };
+
+        assert!(
+            fade(Some(here)).exterior_admitted(&sealed, Some(here)),
+            "a prop of the building the camera is in must keep emitting"
+        );
+        assert!(
+            !fade(Some(elsewhere)).exterior_admitted(&sealed, Some(here)),
+            "another building's prop is exterior scene, and the room is sealed"
+        );
+        assert!(
+            !fade(None).exterior_admitted(&sealed, Some(here)),
+            "an ADT map doodad belongs to no building — the reported mushroom"
+        );
+        // Outdoors the gate stands down and every one of them emits again.
+        for instance in [Some(here), Some(elsewhere), None] {
+            assert!(fade(instance).exterior_admitted(&ExteriorGate::Open, Some(here)));
+        }
+        // …and with no room claimed at all, `None == None` must NOT read as "my own building".
+        assert!(!fade(None).exterior_admitted(&sealed, None));
     }
 
     /// The emitter gate and the owner mesh's own cull must agree on the boundary — they read the
@@ -768,8 +841,12 @@ pub(crate) mod tests {
                         "precondition: this owner never size-fades"
                     );
                     let mesh_drawn = crate::view::within_farclip(farclip, cam, fwd, center, radius);
-                    let emitter_drawn =
-                        EmitterFade { radius, center }.in_draw_set(cam, fwd, farclip, true);
+                    let emitter_drawn = EmitterFade {
+                        radius,
+                        center,
+                        instance: None,
+                    }
+                    .in_draw_set(cam, fwd, farclip, true, true);
                     assert_eq!(
                         mesh_drawn, emitter_drawn,
                         "wall disagreement at farclip {farclip} depth {depth} radius {radius}"

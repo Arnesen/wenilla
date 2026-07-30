@@ -698,9 +698,13 @@ fn drive_vplates(
             // classification rank 3, from the ask-once creature record (it lands with the
             // name query; a miss just means no skull yet) — unconditionally; or a hostile
             // ≥ 10 levels up that isn't trivial-grey (`0x5f0700`, the shared grey check).
-            let world_boss = benilla_protocol::guid::entry(guid.0)
-                .and_then(|e| names.creature_record(e))
-                .is_some_and(|r| r.rank == 3);
+            // The rank goes through the client's own getter (`gated_rank`, decision 0782), which is
+            // what makes a MIND-CONTROLLED world boss show its NUMBER here rather than a skull:
+            // `0x7cbb40` reads rank via `0x605620`, pet gate and all.
+            let world_boss = crate::names::gated_rank(
+                benilla_protocol::guid::entry(guid.0).and_then(|e| names.creature_record(e)),
+                store,
+            ) == 3;
             if world_boss || (rank <= 1 && level >= my_level + 10 && !unit_is_grey(my_level, level))
             {
                 let half = gx(SKULL_SIZE) * 0.5;

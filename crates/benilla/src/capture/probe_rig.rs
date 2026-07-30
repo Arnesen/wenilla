@@ -67,6 +67,7 @@
 use benilla_protocol::{messages, CharAction, CharCreateReq};
 use bevy::prelude::*;
 
+use super::probes::ProbeClock;
 use crate::char_select::{send_pick, Roster};
 use crate::net::{
     CharActionResultMessage, CharListMessage, CharPick, CharRequest, EnteredWorldMessage,
@@ -267,7 +268,7 @@ fn drive_rig(
     mut rig: ResMut<Rig>,
     mut roster: ResMut<Roster>,
     pick: Res<CharPick>,
-    time: Res<Time>,
+    time: ProbeClock,
     mut lists: MessageReader<CharListMessage>,
     mut results: MessageReader<CharActionResultMessage>,
     mut entered: MessageReader<EnteredWorldMessage>,

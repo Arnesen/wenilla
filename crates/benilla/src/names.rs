@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use benilla_protocol::guid;
 
-use crate::net::{ClientCommand, NetCommands};
+use crate::net::{ClientCommand, NetCommands, ObjectStore};
 
 /// The name cache: players by guid, creatures by template entry, plus the in-flight ask-once sets.
 /// Filled by the net bridge; read (and query-triggered) through [`Self::resolve`].
@@ -54,7 +54,8 @@ pub(crate) struct CreatureRecord {
     pub(crate) name: String,
     pub(crate) subname: Option<String>,
     pub(crate) creature_type: u32,
-    /// Elite rank 0..4 — the tooltip rank word `{"", Elite, Elite, Boss, ""}`.
+    /// Elite rank 0..4 **as the template declares it** — read it through [`gated_rank`], never
+    /// directly, unless you specifically want the ungated template value.
     pub(crate) rank: u32,
     /// Template type flags — bit `0x10` (HIDE_FACTION_TOOLTIP) suppresses the tooltip's
     /// faction-name line (the client's `0x612610` gate).
@@ -62,6 +63,35 @@ pub(crate) struct CreatureRecord {
     pub(crate) civilian: bool,
     /// Racial leader — the tooltip's white LEADER line (`0x6125c0`).
     pub(crate) racial_leader: bool,
+}
+
+/// The client's **creature-rank getter**, `0x605620` — 33 bytes, and the single source every rank
+/// reader in the real client goes through (decision 0782):
+///
+/// ```text
+/// 605620: mov eax,[ecx+0xb30]   ; the cached creature record
+///         test eax,eax / je  →  0     ; not queried yet
+///         mov ecx,[ecx+0x110]         ; the unit descriptor block
+///         mov edx,[ecx+0x214]         ; UNIT_FIELD_PETNUMBER
+///         test edx,edx / jne →  0     ; somebody's pet or charm
+///         mov eax,[eax+0x20]          ; record->rank
+/// ```
+///
+/// Two gates, and the pet gate is the one nobody expects: a **charmed or enslaved unit reports rank
+/// 0** whatever its template says. Because all three of the client's rank consumers call this one
+/// getter — `UnitClassification` (the target frame's elite/rare border), the unit tooltip's
+/// ELITE/BOSS word, and `UnitLevel`'s world-boss `−1` (the target frame *and* nameplate skull) — a
+/// mind-controlled world boss loses its dragon, its BOSS word and its skull together. Applying the
+/// gate per-reader is how those three silently drift apart, so this function is the only place any
+/// of them may read a rank from.
+///
+/// `store: None` (no descriptor streamed) cannot prove a pet number, so it reads as not-a-pet —
+/// matching the client, whose descriptor block is zero-initialized.
+pub(crate) fn gated_rank(rec: Option<&CreatureRecord>, store: Option<&ObjectStore>) -> u32 {
+    match rec {
+        Some(rec) if !store.is_some_and(|s| s.0.unit_is_pet_or_charm()) => rec.rank,
+        _ => 0,
+    }
 }
 
 impl NameCache {

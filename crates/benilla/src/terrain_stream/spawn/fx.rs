@@ -129,6 +129,9 @@ pub(super) fn spawn_emitters_for(
     joints: Option<&[Entity]>,
     arm: Option<Entity>,
     fade: (f32, Vec3),
+    // The WMO placement this model's doodad set belongs to (`None` for an ADT map doodad) — the
+    // exterior-window exemption for a prop of the building the camera is standing in (0786).
+    instance: Option<Entity>,
     out: &mut Vec<Entity>,
 ) {
     // The owner doodad's fade sphere (radius, local centre) → the emitter's draw-set gate
@@ -162,6 +165,7 @@ pub(super) fn spawn_emitters_for(
             commands.entity(e).insert(particles::EmitterFade {
                 radius: fade_radius,
                 center: world_center,
+                instance,
             });
             out.push(e);
         }

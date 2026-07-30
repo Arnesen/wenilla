@@ -4,7 +4,11 @@
 //! tiles + WMO faces — **never** doodads/GameObjects) whose BVH overlaps a projection box, clip
 //! each to the box ([`clip_to_frame`]), and emit them with planar top-down UVs. Because the
 //! emitted triangles are exact sub-pieces of the drawn surfaces, a decal is pixel-coplanar with
-//! what's on screen (the draw's rasterizer `depth_bias` settles the depth test) and drapes down
+//! what's on screen — **provided it transforms through the same `clip_from_world` matrix as the
+//! world-mesh shaders** (the `DECAL_WORLD_CLIP` lane variant; the cam-relative route reaches
+//! the same plane through different arithmetic and misses by more than the bias at WoW-scale
+//! coordinates — decision 0781), the rasterizer `depth_bias` settling the depth test — and
+//! drapes down
 //! steps and ledge faces precisely like the reference (a vertical face gets the smeared texel
 //! column of its XZ spot: projective texturing, faithfully).
 //!

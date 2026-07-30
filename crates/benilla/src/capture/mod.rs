@@ -84,7 +84,7 @@ pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
+    ProbeClock, ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
 };
 use scenarios::{Scenario, SubjectKind, UiFixture, GROUND_EYE, SCENARIOS};
 
@@ -644,6 +644,11 @@ fn drive_capture(
     fx_req: Option<Res<FxViewRequest>>,
     wfx_req: Option<Res<crate::water_fx::WaterFxView>>,
     mut fx_state: Option<ResMut<FxViewState>>,
+    // **The harness's one deliberate virtual clock** — the allowlisted exception in
+    // `probes::probe_schedules_read_the_wall_clock`. The fixture age below is an age *on the clock
+    // the effect animates on* — the same clock this system freezes at save time, one field down —
+    // not a schedule. Everything schedule-shaped in the harness reads [`probes::ProbeClock`]
+    // instead; decision 0789 says why, and what learning it cost.
     game_time: Res<Time>,
     mut clock: ResMut<Time<Virtual>>,
 ) {

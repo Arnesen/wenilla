@@ -164,7 +164,10 @@ pub(crate) fn drive_nock_latch(
     for ev in events.read() {
         match &ev.ident {
             b"$BWP" if nocked.get(ev.entity) == Ok(true) => {
-                commands.entity(ev.entity).insert(NockLatch);
+                // `try_insert`, matching the `$BWR` arm's guard below: the tag names a unit that
+                // may be despawned by the time these commands apply (the fade lane is unordered
+                // against this chain — B130's second window, in the same defect class).
+                commands.entity(ev.entity).try_insert(NockLatch);
             }
             b"$BWR" => {
                 if let Ok(mut e) = commands.get_entity(ev.entity) {

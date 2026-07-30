@@ -564,3 +564,50 @@ fn faction_group_pair_and_the_pvp_toggle() {
     );
     assert_eq!(s.take_pvp_toggles(), 0, "the drain empties the queue");
 }
+
+/// `UnitClassification` (decision 0782, byte-verified table `0x850424`): five words indexed by the
+/// gated rank, a STRING for every input — including an absent token, which the binary answers
+/// `"normal"` for (its unresolved path loads index 0), never nil.
+#[test]
+fn unit_classification_reads_the_five_word_table() {
+    let mut s = UiScript::new().unwrap();
+
+    for (rank, word) in [
+        (0, "normal"),
+        (1, "elite"),
+        (2, "rareelite"),
+        (3, "worldboss"),
+        (4, "rare"),
+    ] {
+        s.set_unit(
+            "target",
+            Some(UnitState {
+                exists: true,
+                rank,
+                ..UnitState::default()
+            }),
+        );
+        assert_eq!(
+            s.eval::<String>(r#"return UnitClassification("target")"#)
+                .unwrap(),
+            word,
+            "rank {rank}"
+        );
+    }
+
+    // No snapshot at all, and a missing argument: still "normal", never nil. The target frame's
+    // border branch compares this against string literals, so a nil here would be a Lua error the
+    // reference cannot produce.
+    s.set_unit("target", None);
+    assert_eq!(
+        s.eval::<String>(r#"return UnitClassification("target")"#)
+            .unwrap(),
+        "normal",
+        "an absent unit is normal, not nil"
+    );
+    assert_eq!(
+        s.eval::<String>(r#"return UnitClassification()"#).unwrap(),
+        "normal",
+        "a missing token is normal, not nil"
+    );
+}

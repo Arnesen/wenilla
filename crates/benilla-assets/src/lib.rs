@@ -532,7 +532,7 @@ mod tests {
             app.update();
             if let Some(t) = app.world().resource::<Assets<AdtTile>>().get(&handle) {
                 info = Some((
-                    t.mesh.clone(),
+                    t.chunk_meshes.clone(),
                     t.layer_array.clone(),
                     t.alpha_array.clone(),
                     t.shadow_array.clone(),
@@ -542,18 +542,25 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let (mesh_h, layer_h, alpha_h, shadow_h, n_doodads) =
+        let (chunk_hs, layer_h, alpha_h, shadow_h, n_doodads) =
             info.expect("the ADT tile should load via mpq:// + AdtLoader");
 
+        // One drawn mesh per MCNK cell, never one merged slab (decision 0780) — the exterior-scene
+        // cull's unit is the chunk, and a tile that loads as a single object cannot be culled from
+        // inside a building. Every cell must be non-empty and a 145-vertex 9×9+8×8 grid.
         let meshes = app.world().resource::<Assets<Mesh>>();
-        let vc = meshes
-            .get(&mesh_h)
-            .expect("merged terrain mesh present")
-            .count_vertices();
         assert!(
-            vc > 0 && vc <= 256 * 145,
-            "merged tile mesh ≤ 256 chunks × 145 verts, got {vc}"
+            (1..=256).contains(&chunk_hs.len()),
+            "a tile draws as its MCNK cells, got {} meshes",
+            chunk_hs.len()
         );
+        for h in &chunk_hs {
+            let vc = meshes
+                .get(h)
+                .expect("chunk mesh sub-asset present")
+                .count_vertices();
+            assert_eq!(vc, 145, "an MCNK cell is 9×9 + 8×8 vertices");
+        }
 
         let images = app.world().resource::<Assets<Image>>();
         let layer = images.get(&layer_h).expect("layer array present");
@@ -568,6 +575,9 @@ mod tests {
         assert!(images.get(&alpha_h).is_some(), "alpha array present");
         assert!(images.get(&shadow_h).is_some(), "shadow array present");
         // Placement lists are carried as data (count is tile-dependent — some tiles are bare).
-        eprintln!("ADT tile loaded: {vc} verts, {n_doodads} doodad placements");
+        eprintln!(
+            "ADT tile loaded: {} MCNK cells, {n_doodads} doodad placements",
+            chunk_hs.len()
+        );
     }
 }

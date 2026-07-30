@@ -265,7 +265,7 @@ struct EntityMaterials(MaterialCache);
 /// composite is a fresh `Image` asset per build (unlike an `asset_server.load` path, which dedups by
 /// path), so without this cache every player would re-composite and break material dedup downstream.
 #[derive(Resource, Default)]
-struct SkinComposites(HashMap<SkinKey, Handle<Image>>);
+struct SkinComposites(crate::art_scope::SpatialCache<SkinKey, Handle<Image>>);
 
 /// The appearance fields that determine a composited body skin (decision 0044): race/sex pick the
 /// CharSections rows; skin/face/facialHair/hairStyle/hairColor pick the base + overlay variations;
@@ -336,6 +336,21 @@ fn evict_display_caches(
     }
 }
 
+/// Expire the streamed-entity dedups by **distance** (decision 0793) — the within-map half of
+/// [`evict_display_caches`]. The composited skins are the notable half: each distinct dressed look is
+/// its own 256² `Image` (decision 0044), so a session that meets a lot of players accumulates
+/// uploads no map change ever reaches. The display-id → model caches (`Creatures`/`GameObjects`/
+/// `ItemDisplays`/`SpellFx`) are deliberately *not* swept: they key on ids, not places, and hold M2
+/// assets whose count is bounded by the catalogs rather than by where you have been.
+fn scope_entity_art(
+    mut scope: crate::art_scope::ArtScope,
+    mut mats: ResMut<EntityMaterials>,
+    mut composites: ResMut<SkinComposites>,
+) {
+    scope.apply(&mut mats.0, crate::art_scope::ArtSlot::EntityMats);
+    scope.apply(&mut composites.0, crate::art_scope::ArtSlot::Skins);
+}
+
 /// The streamed-entity subsystem: builds the shared cube assets + display catalogs at startup, then
 /// each frame resolves/builds display models and attaches a visual to every net entity.
 pub(crate) struct EntitiesPlugin;
@@ -353,7 +368,7 @@ impl Plugin for EntitiesPlugin {
             .add_systems(Startup, setup_entities.after(AssetSet::Open))
             // The map-scope teardown (`world_map::MapChange`): drop every display/material dedup
             // so a map's assets actually die with it — the #bugs teleport leak.
-            .add_systems(Update, evict_display_caches)
+            .add_systems(Update, (evict_display_caches, scope_entity_art))
             // Every streamed unit's collision height, the frame after `apply_net_updates` spawns it
             // (that stage's Commands are what create the entity, so this cannot be earlier). Its
             // consumers all read `Option<&CollisionHeight>` against the ctor default, so a unit's

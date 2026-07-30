@@ -114,7 +114,7 @@ pub struct WowModelExt {
     /// (shader-unread; `WowModelKey` reads it back for the per-batch depth bias). `zw` = the batch's
     /// live **UV-animation offset** (decision 0130 phase 3): added to the stage UVs in
     /// `wow_model.wgsl`; `0` for static batches, re-sampled per frame by
-    /// `doodad_anim::tick_uv_anim_materials` for texanim batches (flowing waterfalls).
+    /// `doodad_anim::tick_anim_materials` for texanim batches (flowing waterfalls).
     #[uniform(100)]
     pub sun_scale: Vec4,
     /// Per-material **RGB tint** (`xyz`): the M2Color colour multiplied into the albedo exactly

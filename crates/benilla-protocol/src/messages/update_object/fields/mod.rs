@@ -91,6 +91,13 @@ const FIELD_UNIT_DISPLAYID: u16 = 131;
 /// on every dismount path (`Unit::Mount`/`Unmount`) — this field, not the aura, IS the mounted
 /// state (`Unit::IsMounted` reads it back; no flag or bytes field accompanies it). Decision 0441.
 const FIELD_UNIT_MOUNTDISPLAYID: u16 = 133;
+/// `UNIT_FIELD_PETNUMBER` (`OBJECT_END(6) + 0x85` = 139, PUBLIC — vmangos
+/// `UpdateFields_1_12_1.h:84`; byte-verified client-side as `[unit+0x110]+0x214` = relative index
+/// `0x85`, the second gate inside the rank getter `0x605620` — decision 0782). Non-zero ⇒ this
+/// unit is somebody's pet or charm, which is exactly how the
+/// client decides a creature has **no** classification (rank forced to 0), so no elite dragon, no
+/// ELITE/BOSS tooltip word and no world-boss skull on an enslaved mob.
+const FIELD_UNIT_PETNUMBER: u16 = 139;
 const FIELD_UNIT_DYNAMIC_FLAGS: u16 = 143;
 /// `UNIT_CHANNEL_SPELL` (idx 144, `OBJECT_END(6) + 0x8A`, PUBLIC — VERIFIED vmangos
 /// `UpdateFields_1_12_1.h:89`) — the spell id a unit is channeling (`0` = not channeling).
