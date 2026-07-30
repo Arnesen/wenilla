@@ -17,11 +17,25 @@
 //!   (`0x71c110` → collector `+0x184..`, lane by `[node+0xc]`; wow-re `m2-unit-interior-fog.md`).
 //!   Carried by BOTH indoor laws: [`probe_bits`] bakes it in, and the entity classifier ORs it
 //!   onto the Matte (day/night) payload. Masked off with bit 31 before the payload decode.
-//! - **Rig slot** (bits 19..=29, BOTH payload modes — decision 0720): the instance's skin-palette
-//!   rig slot ([`crate::rig_palette`]), `0` = not skinned. The vertex stage reads it to index the
-//!   shared-buffer palette region; it is written ONCE at part spawn ([`rig_bits`]) and every
-//!   runtime writer below preserves it by construction (the `with_*` accessors carry bits the
-//!   writer doesn't own). 11 bits ⇔ [`MAX_RIG_SLOTS`] concurrent rigs.
+//! - **Instance slot** (bits 19..=29, BOTH payload modes — decisions 0720, 0812, 0820): the
+//!   per-instance index into the shared buffer's slot-keyed regions. `0` is the world's shared
+//!   no-instance sentinel (terrain, WMO, doodads, clutter, and every part of a rig-less model). Two
+//!   consumers, reading it in different stages — which is why it is no longer called "the rig slot":
+//!     - the **vertex** stage indexes the skin-palette region with it ([`crate::rig_palette`], 0720)
+//!       — but only under `WOW_RIG_SKIN`, which `WowModelExt::specialize` compiles from the **mesh's
+//!       own joint attributes**, never from this field. A static mesh carrying a slot is not skinned.
+//!     - the **fragment** stage indexes the per-instance body-tint table with it
+//!       ([`crate::instance_tint`], 0812) — for every part, skinned or not.
+//!
+//!   That asymmetry is why the field is written from the **unit** and not from the part: a unit's
+//!   boneless geosets, its helm and shoulders, its held items and its billboard cards all carry
+//!   their wearer's slot, so a tinted unit tints *whole* — the reference's own rule (an
+//!   attached/chained model inherits the parent CM2's computed colours, `0x714000`). Before 0820 the
+//!   field was skinning-only, and a dwarf's Stoneform tint stopped at his pauldrons.
+//!
+//!   Written ONCE at part spawn ([`rig_bits`]); every runtime writer below preserves it by
+//!   construction (the `with_*` accessors carry bits the writer doesn't own). 11 bits ⇔
+//!   [`MAX_RIG_SLOTS`] concurrent instances.
 //! - **Alpha** (bits 0..=5, BOTH payload modes): the fade alpha as a 6-bit fraction (`63` =
 //!   opaque), multiplying the cutout alpha. 64 steps is past perceptual for the sub-second fade
 //!   ramps that write it (it was u16 pre-0720 — the rig field bought its bits from here). A whole

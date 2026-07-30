@@ -599,23 +599,28 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // WMO MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
     // MCSH-shadowed (0.5). The ramp runs in animator units and the COMMIT clamps.
     //
-    // **The per-instance GAIN — half untied (0809).** The reference's own traces show a player +
-    // three NPCs committing their sun at gain EXACTLY 1.0, never 2.5 or 0.5, while the same frames'
-    // ADT doodads show the full 0.5/0.85/1.0/1.874/2.5 spread (wow-re
-    // `trace-forensics-northshire-d3d` §5). wow-re settled the mechanism in
-    // `unit-mcsh-shadow-target.md`: the 2.5/0.5 node TARGET is byte-shared between a unit and an ADT
-    // static (single 2.5 site `69e4ad`, shared MCSH sampler `0x69b350`), but DELIVERY splits at
-    // `0x672a20` — with `[model+0x3c0]==0` the null fallback commits the raw day/night pair with NO
-    // intensity multiply anywhere: hardwired ×1.0, position-independent, never sampling MCSH. A
-    // unit's node is born UNREGISTERED (`0x670db0`'s birth-register gate `670fca` is skipped for the
-    // model-arg-0 spawn), so that is the normal outdoor case. `entity_shade` models exactly that,
-    // pinning a unit's tag byte to the day/night point CPU-side — units no longer reach the clamp
-    // below to land on ×1.0, they are already there.
+    // **`min(I, 1)` is OURS, and it is the one unfaithful term in this lane (0803 §3, 0814, 0821).**
+    // The reference does not cap the gain. On the VS/SH lane — the default config, and the lane this
+    // shader IS — `0x71c4e0` bakes `[node+0xa4]` straight into the SH moments with no clamp; on the
+    // FFP lane `0x71c730`→`0x71ca80` clamps the **product** `D × I` (by max-channel, preserving hue),
+    // never the multiplier. So the cap below is a benilla choice, and it costs us twice:
     //
-    // What is left of the knot falls only on statics: `min(I,1)` puts an ADT doodad on lit ground at
-    // ×1.0 where the reference gives it ×2.5, so **doodads still read dimmer than the reference**.
-    // Cutting it is safe now that units are off the chain; before 0809 it would have landed every
-    // character at ×2.5, precisely the amplitude 0410 rejected.
+    //   1. **Brightness.** A lit ADT doodad commits ×1.0 where the reference gives ×2.5, so doodads
+    //      and characters in sun read dimmer than the reference. Still open — lifting it pushes a
+    //      sun-facing surface well past 1.0 (with an over-gamut sun, into green as well), which is a
+    //      world-wide look change and the director's call, not one to self-grade.
+    //   2. **Timing — fixed CPU-side (0821).** Because the cap sits on the multiplier, every target
+    //      from 2.5 down to 1.0 renders identically, so a unit ramping 2.5 → 0.5 spent its first
+    //      0.45 s (75 % of the chase) invisibly pinned at 1.0 and then dropped in 0.15 s. It read as a
+    //      dead pause then a snap — what the director reported walking sun → shade.
+    //      `entity_shade::LIT_T` now aims the LIT target at the value this cap can actually show
+    //      (1.0), so the chase moves only through visible range, at the reference's own
+    //      3.3333 intensity-units/s. The cap is a backstop here, not the thing the ramp fights.
+    //
+    // Two faces of one bug, and they unwind together: **cut `min(I, 1)` and `LIT_T` goes back to 0.0**
+    // so the full 2.5 → 0.5 sweep becomes visible on its own. Do not cut one alone. (Units are on this
+    // chain again — 0809's flat ×1.0 pin was wrong and 0814 reverted it; the null fallback that
+    // motivated it is real, but it is a lifecycle state we do not model.)
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);

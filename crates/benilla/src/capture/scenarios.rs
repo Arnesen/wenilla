@@ -140,45 +140,29 @@ pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 pub(super) const MAP_AZEROTH: u32 = 0;
 pub(super) const MAP_KALIMDOR: u32 = 1;
 
-/// THE golden baseline: six spots FRAMED BY THE DIRECTOR in the live client ([`/shot`], the
-/// numbers below verbatim from their `~/.benilla/shots.txt`) — the Northshire overlook toward the
-/// Abbey, a Stormwind canal view, Elwynn water, the Lion's Pride Inn common room, a Felwood hollow,
-/// and an Elwynn fence lying across the sun's shadow line — each at noon and at night, except the
-/// inn (which the clock barely reaches) and the fence, whose DAY cell keeps the director's own
-/// 10:24 because its subject is where the shadow line falls; see both below.
+/// THE golden baseline: **three spots FRAMED BY THE DIRECTOR, each at noon and at night — six
+/// captures, and that is the whole sweep.** A Stormwind canal view, Elwynn water, and a Felwood
+/// hollow on Kalimdor. The numbers below are verbatim from their `~/.benilla/shots.txt` ([`/shot`]).
 ///
-/// Ten landscape shots of maximal mutual difference. The old set was thirty, and the director judged the
-/// design bad: low-value repetition (four compass looks at one farmhouse, five frames from one
-/// Northshire camera, sixteen UI windows over the same backdrop), each one a real window popping
-/// open on their screen while they worked. The law is **a few spots chosen with the director, times
-/// a couple of day times**; everything else lives in [`ON_DEMAND`], invocable by name but out of the
-/// blessed sweep. (Decision 0632; ported from the sibling `substrate` fork's `notes/0025`, where the
-/// redesign was made and where it caught a real determinism bug — see `liquid::animate_liquid` — on
-/// its first run.)
+/// **Held at six on purpose (decision 0817).** 0632 cut a thirty-shot set down to six for exactly
+/// this reason and stated the law — *a few spots chosen with the director, times a couple of day
+/// times* — and then the set grew back to **twenty-one** one well-argued addition at a time: an
+/// interior, a second continent, a shadow-line fence, four creature cells, four chest cells, two
+/// indoor creature cells. Every one had a real case. The aggregate was 42 windows popping open on the
+/// director's screen per `selfcheck`, several of them not reproducible, and a standing invitation to
+/// spend sessions chasing harness ghosts — which is what happened (0810, 0815). The director's call:
+/// *"get rid of that shit, making more problems than it's helping… just keep the simple stuff we had
+/// before, 3 frames 2 times of day."*
 ///
-/// The first six were all EXTERIOR, all Azeroth, all Elwynn/Stormwind. The two spots added in
-/// decision 0743 are the two things that set of six could not photograph at all: the inside of a
-/// building (portal culling, the INT vertex bake, MOCV self-illum, MOLT point pools, props) and a
-/// second continent (a different tileset, fog palette, liquid type and horizon). Both were framed
-/// by the director after the agent's own framings of the same two subjects were judged bad — which
-/// is 0632's rule working exactly as intended.
+/// So growth is now the thing to resist, not to justify. **Nothing is deleted** — every evicted
+/// viewpoint is still capturable by name from [`ON_DEMAND`], which is where a subject being worked on
+/// belongs. A shot earns a place here only by the director putting it here.
+///
+/// The Northshire overlook toward the **Abbey** was 0632's shot 1 and is the one this set drops, at
+/// the director's instruction, in favour of the Felwood hollow — which covers strictly more: a second
+/// continent, its own tileset, fog palette, liquid type and WDL horizon, none of which the Elwynn
+/// spots can photograph at all.
 pub(super) const SCENARIOS: &[Scenario] = &[
-    Scenario {
-        name: "overlook-noon",
-        map: MAP_AZEROTH,
-        eye: OVERLOOK_EYE,
-        look: OVERLOOK_LOOK,
-        minute: 720,
-        ui: None,
-    },
-    Scenario {
-        name: "overlook-night",
-        map: MAP_AZEROTH,
-        eye: OVERLOOK_EYE,
-        look: OVERLOOK_LOOK,
-        minute: 0,
-        ui: None,
-    },
     Scenario {
         name: "canal-noon",
         map: MAP_AZEROTH,
@@ -212,19 +196,6 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         ui: None,
     },
     Scenario {
-        name: "inn-noon",
-        map: MAP_AZEROTH,
-        eye: INN_EYE,
-        look: INN_LOOK,
-        minute: 720,
-        ui: None,
-    },
-    // No `inn-night`: MEASURED at MAE 0.198 against `inn-noon`, 0.82 % of pixels — the room is lit
-    // by its hearth and candles, and the clock barely reaches it (the outdoor spots' own noon/night
-    // pairs differ by MAE 38-83 across ~100 % of the frame). A second window for 0.8 % of one shot
-    // is the low-value repetition 0632 exists to prevent, and noon is the richer of the two anyway:
-    // it has the daylight window AND the fire. Re-add it the day the interior light path earns it.
-    Scenario {
         name: "felwood-noon",
         map: MAP_KALIMDOR,
         eye: FELWOOD_EYE,
@@ -238,6 +209,138 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         eye: FELWOOD_EYE,
         look: FELWOOD_LOOK,
         minute: 0,
+        ui: None,
+    },
+];
+
+/// Director shot 1 — the Northshire overlook, north-east of the Abbey looking at it: terrain,
+/// trees, the Abbey WMO, stained glass, props.
+pub(super) const OVERLOOK_EYE: [f32; 3] = [-8955.0, -98.5, 91.1];
+pub(super) const OVERLOOK_LOOK: [f32; 3] = [-8912.9, -125.4, 87.7];
+
+/// Director shot 2 — the Stormwind canal (Cathedral Square side): water, bridge, walls, spires,
+/// far mountains.
+pub(super) const CANAL_EYE: [f32; 3] = [-8871.7, 724.6, 110.7];
+pub(super) const CANAL_LOOK: [f32; 3] = [-8836.7, 760.3, 112.3];
+
+/// Director shot 3 — Elwynn river, south-east of Northshire: open water dominant, shoreline blend,
+/// murloc camp, fog.
+pub(super) const WATER_EYE: [f32; 3] = [-9527.0, -310.6, 70.8];
+pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
+
+/// Director shot 4 (decision 0743) — INSIDE the Lion's Pride Inn at Goldshire, standing in the
+/// common room: the hearth (the MOCV-alpha self-illum bake), a daylight window, the lit chandelier,
+/// the stair run, floor boards and ceiling beams, and a room full of props. The sweep's only
+/// interior, and the only shot that exercises portal culling, the INT bake, the MOLT point pools
+/// and WMO props at all — the surface the ledger's dungeon reports live on, and the one B101's
+/// prop-cull regression (which hid the Blackrock lava falls) crossed unseen.
+///
+/// The agent's own interior framing (`inn-interior`, a tight crop of the kitchen hearth) was judged
+/// badly framed and stays in [`ON_DEMAND`]; this is the director's, and it frames the ROOM.
+///
+/// NB the camera must stand over a FLOOR FACE: over a floorless pocket the portal cull's down-ray
+/// reads "outside" and faithfully culls the containing group, which vanishes the room.
+pub(super) const INN_EYE: [f32; 3] = [-9471.4, 39.4, 59.9];
+pub(super) const INN_LOOK: [f32; 3] = [-9458.8, -7.5, 48.2];
+
+/// Director shot 6 (decision 0749) — an Elwynn rail fence lying ACROSS the sun's shadow boundary,
+/// at 10:24: the right-hand span is in full sun, the left-hand span in shade, and the same edge
+/// runs on across the road behind it. One frame holding **both** states of the MCSH sun term, on
+/// terrain and on a doodad at once, with the ramp visible as the hard line between them.
+///
+/// The lighting matrix (0746) samples the lit and shadowed lanes as SEPARATE cells at separate
+/// positions, so a regression that scaled both equally could pass both. Here the two states share
+/// one frame, one model and one texture, so only their DIFFERENCE can carry the shot — the control
+/// is inside the picture. It also lights the third lane neither matrix subject touches: a
+/// world-placed **doodad**, which takes its shade per-vertex at bake rather than through
+/// `entity_shade`'s per-object ramp.
+///
+/// Found by the director, who framed it because they had already spotted it was "both lit and unlit
+/// from sun, half half".
+pub(super) const FENCE_EYE: [f32; 3] = [-9511.9, -4.0, 61.9];
+pub(super) const FENCE_LOOK: [f32; 3] = [-9552.0, 18.6, 42.4];
+
+/// Director shot 5 (decision 0743) — a Felwood hollow on **Kalimdor** (`MAP_KALIMDOR`): the
+/// corrupted forest floor's root mat, a stand of emissive `felwoodmushroom` doodads, a pool of
+/// green sludge (a liquid type no other golden shot contains), the vast trunks behind, and the
+/// zone's sick-green fog and light palette.
+///
+/// The sweep's only shot outside Azeroth and outside the Elwynn/Stormwind palette — until this one
+/// landed, a fog, tileset, WDL-horizon or per-map lighting regression anywhere else in the world
+/// had nowhere to show up. It is also what forced [`Scenario::map`]: this spot's ADT tile
+/// (`33_24`) exists in Azeroth too, empty, so on the old table it would have photographed a void.
+pub(super) const FELWOOD_EYE: [f32; 3] = [4060.9, -944.3, 256.8];
+pub(super) const FELWOOD_LOOK: [f32; 3] = [4014.0, -954.4, 242.9];
+
+// ---------------------------------------------------------------------------------------------
+// The LIGHTING MATRIX (decision 0744) — one subject, three lanes, two sides.
+//
+// The golden spots are landscape: they photograph terrain, buildings and water, and (captures being
+// server-less) contain no creature or GameObject at all. So the *object* light path — the one every
+// creature, player, pet and chest in the game is lit by — had no regression coverage whatsoever,
+// while the bug ledger's unit reports (blacked-out textures, mis-lit NPCs across city WMOs) sit
+// squarely on it.
+//
+// The three positions are the three lanes an object's light can take, and they were CHOSEN FROM THE
+// DATA, not by eye — `WOW_LIGHT_AT`/`WOW_LIGHT_GRID` (`wmo_portal::audit::light_probe`) reports the
+// lane and the terrain MCSH bit at any world point:
+//
+//   SUN    (-9500, 56)   terrain z 56.48   MCSH false  lane exterior-on-terrain  — sun term at full
+//   SHADE  (-9500, 44)   terrain z 55.95   MCSH true   lane exterior-on-terrain  — sun term dimmed
+//   INDOOR (-9469.4, 31.9)  terrain z none  zone-text indoor 5, lane BAKE g05    — no sun at all
+//
+// SUN and SHADE are twelve yards apart on the same open ground, so between that pair the ONLY
+// changed input is the baked shadow bit — exactly the discriminator `entity_shade` ramps on
+// (2.5 lit → 0.5 shadowed). INDOOR stands in the Goldshire inn's common room, where the interior
+// classifier owns the tag instead and the sun never reaches.
+//
+// Two sides per lane, straddling the light: the game's LIGHTING sun is near-fixed at azimuth 45°
+// (`sun::follow`), so `front` puts the camera on that bearing (sun behind us — the subject's lit
+// face) and `rear` puts it opposite (the shadowed face). Indoors there is no sun, so the pair simply
+// samples the bake from two sides. Cameras sit at a fixed offset off the subject's feet, eye a
+// little above and aimed at the body, so every cell frames the subject identically and a diff is
+// about light, never framing.
+
+/// Lighting-matrix subject positions (feet, raw WoW coords) — see the note above.
+pub(super) const SUBJECT_SUN: [f32; 3] = [-9500.0, 56.0, 56.48];
+pub(super) const SUBJECT_SHADE: [f32; 3] = [-9500.0, 44.0, 55.95];
+pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
+
+/// Every remaining named viewpoint — the UI look-pass fixtures, the sun/moon/sky regression
+/// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
+/// debugging and look passes, but NOT part of the blessed baseline sweep.
+pub(super) const ON_DEMAND: &[Scenario] = &[
+    // ---- Evicted from the blessed sweep by decision 0817, NOT deleted ----
+    // The sweep had grown from 0632's six to twenty-one, i.e. 42 windows on the director's screen per
+    // `selfcheck`, and the director cut it back to three spots x two day times. Everything below this
+    // note used to be in SCENARIOS and is still capturable by name — which is the right home for a
+    // subject somebody is actively working on. `chest-shade-{front,rear}` additionally measured NOT
+    // reproducible on the sweep that prompted the cut (MAE 2.721 / 2.649, ~7.8 % of pixels, two runs
+    // of one build) — same coplanar-batch draw-order defect as `chest-indoor-*` below (0815 Open).
+    Scenario {
+        name: "overlook-noon",
+        map: MAP_AZEROTH,
+        eye: OVERLOOK_EYE,
+        look: OVERLOOK_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    Scenario {
+        name: "overlook-night",
+        map: MAP_AZEROTH,
+        eye: OVERLOOK_EYE,
+        look: OVERLOOK_LOOK,
+        minute: 0,
+        ui: None,
+    },
+    // The sweep's only interior until 0817 moved it here; no `inn-night` (measured MAE 0.198 against
+    // `inn-noon` — the room is lit by hearth and candles, so the clock barely reaches it).
+    Scenario {
+        name: "inn-noon",
+        map: MAP_AZEROTH,
+        eye: INN_EYE,
+        look: INN_LOOK,
+        minute: 720,
         ui: None,
     },
     // The day cell keeps the director's own minute (10:24) rather than the sweep's noon: the subject
@@ -375,105 +478,6 @@ pub(super) const SCENARIOS: &[Scenario] = &[
             at: SUBJECT_SHADE,
         }),
     },
-];
-
-/// Director shot 1 — the Northshire overlook, north-east of the Abbey looking at it: terrain,
-/// trees, the Abbey WMO, stained glass, props.
-pub(super) const OVERLOOK_EYE: [f32; 3] = [-8955.0, -98.5, 91.1];
-pub(super) const OVERLOOK_LOOK: [f32; 3] = [-8912.9, -125.4, 87.7];
-
-/// Director shot 2 — the Stormwind canal (Cathedral Square side): water, bridge, walls, spires,
-/// far mountains.
-pub(super) const CANAL_EYE: [f32; 3] = [-8871.7, 724.6, 110.7];
-pub(super) const CANAL_LOOK: [f32; 3] = [-8836.7, 760.3, 112.3];
-
-/// Director shot 3 — Elwynn river, south-east of Northshire: open water dominant, shoreline blend,
-/// murloc camp, fog.
-pub(super) const WATER_EYE: [f32; 3] = [-9527.0, -310.6, 70.8];
-pub(super) const WATER_LOOK: [f32; 3] = [-9499.4, -351.3, 61.4];
-
-/// Director shot 4 (decision 0743) — INSIDE the Lion's Pride Inn at Goldshire, standing in the
-/// common room: the hearth (the MOCV-alpha self-illum bake), a daylight window, the lit chandelier,
-/// the stair run, floor boards and ceiling beams, and a room full of props. The sweep's only
-/// interior, and the only shot that exercises portal culling, the INT bake, the MOLT point pools
-/// and WMO props at all — the surface the ledger's dungeon reports live on, and the one B101's
-/// prop-cull regression (which hid the Blackrock lava falls) crossed unseen.
-///
-/// The agent's own interior framing (`inn-interior`, a tight crop of the kitchen hearth) was judged
-/// badly framed and stays in [`ON_DEMAND`]; this is the director's, and it frames the ROOM.
-///
-/// NB the camera must stand over a FLOOR FACE: over a floorless pocket the portal cull's down-ray
-/// reads "outside" and faithfully culls the containing group, which vanishes the room.
-pub(super) const INN_EYE: [f32; 3] = [-9471.4, 39.4, 59.9];
-pub(super) const INN_LOOK: [f32; 3] = [-9458.8, -7.5, 48.2];
-
-/// Director shot 6 (decision 0749) — an Elwynn rail fence lying ACROSS the sun's shadow boundary,
-/// at 10:24: the right-hand span is in full sun, the left-hand span in shade, and the same edge
-/// runs on across the road behind it. One frame holding **both** states of the MCSH sun term, on
-/// terrain and on a doodad at once, with the ramp visible as the hard line between them.
-///
-/// The lighting matrix (0746) samples the lit and shadowed lanes as SEPARATE cells at separate
-/// positions, so a regression that scaled both equally could pass both. Here the two states share
-/// one frame, one model and one texture, so only their DIFFERENCE can carry the shot — the control
-/// is inside the picture. It also lights the third lane neither matrix subject touches: a
-/// world-placed **doodad**, which takes its shade per-vertex at bake rather than through
-/// `entity_shade`'s per-object ramp.
-///
-/// Found by the director, who framed it because they had already spotted it was "both lit and unlit
-/// from sun, half half".
-pub(super) const FENCE_EYE: [f32; 3] = [-9511.9, -4.0, 61.9];
-pub(super) const FENCE_LOOK: [f32; 3] = [-9552.0, 18.6, 42.4];
-
-/// Director shot 5 (decision 0743) — a Felwood hollow on **Kalimdor** (`MAP_KALIMDOR`): the
-/// corrupted forest floor's root mat, a stand of emissive `felwoodmushroom` doodads, a pool of
-/// green sludge (a liquid type no other golden shot contains), the vast trunks behind, and the
-/// zone's sick-green fog and light palette.
-///
-/// The sweep's only shot outside Azeroth and outside the Elwynn/Stormwind palette — until this one
-/// landed, a fog, tileset, WDL-horizon or per-map lighting regression anywhere else in the world
-/// had nowhere to show up. It is also what forced [`Scenario::map`]: this spot's ADT tile
-/// (`33_24`) exists in Azeroth too, empty, so on the old table it would have photographed a void.
-pub(super) const FELWOOD_EYE: [f32; 3] = [4060.9, -944.3, 256.8];
-pub(super) const FELWOOD_LOOK: [f32; 3] = [4014.0, -954.4, 242.9];
-
-// ---------------------------------------------------------------------------------------------
-// The LIGHTING MATRIX (decision 0744) — one subject, three lanes, two sides.
-//
-// The golden spots are landscape: they photograph terrain, buildings and water, and (captures being
-// server-less) contain no creature or GameObject at all. So the *object* light path — the one every
-// creature, player, pet and chest in the game is lit by — had no regression coverage whatsoever,
-// while the bug ledger's unit reports (blacked-out textures, mis-lit NPCs across city WMOs) sit
-// squarely on it.
-//
-// The three positions are the three lanes an object's light can take, and they were CHOSEN FROM THE
-// DATA, not by eye — `WOW_LIGHT_AT`/`WOW_LIGHT_GRID` (`wmo_portal::audit::light_probe`) reports the
-// lane and the terrain MCSH bit at any world point:
-//
-//   SUN    (-9500, 56)   terrain z 56.48   MCSH false  lane exterior-on-terrain  — sun term at full
-//   SHADE  (-9500, 44)   terrain z 55.95   MCSH true   lane exterior-on-terrain  — sun term dimmed
-//   INDOOR (-9469.4, 31.9)  terrain z none  zone-text indoor 5, lane BAKE g05    — no sun at all
-//
-// SUN and SHADE are twelve yards apart on the same open ground, so between that pair the ONLY
-// changed input is the baked shadow bit — exactly the discriminator `entity_shade` ramps on
-// (2.5 lit → 0.5 shadowed). INDOOR stands in the Goldshire inn's common room, where the interior
-// classifier owns the tag instead and the sun never reaches.
-//
-// Two sides per lane, straddling the light: the game's LIGHTING sun is near-fixed at azimuth 45°
-// (`sun::follow`), so `front` puts the camera on that bearing (sun behind us — the subject's lit
-// face) and `rear` puts it opposite (the shadowed face). Indoors there is no sun, so the pair simply
-// samples the bake from two sides. Cameras sit at a fixed offset off the subject's feet, eye a
-// little above and aimed at the body, so every cell frames the subject identically and a diff is
-// about light, never framing.
-
-/// Lighting-matrix subject positions (feet, raw WoW coords) — see the note above.
-pub(super) const SUBJECT_SUN: [f32; 3] = [-9500.0, 56.0, 56.48];
-pub(super) const SUBJECT_SHADE: [f32; 3] = [-9500.0, 44.0, 55.95];
-pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
-
-/// Every remaining named viewpoint — the UI look-pass fixtures, the sun/moon/sky regression
-/// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
-/// debugging and look passes, but NOT part of the blessed baseline sweep.
-pub(super) const ON_DEMAND: &[Scenario] = &[
     // The chest INDOORS is out of the blessed sweep and in here instead: measured over two runs of
     // one build it is not reproducible (front MAE 1.551 / 9.2 % of pixels, rear 0.529 / 7.6 %), and
     // the diff is the whole body shifting brightness in perfect registration — LIGHT, not pose. The

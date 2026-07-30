@@ -27,9 +27,9 @@ use crate::terrain::WowModelMaterial;
 
 use super::framing::{attachment_point, DIAG_TO_VERT};
 use super::{
-    aim, body_frame, new_target_image, spawn_booth_model, Booth, BoothBillboardSpec, BoothCam,
-    BoothLight, BoothMotion, BoothPart, BoothRider, Booths, PortraitImages, PortraitSource,
-    GLUE_LAYER,
+    aim, body_frame, new_target_image, spawn_booth_effects, spawn_booth_model, Booth,
+    BoothBillboardSpec, BoothCam, BoothEffects, BoothLight, BoothMotion, BoothPart, BoothRider,
+    Booths, PortraitImages, PortraitSource, GLUE_LAYER,
 };
 
 /// The glue booth slot token (its key in [`super::PortraitImages`] / [`Booths`]).
@@ -293,28 +293,50 @@ pub(crate) struct PreviewRider {
     pub(crate) offset: Vec3,
 }
 
-/// One character billboard batch on the assembled preview — the undead/night-elf **eye-glow** (the
-/// world path's camera-facing card, [`crate::billboard`]). The booth is a separate camera, so the
-/// glow can't ride the world card system; it's rebuilt here for the booth's own camera
-/// ([`super::booth::face_booth_billboards`]). Its centred quad, fullbright material, and the
-/// billboard bone/flag it rides.
+/// One **camera-facing batch** on the assembled preview — the world path's billboard card
+/// ([`crate::billboard`]). The booth is a separate camera, so such a batch can't ride the world card
+/// system; it's rebuilt here for the booth's own camera ([`super::booth::face_booth_billboards`]).
+/// Its centred quad, its material, and the billboard bone/flag it rides.
+///
+/// Three sources, all seated the same way — under the body bone's joint at [`Self::offset`]:
+///
+/// - The character's own **eye-glow** (undead/night-elf, geoset 302). Seated on its billboard
+///   bone's joint, whose frame already bakes the bone pivot (the 0130 rig identity), so its offset
+///   is `ZERO` — the rigged case, exactly like the world's `BillboardCard::following_joint`.
+/// - An **equipped item's** camera-facing batch — a wand's gem, a glowing rune on a weapon. 270 of
+///   the 2681 `Item\` models author one. An item model gets no rig here, so its offset carries the
+///   attach point *and* the batch's own model-local pivot.
+/// - An **item glow's** camera-facing batch (decision 0805) — `Spells\Enchantments\Sparkle_A.m2` is
+///   exactly one such quad and nothing else, and `ItemVisuals` 28 (10 item displays) hangs it. Same
+///   rig-less seat, plus the glow slot's offset on the weapon model.
 #[derive(Clone)]
 pub(crate) struct PreviewBillboard {
     pub(crate) mesh: Handle<Mesh>,
     pub(crate) material: Handle<WowModelMaterial>,
     pub(crate) bone: u16,
+    /// Where the card's **pivot** sits in that bone's joint frame (Bevy axes). `ZERO` for a batch of
+    /// the rigged body itself — its joint already bakes the pivot.
+    pub(crate) offset: Vec3,
     pub(crate) kind: benilla_formats::BillboardKind,
 }
 
-/// One **item glow** on the assembled preview (decision 0805): the `Spells\Enchantments\*.mdx`
-/// effect a held weapon's `ItemVisuals` id hangs on the weapon's own attachment point. Carried as
-/// the glow model's particle emitters — all but three of the 35 shipped glow models are pure
-/// emitters — plus the composed seat: the BODY bone the weapon rides, and the offset of the
-/// weapon's own attachment point expressed in that bone's frame. The booth spawns one host there
-/// and owns the emitters off it, exactly as [`sync_glue_scene`] does for a backdrop's braziers; a
-/// glow's rare geometry rides the ordinary [`PreviewRider`] list at the same seat.
+/// One **effect-bearing model** on the assembled preview, carried as its particle emitters plus the
+/// composed seat: the BODY bone it rides and its offset expressed in that bone's frame. The booth
+/// spawns one host there and owns the emitters off it, exactly as [`sync_glue_scene`] does for a
+/// backdrop's braziers; any geometry the same model carries rides the ordinary [`PreviewRider`]
+/// list at the same seat.
+///
+/// Two sources produce these, and the booth treats them identically:
+///
+/// - **An equipped item's own emitters** — the R14 PVP pauldron's `SPARKLE` twinkle, the held
+///   torch's flame (decision 0813; `#bugs` B118 is *this* case, and the select screen showed
+///   nothing at all until it was carried here). Seat = the body's attach point for that slot.
+/// - **An item glow** (decision 0805) — the `Spells\Enchantments\*.mdx` effect a held weapon's
+///   `ItemVisuals` id hangs on the weapon's own attachment point; all but three of the 35 shipped
+///   glow models are pure emitters. Seat = the body attach point **plus** the slot's offset on the
+///   weapon model.
 #[derive(Clone)]
-pub(crate) struct PreviewGlow {
+pub(crate) struct PreviewEffects {
     pub(crate) bone: u16,
     pub(crate) offset: Vec3,
     pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
@@ -331,10 +353,12 @@ pub(crate) struct GluePreviewBake {
     pub(crate) display_id: u32,
     pub(crate) parts: Vec<PreviewPart>,
     pub(crate) riders: Vec<PreviewRider>,
-    /// The held items' glow effects (decision 0805) — see [`PreviewGlow`].
-    pub(crate) glows: Vec<PreviewGlow>,
-    /// The look's character billboard batches (the eye-glow) — geoset-gated like `parts`, but seated
-    /// on their billboard bone's joint and camera-faced by the booth, not drawn as plain body meshes.
+    /// Every emitter-bearing model the look wears — the equipped items' own effects (decision 0813)
+    /// and the held items' glows (decision 0805). See [`PreviewEffects`].
+    pub(crate) effects: Vec<PreviewEffects>,
+    /// The look's camera-facing batches (the eye-glow, a wand's gem, a glow model's quad) — seated at
+    /// their seat under a body joint and faced to the booth camera, not drawn as plain meshes. See
+    /// [`PreviewBillboard`].
     pub(crate) billboards: Vec<PreviewBillboard>,
     /// Per-hand weapon grip `[right, left]` — a hand whose attach point holds a weapon closes into the
     /// `HandsClosed` finger pose (wow-re `hand-grip-mechanism.md`). The builder knows the held items'
@@ -398,6 +422,9 @@ pub(super) fn spawn_glue_booth(
             // active exactly while a glue scene shows (the scene is LIVE — looping animation,
             // global sequences, particle emitters — so it renders continuously, unlike the stills).
             wake: 0,
+            // …which is `live_scene` in the gate, keyed on a scene being up rather than on this
+            // flag: the glue booth is live from the moment a screen shows, before any bake.
+            live: false,
             pending: Vec::new(),
         },
     );
@@ -827,8 +854,9 @@ pub(super) fn sync_glue_booth(
                 offset: r.offset,
             })
             .collect();
-        // The eye-glow billboards, relit onto the booth's buffer like everything else (harmless —
-        // the glow batch is fullbright, so it ignores the buffer; the variant just keeps parity).
+        // The camera-facing batches (the eye-glow, a wand's gem, a glow model's quad), relit onto the
+        // booth's buffer like everything else (harmless where the batch is fullbright — the variant
+        // just keeps parity).
         let booth_billboards: Vec<BoothBillboardSpec> = bake
             .billboards
             .iter()
@@ -836,6 +864,7 @@ pub(super) fn sync_glue_booth(
                 mesh: b.mesh.clone(),
                 material: relight(&b.material, &mut scene, &mut booth_light, &mut materials),
                 bone: b.bone,
+                offset: b.offset,
                 kind: b.kind,
             })
             .collect();
@@ -855,53 +884,34 @@ pub(super) fn sync_glue_booth(
             bake.grip,         // close each hand that draws a weapon (the ref's paperdoll rule)
             &booth_billboards,
         );
-        // The held items' glows (decision 0805): one host per glow at its weapon's attachment
-        // point, with the effect model's emitters owned by it — the scene-brazier recipe (0539
-        // §5), so they billboard against THIS camera and fog on the scene's own light. Children
-        // of the booth root through their joint, so the next re-bake's `despawn_related` reaps
-        // them. The reference glows a weapon at character select through the very same attach
-        // primitive it uses in the world (`0x472c91` → `0x47a0c0` → `0x4798c0`), and the enum
-        // carries no enchant, so what shows here is the item's intrinsic visual only.
-        let mut glow_emitters = 0usize;
-        for glow in &bake.glows {
-            let Some(&joint) = joints.get(glow.bone as usize) else {
-                continue;
-            };
-            let host = commands
-                .spawn((
-                    Transform::from_translation(glow.offset),
-                    Visibility::default(),
-                    ChildOf(joint),
-                    booth.layer.clone(),
-                ))
-                .id();
-            for em in &glow.emitters {
-                let Some(e) = crate::particles::spawn_emitter(
-                    &mut commands,
-                    em,
-                    Transform::IDENTITY,
-                    Some((host, [0.0; 3])), // whole-model owner: a glow model poses at rest
-                    Some(host),             // an attached model — it swings with the weapon
-                    Some(host),
-                    crate::particles::EmitClock::Pinned, // the glow loops forever
-                ) else {
-                    continue;
-                };
-                commands
-                    .entity(e)
-                    .insert((booth.layer.clone(), ChildOf(host)));
-                if let Some(buf) = &scene_buf {
-                    commands
-                        .entity(e)
-                        .insert(crate::particles::buffer::EffectLightOverride(buf.clone()));
-                }
-                glow_emitters += 1;
-            }
-        }
-        if glow_emitters > 0 {
+        // The worn items' effects: an equipped item model's OWN emitters (decision 0813 — the R14
+        // pauldron's sparkle, the torch's flame; `#bugs` B118) and the held weapons' `ItemVisuals`
+        // glows (decision 0805). One host per effect model at its seat, emitters owned by it — the
+        // scene-brazier recipe (0539 §5), so they draw against THIS camera and fog on the scene's own
+        // light. Children of the booth root through their joint, so the next re-bake's
+        // `despawn_related` reaps them. The reference reaches both through the very same attach
+        // primitive it uses in the world (`0x472c91` → `0x47a0c0` → `0x4798c0`), and the enum carries
+        // no enchant, so what shows here is each item's intrinsic effects only.
+        let (fx_emitters, fx_frames) = spawn_booth_effects(
+            &mut commands,
+            &joints,
+            &booth.layer,
+            scene_buf.as_ref(),
+            &bake
+                .effects
+                .iter()
+                .map(|fx| BoothEffects {
+                    bone: fx.bone,
+                    offset: fx.offset,
+                    emitters: fx.emitters.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        if fx_emitters > 0 {
             info!(
-                "glue booth: {glow_emitters} item-glow emitter(s) up on {} glow instance(s)",
-                bake.glows.len()
+                "glue booth: {fx_emitters} item emitter(s) up on {} effect model(s), \
+                 {fx_frames} on a billboard frame",
+                bake.effects.len()
             );
         }
         // The character-only fallback framing (no scene up — art missing / still loading): the

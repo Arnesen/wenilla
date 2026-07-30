@@ -439,9 +439,31 @@ mod tests {
         }
     }
 
-    /// Bake against sequence file slot `index` with band `band`.
+    /// Bake against a **looping** sequence file slot `index` with band `band`. The clamped clock
+    /// (the one-shot band that must hold its tail) is [`a_clamped_band_holds_its_faded_tail`].
     fn bake_at(t: &M2ScalarTrack, index: usize, band: (u32, u32)) -> Option<ScalarAnim> {
-        bake_scalar_anim(t, &[], Some(SeqSlot { index, band }))
+        bake_scalar_anim(
+            t,
+            &[],
+            Some(SeqSlot {
+                index,
+                band,
+                looping: true,
+            }),
+        )
+    }
+
+    /// Bake against a **clamped** (one-shot) sequence file slot — the Death-band shape.
+    fn bake_at_clamped(t: &M2ScalarTrack, index: usize, band: (u32, u32)) -> Option<ScalarAnim> {
+        bake_scalar_anim(
+            t,
+            &[],
+            Some(SeqSlot {
+                index,
+                band,
+                looping: false,
+            }),
+        )
     }
 
     /// The bake's contribution gate: keyless and constant-1 tracks vanish; a dimming constant is
@@ -570,6 +592,95 @@ mod tests {
         assert_eq!(a.sample(0.5), 0.0, "past the last key: hold it");
     }
 
+    /// **The Death-band clock** — the AirElemental shape, synthesized. A one-shot (clamped) band
+    /// whose transparency steps `1 → 0` partway through: the body dissolves, and the clock then
+    /// PARKS at (or just past) the band end for the whole life of the corpse. The baked loop must
+    /// hold that faded tail there.
+    ///
+    /// It used to wrap. Bevy's `ActiveAnimation::update` returns early once a
+    /// `RepeatAnimation::Never` clip completes — *before* its own modulo — so a finished Death clip
+    /// parks at `seek_time >= clip_duration == period`, and `t mod period` aliased that straight
+    /// back onto the band's opening value: one frame after the elemental had fully dissolved, its
+    /// whole body snapped back to full opacity and stayed there, frozen in mid-air, until the
+    /// server destroyed the corpse. 74 models author an aliasing Death band (elementals, voidwalker,
+    /// shade, ghost, wisp, banshee, lich, Ragnaros, Thunderaan, the totems…), 327 an aliasing
+    /// one-shot band of any kind.
+    #[test]
+    fn a_clamped_band_holds_its_faded_tail() {
+        // Band 43333..46333 (3 s), the elemental's Death; the body's weight steps to 0 at 867 ms.
+        let t = ranged(0, &[(3333, 1.0), (44200, 0.0)], &[(0, 1)]);
+        let a = bake_at_clamped(&t, 0, (43333, 46333)).expect("the band moves, so it bakes");
+        assert!(!a.wrap, "a one-shot band clamps its clock");
+        assert_eq!(a.sample(0.0), 1.0, "the body is still there as death opens");
+        assert_eq!(
+            a.sample(2.999),
+            0.0,
+            "…and gone by the end of the animation"
+        );
+        assert_eq!(a.sample(3.0), 0.0, "t == period must not alias to the head");
+        assert_eq!(
+            a.sample(3.008),
+            0.0,
+            "where a finished Bevy clip actually parks"
+        );
+        assert_eq!(a.sample(600.0), 0.0, "still gone a corpse-decay later");
+    }
+
+    /// The same band authored as a LOOPING sequence keeps the modulo wrap — the kernel re-fires a
+    /// windowed track every pass, which is what makes a cyclic flicker cycle.
+    #[test]
+    fn a_looping_band_still_wraps() {
+        let t = ranged(0, &[(3333, 1.0), (44200, 0.0)], &[(0, 1)]);
+        let a = bake_at(&t, 0, (43333, 46333)).expect("the band moves, so it bakes");
+        assert!(a.wrap, "a looping band wraps its clock");
+        assert_eq!(a.sample(2.999), 0.0, "first pass: faded out");
+        assert_eq!(a.sample(3.0), 1.0, "second pass: the window re-fires");
+    }
+
+    /// The real `AirElemental.m2`, straight off the client data — the model the bug was reported
+    /// on. Its Death band (file slot 10) fades every body batch to 0, and the parked clock must
+    /// still read 0 there. Skips when the client data isn't present.
+    #[test]
+    fn air_elemental_death_leaves_no_opaque_body() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Creature\\AirElemental\\AirElemental.m2")
+            .expect("read AirElemental.m2");
+        let subs = super::super::parse_m2_render_submeshes(&bytes, "", &[]).expect("parse");
+        // Slot 10 = anim id 1 (Death), clamped, band 43333..46333 → period exactly 3.0 s.
+        const DEATH: usize = 10;
+        let faded: Vec<usize> = subs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.alpha_anim
+                    .as_ref()
+                    .is_some_and(|a| a.sample(Some(DEATH), 2.999) <= 0.0)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            faded.len() > 20,
+            "the death animation hides most of the body by its end, got {}",
+            faded.len()
+        );
+        for i in faded {
+            let a = subs[i].alpha_anim.as_ref().unwrap();
+            for t in [3.0f32, 3.008, 10.0, 600.0] {
+                assert_eq!(
+                    a.sample(Some(DEATH), t),
+                    0.0,
+                    "batch {i} came back at t={t} — the parked clock aliased to the band head"
+                );
+            }
+        }
+    }
+
     /// Step interpolation holds each key until the next (the kernel's `interp == 0` leg).
     #[test]
     fn step_tracks_hold_between_keys() {
@@ -583,6 +694,7 @@ mod tests {
         Some(ScalarAnim {
             period: 0.0,
             step: false,
+            wrap: true,
             keys: vec![(0.0, v)],
         })
     }

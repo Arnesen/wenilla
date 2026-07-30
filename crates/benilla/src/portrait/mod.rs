@@ -80,11 +80,14 @@ mod framing;
 pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
 use framing::{body_frame, frame, PORTRAIT_FOV};
 mod booth;
-use booth::{spawn_booth_model, BoothBillboardSpec, BoothMotion, BoothPart, BoothRider};
+use booth::{
+    spawn_booth_effects, spawn_booth_model, BoothBillboardSpec, BoothEffects, BoothMotion,
+    BoothPart, BoothRider,
+};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard, PreviewGlow,
-    PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
+    CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard,
+    PreviewEffects, PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
 use light::{material_variant, model_pane_light_rows, studio_light_rows, BoothLight};
@@ -161,6 +164,11 @@ pub(crate) struct PortraitPart {
 /// sits — the body bone it rides and the attach-point offset under that bone. The posed booth
 /// seats the rider under its throwaway skeleton's joint (so it rides the Stand pose exactly like
 /// the world instance rides its gait); the ref resets the attach *sockets* the same way (RE C3).
+///
+/// It also rides a **mirror-only carrier** — a marker child that draws nothing — where the world
+/// geometry it names is not a unit descendant we can stamp: an item glow's own render batches, which
+/// the shared effect lane spawns under its own rig ([`crate::entities::item_glow`], decision 0822).
+/// A booth bakes those at the bind pose, like any other rider.
 #[derive(Component)]
 pub(crate) struct PortraitRider {
     pub(crate) static_mesh: Handle<Mesh>,
@@ -171,21 +179,83 @@ pub(crate) struct PortraitRider {
     pub(crate) offset: Vec3,
 }
 
-/// Stamped on a lightweight **anchor child** the attach path plants under a unit for each of its
-/// character billboard batches — the undead/night-elf **eye-glow** (geoset 302 / geoset 0, a
-/// camera-facing fullbright quad on the eye bone). The visible world card is a *root-spawned*
-/// entity ([`crate::billboard::BillboardCard`]), never a unit descendant, so it can't be mirrored;
-/// this marker rides the unit's tree purely so the portrait / paper-doll booths (which mirror the
-/// unit's dressed descendants) can rebuild the glow as a booth card ([`BoothBillboardSpec`] +
+/// Stamped on a lightweight **anchor child** the attach path plants under a unit for each
+/// camera-facing batch it dresses in. The visible world card is a *root-spawned* entity
+/// ([`crate::billboard::BillboardCard`]), never a unit descendant, so it can't be mirrored; this
+/// marker rides the unit's tree purely so the portrait / paper-doll booths (which mirror the unit's
+/// dressed descendants) can rebuild the batch as a booth card ([`BoothBillboardSpec`] +
 /// [`booth::face_booth_billboards`]) — the same reconstruction the char-create glue path does from
-/// its own parts. Carries the centred quad, its fullbright material, and the billboard bone/flag.
+/// its own parts ([`PreviewBillboard`]). Carries the centred quad, its material, where it sits, and
+/// the billboard flag.
+///
+/// Three sources plant one, exactly as on the glue path (decision 0822):
+///
+/// - The character's own **eye-glow** (undead/night-elf, geoset 302 / geoset 0 — a fullbright quad
+///   on the eye bone), planted by [`crate::entities::attach`].
+/// - An **equipped item's** camera-facing batch — a wand's gem, the held torch's `GLOWWHITE32` halo
+///   (270 of the 2681 `Item\` models author one), planted by
+///   [`crate::entities::equipment`]'s attach.
+/// - An **item glow's** batch (decision 0805) — `Spells\Enchantments\Sparkle_A.m2` is one additive
+///   quad and nothing else — planted by [`crate::entities::item_glow`].
 #[derive(Component)]
 pub(crate) struct PortraitBillboard {
     pub(crate) mesh: Handle<Mesh>,
     pub(crate) material: Handle<WowModelMaterial>,
-    /// The billboard bone (the eye bone) whose booth joint the card seats on.
+    /// The BODY bone whose booth joint the card seats on — the eye bone for the character's own
+    /// glow, the item's attach-point bone for anything an item wears.
     pub(crate) bone: u16,
+    pub(crate) seat: PortraitSeat,
     pub(crate) kind: benilla_formats::BillboardKind,
+}
+
+/// Whose model a mirrored camera-facing batch belongs to — which decides both where its pivot comes
+/// from and whether a *mounted* unit's booth keeps it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum PortraitSeat {
+    /// A batch of the **rigged host model** itself (the eye-glow). Its bone's joint frame already
+    /// bakes the bone pivot (the 0130 rig identity), so it needs no offset — and it belongs to that
+    /// model's body, so a mount's own glow card prunes with the mount's meshes (a portrait shows the
+    /// rider alone, never the horse — decision 0441).
+    Body,
+    /// A batch of a **rig-less rider** — an equipped item's, an item glow's — at its seat in the
+    /// bone's joint frame (Bevy axes): the attach point **plus the batch's own model-local pivot**,
+    /// because with no rig nothing else will bake that pivot. Collected like a [`PortraitRider`]
+    /// whatever the mount state: while mounted, the character's own joints re-root INSIDE the mount
+    /// subtree, and the rider's gear must survive that.
+    Rider(Vec3),
+}
+
+impl PortraitSeat {
+    /// The offset a booth seats this batch at under its bone's joint.
+    pub(crate) fn offset(self) -> Vec3 {
+        match self {
+            PortraitSeat::Body => Vec3::ZERO,
+            PortraitSeat::Rider(at) => at,
+        }
+    }
+}
+
+/// Stamped on an **effect-bearing model** riding a unit — the equipped item whose own emitters are
+/// its whole look (the R14 PVP pauldron's `SPARKLE` twinkle, the held torch's flame — decision 0813,
+/// `#bugs` B118) and the `ItemVisuals` glow a held weapon hangs on its own attachment points
+/// (decision 0805). The world emitters are *free* entities the owner contract walks
+/// ([`crate::particles::spawn_emitter`]), never unit descendants, so — like [`PortraitBillboard`] —
+/// this marker is how a booth learns they exist at all: the mirror carries the emitter records plus
+/// the composed seat, and the booth spawns its own copies against its own camera
+/// ([`booth::spawn_booth_effects`]). The glue path's [`PreviewEffects`] is the same carry assembled
+/// from data instead of mirrored from entities.
+///
+/// Which booths act on it is a *fidelity* split, not a cost one — see
+/// [`booth::spawn_booth_effects`]: the body panes are live `<PlayerModel>` widgets in the reference,
+/// the round portraits a one-shot cached bake.
+#[derive(Component)]
+pub(crate) struct PortraitEffects {
+    /// The BODY bone whose booth joint the effect model's host seats on.
+    pub(crate) bone: u16,
+    /// The host's offset in that bone's joint frame (Bevy axes) — the item's attach point, plus the
+    /// glow slot's offset on the item's own model when this is a glow.
+    pub(crate) offset: Vec3,
+    pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
 }
 
 /// What a portrait slot currently shows — the booth's live bake, or the ref's 2D stand-in file
@@ -241,10 +311,50 @@ impl Default for InspectBooth {
     }
 }
 
-/// The key identifying what a booth currently has baked: the (mesh, material) identity of every
-/// mirrored [`PortraitPart`]. Any change in the unit's dressed look (gear swap, appearance refresh,
-/// different unit) changes the key → re-bake.
-type PartsKey = Vec<(AssetId<Mesh>, AssetId<WowModelMaterial>)>;
+/// The key identifying what a booth currently has baked. Any change in the unit's dressed look
+/// (gear swap, appearance refresh, different unit) changes it → re-bake.
+#[derive(PartialEq)]
+struct LookKey {
+    /// The (mesh, material) identity of every mirrored draw — [`PortraitPart`],
+    /// [`PortraitRider`], [`PortraitBillboard`].
+    draws: Vec<(AssetId<Mesh>, AssetId<WowModelMaterial>)>,
+    /// One entry per mirrored [`PortraitEffects`]: its seat (bone + offset bits) and how many
+    /// emitters it carries. Effects carry no asset handle to key on, and they can arrive **later**
+    /// than the meshes they ride with — an item glow resolves asynchronously
+    /// ([`crate::entities::item_glow`]: a template round trip, then the effect model's own load) —
+    /// so a key blind to them would leave the glow out of the bake until some unrelated edge forced
+    /// a re-bake.
+    effects: Vec<(u16, [u32; 3], usize)>,
+}
+
+impl LookKey {
+    /// The key for one mirrored dressed look, in the order [`DressedLook::collect`] returns it.
+    fn build(
+        parts: &[&PortraitPart],
+        riders: &[&PortraitRider],
+        billboards: &[&PortraitBillboard],
+        effects: &[&PortraitEffects],
+    ) -> Self {
+        LookKey {
+            draws: parts
+                .iter()
+                .map(|p| (p.static_mesh.id(), p.material.id()))
+                .chain(riders.iter().map(|r| (r.static_mesh.id(), r.material.id())))
+                .chain(billboards.iter().map(|b| (b.mesh.id(), b.material.id())))
+                .collect(),
+            effects: effects
+                .iter()
+                .map(|e| {
+                    (
+                        e.bone,
+                        e.offset.to_array().map(f32::to_bits),
+                        e.emitters.len(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
 
 /// Per-slot booth: its render layer, the model-root entity (children = the baked model's meshes),
 /// its render-target image (so the bridge can flip back to `Live` after a `File` stand-in), and the
@@ -253,12 +363,17 @@ struct Booth {
     layer: RenderLayers,
     root: Entity,
     target: Handle<Image>,
-    baked: Option<PartsKey>,
+    baked: Option<LookKey>,
     /// Demand-render window (decision 0540): frames [`gate_booth_cameras`] still keeps this
     /// booth's camera active. Armed to [`BOOTH_SETTLE_FRAMES`] by every content edge (bake,
     /// empty, framing/yaw write); 0 with `pending` drained = the camera sleeps and the target
     /// keeps the last render — a still costs nothing per frame.
     wake: u32,
+    /// The bake standing in this booth contains **live** content — particle emitters
+    /// ([`booth::spawn_booth_effects`]) — so its camera never sleeps: a still of a cloud mid-birth
+    /// is not what the pane shows. The generalization of the glue booth's own always-on rule
+    /// (`live_scene` below, decision 0540); only the body panes can set it (decision 0822).
+    live: bool,
     /// Textures the last bake referenced that were not yet resident: the camera stays awake
     /// until each lands (an `mpq://` image arriving after the bake would otherwise be frozen
     /// OUT of the still forever), then renders one final resident frame.
@@ -281,9 +396,23 @@ fn booth_log() -> bool {
 /// many parts/riders did the bake see, and did it ever re-bake when the rest arrived".
 /// `verb`: `bake` committed · `wait` abandoned (a source material was not resident, 0744) ·
 /// `stand-in` the 2D fallback while no parts are attached · `empty` the booth was cleared.
-fn log_bake(token: &str, verb: &str, parts: usize, riders: usize, billboards: usize) {
+fn log_bake(
+    token: &str,
+    verb: &str,
+    parts: &[&PortraitPart],
+    riders: &[&PortraitRider],
+    billboards: &[&PortraitBillboard],
+    effects: &[&PortraitEffects],
+) {
     if booth_log() {
-        eprintln!("[booth] {token} {verb} parts={parts} riders={riders} billboards={billboards}");
+        eprintln!(
+            "[booth] {token} {verb} parts={} riders={} billboards={} fx={}/{}",
+            parts.len(),
+            riders.len(),
+            billboards.len(),
+            effects.len(),
+            effects.iter().map(|e| e.emitters.len()).sum::<usize>(),
+        );
     }
 }
 
@@ -550,6 +679,7 @@ fn setup_booths(
                 target: image,
                 baked: None,
                 wake: 0,
+                live: false,
                 pending: Vec::new(),
             },
         );
@@ -613,6 +743,7 @@ fn setup_booths(
                 target: image,
                 baked: None,
                 wake: 0,
+                live: false,
                 pending: Vec::new(),
             },
         );
@@ -638,11 +769,12 @@ struct DressedLook<'w, 's> {
     parts: Query<'w, 's, &'static PortraitPart>,
     riders: Query<'w, 's, &'static PortraitRider>,
     billboards: Query<'w, 's, &'static PortraitBillboard>,
+    effects: Query<'w, 's, &'static PortraitEffects>,
     mounts: Query<'w, 's, (), With<crate::entities::mount::MountBody>>,
 }
 
 impl DressedLook<'_, '_> {
-    /// Walk `unit`'s descendants once, collecting its part + rider children. Both empty while the
+    /// Walk `unit`'s descendants once, collecting its part + rider children. All empty while the
     /// unit's model is still loading / cube-fallback (no attach path has spawned the parts yet).
     ///
     /// A mounted unit's MOUNT child (decision 0441) is a second creature under the unit — a
@@ -651,7 +783,9 @@ impl DressedLook<'_, '_> {
     /// skipped by pruning on the [`mount::MountBody`] marker; **riders** stay collected from the
     /// whole tree, because the rider's own helm/shoulder/held riders hang under the rider's
     /// joints, which re-root under the mount's seat anchor INSIDE the mount subtree while
-    /// mounted — and a mount model never carries equipment riders of its own.
+    /// mounted — and a mount model never carries equipment riders of its own. An item's
+    /// camera-facing batches and effects hang off those same joints, so they follow the rider rule,
+    /// not the part rule; only the CHARACTER's own billboard (the eye-glow) prunes with the body.
     fn collect(
         &self,
         unit: Entity,
@@ -659,10 +793,12 @@ impl DressedLook<'_, '_> {
         Vec<&PortraitPart>,
         Vec<&PortraitRider>,
         Vec<&PortraitBillboard>,
+        Vec<&PortraitEffects>,
     ) {
         let mut parts = Vec::new();
         let mut riders = Vec::new();
         let mut billboards = Vec::new();
+        let mut effects = Vec::new();
         let mut stack: Vec<(Entity, bool)> = vec![(unit, false)];
         while let Some((e, mut in_mount)) = stack.pop() {
             in_mount |= self.mounts.contains(e);
@@ -670,20 +806,29 @@ impl DressedLook<'_, '_> {
                 if let Ok(p) = self.parts.get(e) {
                     parts.push(p);
                 }
-                // The eye-glow rides the character, not the mount (a portrait shows the rider
-                // alone), so it prunes on `in_mount` exactly like a body part.
-                if let Ok(b) = self.billboards.get(e) {
-                    billboards.push(b);
-                }
             }
             if let Ok(r) = self.riders.get(e) {
                 riders.push(r);
+            }
+            // A camera-facing batch prunes by whose model it is ([`PortraitSeat`]): a mount's own
+            // glow card goes with the mount's meshes, an item's card rides an attach joint that
+            // re-roots INSIDE the mount subtree while mounted and must survive it like a rider.
+            if let Ok(b) = self.billboards.get(e) {
+                if !in_mount || b.seat != PortraitSeat::Body {
+                    billboards.push(b);
+                }
+            }
+            // Never pruned: every publisher of this marker is an ITEM's model (its own emitters, or
+            // its `ItemVisuals` glow's), seated on an attach joint — the rider rule. Nothing
+            // publishes a mount's own emitters, so there is no mount case to exclude.
+            if let Ok(fx) = self.effects.get(e) {
+                effects.push(fx);
             }
             if let Ok(c) = self.children.get(e) {
                 stack.extend(c.iter().map(|child| (child, in_mount)));
             }
         }
-        (parts, riders, billboards)
+        (parts, riders, billboards, effects)
     }
 }
 
@@ -759,9 +904,9 @@ fn sync_portraits(
         };
         // The unit's dressed look: its attach-spawned part children (geosets filtered, composited
         // materials) + its bone riders (helm/shoulders/held — grandchildren under joint entities)
-        // + its eye-glow billboard anchors, one descendants walk. Parts empty while the model is
-        // still loading / cube-fallback.
-        let (parts, riders, billboards) = look.collect(unit);
+        // + the camera-facing batches and effect models it wears, one descendants walk. Parts empty
+        // while the model is still loading / cube-fallback.
+        let (parts, riders, billboards, effects) = look.collect(unit);
         if parts.is_empty() {
             // Model not attached yet → the ref's own 2D stand-in (RE C5): sex/race for a player
             // body, the Monster art for a creature (our pick — the ref's `-Pet` file belongs to
@@ -773,12 +918,7 @@ fn sync_portraits(
             }
             continue;
         }
-        let key: PartsKey = parts
-            .iter()
-            .map(|p| (p.static_mesh.id(), p.material.id()))
-            .chain(riders.iter().map(|r| (r.static_mesh.id(), r.material.id())))
-            .chain(billboards.iter().map(|b| (b.mesh.id(), b.material.id())))
-            .collect();
+        let key = LookKey::build(&parts, &riders, &billboards, &effects);
         if booth.baked.as_ref() != Some(&key) {
             let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
             // The look changed — re-bake: studio-lit twins of the exact dressed materials, posed
@@ -792,9 +932,10 @@ fn sync_portraits(
                 log_bake(
                     token,
                     "wait-anchors",
-                    parts.len(),
-                    riders.len(),
-                    billboards.len(),
+                    &parts,
+                    &riders,
+                    &billboards,
+                    &effects,
                 );
                 continue;
             };
@@ -822,14 +963,16 @@ fn sync_portraits(
                     offset: r.offset,
                 })
                 .collect();
-            // The eye-glow, seated on its eye bone's booth joint and camera-faced by the booth
-            // (relit onto the studio buffer like everything else — harmless, the glow is fullbright).
+            // The camera-facing batches — the eye-glow on its eye bone, an item's gem/halo at its
+            // attach point — seated on their bone's booth joint and camera-faced by the booth (relit
+            // onto the studio buffer like everything else; harmless where the batch is fullbright).
             let booth_billboards: Vec<BoothBillboardSpec> = billboards
                 .iter()
                 .map(|b| BoothBillboardSpec {
                     mesh: b.mesh.clone(),
                     material: booth_light.studio.variant(&b.material, &mut wow_mats),
                     bone: b.bone,
+                    offset: b.seat.offset(),
                     kind: b.kind,
                 })
                 .collect();
@@ -860,11 +1003,21 @@ fn sync_portraits(
                 [false, false], // a still portrait sheaths its weapons — no in-hand grip
                 &booth_billboards,
             );
+            // **No emitters here, and that is the reference's own answer** (decision 0822): the
+            // round portrait is a ONE-SHOT bake — a fresh M2 scene + instance, one `0x707680` draw,
+            // the texture cached by GUID/displayId and returned with *no re-render* on a hit, nothing
+            // persisting between bakes (wow-re `portrait-render.md` §2, byte-verified). A particle
+            // emitter contributes nothing to a single frame of a freshly-born pool, so the ref's
+            // portrait shows none — and a booth that spawned them would either freeze a cloud
+            // mid-birth into the still or have to render forever for a 256² face. The batches above
+            // *are* geometry, so they draw in that one frame and belong here. The body panes are a
+            // different widget with a different law — see [`sync_body_booth`].
+            //
             // Frame through the display's authored portrait camera (heuristic anchors for the
             // camera-less few), resolved above before anything was torn down.
             log_frame(token, &anchors, &frame(&anchors).0);
             aim(&mut cams, token, &frame(&anchors));
-            log_bake(token, "bake", parts.len(), riders.len(), billboards.len());
+            log_bake(token, "bake", &parts, &riders, &billboards, &effects);
             wake_booth(
                 booth,
                 &wow_mats,
@@ -1007,11 +1160,11 @@ fn sync_body_booth(
     if portraits.0.get(slot) != Some(&live) {
         portraits.0.insert(slot.to_string(), live);
     }
-    // The unit's dressed look — the same `PortraitPart`/`PortraitRider` descendants the portrait
-    // slots mirror. Empty while there's no unit, or its model hasn't attached yet.
-    let (parts, riders, billboards) = match unit {
+    // The unit's dressed look — the same mirrored descendants the portrait slots collect. Empty
+    // while there's no unit, or its model hasn't attached yet.
+    let (parts, riders, billboards, effects) = match unit {
         Some(unit) => look.collect(unit),
-        None => (Vec::new(), Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
     if parts.is_empty() {
         // No unit / model not attached → empty the booth and forget the applied yaw (so it
@@ -1020,19 +1173,16 @@ fn sync_body_booth(
             commands.entity(booth.root).despawn_related::<Children>();
             booth.baked = None;
             *last_yaw = None;
-            // Render the emptied stage before sleeping (decision 0540).
+            // Render the emptied stage before sleeping (decision 0540) — and the emptied stage has
+            // no emitters left, so the pane stops being live.
             booth.wake = BOOTH_SETTLE_FRAMES;
+            booth.live = false;
             booth.pending.clear();
         }
         return;
     }
     let unit = unit.expect("unit present — parts came from its descendants");
-    let key: PartsKey = parts
-        .iter()
-        .map(|p| (p.static_mesh.id(), p.material.id()))
-        .chain(riders.iter().map(|r| (r.static_mesh.id(), r.material.id())))
-        .chain(billboards.iter().map(|b| (b.mesh.id(), b.material.id())))
-        .collect();
+    let key = LookKey::build(&parts, &riders, &billboards, &effects);
     let parts_changed = booth.baked.as_ref() != Some(&key);
     if parts_changed {
         let display_id = ent_q.get(unit).ok().and_then(|n| n.display_id);
@@ -1040,13 +1190,7 @@ fn sync_body_booth(
         // fabricated zero bounds (see the portrait site, and `booth_anchors`).
         let Some(anchors) = booth_anchors(creatures, display_id) else {
             booth.wake = booth.wake.max(BOOTH_SETTLE_FRAMES);
-            log_bake(
-                slot,
-                "wait-anchors",
-                parts.len(),
-                riders.len(),
-                billboards.len(),
-            );
+            log_bake(slot, "wait-anchors", &parts, &riders, &billboards, &effects);
             return;
         };
         let rig = creatures
@@ -1071,15 +1215,29 @@ fn sync_body_booth(
                 offset: r.offset,
             })
             .collect();
-        // The eye-glow, seated on its eye bone's booth joint and camera-faced by the booth (relit
-        // onto the studio buffer like everything else — harmless, the glow is fullbright).
+        // The camera-facing batches — the eye-glow on its eye bone, a wand's gem or the held torch's
+        // halo at its attach point — seated on their bone's booth joint and camera-faced by the booth
+        // (relit onto the pane buffer like everything else; harmless where the batch is fullbright).
         let booth_billboards: Vec<BoothBillboardSpec> = billboards
             .iter()
             .map(|b| BoothBillboardSpec {
                 mesh: b.mesh.clone(),
                 material: booth_light.pane.variant(&b.material, wow_mats),
                 bone: b.bone,
+                offset: b.seat.offset(),
                 kind: b.kind,
+            })
+            .collect();
+        // The worn items' effects (decision 0822) — an equipped item's own emitters (0813, `#bugs`
+        // B118) and a held weapon's `ItemVisuals` glow (0805). Collected BEFORE the teardown for the
+        // same reason as everything else here; spawned after the model, which is what hands us the
+        // joints they seat on.
+        let booth_effects: Vec<BoothEffects> = effects
+            .iter()
+            .map(|fx| BoothEffects {
+                bone: fx.bone,
+                offset: fx.offset,
+                emitters: fx.emitters.clone(),
             })
             .collect();
         // Same law as the portrait bake: never latch a world-lane material into the pane. Leave
@@ -1089,7 +1247,7 @@ fn sync_body_booth(
             return;
         }
         commands.entity(booth.root).despawn_related::<Children>();
-        spawn_booth_model(
+        let joints = spawn_booth_model(
             commands,
             palettes,
             booth.root,
@@ -1106,11 +1264,24 @@ fn sync_body_booth(
             [false, false], // a still portrait sheaths its weapons — no in-hand grip
             &booth_billboards,
         );
+        // The item effects go up on the posed skeleton's joints — the body pane is the lane that gets
+        // them (the reference's `<PlayerModel>` widget renders live; the round portraits are a
+        // one-shot cached bake — [`spawn_booth_effects`]). A booth holding emitters is LIVE: its
+        // camera must not sleep on a cloud mid-birth, so `wake` alone can't gate it. The body itself
+        // stays `Frozen` — matching the ref's animating widget is its own look call (decision 0822).
+        let (fx_emitters, _) = spawn_booth_effects(
+            commands,
+            &joints,
+            &booth.layer,
+            booth_light.pane.buffer.as_ref(),
+            &booth_effects,
+        );
+        booth.live = fx_emitters > 0;
         // Body framing from the display's bounds — the full standing figure, feet-to-crown.
         // Resolved before the teardown above; see the portrait site for why it cannot be faked.
         log_frame(slot, &anchors, &body_frame(&anchors).0);
         aim(cams, slot, &body_frame(&anchors));
-        log_bake(slot, "bake", parts.len(), riders.len(), billboards.len());
+        log_bake(slot, "bake", &parts, &riders, &billboards, &effects);
         wake_booth(
             booth,
             wow_mats,
@@ -1137,10 +1308,12 @@ fn sync_body_booth(
 
 /// The demand-render gate (decision 0540): each booth camera is active only while its booth has
 /// something new to show — [`Booth::wake`] frames after a content edge, or a bake texture still
-/// in flight ([`Booth::pending`]) — except the glue booth, whose scene is live-animated (looping
-/// sequences, global-sequence bones, particle emitters) and renders continuously while a glue
-/// screen shows. A sleeping camera skips its whole pass (clear + model + FFXGlow chain); its
-/// target keeps the last render — exactly right for a still (the 0105 bake, frozen at Stand).
+/// in flight ([`Booth::pending`]) — except the booths whose content is **live**, which render
+/// continuously: the glue booth, whose whole scene is animated (looping sequences, global-sequence
+/// bones, particle emitters) while a glue screen shows, and any booth whose bake spawned particle
+/// emitters ([`Booth::live`] — a body pane wearing an effect item, decision 0822). A sleeping camera
+/// skips its whole pass (clear + model + FFXGlow chain); its target keeps the last render — exactly
+/// right for a still (the 0105 bake, frozen at Stand).
 /// With `WOW_PORTRAIT_TEST` set the gate stands down (the eyeball harness wants live cameras).
 fn gate_booth_cameras(
     mut booths: ResMut<Booths>,
@@ -1162,7 +1335,8 @@ fn gate_booth_cameras(
             booth.wake = booth.wake.max(1);
         }
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
-        let active = test || live_scene || booth.wake > 0 || !booth.pending.is_empty();
+        let active =
+            test || live_scene || booth.live || booth.wake > 0 || !booth.pending.is_empty();
         // `WOW_BOOTH_LOG=1`: the gate's timeline — every activity flip and every armed frame,
         // wall-stamped (the first-login black-pane hunt).
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1228,5 +1402,184 @@ fn aim(
             *t = rig.0;
             *p = rig.1.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body_part() -> PortraitPart {
+        PortraitPart {
+            static_mesh: Handle::default(),
+            skinned_mesh: None,
+            material: Handle::default(),
+        }
+    }
+
+    fn card(seat: PortraitSeat) -> PortraitBillboard {
+        PortraitBillboard {
+            mesh: Handle::default(),
+            material: Handle::default(),
+            bone: 4,
+            seat,
+            kind: benilla_formats::BillboardKind::Spherical,
+        }
+    }
+
+    fn effects(bone: u16, offset: Vec3, count: usize) -> PortraitEffects {
+        PortraitEffects {
+            bone,
+            offset,
+            emitters: (0..count)
+                .map(|_| benilla_assets::ModelEmitter {
+                    def: crate::particles::tests::plain_def(),
+                    texture: None,
+                    bone_pivot: [0.0; 3],
+                    billboard: None,
+                    recursion: None,
+                    geometry: None,
+                    owner_reach: 0.0,
+                })
+                .collect(),
+        }
+    }
+
+    /// What [`DressedLook::collect`] found, flattened to what the assertions care about.
+    #[derive(Resource, Default)]
+    struct Collected {
+        parts: usize,
+        riders: usize,
+        billboards: Vec<PortraitSeat>,
+        effects: Vec<(u16, usize)>,
+    }
+
+    /// Run the walk over `unit` in `app` and hand back what it collected.
+    fn walk(app: &mut App, unit: Entity) -> Collected {
+        app.init_resource::<Collected>();
+        app.insert_resource(Unit(unit));
+        app.add_systems(
+            Update,
+            |unit: Res<Unit>, look: DressedLook, mut out: ResMut<Collected>| {
+                let (parts, riders, billboards, effects) = look.collect(unit.0);
+                *out = Collected {
+                    parts: parts.len(),
+                    riders: riders.len(),
+                    billboards: billboards.iter().map(|b| b.seat).collect(),
+                    effects: effects.iter().map(|e| (e.bone, e.emitters.len())).collect(),
+                };
+            },
+        );
+        app.update();
+        std::mem::take(app.world_mut().resource_mut::<Collected>().as_mut())
+    }
+
+    #[derive(Resource)]
+    struct Unit(Entity);
+
+    /// **A mounted unit's booth keeps the rider's gear and drops the horse's.** The mount prune is
+    /// what makes a portrait show the character alone (decision 0441) — but while mounted the
+    /// character's own attach joints re-root INSIDE the mount subtree, so pruning everything under it
+    /// would take the rider's equipment with the horse. Riders were already exempt; an equipped item's
+    /// camera-facing batch and its effects have to be too (decision 0822), and the discriminator is
+    /// [`PortraitSeat`] — whose model the batch belongs to — not where in the tree it happens to sit.
+    #[test]
+    fn a_mounts_own_glow_card_prunes_but_the_riders_gear_does_not() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let unit = app.world_mut().spawn(body_part()).id();
+        // The character's own eye-glow, outside the mount subtree.
+        app.world_mut()
+            .spawn((card(PortraitSeat::Body), ChildOf(unit)));
+        let mount = app
+            .world_mut()
+            .spawn((
+                body_part(),
+                crate::entities::mount::MountBody { host: unit },
+                ChildOf(unit),
+            ))
+            .id();
+        // The mount's OWN glow card (its lantern) — a batch of the mount's rigged body.
+        app.world_mut()
+            .spawn((card(PortraitSeat::Body), ChildOf(mount)));
+        // …and the seated rider's gear, re-rooted under the mount: a shoulder rider, its
+        // camera-facing batch and its emitters.
+        let seat = app.world_mut().spawn(ChildOf(mount)).id();
+        app.world_mut().spawn((
+            PortraitRider {
+                static_mesh: Handle::default(),
+                material: Handle::default(),
+                bone: 4,
+                offset: Vec3::new(0.21, 1.42, 0.06),
+            },
+            ChildOf(seat),
+        ));
+        app.world_mut().spawn((
+            card(PortraitSeat::Rider(Vec3::new(0.15, 1.58, 0.05))),
+            ChildOf(seat),
+        ));
+        app.world_mut()
+            .spawn((effects(4, Vec3::new(0.21, 1.42, 0.06), 2), ChildOf(seat)));
+
+        let got = walk(&mut app, unit);
+        assert_eq!(got.parts, 1, "the character's body, never the mount's");
+        assert_eq!(
+            got.riders, 1,
+            "the rider's shoulder survives the mount subtree"
+        );
+        // Two `Body` cards exist in this tree — the character's eye-glow and the mount's lantern —
+        // and exactly one may survive; the item's `Rider` card must, wherever it sits.
+        let (body, rider): (Vec<PortraitSeat>, Vec<PortraitSeat>) = got
+            .billboards
+            .iter()
+            .partition(|s| **s == PortraitSeat::Body);
+        assert_eq!(
+            body.len(),
+            1,
+            "the character's eye-glow, not the mount's lantern"
+        );
+        assert_eq!(
+            rider,
+            vec![PortraitSeat::Rider(Vec3::new(0.15, 1.58, 0.05))],
+            "the item's card survives the mount subtree, like the rider it belongs to",
+        );
+        assert_eq!(
+            got.effects,
+            vec![(4, 2)],
+            "an item's emitters are never pruned"
+        );
+    }
+
+    /// **A key blind to effects would never re-bake for a glow.** An item glow resolves
+    /// asynchronously (`entities::item_glow`: the item's template, then the effect model's own load),
+    /// so its mirror lands *after* the meshes it rides with — a later frame, with every mesh handle
+    /// identical. If the bake key ignored effects, the compare would say "unchanged" and the glow
+    /// would stay out of the pane until some unrelated content edge forced a re-bake.
+    #[test]
+    fn a_glow_arriving_after_its_item_still_changes_the_bake_key() {
+        let parts = [body_part()];
+        let riders = [PortraitRider {
+            static_mesh: Handle::default(),
+            material: Handle::default(),
+            bone: 4,
+            offset: Vec3::new(0.21, 1.42, 0.06),
+        }];
+        let parts: Vec<&PortraitPart> = parts.iter().collect();
+        let riders: Vec<&PortraitRider> = riders.iter().collect();
+
+        let before = LookKey::build(&parts, &riders, &[], &[]);
+        let glow = effects(4, Vec3::new(0.21, 1.42, 0.06), 1);
+        let after = LookKey::build(&parts, &riders, &[], &[&glow]);
+        assert!(before != after, "the glow's arrival is a content edge");
+
+        // …and a *different* seat for the same emitter count is a different bake too: two glow slots
+        // on one weapon differ by nothing else.
+        let moved = effects(4, Vec3::new(0.21, 1.55, 0.06), 1);
+        assert!(
+            LookKey::build(&parts, &riders, &[], &[&moved]) != after,
+            "the seat is part of the key",
+        );
+        // The same look twice is the same key — the compare must not re-bake every frame.
+        assert!(LookKey::build(&parts, &riders, &[], &[&glow]) == after);
     }
 }

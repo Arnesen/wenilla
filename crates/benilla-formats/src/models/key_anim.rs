@@ -52,16 +52,19 @@ impl Lerp for [f32; 4] {
 }
 
 /// The sequence a sequence-timeline track bakes against: the model's **file** sequence slot (which
-/// is what indexes the track's [`M2Track::ranges`] — NOT an index into a filtered animation list)
-/// and that sequence's absolute `(start_ms, end_ms)` band.
+/// is what indexes the track's [`M2Track::ranges`] — NOT an index into a filtered animation list),
+/// that sequence's absolute `(start_ms, end_ms)` band, and whether the band LOOPS (sequence flags
+/// bit 0 CLEAR) — which is the baked loop's clock law, see [`KeyAnim::wrap`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SeqSlot {
     pub index: usize,
     pub band: (u32, u32),
+    pub looping: bool,
 }
 
-/// One baked keyed loop, seconds: sample at `t mod period` (linear or step per [`Self::step`]),
-/// holding the first/last key outside the keyed span. `period == 0` ⇒ a constant (single key).
+/// One baked keyed loop, seconds: sample at `t mod period` / `min(t, period)` per [`Self::wrap`]
+/// (linear or step per [`Self::step`]), holding the first/last key outside the keyed span.
+/// `period == 0` ⇒ a constant (single key).
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyAnim<V> {
     /// Loop period (secs): the global sequence's duration, or the sequence band's length.
@@ -69,23 +72,30 @@ pub struct KeyAnim<V> {
     pub period: f32,
     /// Step interpolation (`interp == 0`): hold each key until the next; else linear.
     pub step: bool,
+    /// **The clock law**, decided at bake time from what this loop is baked against — never by the
+    /// consumer, which is how it used to be got wrong. `true` = WRAP (`t mod period`): a global
+    /// sequence (its own free-running clock) or a sequence band whose sequence loops, where the
+    /// modulo is the kernel's own re-fire of a windowed track every pass. `false` = CLAMP
+    /// (`min(t, period)`): a band whose sequence is one-shot, where the animation clock parks at
+    /// (or just past) the band end and the track must hold its TAIL value there.
+    ///
+    /// The distinction is only ever visible at the very end of a one-shot clip — and that is
+    /// exactly where it is load-bearing, because Bevy's `ActiveAnimation::update` returns early on
+    /// completion *without* its own modulo, so a finished `RepeatAnimation::Never` clip parks at
+    /// `seek_time >= clip_duration == period`. Wrapping that aliases the end of the animation back
+    /// onto its **opening** value: an elemental's Death sequence fades every batch to alpha 0 and
+    /// then — one frame later, for ever — snapped back to a fully opaque body frozen in mid-air.
+    pub wrap: bool,
     /// `(secs from loop start, value)`, time-ascending.
     pub keys: Vec<(f32, V)>,
 }
 
 impl<V: Lerp> KeyAnim<V> {
-    /// Sample at `elapsed` seconds on the loop clock; `empty` is the channel's identity for the
-    /// keyless case (the bake never emits that — each channel's `sample` supplies it).
+    /// Sample at `elapsed` seconds on this loop's own clock ([`Self::wrap`]); `empty` is the
+    /// channel's identity for the keyless case (the bake never emits that — each channel's
+    /// `sample` supplies it).
     pub(crate) fn sample_or(&self, elapsed: f32, empty: V) -> V {
-        self.sample_clocked(elapsed, true, empty)
-    }
-
-    /// [`Self::sample_or`] with the clock law explicit: `wrap` = the playing sequence LOOPS
-    /// (`t mod period` — the kernel's modulo wrap re-fires windowed tracks every pass); `!wrap` =
-    /// it CLAMPS (`min(t, period)` — the clock parks at the band end and the track holds its tail
-    /// value there, never wrapping back to the band-start value). The distinction is what keeps a
-    /// clamped one-shot clip's end state honest: at `t == period` a modulo would alias to `0`.
-    pub(crate) fn sample_clocked(&self, elapsed: f32, wrap: bool, empty: V) -> V {
+        let wrap = self.wrap;
         let Some(&(t0, v0)) = self.keys.first() else {
             return empty;
         };
@@ -195,9 +205,12 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     }
     let keys: Vec<(u32, V)> = track.keys.iter().map(|&(t, v)| (t, proj(v))).collect();
     let step = track.interp == 0;
+    // A constant has no clock at all (`period == 0` short-circuits the sampler), so `wrap` is
+    // arbitrary — `true` keeps it the identity value it has always been.
     let constant = |v: V| KeyAnim {
         period: 0.0,
         step,
+        wrap: true,
         keys: vec![(0.0, v)],
     };
     // An all-equal track is a constant in every band: dropped when the static path owns it, else a
@@ -220,13 +233,20 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
         return Some(KeyAnim {
             period: period_ms as f32 / 1000.0,
             step,
+            // A global sequence runs its own free clock, the same loop in every animation — it
+            // always wraps, whatever the playing sequence's own loop flag says.
+            wrap: true,
             keys: keys.iter().map(|&(t, v)| (t as f32 / 1000.0, v)).collect(),
         });
     }
     // Sequence-timeline track: rebuild the function the reference samples across THIS sequence's
     // band. Its key window is the track's own per-sequence `(lo, hi)` pair; an absent ranges array
     // is the reference's `[track+4] == 0` fallback — search the whole key list.
-    let SeqSlot { index, band } = seq?;
+    let SeqSlot {
+        index,
+        band,
+        looping,
+    } = seq?;
     let (start, end) = band;
     let (lo, hi) = match track.ranges.get(index) {
         Some(&(lo, hi)) => (lo as usize, hi as usize),
@@ -258,6 +278,8 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     Some(KeyAnim {
         period: ((end - start) as f32 / 1000.0).max(0.001),
         step,
+        // The band's own loop flag IS this loop's clock: a one-shot sequence holds its tail.
+        wrap: looping,
         keys: baked,
     })
 }

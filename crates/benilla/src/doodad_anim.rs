@@ -822,6 +822,7 @@ mod tests {
         let hidden = benilla_formats::ScalarAnim {
             period: 0.0,
             step: true,
+            wrap: true, // period 0: a constant has no clock
             keys: vec![(0.0, 0.0)],
         };
         std::sync::Arc::new(

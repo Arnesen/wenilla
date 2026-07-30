@@ -683,29 +683,25 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
     // flags @ +0x10, bit 0 CLEAR = loops) — the addressing unit the per-sequence timing bake needs,
     // the same walk as `m2_batches`. A sequence-less model gets one synthetic whole-timeline slot
     // so an authored track still bakes (raw timestamps, the pre-sequence degenerate).
-    let (mut seq_slots, mut looping) = {
+    let mut seq_slots: Vec<SeqSlot> = {
         let (n, o) = (le_u32(bytes, 0x1c) as usize, le_u32(bytes, 0x20) as usize);
         (0..n)
             .map_while(|i| {
                 let e = o + i * 0x44;
-                (e + 0x44 <= bytes.len()).then(|| {
-                    (
-                        SeqSlot {
-                            index: i,
-                            band: (le_u32(bytes, e + 0x04), le_u32(bytes, e + 0x08)),
-                        },
-                        le_u32(bytes, e + 0x10) & 1 == 0,
-                    )
+                (e + 0x44 <= bytes.len()).then(|| SeqSlot {
+                    index: i,
+                    band: (le_u32(bytes, e + 0x04), le_u32(bytes, e + 0x08)),
+                    looping: le_u32(bytes, e + 0x10) & 1 == 0,
                 })
             })
-            .unzip::<_, _, Vec<_>, Vec<_>>()
+            .collect()
     };
     if seq_slots.is_empty() {
         seq_slots.push(SeqSlot {
             index: 0,
             band: (0, u32::MAX),
+            looping: true,
         });
-        looping.push(true);
     }
     // The global-sequence duration table (header +0x14/+0x18) — a gseq-tagged timing track loops
     // on its own free clock, same law as every other channel.
@@ -819,7 +815,6 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
                 &read_raw_track(bytes, e + 0xdc, 4, le_f32),
                 &read_raw_track(bytes, e + 0x1dc, 1, |b, o| f32::from(b[o] != 0)),
                 &seq_slots,
-                looping.clone(),
                 &gseq,
             ),
             area_length: track_first(bytes, e + 0xf8, 0.0),

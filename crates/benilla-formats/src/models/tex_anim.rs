@@ -72,7 +72,12 @@ mod tests {
     }
 
     fn bake(t: &M2Vec3Track, gseq: &[u32], seq0: Option<(u32, u32)>) -> Option<UvAnim> {
-        let slot = seq0.map(|band| SeqSlot { index: 0, band });
+        // Slot 0 as the UV lane meets it: the loop a placed doodad's one-time arm plays.
+        let slot = seq0.map(|band| SeqSlot {
+            index: 0,
+            band,
+            looping: true,
+        });
         super::super::key_anim::bake_track(t, gseq, slot, |v| [v[0], v[1]], is_zero, is_zero)
     }
 

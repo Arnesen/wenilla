@@ -25,7 +25,7 @@ use bevy::prelude::*;
 use crate::assets::WorldAssets;
 use crate::lighting::SharedLightBuffer;
 use crate::portrait::{
-    GlueLook, GluePreview, GluePreviewBake, PreviewBillboard, PreviewGlow, PreviewPart,
+    GlueLook, GluePreview, GluePreviewBake, PreviewBillboard, PreviewEffects, PreviewPart,
     PreviewRider,
 };
 use crate::terrain::WowModelMaterial;
@@ -284,8 +284,9 @@ pub(in crate::entities) fn build_glue_preview(
     // system — carry them through to the booth spawn, which seats each on its billboard bone's joint
     // and re-faces it ([`crate::portrait::booth::face_booth_billboards`]). Geoset-gated like the body
     // parts: the undead glow rides geoset 302 (the glowing "Features" variants), faithful to the DBC.
-    // The batch is fullbright (M2 unlit), so it keeps its built material — no char-skin swap.
-    let preview_billboards: Vec<PreviewBillboard> = parts
+    // The batch is fullbright (M2 unlit), so it keeps its built material — no char-skin swap. Offset
+    // `ZERO`: the body IS rigged here, so its billboard bone's joint already bakes the pivot.
+    let mut preview_billboards: Vec<PreviewBillboard> = parts
         .iter()
         .filter(|p| shows(p))
         .filter_map(|p| {
@@ -294,6 +295,7 @@ pub(in crate::entities) fn build_glue_preview(
                 mesh: p.mesh.clone(),
                 material: p.material.clone(),
                 bone: info.bone,
+                offset: Vec3::ZERO,
                 kind: info.kind,
             })
         })
@@ -306,9 +308,18 @@ pub(in crate::entities) fn build_glue_preview(
     // hands `ItemDisplayInfo+0x58` to `0x4798c0`), so a permanently-glowing weapon glows on the
     // select screen too; the enum carries no enchant ids (vmangos `BuildEnumData` sends displayId
     // + inventoryType only), so the fork's enchant half simply has no input here.
+    //
+    // An item model is not just meshes, and for a while this loop treated it as if it were — it kept
+    // the batches with no billboard flag and dropped everything else on the floor, so at character
+    // select a worn item's own **effects** (its emitters, its camera-facing batches) simply did not
+    // exist. That is `#bugs` B118 as nazriel filed it: the R14 PVP shoulders' sparkle is the item
+    // model's own emitters (decision 0813), and no part of it reached the booth. So each want
+    // contributes up to four things at one seat: plain meshes ([`PreviewRider`]), camera-facing
+    // batches ([`PreviewBillboard`]), its emitters ([`PreviewEffects`]), and — held weapons only —
+    // the same three off each glow model its `ItemVisuals` names.
     let attach_point = |id: u16| dm.attachments.iter().find(|a| a.id == id);
     let mut riders = Vec::new();
-    let mut preview_glows = Vec::new();
+    let mut preview_effects = Vec::new();
     if let Some(d) = displays.as_deref() {
         for w in &held {
             let Some(point) = attach_point(w.attach) else {
@@ -320,12 +331,37 @@ pub(in crate::entities) fn build_glue_preview(
             let Some(item_parts) = item.parts.as_deref() else {
                 continue;
             };
-            for p in item_parts.iter().filter(|p| p.billboard.is_none()) {
-                riders.push(PreviewRider {
-                    mesh: p.mesh.clone(),
-                    material: p.material.clone(),
+            for p in item_parts.iter() {
+                // A camera-facing batch of the item — a wand's gem, a glowing rune (270 of the 2681
+                // `Item\` models author one). It can't be drawn as a plain rider mesh: the world
+                // splits it into a card, so the booth carries it as one too, seated at the attach
+                // point **plus its own model-local pivot** (an item model gets no rig here, so
+                // nothing else bakes that pivot).
+                match &p.billboard {
+                    Some(info) => preview_billboards.push(PreviewBillboard {
+                        mesh: p.mesh.clone(),
+                        material: p.material.clone(),
+                        bone: point.bone,
+                        offset: point.offset + info.pivot,
+                        kind: info.kind,
+                    }),
+                    None => riders.push(PreviewRider {
+                        mesh: p.mesh.clone(),
+                        material: p.material.clone(),
+                        bone: point.bone,
+                        offset: point.offset,
+                    }),
+                }
+            }
+            // The item model's OWN particle emitters — the R14 PVP pauldron's `SPARKLE` twinkle
+            // (`#bugs` B118, decision 0813), the held torch's flame. 95 `Item\` models hang one on a
+            // billboard bone alone; the booth spawns them off a host at the attach point, each
+            // billboard-chain emitter through a booth-camera frame.
+            if !item.emitters.is_empty() {
+                preview_effects.push(PreviewEffects {
                     bone: point.bone,
                     offset: point.offset,
+                    emitters: item.emitters.clone(),
                 });
             }
             let Some(paths) = glows.as_deref().and_then(|g| g.effects(w.visual)) else {
@@ -350,21 +386,30 @@ pub(in crate::entities) fn build_glue_preview(
                     continue;
                 };
                 let offset = point.offset + at;
-                for p in glow
-                    .parts
-                    .iter()
-                    .flatten()
-                    .filter(|p| p.billboard.is_none())
-                {
-                    riders.push(PreviewRider {
-                        mesh: p.mesh.clone(),
-                        material: p.material.clone(),
-                        bone: point.bone,
-                        offset,
-                    });
+                for p in glow.parts.iter().flatten() {
+                    // Same split as the item's own batches above. This is not a rare arm:
+                    // `Spells\Enchantments\Sparkle_A.m2` is *one* additive camera-facing quad and
+                    // nothing else — no emitters at all — and `ItemVisuals` 28 (10 item displays)
+                    // hangs it on slot 4, so dropping billboard batches here glowed those items
+                    // nothing whatsoever at select.
+                    match &p.billboard {
+                        Some(info) => preview_billboards.push(PreviewBillboard {
+                            mesh: p.mesh.clone(),
+                            material: p.material.clone(),
+                            bone: point.bone,
+                            offset: offset + info.pivot,
+                            kind: info.kind,
+                        }),
+                        None => riders.push(PreviewRider {
+                            mesh: p.mesh.clone(),
+                            material: p.material.clone(),
+                            bone: point.bone,
+                            offset,
+                        }),
+                    }
                 }
                 if !glow.emitters.is_empty() {
-                    preview_glows.push(PreviewGlow {
+                    preview_effects.push(PreviewEffects {
                         bone: point.bone,
                         offset,
                         emitters: glow.emitters.clone(),
@@ -376,11 +421,15 @@ pub(in crate::entities) fn build_glue_preview(
 
     debug!(
         "glue preview: race {race} sex {sex} display {display_id} → {} parts, {} riders, \
-         {} eye-glow, {} item glow ({})",
+         {} camera-facing, {} effect model(s) / {} emitter(s) ({})",
         preview_parts.len(),
         riders.len(),
         preview_billboards.len(),
-        preview_glows.len(),
+        preview_effects.len(),
+        preview_effects
+            .iter()
+            .map(|e: &PreviewEffects| e.emitters.len())
+            .sum::<usize>(),
         match look {
             GlueLook::Create(_) => "create",
             GlueLook::Select(_) => "select",
@@ -391,7 +440,7 @@ pub(in crate::entities) fn build_glue_preview(
         display_id,
         parts: preview_parts,
         riders,
-        glows: preview_glows,
+        effects: preview_effects,
         billboards: preview_billboards,
         grip,
         revision: bake.revision + 1,

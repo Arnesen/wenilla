@@ -449,15 +449,14 @@ pub(super) fn attach_entity_visuals(
             let bake_center = dm.map(|d| d.bake_center_local).unwrap_or(Vec3::ZERO);
             // The dynamic ground-shade root (decision 0173): one light-node state per object, like
             // the reference's `[obj+0xe0]`; every M2 part below (body, held items) reads it from the
-            // tree walk. The KIND decides how the node's light is delivered (0809): a GameObject
-            // samples the terrain MCSH under it and ramps its sun term over 2.5/0.5, while a
-            // unit/player takes `0x672a20`'s null fallback — a flat day/night ×1.0. `insert_if_new`
-            // so a gear-change re-attach keeps the already-ramped state instead of resetting it (no
-            // one-frame lighting pop); the kind it captures cannot change under a live display-id
-            // swap, the same argument the attach-mode split below rests on.
+            // tree walk. Kind-independent — a unit and a GameObject run the same 2.5/0.5 MCSH chase,
+            // which is the byte-shared target law (0814 restored this; 0809 had split it by kind on
+            // the strength of a delivery state we do not model). `insert_if_new` so a gear-change
+            // re-attach keeps the already-ramped state instead of resetting it (no one-frame
+            // lighting pop).
             commands
                 .entity(entity)
-                .insert_if_new(crate::entity_shade::GroundShade::for_kind(net.kind));
+                .insert_if_new(crate::entity_shade::GroundShade::default());
             // The root's canonical fold reference: held items share the root's interior verdict
             // (one light node per unit — the reference aliases the wearer's collector into each
             // equipped item, wow-re `unit-light-combine-storm.md`), and their classifier fold must
@@ -666,6 +665,11 @@ pub(super) fn attach_entity_visuals(
             // load) can join the same ramp instead of popping in opaque or racing its own fade from
             // zero. Decision 0032 read as a per-unit property, not a per-mesh-at-attach-time stamp.
             let mut unit_will_fade = false;
+            // This unit's **instance slot**, in tag-field form — one value for the whole unit, worn by
+            // every part and card below. See the per-part note at the spawn for why it is the
+            // instance's identity rather than a skinning detail (decision 0812).
+            let inst_slot = skin.as_ref().map_or(0, |rb| rb.slot);
+            let rig_tag = crate::mesh_tag::rig_bits(inst_slot);
             // Billboard batches (the brazier/lantern glow card) collected for the world-root card
             // spawn below — inside the loop we only plant their anchor child.
             let mut billboard_parts = Vec::new();
@@ -721,6 +725,11 @@ pub(super) fn attach_entity_visuals(
                                     mesh: part.mesh.clone(),
                                     material: part.material.clone(),
                                     bone: info.bone,
+                                    // This host IS rigged, so its billboard bone's booth joint
+                                    // already bakes the pivot (the 0130 rig identity) — and the
+                                    // batch belongs to the host's body, so a mount's own glow card
+                                    // prunes with the mount (`DressedLook::collect`).
+                                    seat: crate::portrait::PortraitSeat::Body,
                                     kind: info.kind,
                                 },
                             ))
@@ -772,16 +781,23 @@ pub(super) fn attach_entity_visuals(
                         Some(b) => (b.clone(), true),
                         None => (mat.clone(), false),
                     };
+                    // The tag's slot field identifies the **instance**, not this part's skinning: it
+                    // is the UNIT's slot on every part, even a boneless geoset. The vertex stage only
+                    // reads it under `WOW_RIG_SKIN`, which `WowModelExt::specialize` keys on the
+                    // mesh's own joint attributes — so a static mesh carrying a slot is not skinned
+                    // by it — while the fragment stage reads it for the per-instance body tint
+                    // (decision 0812). Giving it to every part is what makes a tinted unit tint
+                    // *whole*, which is the reference's own rule: an attached/chained model inherits
+                    // the parent CM2's computed colours (`0x714000` recursion). Hoisted above the
+                    // loop — it is a property of the unit, not of the part.
+                    //
                     // A skinned creature part draws its skinned-mesh twin (the WOW joint
                     // attributes → the owned-palette WOW_RIG_SKIN shader path, decision 0720);
                     // everything else — and the palette-full fallback (slot 0) — the static mesh.
-                    let rig_slot = match (&skin, &part.skinned_mesh) {
-                        (Some(rb), Some(_)) => rb.slot,
-                        _ => 0,
-                    };
-                    let rig_tag = crate::mesh_tag::rig_bits(rig_slot);
-                    let mesh = match (rig_slot, &part.skinned_mesh) {
-                        (1.., Some(sm)) => sm.clone(),
+                    // Keyed on the part having a twin, which the slot alone no longer implies.
+                    let skinned = inst_slot != 0 && part.skinned_mesh.is_some();
+                    let mesh = match &part.skinned_mesh {
+                        Some(sm) if skinned => sm.clone(),
                         _ => part.mesh.clone(),
                     };
                     let mut child = parent.spawn((
@@ -804,14 +820,22 @@ pub(super) fn attach_entity_visuals(
                         },
                         object.clone(),
                     ));
-                    // Bind this part to the instance's palette rig (decision 0720) — all parts
-                    // share the one joint set through the rig slot in their tag; `RigPart` is the
-                    // CPU-side link (the mouseover picker's skinned ray test).
-                    if rig_slot != 0 {
-                        child.insert((
-                            crate::rig_palette::RigPart(entity),
-                            MeshTag(rig_tag | crate::mesh_tag::alpha_bits(1.0)),
-                        ));
+                    // Every part gets a tag: the instance slot above plus the live alpha field. It is
+                    // unconditional because the slot is now a per-instance identity every part needs
+                    // (the tint) rather than a skinning detail only skinned parts have — and because
+                    // the two conditional writers that used to seed it (the interior classifier, the
+                    // animated-alpha compose) each covered only their own subset, so a part in
+                    // neither carried no tag at all. The alpha honours `fading` like those two did:
+                    // the old unconditional `1.0` here was overwritten by them on the parts they
+                    // covered, and left a one-frame opaque flash on the parts they didn't.
+                    child.insert(MeshTag(
+                        rig_tag | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 }),
+                    ));
+                    // `RigPart` stays gated on actually being skinned by that rig — it is the
+                    // CPU-side link for the mouseover picker's skinned ray test (decision 0720),
+                    // which has nothing to say about a static part.
+                    if skinned {
+                        child.insert(crate::rig_palette::RigPart(entity));
                     }
                     if let (Some(_), Some(_)) = (&skin, &part.skinned_mesh) {
                         // A streamed entity's M2 is **never view-culled** — the reference registers
@@ -851,10 +875,9 @@ pub(super) fn attach_entity_visuals(
                     if let Some(lit) =
                         part_interior_lit(mat, mat_interior, mat_bake, bake_center, entity)
                     {
-                        // `rig_tag` rides every whole-tag write here and below (decision 0720).
-                        let tag =
-                            rig_tag | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 });
-                        child.insert((MeshTag(tag), lit));
+                        // The tag itself is already seeded above, with this same value — the
+                        // classifier composes into it rather than owning it.
+                        child.insert(lit);
                     }
                     // The batch's **animated material alpha** (the verified combine's runtime half,
                     // wow-re `m2-alpha-combine-cull.md`): a creature's colour-alpha/transparency
@@ -866,16 +889,8 @@ pub(super) fn attach_entity_visuals(
                     // factor through `entities::apply_unit_mat_alpha`. Nothing is inserted for the
                     // overwhelming majority of batches, which author no tracks at all.
                     if let Some(anim) = &part.alpha_anim {
+                        // The compose needs a tag to write into; every part has one now (above).
                         child.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
-                        // The compose needs a tag to write into. An interior-capable part already
-                        // got one above; anything else (a WMO-display part, a model with no
-                        // interior variants) is seeded with the same neutral value.
-                        if mat_interior.is_none() {
-                            child.insert(MeshTag(
-                                rig_tag
-                                    | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 }),
-                            ));
-                        }
                     }
                     // Queue the appear-fade on M2 parts — `arm_appear_fade` starts the ramp once the world
                     // is on-screen (not behind the loading screen), so it plays where the player sees it.
@@ -918,8 +933,15 @@ pub(super) fn attach_entity_visuals(
                 // A card takes its MODEL's indoor law, through the same constructor as the sibling
                 // meshes it was split out of (decision 0778). No char-slot variants are consulted:
                 // a body/hair/cape/skin-extra batch is never a billboard batch, so the slot lookup
-                // living past the `continue` above costs a card nothing. The rig field stays 0 —
-                // a card draws the static mesh whatever its host.
+                // living past the `continue` above costs a card nothing.
+                //
+                // A card carries the unit's INSTANCE slot like every sibling part, even though it is
+                // never skinned by it (it draws the static mesh whatever its host — that is what the
+                // vertex stage's attribute gate is for): it is a batch of the unit's own model, so a
+                // tinted unit tints its eye-glow and torch cards too (decision 0812). Seeded
+                // unconditionally for the same reason as the mesh parts — the two writers below cover
+                // only their own subsets.
+                card.insert(MeshTag(rig_tag | crate::mesh_tag::alpha_bits(1.0)));
                 if let Some(lit) = part_interior_lit(
                     &part.material,
                     part.material_interior.as_ref(),
@@ -927,7 +949,7 @@ pub(super) fn attach_entity_visuals(
                     bake_center,
                     entity,
                 ) {
-                    card.insert((MeshTag(crate::mesh_tag::alpha_bits(1.0)), lit));
+                    card.insert(lit);
                 }
                 // A card shares its batch's per-sequence alpha loops (the billboard split copies
                 // them onto every group), sampled off the same unit clock as the mesh parts — a
@@ -937,9 +959,6 @@ pub(super) fn attach_entity_visuals(
                 // just for the batches that classified out above.
                 if let Some(anim) = &part.alpha_anim {
                     card.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
-                    if part.material_interior.is_none() {
-                        card.insert(MeshTag(crate::mesh_tag::alpha_bits(1.0)));
-                    }
                 }
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item

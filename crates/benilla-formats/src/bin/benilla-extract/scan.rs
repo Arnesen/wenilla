@@ -1240,6 +1240,24 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                 benilla_formats::ParticleShape::Sphere => hit("shape:sphere"),
                 benilla_formats::ParticleShape::Spline => hit("shape:SPLINE"),
             }
+            // ANISOTROPIC plane rectangles — the population on which the areaLength↔areaWidth axis
+            // pairing is observable at all (a SQUARE area renders identically either way). 0563 and
+            // 0566 both pre-named "a 90°-wrong ANISOTROPIC effect" as this lane's suspect, but no
+            // instrument could LIST that population, so the swapped pairing outlived both audits
+            // until Gressil's 0.1 × 1.1 blade smoke drew its curtain across the blade. Bucketed by
+            // aspect so a thin curtain (load-bearing) separates from a near-square (invisible).
+            if d.shape == benilla_formats::ParticleShape::Plane {
+                let lo = d.area_length.abs().min(d.area_width.abs());
+                let hi = d.area_length.abs().max(d.area_width.abs());
+                if hi > 1e-4 {
+                    let aspect = if lo > 1e-4 { hi / lo } else { f32::INFINITY };
+                    if aspect >= 4.0 {
+                        hit("plane-area:ANISOTROPIC >=4:1");
+                    } else if aspect >= 1.5 {
+                        hit("plane-area:anisotropic >=1.5:1");
+                    }
+                }
+            }
             match d.head_tail {
                 0 => hit("type:head"),
                 1 => hit("type:tail"),

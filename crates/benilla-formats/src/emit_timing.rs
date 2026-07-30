@@ -14,11 +14,13 @@ use crate::models::{bake_track, ScalarAnim, SeqSlot};
 /// **playing** sequence's key window every frame and forces the spawn rate to 0 while the gate is
 /// off (wow-re `part-emission-rate-animated.md` §2/§3, byte-verified `0x717d90`/`0x718f32`).
 ///
-/// The clock law rides the slot: a **looping** sequence wraps its band (`t mod period` — a
-/// windowed gate re-fires every pass), a **clamped** one parks at the band end and holds the
-/// tail value (never aliasing back to the band start). Consumers resolve `seq` from whatever
-/// clock they run: a placed doodad passes `None` (slot 0 — its one-time arm), an effect its
-/// armed slot, a unit/GameObject its live playing sequence.
+/// The clock law rides the **baked loop** ([`crate::models::KeyAnim::wrap`]), decided from the
+/// slot at bake time: a **looping** sequence wraps its band (`t mod period` — a windowed gate
+/// re-fires every pass), a **clamped** one parks at the band end and holds the tail value (never
+/// aliasing back to the band start), and a gseq-tagged track always wraps on its own free clock
+/// whatever the playing sequence does. Consumers resolve `seq` from whatever clock they run: a
+/// placed doodad passes `None` (slot 0 — its one-time arm), an effect its armed slot, a
+/// unit/GameObject its live playing sequence.
 #[derive(Debug, Clone, Default)]
 pub struct EmitTiming {
     /// Baked rate loop per file slot; `None` = the track keys nothing there (spawn rate 0).
@@ -26,18 +28,18 @@ pub struct EmitTiming {
     /// Baked gate per file slot (step, 0/1); `None` = no gate authored — the loader default is
     /// ON (`0x710092`: `block+0x14c = 1` for every emitter).
     enabled: Vec<Option<ScalarAnim>>,
-    /// Per file slot: sequence flags bit 0 CLEAR = the band loops (the kernel's modulo wrap).
+    /// Per file slot: sequence flags bit 0 CLEAR = the band loops. Carried for [`Self::idx`]'s
+    /// slot count and the dump instruments' view — the *sampling* clock is the baked loop's own.
     looping: Vec<bool>,
 }
 
 impl EmitTiming {
-    /// Bake both tracks against every file sequence slot. `slots`/`looping` are parallel
-    /// (one per file sequence); `gseq` is the global-sequence duration table.
+    /// Bake both tracks against every file sequence slot; `gseq` is the global-sequence duration
+    /// table. Each slot carries its own loop flag, which becomes the baked loop's clock.
     pub(crate) fn bake(
         rate: &M2ScalarTrack,
         enabled: &M2ScalarTrack,
         slots: &[SeqSlot],
-        looping: Vec<bool>,
         gseq: &[u32],
     ) -> Self {
         // Keep every baked shape, constants included — this channel has no static fallback path,
@@ -51,7 +53,7 @@ impl EmitTiming {
         Self {
             rate: per_slot(rate),
             enabled: per_slot(enabled),
-            looping,
+            looping: slots.iter().map(|s| s.looping).collect(),
         }
     }
 
@@ -67,23 +69,19 @@ impl EmitTiming {
     /// Is the gate ON, `elapsed` seconds into sequence slot `seq`? A slot with no baked gate is
     /// ON (the loader default).
     pub fn emitting(&self, seq: Option<usize>, elapsed: f32) -> bool {
-        let i = self.idx(seq);
-        let wrap = self.looping.get(i).copied().unwrap_or(true);
         self.enabled
-            .get(i)
+            .get(self.idx(seq))
             .and_then(|o| o.as_ref())
-            .is_none_or(|a| a.sample_clocked(elapsed, wrap, 1.0) > 0.5)
+            .is_none_or(|a| a.sample_or(elapsed, 1.0) > 0.5)
     }
 
     /// The spawn rate (particles/sec), `elapsed` seconds into sequence slot `seq`. A slot with no
     /// baked rate spawns nothing. Floored at 0 (a track tail may legitimately go negative).
     pub fn rate(&self, seq: Option<usize>, elapsed: f32) -> f32 {
-        let i = self.idx(seq);
-        let wrap = self.looping.get(i).copied().unwrap_or(true);
         self.rate
-            .get(i)
+            .get(self.idx(seq))
             .and_then(|o| o.as_ref())
-            .map_or(0.0, |a| a.sample_clocked(elapsed, wrap, 0.0))
+            .map_or(0.0, |a| a.sample_or(elapsed, 0.0))
             .max(0.0)
     }
 
@@ -128,6 +126,7 @@ impl EmitTiming {
             rate: vec![Some(ScalarAnim {
                 period: 0.0,
                 step: true,
+                wrap: true,
                 keys: vec![(0.0, rate)],
             })],
             enabled: vec![None],
@@ -149,11 +148,16 @@ mod tests {
         }
     }
 
-    fn slots(bands: &[(u32, u32)]) -> Vec<SeqSlot> {
-        bands
-            .iter()
+    /// File sequence slots as `(band, loops)` — the loop flag is the slot's CLOCK, so these tests
+    /// spell it per slot rather than carry a parallel array beside the bands.
+    fn slots(spec: &[((u32, u32), bool)]) -> Vec<SeqSlot> {
+        spec.iter()
             .enumerate()
-            .map(|(index, &band)| SeqSlot { index, band })
+            .map(|(index, &(band, looping))| SeqSlot {
+                index,
+                band,
+                looping,
+            })
             .collect()
     }
 
@@ -165,8 +169,7 @@ mod tests {
         let t = EmitTiming::bake(
             &track(0, &[(0, 0.0), (67, 30.0)], &[]),
             &M2ScalarTrack::default(),
-            &slots(&[(0, 1000)]),
-            vec![true],
+            &slots(&[((0, 1000), true)]),
             &[],
         );
         assert_eq!(t.rate(None, 0.050), 0.0, "before the key: step holds 0");
@@ -182,8 +185,7 @@ mod tests {
         let t = EmitTiming::bake(
             &track(1, &[(0, 0.0), (100, 100.0), (200, 0.0)], &[]),
             &M2ScalarTrack::default(),
-            &slots(&[(0, 1000)]),
-            vec![true],
+            &slots(&[((0, 1000), true)]),
             &[],
         );
         assert!((t.rate(None, 0.050) - 50.0).abs() < 1e-4, "rising mid-ramp");
@@ -210,8 +212,11 @@ mod tests {
         let t = EmitTiming::bake(
             &track(0, &[(0, 20.0)], &[]),
             &gate,
-            &slots(&[(1000, 2000), (2333, 2667), (3800, 4100)]),
-            vec![false, true, false],
+            &slots(&[
+                ((1000, 2000), false),
+                ((2333, 2667), true),
+                ((3800, 4100), false),
+            ]),
             &[],
         );
         // Idle (slot 1): the collapsed window (1,1) resolves to keys[1] = OFF — at every time,
@@ -246,8 +251,7 @@ mod tests {
         let t = EmitTiming::bake(
             &track(0, &[(0, 40.0)], &[]),
             &gate,
-            &slots(&[(0, 1000)]),
-            vec![true],
+            &slots(&[((0, 1000), true)]),
             &[],
         );
         assert!(t.emitting(None, 0.1), "first pass: inside the window");
@@ -282,8 +286,7 @@ mod tests {
         let t = EmitTiming::bake(
             &rate,
             &M2ScalarTrack::default(),
-            &slots(&[(0, 1333), (1367, 2667)]),
-            vec![true, true],
+            &slots(&[((0, 1333), true), ((1367, 2667), true)]),
             &[],
         );
         // Slot 0 — what the old pinned consumer sampled. Silent across its whole band.

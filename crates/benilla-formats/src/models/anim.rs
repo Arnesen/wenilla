@@ -1184,4 +1184,45 @@ mod tests {
         // …and an out-of-range bone index is a `None`, never a panic.
         assert_eq!(skel.billboard_host(999), None);
     }
+
+    /// **An effect model can be pure camera-facing geometry with no emitters at all** — the premise
+    /// that makes a consumer's "keep the meshes, carry the emitters" split wrong on its own.
+    ///
+    /// `Spells\Enchantments\Sparkle_A.m2` is the shipped proof: **one** bone, spherical billboard
+    /// (flags `0x08`), **zero** particle emitters and zero ribbons — the whole model is a single
+    /// additive quad that faces the camera. `ItemVisuals` 28 hangs it on slot 4, and 10 of the 29604
+    /// `ItemDisplayInfo` rows carry that visual, so a preview path that drops billboard batches and
+    /// keeps only emitters renders *nothing whatsoever* for those items (the select-screen half of
+    /// `#bugs` B118). Pinned here because the mistake is invisible in code that reads correct.
+    #[test]
+    fn a_real_item_glow_model_is_pure_billboard_geometry_with_no_emitters() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Spells\\Enchantments\\Sparkle_A.m2")
+            .expect("read the Sparkle_A item glow");
+        let skel = parse_m2_skeleton(&bytes).expect("skeleton");
+        assert_eq!(skel.bones.len(), 1, "one bone — the quad's own");
+        assert_eq!(
+            skel.bones[0].billboard,
+            Some(crate::BillboardKind::Spherical),
+            "…and it is a spherical billboard, so its geometry is a card"
+        );
+        assert!(
+            crate::parse_m2_particle_emitters(&bytes)
+                .expect("emitters")
+                .is_empty(),
+            "no particle emitters: carrying only emitters carries nothing"
+        );
+        assert!(
+            crate::parse_m2_ribbon_emitters(&bytes)
+                .expect("ribbons")
+                .is_empty(),
+            "nor ribbons"
+        );
+    }
 }

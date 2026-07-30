@@ -145,6 +145,12 @@ pub(in crate::entities) struct ItemGlow {
     pub(in crate::entities) display: u32,
     pub(in crate::entities) kind: ItemModelKind,
     pub(in crate::entities) visual: i32,
+    /// The ITEM's seat on the wearer's body — the attach point's bone and offset
+    /// ([`super::BoneAttach`]). Carried purely so this lane can publish the booth mirrors of what it
+    /// spawns (decision 0822): a glow's seat is this offset plus the slot's point on the item model,
+    /// and by the time the glow models load the attach path that knew the body bone is long gone.
+    pub(in crate::entities) bone: u16,
+    pub(in crate::entities) offset: bevy::prelude::Vec3,
 }
 
 /// Set once an item root's glow instances are spawned (or resolved to nothing) — the once-only
@@ -226,6 +232,53 @@ pub(super) fn attach_item_glows(
                 .spawn((Transform::from_translation(at), Visibility::default()))
                 .id();
             commands.entity(root).add_child(instance);
+            // The booth mirrors for this instance (decision 0822), at its seat on the BODY: the item's
+            // attach point plus this slot's point on the item model. `attach_effect_visuals` below
+            // spawns the effect's real geometry and emitters — the meshes as instance children, the
+            // emitters as free owner-followed entities — and the shared spell-fx lane is deliberately
+            // not the place to stamp portrait markers (a *spell's* fx must never reach a booth), so
+            // this lane publishes its own from the same `dm`. Without them a permanently-glowing
+            // weapon glowed nothing in the character window: 32 of the 35 shipped glow models are pure
+            // emitters, and `Sparkle_A.m2` is a lone camera-facing quad.
+            let seat = glow.offset + at;
+            for p in dm.parts.iter().flatten() {
+                match &p.billboard {
+                    Some(info) => {
+                        commands.entity(instance).with_child((
+                            Transform::default(),
+                            Visibility::default(),
+                            crate::portrait::PortraitBillboard {
+                                mesh: p.mesh.clone(),
+                                material: p.material.clone(),
+                                bone: glow.bone,
+                                seat: crate::portrait::PortraitSeat::Rider(seat + info.pivot),
+                                kind: info.kind,
+                            },
+                        ));
+                    }
+                    None => {
+                        commands.entity(instance).with_child((
+                            Transform::default(),
+                            Visibility::default(),
+                            crate::portrait::PortraitRider {
+                                static_mesh: p.mesh.clone(),
+                                material: p.material.clone(),
+                                bone: glow.bone,
+                                offset: seat,
+                            },
+                        ));
+                    }
+                }
+            }
+            if !dm.emitters.is_empty() {
+                commands
+                    .entity(instance)
+                    .insert(crate::portrait::PortraitEffects {
+                        bone: glow.bone,
+                        offset: seat,
+                        emitters: dm.emitters.clone(),
+                    });
+            }
             attach_effect_visuals(
                 &mut commands,
                 instance,

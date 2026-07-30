@@ -266,11 +266,14 @@ pub fn parse_m2_render_submeshes(
             .collect()
     };
 
-    // Every sequence's (anim id, absolute time band): entry stride 0x44, anim id u16 at +0x00,
-    // band start/end u32 at +0x04/+0x08. The first entry's band is the loop a placed doodad's
-    // one-time arm plays; sequence-timeline colour/weight tracks bake against it (`mat_anim`);
-    // the full list feeds the billboard bones' per-sequence translation loops.
-    let seq_bands: Vec<(u16, (u32, u32))> = {
+    // Every sequence's (anim id, absolute time band, loops): entry stride 0x44, anim id u16 at
+    // +0x00, band start/end u32 at +0x04/+0x08, flags u32 at +0x10 (bit 0 CLEAR = the band loops —
+    // the same read `particles` makes for the emission-timing bake). The first entry's band is the
+    // loop a placed doodad's one-time arm plays; sequence-timeline colour/weight tracks bake
+    // against it (`mat_anim`); the full list feeds the billboard bones' per-sequence translation
+    // loops. The loop flag is the baked loop's CLOCK (`KeyAnim::wrap`) — reading the band without
+    // it is what left a one-shot Death band wrapping back onto its opening alpha.
+    let seq_bands: Vec<(u16, (u32, u32), bool)> = {
         let (n, o) = (le_u32(bytes, 0x1c) as usize, le_u32(bytes, 0x20) as usize);
         (0..n)
             .map_while(|i| {
@@ -279,17 +282,22 @@ pub fn parse_m2_render_submeshes(
                     (
                         le_u16(bytes, e),
                         (le_u32(bytes, e + 0x04), le_u32(bytes, e + 0x08)),
+                        le_u32(bytes, e + 0x10) & 1 == 0,
                     )
                 })
             })
             .collect()
     };
-    // The same list as the bake's addressing unit: file slot + band. The slot is what indexes a
-    // track's per-sequence key ranges, so it must stay the FILE order — no filtering.
+    // The same list as the bake's addressing unit: file slot + band + clock. The slot is what
+    // indexes a track's per-sequence key ranges, so it must stay the FILE order — no filtering.
     let seq_slots: Vec<SeqSlot> = seq_bands
         .iter()
         .enumerate()
-        .map(|(index, &(_, band))| SeqSlot { index, band })
+        .map(|(index, &(_, band, looping))| SeqSlot {
+            index,
+            band,
+            looping,
+        })
         .collect();
     // Slot 0 — the loop a placed doodad's one-time arm plays, and the only band the shared-material
     // UV/tint registries can key on (see `tex_anim::bake_uv_anim`).
@@ -454,7 +462,7 @@ pub fn parse_m2_render_submeshes(
                 // (see the field doc).
                 seq_translations: seq_bands
                     .iter()
-                    .filter_map(|&(id, band)| {
+                    .filter_map(|&(id, band, _)| {
                         Some((id, parse_bone_seq_translation(bytes, bone_idx, band)?))
                     })
                     .collect(),

@@ -1,8 +1,8 @@
 //! Deterministic capture mode — the machine half of the Phase-5 visual A/B harness (decision 0008).
 //!
 //! With `$WOW_CAPTURE=<scenario>` set, the app boots server-less (net disabled in `main`), pins the
-//! game-clock and the camera to a named viewpoint, waits for terrain streaming to settle, writes one
-//! PNG of the primary window to `$WOW_CAPTURE_OUT`, and exits. The render rework (decision 0008) is the
+//! game-clock and the camera to a named viewpoint, waits for the rendered image to stop changing,
+//! writes one PNG of the primary window to `$WOW_CAPTURE_OUT`, and exits. The render rework (decision 0008) is the
 //! single riskiest change in the architecture — it can regress the whole look at once — so it goes
 //! behind this harness: baselines are captured on the *current* pipeline, then every rework step is
 //! diffed against them by the `benilla-visual` tool, catching regressions by machine before the
@@ -11,12 +11,30 @@
 //! Captures contain Blizzard-derived imagery (rendered terrain/models), so they live under the
 //! gitignored `target/visual/` and are never committed.
 //!
-//! ## Why the clock is frozen (decision 0723)
+//! ## What makes a capture reproducible — two mechanisms, and that is all
 //! "Deterministic" is the whole claim: a golden diff is evidence only if two runs of one unchanged
-//! build agree. Pinning the camera, the game clock and the clutter seed is not enough, because the
-//! sims integrate in *seconds* while the settle counts *frames* — see [`CAPTURE_FRAME_DT`] and
-//! [`hold_clock`], which together make a capture a pure function of the build. `scripts/visual.sh
-//! selfcheck` is the tripwire that keeps it that way.
+//! build agree. Pinning the camera, the game clock and the clutter seed is not enough.
+//!
+//! 1. **The shutter waits for the IMAGE to stop changing** ([`STABLE_FRAMES`], [`FrameWatch`],
+//!    decision 0815). The scene is built when the rendered frame stops moving — measured, by reading
+//!    the framebuffer back and comparing bytes. This replaced four *proxies* for the same question
+//!    (tile residency, `scene_ready`, outstanding placements, and a world-entity-count quiescence
+//!    counter), each of which was partial by construction and each of which had been added after the
+//!    previous one was caught missing something. Streaming, pipeline warm-up, late placements, late
+//!    M2 loads and the loading-screen fade are all *visible in the frame* — or they do not affect the
+//!    shot, in which case they were never the harness's business.
+//! 2. **The game clock is frozen** ([`CAPTURE_FRAME_DT`], [`hold_clock`], decision 0723), because the
+//!    sims integrate in *seconds* while the harness counts *frames*. Held while the scene is being
+//!    built, then released for exactly [`age_frames`] fixed steps, so the shot's sim age is the same
+//!    duration on any machine.
+//!
+//! **Neither one fixes the known residual flake, and no gate here can.** `scripts/visual.sh
+//! selfcheck` still finds a small number of scenarios that land in one of exactly two states. The
+//! cause is not timing: it is that our draw order among *coplanar, equal-depth* batches follows spawn
+//! order, and spawn order varies because asset loads complete on a thread pool (0723's Open section,
+//! reached again by 0810 and 0815). Both states are perfectly stable — so waiting longer, waiting for
+//! quiescence, or waiting for pixel stability cannot help. It is a renderer defect that the harness
+//! correctly *reports*; do not try to gate it away here. Read 0815 before touching this file's phases.
 //!
 //! ## Running one capture by hand
 //! **Run through Cargo — never the built binary directly:**
@@ -38,7 +56,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot};
+use bevy::render::view::screenshot::{save_to_disk, Capturing, Screenshot, ScreenshotCaptured};
 use bevy::time::TimeUpdateStrategy;
 
 use benilla_assets::coords::wow_to_bevy;
@@ -193,24 +211,32 @@ pub(crate) fn print_scenario_names() {
 #[derive(Resource)]
 pub(crate) struct CaptureMode;
 
-/// Frames the scene must stay fully streamed (residency reached) before the shot. This window is also
-/// what warms the renderer: wgpu specialises the terrain/model/sky pipelines on their first draw, and
-/// until they are ready Bevy draws only the clear colour — so a too-short settle photographs a uniform
-/// fog-blue frame. 150 frames (~2.5 s) is generous margin for pipeline warm-up after the tiles spawn,
-/// and also covers clutter/water/lighting settling and the loading-screen fade. (Residency reporting
-/// alone is not enough: tile *entities* exist well before their pipelines are warm.)
-const SETTLE_FRAMES: u32 = 150;
+/// Consecutive byte-identical framebuffer readbacks that mean "the scene is built" (decision 0815).
+///
+/// This is the harness's ONE residency test, and it is a measurement rather than a proxy: whatever is
+/// still arriving — a tile, a placement, an M2 that just finished loading, a pipeline wgpu has not
+/// specialised yet (until it is warm Bevy draws only the clear colour, which is why a blind settle
+/// could photograph a uniform fog-blue frame) — either changes the image, and resets this counter, or
+/// does not affect the shot at all.
+///
+/// 30 frames (~0.5 s of held-clock frames) is the same confidence window the entity-count counter it
+/// replaced used. Raise it with `$WOW_CAPTURE_STABLE` for a scene with a very slow tail; this is the
+/// knob that used to be `WOW_CAPTURE_SETTLE`, and unlike that one it buys *evidence* rather than a
+/// guess at a duration.
+const STABLE_FRAMES: u32 = 30;
 
-/// The effective settle window: `$WOW_CAPTURE_SETTLE` overrides [`SETTLE_FRAMES`] for scenes whose
-/// assets take longer to arrive. This buys **real** frames (loading, pipeline warm-up, spawning) —
-/// for *sim* time, which is what a precipitation column or a particle pool needs, raise
-/// [`age_frames`] instead; the two were the same knob until decision 0723 split them.
-fn settle_frames() -> u32 {
-    std::env::var("WOW_CAPTURE_SETTLE")
+/// The effective stability window — see [`STABLE_FRAMES`].
+fn stable_frames() -> u32 {
+    std::env::var("WOW_CAPTURE_STABLE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(SETTLE_FRAMES)
+        .unwrap_or(STABLE_FRAMES)
 }
+
+/// Hard cap on held frames spent waiting for [`STABLE_FRAMES`], so a scene whose image never settles
+/// (a UI fixture with a live animation) shoots anyway rather than hanging — forfeiting the guarantee,
+/// loudly. Deliberately generous: reaching it means the shot is not reproducible.
+const BUILD_CAP_FRAMES: u32 = 1800;
 
 /// Steps of [`CAPTURE_FRAME_DT`] the sims run, clock released, once the scene is built and
 /// quiescent — the shot's *sim age*. 150 = 2.5 s: past the 2 s spawn appear-fade
@@ -230,19 +256,11 @@ fn age_frames() -> u32 {
         .unwrap_or(AGE_FRAMES)
 }
 
-/// Consecutive frames the world entity count must hold before [`Phase::Settling`] calls the scene
-/// quiescent. Residency is not enough on its own: it counts terrain *tiles*, while a tile's doodads
-/// and WMOs only get *registered* there and spawn later still, as their M2s finish loading under
-/// `terrain_stream`'s wall-clock `SPAWN_BUDGET`. Every one of those carries the torches and braziers
-/// whose flames this is all about, so a capture that starts its clock at residency still ages each
-/// flame from whichever frame its model happened to land on. Waiting for the count to stop moving
-/// is the generic form of "everything that was going to spawn has spawned".
-const QUIESCE_FRAMES: u32 = 30;
 /// The frozen capture clock's frame step: every capture frame advances the game clock by exactly
 /// this, whatever the frame really cost. Anything integrated in *seconds* — particle pools, ribbon
 /// trails, animation, weather, fades — therefore reaches the shutter in the same state every run.
 ///
-/// Without it the harness is only **frame**-pinned: [`settle_frames`] counts frames while the sims
+/// Without it the harness is only **frame**-pinned: the build window counts frames while the sims
 /// advance on `time.delta_secs()`, i.e. real wall-clock, so two runs spend different real time per
 /// frame (streaming, pipeline warm-up, whatever else the machine is doing) and photograph the flames
 /// in different places. Measured on this tree before the change — the golden six captured twice from
@@ -262,15 +280,47 @@ const EXIT_GRACE_FRAMES: u32 = 3;
 /// Frames the perf probe discards after uncapping vsync (present-mode switch + pipeline settle).
 const PROBE_WARMUP_FRAMES: u32 = 60;
 
+/// Marks a framebuffer readback taken to test scene stability, so the real shot's `Capturing` wait
+/// (see [`Phase::Saving`]) cannot mistake one for the screenshot it is waiting on.
+#[derive(Component)]
+struct StabilityShot;
+
+/// The image-stability tracker: the previous framebuffer, and how many consecutive readbacks have
+/// matched it byte for byte (decision 0815). Bytes, not a hash — the buffer is tens of MB at most,
+/// a `memcmp` is free next to the readback itself, and an exact compare needs no collision argument.
+#[derive(Resource, Default)]
+struct FrameWatch {
+    /// The last framebuffer read back, or `None` before the first one lands.
+    prev: Option<Vec<u8>>,
+    /// Consecutive readbacks identical to their predecessor. Reset to 0 by any change.
+    stable: u32,
+    /// A readback is outstanding. Only ever one at a time, so `stable` counts *distinct* frames
+    /// rather than however many requests the GPU happened to retire together.
+    in_flight: bool,
+}
+
+/// Observer for a stability readback: compare against the previous frame, count, and free the slot.
+fn watch_frame(shot: On<ScreenshotCaptured>, mut watch: ResMut<FrameWatch>) {
+    watch.in_flight = false;
+    let Some(bytes) = shot.image.data.as_ref() else {
+        return; // no readback payload (a zero-sized or unavailable target) — treat as no evidence
+    };
+    watch.stable = if watch.prev.as_deref() == Some(bytes.as_slice()) {
+        watch.stable + 1
+    } else {
+        0
+    };
+    watch.prev = Some(bytes.clone());
+}
+
 /// Capture lifecycle. Advances one step per frame in [`drive_capture`].
 #[derive(Clone, Copy)]
 enum Phase {
-    /// Waiting for terrain streaming to report the scene fully resident.
-    Streaming,
-    /// Resident; counting settle frames — and waiting for the scene to stop growing — before the
-    /// shot. The game clock is held here (see [`hold_clock`]).
-    Settling(u32),
-    /// Scene built and quiescent, clock released: running exactly [`age_frames`] steps of
+    /// Clock held; waiting for the rendered image to stop changing ([`STABLE_FRAMES`]). This one
+    /// phase replaced `Streaming` + `Settling` and the four world-state proxies they waited on — see
+    /// this module's header.
+    Building(u32),
+    /// Scene built, clock released: running exactly [`age_frames`] steps of
     /// [`CAPTURE_FRAME_DT`] so every second-driven thing is at a known, machine-independent age.
     Aging(u32),
     /// fxview only: scene settled, fixture armed; waiting for the effect to attach and run its
@@ -300,13 +350,6 @@ struct CaptureCtx {
     /// The frozen clock is in force ([`CAPTURE_FRAME_DT`]) — always, except under a perf probe,
     /// whose entire measurement *is* the real frame cost.
     frozen_clock: bool,
-    /// World entity count at the previous frame, and how many consecutive frames it has held —
-    /// the scene-quiescence test [`Phase::Settling`] waits on. See [`QUIESCE_FRAMES`].
-    last_entities: usize,
-    stable_frames: u32,
-    /// Frames spent in [`Phase::Aging`] including restarts — the backstop that shoots anyway if a
-    /// scene never goes quiescent, so the harness cannot hang on one.
-    aging_total: u32,
     /// Probe samples (frame ms).
     probe_samples: Vec<f32>,
     /// Process CPU seconds at the first sampled frame — the window baseline for the probe line's
@@ -527,16 +570,14 @@ impl Plugin for CapturePlugin {
                 .add_systems(Startup, hold_clock);
         }
         app.insert_resource(CaptureMode)
+            .init_resource::<FrameWatch>()
             .insert_resource(CaptureCtx {
                 scenario,
                 out,
-                phase: Phase::Streaming,
+                phase: Phase::Building(0),
                 ui_seeded: false,
                 probe_frames,
                 frozen_clock,
-                last_entities: 0,
-                stable_frames: 0,
-                aging_total: 0,
                 probe_samples: Vec::new(),
                 probe_cpu_start: None,
             })
@@ -615,15 +656,16 @@ fn pin_scene(
     }
 }
 
-/// Hold the game clock at zero until the scene is resident; [`drive_capture`] releases it.
+/// Hold the game clock at zero until the image stops changing; [`drive_capture`] releases it.
 ///
 /// The fixed frame step alone is not enough, because it only makes each frame the same *size* — a
 /// torch flame still ages from the frame its tile happened to spawn on, and tiles spawn under a
 /// wall-clock budget (`terrain_stream`'s `SPAWN_BUDGET`) against asset I/O that finishes on a
-/// different frame every run. Held through streaming, every emitter in the scene is zero-age at
-/// residency, so at the shutter each has run exactly `settle_frames()` steps no matter when it
-/// appeared. Frame-driven work (streaming itself, the spawn budget, the screenshot save) is on the
-/// real clock and runs on regardless.
+/// different frame every run. Held through the whole build, every emitter in the scene is zero-age
+/// when the clock is released, so at the shutter each has run exactly [`age_frames`] steps no matter
+/// when it appeared. Frame-driven work (streaming itself, the spawn budget, the screenshot save) is
+/// on the real clock and runs on regardless — which is what lets the scene finish arriving while the
+/// sims stand still.
 fn hold_clock(mut clock: ResMut<Time<Virtual>>) {
     clock.pause();
 }
@@ -632,8 +674,10 @@ fn hold_clock(mut clock: ResMut<Time<Virtual>>) {
 #[allow(clippy::too_many_arguments)]
 fn drive_capture(
     mut ctx: ResMut<CaptureCtx>,
-    progress: Res<WorldLoadProgress>,
-    capturing: Query<(), With<Capturing>>,
+    mut watch: ResMut<FrameWatch>,
+    // Disjoint from the stability readbacks by the marker: without it, one of those in flight would
+    // satisfy this wait and the harness could call the real shot done before it was written.
+    capturing: Query<(), (With<Capturing>, Without<StabilityShot>)>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
     time: Res<Time<bevy::time::Real>>,
@@ -652,44 +696,72 @@ fn drive_capture(
     game_time: Res<Time>,
     mut clock: ResMut<Time<Virtual>>,
 ) {
-    // Residency, on the STRONGEST term the streamer publishes (0810). `ready == total` counts desired
-    // tiles spawned, and `focus_resident` only that the tile under the focus exists — neither says the
-    // tile's *placements* are up. `scene_ready` does exactly that (the focus tile and its 8 neighbours
-    // spawned with every WMO/doodad/prop they reference — `loading_screen`, 0737), and
-    // `placements_pending` is its outstanding count. The entity-count quiescence test below cannot
-    // cover the gap either: a placement that has not spawned yet moves no count, so the window can
-    // elapse while one is still arriving.
-    //
-    // **This is a gate correction, NOT the fix for the capture flake** (`creature-{sun,shade}-rear`
-    // still flip under `visual.sh selfcheck` at MAE ~4.27 with this in). 0810 has the open defect and,
-    // more importantly, the protocol: consecutive captures of ONE scenario share a warm asset cache
-    // and converge on a single state, so they always look deterministic. Test with a full-sweep
-    // selfcheck, never with repetition — that mistake produced three wrong diagnoses in a row.
-    let resident = progress.total > 0
-        && progress.ready == progress.total
-        && progress.focus_resident
-        && progress.scene_ready
-        && progress.placements_pending == 0;
-    // Both fixture viewers (fxview / waterfx) share the settle→arm→age→shoot flow; only the
+    // Both fixture viewers (fxview / waterfx) share the build→arm→age→shoot flow; only the
     // requested age differs.
     let fixture_age = fx_req
         .as_ref()
         .map(|r| r.age)
         .or(wfx_req.as_ref().map(|r| r.age));
-    // Scene quiescence: how long the world entity count has held still (see [`QUIESCE_FRAMES`]).
-    let live = entities.iter().len();
-    ctx.stable_frames = if live == ctx.last_entities {
-        ctx.stable_frames + 1
-    } else {
-        0
-    };
-    ctx.last_entities = live;
     ctx.phase = match ctx.phase {
-        Phase::Streaming => {
-            if resident {
-                Phase::Settling(0)
+        Phase::Building(n) => {
+            // One readback at a time, requested only here — so a leftover can never be mistaken for
+            // the real shot (the `StabilityShot` marker keeps `Saving`'s wait disjoint too).
+            if !watch.in_flight {
+                watch.in_flight = true;
+                commands
+                    .spawn((Screenshot::primary_window(), StabilityShot))
+                    .observe(watch_frame);
+            }
+            let capped = n + 1 >= BUILD_CAP_FRAMES;
+            if capped {
+                warn!(
+                    "capture: the image never settled in {} frames ({} stable); the shot is not \
+                     reproducible",
+                    n + 1,
+                    watch.stable,
+                );
+            }
+            if watch.stable < stable_frames() && !capped {
+                Phase::Building(n + 1)
+            } else if fixture_age.is_some() {
+                if let Some(state) = fx_state.as_deref_mut() {
+                    state.armed = true; // scene ready — the fixture spawns now, age clock clean
+                }
+                Phase::FxAging
+            } else if ctx.probe_frames > 0 {
+                // Probe: uncap presentation so we measure true frame cost, not the vsync ceiling.
+                // `$WOW_PROBE_VSYNC=1` keeps vsync ON instead — the probe then measures the PRESENT
+                // ceiling itself (what fps the display sync actually grants this window), the
+                // instrument for "what is the vsync cap right now".
+                let keep_vsync = std::env::var("WOW_PROBE_VSYNC").as_deref() == Ok("1");
+                if !keep_vsync {
+                    if let Ok(mut w) = windows.single_mut() {
+                        w.present_mode = probe_uncap_mode();
+                    }
+                }
+                info!(
+                    "probe: image settled; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
+                    if keep_vsync { "KEPT ON" } else { "off" }
+                );
+                Phase::ProbeWarmup(0)
+            } else if ctx.frozen_clock {
+                // Clock released here: the sims now run exactly `age_frames()` fixed steps, so the
+                // shot's sim age is the same on any machine (decision 0723).
+                info!(
+                    "capture: image settled after {} frames, aging {}",
+                    n + 1,
+                    age_frames()
+                );
+                Phase::Aging(0)
             } else {
-                Phase::Streaming
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(ctx.out.clone()));
+                info!("capture: image settled, writing {}", ctx.out);
+                Phase::Saving {
+                    frames: 0,
+                    seen: false,
+                }
             }
         }
         Phase::FxAging => {
@@ -714,81 +786,13 @@ fn drive_capture(
                 Phase::FxAging
             }
         }
-        Phase::Settling(n) => {
-            // Settled = the window elapsed AND the scene stopped growing. The quiescence half has
-            // a hard cap so a scene that never stops churning (a UI fixture with a live animation)
-            // still shoots rather than hanging — it just forfeits the guarantee, loudly.
-            let capped = n + 1 >= settle_frames() * 3;
-            if capped && ctx.stable_frames < QUIESCE_FRAMES {
-                warn!(
-                    "capture: scene never went quiescent ({} frames); the shot is not reproducible",
-                    n + 1
-                );
-            }
-            let settled =
-                n + 1 >= settle_frames() && (ctx.stable_frames >= QUIESCE_FRAMES || capped);
-            if !resident {
-                Phase::Streaming // a late tile dropped out of residency — wait for it again
-            } else if settled && fixture_age.is_some() {
-                if let Some(state) = fx_state.as_deref_mut() {
-                    state.armed = true; // scene ready — the fixture spawns now, age clock clean
-                }
-                Phase::FxAging
-            } else if settled {
-                if ctx.probe_frames > 0 {
-                    // Probe: uncap presentation so we measure true frame cost, not the vsync
-                    // ceiling. `$WOW_PROBE_VSYNC=1` keeps vsync ON instead — the probe then
-                    // measures the PRESENT ceiling itself (what fps the display sync actually
-                    // grants this window), the instrument for "what is the vsync cap right now".
-                    let keep_vsync = std::env::var("WOW_PROBE_VSYNC").as_deref() == Ok("1");
-                    if !keep_vsync {
-                        if let Ok(mut w) = windows.single_mut() {
-                            w.present_mode = probe_uncap_mode();
-                        }
-                    }
-                    info!(
-                        "probe: settled; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
-                        if keep_vsync { "KEPT ON" } else { "off" }
-                    );
-                    Phase::ProbeWarmup(0)
-                } else if ctx.frozen_clock {
-                    // Clock released here: the sims now run exactly `age_frames()` fixed steps, so
-                    // the shot's sim age is the same on any machine (decision 0723).
-                    info!("capture: scene quiescent, aging {} frames", age_frames());
-                    Phase::Aging(0)
-                } else {
-                    commands
-                        .spawn(Screenshot::primary_window())
-                        .observe(save_to_disk(ctx.out.clone()));
-                    info!("capture: scene settled, writing {}", ctx.out);
-                    Phase::Saving {
-                        frames: 0,
-                        seen: false,
-                    }
-                }
-            } else {
-                Phase::Settling(n + 1)
-            }
-        }
         Phase::Aging(n) => {
-            // A straggler landed (a model whose M2 finished loading after the scene looked
-            // quiescent). The clock re-holds below and the window restarts, so that emitter and
-            // every older one still reach the shutter having run exactly `age_frames()` steps.
-            ctx.aging_total += 1;
-            let give_up = ctx.aging_total >= age_frames() * 4;
-            if give_up && ctx.stable_frames < QUIESCE_FRAMES {
-                warn!(
-                    "capture: scene still churning after {} aging frames; the shot is not \
-                     reproducible",
-                    ctx.aging_total
-                );
-            }
-            if ctx.stable_frames < QUIESCE_FRAMES && !give_up {
-                if n > 0 {
-                    info!("capture: scene moved during aging at frame {n}; restarting the window");
-                }
-                Phase::Aging(0)
-            } else if n + 1 >= age_frames() {
+            // No churn-restart here. The old one re-held the clock and restarted this window if the
+            // world entity count moved — and 0723 measured that it **never fired**, because the
+            // count-quiescence gate it shared a threshold with had already passed. What replaced it
+            // is upstream and stronger: the image itself stopped changing before the clock was
+            // released, so a straggler that would have mattered was already waited out (0815).
+            if n + 1 >= age_frames() {
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(ctx.out.clone()));
@@ -914,12 +918,11 @@ fn drive_capture(
     // built (see [`hold_clock`]), running from the moment it is quiescent. Re-held if a late tile
     // drops the scene back out of residency, so the restarted settle is the same settle.
     if ctx.frozen_clock {
-        // The invariant, in one line: **the clock runs only while the world is quiescent.** Held
-        // while the scene is still being built, and re-held the moment anything spawns, so no
-        // effect can ever age from the frame its model happened to arrive on.
+        // The invariant, in one line: **the clock runs only once the image has stopped changing.**
+        // Held while the scene is still being built, so no effect can ever age from the frame its
+        // model happened to arrive on.
         let held = match ctx.phase {
-            Phase::Streaming | Phase::Settling(_) => true,
-            Phase::Aging(_) => ctx.stable_frames < QUIESCE_FRAMES,
+            Phase::Building(_) => true,
             // Shutter open — hold the sims still. The screenshot is *requested* on one frame but
             // the render world may serve it a frame or two later (pipelined rendering), and with
             // the clock still running that is a one-step difference in every particle pool: the

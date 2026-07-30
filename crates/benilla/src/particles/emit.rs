@@ -33,9 +33,14 @@ pub(super) fn rand_s11(state: &mut u32) -> f32 {
 /// local WoW frame (Z up, origin at the emitter record's `position`). The caller applies the speed
 /// roll and the space-mode transform.
 ///
-/// - **Plane** (`0x7b8890`): position uniform in the ±½·area rectangle; direction a cone around +Z
-///   with **symmetric** angles θ = S11·verticalRange, φ = S11·horizontalRange (the reference draws
-///   ±range, not [0, range] — a one-sided cone tilted every flame the same way).
+/// - **Plane** (`0x7b8890`): position uniform in the ±½·area rectangle — **local x takes
+///   `areaLength`, local y takes `areaWidth`** (wow-re `part-shape-kernels.md` §4, VERIFIED:
+///   `p = (r2·A_x·0.5, r1·A_y·0.5, 0)` with `A_x = rt+0x290 = EmissionAreaLength`,
+///   `A_y = rt+0x294 = EmissionAreaWidth`). The pairing is only observable on an **anisotropic**
+///   rectangle, which is why it stayed wrong through 0563/0566 — every emitter checked until
+///   Gressil's blade smoke authored a square area. Direction: a cone around +Z with **symmetric**
+///   angles θ = S11·verticalRange, φ = S11·horizontalRange (the reference draws ±range, not
+///   [0, range] — a one-sided cone tilted every flame the same way).
 /// - **Sphere** (`0x7b8d70`): radius uniform in [areaLength, areaWidth] (= min/max radius for this
 ///   shape), position on the shell at latitude S11·verticalRange / longitude S11·horizontalRange;
 ///   direction radial outward (flag `0x4000` ⇒ straight +Z instead).
@@ -96,10 +101,13 @@ pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3
         let shell = Vec3::new(clat * clon, clat * slon, slat); // unit by construction
         (r * shell, Some(shell))
     } else {
+        // x ← areaLength (rt+0x290), y ← areaWidth (rt+0x294) — the VERIFIED pairing, see the
+        // Plane bullet above. Both draws are iid S11, so which one feeds which axis changes the
+        // rectangle's ORIENTATION but not its distribution; that is the whole bug.
         (
             Vec3::new(
-                rand_s11(rng) * 0.5 * def.area_width,
                 rand_s11(rng) * 0.5 * def.area_length,
+                rand_s11(rng) * 0.5 * def.area_width,
                 0.0,
             ),
             None,
@@ -192,28 +200,45 @@ pub(crate) mod tests {
     /// SYMMETRIC (θ = S11·range — wow-re `part-shape-kernels.md`'s correction of our old
     /// [0, range) draw): with a wide sample, x-velocities must land on both signs. The
     /// rectangle rides the R(+Z,90°) emitter frame (`emit_local`'s tail): the kernel's
-    /// width-along-x/length-along-y square lands width-along-y/length-along-x.
+    /// length-along-x/width-along-y rectangle lands **width-along-x, length-along-y**. Asserted on
+    /// an ANISOTROPIC area (2 × 4) so the pairing is actually pinned — a square area passes either
+    /// way, which is exactly how the swapped pairing survived 0563/0566 (Gressil's 0.1 × 1.1 blade
+    /// smoke drew the 1.1 yd curtain ACROSS the blade).
     #[test]
     fn plane_kernel_rect_bounds_and_symmetric_cone() {
         let d = def(ParticleShape::Plane);
         let mut rng = 12345u32;
         let (mut neg, mut pos) = (false, false);
+        let (mut max_dx, mut max_dy) = (0.0f32, 0.0f32);
         for _ in 0..256 {
             let (p, dir) = emit_local(&d, &mut rng);
             assert!(
-                (p.x - 1.0).abs() <= 1.0 + 1e-4,
-                "x within ±½·length of position (post-R)"
+                (p.x - 1.0).abs() <= 2.0 + 1e-4,
+                "x within ±½·width of position (post-R)"
             );
             assert!(
-                (p.y - 2.0).abs() <= 2.0 + 1e-4,
-                "y within ±½·width of position (post-R)"
+                (p.y - 2.0).abs() <= 1.0 + 1e-4,
+                "y within ±½·length of position (post-R)"
             );
             assert_eq!(p.z, 3.0);
             assert!(dir.z > 0.0, "cone around +Z stays upward for range < π/2");
+            max_dx = max_dx.max((p.x - 1.0).abs());
+            max_dy = max_dy.max((p.y - 2.0).abs());
             neg |= dir.x < -1e-3;
             pos |= dir.x > 1e-3;
         }
         assert!(neg && pos, "symmetric cone covers both x signs");
+        // The PIN, not just the bound: the LONG extent must land on x. A swapped
+        // areaLength/areaWidth pairing caps `max_dx` at ½·length = 1.0 and pushes `max_dy` past it,
+        // so this pair of asserts is what fails on the 0563-era kernel.
+        assert!(
+            max_dx > 1.5,
+            "the wide extent (½·width = 2.0) rides x post-R, reached {max_dx}"
+        );
+        assert!(
+            max_dy <= 1.0 + 1e-4,
+            "the narrow extent (½·length = 1.0) rides y post-R, reached {max_dy}"
+        );
     }
 
     /// Sphere births sit on a shell with radius in [areaLength, areaWidth] (min/max radius for
