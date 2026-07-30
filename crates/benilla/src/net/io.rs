@@ -689,6 +689,9 @@ fn writer_loop(
                         count,
                     } => w.destroy_item(bag_index, slot, count),
                     ClientCommand::CastSpell { spell_id, target } => w.cast_spell(spell_id, target),
+                    ClientCommand::CastSpellAtDest { spell_id, dest } => {
+                        w.cast_spell_at_dest(spell_id, dest)
+                    }
                     ClientCommand::CancelAura { spell_id } => w.cancel_aura(spell_id),
                     ClientCommand::SetActionButton { button, packed } => {
                         w.set_action_button(button, packed)

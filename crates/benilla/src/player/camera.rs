@@ -13,7 +13,7 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 use avian3d::prelude::*;
 
 use crate::collision::camera_query_filter;
-use crate::interact::{WorldClick, WorldRightClick};
+use crate::interact::{WorldClick, WorldRightClick, WorldRightPress};
 use crate::model_fade::{
     self_model_fade_alpha, FadeMaterials, PendingAppearFade, RenderFade, SELF_FADE_WINDOW,
 };
@@ -206,9 +206,20 @@ pub(super) fn run_look_session(
     click_consumed: bool,
     world_click: &mut MessageWriter<WorldClick>,
     world_right_click: &mut MessageWriter<WorldRightClick>,
+    world_right_press: &mut MessageWriter<WorldRightPress>,
     left_click: &mut Option<f32>,
     right_click: &mut Option<f32>,
 ) {
+    // The right button's DOWN edge, before any click-vs-drag classification — the reference's
+    // WorldFrame OnMouseDown fires at the press whether it becomes a click or a turn. It belongs
+    // to the world when the press lands in the viewport off the UI, or whenever a look session
+    // already owns the (hidden, locked) cursor — a right join into a left-orbit is still a world
+    // press. Ground-targeting's cancel reads this edge (decision 0792).
+    if buttons.just_pressed(MouseButton::Right)
+        && (rig.look.is_some() || (cursor_in_viewport(window, camera) && !pointer_over_ui))
+    {
+        world_right_press.write(WorldRightPress);
+    }
     // A left+right gesture is a both-button run / camera turn — never a target select. Cancel any
     // pending left click-vs-drag test the instant the right button joins in, so releasing out of a
     // both-button move never fires a spurious selection click.

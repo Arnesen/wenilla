@@ -17,13 +17,21 @@
 // detail clutter, the merged mesh ships `ATTRIBUTE_COLOR = (mcsh_tint, mcsh_tint, mcsh_tint, 1)`,
 // which Bevy folds into base_color → the lit factor is multiplied by the MCSH grey per-doodad.
 //
-// Models (M2 doodads/creatures/player) are lit by the SAME faithful fixed-function directional matte as
+// Models (M2 doodads/creatures/player) are lit here by the same fixed-function directional matte as
 // terrain and WMO — `clamp(ambient + diffuse·max(N·L,0))` on the model's own vertex normal, to-light =
-// `−light_sun.xyz` (GL_LIGHTING + GL_LIGHT0 + GL_COLOR_MATERIAL, byte-verified off WoW.exe 5875). The one
-// difference for exterior WORLD doodads: the sun/diffuse term is scaled by the per-instance TERRAIN-SHADE
-// sampled at the doodad's base (2.5 on lit ground, 0.5 on MCSH-shadowed ground — verified `[def+0xa4]`,
-// ratio 0.2 load-bearing; ambient stays full). There is NO M2 irradiance lobe: the earlier `model_lobe`
-// order-2 curve was a fabrication (no such program runs — M2UsePixelShaders defaults off), now removed.
+// `−light_sun.xyz`. The one difference for exterior WORLD doodads: the sun/diffuse term is scaled by the
+// per-instance TERRAIN-SHADE sampled at the doodad's base (2.5 on lit ground, 0.5 on MCSH-shadowed
+// ground — verified `[def+0xa4]`, ratio 0.2 load-bearing; ambient stays full).
+//
+// **On the exterior M2 lane that matte is OUR choice, not the reference's response** — see 0796 and the
+// lane comment at step 7. Terrain and WMO genuinely are fixed-function (GL_LIGHTING + GL_LIGHT0 +
+// GL_COLOR_MATERIAL, byte-verified off WoW.exe 5875, and all five FFP light-commit call sites are
+// terrain's); M2 is not. An earlier version of this header claimed "there is NO M2 irradiance lobe … no
+// such program runs — M2UsePixelShaders defaults off". That is wrong twice over: the gate is the VERTEX
+// cvar `M2UseShaders`, which defaults to "1", and the program it loads (`Shaders\Vertex\Model2.bls`, out
+// of misc.MPQ) IS an order-2 irradiance lobe, running on every exterior M2 the reference draws. The claim
+// is corrected rather than deleted — it stood long enough to seed a decision record, and the next reader
+// should know it was retired, not that it was never made.
 //
 // Specular (row 9 separate-specular, local viewer) is verified by q4/q5/Q13 but kept OUT of this
 // step — M2 per-material shininess (q4 §6 INFERRED) is its own A/B and lives in Step 7b. WMO
@@ -58,7 +66,7 @@ struct ModelParams {
     clutter_fade: vec4<f32>,
     model_flags: vec4<f32>,
     // x = per-material MCSH terrain-shade SELECTOR (≥0.5 ⇒ lit ground, <0.5 ⇒ MCSH-shadowed); the shader
-    // thresholds it to pick the live lit/shaded doodad sun LEVEL from `sh_c16.x`/`.z`. yzw reserved.
+    // thresholds it into the lit/shaded doodad sun INTENSITY family below. yzw reserved.
     sun_scale: vec4<f32>,
     // xyz = the M2Color RGB tint for batches whose colour track ANIMATES (the static vertex bake is
     // skipped for those — WowModelExt::tint): folded into the albedo exactly where the vertex tint
@@ -80,11 +88,10 @@ struct ModelParams {
 
 // The shared global light (lighting::global_light): ONE storage buffer every material reads, updated
 // once/frame in place — replaces the per-material light/fog uniforms the old apply_wow_lighting re-pushed
-// each frame. The model reads rows 0-2 (ambient/diffuse/sun for the WMO/clutter matte) + fog + the
-// LIVE global SH rows 6-12 — the disassembled `Model2.bls` probe of the day/night scene light, packed
-// at intensity 1 (decision 0354: the exterior M2 lane evaluates it per fragment, scaled by the
-// per-instance INTENSITY — the byte-verified `[node+0xa4]`, 2.5 lit / 0.5 MCSH-shadowed / 1.0
-// day-night). Shared with terrain.wgsl — a tree and the dirt under it fade into the same haze.
+// each frame. The model reads rows 0-2 (ambient/diffuse/sun) + fog, plus rows 6-12: the disassembled
+// `Model2.bls` probe of the day/night scene light at intensity 1 — the reference's own exterior M2
+// response, read by the doodad/entity lane under the `WOW_M2_SH=1` A/B (0796 §5) and dark otherwise.
+// Shared with terrain.wgsl — a tree and the dirt under it fade into the same haze.
 // (light_spec is part of the prefix layout but the model path never reads it.)
 struct WowLight {
     light_ambient: vec4<f32>, // rgb ambient; w = Mod2x scale
@@ -93,26 +100,32 @@ struct WowLight {
     light_spec: vec4<f32>,    // rgb spec color; w = shininess (terrain's — unused by the matte model path)
     fog_color: vec4<f32>,     // rgb row-7 fog (gamma); w = enable (>0.5)
     fog_params: vec4<f32>,    // x=start y=end z=linear-lighting A/B flag w=farclip wall
-    // The global Model2.bls SH rows (6-12), LIVE (decision 0354): the scene day/night light as an
-    // order-2 probe at intensity 1 — DC (ambient, `.w` of c10) + the sun's linear/quad bands in
-    // c10.xyz / c13 / c16.xyz, the disassembled closed form (wow-re model2-bls-vertex-sh.md).
-    // Every sun band is linear in the committed colour, so the exterior M2 lane scales them ALL by
-    // the per-instance intensity (never I²); the sun's DC redistribution rides `grade.yzw`
-    // (× intensity). Storm/night blends flow through automatically — the pack reads the blended
-    // scene rows.
+    // The global Model2.bls SH rows (6-12): the scene day/night light as an order-2 probe at
+    // intensity 1 — DC (ambient, `.w` of c10) + the sun's linear/quad bands in c10.xyz / c13 /
+    // c16.xyz, the disassembled closed form (wow-re model2-bls-vertex-sh.md). Every sun band is
+    // linear in the committed colour, so a consumer scales them ALL by the per-instance intensity
+    // (never I²); the sun's DC redistribution rides `grade.yzw` (× intensity).
+    //
+    // **LIVE only under the response A/B (`WOW_M2_SH=1`; 0796 §5).** 0410 took the exterior M2 lane
+    // off this curve onto the hard-cutoff FFP matte on the director's look call, and the block sat
+    // packed-but-unread until that call was reopened: 0796 REFUTED the fidelity premise behind
+    // retiring it (the reference's M2 lane IS this SH shader, not an FFP light slot), so the cutoff
+    // now stands purely as a look call and the two need to be seen side by side. `sh_c16.w` carries
+    // the switch (it had been free since the 0273 point gain and the 0750/0751 sun dial retired).
+    // Whichever side the director calls, the loser goes — the eval below, or this block plus
+    // `pack_model_core_rows`' fold and the four struct mirrors that carry it for layout.
     sh_c10_r: vec4<f32>,
     sh_c10_g: vec4<f32>,
     sh_c10_b: vec4<f32>,
     sh_c13_r: vec4<f32>,
     sh_c13_g: vec4<f32>,
     sh_c13_b: vec4<f32>,
-    // xyz = the true c16 quad band (x²−y², per channel); w = a free lane (the eval never reads
-    // a c16.w; the retired point-light gain dial rode it, then the 0750/0751 sun calibration
-    // dial, retired by the 0753 trace law).
+    // xyz = the true c16 quad band (x²−y², per channel), live with the block above; w = the exterior
+    // M2 response A/B (0796 §5): >0.5 ⇒ the SH lobe, else the shipped hard cutoff.
     sh_c16: vec4<f32>,
     _water: array<vec4<f32>, 4>, // rows 13-16: the liquid swatches — unread by models.
     // x = SIDN night fraction (1 overnight, 0 by day — scales m.sidn.rgb).
-    // yzw = the sun's SH DC redistribution per channel, at intensity 1 (the exterior lane × I).
+    // yzw = the sun's SH DC redistribution per channel, at intensity 1 (× the per-instance I).
     grade: vec4<f32>,
     // Rows 18-19: the INTERIOR fog triple — the 4 s camera-in-WMO MFOG crossfade (== the scene fog
     // outdoors). Consumed by the interior lanes only (round-6 Q-I): interior WMO-group surfaces
@@ -528,36 +541,93 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     let quad = vec4<f32>(n_lit.x * n_lit.y, n_lit.y * n_lit.z, n_lit.z * n_lit.z, n_lit.x * n_lit.z);
     let n1 = vec4<f32>(n_lit, 1.0);
     let x2y2 = n_lit.x * n_lit.x - n_lit.y * n_lit.y;
-    // Exterior world doodad/entity: the TRACE-VERIFIED committed-sun law (decision 0753).
-    // The CPU light animator targets the per-instance intensity `[node+0xa4]` — 2.5 on lit
-    // ground / 0.5 on MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`,
-    // `0x69e280`; the force-1.0 leg is `0x69e36b`) — but the reference AS THE DIRECTOR RUNS IT
-    // (WoW.exe D3D → wined3d; apitrace of their own client, 2026-07-29) commits the sun to the
-    // device at `D · min(I, 1)`: the lit 2.5 rung arrives at ×1, the shadowed rung at ×0.5, hue
-    // exact, never over-gamut (the Silverpine direct commits with max channel 254/255 — both
-    // peak-normalization and the raw ×2.5 product are refuted by that one byte). The light
-    // reaches the GPU as an FFP light slot (no SH constants anywhere in the trace), so the
-    // response is the FFP `max(N·L, 0)` — 0747's shader-lane f(μ) curve is superseded on this
-    // lane, and 0706's "the reference runs the shader path" premise is refuted for the
-    // reference-as-run. Lane history: `Model2.bls` SH lobe (0354/0358) → FFP matte, hard cutoff
-    // (director's call: the shadow side sits exactly at ambient) → unclamped source (0706) →
-    // verified curve (0747) → peak-norm (0750) → calibration dial (0751) → this trace law
-    // (0753), which retires the curve, the peak-norm and the dial here.
+    // Exterior world doodad/entity: a hard-cutoff FFP matte — `clamp01(ambient + D·min(I,1)·
+    // max(N·L,0))`. **A DELIBERATE DEVIATION, not the reference's response** (0796; read that
+    // record before touching this lane).
+    //
+    // 0410 put the hard cutoff here on the director's look call — a sunlit character's shadow side
+    // must read the SAME as the same skin standing in shade, and the SH lobe's authored wrap
+    // (0.059·C on the anti-sun side, dipping −0.037·C mid-back) tinted it warm and lifted it.
+    // 0753 then read the reference's own apitrace as CORROBORATING that shape (an FFP light slot,
+    // "no SH constants anywhere in the trace") and set the `min(I,1)` commit. **0796 refutes the
+    // fidelity half of 0753**: wow-re's §5 cross-check shows the reference's M2 lane — ADT doodad,
+    // GameObject, creature, player alike — is its own authored `Model2.bls` vertex shader running
+    // order-2 SH, and the FFP light commits visible in a world frame belong to TERRAIN
+    // (`0x71c730`'s five `0x68xxxx` call sites) and the WMO path. M2's single FFP call site
+    // (`70bdf6`) is reachable only with `M2UseShaders` off. "No SH constants" was a measurement
+    // artifact — constants upload as dirty-range deltas whose start register varies.
+    //
+    // So the reference's response on this lane is `E = A + C·(4/17)(0.375 + 2μ + 1.875μ²)`,
+    // μ = N·u, `clamp01` on the SUM, with the per-instance gain UNCLAMPED (linear-band gains
+    // observed live at 0.5/0.85/1.0/1.874/2.5). What survives here is 0410's look call alone.
+    // The curve is still packed and dormant in rows 6-12 (see WowLight) — one predicate away.
+    //
+    // The CPU light animator targets the per-instance intensity `[node+0xa4]` — 2.5 on lit ground
+    // / 0.5 on MCSH-shadowed ground / 1.0 on the interior/WMO-prop leg (`0x69e4ad`, `0x69e280`;
+    // the force-1.0 leg is `0x69e36b`). Lane history: `Model2.bls` SH lobe (0354/0358) → FFP
+    // matte, hard cutoff (0410, director's call) → unclamped source (0706) → verified curve
+    // (0747) → peak-norm (0750) → calibration dial (0751) → the 0753 trace law → 0796, which
+    // keeps the pixels and demotes the justification to a deviation.
     //
     // The per-material `sun_scale.x` selector has THREE states (model_render::ShadeSel): ≥0.85 =
     // the lit-ground family (ADT doodads and every entity M2 — animator target 2.5, mixed toward
     // 0.5 by the per-instance tag shade byte, which units/players/GameObjects ramp CPU-side like
     // the binary's `0x69e770`; statics leave it 0), 0.5..0.85 = fixed intensity 1.0 (an exterior
     // WMO MODD prop — the 2.5 site is one a MODD prop never reaches, §8b), <0.5 = statically
-    // MCSH-shadowed (0.5). The ramp runs in animator units and the COMMIT clamps, like the
-    // reference: a lit↔shadowed transition holds ×1 until the ramp crosses 1.0.
+    // MCSH-shadowed (0.5). The ramp runs in animator units and the COMMIT clamps.
+    //
+    // **OPEN (0796): putting entity M2 in the lit-ground family is contradicted by observation.**
+    // A player + three NPCs across two of the reference's own apitraces all commit their sun at
+    // gain EXACTLY 1.0 — never 2.5, never 0.5 — while the same frames' ADT doodads show the full
+    // 0.5/0.85/1.0/1.874/2.5 spread (wow-re `trace-forensics-northshire-d3d` §5). That signature
+    // is `0x672a20`'s null-node fallback, i.e. a unit may not sit on the terrain-shade chain at
+    // all. The byte chain benilla built this on (`m2-interior-doodad-base-light` §9) is verified
+    // up to its FINAL link — "the unit's own node fills the unit's light" — which is the INFERRED
+    // one the traces contradict; wow-re has it as an open follow-up. It is NOT acted on here
+    // because `min(I,1)` below already lands a lit-ground unit on 1.0, so the visible error is
+    // confined to a unit on MCSH-shadowed ground (we dim to 0.5, the reference observes 1.0), and
+    // the honest fix deletes a byte-verified subsystem (0173/0354/0477/0480) on a mechanism wow-re
+    // has not closed. Do not "fix" it by unclamping — that lands every character at ×2.5.
     let inst_shade = select(f32((fade_tag >> 6u) & 0xffu) / 255.0, 0.0, interior_prop);
     let mat_shade = select(0.0, 1.0, m.sun_scale.x < 0.5);
     let shade_t = max(mat_shade, inst_shade);
     let mid_band = m.sun_scale.x >= 0.5 && m.sun_scale.x < 0.85;
     let intensity = min(select(mix(2.5, 0.5, shade_t), 1.0, mid_band), 1.0);
+    let lit_ffp = wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (intensity * ndotl);
+    // THE A/B (`WOW_M2_SH=1` → row 12 `.w`; 0796 §5) — the reference's OWN response on this lane,
+    // the order-2 `Model2.bls` lobe over the dormant SH rows, restored beside the cutoff so the
+    // director can judge the two by eye. Same closed form the interior-prop lane below runs and the
+    // same one `pack_model_core_rows` folds: `E = A + C·(4/17)(0.375 + 2μ + 1.875μ²)`, μ = N·u.
+    // Every sun band is linear in the committed colour, so ONE `intensity` multiply covers the whole
+    // lobe (never I²); ambient rides the c10 `.w` lanes and does NOT scale with it, and the sun's DC
+    // redistribution rides `grade.yzw`.
+    //
+    // `intensity` is shared with the FFP branch ON PURPOSE, so the A/B has exactly one variable —
+    // the curve. It keeps `min(I,1)`, which is refuted as fidelity (0796 §1) but happens to give a
+    // character in sunlight the ×1.0 the reference is observed to give it — i.e. the amplitude for
+    // the case 0410 actually judged. The known cost: an ADT doodad on lit ground sits at ×1.0 where
+    // the reference gives it ×2.5, so DOODADS read dimmer than the reference under either branch.
+    // Unclamping needs 0796 §4 (units) settled first or every character lands at ×2.5.
+    let sun_dc = wow_light.grade.yzw * intensity;
+    let lit_sh = vec3<f32>(
+        wow_light.sh_c10_r.w + sun_dc.x
+            + intensity
+                * (dot(wow_light.sh_c10_r.xyz, n_lit) + dot(wow_light.sh_c13_r, quad)
+                    + wow_light.sh_c16.x * x2y2),
+        wow_light.sh_c10_g.w + sun_dc.y
+            + intensity
+                * (dot(wow_light.sh_c10_g.xyz, n_lit) + dot(wow_light.sh_c13_g, quad)
+                    + wow_light.sh_c16.y * x2y2),
+        wow_light.sh_c10_b.w + sun_dc.z
+            + intensity
+                * (dot(wow_light.sh_c10_b.xyz, n_lit) + dot(wow_light.sh_c13_b, quad)
+                    + wow_light.sh_c16.z * x2y2),
+    );
+    // clamp01 the SUM, never per term — the lobe dips to −0.037·C around μ≈−0.53 (low-order-SH
+    // ringing, the reference's own authored response), and clamping the sun term alone would floor
+    // that away and lose the mid-back dip the whole A/B is partly about.
     let lit_doodad = clamp(
-        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (intensity * ndotl),
+        select(lit_ffp, lit_sh, wow_light.sh_c16.w > 0.5),
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );

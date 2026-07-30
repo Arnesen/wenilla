@@ -179,7 +179,7 @@ pub struct EffectPipelineKey {
     /// The draw's blend — the whole state-variant axis (0733 §4).
     blend: EffectBlend,
     /// The rasterizer depth-bias constant (the decal family's coplanarity settle; 0 for
-    /// free-floating geometry). Three values exist ({0, 4096, 8192}), so the key space stays
+    /// free-floating geometry). Three values exist ({0, 8192, 32768}), so the key space stays
     /// small. Nonzero ALSO selects the `DECAL_WORLD_CLIP` transform (0781): a coplanar decal
     /// keeps absolute verts and runs the mesh path's `clip_from_world`, so its depth ties
     /// against the drawn ground within the bias.
@@ -466,7 +466,7 @@ fn prepare_effects(
     let effect_fn = draw_functions.read().id::<DrawEffects>();
     // `$WOW_EFFECT_TRACE` — the lane's own phase probe (the WOW_PHASE shape, decision 0665,
     // asked of effect items): during the merge walk, record each BLOB-SHADOW item (Tris
-    // topology + the shadow's 4096 raster bias) with its sort distance and appended index
+    // topology + the shadow's own raster bias) with its sort distance and appended index
     // range, then log the phase totals. Splits "never pushed / never queued / merged away /
     // submitted but the GPU state ate it" — the gap no pixel reading can see into.
     let trace = std::env::var_os("WOW_EFFECT_TRACE").is_some();
@@ -528,7 +528,10 @@ fn prepare_effects(
                 }
             }
             let index_end = meta.indices.len() as u32;
-            if trace && draw.topology == EffectTopology::Tris && draw.raster_bias == 4096 {
+            if trace
+                && draw.topology == EffectTopology::Tris
+                && draw.raster_bias == crate::blob_shadow::SHADOW_RASTER_BIAS
+            {
                 trace_lines.push(format!(
                     "  item {i}: shadow anchor {:.1?}, dist {:.1}, verts {}, indices \
                      {index_start}..{index_end}, tex {:?}",
@@ -795,7 +798,7 @@ mod tests {
 
     /// 0781's premise, demonstrated in the two routes' exact arithmetic shapes: give both the
     /// SAME ground vertex at WoW-scale coordinates, and the cam-relative route (0733 §2)
-    /// disagrees with the world-mesh route by the ORDER OF THE WHOLE 4096-unit rasterizer bias
+    /// disagrees with the world-mesh route by the ORDER OF THE WHOLE 0781-era 4096-unit bias
     /// at close camera distances — pure arithmetic divergence spending the margin that exists
     /// to settle real geometry deltas (the CPU-baked decal verts vs the GPU-transformed render
     /// verts; GPU per-pipeline FMA differences push the route term higher still). The
@@ -834,6 +837,84 @@ mod tests {
             "cam-relative route divergence stayed far inside the bias \
              (worst {worst_route_over_bias:.2}× across the sweep) — 0781's premise would be \
              unfounded"
+        );
+    }
+
+    /// 0781's named residual, sized (B131 — the director-confirmed flicker): the decal's verts
+    /// are CPU-baked world positions, the receiver's are GPU-transformed per frame, and the two
+    /// roundings displace the baked point from the drawn plane by a few ulps of the WORLD
+    /// COORDINATE — millimetres at city magnitudes. The depth conflict is that displacement's
+    /// component along the receiver's normal: a level street barely samples it (the y ulp at
+    /// street height is micro-scale), a *sloped* receiver takes the full horizontal ulps onto
+    /// its tilted normal — and the confirmed flicker walk was the Stormwind gate ramp. Model
+    /// the 3-ulp worst case (0781: "~1–3 ulps") at the walk's own coordinates across zoom and
+    /// slope, and pin the resize: the residual spends over half the 0781-era 4096 margin (with
+    /// the GPU's FMA-contraction noise on top, the tie is lost — the live A/B), while
+    /// `SHADOW_RASTER_BIAS` dominates the same worst case with ≥2× headroom.
+    #[test]
+    fn raised_bias_dominates_the_bake_residual() {
+        use crate::blob_shadow::SHADOW_RASTER_BIAS;
+        // The ramp mid-spot of the flicker walk: bevy (−wow.y, wow.z, −wow.x) of
+        // wow (−8843.41, 642.68, 95.92).
+        let ground = Vec3::new(-642.68, 95.92, 8843.41);
+        let clip_from_view =
+            Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1);
+        let ulp = |v: f32| f32::from_bits(v.to_bits() + 1) - v;
+        // 3 ulps per world axis, signs free — the worst displacement onto a unit normal n is
+        // the absolute sum.
+        let worst_normal_offset = |n: Vec3| {
+            3.0 * (n.x.abs() * ulp(ground.x)
+                + n.y.abs() * ulp(ground.y)
+                + n.z.abs() * ulp(ground.z))
+        };
+        let cam_dir = Vec3::new(0.35, 0.55, 0.76).normalize();
+        let mut worst_over_old = 0.0_f32;
+        let mut worst_over_new = 0.0_f32;
+        // Receiver grades from level street to a steep ramp, tilted along 8 azimuths.
+        for slope in [0.0_f32, 0.08, 0.2, 0.35] {
+            for az in 0..8 {
+                let a = az as f32 * std::f32::consts::FRAC_PI_4;
+                let tilt = Vec3::new(a.cos(), 0.0, a.sin());
+                let normal = (Vec3::Y - tilt * slope).normalize();
+                let delta_n = worst_normal_offset(normal);
+                for step in 0..80 {
+                    let d = 1.0 + step as f32 * 0.5;
+                    let cam = ground + cam_dir * d;
+                    let world_from_view = Mat4::look_at_rh(cam, ground, Vec3::Y).inverse();
+                    let view_from_world = world_from_view.inverse();
+                    let clip_from_world = clip_from_view * view_from_world;
+                    let depth = depth_world(&clip_from_world, ground);
+                    // Window-depth cost of the offset along the normal, differenced in f64 so
+                    // the measurement isn't polluted by the very f32 noise it measures.
+                    let m = clip_from_world.as_dmat4();
+                    let z_at = |p: bevy::math::DVec3| {
+                        let c = m * p.extend(1.0);
+                        c.z / c.w
+                    };
+                    let p = ground.as_dvec3();
+                    let eps = 0.05;
+                    let grad = (z_at(p + normal.as_dvec3() * eps) - z_at(p)).abs() / eps;
+                    let conflict = delta_n as f64 * grad;
+                    let unit = bias_unit(depth) as f64;
+                    worst_over_old = worst_over_old.max((conflict / (4096.0 * unit)) as f32);
+                    worst_over_new =
+                        worst_over_new.max((conflict / (SHADOW_RASTER_BIAS as f64 * unit)) as f32);
+                }
+            }
+        }
+        eprintln!(
+            "bake residual worst: {worst_over_old:.3}x the 0781-era 4096 margin, \
+             {worst_over_new:.3}x SHADOW_RASTER_BIAS"
+        );
+        assert!(
+            worst_over_old > 0.5,
+            "the 3-ulp residual stayed far inside the 0781-era 4096 margin \
+             (worst {worst_over_old:.2}×) — the resize's premise would be unfounded"
+        );
+        assert!(
+            worst_over_new < 0.5,
+            "SHADOW_RASTER_BIAS leaves under 2× headroom against the 3-ulp residual \
+             (worst {worst_over_new:.2}×) — raise it"
         );
     }
 }

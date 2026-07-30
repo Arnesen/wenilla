@@ -93,6 +93,14 @@ mod wmo_props;
 use wmo_props::{resolve_wmo_gameobject_props, spawn_wmo_gameobject_props};
 mod spell_fx;
 use spell_fx::{attach_spell_fx, resolve_spell_fx};
+
+/// Dest-anchored spell effects (decision 0797): a DynamicObject's persistent area visuals
+/// (Blizzard's storm, Flamestrike's burn) + the GO dest one-shot burst. (Distinct from
+/// `crate::ground_fx`, the flat-quad decal renderer this lane's models feed into.)
+pub(crate) mod dest_fx;
+use dest_fx::{
+    arm_ground_effects, attach_ground_fx_models, spawn_ground_bursts, tick_shard_emitters,
+};
 // The container feed reads the icon column off the same catalog resource (one DBC parse).
 pub(crate) use attach::spawn_joints;
 pub(crate) use equipment::ItemDisplays;
@@ -365,6 +373,8 @@ impl Plugin for EntitiesPlugin {
             .init_resource::<missile::PendingMissiles>()
             // The projectile flight-loop edges (`crate::sound::missile` consumes them).
             .add_message::<MissileSound>()
+            // The cast router's dest one-shot orders (`dest_fx`, decision 0797).
+            .add_message::<dest_fx::GroundBurst>()
             .add_systems(Startup, setup_entities.after(AssetSet::Open))
             // The map-scope teardown (`world_map::MapChange`): drop every display/material dedup
             // so a map's assets actually die with it — the #bugs teleport leak.
@@ -391,6 +401,11 @@ impl Plugin for EntitiesPlugin {
                     resolve_spell_fx,
                     move_missiles,
                     spawn_missiles,
+                    // The dest-anchored lane (0797): the dynobj arm + the GO burst + the shard
+                    // tick all create cache entries too — before the same-frame build below.
+                    // One nested (unordered) element: three independent producers, and the
+                    // outer tuple is at `chain()`'s 20-element ceiling.
+                    (arm_ground_effects, spawn_ground_bursts, tick_shard_emitters),
                     // The fxview capture fixture (inert outside `WOW_CAPTURE=fxview`): creates
                     // its cache entry before the same-frame build, attaches after it.
                     spell_fx::drive_fx_view,
@@ -407,7 +422,9 @@ impl Plugin for EntitiesPlugin {
                     spawn_wmo_gameobject_props,
                     attach_held_items,
                     attach_spell_fx,
-                    attach_missile_models,
+                    // One nested (unordered) element — two independent free-model attach
+                    // passes; the outer tuple is at `chain()`'s 20-element ceiling.
+                    (attach_missile_models, attach_ground_fx_models),
                     // Tick the live per-instance tint clones AFTER the attach passes registered
                     // them, so a clone's first drawn frame is already on its own clock.
                     spell_fx::tick_fx_tint,

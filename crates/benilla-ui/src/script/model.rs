@@ -234,6 +234,15 @@ pub(crate) struct Model {
     /// Set when `SpellStopCasting()` fired while [`Self::casting`] — the ESC local-cancel
     /// trigger, drained by [`super::UiScript::take_spell_stop`] ([`spellbook`]).
     pub(crate) spell_stop: bool,
+    /// Whether the app's spell-targeting cursor mode is active — the `flag_word != 0` mirror
+    /// (`SpellIsTargeting 0x6e6cd0`, decision 0792). Pushed each frame by the app's targeting
+    /// feed ([`super::UiScript::set_spell_targeting`]); read by `SpellIsTargeting()` and gating
+    /// `SpellStopTargeting()`, whose 1/nil return the ESC chain's rung (`UIParent.lua:1490`)
+    /// falls through on, exactly like [`Self::casting`]'s.
+    pub(crate) spell_targeting: bool,
+    /// Set when `SpellStopTargeting()` fired while [`Self::spell_targeting`] — the ESC-chain
+    /// targeting cancel, drained by [`super::UiScript::take_stop_targeting`] ([`spellbook`]).
+    pub(crate) spell_stop_targeting: bool,
 
     /// The player's talent pages (decision 0304) — tabs + per-tab talents the
     /// `GetNumTalentTabs`/`GetTalentInfo`/… bindings read ([`super::talent`]). Durable player
@@ -698,6 +707,8 @@ impl Model {
             spell_casts: Vec::new(),
             casting: false,
             spell_stop: false,
+            spell_targeting: false,
+            spell_stop_targeting: false,
             talents: super::talent::TalentUiState::default(),
             talent_learns: Vec::new(),
             shapeshift_forms: Vec::new(),

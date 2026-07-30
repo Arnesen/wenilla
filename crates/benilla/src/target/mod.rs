@@ -50,6 +50,7 @@ mod flash;
 mod highlight;
 mod hover;
 pub(crate) mod lock;
+mod reticle;
 mod ring;
 mod scan;
 
@@ -113,12 +114,17 @@ pub(crate) struct HoveredObject {
 #[derive(Resource)]
 pub(crate) struct PickOcclusion {
     pub(crate) distance: f32,
+    /// The hit itself — the world-space point `distance` names along the cursor ray, or `None`
+    /// with no hit (sky, mouselook, no cursor). The ground-targeting machine's hover/commit point
+    /// (decision 0792): the same world trace the reference's targeting position rides.
+    pub(crate) point: Option<Vec3>,
 }
 
 impl Default for PickOcclusion {
     fn default() -> Self {
         Self {
             distance: f32::INFINITY,
+            point: None,
         }
     }
 }
@@ -169,6 +175,7 @@ impl Plugin for TargetPlugin {
                 Startup,
                 (
                     ring::setup_ring,
+                    reticle::setup_reticle,
                     (ring::load_factions, scan::load_creature_types).after(AssetSet::Open),
                 ),
             )
@@ -185,8 +192,22 @@ impl Plugin for TargetPlugin {
                     hover::update_hover,
                     hover::update_hovered_object,
                     cursor_mode::classify_cursor,
+                    // The right button's down-edge cancel first (the ref's OnMouseDown hook,
+                    // 0792): the frame the press lands, the cursor drive below already reads
+                    // the mode cleared and the classifier's verdict stands.
+                    crate::ui_action::targeting::cancel_targeting_on_right_press,
+                    // The ground-targeting pre-empt (decision 0792): overwrites the classifier's
+                    // verdict while the targeting cursor is up — the ref's dispatcher runs this
+                    // branch before the object classifier; last-writer-wins reads the same.
+                    crate::ui_action::targeting::drive_targeting_cursor,
+                    // The AoE reticle reads that verdict (`WorldCursor.unable` IS the frame's
+                    // range state — the ref's one CheckGroundPointInRange caller feeds both).
+                    reticle::update_reticle,
                     click::world_right_click_payload,
                     click::select_on_click,
+                    // AFTER the gated select (which holds while the mode is active): the commit
+                    // may clear the mode, and the selection gate must have read it first.
+                    crate::ui_action::targeting::commit_ground_cast_on_click,
                     click::act_on_right_click,
                     click::clear_target_requests,
                     click::target_unit_requests,
@@ -207,7 +228,8 @@ impl Plugin for TargetPlugin {
             // rebuilt by `update_ring` in Update; this is a tinted copy).
             .add_systems(
                 PostUpdate,
-                ring::push_ring.after(crate::particles::buffer::begin_effect_frame),
+                (ring::push_ring, reticle::push_reticle)
+                    .after(crate::particles::buffer::begin_effect_frame),
             );
     }
 }

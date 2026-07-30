@@ -61,10 +61,18 @@ pub(super) fn select_on_click(
     payload_held: Res<crate::ui_script::CursorPayloadHeld>,
     occlusion: Res<PickOcclusion>,
     mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
+    ground: Res<crate::ui_action::SpellTargeting>,
 ) {
     // Drain the frame's clicks; act only if there was one and the inspector isn't holding left-click.
     let clicked = clicks.read().last().is_some();
     if !clicked || inspect.enabled {
+        return;
+    }
+    // The ground-targeting cursor owns the click (decision 0792): the ref's terrain leg tries
+    // the ground commit BEFORE its select/deselect half and skips it when the commit fires
+    // (`0x492580`'s "otherwise"). The commit system runs after this one in the chain, so the
+    // mode is still readable here — selection changes not at all, in range or out.
+    if ground.active() {
         return;
     }
     let (self_guid, engaged) = self_q

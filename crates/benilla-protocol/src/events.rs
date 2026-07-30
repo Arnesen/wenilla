@@ -27,6 +27,10 @@ pub enum EntityKind {
     Player,
     Unit,
     GameObject,
+    /// A `TYPEID_DYNAMICOBJECT` (6) create — the invisible anchor a ground-targeted spell's
+    /// area effect hangs on (Blizzard's storm, Flamestrike's burn). Carries no display id; its
+    /// visual resolves through the spell chain (`DYNAMICOBJECT_SPELLID`), not a model field.
+    DynamicObject,
     Other,
 }
 
@@ -512,6 +516,10 @@ pub enum SessionEvent {
         /// The GameObject an open-lock cast launched at (`TARGET_FLAG_GAMEOBJECT`) — opens a chest lid /
         /// locked door (decision 0250). `None` for a unit spell.
         go_target: Option<u64>,
+        /// The ground point a dest-targeted cast launched at (`TARGET_FLAG_DEST_LOCATION`), raw
+        /// WoW coords — where a ground AOE's launch-side visual belongs (the B132 follow-up;
+        /// the persistent effect anchors to the DynamicObject create instead). `None` otherwise.
+        dest: Option<[f32; 3]>,
         ammo_display_id: Option<u32>,
         /// The **cast item's** guid when the packet's first guid names one (an item use — potion,
         /// scroll: `item_or_caster != caster`); `None` for a plain spell cast. The item-use

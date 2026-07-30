@@ -402,3 +402,37 @@ fn merge_overlays_deltas_and_replaces_on_recreate() {
         "a re-create replaces — the stale 30 must not survive an overlay"
     );
 }
+
+/// The `DYNAMICOBJECT_*` accessors against the exact live capture (vmangos, 2026-07-30, the
+/// B132 follow-up's `--groundfx 10` run): Blizzard's dynobj create — caster guid 26, BYTES 1
+/// (area spell), SPELLID 10, RADIUS 8.0, the cast point in POS, FACING never sent.
+#[test]
+fn dynamicobject_fields_read_the_live_blizzard_capture() {
+    let f = ObjectFields::from_pairs(&[
+        (0, 6),                        // OBJECT_FIELD_GUID lo
+        (1, 0xf100_0000),              // guid hi — HIGHGUID dynobj
+        (2, 0x41),                     // TYPE: OBJECT | DYNAMICOBJECT
+        (3, 10),                       // ENTRY = the spell id
+        (4, 1.0f32.to_bits()),         // SCALE_X
+        (6, 26),                       // DYNAMICOBJECT_CASTER lo
+        (8, 1),                        // BYTES: area spell
+        (9, 10),                       // SPELLID
+        (10, 8.0f32.to_bits()),        // RADIUS
+        (11, (-8844.14f32).to_bits()), // POS_X
+        (12, 668.83f32.to_bits()),     // POS_Y
+        (13, 97.81f32.to_bits()),      // POS_Z
+    ])
+    .into_created();
+    assert_eq!(f.dynamicobject_caster(), Some(26));
+    assert_eq!(f.dynamicobject_bytes(), Some(1));
+    assert_eq!(f.dynamicobject_spell_id(), Some(10));
+    assert_eq!(f.dynamicobject_radius(), Some(8.0));
+    let (pos, facing) = f.dynamicobject_position().unwrap();
+    assert_eq!(pos, [-8844.14, 668.83, 97.81]);
+    assert_eq!(facing, 0.0, "FACING absent on a created store reads 0");
+    // Not a dynobj (a corpse never streams SPELLID): the id gate reads None, not Some(0).
+    assert_eq!(
+        ObjectFields::from_pairs(&[(6, 26)]).dynamicobject_spell_id(),
+        None
+    );
+}

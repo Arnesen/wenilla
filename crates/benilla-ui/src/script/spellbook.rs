@@ -112,6 +112,19 @@ impl super::UiScript {
     pub fn take_spell_stop(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().spell_stop)
     }
+
+    /// Push whether the app's spell-targeting cursor mode is active (decision 0792) — what
+    /// `SpellIsTargeting()` reads and `SpellStopTargeting()` gates on. Pushed each frame by the
+    /// app's targeting feed (`benilla::ui_action`), before the input pass runs the ESC chain.
+    pub fn set_spell_targeting(&mut self, targeting: bool) {
+        self.model_mut().spell_targeting = targeting;
+    }
+
+    /// Drain the `SpellStopTargeting()` trigger: `true` if it fired while targeting since the
+    /// last call — the ESC-chain rung (`UIParent.lua:1490`); the app clears its targeting mode.
+    pub fn take_stop_targeting(&mut self) -> bool {
+        std::mem::take(&mut self.model_mut().spell_stop_targeting)
+    }
 }
 
 /// The book-id → 0-based [`SpellBookState::slots`] index seam (module docs): `None` for a
@@ -277,6 +290,40 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
             if model.casting {
                 model.spell_stop = true;
+                Ok(Value::Integer(1))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+
+    // SpellIsTargeting() — the ref's Script::SpellIsTargeting (`0x6e6cd0`, wow-re
+    // `wave-cast.md`): true while the targeting cursor is up (`flag_word != 0`), nil otherwise.
+    // Read by FrameXML (PetFrame's right-click bind fork) and by the ESC chain's callers.
+    g.set(
+        "SpellIsTargeting",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            if model.spell_targeting {
+                Ok(Value::Boolean(true))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+
+    // SpellStopTargeting() — the ref's Script::SpellStopTargeting (`0x6e6e30`: if IsTargeting →
+    // StopTargeting `0x6e4900` → AbortCast(0x1c), which in targeting mode just clears the word,
+    // no packet). The 1/nil return is load-bearing exactly like SpellStopCasting's above: the
+    // ESC chain's rung (`UIParent.lua:1490`, `elseif ( SpellStopTargeting() ) then`) must fall
+    // through to the game menu when nothing was targeting. The host drains the trigger
+    // (`benilla::ui_action::targeting`) and clears its mode.
+    g.set(
+        "SpellStopTargeting",
+        lua.create_function(|lua, ()| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if model.spell_targeting {
+                model.spell_stop_targeting = true;
                 Ok(Value::Integer(1))
             } else {
                 Ok(Value::Nil)

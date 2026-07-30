@@ -20,9 +20,13 @@
 //!   is unmodeled here (INTERIM): we refuse locally with the client's own error strings instead —
 //!   `0x09` "You have no target." / `0x0A` "Invalid target" — and never ship an unbindable cast.
 //!
-//! Deferred, refused-not-guessed: ground-target AoEs (switch enum 16 / location bits 5–6 — the
-//! targeting cursor), item bits 4/14 (enchants/poisons cast *at* an item), gameobject bit 11 (the
-//! OPEN_LOCK path already has its own shape), STRING bit 13.
+//! The **location half of the targeting cursor is modeled** (decision 0792): switch enum 16 and
+//! the bare DEST word (`Targets = 0x40`) resolve to [`CastWireTarget::GroundTargeting`], which
+//! [`super::targeting`] turns into the Cast/UnableCast cursor + the world-click commit. Still
+//! deferred, refused-not-guessed: the pure SOURCE word (0x20 — NPC-cast data only), item bits
+//! 4/14 (enchants/poisons cast *at* an item), gameobject bit 11 (the OPEN_LOCK path already has
+//! its own shape), STRING bit 13, and the *unit* hand-cursor mode (the residual-unit-word
+//! machine behind the autoSelfCast stand-in above).
 
 use benilla_formats::SpellDisplay;
 use bevy::ecs::system::SystemParam;
@@ -56,6 +60,10 @@ const UNIT_BITS: u16 = TF_UNIT
 pub(crate) const ERR_NO_TARGET: u8 = 0x09;
 pub(crate) const ERR_INVALID_TARGET: u8 = 0x0A;
 
+/// The dest-location bit — the ground-cast wire mask (`BindLocation 0x6e60f0`'s bit-6 arm; the
+/// source bit 5 completes `TargetingWantsLocation 0x6e6320`'s `0x60`, still refused below).
+const TF_DEST_LOCATION: u16 = 0x0040;
+
 /// What the wire's target block should carry for this cast.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CastWireTarget {
@@ -64,6 +72,9 @@ pub(crate) enum CastWireTarget {
     /// A bound unit — mask `TARGET_FLAG_UNIT (0x2)` + this guid (possibly the player's own,
     /// via the autoSelfCast fallback).
     Unit(u64),
+    /// A ground-targeted cast (decision 0792) — no send yet: enter the targeting-cursor mode's
+    /// location half ([`super::targeting`]); the world click commits mask `0x40` + the point.
+    GroundTargeting,
     /// Nothing bindable — do NOT send; surface this client error instead.
     Refused(u8),
 }
@@ -185,8 +196,9 @@ pub(crate) fn cast_target_mask(def: &SpellDisplay) -> u16 {
         1 => word &= !TF_EXPLICIT_GATE,
         5 => word &= !TF_CORPSE_ALLY,
         6 | 53 => word |= TF_UNIT_ENEMY,
-        // 16 (ground-target) sets the cursor-mode flag, not a word bit — the location bits
-        // 0x60 usually arrive via `Targets` itself; both land in the refused leg below.
+        // 16 (ground-target) sets the cursor-mode flag (the ref's `bl`), not a word bit — the
+        // location bits 0x60 usually arrive via `Targets` itself; both resolve to
+        // `GroundTargeting` in [`resolve_cast_target`] (decision 0792).
         21 | 45 => word |= TF_UNIT_ASSIST,
         23 => word |= 0x0800,
         25 | 63 => word |= TF_UNIT,
@@ -276,9 +288,25 @@ pub(crate) fn resolve_cast_target(
     if word == 0 {
         return CastWireTarget::SelfImplicit;
     }
-    // Bits outside the unit family (item/gameobject/location/string) have no candidate here —
-    // the ref's item/GO/ground binders are separate machines. Refuse rather than guess.
+    // Arm 16's ground fast-defer (`6e52db` sets bl, `6e535b` returns-to-cursor): a ground-arm
+    // spell (Flamestrike) drops into targeting-cursor mode BEFORE any candidate bind — but only
+    // after the word==0 immediate-commit above, whose order the ref fixes (`6e5338` precedes the
+    // bl test).
+    if def.implicit_target_a1 == 16 {
+        return CastWireTarget::GroundTargeting;
+    }
+    // Bits outside the unit family (item/gameobject/location/string) have no candidate here.
+    // The DEST-location word (Blizzard's bare `Targets = 0x40`, default switch arm) is the
+    // targeting cursor's location half (decision 0792) — in the ref it falls out of the failed
+    // bind walk into cursor mode (`6e50c8`); real 5875 data never combines location bits with
+    // unit bits (live spell_template sweep: `Targets & 0x60` rows are exactly 0x20 or 0x40
+    // alone), so deferring before the unit walk is byte-equivalent. The pure SOURCE word (0x20)
+    // is NPC-cast data (Aura of Fear kin), unreachable from a player's book, and keeps the
+    // refusal with the item/GO/string machines.
     if word & !UNIT_BITS != 0 {
+        if word == TF_DEST_LOCATION {
+            return CastWireTarget::GroundTargeting;
+        }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
     // Candidate 1: the current selection (ArmCast's explicit-guid leg — for a player caster the
@@ -404,15 +432,49 @@ mod tests {
         );
     }
 
-    /// Non-unit masks (ground AoE's dest-location bit, item bits) refuse instead of shipping a
-    /// guess — the deferred machines named in the module docs.
+    /// The ground family resolves to `GroundTargeting` by BOTH routes (decision 0792): the
+    /// arm-16 fast-defer (Flamestrike: `Targets 0x40`, implicit 16 — and even with a selection,
+    /// the ref defers before any candidate bind) and the bare DEST word falling out of the bind
+    /// walk (Blizzard: `Targets 0x40`, implicit 28 = default arm). The word==0 immediate commit
+    /// still precedes the arm-16 check, as the ref orders them (`6e5338` before the bl test).
+    #[test]
+    fn ground_masks_enter_targeting_mode() {
+        let flamestrike = spell(0x40, 16);
+        assert_eq!(
+            resolve_cast_target(Some(&flamestrike), Some(42), Some(1), true, &rel_none()),
+            CastWireTarget::GroundTargeting
+        );
+        let blizzard = spell(0x40, 28);
+        assert_eq!(
+            resolve_cast_target(Some(&blizzard), None, Some(1), true, &rel_none()),
+            CastWireTarget::GroundTargeting
+        );
+        let self_commit_with_ground_arm = spell(0, 16);
+        assert_eq!(
+            resolve_cast_target(
+                Some(&self_commit_with_ground_arm),
+                None,
+                Some(1),
+                true,
+                &rel_none()
+            ),
+            CastWireTarget::SelfImplicit,
+            "word==0 commits before the arm-16 defer — the ref's order"
+        );
+    }
+
+    /// The still-deferred non-unit masks (source-location, item bits, string) refuse instead of
+    /// shipping a guess — the machines named in the module docs.
     #[test]
     fn non_unit_masks_refuse() {
-        let blizzard = spell(0x40, 16);
-        assert_eq!(
-            resolve_cast_target(Some(&blizzard), Some(42), Some(1), true, &rel_none()),
-            CastWireTarget::Refused(ERR_INVALID_TARGET)
-        );
+        for targets in [0x20u32, 0x10, 0x2000, 0x60] {
+            let s = spell(targets, 0);
+            assert_eq!(
+                resolve_cast_target(Some(&s), Some(42), Some(1), true, &rel_none()),
+                CastWireTarget::Refused(ERR_INVALID_TARGET),
+                "Targets {targets:#x} must stay refused"
+            );
+        }
     }
 
     fn rel_none() -> TargetRelations<'static> {

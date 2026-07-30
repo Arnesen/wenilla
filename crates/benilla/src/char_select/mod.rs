@@ -121,8 +121,10 @@ pub(crate) struct Roster {
     /// `WOW_CHAR`, when explicitly set: auto-pick this name on the FIRST roster (the dev fast
     /// path past the screen). `take()`n once — a later `/logout` shows the screen normally.
     env_char: Option<String>,
-    /// A just-created character's name (decision 0423): the next roster update selects its row
-    /// (the ref's `SELECT_LAST_CHARACTER`, keyed by name so it survives the create/enum race).
+    /// A just-created character's name (decision 0423): its row gets selected (the ref's
+    /// `SELECT_LAST_CHARACTER`, keyed by name so it survives the create/enum race). Armed by
+    /// [`Roster::note_created`], which consumes it against the roster **already in hand** —
+    /// [`apply_roster_policy`] only has to answer the other arrival order.
     just_created: Option<String>,
     /// The auth realm-list entry this session connected to (the screen's realm banner, 0465);
     /// refreshed with each roster.
@@ -132,9 +134,38 @@ pub(crate) struct Roster {
 }
 
 impl Roster {
-    /// Note a character the create screen just made, so the next roster update selects its row.
+    /// Note a character the create screen just made, and select its row.
+    ///
+    /// **The consume happens here, not on the next roster message** (B119): the IO thread
+    /// re-enumerates and emits the fresh roster *before* the create result (`net::io`), so by the
+    /// time the result reaches [`crate::char_create`] the new row is normally already in
+    /// [`Self::chars`] and [`apply_roster_policy`] has already run for that list. Arming a flag for
+    /// "the next roster update" then waited for a message that never arrives again — the select
+    /// screen came back on the previously-selected row (reproduced: create a tauren on a
+    /// human-first account and the human is still standing there).
+    ///
+    /// The arm survives when the name isn't in hand yet, so the reverse arrival order (result
+    /// first) is still answered by [`apply_roster_policy`].
     pub(crate) fn note_created(&mut self, name: String) {
         self.just_created = Some(name);
+        self.select_created_by_name();
+    }
+
+    /// Select the armed just-created row **by name**, disarming only on a hit. Case-insensitive:
+    /// vmangos normalizes a created name (`normalizePlayerName` — first letter upper, rest lower),
+    /// so a typed `ZZBULL` enumerates back as `Zzbull` and an exact compare would miss.
+    fn select_created_by_name(&mut self) {
+        let Some(name) = self.just_created.as_deref() else {
+            return;
+        };
+        if let Some(row) = self
+            .chars
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(name))
+        {
+            self.selected = Some(row);
+            self.just_created = None;
+        }
     }
 
     /// The selected character, if any.
@@ -204,10 +235,19 @@ fn apply_roster_policy(
     for msg in msgs.read() {
         roster.chars = msg.characters.clone();
         roster.realm = msg.realm.clone();
-        // Select the just-created character's row (the ref's SELECT_LAST_CHARACTER — ours keys by
-        // name so it survives the create → enum race), else clamp into range, first row default.
-        if let Some(name) = roster.just_created.take() {
-            roster.selected = roster.chars.iter().position(|c| c.name == name);
+        // A still-armed create (the result hasn't landed yet — the reverse of the order `net::io`
+        // actually sends in) selects its row here: by name first, else the LAST row, which is the
+        // ref's literal `SELECT_LAST_CHARACTER` → `SelectCharacter(numChars)` and lands on the same
+        // character regardless — vmangos enumerates `ORDER BY create_time, guid`, so the new one is
+        // last. Otherwise clamp into range, first row default.
+        if roster.just_created.is_some() {
+            roster.select_created_by_name();
+            if let Some(name) = roster.just_created.take() {
+                warn!(
+                    "char select: created {name:?} is not on the fresh roster — selecting the last row"
+                );
+                roster.selected = roster.chars.len().checked_sub(1);
+            }
         }
         if roster.chars.is_empty() {
             roster.selected = None;
@@ -423,10 +463,20 @@ fn debug_select_dialog(
     *done = true;
 }
 
+/// Default delay before the select-screen shot fires (seconds from the screen coming up) — long
+/// enough for the art, the glue scene and the geared model to settle.
+const SELECT_SHOT_AT: f32 = 8.0;
+
 /// The select-screen shot instrument (`WOW_CHARSELECT_SHOT_OUT=<path>`, decision 0465): once the
 /// screen has been up a few seconds (art + scene + model settled), write one PNG of the window via
 /// Bevy's own framebuffer readback — machine-checkable geometry without macOS screen-recording
 /// permission. Inert without the env.
+///
+/// `WOW_CHARSELECT_SHOT_AT=<secs>` moves the shot (default [`SELECT_SHOT_AT`], measured from the
+/// first frame the screen is up). The knob exists because the fixed 8 s lands *inside* the
+/// create round-trip when the run is `WOW_CHARCREATE_SHOT` + `WOW_CHARCREATE_NAME`: the B119 retest
+/// wants the screen a few seconds AFTER the new character lands, and it captured the frame 19 ms
+/// after the create result — before the booth had re-baked the new selection.
 fn debug_select_shot(
     mut commands: Commands,
     time: Res<Time>,
@@ -440,8 +490,12 @@ fn debug_select_shot(
         *done = true;
         return;
     };
+    let at = std::env::var("WOW_CHARSELECT_SHOT_AT")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(SELECT_SHOT_AT);
     let start = *entered_at.get_or_insert(time.elapsed_secs());
-    if time.elapsed_secs() - start < 8.0 {
+    if time.elapsed_secs() - start < at {
         return;
     }
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
@@ -485,5 +539,90 @@ pub(crate) fn class_name(class: u8) -> &'static str {
         9 => "Warlock",
         11 => "Druid",
         _ => "?",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn character(guid: u64, name: &str) -> Character {
+        Character {
+            guid,
+            name: name.to_string(),
+            race: 1,
+            class: 1,
+            gender: 0,
+            skin: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+            level: 1,
+            zone: 0,
+            map: 0,
+            position: benilla_protocol::wire::Vector3d {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            flags: 0,
+            equipment: [benilla_protocol::CharEnumItem::default(); 19],
+        }
+    }
+
+    /// B119 — a created character is selected against the roster **already in hand**. `net::io`
+    /// re-enumerates and emits the fresh roster BEFORE the create result, so by the time
+    /// `note_created` runs the row exists and the roster message is spent; a version that only armed
+    /// a flag for "the next roster update" left the previously-selected row standing (reproduced
+    /// live: create a tauren on a human-first account, the human stays on the stage).
+    #[test]
+    fn a_created_character_is_selected_from_the_roster_in_hand() {
+        let mut roster = Roster {
+            chars: vec![
+                character(1, "Kerwind"),
+                character(2, "Xero"),
+                character(3, "Zzbullone"), // the fresh row, appended by the re-enum
+            ],
+            selected: Some(0),
+            ..default()
+        };
+        roster.note_created("Zzbullone".to_string());
+        assert_eq!(roster.selected, Some(2), "the new row must be selected");
+        assert!(roster.just_created.is_none(), "and the arm consumed");
+    }
+
+    /// The name key is case-insensitive: vmangos normalizes a created name
+    /// (`normalizePlayerName` — first letter upper, rest lower), so the string the create screen
+    /// typed is NOT what the enum sends back.
+    #[test]
+    fn the_created_name_matches_the_servers_normalized_spelling() {
+        let mut roster = Roster {
+            chars: vec![character(1, "Kerwind"), character(2, "Zzbullone")],
+            selected: Some(0),
+            ..default()
+        };
+        roster.note_created("ZZBULLONE".to_string()); // as typed
+        assert_eq!(roster.selected, Some(1));
+    }
+
+    /// The reverse arrival order (result first, roster after) stays armed and is answered by the
+    /// roster policy — and a name that still can't be found falls back to the LAST row, which is the
+    /// ref's literal `SELECT_LAST_CHARACTER` → `SelectCharacter(numChars)` and the same character
+    /// anyway (vmangos enumerates `ORDER BY create_time, guid`).
+    #[test]
+    fn an_unanswerable_create_stays_armed() {
+        let mut roster = Roster {
+            chars: vec![character(1, "Kerwind")],
+            selected: Some(0),
+            ..default()
+        };
+        roster.note_created("Zzbulltwo".to_string());
+        assert_eq!(
+            roster.just_created.as_deref(),
+            Some("Zzbulltwo"),
+            "no row to select yet — the arm must survive for the roster policy"
+        );
+        assert_eq!(roster.selected, Some(0), "and nothing is mis-selected");
     }
 }

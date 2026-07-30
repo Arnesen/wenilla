@@ -64,6 +64,16 @@ pub struct WorldClick;
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightClick;
 
+/// The right button's **DOWN edge** in the world — emitted at the press, before the click-vs-drag
+/// test even starts, whenever the press belongs to the world (in the viewport off the UI, or any
+/// press while a look session already owns the hidden cursor). The reference's
+/// `CGWorldFrame::OnMouseDown 0x483c40` analogue: ground-targeting's right-click cancel hangs off
+/// this edge (`0x492c20`, wow-re `world-click-targeting.md` Q3), which fires whether the press
+/// becomes a click OR a turn-drag, and consumes nothing (the ref handler returns 0, so the
+/// BUTTON2 turn and the release's context click still run).
+#[derive(Message, Clone, Copy)]
+pub struct WorldRightPress;
+
 /// Whether mouseover picking runs. Today it's armed/disarmed by the **Ctrl+Cmd+I** inspector toggle
 /// ([`toggle_inspect`]).
 #[derive(Resource, Default)]
@@ -515,6 +525,7 @@ impl Plugin for InteractPlugin {
             .init_resource::<journal::CastJournal>()
             .add_message::<WorldClick>()
             .add_message::<WorldRightClick>()
+            .add_message::<WorldRightPress>()
             // After the UI keyboard feed because `update_mouseover` reads `PointerOverUi`, whose
             // player-UI half `UiInput` writes — the pick must see this frame's hover, not last
             // frame's. (`toggle_inspect` itself no longer needs the ordering: its Ctrl+Cmd+I chord

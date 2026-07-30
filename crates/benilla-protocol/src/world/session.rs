@@ -321,6 +321,16 @@ impl WorldSession {
         )
     }
 
+    /// Cast a spell at a **ground point** (`CMSG_CAST_SPELL` with `TARGET_FLAG_DEST_LOCATION` +
+    /// WoW world coords) — the unsplit twin of [`WorldWriter::cast_spell_at_dest`], for the
+    /// `--spells` probe's dest-cast round trip (decision 0792).
+    pub fn cast_spell_at_dest(&mut self, spell_id: u32, dest: [f32; 3]) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_at_dest(spell_id, dest),
+        )
+    }
+
     /// Cast an OPEN_LOCK spell at a **GameObject** (`CMSG_CAST_SPELL`) — the unsplit twin of
     /// [`WorldWriter::cast_spell_gameobject`], for a probe's live chest-loot verification (decision
     /// 0239): cast e.g. 3365 "Opening" / 2575 "Mining" at a lockable GO and expect

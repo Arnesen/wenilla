@@ -1080,7 +1080,9 @@ pub(super) fn attach_entity_visuals(
                     );
                     None
                 }
-                EntityKind::Other => None,
+                // A DynamicObject is deliberately invisible as an *object* — its look is the
+                // spell's area effect (the dest-anchored visual lane), never a fallback cube.
+                EntityKind::DynamicObject | EntityKind::Other => None,
             };
             if let Some((material, mesh, lift)) = fallback {
                 // Tag the cube as a pickable unit too (kind `Creature` covers units + player bodies), so

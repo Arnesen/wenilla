@@ -42,6 +42,7 @@ pub(super) fn update_pick_occlusion(
     mut occlusion: ResMut<PickOcclusion>,
 ) {
     occlusion.distance = f32::INFINITY;
+    occlusion.point = None;
     let (Ok((camera, cam_tf)), Ok(window)) = (camera.single(), window.single()) else {
         return;
     };
@@ -62,6 +63,7 @@ pub(super) fn update_pick_occlusion(
         &|e| occluders.contains(e),
     ) {
         occlusion.distance = hit.distance;
+        occlusion.point = Some(ray.origin + *ray.direction * hit.distance);
     }
 }
 

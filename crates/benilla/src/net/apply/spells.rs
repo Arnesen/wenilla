@@ -272,6 +272,7 @@ pub(super) fn spell_go(
     misses: Vec<(u64, u8)>,
     target: Option<u64>,
     go_target: Option<u64>,
+    dest: Option<[f32; 3]>,
     ammo_display_id: Option<u32>,
     item_caster: Option<u64>,
     commands: &mut Commands,
@@ -297,7 +298,8 @@ pub(super) fn spell_go(
 ) {
     debug!(
         "net: spell go {spell_id} by {caster:#x} ({} hit(s), {} miss(es), flags \
-         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, ammo {ammo_display_id:?})",
+         {cast_flags:#x}, target {target:?}, go_target {go_target:?}, dest {dest:?}, \
+         ammo {ammo_display_id:?})",
         hits.len(),
         misses.len()
     );
@@ -442,12 +444,17 @@ pub(super) fn spell_go(
             .iter()
             .filter_map(|&(g, code)| index.0.get(&g).map(|&e| (e, code)))
             .collect();
-        if !hits.is_empty() || !misses.is_empty() {
+        // A pure dest cast (ground AOE — empty hit/miss lists) rides the same message: the
+        // point is a target too (the B132 follow-up; the launch-side dest visual is the
+        // router's to resolve).
+        let dest = dest.map(benilla_assets::coords::wow_to_bevy);
+        if !hits.is_empty() || !misses.is_empty() || dest.is_some() {
             go_targets.write(SpellGoTargets {
                 caster: e,
                 spell_id,
                 hits,
                 misses,
+                dest,
                 ammo_display_id,
                 seq,
             });
@@ -800,6 +807,7 @@ mod tests {
                             0,
                             vec![],
                             vec![],
+                            None,
                             None,
                             None,
                             None,

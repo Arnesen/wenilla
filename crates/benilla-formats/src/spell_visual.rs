@@ -16,8 +16,11 @@
 //!   `spell-visual-apply.md` §5), and **field 10 = the missile's in-flight LOOP sound**
 //!   ([`SoundEntries`] id — Fireball's `FireMissileLoop`, the thrown dagger's `WeaponLoop`; the
 //!   client's per-missile loop handle `CMissile+0x44`, wow-re `w2f1.md`). Field 6 (`hasMissile`)
-//!   is never read — the spawn gate is `Spell.dbc` Speed alone; field 8 (`missilePathType`) is
-//!   dead-by-absence; field 13 (the caster's ground-arrival kit) is not read here yet. Stage
+//!   is never read by the missile spawn (its gate is `Spell.dbc` Speed alone) — its ONE reader
+//!   is the GO dest one-shot's suppressor ([`VisualStages::missile_gate`], 0797); field 8
+//!   (`missilePathType`) is dead-by-absence; **fields 11/12/13 are the dest-anchored block**
+//!   ([`VisualStages::area_gate`]/[`VisualStages::area_effect`]/[`VisualStages::area_kit`] —
+//!   wow-re `dynobject-visual-machine.md`, 0797). Stage
 //!   semantics (decision 0107 verdict 2): the stage sets *lifetime policy* only —
 //!   every populated slot on a reached row fires, precast persisting (reaped spell-id-keyed)
 //!   while cast/impact self-terminate.
@@ -120,11 +123,28 @@ pub struct VisualStages {
     /// 1143 "Mining Impact" (the pick clang), Herb's 91 carries 1142, the smithing crafts' 395
     /// carries 1143 (the hammer). `None` = no strike sound.
     pub strike_sound: Option<u32>,
+    /// Field 6 (`+0x18`): the missile gate the dest one-shot checks — `SMSG_SPELL_GO` spawns a
+    /// CEffect at the packet's DEST point only when this is **0** and [`Self::area_effect`] is
+    /// set (the client's `0x6e8088`–`0x6e8143`; wow-re `spell-go-dest-effect.md`). Nonzero =
+    /// the missile owns the arrival, no dest one-shot.
+    pub missile_gate: u32,
+    /// Field 11 (`+0x2c`): the gate on a DynamicObject's **own** `.mdx` (visual A) — the model
+    /// resolve at `0x5d57c0` requires this ≠ 0 before reading [`Self::area_effect`] (wow-re
+    /// `dynobject-visual-machine.md`).
+    pub area_gate: u32,
+    /// Field 12 (`+0x30`): the `SpellVisualEffectName` id of the **dest-anchored model** — a
+    /// DynamicObject's own `.mdx` (visual A, gated by [`Self::area_gate`]) and the GO dest
+    /// one-shot's model (gated by [`Self::missile_gate`] == 0). NOT the kit table.
+    pub area_effect: u32,
+    /// Field 13 (`+0x34`): the `SpellVisualKit` id of the **area kit** — a DynamicObject's
+    /// emitter chain (`0x5d55c0`: CharProcType scan for 9 → the hardcoded shard-model table)
+    /// and its looping area sound (the kit's own field-13 SoundEntries). `0` = none.
+    pub area_kit: u32,
 }
 
 /// One `SpellVisualKit.dbc` row's body-animation + sound + the nine attach-point emitter slots
 /// (the columns consumed through decision 0099 phase 3; see the module doc for what remains).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VisualKit {
     /// The `AnimationData.dbc` id this kit plays on the unit (`None` = no animation for this kit
     /// — see the module doc's none-sentinel finding; common on impact kits).
@@ -135,6 +155,20 @@ pub struct VisualKit {
     /// order — slot `i` attaches at [`KIT_SLOT_TAGS`]`[i]`. Both none-sentinels fold to `None`
     /// like [`Self::anim_id`]. Iterate populated slots via [`Self::effects`].
     pub effect_slots: [Option<u32>; 9],
+    /// The four CharProc blocks — `CharProcType` (fields 15–18, int) with `CharParamZero`
+    /// (19–22, f32) and `CharParamOne` (23–26, f32). The dynobj emitter chain scans for the
+    /// FIRST type **9** slot: param0 encodes the shard-model table index (the exact small-int
+    /// decode `bits(param0 + 512.0) >> 14 & 0xff`, `0x5d55c0`), param1 is the emit rate the
+    /// graphics-quality factor multiplies (wow-re `dynobject-visual-machine.md`).
+    pub char_procs: [KitCharProc; 4],
+}
+
+/// One `SpellVisualKit` CharProc block (see [`VisualKit::char_procs`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct KitCharProc {
+    pub proc_type: u32,
+    pub param0: f32,
+    pub param1: f32,
 }
 
 impl VisualKit {
@@ -296,6 +330,10 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
                 missile_attach: g(9),
                 missile_sound: u32_at(r, 10).and_then(some_unless_none),
                 strike_sound: u32_at(r, 14).and_then(some_unless_none),
+                missile_gate: g(6),
+                area_gate: g(11),
+                area_effect: g(12),
+                area_kit: g(13),
             },
         );
     }
@@ -317,12 +355,21 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
         for (i, slot) in effect_slots.iter_mut().enumerate() {
             *slot = u32_at(r, 3 + i).and_then(some_unless_none);
         }
+        // The four CharProc blocks: type (int column) + two f32 param columns, read as the
+        // client does — param0/param1 are IEEE floats in the file (the `fadd 512.0` decode and
+        // the emit-rate multiply are float ops at `0x5d55c0`/`0x6eb930`).
+        let char_procs = std::array::from_fn(|i| KitCharProc {
+            proc_type: u32_at(r, 15 + i).unwrap_or(0),
+            param0: u32_at(r, 19 + i).map(f32::from_bits).unwrap_or(0.0),
+            param1: u32_at(r, 23 + i).map(f32::from_bits).unwrap_or(0.0),
+        });
         kits.insert(
             id,
             VisualKit {
                 anim_id,
                 sound,
                 effect_slots,
+                char_procs,
             },
         );
     }
@@ -467,6 +514,10 @@ mod tests {
                     missile_attach: g(9),
                     missile_sound: u32_at(r, 10).and_then(some_unless_none),
                     strike_sound: u32_at(r, 14).and_then(some_unless_none),
+                    missile_gate: g(6),
+                    area_gate: g(11),
+                    area_effect: g(12),
+                    area_kit: g(13),
                 },
             );
         }
@@ -482,6 +533,9 @@ mod tests {
                 missile_attach: 1,
                 missile_sound: None,
                 strike_sound: None,
+                // The synthetic row builder writes 0 into field 6 and the dest-anchored block
+                // (the REAL Fireball row's missile_gate = 1 is pinned in the real-data test).
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -594,6 +648,12 @@ mod tests {
                 // Field 10: the fireball's in-flight loop (SoundEntries 3011 → FireMissileLoop.wav).
                 missile_sound: Some(3011),
                 strike_sound: None,
+                // Field 6 set = a missile owns the arrival: the GO dest one-shot gate is closed
+                // (0797); the dest-anchored columns are empty on a projectile nuke.
+                missile_gate: 1,
+                area_gate: 0,
+                area_effect: 0,
+                area_kit: 0,
             }
         );
         // The gathering/work strike sounds (decision 0562): Mining's visual 93 carries the pick
@@ -709,5 +769,84 @@ mod tests {
             chain.read_file("Particles\\LootFX.m2").is_ok(),
             "LootFX.m2 must ship in the chain"
         );
+    }
+}
+
+#[cfg(test)]
+mod ground_fx_data_tests {
+    use super::*;
+
+    /// The dest-anchored chain on the REAL data — 0797's mandatory per-spell data check (the
+    /// wow-re read pinned the GATE; whether each spell passes it is a table fact). Skips
+    /// without client data. Every value here corroborates the live vmangos wire capture:
+    /// Blizzard's dynobj RADIUS was 8.0 (row 14), Flamestrike's 5.0 (row 8).
+    #[test]
+    fn ground_aoe_chain_reads_the_dest_anchored_block() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let catalog = crate::load_spell_catalog(&mut chain).expect("spells");
+        let visuals = load_spell_visual_catalog(&mut chain).expect("visuals");
+        let radii = crate::load_spell_radii(&mut chain).expect("radii");
+
+        // Blizzard 10 → visual 259: both visuals — its own model AND a type-9 shard emitter
+        // whose table index decodes to 0 (the same model), rate 5/s, sound 7.
+        let d = catalog.get(10).unwrap();
+        assert_eq!((d.visual, d.effect_radius_index), (259, [14, 0, 0]));
+        assert_eq!(
+            radii.get(14).map(|r| r.radius),
+            Some(8.0),
+            "the wire radius"
+        );
+        let v = visuals.stages(259).unwrap();
+        assert_eq!(
+            (v.missile_gate, v.area_gate, v.area_effect, v.area_kit),
+            (0, 1, 398, 609)
+        );
+        assert_eq!(
+            visuals.effect_path(398),
+            Some("Spells\\Blizzard_Impact_Base.mdx")
+        );
+        let k = visuals.kit(609).unwrap();
+        assert_eq!(k.sound, Some(7));
+        let proc = k.char_procs.iter().find(|p| p.proc_type == 9).unwrap();
+        assert_eq!((proc.param0, proc.param1), (0.0, 5.0));
+
+        // Flamestrike 2120 → visual 33: its own model + sound, NO type-9 proc (a burning
+        // patch has no falling shards) — the emitter half is data-absent, not code-gated.
+        let d = catalog.get(2120).unwrap();
+        assert_eq!((d.visual, d.effect_radius_index), (33, [8, 8, 0]));
+        assert_eq!(radii.get(8).map(|r| r.radius), Some(5.0), "the wire radius");
+        let v = visuals.stages(33).unwrap();
+        assert_eq!(
+            (v.missile_gate, v.area_gate, v.area_effect, v.area_kit),
+            (0, 1, 420, 695)
+        );
+        assert_eq!(
+            visuals.effect_path(420),
+            Some("Spells\\Flamestrike_Impact_Base.mdx")
+        );
+        let k = visuals.kit(695).unwrap();
+        assert_eq!(k.sound, Some(3077));
+        assert!(k.char_procs.iter().all(|p| p.proc_type != 9));
+
+        // Rain of Fire 5740 → visual 329: shard-table index 1 (its own model again), rate 5/s.
+        let v = visuals.stages(catalog.get(5740).unwrap().visual).unwrap();
+        assert_eq!((v.missile_gate, v.area_gate, v.area_effect), (0, 1, 448));
+        let proc = visuals
+            .kit(v.area_kit)
+            .unwrap()
+            .char_procs
+            .iter()
+            .find(|p| p.proc_type == 9)
+            .copied()
+            .unwrap();
+        assert_eq!((proc.param0, proc.param1), (1.0, 5.0));
+
+        // All three pass the GO dest one-shot gate (field 6 == 0 ∧ field 12 ≠ 0) — the burst
+        // fires for each; Fireball (missile_gate 1, pinned in the loader test above) does not.
     }
 }

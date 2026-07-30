@@ -496,8 +496,7 @@
         --    else claims it; and only a press with NOTHING left to eat opens the menu.
         --
         -- Absent branches, and why: no OptionsFrame (nothing to cancel — GameMenuFrame.xml's five
-        -- disabled buttons are exactly that gap), and no SpellStopTargeting (no ground-target
-        -- cursor mode yet). ONE benilla ADDITION, ahead of everything: a held cursor item is
+        -- disabled buttons are exactly that gap). ONE benilla ADDITION, ahead of everything: a held cursor item is
         -- dropped (ClearCursor). The cursor-item model (decision 0068 T2) has no real-client ESC
         -- handling to mirror — vanilla leaves the item on the cursor — so this is a deliberate
         -- benilla convenience (ESC as the universal "get me out" key). Guarded so it stays inert
@@ -587,6 +586,13 @@
             -- falls through. Truthy only when something was actually stopped (the host's
             -- stoppable mirror), so an idle ESC still falls through to CloseAllWindows.
             if SpellStopCasting() then
+                return
+            end
+            -- The ref chain's SpellStopTargeting leg (UIParent.lua l.1490, decision 0792): ESC
+            -- with the ground-targeting cursor up cancels the targeting — word cleared, no
+            -- packet — and eats the press. After the cast rung, exactly the artifact's order
+            -- (while merely targeting nothing is in flight, so SpellStopCasting answered nil).
+            if SpellStopTargeting() then
                 return
             end
             -- CloseAllWindows eats the press when it closed anything (l.1491); only a press with

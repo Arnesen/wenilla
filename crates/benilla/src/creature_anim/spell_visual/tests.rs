@@ -42,6 +42,7 @@ fn app() -> App {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
@@ -200,6 +201,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([(
@@ -567,6 +569,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<SpellKitSound>()
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
@@ -633,6 +636,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
             spell_id,
             hits: vec![target],
             misses: Vec::new(),
+            dest: None,
             ammo_display_id: None,
             seq: 1,
         });

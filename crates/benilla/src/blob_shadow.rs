@@ -64,11 +64,23 @@ use crate::schedule::WorldStage;
 /// The reference's shadow disc (`Textures\ShadowBlob.blp`, wow-re unit-blob-shadow RE): grayscale
 /// radial blob (gray-160 core → white rim) under a binary alpha disc, multiplied onto the ground.
 const SHADOW_TEXTURE: &str = "mpq://textures/shadowblob.blp";
-/// The shadow's ladder rung — sort bias AND rasterizer depth-bias constant (the coplanarity fix,
-/// same mechanism as the ring's `RING_DEPTH_BIAS`; the reference's own knob is the `shadowBias`
-/// cvar, default 0.1 → a polygon offset). Half the ring's, so where both decals stack the ring
-/// draws later deterministically.
-const SHADOW_DEPTH_BIAS: f32 = 4096.0;
+/// The shadow's sort-ladder rung: half the ring's `RING_DEPTH_BIAS`, so where both decals stack
+/// the ring draws later deterministically. Sort only — the rasterizer margin is
+/// [`SHADOW_RASTER_BIAS`], sized independently (B131 split one constant into its two roles).
+const SHADOW_SORT_BIAS: f32 = 4096.0;
+/// The shadow's rasterizer depth-bias constant — the margin funding the `GreaterEqual` tie
+/// against the drawn ground (`DECAL_WORLD_CLIP`, 0781). The reference's mechanism is the same
+/// class: `shadowBias` cvar 0.1 → a **constant-only** polygon offset (−102.4 LSBs of its 24-bit
+/// buffer; no slope term exists in the binary — wow-re unit-blob-shadow RE, corroborated across
+/// every shadow draw of four apitraces). The *size* is ours, not the reference's number: our
+/// residual is 0781's — the decal's CPU-baked world verts vs the receiver's GPU-transformed
+/// verts diverge by ~1–3 ulps of the world coordinate, which is millimetres at city magnitudes
+/// and lands on the depth tie where the receiver is *sloped* (horizontal ulps project onto the
+/// tilted normal — the confirmed B131 flicker walk was the Stormwind gate ramp). 4096 absorbed
+/// under half the 3-ulp worst case at close zoom and lost the tie while moving; 32768 dominates
+/// it ≥2× at every zoom ≥1 yd and stays centimetre-order at 30 yd (no visible punch-through).
+/// Sizing pinned by `raised_bias_dominates_the_bake_residual` (particles/render.rs).
+pub(crate) const SHADOW_RASTER_BIAS: i32 = 32768;
 /// The byte clamp on the animation box: each corner component is clamped INTO ±5 yd pre-scale
 /// (`0x6992c0` MAX(−5) / `0x699250` MIN(+5) — a cap on huge authored boxes, never a floor).
 const BOX_CLAMP: f32 = 5.0;
@@ -475,8 +487,8 @@ fn push_shadows(
                 blend: EffectBlend::Multiply,
                 fog: EffectFog::Off,
                 anchor: key.feet,
-                bias: SHADOW_DEPTH_BIAS,
-                raster_bias: SHADOW_DEPTH_BIAS as i32,
+                bias: SHADOW_SORT_BIAS,
+                raster_bias: SHADOW_RASTER_BIAS,
                 main_entity: entity,
                 light: None,
             },

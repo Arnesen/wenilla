@@ -152,6 +152,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             misses: s.misses,
             target: s.targets.unit_target,
             go_target: s.targets.go_target,
+            dest: s.targets.dest.map(|d| [d.x, d.y, d.z]),
             ammo_display_id: s.ammo_display_id,
             item_caster: (s.item_or_caster != s.caster).then_some(s.item_or_caster),
         }],
@@ -823,6 +824,7 @@ fn entity_kind(t: ObjectType) -> EntityKind {
         ObjectType::Player => EntityKind::Player,
         ObjectType::Unit => EntityKind::Unit,
         ObjectType::GameObject => EntityKind::GameObject,
+        ObjectType::DynamicObject => EntityKind::DynamicObject,
         _ => EntityKind::Other,
     }
 }

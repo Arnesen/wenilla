@@ -75,11 +75,19 @@ pub(crate) const LIGHT_HEADER_ROWS: usize = 21;
 /// interior lane runs, per the disassembly of the shipped ARB program (wow-re
 /// `system/models/scratch/model2-bls-vertex-sh.md`): `E(n) = D·(3 + 16μ + 15μ²)/34`, μ = n·u
 /// toward-light, EVERY band linear in the committed colour `D` — there is no separate amplitude
-/// scalar, and the per-instance intensity lives entirely in that colour (the shader multiplies
-/// ALL sun terms by I, packed here at I = 1). The peak (μ=1) equals the FFP walls' `D·(N·L)`
+/// scalar, and the per-instance intensity lives entirely in that colour (a consumer multiplies
+/// ALL sun terms by I; packed here at I = 1). The peak (μ=1) equals the FFP walls' `D·(N·L)`
 /// peak by construction (the 16/17 accumulate scale exists for exactly that), and the closed form
 /// never goes meaningfully negative — the old trace-fit's ~¼-strength lobe with a negative back
 /// side (shadow-side characters turned blue as the warm channels floored at 0) is superseded.
+///
+/// **The SH block (rows 6-11, row 12 `.xyz`, row 17 `.yzw`) is read only under the response A/B**
+/// ([`m2_sh_response`], `WOW_M2_SH=1` → row 12 `.w`). 0410 took the exterior M2 lane off this curve
+/// onto the hard-cutoff FFP matte on the director's look call and nothing consumed the rows for
+/// months; 0796 refuted the fidelity premise behind that retirement (the reference's M2 lane IS
+/// this SH shader), which reopens the call and puts the eval back beside the cutoff so the two can
+/// be seen. The interior-prop and glue-rig lanes are unaffected — they fold their own probes
+/// through the per-instance `prop_probes` table, not these rows.
 ///
 /// This is the ONE packer for the scene light ([`build_light_data`]) AND the portrait booth's
 /// studio light (`portrait::setup_booths`): the booth used to hand-copy the layout and rendered
@@ -109,8 +117,8 @@ pub(crate) fn pack_model_core_rows(
     rows[12][1] = sun[6].y;
     rows[12][2] = sun[6].z;
     // 17 `.yzw` — the sun's SH DC redistribution at intensity 1 (`D·(4/17)(0.375+0.9375(uₓ²+u_y²))`
-    // per channel): the exterior M2 lane adds it × the per-instance intensity. `.x` (SIDN) is the
-    // scene's.
+    // per channel): an SH consumer adds it × the per-instance intensity (dormant since 0410 — see
+    // the doc above). `.x` (SIDN) is the scene's.
     rows[17][1] = sun[0].w;
     rows[17][2] = sun[1].w;
     rows[17][3] = sun[2].w;
@@ -132,6 +140,19 @@ pub(crate) fn pack_model_core_rows(
 /// interpolation — see `terrain.wgsl`), never from the commit.
 pub(crate) fn commit_raw(rgb: [f32; 3]) -> [f32; 3] {
     rgb.map(|c| c.max(0.0))
+}
+
+/// `WOW_M2_SH=1` ⇒ the exterior M2 doodad/entity lane evaluates the reference's own order-2
+/// `Model2.bls` response instead of the shipped hard-cutoff FFP matte. The **one open director call**
+/// on this lane (0796 §5): the reference genuinely runs the SH lobe, and 0410 replaced it with the
+/// cutoff on a look call made when both lanes were believed reference-real — only one is.
+///
+/// Read once (the process can't change its mind mid-run) and published to the shaders in row 12 `.w`.
+/// Deliberately NOT a resource or a debug-menu toggle: it is a short-lived instrument for one A/B,
+/// and the cheapest thing to delete when the call lands.
+fn m2_sh_response() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("WOW_M2_SH").as_deref(), Ok("1")))
 }
 
 /// Capacity of the packed point-light table (fixed-size in the WGSL mirror structs — keep in sync).
@@ -265,9 +286,9 @@ fn build_light_data(
                                            // multiplies each WMO SIDN material's authored emissive colour by it on the lit lanes).
                                            // `.yzw` is the core packer's below.
     rows[17][0] = l.sidn_night;
-    // 18/19 — the INTERIOR fog triple (see the layout doc above). 19.zw (and 12.w) are free
-    // lanes: they carried retired dials (the 0273/0354-era A/Bs, the point gain, the 0750/0751
-    // sun calibration) — the shaders read the faithful path unconditionally now (0753).
+    // 18/19 — the INTERIOR fog triple (see the layout doc above). 19.zw are free lanes: they
+    // carried retired dials (the 0273/0354-era A/Bs, the point gain, the 0750/0751 sun
+    // calibration). 12.w was free too until 0796 gave it the response A/B (below).
     rows[18] = [
         l.wmo_fog_color[0],
         l.wmo_fog_color[1],
@@ -278,6 +299,14 @@ fn build_light_data(
     // Rows 0-2, the SH block 6-12.xyz, and the sun DC (17.yzw) — the shared model-light core
     // (also the portrait booth's packer). Row 20 (point_count) is the point-table pack's below.
     pack_model_core_rows(rows, l.ambient, l.diffuse, l.sun_dir);
+    // 12 `.w` — the exterior M2 RESPONSE A/B (0796 §5), the one open director call on this lane.
+    // 0 (default) = the shipped hard-cutoff FFP matte, 0410's look call. 1 = the reference's own
+    // response, the order-2 `Model2.bls` lobe over the rows packed just above. Not a calibration
+    // dial (0750/0751's kind, rightly retired) — it is a two-way switch between two fully specified
+    // laws, and it exists because §5 is a look question that only the director can answer and they
+    // cannot answer it without seeing both. It goes the moment they call it: whichever side loses,
+    // this lane and the loser's code come out together.
+    rows[12][3] = if m2_sh_response() { 1.0 } else { 0.0 };
     // The dynamic point-light table (decision 0278): every spawned point light within
     // [`POINT_PACK_RADIUS`] of the camera, nearest-first when over capacity — the VERTEX stages of
     // `terrain.wgsl`/`wow_model.wgsl` walk it for the Gouraud point term (bevy's clusterable buffer
@@ -411,6 +440,94 @@ fn upload_light(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GOLDEN — the exterior M2 **response A/B** (0796 §5): the SH branch of `wow_model.wgsl` must
+    /// reproduce `E = A + I·D·(4/17)(0.375 + 2μ + 1.875μ²)` off the rows [`pack_model_core_rows`]
+    /// writes, with `A` NOT scaling by the per-instance intensity and every sun band scaling by it
+    /// exactly once (never I²).
+    ///
+    /// This exists because the capture harness cannot check it. `visual.sh`-style captures are
+    /// bit-deterministic on static scenes (canal-noon: MAE 0.000) but NOT on the entity/GameObject
+    /// scenarios this lane owns — measured run-to-run at MAE 5.1 (chest-shade-rear) and 8.8
+    /// (creature-sun-rear), a noise floor far above the ~0.24 signal the A/B produces. So the lane's
+    /// correctness is pinned HERE, deterministically, and the captures are only good for "it
+    /// compiles and it moves pixels".
+    ///
+    /// `eval_sh_lane` mirrors the WGSL lane-for-lane on purpose — read the two side by side; a
+    /// channel or row swap in the shader is caught by eye against this, not by this test.
+    #[test]
+    fn the_sh_response_lane_matches_the_closed_form_at_every_intensity() {
+        // Stormwind, minute ≈1185 — the bands wow-re independently recovered from the reference's
+        // own uploaded shader constants (0796 §1), so the test is anchored on a real committed pair.
+        let ambient = [102.0 / 255.0, 97.0 / 255.0, 123.0 / 255.0];
+        let diffuse = [255.0 / 255.0, 112.0 / 255.0, 0.0];
+        let sun_dir = Vec3::new(0.31, -0.82, 0.48).normalize(); // travel dir; to-light = −this
+        let mut rows = [[0.0f32; 4]; LIGHT_HEADER_ROWS];
+        pack_model_core_rows(&mut rows, ambient, diffuse, sun_dir);
+
+        /// The SH branch of `wow_model.wgsl`'s exterior doodad/entity lane, verbatim.
+        fn eval_sh_lane(rows: &[[f32; 4]; LIGHT_HEADER_ROWS], n: Vec3, intensity: f32) -> [f32; 3] {
+            let quad = [n.x * n.y, n.y * n.z, n.z * n.z, n.x * n.z];
+            let x2y2 = n.x * n.x - n.y * n.y;
+            let dot3 = |r: [f32; 4]| r[0] * n.x + r[1] * n.y + r[2] * n.z;
+            let dot4 =
+                |r: [f32; 4]| r[0] * quad[0] + r[1] * quad[1] + r[2] * quad[2] + r[3] * quad[3];
+            [0usize, 1, 2].map(|ch| {
+                // sh_c10_{r,g,b} = rows[6+ch] (.w = ambient) · sh_c13_{r,g,b} = rows[9+ch]
+                // sh_c16.xyz = rows[12][ch] · grade.yzw = rows[17][1+ch] (the sun's DC, at I=1)
+                rows[6 + ch][3]
+                    + rows[17][1 + ch] * intensity
+                    + intensity * (dot3(rows[6 + ch]) + dot4(rows[9 + ch]) + rows[12][ch] * x2y2)
+            })
+        }
+
+        let u = -sun_dir; // toward-light unit
+        let f = |mu: f32| (4.0 / 17.0) * (0.375 + 2.0 * mu + 1.875 * mu * mu);
+        // A side-on normal (μ = 0) and a mid-back one (μ ≈ −0.53, the lobe's negative dip).
+        let side = u.cross(Vec3::Y).normalize();
+        let mid_back = (u * -0.5333 + side * (1.0f32 - 0.5333 * 0.5333).sqrt()).normalize();
+        for (label, n) in [
+            ("facing", u),
+            ("away", -u),
+            ("side-on", side),
+            ("mid-back", mid_back),
+        ] {
+            for intensity in [0.5f32, 1.0, 2.5] {
+                let mu = n.dot(u);
+                let got = eval_sh_lane(&rows, n, intensity);
+                for ch in 0..3 {
+                    let want = ambient[ch] + intensity * diffuse[ch] * f(mu);
+                    assert!(
+                        (got[ch] - want).abs() < 1e-5,
+                        "{label} I={intensity} ch{ch}: got {} want {want}",
+                        got[ch]
+                    );
+                }
+            }
+        }
+        // The peak is calibrated to the FFP peak by construction (the 16/17 accumulate scale) — so
+        // the A/B changes NOTHING on a surface square to the sun, and the whole visible difference
+        // lives on the shadow side. This is why the switch reads subtle rather than dramatic.
+        let peak = eval_sh_lane(&rows, u, 1.0);
+        for ch in 0..3 {
+            let ffp_peak = ambient[ch] + diffuse[ch]; // ambient + D·max(N·L,0) at N·L = 1
+            assert!(
+                (peak[ch] - ffp_peak).abs() < 1e-5,
+                "peak ch{ch}: SH {} vs FFP {}",
+                peak[ch],
+                ffp_peak
+            );
+        }
+        // And the mid-back dip really is BELOW ambient — the low-order-SH ringing the reference
+        // authors. Clamping the sun term per-term instead of the sum would erase it.
+        let dip = eval_sh_lane(&rows, mid_back, 1.0);
+        assert!(
+            dip[0] < ambient[0],
+            "mid-back should dip below ambient: {} vs {}",
+            dip[0],
+            ambient[0]
+        );
+    }
 
     /// GOLDEN — the **commit clamp** (wow-re `m2-light-emitter-instances.md` §6a: `0x71ca80` with
     /// `w = 1.0` degenerates to clamp01), driven end to end through the real packer so removing the

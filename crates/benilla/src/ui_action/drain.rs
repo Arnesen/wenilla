@@ -101,9 +101,14 @@ pub(super) fn drain_action_uses(
     mut pending: ResMut<crate::ui_cast::PendingCast>,
     mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
     mut cooldowns: ResMut<crate::cooldowns::Cooldowns>,
-    // The error sinks, one tuple param (Bevy's 16-param ceiling): the reason-coded cast line
-    // + the by-key local line.
-    mut errors: (ResMut<CastErrors>, ResMut<UiErrorKeys>),
+    // The error sinks + the targeting mode, one tuple param (Bevy's 16-param ceiling): the
+    // reason-coded cast line, the by-key local line, and the ground-targeting state the SPELL
+    // arm's toggle-cancel and the cast path's entry both write (decision 0792).
+    mut errors: (
+        ResMut<CastErrors>,
+        ResMut<UiErrorKeys>,
+        ResMut<super::targeting::SpellTargeting>,
+    ),
     mut auto_repeat: ResMut<AutoRepeatActive>,
     mut trade_skill_opens: ResMut<crate::ui_tradeskill::TradeSkillOpens>,
     mut ecs: Commands,
@@ -160,6 +165,19 @@ pub(super) fn drain_action_uses(
                 }
             }
             Some(b) if b.kind == ACTION_KIND_SPELL => {
+                // UseAction's toggle-cancel (`0x4e5ee0`: `GetTargetingSpellId 0x6e48e0` +
+                // `StopTargeting 0x6e4900`, decision 0792): re-pressing the spell whose
+                // targeting cursor is up cancels the targeting instead of re-arming it —
+                // press-again-to-cancel, before TryCast ever runs. (A spellbook re-press stays
+                // the ref's abort-and-re-enter — it never passes through UseAction.)
+                if errors.2.spell() == Some(b.action) {
+                    debug!(
+                        "ui_action: cast {} re-pressed — targeting toggles off",
+                        b.action
+                    );
+                    errors.2.clear();
+                    continue;
+                }
                 debug!("ui_action: cast {} (target {:?})", b.action, selection.guid);
                 send_spell_cast(
                     b.action,
@@ -176,6 +194,7 @@ pub(super) fn drain_action_uses(
                     &mut errors.0,
                     &mut auto_repeat,
                     &mut trade_skill_opens,
+                    &mut errors.2,
                 );
             }
             // An item action names an item ENTRY, not a position, so the click has to find a copy

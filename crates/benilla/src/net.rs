@@ -648,6 +648,11 @@ pub(crate) enum ClientCommand {
     /// Cast a spell (`CMSG_CAST_SPELL`): `target: None` = self/implicit-target cast, `Some(guid)`
     /// = explicit unit target. Answered by `SMSG_CAST_RESULT` (a `CastResult` event).
     CastSpell { spell_id: u32, target: Option<u64> },
+    /// Cast a spell at a **ground point** (`CMSG_CAST_SPELL` with `TARGET_FLAG_DEST_LOCATION`,
+    /// decision 0792): the targeting-cursor commit for a ground-targeted AOE. `dest` is the
+    /// clicked world point in **WoW coords** (`bevy_to_wow` at the send site — the wire never
+    /// sees Bevy space). Answered by `SMSG_CAST_RESULT`.
+    CastSpellAtDest { spell_id: u32, dest: [f32; 3] },
     /// Cancel one of our own auras (`CMSG_CANCEL_AURA`, decision 0257): the right-click-a-buff wire,
     /// carrying the **spell id** (the server cancels by spell, not slot). No answer packet — the
     /// removal comes back as a `UNIT_FIELD_AURA` delta. Sent by the aura feed's cancel drain.

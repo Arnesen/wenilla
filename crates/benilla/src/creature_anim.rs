@@ -428,6 +428,12 @@ pub(crate) struct SpellGoTargets {
     /// *flight* visual (the projectile glancing off) stays a named approximation — ours ends
     /// the flight at the target.
     pub(crate) misses: Vec<(Entity, u8)>,
+    /// The ground point a dest-targeted cast launched at (`TARGET_FLAG_DEST_LOCATION`), in
+    /// **bevy** coords (converted at the apply seam like every scene position). A ground AOE's
+    /// GO arrives with empty hit/miss lists and only this. No consumer reads it yet — the
+    /// dest-anchored launch visual is pending the dispatched wow-re read (the persistent area
+    /// effect anchors to the DynamicObject create, not to this packet).
+    pub(crate) dest: Option<Vec3>,
     /// The GO's ammo block (`castFlags & 0x20`, a ranged shot): the `ItemDisplayInfo` id of the
     /// caster's ammo/thrown — the missile's model when the spell's visual chain has none (the
     /// client's `0x479f40` fallback, decision 0099 phase 5).

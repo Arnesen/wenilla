@@ -63,8 +63,10 @@ use super::{BoneAttach, DisplayModel, EntityPart, ModelHandle};
 const ATTACH_FALLBACKS: [u16; 2] = [0xf, 0x13];
 
 /// The self-termination span when an effect model has no sequence table at all (the cube
-/// fallback and kin) — long enough to read as a flash, short enough never to linger.
-const FALLBACK_SPAN: f32 = 1.0;
+/// fallback and kin) — long enough to read as a flash, short enough never to linger. Shared
+/// with the dest-anchored lane's one-shots ([`super::dest_fx`]) — same completion-callback
+/// stand-in.
+pub(super) const FALLBACK_SPAN: f32 = 1.0;
 
 /// The `fxview` unit lane's synthetic guid (`WOW_FX_DISPLAY`) — a high-word `0xF130` creature guid
 /// like the wire's, in a serverless capture where nothing else claims one.

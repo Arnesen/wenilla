@@ -24,7 +24,7 @@ use avian3d::prelude::*;
 
 use crate::assets::AssetSet;
 use crate::creature_anim::{move_flags, wrap_pi, BodyTwist, MovementState};
-use crate::interact::{InspectMode, WorldClick, WorldRightClick};
+use crate::interact::{InspectMode, WorldClick, WorldRightClick, WorldRightPress};
 use crate::net::{ClientCommand, NetCommands, SelfPlayer, TeleportMessage, WorldportMessage};
 use crate::schedule::WorldStage;
 use crate::ui_script::PointerOverUi;
@@ -273,10 +273,15 @@ fn control(
     >,
     window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     // Clean clicks (press+release, no drag) go out here — left for the target picker, right for the
-    // context action (attack) — while *drags* engage the camera looks below instead. The locals hold
+    // context action (attack) — while *drags* engage the camera looks below instead; the third is
+    // the right button's raw DOWN edge (targeting's cancel, decision 0792). The locals hold
     // each button's accumulated drag distance while a press is being classified (`None` = no press
     // pending).
-    mut world_clicks: (MessageWriter<WorldClick>, MessageWriter<WorldRightClick>),
+    mut world_clicks: (
+        MessageWriter<WorldClick>,
+        MessageWriter<WorldRightClick>,
+        MessageWriter<WorldRightPress>,
+    ),
     mut click_test: (Local<Option<f32>>, Local<Option<f32>>),
     // World context for the mover, bundled into one param (16-param limit): the loaded water
     // surfaces (swim mode + the buoyant float, see [`swim`]), the armed transports (the
@@ -374,6 +379,7 @@ fn control(
         click_consumed.0,
         &mut world_clicks.0,
         &mut world_clicks.1,
+        &mut world_clicks.2,
         left_click,
         right_click,
     );

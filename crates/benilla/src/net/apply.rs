@@ -923,6 +923,7 @@ pub(super) fn apply_net_updates(
                 misses,
                 target,
                 go_target,
+                dest,
                 ammo_display_id,
                 item_caster,
             } => spell_go(
@@ -933,6 +934,7 @@ pub(super) fn apply_net_updates(
                 misses,
                 target,
                 go_target,
+                dest,
                 ammo_display_id,
                 item_caster,
                 &mut commands,

@@ -68,6 +68,7 @@ type CastTail<'w> = (
     ResMut<'w, crate::ui_action::CastErrors>,
     ResMut<'w, crate::ui_action::AutoRepeatActive>,
     ResMut<'w, TradeSkillOpens>,
+    ResMut<'w, crate::ui_action::SpellTargeting>,
 );
 
 pub(crate) struct UiCraftPlugin;
@@ -298,6 +299,7 @@ fn drain_craft(
         mut cast_errors,
         mut auto_repeat,
         mut trade_opens,
+        mut ground,
     ) = cast_tail;
     let Some(mut script) = script else {
         return;
@@ -340,6 +342,7 @@ fn drain_craft(
                     &mut cast_errors,
                     &mut auto_repeat,
                     &mut trade_opens,
+                    &mut ground,
                 );
             }
             None => debug!("ui_craft: DoCraft({spell_id}) — unknown spell, ignored"),

@@ -334,3 +334,65 @@ fn escape_ladder_cast_then_windows_then_target_one_eater_per_press() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The SpellStopTargeting rung (`UIParent.lua:1490`, decision 0792): ESC with the ground-target
+/// cursor up cancels the targeting and ONLY the targeting — after the cast rung (the artifact's
+/// order), before the window close. The 1/nil returns are load-bearing exactly like the cast
+/// rung's: an idle press must fall straight through both.
+#[test]
+fn escape_ladder_targeting_rung_after_cast_before_windows() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "Cooldown.xml");
+    load_xml(&s, "BagFrame.xml");
+    s.set_money(0);
+    s.set_container(0, Some(one_item_backpack()));
+    s.run("BenillaBagToggle_OnClick()").unwrap();
+    let _ = s.take_sounds();
+    assert!(s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap());
+
+    // SpellIsTargeting() mirrors the pushed state — the PetFrame-family readers' predicate.
+    assert!(!s.eval::<bool>("return SpellIsTargeting()").unwrap_or(false));
+    s.set_spell_targeting(true);
+    assert!(s.eval::<bool>("return SpellIsTargeting()").unwrap());
+
+    // Press 1 — targeting, no cast in flight: SpellStopTargeting eats the press; the bag stays.
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(
+        s.take_stop_targeting(),
+        "the stop-targeting request queued for the app's cancel"
+    );
+    assert!(
+        !s.take_spell_stop(),
+        "the cast rung answered nil — nothing casting"
+    );
+    assert!(
+        s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "ESC while targeting must NOT also close windows"
+    );
+
+    // Press 2 — BOTH casting and targeting pushed (unreachable app state, but the chain's order
+    // is the artifact's law): the cast rung sits first (l.1489 before l.1490) and eats alone.
+    s.set_casting(true);
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(s.take_spell_stop(), "the cast rung eats first");
+    assert!(
+        !s.take_stop_targeting(),
+        "the same press must not also cancel the targeting"
+    );
+
+    // Press 3 — idle (the app cleared the mode and the cast resolved): both rungs answer nil
+    // and the press falls through to CloseAllWindows.
+    s.set_casting(false);
+    s.set_spell_targeting(false);
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(!s.take_stop_targeting(), "no stray trigger when idle");
+    assert!(
+        !s.eval::<bool>("return BenillaBagFrame:IsShown()").unwrap(),
+        "the idle press falls through both spell rungs to CloseAllWindows"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

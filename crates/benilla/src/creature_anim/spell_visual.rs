@@ -440,8 +440,14 @@ pub(super) fn route_cast_visuals(
     mut wounds: MessageWriter<WoundAnim>,
     mut sounds: MessageWriter<SpellKitSound>,
     mut fx: MessageWriter<SpellKitFx>,
-    mut missiles: MessageWriter<MissileSpawn>,
     mut sheaths: MessageWriter<super::SheathRequest>,
+    // One tuple param (the 16-SystemParam ceiling): the missile spawns + the dest one-shot
+    // orders (0797) — the GO's two launch-side spawn lanes, resolved here where the catalogs
+    // live, spawned by `crate::entities`.
+    mut spawns: (
+        MessageWriter<MissileSpawn>,
+        MessageWriter<crate::entities::dest_fx::GroundBurst>,
+    ),
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
@@ -699,6 +705,24 @@ pub(super) fn route_cast_visuals(
         let Some(display) = spells.catalog.get(go.spell_id) else {
             continue;
         };
+        // The GO's dest one-shot (decision 0797, byte-pinned `0x6e8088`–`0x6e8143`): a
+        // dest-carrying GO plays the SpellVisual field-12 model ONCE at the packet's point —
+        // gate `field 6 == 0` (no missile owns the arrival) ∧ `field 12 ≠ 0`. NOT gated on the
+        // hit list (a pure ground cast's lists are empty and the burst still plays — the
+        // captured Flamestrike shape); fired here at the GO, never waiting on the dynobj
+        // create (wow-re trap #6: the burst precedes the object).
+        if let Some(dest) = go.dest {
+            if let Some(stages) = visuals.0.stages(display.visual) {
+                if stages.missile_gate == 0 && stages.area_effect != 0 {
+                    if let Some(path) = visuals.0.effect_path(stages.area_effect) {
+                        spawns.1.write(crate::entities::dest_fx::GroundBurst {
+                            path: path.to_string(),
+                            pos: dest,
+                        });
+                    }
+                }
+            }
+        }
         // The caster's ranged fallback visual, resolved once per GO (the client's `0x6e802e`
         // call into `0x60d450`) — feeds the inline impacts, the missile chain, and the flight.
         let wv = weapon_src.caster(go.caster);
@@ -751,7 +775,7 @@ pub(super) fn route_cast_visuals(
                 let awaits_release =
                     resolve_kit(spells, &visuals.0, go.spell_id, |s| s.cast, || wv)
                         .is_some_and(|k| k.anim_id.is_some());
-                missiles.write(MissileSpawn {
+                spawns.0.write(MissileSpawn {
                     caster: go.caster,
                     spell_id: go.spell_id,
                     path,

@@ -370,6 +370,7 @@ fn spell_visual_wire_golden() {
             misses,
             target,
             go_target,
+            dest,
             ammo_display_id,
             item_caster,
         } => {
@@ -380,12 +381,58 @@ fn spell_visual_wire_golden() {
             assert_eq!(misses, vec![(0xCC, 2), (0xDD, 11)]);
             assert_eq!(target, Some(0xEE));
             assert_eq!(go_target, None); // a unit-targeted cast leaves the GO target empty
+            assert_eq!(dest, None); // …and the ground point empty (mask 0x2, no 0x40)
             assert_eq!(ammo_display_id, Some(5996));
             // The packet's first guid (1) differs from the caster — an item cast, surfaced for
             // the item-use cooldown key.
             assert_eq!(item_caster, Some(1));
         }
         other => panic!("spell go event, got {other:?}"),
+    }
+
+    // SMSG_SPELL_GO for a GROUND cast (the B132 follow-up): empty hit/miss lists, mask 0x0040 +
+    // the dest Vector3d — the exact shape the live vmangos Blizzard capture produced
+    // (2026-07-30; the f32 bit patterns below are the captured DYNAMICOBJECT_POS values). The
+    // event layer must surface the point — it is the only launch-side record of where the
+    // spell went.
+    let body = hx(concat!(
+        "011a",     // item_or_caster pguid: guid 0x1a (== caster: a plain spell, no item)
+        "011a",     // caster pguid
+        "0a000000", // spellId 10 (Blizzard)
+        "0001",     // castFlags 0x100 (CAST_FLAG_UNKNOWN9)
+        "00",       // hit count 0
+        "00",       // miss count 0
+        "4000",     // SpellCastTargets mask: TARGET_FLAG_DEST_LOCATION
+        "8f300ac6", // dest x −8844.14 (0xc60a308f)
+        "1f352744", // dest y 668.83 (0x4427351f)
+        "b89ec342", // dest z 97.81 (0x42c39eb8)
+    ));
+    let packet = messages::parse_server(messages::opcode::SMSG_SPELL_GO, &body).unwrap();
+    match decode(packet).pop().unwrap() {
+        SessionEvent::SpellGo {
+            caster,
+            spell_id,
+            hits,
+            misses,
+            target,
+            dest,
+            item_caster,
+            ..
+        } => {
+            assert_eq!((caster, spell_id), (0x1a, 10));
+            assert!(hits.is_empty() && misses.is_empty());
+            assert_eq!(target, None);
+            assert_eq!(
+                dest,
+                Some([
+                    f32::from_bits(0xc60a308f),
+                    f32::from_bits(0x4427351f),
+                    f32::from_bits(0x42c39eb8),
+                ])
+            );
+            assert_eq!(item_caster, None, "same guid twice — not an item cast");
+        }
+        other => panic!("ground spell go event, got {other:?}"),
     }
 
     // SMSG_SPELL_FAILED_OTHER: raw (unpacked) guid + spellId (vmangos `Spell::SendInterrupted`).

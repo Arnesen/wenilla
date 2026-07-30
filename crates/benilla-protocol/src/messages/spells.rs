@@ -353,6 +353,22 @@ pub fn cast_spell_item(spell_id: u32, item_guid: u64) -> Vec<u8> {
     body
 }
 
+/// Body of `CMSG_CAST_SPELL` aimed at a **ground point** (decision 0792): the targeting-cursor
+/// commit for a `Targets & 0x40` spell (Blizzard, Flamestrike, Rain of Fire…). `spell_id`, mask
+/// `DEST_LOCATION (0x0040)`, then the destination as three `f32` **WoW world coords** — the one
+/// field the mask reads (vmangos `SpellCastTargets::read`, `SpellCastTargetsInfo.cpp:169-174`:
+/// `DEST_LOCATION → x,y,z`, `IsValidMapCoord`-gated). The real client ships the same shape from
+/// `SPELLCAST+0x3c..0x44` (`BindLocation 0x6e60f0` → `SendCast 0x6e54f0`, wow-re `wave-cast.md`).
+pub fn cast_spell_at_dest(spell_id: u32, dest: [f32; 3]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(18);
+    body.extend_from_slice(&spell_id.to_le_bytes());
+    body.extend_from_slice(&TARGET_FLAG_DEST_LOCATION.to_le_bytes());
+    for c in dest {
+        body.extend_from_slice(&c.to_le_bytes());
+    }
+    body
+}
+
 /// Body of `CMSG_CANCEL_AURA` (vmangos `WorldPackets::Spell::CancelAura`, `Server/Packets/Spell.h:55-62`):
 /// one `u32` spell id. The server cancels **by spell, not by slot** — `HandleCancelAuraOpcode`
 /// (`SpellHandler.cpp:333-405`) looks the spell up, refuses passives, `SPELL_ATTR_NO_AURA_CANCEL`
@@ -378,6 +394,24 @@ mod tests {
         );
         // The unit-target twin still carries flag 0x2, not 0x4800 — the two shapes stay distinct.
         assert_eq!(cast_spell(1, None), [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn cast_spell_at_dest_body_golden() {
+        // spell_id 10 (Blizzard, LE) + mask DEST_LOCATION 0x0040 (LE `40 00`) + the dest Vec3 as
+        // three f32 LE: 1.0 = 00 00 80 3F, -2.5 = 00 00 20 C0, 3.0 = 00 00 40 40. VERIFIED against
+        // vmangos `SpellCastTargets::read` (mask → DEST branch reads exactly x, y, z).
+        assert_eq!(
+            cast_spell_at_dest(10, [1.0, -2.5, 3.0]),
+            [
+                0x0A, 0x00, 0x00, 0x00, // spell id
+                0x40, 0x00, // TARGET_FLAG_DEST_LOCATION
+                0x00, 0x00, 0x80, 0x3F, // x = 1.0
+                0x00, 0x00, 0x20, 0xC0, // y = -2.5
+                0x00, 0x00, 0x40, 0x40, // z = 3.0
+            ],
+            "CMSG_CAST_SPELL (ground dest) body"
+        );
     }
 
     #[test]

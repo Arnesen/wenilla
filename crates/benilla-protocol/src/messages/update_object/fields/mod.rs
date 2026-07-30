@@ -472,6 +472,39 @@ impl ObjectFields {
         self.get_guid(6).filter(|&g| g != 0)
     }
 
+    /// `DYNAMICOBJECT_CASTER` (fields 6–7, `OBJECT_END + 0x0`, a 2-field guid — vmangos
+    /// `UpdateFields_1_12_1.h:325`): the unit whose ground cast anchored this object.
+    /// Index-twin of [`Self::corpse_owner`] — each TYPEID reuses `OBJECT_END`; the TypeId (or
+    /// [`Self::dynamicobject_spell_id`]'s presence) decides which name applies.
+    pub fn dynamicobject_caster(&self) -> Option<u64> {
+        self.get_guid(6).filter(|&g| g != 0)
+    }
+    /// `DYNAMICOBJECT_BYTES` (field 8): the dynobj type byte — vmangos sends `1` (area spell)
+    /// for every persistent-area cast (`DynamicObject::Create`; captured live 2026-07-30 for
+    /// Blizzard 10 and Flamestrike 2120).
+    pub fn dynamicobject_bytes(&self) -> Option<u32> {
+        self.get_u32(8)
+    }
+    /// `DYNAMICOBJECT_SPELLID` (field 9): the anchoring spell — the root of the dest-anchored
+    /// visual chain (B132 follow-up). `None`/0 when absent.
+    pub fn dynamicobject_spell_id(&self) -> Option<u32> {
+        self.get_u32(9).filter(|&s| s != 0)
+    }
+    /// `DYNAMICOBJECT_RADIUS` (field 10): the area's radius in yards (live: Blizzard 8.0,
+    /// Flamestrike 5.0 — the server's `SpellRadius.dbc` resolve).
+    pub fn dynamicobject_radius(&self) -> Option<f32> {
+        self.get_f32(10)
+    }
+    /// `DYNAMICOBJECT_POS_X/Y/Z` + `FACING` (fields 11–14): the anchored point in raw WoW
+    /// coords. Duplicates the create's movement-block position on the vmangos wire (both
+    /// captured identical live); the accessor exists for `Values`-delta reads and tests.
+    pub fn dynamicobject_position(&self) -> Option<([f32; 3], f32)> {
+        Some((
+            [self.get_f32(11)?, self.get_f32(12)?, self.get_f32(13)?],
+            self.get_f32(14).unwrap_or(0.0),
+        ))
+    }
+
     fn get_guid(&self, index: u16) -> Option<u64> {
         // Raw map read on purpose: a guid slot stays "present iff the low half is" even on a
         // created store — every consumer already treats a sent-empty `Some(0)` as no-guid, so the

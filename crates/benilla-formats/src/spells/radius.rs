@@ -31,6 +31,12 @@ impl SpellRadiusCatalog {
         self.rows.get(&index)
     }
 
+    /// Fixture constructor — tests (the [`crate::SpellCatalog::from_displays`] convention).
+    /// The live path is [`load_spell_radii`].
+    pub fn from_rows(rows: HashMap<u32, SpellRadius>) -> Self {
+        Self { rows }
+    }
+
     pub fn len(&self) -> usize {
         self.rows.len()
     }

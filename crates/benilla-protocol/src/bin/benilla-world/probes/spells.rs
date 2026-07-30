@@ -9,10 +9,22 @@ use benilla_protocol::{decode, guid, EntityKind, SessionEvent};
 
 use crate::probes::{Ctx, Probe};
 
+/// The dest-cast phase's spell: 4054 "Rough Dynamite" — dest-targeted (`Targets = 0x40`), zero
+/// mana, no reagents/totems, no equipped-item requirement, no aura state (live `spell_template`
+/// sweep, decision 0792) — castable by ANY class the probe character happens to be, once GM-learnt.
+const DEST_SPELL: u32 = 4054;
+
 #[derive(Default)]
 pub(crate) struct Spells {
     cast_sent: Option<u32>,
     targeted_cast_sent: Option<(u32, u64)>,
+    dest_cast_sent: Option<[f32; 3]>,
+    dest_learn_sent: bool,
+    /// Set by `SMSG_LEARNED_SPELL` naming [`DEST_SPELL`] — the gate the dest cast waits behind.
+    /// The `.learn` chat command executes DEFERRED on the server (past the session's opcode
+    /// batch), so a cast sent in the same batch beats it and is silently dropped as unknown
+    /// ("casts spell 4054 which he shouldn't have" — observed live, 2026-07-30).
+    dest_spell_known: bool,
 }
 
 impl Probe for Spells {
@@ -39,10 +51,47 @@ impl Probe for Spells {
                 }
             }
         }
-        // Phase 2: once the self-cast is answered, cast the same spell AT the first streamed
-        // creature — this exercises the mask-2 + PACKED-guid target block, the path the action
-        // bar uses with a selection (the self-cast only proves mask 0).
-        if self.targeted_cast_sent.is_none() && cx.world.cast_verdict.is_some() {
+        // Phase 3 (decision 0792): the GROUND cast — mask 0x40 + three f32 WoW coords, the body
+        // the targeting cursor's world-click commit sends. GM-learn the classless DEST_SPELL,
+        // wait for the server's own `SMSG_LEARNED_SPELL` ack (the chat command executes deferred
+        // — a cast in the same batch is dropped as unknown), then cast at our own feet
+        // (`self_pose` — distance 0, always in range, always LOS). Routed to `dest_verdict` by
+        // spell id, so it can't collide with phase 2's positional slot. Gated like phase 2 on
+        // the phase-1 verdict (the book/bar round trip is proven).
+        if self.dest_cast_sent.is_none() && cx.world.cast_verdict.is_some() {
+            // A prior run's deferred .learn may already have stuck — the login book then
+            // carries the spell and no fresh SMSG_LEARNED_SPELL will ever fire.
+            if !self.dest_spell_known
+                && cx
+                    .world
+                    .spell_book
+                    .as_ref()
+                    .is_some_and(|b| b.contains(&DEST_SPELL))
+            {
+                self.dest_spell_known = true;
+            }
+            if !self.dest_spell_known && !self.dest_learn_sent {
+                cx.session.send_chat(&format!(".learn {DEST_SPELL}"))?;
+                println!("sent .learn {DEST_SPELL} (Rough Dynamite — the dest-cast phase's spell)");
+                self.dest_learn_sent = true;
+            }
+            if self.dest_spell_known {
+                let (pos, _) = cx.world.self_pose();
+                cx.world.dest_spell = Some(DEST_SPELL);
+                cx.session.cast_spell_at_dest(DEST_SPELL, pos)?;
+                println!(
+                    "sent CMSG_CAST_SPELL for spell {DEST_SPELL} at dest ({:.2}, {:.2}, {:.2}) — mask 0x40",
+                    pos[0], pos[1], pos[2]
+                );
+                self.dest_cast_sent = Some(pos);
+            }
+        }
+        // Phase 2: once the self-cast AND the ground cast are answered, cast the bar spell AT
+        // the first streamed creature — the mask-2 + PACKED-guid target block. Ordered AFTER the
+        // dest phase deliberately: `.learn` executes deferred and resolves the SELECTION, so a
+        // creature selected here before the command ran turned the learn into "Player not
+        // found!" (observed live, 2026-07-30 — the `.cheat god` re-target trap, method.md).
+        if self.targeted_cast_sent.is_none() && cx.world.dest_verdict.is_some() {
             if let Some(spell) = self.cast_sent {
                 if let Some((&guid, _)) = cx
                     .world
@@ -55,6 +104,18 @@ impl Probe for Spells {
                     println!("sent CMSG_CAST_SPELL for spell {spell} at {guid:#x} (packed target)");
                     self.targeted_cast_sent = Some((spell, guid));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn on_event(&mut self, ev: &SessionEvent, _cx: &mut Ctx) -> Result<()> {
+        // The dest phase's learn ack: the book already carrying the spell (a prior probe run's
+        // leftover) counts the same — `SMSG_INITIAL_SPELLS` is handled at the gate below instead,
+        // since the book arrives before the learn is ever sent.
+        if let SessionEvent::SpellLearned { spell_id } = ev {
+            if *spell_id == DEST_SPELL {
+                self.dest_spell_known = true;
             }
         }
         Ok(())
@@ -181,6 +242,27 @@ impl Probe for Spells {
             }
             (Some(e), _) => bail!("no SMSG_ITEM_QUERY_SINGLE_RESPONSE for entry {e}"),
             (None, _) => println!("(no item-kind button on the bar to item-query)"),
+        }
+        // --spells dest-cast verdict (decision 0792): the wire shape must not merely parse — the
+        // cast must be ACCEPTED. A missing verdict means the body desynced the server's reader
+        // (the CMSG was dropped or the session died); a refusal names the CheckCast reason.
+        match (self.dest_cast_sent, &world.dest_verdict) {
+            (Some(pos), Some((_, true, _))) => {
+                println!(
+                    "✅ ground cast (mask 0x40 + dest): spell {DEST_SPELL} at ({:.2}, {:.2}, {:.2}) → ok.",
+                    pos[0], pos[1], pos[2]
+                );
+            }
+            (Some(_), Some((_, false, r))) => {
+                bail!(
+                    "ground cast {DEST_SPELL} REFUSED (reason {:#04x}) — the dest body parsed but CheckCast said no",
+                    r.unwrap_or(0)
+                )
+            }
+            (Some(_), None) => {
+                bail!("no SMSG_CAST_RESULT for the GROUND cast of {DEST_SPELL} — the mask-0x40 dest body desyncs the server")
+            }
+            (None, _) => bail!("ground cast never sent (phase 1 never resolved?)"),
         }
         match (self.targeted_cast_sent, &world.targeted_verdict) {
             (Some((spell, guid)), Some((s2, ok2, r2))) if *s2 == spell => {

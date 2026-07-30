@@ -195,6 +195,7 @@ fn drain_shapeshift_casts(
     mut cast_errors: ResMut<crate::ui_action::CastErrors>,
     mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
     mut trade_skill_opens: ResMut<crate::ui_tradeskill::TradeSkillOpens>,
+    mut ground: ResMut<crate::ui_action::SpellTargeting>,
     mut ecs: Commands,
 ) {
     let Some(mut script) = script else {
@@ -237,6 +238,7 @@ fn drain_shapeshift_casts(
             &mut cast_errors,
             &mut auto_repeat,
             &mut trade_skill_opens,
+            &mut ground,
         );
     }
 }

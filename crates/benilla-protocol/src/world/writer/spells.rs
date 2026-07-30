@@ -60,6 +60,17 @@ impl WorldWriter {
         )
     }
 
+    /// Cast a spell at a **ground point** (`CMSG_CAST_SPELL` with `TARGET_FLAG_DEST_LOCATION` +
+    /// the destination Vec3 in WoW world coords — [`messages::cast_spell_at_dest`]): the
+    /// targeting-cursor commit for a ground-targeted AOE (decision 0792). The server range/LOS
+    /// checks the point in `Spell::CheckCast`; refusal answers `SMSG_CAST_RESULT`.
+    pub fn cast_spell_at_dest(&mut self, spell_id: u32, dest: [f32; 3]) -> Result<()> {
+        self.send(
+            opcode::CMSG_CAST_SPELL,
+            &messages::cast_spell_at_dest(spell_id, dest),
+        )
+    }
+
     /// Cancel a named in-flight cast (`CMSG_CANCEL_CAST`: one `u32` spell id — vmangos
     /// `HandleCancelCastOpcode`). Sent by the wand-only auto-repeat handoff (`0x6095b8`) and by
     /// the cast bar's local self-cancel (movement/Esc mid-cast, `benilla::ui_cast`).

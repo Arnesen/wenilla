@@ -52,6 +52,7 @@ pub(crate) fn send_spell_cast(
     cast_errors: &mut CastErrors,
     auto_repeat: &mut AutoRepeatActive,
     trade_skill_opens: &mut crate::ui_tradeskill::TradeSkillOpens,
+    ground: &mut super::targeting::SpellTargeting,
 ) {
     let now = Instant::now();
     let def = spells.and_then(|s| s.catalog.get(spell_id));
@@ -73,6 +74,14 @@ pub(crate) fn send_spell_cast(
         let self_e = self_player.single().ok().map(|(e, _)| e);
         crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, ecs, commands);
         return;
+    }
+    // TryCast's IsTargeting leg (`6e4d62`, decision 0792): a NEW cast pressed while the
+    // targeting cursor is up aborts the targeting first — AbortCast in targeting mode clears
+    // the word, no packet — and the press proceeds down the ladder. (The SAME spell's re-press
+    // on the action bar never reaches here: UseAction's toggle-cancel returns at the drain.)
+    if ground.active() {
+        debug!("ui_action: cast {spell_id} supersedes the targeting cursor");
+        ground.clear();
     }
     // The local not-ready refusal (the client's `IsSpellOnCooldown 0x6e1690` gate in the cast
     // path): a spell/category cooldown refuses at the source with the client's own reason 0x3c
@@ -160,6 +169,14 @@ pub(crate) fn send_spell_cast(
     ) {
         cast_target::CastWireTarget::SelfImplicit => None,
         cast_target::CastWireTarget::Unit(guid) => Some(guid),
+        cast_target::CastWireTarget::GroundTargeting => {
+            // Enter the targeting-cursor mode's location half (decision 0792) — nothing is
+            // sent, nothing armed: the ref's cursor entry (`6e50c8`) runs none of the commit
+            // tail; the world click's commit owes the GCD and the pending arm.
+            debug!("ui_action: cast {spell_id} awaits its ground click — targeting cursor up");
+            ground.enter(spell_id);
+            return;
+        }
         cast_target::CastWireTarget::Refused(reason) => {
             debug!("ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})");
             cast_errors.0.push((spell_id, reason));

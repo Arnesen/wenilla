@@ -576,8 +576,10 @@ fn create_result(
             char_result_text(msg.code)
         );
         if msg.code == benilla_protocol::messages::CHAR_CREATE_SUCCESS {
-            // The fresh roster already arrived (phase 1 emits it before the result); arm the new row
-            // and return to select.
+            // The fresh roster already arrived (`net::io` re-enumerates and emits it BEFORE the
+            // result), so `note_created` selects the new row against the list already in hand —
+            // arming a flag for "the next roster update" waited for a message that never comes
+            // again, and the select screen came back on the old row (B119).
             roster.note_created(sel.name.text.clone());
             next.set(ClientState::CharSelect);
         } else if let Ok(mut text) = status.single_mut() {

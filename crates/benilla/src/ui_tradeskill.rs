@@ -439,8 +439,13 @@ fn drain_trade_skill(
     commands: Res<NetCommands>,
     self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     // The cast catalog + the item cache the pre-send totem/reagent check reads (decision
-    // 0552), one tuple param (Bevy's 16-param ceiling).
-    spell_inputs: (Option<Res<Spells>>, Res<Items>),
+    // 0552) + the targeting mode the one cast path threads (0792), one tuple param (Bevy's
+    // 16-param ceiling).
+    spell_inputs: (
+        Option<Res<Spells>>,
+        Res<Items>,
+        ResMut<crate::ui_action::SpellTargeting>,
+    ),
     mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
     mut pending: ResMut<crate::ui_cast::PendingCast>,
     mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
@@ -450,7 +455,7 @@ fn drain_trade_skill(
     mut opens: ResMut<TradeSkillOpens>,
     mut ecs: Commands,
 ) {
-    let (spells, cast_items) = spell_inputs;
+    let (spells, cast_items, mut ground) = spell_inputs;
     let Some(mut script) = script else {
         return;
     };
@@ -478,6 +483,7 @@ fn drain_trade_skill(
                 cast_errors,
                 auto_repeat,
                 &mut opens,
+                &mut ground,
             );
         };
 

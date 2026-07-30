@@ -22,8 +22,9 @@ use benilla_protocol::{decode, EntityKind, WorldSession, WORLD_PORT};
 use clap::Parser;
 
 use probes::{
-    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, Loot, Probe, QueryNames, Quest,
-    QuestItem, QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot, Vendor, WorldState,
+    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, Probe,
+    QueryNames, Quest, QuestItem, QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot,
+    Vendor, WorldState,
 };
 use world::{DeathArc, Tracked, World};
 
@@ -62,6 +63,13 @@ struct Cli {
     /// either proves the round trip).
     #[arg(long)]
     spells: bool,
+    /// Capture the dest-anchored effect wire for a ground cast of this spell id (the B132
+    /// follow-up instrument): GM-learn it + GM-fill mana, cast at own feet (mask 0x40), and dump
+    /// every DynamicObject create raw (labeled `DYNAMICOBJECT_*` fields), the SPELL_GO, and the
+    /// removal edge with its lifetime. Pair with `--seconds 25`+ so a channel + its object's whole
+    /// life fits the window. Needs a GM account (the deploy's probes are gmlevel 6).
+    #[arg(long)]
+    groundfx: Option<u32>,
     /// Live-verify the melee-swing wire (decision 0073): GM-teleport (`.go xyz`) onto a Northshire
     /// Kobold Vermin spawn, `CMSG_ATTACKSWING` the nearest streamed creature, and require ≥1
     /// `SMSG_ATTACKERSTATEUPDATE` to arrive and decode (attacker/victim/hitInfo/damage). Needs a GM
@@ -330,6 +338,9 @@ fn main() -> Result<()> {
     if cli.spells {
         probes.push(Box::new(Spells::default()));
     }
+    if let Some(spell) = cli.groundfx {
+        probes.push(Box::new(GroundFx::new(spell)));
+    }
     if let Some(n) = cli.use_pack_slot {
         probes.push(Box::new(UsePackSlot { n }));
     }
@@ -432,6 +443,7 @@ fn main() -> Result<()> {
         EntityKind::Player,
         EntityKind::Unit,
         EntityKind::GameObject,
+        EntityKind::DynamicObject,
         EntityKind::Other,
     ] {
         let mut group: Vec<(&u64, &Tracked)> = world

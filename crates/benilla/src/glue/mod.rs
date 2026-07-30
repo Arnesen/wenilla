@@ -60,10 +60,17 @@ pub(crate) fn seat_outline_copies(
 /// The ONE copy of the formula — every glue spawn site and every rescale check reads it here, and
 /// each screen's lifecycle system compares its tree's baked scale against this to know when a
 /// window resize (mac fullscreen, a drag) has invalidated the tree.
+///
+/// **There is no lower clamp** (B120). A floor of 1.0 draws the 768-unit-tall authored layout into a
+/// shorter window and the overflow simply falls off the bottom — silently, and always the
+/// *bottom-most* controls: on the create screen that is the last customization row and the
+/// **RANDOMIZE** button (reproduced at `WOW_WIN=1276x677` — both gone, along with the foot of the
+/// right-hand race/class panels). The reference has no such floor: its glue screens are authored in
+/// the 768-tall virtual space and scaled by the window height, so a short window makes everything
+/// smaller and nothing missing. The upper clamp stays — that is the shipped size on a tall screen,
+/// and lifting it would resize the director's UI without being asked.
 pub(crate) fn screen_scale(window: Option<&Window>) -> f32 {
-    window
-        .map(|w| (w.height() / 768.0).clamp(1.0, 2.2))
-        .unwrap_or(1.0)
+    window.map(|w| (w.height() / 768.0).min(2.2)).unwrap_or(1.0)
 }
 
 /// Mirror every outlined text's content into its black copies ([`widgets::outlined_text`]) — the
@@ -170,6 +177,36 @@ pub(crate) fn glue_button_visuals(
                     Visibility::Hidden
                 };
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screen_scale;
+    use bevy::prelude::*;
+    use bevy::window::WindowResolution;
+
+    /// The authored layout must FIT the window at every height — the B120 regression.
+    /// [`screen_scale`] is the only thing standing between a 768-unit-tall tree and a shorter
+    /// window, so a floor there silently amputates the bottom of every glue screen (the create
+    /// screen's RANDOMIZE button is authored at y 719..749 of 768).
+    #[test]
+    fn the_authored_layout_fits_any_window_height() {
+        /// Bottom edge of the create screen's lowest control (the RANDOMIZE button) in authored
+        /// units: the configuration tower's TOPLEFT y 74 + its 645 in-tower offset + 30 tall.
+        const LOWEST_CONTROL: f32 = 74.0 + 645.0 + 30.0;
+        for h in [480u32, 600, 677, 720, 768, 900, 1286, 2160] {
+            let window = Window {
+                resolution: WindowResolution::new(1600, h),
+                ..default()
+            };
+            let s = screen_scale(Some(&window));
+            assert!(
+                LOWEST_CONTROL * s <= window.height(),
+                "at a {h}px window (scale {s}) the lowest glue control lands at {} — off the bottom",
+                LOWEST_CONTROL * s
+            );
         }
     }
 }

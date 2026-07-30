@@ -44,6 +44,7 @@ mod feed;
 #[cfg(test)]
 mod feed_tests;
 mod state;
+pub(crate) mod targeting;
 mod weapon_icon;
 
 pub(crate) use cast_send::send_spell_cast;
@@ -51,6 +52,9 @@ pub(crate) use errors::{
     attack_mounted_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
     UiErrorKeys,
 };
+// `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
+// spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
+pub(crate) use targeting::{ground_cast_radius, SpellTargeting};
 // `pub(crate)`: the spellbook shows the same borrowed weapon icon its bar buttons do, pre-resolved
 // once per page (decisions 0230/0231).
 pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon};
@@ -204,6 +208,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<crate::cooldowns::Cooldowns>()
             .init_resource::<AutoRepeatActive>()
             .init_resource::<cast_target::AutoSelfCast>()
+            .init_resource::<targeting::SpellTargeting>()
             .add_systems(Startup, load_spells.after(AssetSet::Open))
             .add_systems(
                 Update,
@@ -227,6 +232,16 @@ impl Plugin for UiActionPlugin {
                     track_learned_abilities
                         .in_set(UnitFeed)
                         .after(feed::feed_actions),
+                    // The targeting mode's ESC-chain halves (decision 0792): the state push
+                    // rides the feeds (before the input pass runs `ToggleGameMenu`), the
+                    // trigger drain follows it — same frame, so an ESC's cancel lands before
+                    // the next frame's cursor drive reads the mode. The cursor pre-empt, the
+                    // right-press cancel, and the click commit register in the TARGET chain
+                    // (ordering against the classifier and the select click is theirs to own).
+                    targeting::feed_targeting_to_vm
+                        .in_set(UnitFeed)
+                        .before(UiInput),
+                    targeting::drain_stop_targeting.after(UiInput),
                 ),
             );
     }

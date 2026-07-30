@@ -1,0 +1,199 @@
+//! The **ground-targeting AoE reticle** — the terrain-projected decal the targeting cursor
+//! drags across the world (decision 0797; byte-pinned in wow-re `ground-target-reticle.md`).
+//!
+//! For every ordinary area spell (Blizzard, Flamestrike — no object-placement effect), the
+//! reference draws a **projected decal**, not a model: box = the picked ground point ± r in the
+//! horizontal plane, **± 2.0 vertically** (`0x4837b0`); textures
+//! `Interface\SpellShadow\Spell-Shadow-Acceptable.blp` (in range) /
+//! `…-Unacceptable.blp` (out), vertex colour `0xffffffff` — the *texture* carries the
+//! green/red, not a tint. It projects through **the same ground-decal projector as the
+//! selection ring** (`0x6d7330 → 0x6d6fa0 → 0x6d7480` — [`crate::decal`]), axis-aligned (no
+//! rotation term; the effect-0x51 placement rotate orients a GameObject *preview model*, a
+//! machine we don't carry — that family of spells is a named residual).
+//!
+//! **Radius**: `r = min(GetCurrentCastRadius, 20.0)` (`0x6e6350`, clamp `0x4820f0`):
+//! per-effect `radius + casterLevel × perLevel` over **EffectRadiusIndex[0] and [1] only**
+//! (slot 2 is never read), max with candidate-1 winning ties/NaN. **Out of range forces the
+//! radius to 0.0** — the decal shrinks to the 1.3888889 default *and* turns red. `r == 0` (no
+//! radius rows — a dest spell with no area) also draws at the default. Class-6 spell modifiers
+//! don't exist yet (the same residual as the range gate, 0792).
+//!
+//! **States**: in range → Acceptable at `r`; out of range → Unacceptable at the default size;
+//! cursor over sky / no world hit → **nothing is drawn** (the ref resets its draw state every
+//! hover pass before the pick — the "frozen at the last point" reading was refuted at the
+//! bytes). Over a unit the decal draws on the ground behind it (the pick can't see units while
+//! a dest-only word is up — `world-click-targeting.md` Q2).
+//!
+//! Named gap (shared with the blob shadow): the ref's second projection pass takes **liquid**
+//! surfaces (flags `0x0f0000`) — our [`GroundDecalSurface`] set has no liquid yet, so the
+//! reticle vanishes over water instead of floating on it (wow-re trap #8, half-carried).
+
+use avian3d::prelude::Collider;
+use bevy::prelude::*;
+
+use crate::collision::GroundDecalSurface;
+use crate::decal::{project_decal, DecalFrame};
+use crate::net::{ObjectStore, SelfPlayer};
+use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
+use crate::player::WorldCamera;
+use crate::target::{PickOcclusion, WorldCursor};
+use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells};
+
+/// The default footprint when the radius is 0 — out of range, or a rowless spell
+/// (`[0xb4b3b0] == 0.0 → 1.3888889`, the ref's literal).
+const RETICLE_DEFAULT_RADIUS: f32 = 1.388_889;
+/// The projection box's vertical slab: ± 2.0 around the picked point (`0x4837b0` — fixed, not
+/// radius-scaled like the ring's).
+const RETICLE_VERT: f32 = 2.0;
+/// Same coplanarity treatment as the ring (`ring::RING_DEPTH_BIAS` rationale).
+const RETICLE_DEPTH_BIAS: f32 = 8192.0;
+
+/// The two state textures (the render-side residency gate withholds the draw until loaded).
+#[derive(Resource)]
+pub(super) struct ReticleAssets {
+    acceptable: Handle<Image>,
+    unacceptable: Handle<Image>,
+}
+
+/// The single reticle record — the ring's resource pattern (projection cached against a key,
+/// pushed onto the effect stream per frame).
+#[derive(Resource, Default)]
+pub(super) struct ReticleState {
+    verts: Vec<EffectVertex>,
+    key: ReticleKey,
+    acceptable: bool,
+    shown: bool,
+}
+
+/// The projection's rebuild inputs — a still cursor costs a compare.
+#[derive(Default, PartialEq, Clone, Copy)]
+struct ReticleKey {
+    center: Vec3,
+    radius: f32,
+    surfaces: usize,
+}
+
+pub(super) fn setup_reticle(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(ReticleAssets {
+        acceptable: asset_server
+            .load::<Image>("mpq://interface/spellshadow/spell-shadow-acceptable.blp"),
+        unacceptable: asset_server
+            .load::<Image>("mpq://interface/spellshadow/spell-shadow-unacceptable.blp"),
+    });
+    commands.init_resource::<ReticleState>();
+}
+
+/// Place/size/state the reticle each frame while the targeting cursor is up. Runs after the
+/// targeting cursor drive in the target chain: `WorldCursor.unable` IS the frame's range
+/// verdict (the one `CheckGroundPointInRange` caller — the cursor and the decal state are the
+/// same read in the ref).
+pub(super) fn update_reticle(
+    targeting: Res<SpellTargeting>,
+    occlusion: Res<PickOcclusion>,
+    cursor: Res<WorldCursor>,
+    spells: Option<Res<Spells>>,
+    self_store: Query<&ObjectStore, With<SelfPlayer>>,
+    surfaces: Query<&Collider, With<GroundDecalSurface>>,
+    mut state: ResMut<ReticleState>,
+) {
+    let state = &mut *state;
+    let (Some(spell_id), Some(point)) = (targeting.spell(), occlusion.point) else {
+        // Not targeting, or the pick hit nothing (sky): nothing is drawn — the ref resets the
+        // draw state on every hover pass before the pick.
+        state.shown = false;
+        return;
+    };
+    let acceptable = !cursor.unable;
+    // Out of range forces radius 0.0 (the ref writes the global before the state fork), and a
+    // zero radius draws at the literal default.
+    let radius = if acceptable {
+        let level = self_store
+            .single()
+            .ok()
+            .and_then(|s| s.0.unit_level())
+            .unwrap_or(1);
+        ground_cast_radius(spells.as_deref(), spell_id, level)
+    } else {
+        0.0
+    };
+    let radius = if radius > 0.0 {
+        radius
+    } else {
+        RETICLE_DEFAULT_RADIUS
+    };
+    let key = ReticleKey {
+        center: point,
+        radius,
+        surfaces: surfaces.iter().count(),
+    };
+    if !(state.shown && key == state.key && state.acceptable == acceptable) {
+        state.verts.clear();
+        state.key = key;
+        state.acceptable = acceptable;
+        // Axis-aligned box (no rotation term), the fixed ±2.0 vertical slab, box → [0,1]² UVs
+        // (the ref's 0.5 UV bias is exactly this center mapping). Vertical fade mirrors the
+        // ring's treatment so a draped wall piece dims instead of smearing at full strength.
+        let frame = DecalFrame {
+            center: point,
+            sin: 0.0,
+            cos: 1.0,
+            min_x: -radius,
+            max_x: radius,
+            min_z: -radius,
+            max_z: radius,
+            min_y: -RETICLE_VERT,
+            max_y: RETICLE_VERT,
+        };
+        project_decal(
+            &mut state.verts,
+            &surfaces,
+            &frame,
+            |p| ((RETICLE_VERT - p.y.abs()) / RETICLE_VERT).clamp(0.0, 1.0),
+            |x, z| frame.rect_uv(x, z),
+        );
+    }
+    state.shown = !state.verts.is_empty();
+}
+
+/// Push the shown reticle onto the effect stream — vertex colour white (the ref writes
+/// `0xffffffff`; the state picks the TEXTURE), standard alpha blend (the ref's GxRs blend-mode
+/// 2), fog off, at the ring's decal rung.
+pub(super) fn push_reticle(
+    assets: Option<Res<ReticleAssets>>,
+    state: Option<Res<ReticleState>>,
+    cam: Query<Entity, With<WorldCamera>>,
+    mut quads: ResMut<EffectQuads>,
+) {
+    let (Some(assets), Some(state)) = (assets, state) else {
+        return;
+    };
+    let Ok(cam) = cam.single() else { return };
+    if !state.shown || state.verts.is_empty() {
+        return;
+    }
+    let texture = if state.acceptable {
+        assets.acceptable.id()
+    } else {
+        assets.unacceptable.id()
+    };
+    let start = quads.begin();
+    quads.verts.extend(state.verts.iter().map(|v| EffectVertex {
+        pos: v.pos,
+        uv: v.uv,
+        color: [1.0, 1.0, 1.0, v.color[3]],
+    }));
+    quads.commit_tris(
+        start,
+        EffectDrawSpec {
+            cam,
+            texture,
+            blend: EffectBlend::Alpha,
+            fog: EffectFog::Off,
+            anchor: state.key.center,
+            bias: RETICLE_DEPTH_BIAS,
+            raster_bias: RETICLE_DEPTH_BIAS as i32,
+            main_entity: Entity::PLACEHOLDER,
+            light: None,
+        },
+    );
+}

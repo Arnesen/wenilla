@@ -74,6 +74,11 @@ pub(crate) struct World {
     pub(crate) item_answer: Option<(u32, Option<String>)>,
     pub(crate) cast_verdict: Option<(u32, bool, Option<u8>)>,
     pub(crate) targeted_verdict: Option<(u32, bool, Option<u8>)>,
+    /// The `--spells` dest-cast phase's spell (decision 0792): a `SMSG_CAST_RESULT` naming it
+    /// routes to [`Self::dest_verdict`] instead of the positional pair above — the dest phase
+    /// runs concurrently with the targeted phase, so position alone can't route it.
+    pub(crate) dest_spell: Option<u32>,
+    pub(crate) dest_verdict: Option<(u32, bool, Option<u8>)>,
     pub(crate) swings_seen: u32,
     pub(crate) self_moves: u32,
     pub(crate) tally: BTreeMap<String, u32>,
@@ -113,6 +118,8 @@ impl World {
             item_answer: None,
             cast_verdict: None,
             targeted_verdict: None,
+            dest_spell: None,
+            dest_verdict: None,
             swings_seen: 0,
             self_moves: 0,
             tally: BTreeMap::new(),
@@ -430,7 +437,9 @@ impl World {
                 reason,
             } => {
                 println!("SMSG_CAST_RESULT: spell {spell_id} success={success} reason={reason:?}");
-                if self.cast_verdict.is_none() {
+                if self.dest_spell == Some(*spell_id) {
+                    self.dest_verdict = Some((*spell_id, *success, *reason));
+                } else if self.cast_verdict.is_none() {
                     self.cast_verdict = Some((*spell_id, *success, *reason));
                 } else {
                     self.targeted_verdict = Some((*spell_id, *success, *reason));

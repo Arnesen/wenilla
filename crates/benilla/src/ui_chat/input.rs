@@ -561,6 +561,7 @@ pub(super) fn drain_chat_input(
                                     spell_id,
                                     hits: vec![me],
                                     misses: Vec::new(),
+                                    dest: None,
                                     // Dev stand-in only: a real GO's ammo block carries the
                                     // caster's actual ammo; `/castvis` has none, so shot
                                     // spells (`75 go`, `2480 go`) fly the Rough Arrow

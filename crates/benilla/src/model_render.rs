@@ -75,6 +75,12 @@ pub(crate) struct MatKey {
 pub(crate) enum ShadeSel {
     /// Lit ground, the boosted intensity family (the binary's 2.5): ADT map doodads on unshadowed
     /// ground, and every entity M2 (§9: units carry the same 2.5/0.5 chain as doodads).
+    ///
+    /// The entity half is **contradicted by observation** — a player + three NPCs across two
+    /// reference apitraces all commit at gain exactly 1.0 while the same frames' doodads span
+    /// 0.5..2.5 (decision 0796 §4). Left as-is deliberately: the shader's `min(I,1)` already lands
+    /// a lit-ground unit on 1.0, so only a unit on MCSH-shadowed ground renders wrong, and §9's
+    /// contradicted link is the INFERRED one wow-re still has open.
     Lit,
     /// Lit ground, intensity 1.0: an exterior WMO MODD prop — §8b, byte-verified never to reach
     /// the 2.5 site (a Stormwind street fountain is NOT brightened like an Elwynn tree).

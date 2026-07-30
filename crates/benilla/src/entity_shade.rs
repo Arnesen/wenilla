@@ -5,6 +5,17 @@
 //! a per-frame MCSH sample at the object's node position and a linear intensity ramp (`0x69e770`, the
 //! step constant `[0x810808] = 3.3333`/s), not a static spawn-time bake.
 //!
+//! **OPEN, and it is this file's whole premise (decision 0796 §4).** §9's chain is byte-verified up to
+//! its last link — "the unit's own light node fills the unit's committed light" — and that link is
+//! INFERRED, not verified. Observation contradicts it: a player + three NPCs across two of the
+//! reference's own apitraces commit their sun at gain **exactly 1.0**, never 2.5 or 0.5, while the same
+//! frames' ADT doodads span the full 0.5/0.85/1.0/1.874/2.5 ramp (wow-re
+//! `trace-forensics-northshire-d3d` §5) — the signature of `0x672a20`'s null-node fallback, i.e. units
+//! may not be on the terrain-shade chain at all. If that lands, this system keeps its GameObject and
+//! ambient-word duties and loses its unit/player intensity ramp. Not pre-emptively torn out: the
+//! mechanism is an open wow-re follow-up, and the shader's `min(I,1)` already confines the visible
+//! error to a unit on MCSH-shadowed ground.
+//!
 //! Structure mirrors the reference's one-light-node-per-object: [`GroundShade`] lives on the **net
 //! entity root** (the `[obj+0xe0]` twin), sampled at the root's feet and ramped there; the resulting
 //! shade byte is written to every M2 part in the root's descendant tree — body submeshes, and held
