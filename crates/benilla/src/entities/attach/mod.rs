@@ -447,14 +447,17 @@ pub(super) fn attach_entity_visuals(
             // A GameObject's interior-fold reference point (model-local; the anchor transform
             // applies the entity scale when the classifier folds).
             let bake_center = dm.map(|d| d.bake_center_local).unwrap_or(Vec3::ZERO);
-            // The dynamic ground-shade root (decision 0173): a unit/player/GameObject samples the
-            // terrain MCSH under its feet per frame and ramps its sun term — one state per object,
-            // like the reference's `[obj+0xe0]` light node; every M2 part below (body, held items)
-            // reads it from the tree walk. `insert_if_new` so a gear-change re-attach keeps the
-            // already-ramped state instead of resetting it (no one-frame lighting pop).
+            // The dynamic ground-shade root (decision 0173): one light-node state per object, like
+            // the reference's `[obj+0xe0]`; every M2 part below (body, held items) reads it from the
+            // tree walk. The KIND decides how the node's light is delivered (0809): a GameObject
+            // samples the terrain MCSH under it and ramps its sun term over 2.5/0.5, while a
+            // unit/player takes `0x672a20`'s null fallback — a flat day/night ×1.0. `insert_if_new`
+            // so a gear-change re-attach keeps the already-ramped state instead of resetting it (no
+            // one-frame lighting pop); the kind it captures cannot change under a live display-id
+            // swap, the same argument the attach-mode split below rests on.
             commands
                 .entity(entity)
-                .insert_if_new(crate::entity_shade::GroundShade::default());
+                .insert_if_new(crate::entity_shade::GroundShade::for_kind(net.kind));
             // The root's canonical fold reference: held items share the root's interior verdict
             // (one light node per unit — the reference aliases the wearer's collector into each
             // equipped item, wow-re `unit-light-combine-storm.md`), and their classifier fold must

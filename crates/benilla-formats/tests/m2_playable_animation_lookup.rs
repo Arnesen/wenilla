@@ -44,3 +44,37 @@ fn humanmale_playable_animation_lookup_matches_the_byte_verified_shape() {
     // row 32 substitutes AttackUnarmed(16) for whatever id 32 requests.
     assert_eq!(pal[32].resolved_id, 16, "row 32 substitutes AttackUnarmed");
 }
+
+/// The **prowl clips** the stealth gait branch asks for (`creature_anim::select`'s `STEALTH_WALK` /
+/// `STEALTH_STAND`, RF-0057's `[[110]+0x213]&2` branches): a player model authors both, and a
+/// creature model may author NEITHER — in which case the same baked lookup the real client indexes
+/// steps 119 down to Walk and 120 to Stand. That asymmetry is why the selector's stealth branch needs
+/// no model-capability check of its own, and why a prowling druid cat shows its ordinary walk on the
+/// reference client too.
+#[test]
+fn the_stealth_clips_are_authored_by_players_and_absent_from_the_druid_cat() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let chain = open_chain(&data).expect("open chain");
+    let pal = |path: &str| {
+        parse_m2_playable_animation_lookup(&chain.read(path).expect("read m2")).expect("parse pal")
+    };
+
+    // Rogue/druid bodies: StealthWalk(119) and StealthStand(120) resolve to themselves.
+    for model in [
+        "character\\human\\male\\humanmale.m2",
+        "character\\nightelf\\female\\nightelffemale.m2",
+    ] {
+        let p = pal(model);
+        assert_eq!(p[119].resolved_id, 119, "{model} authors StealthWalk");
+        assert_eq!(p[120].resolved_id, 120, "{model} authors StealthStand");
+    }
+
+    // Cat form authors neither — the baked walk lands on Walk / Stand.
+    let cat = pal("creature\\druidcat\\druidcat.m2");
+    assert_eq!(cat[119].resolved_id, 4, "cat StealthWalk -> Walk");
+    assert_eq!(cat[120].resolved_id, 0, "cat StealthStand -> Stand");
+}

@@ -39,6 +39,37 @@ pub struct Skeleton {
     pub bones: Vec<SkeletonBone>,
 }
 
+impl Skeleton {
+    /// The **billboard host** of `bone`: the index of the nearest bone at or above it in the parent
+    /// chain that authors a billboard arm (`bone` itself included), or `None` when the chain reaches
+    /// the root without one.
+    ///
+    /// This is the palette-level question, and the reason it has to be asked about ancestors and not
+    /// just the bone itself: a billboard bone's matrix ROWS are replaced with the camera basis about
+    /// its own pivot, and *`children multiply onto this`* (wow-re `billboard-bone-law.md`) — so every
+    /// descendant frame is camera-dependent even though only the ancestor carries the flag. Three
+    /// consumers ask it: a skinned vertex (which arm its geometry inherits), a **particle emitter**
+    /// (whose record position rides the replaced matrix — wow-re `part-anchoring-live-bone.md` §1
+    /// row 3), and a ribbon anchor.
+    ///
+    /// The nearest host is the whole answer: a nearer replacement discards the rows an outer one
+    /// wrote, and on a rest-pose chain the pivot-preserving translation rebuild reads the (identity)
+    /// pre-billboard matrix, so nothing above it survives either.
+    pub fn billboard_host(&self, bone: u16) -> Option<usize> {
+        let mut i = usize::from(bone);
+        // Bounded by the bone count — M2 parents precede children, so this terminates on any
+        // well-formed file; the bound is the malformed-parent guard.
+        for _ in 0..=self.bones.len() {
+            let b = self.bones.get(i)?;
+            if b.billboard.is_some() {
+                return Some(i);
+            }
+            i = usize::try_from(b.parent).ok()?;
+        }
+        None
+    }
+}
+
 /// Parse the M2 bone hierarchy (parent + pivot per bone) into a [`Skeleton`]. Straight off
 /// `benilla-m2`'s bone parse (vanilla bone record stride 0x6c: parent i16 @+0x08, pivot C3 @+0x60,
 /// VERIFIED wow-5875-re). A separate byte-in entry point alongside [`parse_m2_render_submeshes`], so
@@ -73,19 +104,30 @@ pub struct M2Attachment {
     pub position: [f32; 3],
 }
 
-/// Parse the M2 attachment-point table (see [`M2Attachment`]). Straight off `benilla-m2`'s already
-/// bone-range-checked parse; empty for a model with no attachment points.
+/// Parse the M2 attachment-point table **as the reference addresses it**: one entry per attach id
+/// the model's AttachLookup resolves (`benilla_m2::M2Model::attachment` — the `0x710310` bounds +
+/// `0xffff` sentinel), in id order, so a consumer keyed by id can simply match on
+/// [`M2Attachment::id`].
+///
+/// This is deliberately **not** the raw file table: ~5% of weapon models author several records
+/// under one id (both ends of a staff), and the lookup names exactly one of them — the other is
+/// unreachable in the reference and must be unreachable here (decision 0805). Records the lookup
+/// never names are therefore absent. Empty for a model with no attachment points.
 pub fn parse_m2_attachments(bytes: &[u8]) -> Result<Vec<M2Attachment>> {
     let format =
         parse_m2(&mut Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("parsing M2: {e}"))?;
-    Ok(format
-        .model()
-        .attachments
-        .iter()
-        .map(|a| M2Attachment {
-            id: a.id,
-            bone: a.bone,
-            position: a.position,
+    let model = format.model();
+    Ok((0..model.attach_lookup.len())
+        .filter_map(|id| {
+            let a = model.attachment(id as u16)?;
+            Some(M2Attachment {
+                // The LOOKUP's id, not the record's own: the reference resolves `lookup[id]` and
+                // never re-reads the record's id field, so that is the id this point answers to.
+                // (They agree on every shipped model checked; this makes it true by construction.)
+                id: id as u16,
+                bone: a.bone,
+                position: a.position,
+            })
         })
         .collect())
 }
@@ -1054,5 +1096,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **The billboard host of a particle emitter's bone chain** (decision 0813), on the two real
+    /// assets that opened it. `Field Marshal's Chain Spaulders` (display 32092 — nazriel's B118
+    /// item) authors a 4-bone chain whose only billboard bone is bone **1** (flags `0x08`,
+    /// spherical), with the two sparkle emitters hanging off its children 2 and 3. Neither emitter
+    /// bone carries the flag, so a consumer that asks only about the emitter's OWN bone sees an
+    /// ordinary rest-pose frame and puts the sparkle ~0.24 yd from where the reference draws it.
+    ///
+    /// Also pins the authoring pattern the offset is measured against: each emitter's record
+    /// `position` **is** its own bone's pivot, so `position − host.pivot` is the chain offset the
+    /// camera basis rotates. And the held torch — the other shipped case — is the same shape one
+    /// generation shallower (emitter on bone 10, host bone 2, a 0.097 yd offset).
+    #[test]
+    fn real_pvp_shoulder_emitters_ride_a_billboard_bone() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Item\\ObjectComponents\\Shoulder\\LShoulder_Mail_PVPAlliance_C_01.m2")
+            .expect("read the R14 mail shoulder");
+        let skel = parse_m2_skeleton(&bytes).expect("skeleton");
+        assert_eq!(skel.bones.len(), 4);
+        assert_eq!(
+            skel.bones.iter().filter(|b| b.billboard.is_some()).count(),
+            1,
+            "one billboard bone in the chain"
+        );
+        assert_eq!(
+            skel.bones[1].billboard,
+            Some(crate::BillboardKind::Spherical),
+            "bone 1 authors flag 0x08"
+        );
+        let emitters = crate::parse_m2_particle_emitters(&bytes).expect("emitters");
+        assert_eq!(emitters.len(), 2);
+        for (i, em) in emitters.iter().enumerate() {
+            let bone = usize::from(em.bone);
+            assert_eq!(bone, 2 + i, "the sparkle pair rides bones 2 and 3");
+            assert!(
+                skel.bones[bone].billboard.is_none(),
+                "…neither of which carries the flag itself"
+            );
+            assert_eq!(
+                skel.billboard_host(em.bone),
+                Some(1),
+                "so the host is their parent"
+            );
+            // The record position IS the emitter bone's own pivot (the exporter's pattern).
+            for c in 0..3 {
+                assert!(
+                    (em.position[c] - skel.bones[bone].pivot[c]).abs() < 1e-3,
+                    "emitter {i} position {:?} vs bone pivot {:?}",
+                    em.position,
+                    skel.bones[bone].pivot
+                );
+            }
+            // …and it sits ~0.24 yd from the host pivot — the offset the camera basis rotates,
+            // i.e. how far a rest-pose placement misses by.
+            let d: f32 = (0..3)
+                .map(|c| (em.position[c] - skel.bones[1].pivot[c]).powi(2))
+                .sum();
+            assert!(
+                (0.23..0.26).contains(&d.sqrt()),
+                "chain offset {} yd",
+                d.sqrt()
+            );
+        }
+        // The held torch: same mechanism, emitter on bone 10 under billboard bone 2.
+        let torch = chain
+            .read_file("Item\\ObjectComponents\\Weapon\\Club_1H_Torch_A_01.m2")
+            .expect("read the torch");
+        let tskel = parse_m2_skeleton(&torch).expect("skeleton");
+        let tem = crate::parse_m2_particle_emitters(&torch).expect("emitters");
+        assert_eq!(tem.len(), 1);
+        assert_eq!(tem[0].bone, 10);
+        assert_eq!(tskel.billboard_host(10), Some(2));
+        assert_eq!(
+            tskel.bones[2].billboard,
+            Some(crate::BillboardKind::Spherical)
+        );
+        // A bone with no billboard anywhere above it has no host (bone 0, the model root).
+        assert_eq!(skel.billboard_host(0), None);
+        // …and an out-of-range bone index is a `None`, never a panic.
+        assert_eq!(skel.billboard_host(999), None);
     }
 }

@@ -57,6 +57,11 @@ mod items;
 pub use items::{load_item_display_catalog, ItemDisplay, ItemDisplayCatalog};
 mod item_sounds;
 pub use item_sounds::{load_item_group_sounds, ItemGesture, ItemGroupSoundsCatalog};
+mod item_visuals;
+pub use item_visuals::{
+    load_enchant_visual_catalog, load_item_visual_catalog, EnchantVisualCatalog, ItemVisualCatalog,
+    ITEM_VISUAL_SLOTS,
+};
 mod ground_effects;
 pub use ground_effects::{
     load_ground_effect_catalog, scatter_ground_doodads, GroundDoodadPlacement, GroundEffect,
@@ -126,8 +131,8 @@ mod talents;
 pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
 mod spell_visual;
 pub use spell_visual::{
-    load_spell_visual_catalog, SpellVisualCatalog, VisualKit, VisualStages, KIT_SLOT_TAGS,
-    MISSILE_ATTACH_TABLE,
+    char_proc_type, load_spell_visual_catalog, CharProc, SpellVisualCatalog, VisualKit,
+    VisualStages, KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE,
 };
 mod emit_timing;
 pub use emit_timing::EmitTiming;
@@ -383,6 +388,15 @@ fn schema_for(dbc_name: &str) -> Option<Schema> {
         ("HelmetGeosetVisData.dbc", characters::helmet_vis_schema),
         ("CharSections.dbc", characters::char_sections_schema),
         ("ItemDisplayInfo.dbc", items::item_display_info_schema),
+        ("ItemVisuals.dbc", item_visuals::item_visuals_schema),
+        (
+            "ItemVisualEffects.dbc",
+            item_visuals::item_visual_effects_schema,
+        ),
+        (
+            "SpellItemEnchantment.dbc",
+            item_visuals::spell_item_enchantment_schema,
+        ),
         ("AreaTrigger.dbc", area_trigger::area_trigger_schema),
     ] {
         if base.eq_ignore_ascii_case(name) {
@@ -631,6 +645,9 @@ mod tests {
             "HelmetGeosetVisData",
             "CharSections",
             "ItemDisplayInfo",
+            "ItemVisuals",
+            "ItemVisualEffects",
+            "SpellItemEnchantment",
             "TaxiNodes",
             "AreaTable",
             "GameObjectDisplayInfo",

@@ -307,6 +307,14 @@ pub(super) fn drive_animations(
         if mounted {
             mv.stand_state = 0;
         }
+        // Stealth — the prowl pose ([`select::STEALTH_WALK`] / [`select::STEALTH_STAND`]): the CREEP
+        // vis flag off the unit's OWN descriptor, read every frame for self and remote alike, which
+        // is where the client reads it (`[[unit+0x110]+0x213] & 2` at select time). Never
+        // controller-fed, unlike the stand state — there is no client-side prediction of stealth, so
+        // the crouch lands with the server's aura. A mount child carries no store and reads `false`:
+        // right by construction, since the rider's body holds Mount(91) regardless and stealth and
+        // mounts are mutually exclusive anyway.
+        mv.stealthed = store.is_some_and(|s| s.0.unit_is_stealthed());
         let moving = mv.flags & move_flags::ANY_MOVE != 0;
         // The airborne arc's bookkeeping (wow-re land-anim-height-gate + rf57b §2): on the arc's
         // FIRST airborne frame, its launch vertical speed splits a **jump** (upward — the client's

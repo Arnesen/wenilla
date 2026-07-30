@@ -1,0 +1,610 @@
+//! **The aura-state CharProc layer** — what an aura does to the *body itself*: its translucency and
+//! its tint, for exactly as long as the aura lives. This is the half of a stage-2 "state kit" that
+//! isn't an attach-point emitter (those are `creature_anim::spell_visual`'s
+//! [`arm_aura_state_fx`](crate::creature_anim::arm_aura_state_fx), decision 0393): where that
+//! watcher hangs *models* on the unit, this one changes how the unit's own model **renders**.
+//!
+//! B114 ("Stealth shows nothing on the character") was this whole layer missing. Stealth's state
+//! kit carries no effect models and no anim at all — its entire visual is one CharProc — so the
+//! effects-only watcher resolved the kit, found an empty slot list, and dropped it on the floor.
+//!
+//! ## The mechanism (VERIFIED — wow-re `ghost-death-visuals.md` §2, `state-kit-aura-lifecycle.md`)
+//!
+//! `UNIT_FIELD_AURA` slot change → the aura watcher `0x604d00` → `0x6123f0` → **`0x5ff350`
+//! PlayAuraStateVisual**: the slot's spell → `Spell.dbc` → `SpellVisual` → **field 4 = the state
+//! kit** → `PlaySpellVisualKit(kit, stage 2)`, whose tail (`0x60f358: push esi(kit);
+//! 0x60f35c: call 0x60d7c0`) runs the **CharProc dispatcher** over the kit's four proc slots
+//! (`SpellVisualKit` fields 15–34 — `benilla_formats::CharProc`). Two of the dispatcher's nine cases
+//! act on the body:
+//!
+//! - **proc 14 = translucency** (`0x60d972`): the param becomes a node keyed by spell id
+//!   (`node+0x18`, value at `node+0x78`) on the unit's list `unit+0xb50`. The unit's effective alpha
+//!   is then recomputed by `0x60d180` as **`baseAlpha × Π(node alphas)`** — `baseAlpha` from the
+//!   CGUnit vtbl+0x6c getter `0x60d2d0` (`CreatureDisplayInfo+0x14 × 1/255`; a flat `1.0` for
+//!   players) — and handed to **`0x614f80` StartAlphaFade(target, 1000 ms)**, the same ramp block
+//!   (`+0xec..0x100`) and the same `clamp01(t)³` ease (`0x614a90`) our appear-fade already rides
+//!   ([`crate::model_fade::fade_alpha`]). Per frame `model+0x180 = baseRenderAlpha × fade`
+//!   (`0x614baa → 0x710cb0`), which multiplies into the per-batch alpha (`0x707680`).
+//! - **proc 1 = tint** (`0x60d840`): `round(param)` is a packed `0x00RRGGBB` OR'd with `0xff000000`
+//!   into a tint node (list `unit+0xce0`); per frame the head node goes `×1/255` into
+//!   `model+0x184/188/18c`.
+//!
+//! Removal is the mirror image: the aura leaves the slot → `0x5ff290` drops that spell's nodes and
+//! recomputes, so the alpha **ramps back** to the new product over the same 1000 ms.
+//!
+//! The vis-flag is a decoy and must not be used here: `UNIT_FIELD_BYTES_1` byte 3's CREEP (stealth)
+//! and GHOST bits drive **no** body render at all — an exhaustive census of every `+0x213` reference
+//! found three sites, all nameplate/marker suppression (wow-re `ghost-death-visuals.md` §1). The two
+//! co-travel only because the server sets the flag and the aura from the same spell. Keying the body
+//! off the flag would be the wrong mechanism that happens to look right on stealth and then fails on
+//! every other member of the family.
+//!
+//! ## The shipped data (read from the real 5875 `SpellVisualKit.dbc` this session —
+//! `benilla-extract charprocs` censuses it)
+//!
+//! 185 of 1772 kits carry a CharProc, and the **state** stage is far and away their home: 103 state
+//! kits, ~1200 (spell, proc) pairs. Proc 14 covers **11 kits / 135 spells** — kit 312 `0.3` is the
+//! whole sneak family (Stealth 1784-1787, Prowl, Vanish, Shadowmeld, Hide, Sneak, Disguise), kit
+//! 3450 `0.5` is Invisibility/Fade, kit 989 `0.5` the ghost aura, 3129 `0.65` Shadowform, 1286 `0.3`
+//! Banish, 3989 `1.0` Possess, 5129 `0.0` a quest fade-out. Proc 1 covers 73 state kits (~800
+//! spells): Frostbolt's chill blue, Immolate's ember orange, the poison green.
+//!
+//! ## What is built here, and what is not
+//!
+//! **Proc 14 ships whole** — nodes, the `baseAlpha × Π` product, the 1000 ms cubic ramp both ways,
+//! and the render composition below.
+//!
+//! **Proc 1 ships too** (decision 0812): its nodes live here ([`AuraNodes::tint`], head-node-wins as
+//! the reference's `unit+0xce0` list is) and [`apply_aura_tint`] publishes the head to
+//! [`crate::instance_tint`], the per-instance modulate channel keyed on the part's rig slot. Written
+//! on change, never eased — the reference's own asymmetry (`unit+0xd04` change-detection straight to
+//! `0x710cf0`, with none of the alpha's 1000 ms ramp).
+//!
+//! 0806 recorded this as blocked on a render-architecture call between per-unit material clones and a
+//! tag-indexed palette. That framing was wrong on its own terms: the `MeshTag` rig field already IS a
+//! per-instance slot into the shared light buffer, so the tint needed **no** new tag bits (which was
+//! the whole stated blocker — the payload has 5 spare bits outdoors and zero indoors) and no material
+//! churn. What it did need was reading our own renderer properly.
+//!
+//! The tint reaches every **skinned** part of a unit, which is the body: skin, face, hair, and every
+//! creature's whole model. Separately-attached M2s (held weapons, shoulders) do not carry the rig
+//! slot and so stay untinted for now — in the reference they inherit the parent's computed colour
+//! (`0x714000` recursion), so this is a real gap; giving them an instance slot means handing them a
+//! `MeshTag` they may not have today, which the ground-shade writer keys on ("matched by carrying a
+//! `MeshTag`"), so it wants its own pass rather than a rider here.
+//!
+//! Types 2, 7, 8, 11 and 13 also appear on state kits (Berserk/Bloodlust's 2, the Sap/Feign-Death 7,
+//! the Freeze/Ice-Block 11, the "Glowy (Red)" 13) and have **no verified mechanism** — the wow-re
+//! dispatcher note names only the cases above. They fall through [`node_for`]'s single `_` arm, which
+//! is where each lands as one match arm the day its RE returns.
+
+use benilla_protocol::EntityKind;
+use bevy::mesh::MeshTag;
+use bevy::prelude::*;
+
+use crate::interior::InteriorLit;
+use crate::model_fade::{fade_alpha, FadeMaterials, PendingAppearFade, RenderFade};
+use crate::terrain::WowModelMaterial;
+
+/// The reference's aura-alpha ramp: `StartAlphaFade(target, **1000 ms**)` (`0x614f80` from
+/// `0x60d180`'s recompute), eased `clamp01(t)³` by `0x614a90` — [`fade_alpha`] is that curve.
+///
+/// It is a **code constant, not a kit column**: proc 14's `params[1..]` are `[2.0, 1000.0, 0.0]` on
+/// the sneak kit but `[0.0, 0.0, 0.0]` on the ghost's, and the ghost's ramp is byte-cited at the same
+/// 1000 ms — so the sneak kit's literal `1000.0` cannot be the source (a data-sourced duration would
+/// snap the ghost instantly). Across the whole shipped table proc 14's `params[2]` is only ever
+/// `0.0`, `2.0` or `1000.0`, which is no duration scale in any unit. Read from `params[0]` only.
+pub(crate) const AURA_ALPHA_FADE_SECS: f32 = 1.0;
+
+/// Settled-ramp epsilon — under half a step of the tag's 6-bit alpha field (1/64), so a ramp that
+/// has visually arrived is treated as arrived.
+const ALPHA_EPS: f32 = 1.0 / 128.0;
+
+/// One CharProc node the dispatcher installed on a unit, keyed by the aura's spell id exactly as the
+/// reference keys `node+0x18`. Held in [`AuraNodes`]; a `Reap` for that spell id removes it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AuraNode {
+    /// Proc 14: this aura's alpha factor (`node+0x78`), one term of the unit's alpha product.
+    Alpha(f32),
+    /// Proc 1: this aura's body tint, unpacked from the param's `0x00RRGGBB`. Modelled, not yet
+    /// rendered (module docs).
+    Tint([u8; 3]),
+}
+
+/// The CharProc node lists of one unit — the ECS twin of the reference's per-unit `unit+0xb50`
+/// (alpha) and `unit+0xce0` (tint) lists, plus the ramp `0x614f80` drives from their product.
+///
+/// Lives on the **net entity root**, like [`crate::entity_shade::GroundShade`]: the reference has one
+/// of these per CGUnit and every attached model (held item, helm, shoulder) renders off the owner's,
+/// which is also why [`apply_aura_alpha`] walks the root's whole descendant tree rather than its
+/// direct children.
+#[derive(Component, Debug, Default)]
+pub(crate) struct AuraNodes {
+    /// `(spell id, factor)` — proc-14 nodes. The product of these times [`Self::base`] is the target.
+    alpha: Vec<(u32, f32)>,
+    /// `(spell id, rgb)` — proc-1 nodes, insertion-ordered so the front is the reference's head node
+    /// (the one its per-frame apply reads). No renderer yet; see the module docs.
+    tint: Vec<(u32, [u8; 3])>,
+    /// `baseAlpha`: `CreatureDisplayInfo.CreatureModelAlpha / 255` for a creature, `1.0` for a player
+    /// (`0x60d2d0`). Seeded when the first node arrives — by then the display id has landed.
+    base: f32,
+    /// Where the ramp is now — what the parts actually render at.
+    current: f32,
+    /// The ramp: `from → to` over [`AURA_ALPHA_FADE_SECS`] from `started` (`Time::elapsed_secs`).
+    from: f32,
+    to: f32,
+    started: f32,
+    /// Whether [`apply_aura_alpha`] still owns this unit's parts. Set while the unit is translucent
+    /// and for the one frame the ramp latches back at opaque — that frame performs the **release**
+    /// (writes the settled alpha and hands the material back to the part's light law), the same
+    /// hand-back protocol the self-avatar feather uses (decision 0213). Without it, a unit whose
+    /// stealth drops stays latched on the blend twin at its last low alpha until something else
+    /// happens to rewrite the channel.
+    authoring: bool,
+}
+
+impl AuraNodes {
+    /// A fresh node set for a unit whose `baseAlpha` is `base`, ramp settled at `base`.
+    fn new(base: f32) -> Self {
+        Self {
+            base,
+            current: base,
+            from: base,
+            to: base,
+            ..Default::default()
+        }
+    }
+
+    /// The reference's `0x60d180`: `baseAlpha × Π(node alphas)`, clamped to a sane `[0, 1]`.
+    fn target(&self) -> f32 {
+        self.alpha
+            .iter()
+            .fold(self.base, |acc, (_, f)| acc * f)
+            .clamp(0.0, 1.0)
+    }
+
+    /// Point the ramp at the current product, from wherever it is now. A no-op when the target
+    /// hasn't moved, so an aura refresh (or a node whose factor equals the live one) doesn't restart
+    /// the ease.
+    fn retarget(&mut self, now: f32) {
+        let target = self.target();
+        if (target - self.to).abs() <= f32::EPSILON {
+            return;
+        }
+        self.from = self.current;
+        self.to = target;
+        self.started = now;
+    }
+
+    /// Advance the ramp to `now` and return the live alpha.
+    fn tick(&mut self, now: f32) -> f32 {
+        let t = (now - self.started) / AURA_ALPHA_FADE_SECS;
+        self.current = fade_alpha(self.from, self.to, t);
+        self.current
+    }
+
+    /// Whether the unit renders translucent right now (the ramp has arrived at, or is heading
+    /// anywhere below, opaque).
+    fn translucent(&self) -> bool {
+        self.current < 1.0 - ALPHA_EPS
+    }
+
+    /// The head tint node's RGB — the reference's `unit+0xce0` head, which its per-frame apply reads
+    /// (`0x60cbd9`). `None` when the unit carries no tint aura. Published to the render channel by
+    /// [`apply_aura_tint`].
+    pub(crate) fn head_tint(&self) -> Option<[u8; 3]> {
+        self.tint.first().map(|(_, rgb)| *rgb)
+    }
+}
+
+/// Publish every rig's body tint to the per-instance channel ([`crate::instance_tint`], decision
+/// 0812): the head node's RGB packed the reference's way, keyed on the unit's rig slot — the slot
+/// each of its skinned parts already carries in its `MeshTag`, and which the fragment stage reads to
+/// index the table.
+///
+/// **On change, not eased** — the reference's own asymmetry between the two node lists: the alpha
+/// gets a 1000 ms cubic ramp (`0x614f80`), the tint goes straight in on change-detection
+/// (`unit+0xd04` → `0x710cf0`). `InstanceTints::set` is idempotent, so the steady state costs one
+/// compare per rig and never touches the upload.
+///
+/// Iterates every **`RigSkin`**, not every `AuraNodes`, deliberately: reasserting the whole table
+/// each frame means no edge can leak a stale colour into a recycled slot — not an `AuraNodes` that
+/// went away, not a unit whose last tint aura dropped. (The despawn/rebuild edge is covered
+/// structurally too, in `RigSkin`'s free hook.)
+pub(crate) fn apply_aura_tint(
+    rigs: Query<(Option<&AuraNodes>, &crate::rig_palette::RigSkin)>,
+    mut tints: ResMut<crate::instance_tint::InstanceTints>,
+    mut probe_logged: Local<bool>,
+) {
+    let probe = tint_probe();
+    let mut painted = 0usize;
+    for (nodes, rig) in &rigs {
+        let word = probe
+            .or_else(|| nodes.and_then(AuraNodes::head_tint))
+            .map_or(crate::instance_tint::IDENTITY, crate::instance_tint::pack);
+        tints.set(rig.slot, word);
+        painted += 1;
+    }
+    if probe.is_some() && !*probe_logged {
+        *probe_logged = true;
+        info!("tint probe: painted {painted} live rig slot(s)");
+    }
+}
+
+/// `WOW_TINT_PROBE=RRGGBB` — paint **every live rig slot** that colour, auras ignored.
+///
+/// The one machine check for the GPU half of the channel: the region upload, the fragment stage's
+/// slot lookup, the unpack, and the placement of the multiply. No headless test can reach any of
+/// that, and the capture harness cannot stage a real aura to do it with — it sees no networked
+/// entities at all (0799), so a tinted *unit* is unstageable there. Pointed at a scene with animated
+/// (rigged) doodads it turns each of them the probe colour, which the visual harness then diffs.
+///
+/// It logs the slot count once, so an unchanged capture reads as "nothing in this scene is rigged"
+/// rather than as "the channel is broken" — the two are indistinguishable from the image alone.
+fn tint_probe() -> Option<[u8; 3]> {
+    static PROBE: std::sync::OnceLock<Option<[u8; 3]>> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let raw = std::env::var("WOW_TINT_PROBE").ok()?;
+        let hex = raw.trim().trim_start_matches('#');
+        let packed = u32::from_str_radix(hex, 16).ok()?;
+        Some([
+            (packed >> 16) as u8,
+            ((packed >> 8) & 0xff) as u8,
+            (packed & 0xff) as u8,
+        ])
+    })
+}
+
+/// One aura's CharProc edge, written by the aura-slot watcher
+/// ([`crate::creature_anim::arm_aura_state_fx`], which owns the slot diff and the state-kit resolve
+/// for both halves of a kit) and drained by [`drain_aura_procs`].
+#[derive(Message, Clone, Debug)]
+pub(crate) enum AuraProc {
+    /// The aura landed in a slot: install this kit's body procs, keyed by its spell id.
+    Begin {
+        entity: Entity,
+        spell_id: u32,
+        /// The kit's proc nodes, in slot order (the client walks all four and dispatches each).
+        nodes: Vec<AuraNode>,
+    },
+    /// The aura left the slots: drop every node this spell id installed (`0x5ff290`).
+    Reap { entity: Entity, spell_id: u32 },
+}
+
+/// Turn one `SpellVisualKit` CharProc into the node it installs, or `None` for a proc type we have
+/// no verified mechanism for (module docs). **The single dispatch point** — the ECS twin of the
+/// client's jump table `0x60dbfc`, and the one place a newly-REd proc type gets an arm.
+pub(crate) fn node_for(proc: benilla_formats::CharProc) -> Option<AuraNode> {
+    use benilla_formats::char_proc_type as ty;
+    match proc.ty {
+        ty::ALPHA => Some(AuraNode::Alpha(proc.params[0])),
+        // `round(param)` → `0x00RRGGBB` (`0x60d8cc` then ORs the opaque byte on). The param is a
+        // float column holding an integral colour: the ghost's 9222653.0 is 0x8CB9FD, pale
+        // blue-white; the poison kit's 65280.0 is 0x00FF00.
+        ty::TINT => {
+            let packed = proc.params[0].round().clamp(0.0, 0xff_ffff as f32) as u32;
+            Some(AuraNode::Tint([
+                (packed >> 16) as u8,
+                (packed >> 8) as u8,
+                packed as u8,
+            ]))
+        }
+        _ => None,
+    }
+}
+
+/// Apply this frame's [`AuraProc`] edges to the units' node lists, then re-aim every live ramp.
+///
+/// `base_alpha` is resolved once per unit, when its first node arrives: a player is a flat `1.0`
+/// (the reference's getter has no display lookup for them), a creature is its display's
+/// `CreatureModelAlpha`. A unit whose display is unknown falls back to `1.0` — opaque, i.e. the
+/// aura's factor alone, which is the safe direction (the alternative would hide a unit whose row
+/// simply failed to load).
+pub(crate) fn drain_aura_procs(
+    mut edges: MessageReader<AuraProc>,
+    time: Res<Time>,
+    mut commands: Commands,
+    mut nodes: Query<&mut AuraNodes>,
+    units: Query<&crate::net::NetEntity>,
+    creatures: Option<Res<crate::entities::Creatures>>,
+) {
+    let now = time.elapsed_secs();
+    // Node sets for units that don't carry the component yet — see the `Begin` arm.
+    let mut fresh: bevy::ecs::entity::EntityHashMap<AuraNodes> = Default::default();
+    for edge in edges.read() {
+        match edge {
+            AuraProc::Begin {
+                entity,
+                spell_id,
+                nodes: procs,
+            } => {
+                if procs.is_empty() {
+                    continue;
+                }
+                if let Ok(mut n) = nodes.get_mut(*entity) {
+                    install(&mut n, *spell_id, procs, now);
+                    trace_edge("arm", *entity, *spell_id, &n);
+                } else {
+                    // First edge for this unit: stage the node set locally rather than inserting
+                    // straight away. `Commands` are deferred to the end of the system, so a unit
+                    // that streams in already carrying two aura procs (or gets two in one packet
+                    // burst) emits two Begins this frame and the second would `get_mut` the
+                    // still-absent component, build a *fresh* set, and insert over the first —
+                    // silently keeping only the last aura's factor. Staging makes the product of a
+                    // same-frame burst come out right, which is the common case for a unit observed
+                    // mid-buff, not a corner.
+                    let n = fresh.entry(*entity).or_insert_with(|| {
+                        AuraNodes::new(base_alpha(*entity, &units, creatures.as_deref()))
+                    });
+                    install(n, *spell_id, procs, now);
+                    trace_edge("arm", *entity, *spell_id, n);
+                }
+            }
+            AuraProc::Reap { entity, spell_id } => {
+                if let Ok(mut n) = nodes.get_mut(*entity) {
+                    reap(&mut n, *spell_id, now);
+                    trace_edge("reap", *entity, *spell_id, &n);
+                } else if let Some(n) = fresh.get_mut(entity) {
+                    // Armed and reaped inside one frame (a flickering re-apply) — the staged set is
+                    // the live one, so the removal has to land there too.
+                    reap(n, *spell_id, now);
+                    trace_edge("reap", *entity, *spell_id, n);
+                }
+            }
+        }
+    }
+    for (entity, n) in fresh {
+        commands.entity(entity).try_insert(n);
+    }
+}
+
+/// Drop every node one spell installed (`0x5ff290`) and re-aim the ramp at the new product.
+fn reap(n: &mut AuraNodes, spell_id: u32, now: f32) {
+    n.alpha.retain(|(s, _)| *s != spell_id);
+    n.tint.retain(|(s, _)| *s != spell_id);
+    n.retarget(now);
+}
+
+/// Install one spell's nodes, replacing any it already had (an aura re-applied by a second caster
+/// holds a second slot but installs one node set — the reference's own per-spell-id keying).
+fn install(n: &mut AuraNodes, spell_id: u32, procs: &[AuraNode], now: f32) {
+    n.alpha.retain(|(s, _)| *s != spell_id);
+    n.tint.retain(|(s, _)| *s != spell_id);
+    for node in procs {
+        match *node {
+            AuraNode::Alpha(f) => n.alpha.push((spell_id, f)),
+            AuraNode::Tint(rgb) => n.tint.push((spell_id, rgb)),
+        }
+    }
+    n.retarget(now);
+}
+
+/// The layer's instrument (`WOW_MOVE_TRACE=<path>`, tag `aur`) — one line per node edge, carrying
+/// the spell, the nodes it installed, and the product the ramp is now aiming at.
+///
+/// This is how "stealth shows nothing" is *reproduced and then closed* without eyeballing a capture
+/// (`method.md` §5/§6): with the aura layer dead the trace is silent on `.cast 1784`; with it live
+/// the same press prints `aur arm spell=1784 alpha=[0.3] -> base 1.00 target 0.30`, and the drop
+/// prints the ramp back to 1.00. It rides the shared move-trace sink so an aura edge interleaves on
+/// one timeline with the movement/anim lines — a "why did it not fade when I moved" question needs
+/// exactly that.
+fn trace_edge(what: &str, entity: Entity, spell_id: u32, n: &AuraNodes) {
+    if !crate::dbg_trace::enabled() {
+        return;
+    }
+    let alphas: Vec<f32> = n.alpha.iter().map(|(_, f)| *f).collect();
+    let tint = n.head_tint().map_or_else(String::new, |[r, g, b]| {
+        format!(" tint=#{r:02x}{g:02x}{b:02x}")
+    });
+    crate::dbg_trace::line(
+        "aur",
+        &format!(
+            "{what} e={entity} spell={spell_id} alpha={alphas:?}{tint}              base {:.2} cur {:.2} target {:.2}",
+            n.base,
+            n.current,
+            n.target()
+        ),
+    );
+}
+
+/// `baseAlpha` for a unit: `1.0` for a player, else its display's `CreatureModelAlpha / 255`.
+fn base_alpha(
+    entity: Entity,
+    units: &Query<&crate::net::NetEntity>,
+    creatures: Option<&crate::entities::Creatures>,
+) -> f32 {
+    let Ok(net) = units.get(entity) else {
+        return 1.0;
+    };
+    if net.kind != EntityKind::Player {
+        if let (Some(c), Some(display)) = (creatures, net.display_id) {
+            return c.display_base_alpha(display).unwrap_or(1.0);
+        }
+    }
+    1.0
+}
+
+/// The fadeable-part view [`apply_aura_alpha`] authors through: the part's material pair and tag,
+/// plus every other factor of its alpha (its animated colour alpha, its live appear/despawn ramp)
+/// and the light law that decides which material variant it should be on. [`FadeMaterials`] is the
+/// "this is a fadeable mesh" marker every writer of this channel keys on.
+type AuraParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static FadeMaterials,
+        &'static mut MeshTag,
+        &'static mut MeshMaterial3d<WowModelMaterial>,
+        Option<&'static crate::doodad_anim::MatAnim>,
+        Option<&'static InteriorLit>,
+        Option<&'static RenderFade>,
+        Has<PendingAppearFade>,
+    ),
+    // Disjointness for the card pass (both want `&mut MeshTag`); a card never carries
+    // `FadeMaterials`, so this filter excludes nothing that would otherwise match — the same
+    // trick `apply_self_model_fade` uses for the same pair of queries.
+    Without<crate::billboard::BillboardCard>,
+>;
+
+/// Drive every unit's aura-alpha ramp and author its parts' render alpha + material.
+///
+/// Ordered **after** the three steady-state authors of a unit part's alpha field (the interior
+/// classifier, the visibility authority, `entities::apply_unit_mat_alpha`) and **before** the
+/// self-avatar zoom feather, so it overrides them for exactly the units that carry a live aura
+/// alpha, and the self feather stays the last word on your own body (it folds this factor in
+/// itself — [`crate::player::apply_self_model_fade`]). This is the same override-then-release
+/// protocol the feather uses (decision 0213); [`AuraNodes::authoring`] is its latch.
+///
+/// The product it writes is the reference's own: this unit's `ramped aura alpha × the part's
+/// animated colour alpha × its live appear/despawn ramp`. Reading the fade back out of
+/// [`RenderFade`] rather than the tag keeps every factor a pure function of state, so the write is
+/// idempotent (running it twice can't compound) exactly as `apply_unit_mat_alpha`'s is.
+///
+/// **The material swap is load-bearing, not cosmetic.** A cutout/opaque batch ignores instance
+/// alpha, so writing `0.3` into the tag without moving the part onto its **blend twin** renders no
+/// translucency at all — the same "blend pass while `0 < fade < 1`" the reference runs for its
+/// doodad fade ([`crate::model_fade`]). It goes through [`FadeMaterials::material_for`], the one
+/// place the blend-vs-law axes compose, so this writer and the classifier can never disagree.
+/// Note the swap keys on the *instance* alpha only: a batch whose own animated colour alpha dips is
+/// a per-batch quantity the reference combines separately, and forcing those onto a blend pass would
+/// change every existing unit's look.
+pub(crate) fn apply_aura_alpha(
+    time: Res<Time>,
+    mut roots: Query<(Entity, &mut AuraNodes)>,
+    children_of: Query<&Children>,
+    mut parts: AuraParts,
+    mut cards: Query<(
+        &crate::billboard::BillboardCard,
+        &mut MeshTag,
+        Option<&crate::doodad_anim::MatAnim>,
+    )>,
+    mut reauthor: ResMut<crate::interior::InteriorReauthor>,
+) {
+    let now = time.elapsed_secs();
+    for (root, mut n) in &mut roots {
+        let alpha = n.tick(now);
+        let translucent = n.translucent();
+        if !translucent && !n.authoring {
+            continue; // settled opaque: not ours, nothing to release
+        }
+        // The walked set doubles as "which anchors belong to this unit" for the card pass below —
+        // built only for a unit we're authoring, so a quiet world never pays for it.
+        let mut walked = bevy::ecs::entity::EntityHashSet::default();
+        author_descendants(
+            root,
+            alpha,
+            now,
+            &children_of,
+            &mut parts,
+            &mut reauthor,
+            &mut walked,
+        );
+        author_cards(alpha, &walked, &mut cards);
+        // The release frame is the one where we authored the settled value and handed the material
+        // back; after it this unit costs a ramp tick and the branch above.
+        n.authoring = translucent;
+    }
+}
+
+/// Fold the unit's aura alpha into its **billboard cards** — the batches that can't be tree children.
+///
+/// An M2's billboard batches are world ROOT entities that merely *follow* an anchor inside the model
+/// (decision 0153: their mesh is centred on the bone pivot and their transform belongs to the
+/// billboard system), so a descendant walk cannot see them. Skipping them is a burned trap, not a
+/// hypothetical: the night-elf eye glow — two additive `…EYEGLOW.BLP` quads at head height — went on
+/// burning in mid-air after the body it belongs to had faded out (ledger B71), and a stealthed night
+/// elf with full-brightness eyes is the same bug wearing this system's clothes. Cards are picked up
+/// by the same rule the self-avatar feather uses: test the card's follow-anchor against the walked
+/// set. One multiply covers both halves — the card dims with the body, and for an ADD blend the
+/// shader's `out_rgb *= faded_alpha` takes a low alpha toward gone.
+fn author_cards(
+    alpha: f32,
+    walked: &bevy::ecs::entity::EntityHashSet,
+    cards: &mut Query<(
+        &crate::billboard::BillboardCard,
+        &mut MeshTag,
+        Option<&crate::doodad_anim::MatAnim>,
+    )>,
+) {
+    for (card, mut tag, anim) in cards.iter_mut() {
+        if !card.follows().is_some_and(|a| walked.contains(&a)) {
+            continue;
+        }
+        // Compose from the animation's own factor rather than from the tag we'd read back, so the
+        // card's per-sequence alpha animation stays alive under the aura — and so the release frame's
+        // `alpha = 1` write lands exactly on the value the card would have had anyway.
+        let authored = anim.map_or(1.0, |a| a.current);
+        let bits = crate::mesh_tag::with_alpha(tag.0, authored * alpha);
+        if tag.0 != bits {
+            tag.0 = bits;
+        }
+    }
+}
+
+/// Depth-first author for [`apply_aura_alpha`]: apply to `entity` if it is a fadeable part, then
+/// recurse regardless — a joint or an attach-model root carries no [`FadeMaterials`] itself but the
+/// held weapon / helm / shoulder meshes hang beneath it, and the reference's alpha is a per-CGUnit
+/// property that its attached models render off (the same reason
+/// [`crate::model_fade::apply_despawn_fade`] and the self feather both walk descendants, not
+/// children).
+fn author_descendants(
+    entity: Entity,
+    alpha: f32,
+    now: f32,
+    children_of: &Query<&Children>,
+    parts: &mut AuraParts,
+    reauthor: &mut crate::interior::InteriorReauthor,
+    walked: &mut bevy::ecs::entity::EntityHashSet,
+) {
+    walked.insert(entity);
+    if let Ok((fm, mut tag, mut mat, anim, lit, fade, pending)) = parts.get_mut(entity) {
+        // A part still WAITING on its appear-fade is deliberately invisible until the ramp arms (its
+        // tag alpha is seeded near-zero at spawn), so authoring it would flash a streaming-in unit's
+        // geometry at the aura alpha for the pending window. Every other author of this channel
+        // filters the same way. Skip the write, still recurse — a joint's children can be past it.
+        if !pending {
+            // Every live factor on this part, recomputed from state (never read back from the tag),
+            // so the write is idempotent: the unit's ramped aura alpha × the batch's animated colour
+            // alpha × the part's own live appear/despawn ramp.
+            let ramp = fade.map_or(1.0, |f| {
+                let t = if f.duration > 0.0 {
+                    (now - f.started) / f.duration
+                } else {
+                    1.0
+                };
+                fade_alpha(f.from, f.to, t)
+            });
+            let combined = alpha * anim.map_or(1.0, |a| a.current) * ramp;
+            let bits = crate::mesh_tag::with_alpha(tag.0, combined);
+            if tag.0 != bits {
+                tag.0 = bits;
+            }
+            // The INSTANCE alpha decides the pass; a settled-opaque release hands the law's steady
+            // material back and asks the classifier to re-author, so nothing is left on a stale one.
+            let want = fm.material_for(lit, alpha < 1.0).clone();
+            if mat.0 != want {
+                mat.0 = want;
+                if alpha >= 1.0 && lit.is_some() {
+                    // 0734's queue: let the classifier re-assert this part's full payload (probe
+                    // slot / fog bit) over whatever this episode wrote.
+                    reauthor.0.push(entity);
+                }
+            }
+        }
+    }
+    if let Ok(kids) = children_of.get(entity) {
+        for kid in kids {
+            author_descendants(*kid, alpha, now, children_of, parts, reauthor, walked);
+        }
+    }
+}
+
+/// This unit's live aura alpha, for the writers that compose it into their own product rather than
+/// deferring to [`apply_aura_alpha`] (the self-avatar feather, which runs after it and wins on the
+/// self body). `1.0` when the unit carries no aura nodes.
+pub(crate) fn root_alpha(nodes: Option<&AuraNodes>) -> f32 {
+    nodes.map_or(1.0, |n| n.current)
+}
+
+#[cfg(test)]
+mod tests;

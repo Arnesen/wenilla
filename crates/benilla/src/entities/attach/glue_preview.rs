@@ -25,11 +25,13 @@ use bevy::prelude::*;
 use crate::assets::WorldAssets;
 use crate::lighting::SharedLightBuffer;
 use crate::portrait::{
-    GlueLook, GluePreview, GluePreviewBake, PreviewBillboard, PreviewPart, PreviewRider,
+    GlueLook, GluePreview, GluePreviewBake, PreviewBillboard, PreviewGlow, PreviewPart,
+    PreviewRider,
 };
 use crate::terrain::WowModelMaterial;
 
 use super::super::equipment::{attach_id, ensure_item_model, placement, ItemModelKind};
+use super::super::item_glow::{self, ItemGlows};
 use super::super::{
     CharCreate, Characters, Creatures, EntityMaterials, EntityPart, ItemDisplays, SkinComposites,
     SkinSections,
@@ -86,6 +88,9 @@ pub(in crate::entities) fn build_glue_preview(
     characters: Option<Res<Characters>>,
     char_create: Option<Res<CharCreate>>,
     mut displays: Option<ResMut<ItemDisplays>>,
+    // The item/enchant glow chain (decision 0805): the glue screens resolve it themselves — the
+    // world's `resolve_equipment` never runs pre-world.
+    mut glows: Option<ResMut<ItemGlows>>,
     sections: Option<Res<SkinSections>>,
     world_assets: Option<Res<WorldAssets>>,
     shared_light: Option<Res<SharedLightBuffer>>,
@@ -184,7 +189,7 @@ pub(in crate::entities) fn build_glue_preview(
     } else {
         equipment[ENUM_HELM].display_id
     };
-    let held = held_wants(&equipment, helm, race, sex);
+    let mut held = held_wants(&equipment, helm, race, sex);
     // Per-hand grip `[right, left]`: a hand whose attach point holds a weapon curls into `HandsClosed`
     // (wow-re `hand-grip-mechanism.md` — the ref's paperdoll rule `0x5059a0`: attach-point occupancy, per
     // hand). Resolved here because the flat rider list drops each held item's attach id. A shield sits on
@@ -201,6 +206,19 @@ pub(in crate::entities) fn build_glue_preview(
         for w in &held {
             ensure_item_model(d, w.display, w.kind, &asset_server);
         }
+        // The glow ids (decision 0805), and the models they imply: **held weapons/shields only**
+        // — the reference passes a display's visual from the hand attach and a literal `0` from
+        // the helm/shoulder ones (`crate::entities::item_glow`). The world lane resolves this in
+        // `resolve_equipment`, which never runs pre-world.
+        if let Some(g) = glows.as_deref_mut() {
+            for w in held
+                .iter_mut()
+                .filter(|w| matches!(w.kind, ItemModelKind::Weapon | ItemModelKind::Shield))
+            {
+                w.visual = d.catalog.get(w.display).map_or(0, |c| c.item_visual);
+                item_glow::ensure_glow_models(g, w.visual, &asset_server);
+            }
+        }
         if !held.iter().all(|w| {
             d.models
                 .get(&(w.display, w.kind))
@@ -208,6 +226,18 @@ pub(in crate::entities) fn build_glue_preview(
                 .is_some()
         }) {
             return; // an item model is still loading — retry next frame
+        }
+        // Same gate for the glow models: they are tiny beside the weapon that carries them, and a
+        // weapon that pops in ahead of its glow would flicker on every selection change.
+        if let Some(g) = glows.as_deref() {
+            let pending = held
+                .iter()
+                .filter_map(|w| g.effects(w.visual))
+                .flat_map(|paths| paths.iter().flatten())
+                .any(|p| g.models.get(p).is_none_or(|m| m.parts.is_none()));
+            if pending {
+                return;
+            }
         }
     }
 
@@ -270,20 +300,25 @@ pub(in crate::entities) fn build_glue_preview(
         .collect();
 
     // The riders: each want's item-model parts seated at the body's attach point (bone + offset),
-    // the world path's `PortraitRider` shape.
+    // the world path's `PortraitRider` shape — plus, for a held weapon, the glows its display's
+    // `ItemVisuals` id hangs on the weapon's OWN attachment points (decision 0805). The reference
+    // reaches those through the same primitive here as in the world (`0x472c91` → `0x47a0c0`
+    // hands `ItemDisplayInfo+0x58` to `0x4798c0`), so a permanently-glowing weapon glows on the
+    // select screen too; the enum carries no enchant ids (vmangos `BuildEnumData` sends displayId
+    // + inventoryType only), so the fork's enchant half simply has no input here.
     let attach_point = |id: u16| dm.attachments.iter().find(|a| a.id == id);
     let mut riders = Vec::new();
+    let mut preview_glows = Vec::new();
     if let Some(d) = displays.as_deref() {
         for w in &held {
             let Some(point) = attach_point(w.attach) else {
                 continue; // the body has no such attach point — hold nothing (world-path rule)
             };
-            let Some(item_parts) = d
-                .models
-                .get(&(w.display, w.kind))
-                .and_then(|m| m.parts.as_deref())
-            else {
+            let Some(item) = d.models.get(&(w.display, w.kind)) else {
                 continue; // gated above; belt-and-braces
+            };
+            let Some(item_parts) = item.parts.as_deref() else {
+                continue;
             };
             for p in item_parts.iter().filter(|p| p.billboard.is_none()) {
                 riders.push(PreviewRider {
@@ -293,14 +328,59 @@ pub(in crate::entities) fn build_glue_preview(
                     offset: point.offset,
                 });
             }
+            let Some(paths) = glows.as_deref().and_then(|g| g.effects(w.visual)) else {
+                continue;
+            };
+            for (slot, path) in paths
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.as_ref().map(|p| (i, p)))
+            {
+                // The seat: the body's attach point plus where this slot sits on the ITEM's own
+                // model. A slot the item model doesn't author hangs nothing — the world lane's
+                // rule, and the reference's.
+                let at = crate::portrait::attachment_point(
+                    &item.skeleton,
+                    &item.attachments,
+                    slot as u16,
+                );
+                let (Some(at), Some(glow)) =
+                    (at, glows.as_deref().and_then(|g| g.models.get(path)))
+                else {
+                    continue;
+                };
+                let offset = point.offset + at;
+                for p in glow
+                    .parts
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.billboard.is_none())
+                {
+                    riders.push(PreviewRider {
+                        mesh: p.mesh.clone(),
+                        material: p.material.clone(),
+                        bone: point.bone,
+                        offset,
+                    });
+                }
+                if !glow.emitters.is_empty() {
+                    preview_glows.push(PreviewGlow {
+                        bone: point.bone,
+                        offset,
+                        emitters: glow.emitters.clone(),
+                    });
+                }
+            }
         }
     }
 
     debug!(
-        "glue preview: race {race} sex {sex} display {display_id} → {} parts, {} riders, {} glow ({})",
+        "glue preview: race {race} sex {sex} display {display_id} → {} parts, {} riders, \
+         {} eye-glow, {} item glow ({})",
         preview_parts.len(),
         riders.len(),
         preview_billboards.len(),
+        preview_glows.len(),
         match look {
             GlueLook::Create(_) => "create",
             GlueLook::Select(_) => "select",
@@ -311,6 +391,7 @@ pub(in crate::entities) fn build_glue_preview(
         display_id,
         parts: preview_parts,
         riders,
+        glows: preview_glows,
         billboards: preview_billboards,
         grip,
         revision: bake.revision + 1,
@@ -318,11 +399,15 @@ pub(in crate::entities) fn build_glue_preview(
     state.built = true;
 }
 
-/// One wanted rider model: which display + model kind, and the body attach point it seats on.
+/// One wanted rider model: which display + model kind, the body attach point it seats on, and —
+/// filled in by the caller once the display catalog is in hand — the `ItemVisuals` id its glow
+/// comes from (`0` for everything that never glows: helm, shoulders, and any weapon whose display
+/// authors none). Decision 0805.
 struct HeldWant {
     display: u32,
     kind: ItemModelKind,
     attach: u16,
+    visual: i32,
 }
 
 /// The select character's attach-model wants from its enum record: helm + the shoulder pair, and
@@ -342,6 +427,7 @@ fn held_wants(equipment: &[CharEnumItem; 19], helm: u32, race: u8, sex: u8) -> V
             display: helm,
             kind: ItemModelKind::Helm { race, sex },
             attach: attach_id::HELM,
+            visual: 0, // a helm never glows: its attach site pushes a literal 0 (0805)
         });
     }
     let shoulder = equipment[ENUM_SHOULDER].display_id;
@@ -354,6 +440,7 @@ fn held_wants(equipment: &[CharEnumItem; 19], helm: u32, race: u8, sex: u8) -> V
                 display: shoulder,
                 kind,
                 attach,
+                visual: 0, // nor do shoulders — same rule
             });
         }
     }
@@ -374,6 +461,7 @@ fn held_wants(equipment: &[CharEnumItem; 19], helm: u32, race: u8, sex: u8) -> V
             display: item.display_id,
             kind,
             attach,
+            visual: 0, // filled by the caller, which holds the display catalog
         });
     }
     wants

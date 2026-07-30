@@ -74,6 +74,23 @@ impl ObjectFields {
             })
             .flatten()
     }
+    /// `PLAYER_VISIBLE_ITEM_<slot>_0 + 1 + j` — the **broadcast enchant ids** on the item worn in
+    /// equipment slot `i`: that 8-field block is the item entry followed by 7 enchant slots, of
+    /// which 1.12 fills exactly two (vmangos `Player::SetVisibleItemSlot` loops
+    /// `MAX_INSPECTED_ENCHANTMENT_SLOT = 2` — PERM then TEMP). This is the only enchant feed a
+    /// client has for **any** unit, itself included: the reference reads a full CGItem's 7-slot
+    /// array (`item+0xc`, wow-re `item-visual-enchant.md` §3b), which on the wire is these.
+    /// Consumed by the weapon-glow lane (decision 0805); `None` = empty slot / field not sent.
+    pub fn player_visible_item_enchant(&self, i: u8, j: u8) -> Option<u32> {
+        (i < 19 && j < 7)
+            .then(|| {
+                self.get_u32(
+                    FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR + 3 + 12 * u16::from(i) + u16::from(j),
+                )
+                .filter(|&e| e != 0)
+            })
+            .flatten()
+    }
     /// `PLAYER_FIELD_INV_SLOT_HEAD + 2i` — our equipment (0–18) and equipped-bag (19–22) guids.
     pub fn player_inv_slot(&self, i: u8) -> Option<u64> {
         (i < 23).then(|| self.get_guid(FIELD_PLAYER_INV_SLOT_HEAD + 2 * u16::from(i)))?

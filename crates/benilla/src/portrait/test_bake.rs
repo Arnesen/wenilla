@@ -133,6 +133,9 @@ fn bake_test(
                     skinned: Some(s.skinned_mesh.clone()),
                     static_mesh: s.mesh.clone(),
                     material: mat,
+                    // The harness parses submeshes straight off the model, so the authored alpha is
+                    // right here — an eyeball bake should show the batch dimming the artist wrote.
+                    alpha_anim: s.alpha_anim.clone(),
                 }
             })
             .collect::<Vec<BoothPart>>()
@@ -283,11 +286,10 @@ pub(super) fn dump_booth_target(
     commands
         .spawn(Screenshot::image(booth.target.clone()))
         .observe(move |shot: On<ScreenshotCaptured>| {
-            // The booth target is deliberately non-sRGB (`new_target_image`), which bevy's stock
-            // `save_to_disk` refuses to convert — relabel the identical bytes as sRGB for the PNG.
-            let mut img = shot.image.clone();
-            img.texture_descriptor.format =
-                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb;
+            let Some(img) = encode_target_readback(&shot.image) else {
+                warn!("WOW_BOOTH_DUMP: unexpected target format, nothing saved");
+                return;
+            };
             match img.try_into_dynamic() {
                 Ok(dyn_img) => match dyn_img.save(&out) {
                     Ok(()) => info!("WOW_BOOTH_DUMP: saved {}", out.display()),
@@ -296,4 +298,101 @@ pub(super) fn dump_booth_target(
                 Err(e) => warn!("WOW_BOOTH_DUMP: convert failed: {e}"),
             }
         });
+}
+
+/// Turn a booth render-target readback into something the PNG encoder can write — and, more to the
+/// point, into what the **screen** shows.
+///
+/// The targets are `Rgba16Float` holding **un-encoded** values (`super::new_target_image`): the
+/// display encode is the UI arc's, applied when the glue/paper-doll tree samples the target
+/// (`crate::ui_gamma`), and a readback bypasses that lane entirely. So it happens here. Without it
+/// the PNG is ~2.2× dark — which is precisely what this instrument produced for its whole first life
+/// (it relabeled the un-encoded 8-bit bytes as sRGB and saved them verbatim), and a dump that reads
+/// darker than the screen is a debugging instrument that lies about the thing it exists to show.
+///
+/// `None` on an unexpected format, so a future target-format change is a loud warning rather than a
+/// garbled PNG.
+fn encode_target_readback(shot: &Image) -> Option<Image> {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{TextureDimension, TextureFormat};
+
+    if shot.texture_descriptor.format != TextureFormat::Rgba16Float {
+        return None;
+    }
+    let src = shot.data.as_ref()?;
+    let mut out = Vec::with_capacity(src.len() / 2);
+    for texel in src.chunks_exact(8) {
+        for (c, half_pair) in texel.chunks_exact(2).enumerate() {
+            let v = half::f16::from_le_bytes([half_pair[0], half_pair[1]]).to_f32();
+            // The sRGB transfer function for colour (channel 3 is plain coverage, never encoded) —
+            // the same curve the swapchain's `…Srgb` write applies to the live frame.
+            let encoded = match c {
+                3 => v,
+                _ if v <= 0.003_130_8 => v * 12.92,
+                _ => 1.055 * v.powf(1.0 / 2.4) - 0.055,
+            };
+            out.push((encoded.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+    }
+    Some(Image::new(
+        shot.texture_descriptor.size,
+        TextureDimension::D2,
+        out,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    fn readback(format: TextureFormat, data: Vec<u8>) -> Image {
+        Image::new(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            format,
+            RenderAssetUsages::default(),
+        )
+    }
+
+    /// The dump encodes colour and passes alpha through — the screen's transfer function, applied
+    /// where the readback bypassed the UI lane that would have applied it.
+    #[test]
+    fn the_booth_dump_encodes_colour_and_leaves_alpha_alone() {
+        let texel = |v: f32| half::f16::from_f32(v).to_le_bytes().to_vec();
+        let mut data = Vec::new();
+        // Mid grey, then the darkest step an 8-bit LINEAR target could hold, then opaque alpha.
+        data.extend(texel(0.5));
+        data.extend(texel(1.0 / 255.0));
+        data.extend(texel(0.0));
+        data.extend(texel(1.0));
+
+        let out = encode_target_readback(&readback(TextureFormat::Rgba16Float, data))
+            .expect("float readback encodes");
+        let bytes = out.data.as_ref().expect("encoded bytes");
+        // 0.5 linear is display 188 — NOT 128. That gap is the whole reason this exists: for its
+        // first life the instrument wrote the 128.
+        assert_eq!(bytes[0], 188);
+        // The old 8-bit linear target's second code lands on 13 — the bottom of the ladder B126
+        // measured, and the reason a float target has ~4× the levels down here.
+        assert_eq!(bytes[1], 13);
+        assert_eq!(bytes[2], 0);
+        // Alpha is coverage, never encoded.
+        assert_eq!(bytes[3], 255);
+    }
+
+    /// A format the encoder doesn't know is a loud `None`, not a garbled PNG.
+    #[test]
+    fn an_unexpected_readback_format_refuses() {
+        let img = readback(TextureFormat::Rgba8Unorm, vec![1, 2, 3, 4]);
+        assert!(encode_target_readback(&img).is_none());
+    }
 }

@@ -37,6 +37,8 @@ pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
                         kit.anim_id.map_or("—".into(), |a| a.to_string()),
                         kit.sound.map_or("—".into(), |s| s.to_string()),
                     );
+                    // The kit's CharProcs (fields 15-34): what it does to the BODY.
+                    crate::charprocs::print_kit_procs(&visuals, kit_id, "           ");
                     // The kit's attach-point emitter slots (phase 3): tag + effect model.
                     for (tag, effect) in kit.effects() {
                         println!(

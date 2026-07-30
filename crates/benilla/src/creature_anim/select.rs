@@ -22,6 +22,31 @@ pub(super) const STAND: u16 = 0;
 
 pub(super) const DEATH: u16 = 1;
 
+/// StealthWalk (119) — the **prowl creep**, and with [`STEALTH_STAND`] the entire difference
+/// stealth makes to a body's *pose*. Byte-verified (wow-re `rf57-movement-anim-select.md`, the
+/// 2026-07-18 §5): both ids are gated by the same descriptor bit — `[[unit+0x110]+0x213] & 2`,
+/// `UNIT_FIELD_BYTES_1` byte 3's CREEP flag ([`crate::net::ObjectStore`]'s `unit_is_stealthed`) —
+/// 119 from the core cascade at `0x5fd1d3`, tested **after** the backward branch and **before the
+/// whole speed tail**, so a prowling unit never plays Run or Sprint however fast it travels.
+///
+/// No aura, no visual kit, no spell id is involved. Stealth's *translucency* is its aura state
+/// kit's CharProc-14 (decision 0806) and its *pose* is this flag: two independent mechanisms off
+/// one server byte, which is exactly why the body could go translucent and still stand bolt
+/// upright. (The same flag's other three read sites are nameplate/marker suppression — it drives
+/// no body render at all; wow-re `ghost-death-visuals.md`.)
+///
+/// **119 is NOT rate-scaled.** The client's locomotion-rate whitelist `0x5fee80` is exactly
+/// `{4,5,11,12,13,37,38,39,42,43,44,45,135,143,187}` (byte-verified, §5-agreed; wow-re
+/// `rf57b-rate-jump-standstate.md`) and 119 is absent — the creep cycle plays at 1× whatever the
+/// live speed, so [`playback_rate`] leaves it alone.
+pub(super) const STEALTH_WALK: u16 = 119;
+
+/// StealthStand (120) — the prowl idle, from the **last** resolver in the chain (the fallback idle
+/// `0x5fd830`: swim-idle → `[110]+0x213&2` → jump/float → plain Stand). Being last is its
+/// precedence: every other resolver — the sit/sleep/kneel and chair stand-states, the turn-in-place
+/// shuffle, the combat Ready idle, loot — outranks it. See [`STEALTH_WALK`] for the shared gate.
+pub(super) const STEALTH_STAND: u16 = 120;
+
 /// Mount (91) — the rider's seated pose while a mount model is attached (decision 0441;
 /// byte-verified, wow-re `mount-composition.md` B1): held **unconditionally** — moving, turning,
 /// airborne. The client arms it outside the base selector (once at attach by `0x607a00`, then
@@ -223,6 +248,12 @@ pub(crate) struct MovementState {
     /// Stand-state (`UNIT_FIELD_BYTES_1` byte 0): 0 Stand · 1 Sit · 3 Sleep · 4/5/6 chair low/med/high ·
     /// 8 Kneel — drives the idle pose / the sit-sleep-kneel transition while standing.
     pub(crate) stand_state: u8,
+    /// **Stealthed** — `UNIT_FIELD_BYTES_1` byte 3's CREEP bit, the gate on [`STEALTH_WALK`] /
+    /// [`STEALTH_STAND`]. Stamped by the driver from the unit's OWN descriptor every frame, self
+    /// and remote alike (the client reads `[[unit+0x110]+0x213]` at select time), so [`unify`]'s
+    /// legs never touch it: unlike the stand state there is nothing to predict controller-side —
+    /// the crouch waits on the server's aura, exactly as the reference does.
+    pub(crate) stealthed: bool,
     /// Riding a **flying** server spline (the taxi flight): the client's selector reads the active
     /// CMovement's spline flags (`[[unit+0x118]+0xa4]+0x18`) and plays Fly 135 when the wire Flying
     /// bit (0x200) is set — RF-0057 `0x5fd19c`. Stamped by [`unify`] from the entity's live
@@ -401,6 +432,16 @@ pub(super) fn gait_candidates(
     if f & BACKWARD != 0 {
         return &[13, 4, 0];
     }
+    // Stealthed and moving — the prowl (RF-0057 `0x5fd1d3`, sitting between the backward branch and
+    // the speed tail; [`STEALTH_WALK`]). The gate outranks the ENTIRE speed tail, so a stealthed
+    // unit creeps at any speed, while a *backpedaling* one plays WalkBackwards — backward is tested
+    // first. The Walk 4 fallback is `AnimationData.dbc`'s own Fallback for row 119, which is also
+    // what the baked PlayableAnimationLookup resolves 119 to on a model lacking the clip: HumanMale
+    // and NightElfFemale author both stealth clips, `druidcat.m2` authors NEITHER (119→4, 120→0), so
+    // a prowling cat shows its ordinary walk — in the reference too, through the same resolver.
+    if state.stealthed && f & ANY_MOVE != 0 {
+        return &[STEALTH_WALK, 4, 0];
+    }
     // Ground gaits by live speed (RF-0057 core): fast-run ≥ 11, run > 2× walk, else walk.
     // (Strafe currently routes here to Run/Walk; the dedicated-shuffle question is under §5 verification.)
     if f & ANY_MOVE != 0 {
@@ -453,10 +494,13 @@ pub(super) fn gait_candidates(
     // State 2 (generic SIT_CHAIR) is verified VESTIGIAL (decision 0280): the client's resolver row
     // for 2 writes no override (`0x5fd644` returns a bool; the 0xd0 sentinel stands), so falling to
     // plain Stand here is the faithful render, not a gap.
+    // Standing stealthed: the prowl idle ([`STEALTH_STAND`]) — placed *after* the chair loops, since
+    // its resolver (`0x5fd830`) is the last in the chain and the stand-state resolver precedes it.
     match state.stand_state {
         4 => &[102, 0],
         5 => &[103, 0],
         6 => &[104, 0],
+        _ if state.stealthed => &[STEALTH_STAND, STAND],
         _ => &[STAND],
     }
 }
@@ -555,8 +599,13 @@ pub(super) fn is_combat_anim(id: u16) -> bool {
 /// this predicate never has to account for Specials itself — they simply never reach here. Movement
 /// starting again drops straight out of the state-emote idle for the same reason Stand does: the
 /// very next frame's `cands` is no longer bare.
+///
+/// The **prowl idle** counts as bare too: [`STEALTH_STAND`] comes from `0x5fd830`, the *last*
+/// resolver in the client's chain, so anything with a resolver of its own outranks it. (OUR
+/// ordering, on that structural argument — where the emote-state idle sits in the real chain is
+/// unpinned; a stealthed unit holding an emote state is degenerate either way.)
 pub(super) fn is_bare_stand(cands: &[u16]) -> bool {
-    cands == [STAND]
+    cands == [STAND] || cands == [STEALTH_STAND, STAND]
 }
 
 /// The candidate array for a state-emote idle occupying the bare-Stand slot: the resolved anim id

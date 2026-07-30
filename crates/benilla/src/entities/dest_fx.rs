@@ -58,8 +58,10 @@ const SHARD_MODELS: [&str; 7] = [
     "Spells\\StarShards_Impact_Base.mdx",
 ];
 
-/// The `CharProcType` the dynobj emitter chain scans for (`0x5d55c0`).
-const PROC_TYPE_SHARD_EMITTER: u32 = 9;
+/// The `CharProcType` the dynobj emitter chain scans for (`0x5d55c0`). One key out of the same
+/// dispatch space the aura-state body procs come from (`crate::aura_visual`, decision 0806) — the
+/// kit column is shared, the consumers are not.
+const PROC_TYPE_SHARD_EMITTER: i32 = 9;
 
 /// The exact small-int decode the client applies to `CharParamZero` (`bits(p0 + 512.0) >> 14 &
 /// 0xff`) — clamped into [`SHARD_MODELS`] because the client itself has **no bounds check**
@@ -182,17 +184,13 @@ pub(super) fn arm_ground_effects(
         // kit's own sound column is the looping area sound (a tracked hold loop the sound
         // module reaps when the anchor's NetEntity is removed).
         if let Some(kit) = visuals.0.kit(stages.area_kit) {
-            if let Some(proc) = kit
-                .char_procs
-                .iter()
-                .find(|p| p.proc_type == PROC_TYPE_SHARD_EMITTER)
-            {
-                let path = SHARD_MODELS[shard_model_index(proc.param0)].to_string();
+            if let Some(proc) = kit.char_procs().find(|p| p.ty == PROC_TYPE_SHARD_EMITTER) {
+                let path = SHARD_MODELS[shard_model_index(proc.params[0])].to_string();
                 ensure_model(&mut fx, &asset_server, &path);
                 commands.entity(anchor).insert(ShardEmitter {
                     path,
                     radius: store.0.dynamicobject_radius().unwrap_or(0.0),
-                    rate: proc.param1,
+                    rate: proc.params[1],
                     accum: 0.0,
                     rng: 0x9e3779b97f4a7c15 ^ anchor.to_bits(),
                 });

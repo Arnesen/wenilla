@@ -58,14 +58,19 @@ pub(crate) fn rig_table_region_offset() -> u64 {
     crate::lighting::prop_probe_region_offset() + (7 * crate::lighting::MAX_PROP_PROBES * 16) as u64
 }
 
-/// Byte offset of the palette rows themselves (after the slot table).
+/// Byte offset of the palette rows themselves — after the slot table AND the per-instance tint
+/// table that shares this slot index ([`crate::instance_tint`], decision 0812). The rows stay last
+/// because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
 pub(crate) fn palette_region_offset() -> u64 {
-    rig_table_region_offset() + (MAX_RIG_SLOTS * 4) as u64
+    crate::instance_tint::region_offset() + crate::instance_tint::region_bytes()
 }
 
-/// Total bytes both regions add to every `wow_light`-layout buffer (`lighting::light_blob_bytes`).
+/// Total bytes the slot-indexed regions add to every `wow_light`-layout buffer
+/// (`lighting::light_blob_bytes`): the rig slot table, the instance-tint table, the palette rows.
 pub(crate) fn palette_regions_bytes() -> u64 {
-    (MAX_RIG_SLOTS * 4) as u64 + MAX_PALETTE_BONES as u64 * BONE_BYTES
+    (MAX_RIG_SLOTS * 4) as u64
+        + crate::instance_tint::region_bytes()
+        + MAX_PALETTE_BONES as u64 * BONE_BYTES
 }
 
 /// The main-world palette table: rows + slot table behind `Arc` (the extract is a pointer bump),
@@ -430,6 +435,13 @@ fn free_rig_skin(mut world: DeferredWorld, ctx: HookContext) {
         .map(|r| r.slot)
         .expect("on_remove runs with the component still present");
     world.resource_mut::<RigPalettes>().free(slot);
+    // The slot indexes the per-instance TINT table too (decision 0812), and slots are recycled — so
+    // clear it on the same edge that frees it. Structural, not disciplinary: whatever kills a rig
+    // (despawn, gear/display rebuild) cannot leave a dead unit's colour behind for the next unit
+    // that allocates the slot, and no tinted-unit teardown path has to remember to.
+    if let Some(mut tints) = world.get_resource_mut::<crate::instance_tint::InstanceTints>() {
+        tints.clear(slot);
+    }
 }
 
 /// On every joint entity (planted by `entities::spawn_joints`): the rig root whose palette this
@@ -717,15 +729,31 @@ mod tests {
 
     #[test]
     fn region_layout_is_consistent() {
-        // The table sits after the probe region, palettes after the table, and the blob-size
-        // extension covers both exactly (wow_model.wgsl mirrors this layout).
+        // The slot table sits after the probe region, the per-instance tint table (decision 0812 —
+        // same slot index) after it, the palette rows last, and the blob-size extension covers all
+        // three exactly (wow_model.wgsl mirrors this layout, and wgpu validates the bound size
+        // against the shader's struct at draw time — a mismatch here is a draw-time failure, which
+        // is why this is asserted rather than trusted).
         assert_eq!(
-            palette_region_offset() - rig_table_region_offset(),
-            (MAX_RIG_SLOTS * 4) as u64
+            crate::instance_tint::region_offset() - rig_table_region_offset(),
+            (MAX_RIG_SLOTS * 4) as u64,
+            "the tint table follows the slot table"
+        );
+        assert_eq!(
+            palette_region_offset() - crate::instance_tint::region_offset(),
+            crate::instance_tint::region_bytes(),
+            "the palette rows follow the tint table"
         );
         assert_eq!(
             palette_regions_bytes(),
-            (MAX_RIG_SLOTS * 4) as u64 + (MAX_PALETTE_BONES as u64) * BONE_BYTES
+            (MAX_RIG_SLOTS * 4) as u64
+                + crate::instance_tint::region_bytes()
+                + (MAX_PALETTE_BONES as u64) * BONE_BYTES
+        );
+        // One word per addressable slot — the shader declares `array<u32, 2048>` for both tables.
+        assert_eq!(
+            crate::instance_tint::region_bytes(),
+            (MAX_RIG_SLOTS * 4) as u64
         );
     }
 }

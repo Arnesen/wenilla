@@ -796,3 +796,108 @@ fn unify_stamps_flying_from_the_live_spline_on_every_leg() {
     let v = unify(None, None, Some(&spline(false)), false);
     assert!(v.flying && v.flags & move_flags::FORWARD != 0 && v.speed > 0.0);
 }
+
+/// The prowl creep outranks the WHOLE speed tail (RF-0057 `0x5fd1d3` precedes `0x5fd202`): a
+/// stealthed unit plays 119 at a dead crawl and at sprint speed alike — never Walk, Run or Sprint.
+#[test]
+fn the_prowl_creeps_at_every_speed() {
+    for speed in [0.5, 3.0, 7.0, 32.0] {
+        let plain = moving_forward(speed);
+        let creeping = MovementState {
+            stealthed: true,
+            ..plain
+        };
+        assert_eq!(
+            gait_candidates(&creeping, 2.5, None, None)[0],
+            STEALTH_WALK,
+            "stealthed at {speed} yd/s must creep",
+        );
+        assert_ne!(
+            gait_candidates(&plain, 2.5, None, None)[0],
+            STEALTH_WALK,
+            "unstealthed at {speed} yd/s must fall through to the speed tail",
+        );
+    }
+    // …and it steps down to Walk on a model lacking the clip (AnimationData row 119's own Fallback).
+    let creeping = MovementState {
+        stealthed: true,
+        ..moving_forward(7.0)
+    };
+    assert_eq!(
+        gait_candidates(&creeping, 2.5, None, None),
+        &[STEALTH_WALK, 4, 0],
+    );
+}
+
+/// Swim, the flying spline and backward each precede the stealth branch in the byte cascade
+/// (swim → fly → backward → **stealth** → speed tail), so each still wins while stealthed.
+#[test]
+fn swim_fly_and_backpedal_all_outrank_the_prowl() {
+    let stealthed = |flags: u32, flying: bool| MovementState {
+        speed: 5.0,
+        flags,
+        stealthed: true,
+        flying,
+        ..Default::default()
+    };
+    let pick = |s: MovementState| gait_candidates(&s, 2.5, None, None)[0];
+    let swim = move_flags::SWIMMING;
+    assert_eq!(
+        pick(stealthed(swim | move_flags::FORWARD, false)),
+        42,
+        "a stealthed swimmer strokes",
+    );
+    assert_eq!(pick(stealthed(swim, false)), 41, "and treads water at rest");
+    assert_eq!(
+        pick(stealthed(move_flags::FORWARD, true)),
+        135,
+        "a stealthed flying ride still flies",
+    );
+    assert_eq!(
+        pick(stealthed(move_flags::BACKWARD, false)),
+        13,
+        "backward is tested BEFORE stealth",
+    );
+}
+
+/// The prowl idle (`0x5fd830`, last resolver in the chain) sits exactly where plain Stand sat: every
+/// resolver ahead of it — the chair stand-states, the turn shuffle, the combat Ready idle — keeps
+/// winning, and the state-emote idle may still fill the slot ([`is_bare_stand`]).
+#[test]
+fn the_prowl_idle_is_the_lowest_priority_stand() {
+    let idle = MovementState {
+        stealthed: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        gait_candidates(&idle, 2.5, None, None),
+        &[STEALTH_STAND, STAND],
+    );
+    assert!(
+        is_bare_stand(gait_candidates(&idle, 2.5, None, None)),
+        "the state-emote idle still owns this slot",
+    );
+    let chair = MovementState {
+        stand_state: 4,
+        ..idle
+    };
+    assert_eq!(gait_candidates(&chair, 2.5, None, None), &[102, 0]);
+    let turning = MovementState {
+        flags: move_flags::TURN_LEFT,
+        ..idle
+    };
+    assert_eq!(gait_candidates(&turning, 2.5, None, None), &[11, 0]);
+    assert_eq!(
+        gait_candidates(&idle, 2.5, Some(26), None),
+        &[26, 25, 0],
+        "an engaged Ready idle outranks the crouch",
+    );
+}
+
+/// The creep is NOT in the client's locomotion-rate whitelist (`0x5fee80`), so unlike Walk it plays
+/// at 1× however fast the unit is actually travelling.
+#[test]
+fn the_prowl_creep_is_not_rate_scaled() {
+    assert_eq!(playback_rate(&clip(STEALTH_WALK, 2.5), 7.0), 1.0);
+    assert_ne!(playback_rate(&clip(4, 2.5), 7.0), 1.0);
+}

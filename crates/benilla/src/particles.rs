@@ -690,7 +690,13 @@ impl Plugin for ParticlePlugin {
                     .chain()
                     .in_set(crate::billboard::BillboardPlace)
                     .after(crate::billboard::billboard_joint_palette)
-                    .after(crate::creature_anim::finalize_rig_worlds),
+                    .after(crate::creature_anim::finalize_rig_worlds)
+                    // …and after the CARD facing pass, for the same reason one step further out:
+                    // an equipped item's emitter rides a mesh-less billboard *frame* card (its
+                    // bone chain reaches a billboard bone and an item model has no rig to carry
+                    // the palette replacement — decision 0813), so that card's transform has to be
+                    // this frame's before births read it.
+                    .after(crate::billboard::face_billboards),
             );
     }
 }

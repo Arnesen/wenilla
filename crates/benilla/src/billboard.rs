@@ -113,6 +113,33 @@ impl BillboardCard {
         card
     }
 
+    /// A card with **no geometry** — a pure billboard *frame*: an entity whose live transform is a
+    /// billboard bone's replaced palette matrix (pivot in the world, camera basis as the rotation),
+    /// for the other consumers of that matrix to ride. Today's one caller is the equipped-item
+    /// emitter lane (`entities::equipment::spawn`): an item model spawns no rig, so nothing else
+    /// would apply the replacement to a particle emitter hanging under a billboard bone — and the
+    /// reference folds the emitter's record position through exactly this matrix
+    /// (wow-re `part-anchoring-live-bone.md` §1 row 3).
+    ///
+    /// It is the same mechanism as a card and deliberately not a second one (decision 0153's rule):
+    /// same basis, same pivot law, same follow/despawn contract, one system. A card without a
+    /// `Mesh3d` simply draws nothing while its transform is maintained.
+    ///
+    /// `pivot` is model-local **Bevy** axes (the frame `owner`'s children live in).
+    pub(crate) fn frame_following(kind: BillboardKind, pivot: Vec3, owner: Entity) -> Self {
+        Self {
+            world_pivot: Vec3::ZERO, // re-seated from the owner before the first facing write
+            scale: 1.0,
+            kind,
+            scale_anim: None,
+            phase_ms: 0,
+            seq_translation: None,
+            placement_rot: Quat::IDENTITY,
+            follow: Some(owner),
+            local_pivot: pivot,
+        }
+    }
+
     /// Arm the card's first-sequence translation loop (the questgiver `?` bob) with the client's
     /// arm-time cursor: sampling runs on `elapsed − arm_ms` (the loop starts at its first key the
     /// moment the marker attaches, like the real arm at status receive). Overrides the position-hash
@@ -134,8 +161,9 @@ impl BillboardCard {
 
     /// The entity this card follows, if any — the anchor/joint that decides both where it sits and
     /// which model it BELONGS to. A card is a world root, so a system that walks a model's tree
-    /// (the self-avatar fade) can only recognise the model's own cards by testing this against the
-    /// entities it walked.
+    /// (the self-avatar fade; the light node's shade push in `entity_shade`) can only recognise the
+    /// model's own cards by testing this against the entities it walked. `None` = a fixed terrain
+    /// doodad's card, whose shade rides its material selector instead.
     pub(crate) fn follows(&self) -> Option<Entity> {
         self.follow
     }
@@ -396,7 +424,7 @@ pub(crate) struct BillboardPlace;
 /// (post-propagation), so it writes `GlobalTransform` directly alongside `Transform` — cards
 /// write ABSOLUTE world transforms and live at the root/identity, so the direct write is exact.
 #[allow(clippy::type_complexity)] // the owner pose + visibility read, commented inline
-fn face_billboards(
+pub(crate) fn face_billboards(
     mut commands: Commands,
     time: Res<Time>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
@@ -540,7 +568,6 @@ mod tests {
         let info = BillboardInfo {
             bone: 0,
             pivot: Vec3::new(0.0, 1.7, 0.0), // the brazier-bowl height, model-local Bevy frame
-            normal: Vec3::Z,
             kind: BillboardKind::Spherical,
             scale_anim: None,
             seq_translations: vec![],
@@ -585,6 +612,90 @@ mod tests {
         );
     }
 
+    /// **The billboard FRAME an equipped item's emitter rides** (decision 0813), with the real
+    /// numbers of nazriel's B118 item (`LShoulder_Mail_PVPAlliance_C_01`: billboard bone 1 pivot
+    /// `(-0.012, 0.162, -0.060)`, sparkle emitter position `(-0.252, 0.178, -0.046)`, both raw WoW
+    /// model space — pinned in `benilla_formats`' `real_pvp_shoulder_emitters_ride_a_billboard_bone`).
+    ///
+    /// The law: the emitter's live origin is `pivot + camBasis·(position − pivot)`, so the sparkle
+    /// sits a **fixed 0.24 yd along the VIEW axis** from the pauldron's billboard pivot — behind it
+    /// (the chain offset's WoW +X is toward the viewer and this offset is negative), which is what
+    /// puts most of the 0.7 yd quad behind the pauldron's own depth. A rest-pose placement instead
+    /// nails it to a fixed model-space point, so what the pad occludes changes with every camera
+    /// move — the reported "way too strong and off position". Both halves are asserted: the offset's
+    /// magnitude/direction at one camera, and that it FOLLOWS the camera to the next.
+    #[test]
+    fn an_item_emitters_billboard_frame_puts_it_behind_the_pivot() {
+        use benilla_assets::coords::wow_to_bevy;
+        const PIVOT: [f32; 3] = [-0.012, 0.162, -0.060];
+        const EMITTER: [f32; 3] = [-0.252, 0.178, -0.046];
+        // What `spawn_emitter`'s pivot rebase stores: the chain offset, raw WoW axes.
+        let local = wow_to_bevy([
+            EMITTER[0] - PIVOT[0],
+            EMITTER[1] - PIVOT[1],
+            EMITTER[2] - PIVOT[2],
+        ]);
+
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        let cam = app
+            .world_mut()
+            .spawn((crate::player::WorldCamera, GlobalTransform::IDENTITY))
+            .id();
+        // The item root — the shoulder attach point, wherever the wearer stands.
+        let root = app
+            .world_mut()
+            .spawn(GlobalTransform::from_translation(Vec3::new(3.0, 1.5, 0.0)))
+            .id();
+        let frame = app
+            .world_mut()
+            .spawn((
+                BillboardCard::frame_following(BillboardKind::Spherical, wow_to_bevy(PIVOT), root),
+                Transform::IDENTITY,
+            ))
+            .id();
+
+        // Camera 1: the Bevy default (at the origin, looking down −Z) — so "away from the viewer"
+        // is −Z.
+        app.update();
+        let tf = *app.world().entity(frame).get::<Transform>().unwrap();
+        let pivot_world = Vec3::new(3.0, 1.5, 0.0) + wow_to_bevy(PIVOT);
+        assert!(
+            (tf.translation - pivot_world).length() < 1e-5,
+            "the frame sits AT the billboard pivot — the rotation swap keeps it fixed"
+        );
+        let sparkle = tf.transform_point(local) - pivot_world;
+        assert!(
+            (sparkle.z + 0.240).abs() < 2e-3,
+            "0.24 yd along the view axis, away from the viewer: {sparkle:?}"
+        );
+        assert!(
+            sparkle.truncate().length() < 0.025,
+            "…and all but ~2 cm of the offset is in that one axis: {sparkle:?}"
+        );
+
+        // Camera 2: a quarter turn — the offset must follow the camera, not the model. This is the
+        // whole difference from the rest pose, which would return the same vector both times.
+        app.world_mut()
+            .entity_mut(cam)
+            .insert(GlobalTransform::from(Transform::from_rotation(
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            )));
+        app.update();
+        let turned = app
+            .world()
+            .entity(frame)
+            .get::<Transform>()
+            .unwrap()
+            .transform_point(local)
+            - pivot_world;
+        assert!(
+            (turned.x + 0.240).abs() < 2e-3 && turned.z.abs() < 0.025,
+            "the same 0.24 yd, now along the new view axis: {turned:?}"
+        );
+    }
+
     /// A card the **exterior-scene cull** owns must not have its `Visibility` written here
     /// (decision 0784). One component, one authority (0025): a world-placement card is tagged
     /// with the rest of its model, both systems run in the same unordered post-propagation
@@ -613,7 +724,6 @@ mod tests {
         let info = BillboardInfo {
             bone: 0,
             pivot: Vec3::new(0.0, 1.7, 0.0),
-            normal: Vec3::Z,
             kind: BillboardKind::Spherical,
             scale_anim: None,
             seq_translations: vec![],
@@ -987,7 +1097,6 @@ mod tests {
         let info = BillboardInfo {
             bone: 0,
             pivot: Vec3::ZERO,
-            normal: Vec3::Z,
             kind: BillboardKind::LockZ,
             scale_anim: None,
             seq_translations: vec![], // doodad default: `new` never arms one

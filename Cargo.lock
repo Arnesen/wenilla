@@ -584,6 +584,7 @@ dependencies = [
  "cosmic-text",
  "crossbeam-channel",
  "fontdb",
+ "half",
  "image",
  "kira",
  "libc",

@@ -59,6 +59,12 @@ use carried_light::spawn_carried_lights;
 mod equipment;
 use equipment::{attach_held_items, refresh_player_looks, resolve_equipment};
 
+/// Item / enchant glow effects (decision 0805): the `Spells\Enchantments\*.mdx` models an item's
+/// `ItemVisuals` id hangs on the item's OWN attachment points — the permanent weapon glows and
+/// the shaman/oil enchant visuals.
+mod item_glow;
+use item_glow::{attach_item_glows, ItemGlows};
+
 /// Mounts (decision 0441): the `UNIT_FIELD_MOUNTDISPLAYID` → second-creature-visual projection —
 /// the mount child + seat components and the transition's diff-and-rebuild.
 pub(crate) mod mount;
@@ -187,6 +193,13 @@ impl Creatures {
         self.catalog.collision_height(display_id)
     }
 
+    /// A display's **base render alpha** (`CreatureDisplayInfo.CreatureModelAlpha / 255`) — the
+    /// `baseAlpha` factor of the per-unit alpha product the aura CharProc nodes multiply into
+    /// (`crate::aura_visual`). `None` for an unknown display.
+    pub(crate) fn display_base_alpha(&self, display_id: u32) -> Option<f32> {
+        self.catalog.display_base_alpha(display_id)
+    }
+
     /// A display's resolved blood id (decision 0137 phase 3 — see [`CreatureModel::blood`]):
     /// the UnitBloodLevels key the melee spurt chain starts from; `None` = unknown display.
     pub(crate) fn blood(&self, display_id: u32) -> Option<i32> {
@@ -308,6 +321,7 @@ pub(crate) struct EntityVisualsSet;
 /// doc for why a clear is always safe mid-session). These caches are get-or-insert at every use
 /// site, so a cleared entry rebuilds on the next spawn that wants it; without this, every display
 /// id, material key, and composited skin ever seen stayed resident for the life of the process.
+#[allow(clippy::too_many_arguments)]
 fn evict_display_caches(
     mut changes: MessageReader<crate::world_map::MapChange>,
     mut entity_mats: ResMut<EntityMaterials>,
@@ -316,18 +330,20 @@ fn evict_display_caches(
     creatures: Option<ResMut<Creatures>>,
     gos: Option<ResMut<GameObjects>>,
     items: Option<ResMut<equipment::ItemDisplays>>,
+    glows: Option<ResMut<ItemGlows>>,
 ) {
     if changes.is_empty() {
         return;
     }
     changes.clear();
     info!(
-        "display caches evicted: {} materials, {} creature / {} go / {} item / {} fx models, {} skins",
+        "display caches evicted: {} materials, {} creature / {} go / {} item / {} fx / {} glow models, {} skins",
         entity_mats.0.len(),
         creatures.as_ref().map_or(0, |c| c.models.len()),
         gos.as_ref().map_or(0, |g| g.models.len()),
         items.as_ref().map_or(0, |i| i.models.len()),
         fx.models.len(),
+        glows.as_ref().map_or(0, |g| g.models.len()),
         composites.0.len(),
     );
     entity_mats.0.clear();
@@ -341,6 +357,9 @@ fn evict_display_caches(
     }
     if let Some(mut i) = items {
         i.models.clear();
+    }
+    if let Some(mut g) = glows {
+        g.models.clear();
     }
 }
 
@@ -421,7 +440,12 @@ impl Plugin for EntitiesPlugin {
                     resolve_wmo_gameobject_props,
                     spawn_wmo_gameobject_props,
                     attach_held_items,
-                    attach_spell_fx,
+                    // One nested (unordered) element — the two passes that hang effect models on
+                    // a unit: its spell-kit instances, and the glows its held items' `ItemVisuals`
+                    // ids name (0805 — after `attach_held_items`, which makes the item roots).
+                    // Independent of each other, both before the tint tick below; the outer tuple
+                    // is at `chain()`'s 20-element ceiling.
+                    (attach_item_glows, attach_spell_fx),
                     // One nested (unordered) element — two independent free-model attach
                     // passes; the outer tuple is at `chain()`'s 20-element ceiling.
                     (attach_missile_models, attach_ground_fx_models),
@@ -472,6 +496,25 @@ impl Plugin for EntitiesPlugin {
                     .after(crate::interior::classify_entity_interior)
                     .after(crate::debug_panel::ModelVisSet)
                     .after(apply_render_fade)
+                    .before(crate::player::apply_self_model_fade),
+            )
+            // The aura CharProc layer (`crate::aura_visual`): the state kit's effect on the BODY.
+            // The drain installs/removes this frame's nodes; the author then owns the render alpha
+            // of every part under a translucent unit — after the three steady-state alpha authors
+            // above so its override lands, before the self feather which folds the factor in itself.
+            .add_systems(
+                Update,
+                (
+                    crate::aura_visual::drain_aura_procs,
+                    // The tint publish only needs the drain ahead of it (it writes a resource, not
+                    // the alpha channel), so it rides the same chain rather than earning its own.
+                    (
+                        crate::aura_visual::apply_aura_alpha,
+                        crate::aura_visual::apply_aura_tint,
+                    ),
+                )
+                    .chain()
+                    .after(apply_unit_mat_alpha)
                     .before(crate::player::apply_self_model_fade),
             )
             // Arm a queued appear-fade once the world is on-screen, then drive it each frame; the despawn
@@ -590,6 +633,26 @@ fn setup_entities(
         }
         Err(e) => warn!("item displays unavailable, units hold nothing: {e:#}"),
     }
+    // The item/enchant glow chain (decision 0805) — both tables or neither: a glow needs the
+    // ItemVisuals join to name a model and the enchant column to know a temporary one. Absent,
+    // weapons simply draw unadorned.
+    match (
+        benilla_formats::load_item_visual_catalog(&mut chain),
+        benilla_formats::load_enchant_visual_catalog(&mut chain),
+    ) {
+        (Ok(visuals), Ok(enchants)) => {
+            info!(
+                "item visual catalog: {} glow rows, {} enchants with a glow",
+                visuals.len(),
+                enchants.len()
+            );
+            commands.insert_resource(ItemGlows::new(visuals, enchants));
+        }
+        (v, e) => {
+            let err = v.err().or(e.err());
+            warn!("item visuals unavailable, weapons never glow: {err:#?}");
+        }
+    }
     match benilla_formats::load_durability_tables(&mut chain) {
         Ok(tables) => commands.insert_resource(crate::ui_merchant::RepairTables(tables)),
         Err(e) => warn!("durability tables unavailable, repair costs show 0: {e:#}"),
@@ -614,6 +677,7 @@ fn update_display_models(
     mut gameobjects: Option<ResMut<GameObjects>>,
     mut held: Option<ResMut<ItemDisplays>>,
     mut spell_fx: Option<ResMut<spell_fx::SpellFx>>,
+    mut glows: Option<ResMut<ItemGlows>>,
     model_assets: (Res<Assets<M2Model>>, Res<Assets<WmoModel>>),
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
@@ -724,6 +788,25 @@ fn update_display_models(
     // `spell_fx::resolve_spell_fx`; the same build, keyed by model path instead of display id.
     if let Some(fx) = spell_fx.as_deref_mut() {
         for dm in fx.models.values_mut() {
+            if dm.parts.is_none() {
+                build_parts(
+                    dm,
+                    m2s,
+                    wmos,
+                    &asset_server,
+                    &mut materials,
+                    cache,
+                    light,
+                    false, // gameobject: effects — unit lighting, no collider
+                );
+            }
+        }
+    }
+
+    // Item/enchant glow models (decision 0805): path-keyed like the effect cache above, entries
+    // created by `resolve_equipment`'s glow resolve.
+    if let Some(glows) = glows.as_deref_mut() {
+        for dm in glows.models.values_mut() {
             if dm.parts.is_none() {
                 build_parts(
                     dm,

@@ -27,16 +27,14 @@ pub use anims::{AnimClip, ModelAnimations, PlayableAnim, ResolvedAnim};
 pub use pose::{PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack};
 
 /// A billboarded submesh's render data (Bevy space): the bone pivot the card rotates about (model-local
-/// — compose with the instance transform), the card's resting plane normal, and the billboard kind.
-/// The mesh is built **centred at `pivot`** so the spawn site can rotate it about the pivot to face the
-/// camera each frame.
+/// — compose with the instance transform) and the billboard kind. The mesh is built **centred at
+/// `pivot`** so the spawn site can rotate it about the pivot to face the camera each frame.
 #[derive(Clone)]
 pub struct BillboardInfo {
     pub pivot: Vec3,
     /// The billboard bone's index — the joint the card rides on an animated host (swinging lamp,
     /// mount lights). On a rest-pose host the pivot alone places the card.
     pub bone: u16,
-    pub normal: Vec3,
     pub kind: BillboardKind,
     /// The billboard bone's global-sequence scale animation (the looping glow-card pulse), if any —
     /// sampled per-frame at the spawn site and folded into the card scale. `None` for a static card.
@@ -606,20 +604,16 @@ pub(crate) fn build_grip_clip(poses: &[(u16, [f32; 4])]) -> (AnimationClip, Pose
 }
 
 /// The [`BillboardInfo`] for a submesh that rides a billboard bone (Bevy space): the pivot to rotate
-/// about and the card's resting plane normal (from its first triangle — robust to absent authored
-/// normals). `None` for ordinary geometry. Pairs with [`build_submesh_mesh`], which centres the mesh.
+/// about. `None` for ordinary geometry. Pairs with [`build_submesh_mesh`], which centres the mesh.
+///
+/// It used to also derive the card's resting plane normal from its first triangle. Nothing has read
+/// that since the camera-basis law replaced the facet-normal card (0788's family), so it is deleted
+/// rather than left as a field that reads as load-bearing.
 pub(crate) fn billboard_info(sub: &RenderSubmesh) -> Option<BillboardInfo> {
     let bb = sub.billboard.as_ref()?;
-    let p = |i: u32| wow_to_bevy(sub.positions[i as usize]);
-    let normal = sub
-        .indices
-        .chunks_exact(3)
-        .find_map(|t| (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).try_normalize())
-        .unwrap_or(Vec3::Z);
     Some(BillboardInfo {
         pivot: wow_to_bevy(bb.pivot),
         bone: bb.bone,
-        normal,
         kind: bb.kind,
         scale_anim: bb.scale_anim.clone(),
         // Translation values are model-space offsets — bake each key to Bevy axes here (scale keys

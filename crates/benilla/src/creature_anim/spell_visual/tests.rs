@@ -438,6 +438,9 @@ fn aura_state_kit_arms_persistent_and_reaps_on_aura_end() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<SpellKitFx>();
+    // The watcher's other fan-out: the kit's CharProc edges (`crate::aura_visual`). Food's kit 409
+    // carries none, so nothing is asserted here — the message just has to exist for the writer.
+    app.add_message::<crate::aura_visual::AuraProc>();
     app.init_resource::<FxLog>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables_with_paths(
         HashMap::from([(

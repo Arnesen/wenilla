@@ -284,7 +284,10 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     // drops legitimate data.
     let att_avail = b.len().saturating_sub(attachments.1 as usize);
     let mut attachment_list = Vec::with_capacity(capped(attachments.0 as usize, 48, att_avail));
-    for i in 0..attachments.0 as usize {
+    // A dropped record shifts the emitted indices, and the AttachLookup below indexes the FILE's
+    // records — so the translation is carried here rather than reconstructed later.
+    let mut emitted_at = vec![0xffffu16; attachments.0 as usize];
+    for (i, emitted) in emitted_at.iter_mut().enumerate() {
         let a = get(attachments.1 as usize + i * 48, 48)?;
         let id = a.u32_at(0).ok_or(Error::Truncated)?;
         let bone = a.u32_at(4).ok_or(Error::Truncated)?;
@@ -295,11 +298,27 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
         if bone as usize >= bone_list.len() {
             continue;
         }
+        *emitted = u16::try_from(attachment_list.len()).unwrap_or(0xffff);
         attachment_list.push(M2Attachment {
             id,
             bone,
             position: [position.x, position.y, position.z],
         });
+    }
+
+    // AttachLookup (header `+0x10c`): attachment **id** → the one record it resolves to. This is
+    // the reference's only id→record map (`0x710310`: `id >= count` ⇒ the `0xffff` sentinel, else
+    // `lookup[id]`) and it is emphatically NOT a scan of the table — shipped weapons author
+    // several records under one id (`Stave_2H_Long_D_05`: eight records, ids 0-3 twice, one at
+    // each end of the staff) and the lookup names exactly one, leaving the other unreachable.
+    // Stored translated into emitted-list indices, `0xffff` where the id resolves to nothing.
+    let lk_avail = b.len().saturating_sub(attach_lookup.1 as usize);
+    let mut attach_lookup_list = Vec::with_capacity(capped(attach_lookup.0 as usize, 2, lk_avail));
+    for i in 0..attach_lookup.0 as usize {
+        let raw = get(attach_lookup.1 as usize + i * 2, 2)?
+            .u16_at(0)
+            .ok_or(Error::Truncated)?;
+        attach_lookup_list.push(emitted_at.get(raw as usize).copied().unwrap_or(0xffff));
     }
 
     // Event markers: 44 bytes each (identifier 4CC @0, data u32 @4, bone u32 @8, position C3 @12;
@@ -482,6 +501,7 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             },
             pivot_attach_z,
             attachments: attachment_list,
+            attach_lookup: attach_lookup_list,
             event_markers,
             animation_lookup,
             playable_animation_lookup,

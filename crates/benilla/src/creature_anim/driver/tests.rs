@@ -1077,6 +1077,77 @@ fn the_self_kneel_rides_the_loot_latch_not_the_flag() {
     );
 }
 
+/// **B114's second half, end to end**: the prowl pose off the descriptor, through the real driver.
+/// The CREEP vis flag (`UNIT_FIELD_BYTES_1` byte 3 bit 1 — field 138, `0x0200_0000`) is the whole
+/// gate, and it is read from the unit's own descriptor for the SELF unit too (unlike the loot kneel
+/// above, which splits self/remote): there is no client-side prediction of stealth, so the crouch
+/// arrives with the server's aura. Stand ⇄ StealthStand and Run ⇄ StealthWalk both flip on the bit
+/// alone, with no other state changing.
+#[test]
+fn the_creep_vis_flag_prowls_the_body() {
+    use benilla_protocol::messages::ObjectFields;
+
+    const CREEP: u32 = 0x0200_0000;
+    let mut app = app();
+    let model = ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),   // Stand
+            clip(5, 2, true),   // Run
+            clip(119, 3, true), // StealthWalk
+            clip(120, 4, true), // StealthStand
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    let unit = app
+        .world_mut()
+        .spawn((
+            model,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::SelfPlayer,
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(138, 0)])),
+            MovementState::default(),
+        ))
+        .id();
+    let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    let set_flag = |app: &mut App, v: u32| {
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+                138, v,
+            )])));
+    };
+
+    app.update();
+    assert_eq!(gait(&app), Some(0), "unstealthed idle stands");
+
+    // The stealth aura landed: the same standing unit drops into the crouch.
+    set_flag(&mut app, CREEP);
+    app.update();
+    assert_eq!(gait(&app), Some(120), "the CREEP bit crouches the idle");
+
+    // Moving while stealthed creeps — at a speed that would otherwise be a flat-out Run.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        speed: 7.0,
+        flags: move_flags::FORWARD,
+        ..Default::default()
+    });
+    app.update();
+    assert_eq!(gait(&app), Some(119), "the prowl outranks the speed tail");
+
+    // Stealth broke mid-run: straight back to the ordinary gait, nothing else touched.
+    set_flag(&mut app, 0);
+    app.update();
+    assert_eq!(gait(&app), Some(5), "broken stealth runs again");
+}
+
 /// The looping-variation ADVANCE (decision 0516 — wow-re `loop-replay-fidget.md` §7/§7d, the
 /// watchdog `0x719370`): a relaxed looping base arm installs a replay window (here `(1,1)` → one
 /// pass exactly); each completed window re-arms the id through the weighted, MEMORYLESS variation

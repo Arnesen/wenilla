@@ -59,7 +59,7 @@ struct WowLight {
     fog_color: vec4<f32>,     // rgb = row 7 fog (raw, gamma 0..1); w = enable (>0.5 ⇒ blend).
     fog_params: vec4<f32>,    // x = fog_start yd; y = fog_end yd; z unused; w = farclip wall.
     _sh: array<vec4<f32>, 6>, // rows 6-11: the model SH coeffs (live in wow_model.wgsl, 0354) — unread by terrain.
-    sh_c16: vec4<f32>,        // row 12: .w = the dynamic point-light gain (decision 0273); xyz the models' c16 band.
+    sh_c16: vec4<f32>,        // row 12: xyz the models' c16 quad band; .w a FREE lane (the 0273 point gain is retired).
     _water: array<vec4<f32>, 4>, // rows 13-16: the liquid swatches — unread by terrain.
     grade: vec4<f32>,         // reserved (the 0282 interior A/B retired; 0163). Layout only.
     _wmo_fog: array<vec4<f32>, 2>, // rows 18-19: the interior fog triple — unread by terrain.

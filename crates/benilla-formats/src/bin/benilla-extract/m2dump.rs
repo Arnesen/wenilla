@@ -127,9 +127,13 @@ pub fn m2attach(chain: &mut Chain, internal_path: &str) -> Result<()> {
         .read_file(&name)
         .with_context(|| format!("reading '{name}' from chain"))?;
     let attachments = benilla_formats::parse_m2_attachments(&data)?;
-    println!("id  bone");
+    // The position is raw WoW model space (X forward, Y left, Z up), as the M2 stores it — "where
+    // on the model does this rider actually sit?" needs it as much as the bone does: an item glow
+    // hangs on ids 0..4, spread along a weapon's length (decision 0805).
+    println!("id  bone  position (WoW model space)");
     for a in &attachments {
-        println!("{:>2}  {}", a.id, a.bone);
+        let [x, y, z] = a.position;
+        println!("{:>2}  {:>4}  [{x:.3} {y:.3} {z:.3}]", a.id, a.bone);
     }
     eprintln!("{} attachment points", attachments.len());
     Ok(())

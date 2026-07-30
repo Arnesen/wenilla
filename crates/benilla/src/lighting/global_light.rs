@@ -69,7 +69,7 @@ pub(crate) const LIGHT_HEADER_ROWS: usize = 21;
 /// from the (ambient, diffuse, sun_dir) triple: rows 0-2 (ambient/diffuse/sun, w = enables), the
 /// SH block (rows 6-11 + row 12 `.xyz`; DC = ambient in the `.w` lanes), and the sun's SH DC
 /// redistribution (row 17 `.yzw`, at intensity 1). Leaves every other row — and row 12 `.w`
-/// (point gain) / row 17 `.x` (SIDN) — untouched.
+/// (free) / row 17 `.x` (SIDN) — untouched.
 ///
 /// The sun's bands are the `Model2.bls` closed form — the SAME [`sh::prop_probe_coeffs`] fold the
 /// interior lane runs, per the disassembly of the shipped ARB program (wow-re
@@ -81,13 +81,13 @@ pub(crate) const LIGHT_HEADER_ROWS: usize = 21;
 /// never goes meaningfully negative — the old trace-fit's ~¼-strength lobe with a negative back
 /// side (shadow-side characters turned blue as the warm channels floored at 0) is superseded.
 ///
-/// **The SH block (rows 6-11, row 12 `.xyz`, row 17 `.yzw`) is read only under the response A/B**
-/// ([`m2_sh_response`], `WOW_M2_SH=1` → row 12 `.w`). 0410 took the exterior M2 lane off this curve
-/// onto the hard-cutoff FFP matte on the director's look call and nothing consumed the rows for
-/// months; 0796 refuted the fidelity premise behind that retirement (the reference's M2 lane IS
-/// this SH shader), which reopens the call and puts the eval back beside the cutoff so the two can
-/// be seen. The interior-prop and glue-rig lanes are unaffected — they fold their own probes
-/// through the per-instance `prop_probes` table, not these rows.
+/// **The SH block (rows 6-11, row 12 `.xyz`, row 17 `.yzw`) is the live exterior M2 response**
+/// (0803). It was dormant for months — 0410 took the lane off this curve onto a hard-cutoff FFP
+/// matte on the director's look call and nothing consumed the rows — until 0796 refuted the fidelity
+/// premise behind that retirement (the reference's M2 lane IS this SH shader) and 0799 put the two
+/// side by side for the call. Anything that stops writing these rows now renders every exterior
+/// doodad and creature black. The interior-prop and glue-rig lanes are unaffected — they fold their
+/// own probes through the per-instance `prop_probes` table, not these rows.
 ///
 /// This is the ONE packer for the scene light ([`build_light_data`]) AND the portrait booth's
 /// studio light (`portrait::setup_booths`): the booth used to hand-copy the layout and rendered
@@ -113,7 +113,7 @@ pub(crate) fn pack_model_core_rows(
     rows[6][3] = ambient[0]; // the DC lanes carry ambient alone
     rows[7][3] = ambient[1];
     rows[8][3] = ambient[2];
-    rows[12][0] = sun[6].x; // 12 sh_c16 xyz — .w belongs to the point-light gain dial
+    rows[12][0] = sun[6].x; // 12 sh_c16 xyz — .w is a free lane (see the struct comment)
     rows[12][1] = sun[6].y;
     rows[12][2] = sun[6].z;
     // 17 `.yzw` — the sun's SH DC redistribution at intensity 1 (`D·(4/17)(0.375+0.9375(uₓ²+u_y²))`
@@ -140,19 +140,6 @@ pub(crate) fn pack_model_core_rows(
 /// interpolation — see `terrain.wgsl`), never from the commit.
 pub(crate) fn commit_raw(rgb: [f32; 3]) -> [f32; 3] {
     rgb.map(|c| c.max(0.0))
-}
-
-/// `WOW_M2_SH=1` ⇒ the exterior M2 doodad/entity lane evaluates the reference's own order-2
-/// `Model2.bls` response instead of the shipped hard-cutoff FFP matte. The **one open director call**
-/// on this lane (0796 §5): the reference genuinely runs the SH lobe, and 0410 replaced it with the
-/// cutoff on a look call made when both lanes were believed reference-real — only one is.
-///
-/// Read once (the process can't change its mind mid-run) and published to the shaders in row 12 `.w`.
-/// Deliberately NOT a resource or a debug-menu toggle: it is a short-lived instrument for one A/B,
-/// and the cheapest thing to delete when the call lands.
-fn m2_sh_response() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| matches!(std::env::var("WOW_M2_SH").as_deref(), Ok("1")))
 }
 
 /// Capacity of the packed point-light table (fixed-size in the WGSL mirror structs — keep in sync).
@@ -299,14 +286,6 @@ fn build_light_data(
     // Rows 0-2, the SH block 6-12.xyz, and the sun DC (17.yzw) — the shared model-light core
     // (also the portrait booth's packer). Row 20 (point_count) is the point-table pack's below.
     pack_model_core_rows(rows, l.ambient, l.diffuse, l.sun_dir);
-    // 12 `.w` — the exterior M2 RESPONSE A/B (0796 §5), the one open director call on this lane.
-    // 0 (default) = the shipped hard-cutoff FFP matte, 0410's look call. 1 = the reference's own
-    // response, the order-2 `Model2.bls` lobe over the rows packed just above. Not a calibration
-    // dial (0750/0751's kind, rightly retired) — it is a two-way switch between two fully specified
-    // laws, and it exists because §5 is a look question that only the director can answer and they
-    // cannot answer it without seeing both. It goes the moment they call it: whichever side loses,
-    // this lane and the loser's code come out together.
-    rows[12][3] = if m2_sh_response() { 1.0 } else { 0.0 };
     // The dynamic point-light table (decision 0278): every spawned point light within
     // [`POINT_PACK_RADIUS`] of the camera, nearest-first when over capacity — the VERTEX stages of
     // `terrain.wgsl`/`wow_model.wgsl` walk it for the Gouraud point term (bevy's clusterable buffer
@@ -441,7 +420,7 @@ fn upload_light(
 mod tests {
     use super::*;
 
-    /// GOLDEN — the exterior M2 **response A/B** (0796 §5): the SH branch of `wow_model.wgsl` must
+    /// GOLDEN — the **live exterior M2 response** (0803): `wow_model.wgsl`'s doodad/entity lane must
     /// reproduce `E = A + I·D·(4/17)(0.375 + 2μ + 1.875μ²)` off the rows [`pack_model_core_rows`]
     /// writes, with `A` NOT scaling by the per-instance intensity and every sun band scaling by it
     /// exactly once (never I²).
@@ -449,9 +428,9 @@ mod tests {
     /// This exists because the capture harness cannot check it. `visual.sh`-style captures are
     /// bit-deterministic on static scenes (canal-noon: MAE 0.000) but NOT on the entity/GameObject
     /// scenarios this lane owns — measured run-to-run at MAE 5.1 (chest-shade-rear) and 8.8
-    /// (creature-sun-rear), a noise floor far above the ~0.24 signal the A/B produces. So the lane's
-    /// correctness is pinned HERE, deterministically, and the captures are only good for "it
-    /// compiles and it moves pixels".
+    /// (creature-sun-rear), a noise floor far above the ~0.24 signal the response change produces
+    /// (0799 §2). So the lane's correctness is pinned HERE, deterministically, and the captures are
+    /// only good for "it compiles and it moves pixels".
     ///
     /// `eval_sh_lane` mirrors the WGSL lane-for-lane on purpose — read the two side by side; a
     /// channel or row swap in the shader is caught by eye against this, not by this test.
@@ -506,8 +485,8 @@ mod tests {
             }
         }
         // The peak is calibrated to the FFP peak by construction (the 16/17 accumulate scale) — so
-        // the A/B changes NOTHING on a surface square to the sun, and the whole visible difference
-        // lives on the shadow side. This is why the switch reads subtle rather than dramatic.
+        // moving onto this curve changed NOTHING on a surface square to the sun, and the whole
+        // visible difference lives on the shadow side. That is why 0803 read subtle, not dramatic.
         let peak = eval_sh_lane(&rows, u, 1.0);
         for ch in 0..3 {
             let ffp_peak = ambient[ch] + diffuse[ch]; // ambient + D·max(N·L,0) at N·L = 1

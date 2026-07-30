@@ -263,9 +263,15 @@ pub struct M2Model {
     pub pivot_attach_z: Option<f32>,
     /// The full attachment-point table (see [`M2Attachment`]) — every record whose id/bone fit `u16`
     /// and whose bone indexes into [`Self::bones`]. `pivot_attach_z` above is the id-17 special case
-    /// kept as its own field (the camera pivot's one historical consumer); this is the general table
-    /// held-item attach points, sheath points, etc. read from.
+    /// kept as its own field (the camera pivot's one historical consumer). **Records are addressed
+    /// by ATTACH ID through [`Self::attachment`], never by scanning this table** (see
+    /// [`Self::attach_lookup`]).
     pub attachments: Vec<M2Attachment>,
+    /// The model's **AttachLookup** (header `+0x10c`), translated into [`Self::attachments`]
+    /// indices: row `i` is the record attachment **id** `i` resolves to, `0xffff` for none. Read
+    /// it through [`Self::attachment`], which is the reference's `0x710310` — bounds check and
+    /// sentinel included.
+    pub attach_lookup: Vec<u16>,
     /// The animation-event table's **positional markers** (see [`M2EventMarker`]) — every record
     /// whose bone fits `u16` and indexes into [`Self::bones`], in file order (queries take the
     /// first ident match, the client's `0x7130e0` scan order). The cast-release launch points
@@ -301,6 +307,24 @@ impl M2Model {
         self.animation_lookup
             .get(anim_id as usize)
             .is_some_and(|&slot| slot != 0xffff)
+    }
+
+    /// **The attachment record an attach id resolves to** — the reference's `0x710310` +
+    /// `0x712f70` pair, byte-for-byte: a bounds-checked [`Self::attach_lookup`] read
+    /// (`id >= count` ⇒ the `0xffff` sentinel) and then the record it names. `None` where the id
+    /// has no record, which is how the reference behaves too: `0x712f70` stores the sentinel and
+    /// every consumer of that field (`0x7140aa`, `0x718668`, `0x719266`) tests `cmp 0xffff; je`
+    /// and skips the child, so an unresolvable id hangs **nothing** rather than falling back to
+    /// the model origin.
+    ///
+    /// Never scan [`Self::attachments`] for a matching id instead: on the ~5% of weapon models
+    /// that author duplicate ids the two disagree, and the lookup is the authority (decision
+    /// 0805).
+    pub fn attachment(&self, id: u16) -> Option<&M2Attachment> {
+        let idx = *self.attach_lookup.get(id as usize)?;
+        (idx != 0xffff)
+            .then(|| self.attachments.get(idx as usize))
+            .flatten()
     }
 }
 

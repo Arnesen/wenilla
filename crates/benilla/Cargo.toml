@@ -29,6 +29,10 @@ bevy_egui = "0.39"
 # Zero-copy POD→bytes for the shared light storage buffer (one per-frame write_buffer). Already in
 # the tree transitively; pinned to the same version as the dev-dep below.
 bytemuck = { version = "1", features = ["derive"] }
+# `f16` decode for the booth-target dump (`WOW_BOOTH_DUMP`): the booth render targets are
+# `Rgba16Float` (decision 0804) and the PNG wants display bytes. Already in the tree via
+# wgpu/bevy_image; declared so the call site is an honest dependency.
+half = "2"
 # `getrusage` — whole-process CPU time (all threads), the perf probes' `cpu_ms`/`cpu_pct` metric
 # (`perf::process_cpu_secs`). Wall-clock fps is unusable as a regression instrument on a machine
 # running parallel sessions' builds; CPU-per-frame is, and it is also the number the Mac report

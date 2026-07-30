@@ -486,6 +486,10 @@ pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
 use spell_visual::{
     arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, load_spell_visuals, route_cast_visuals,
 };
+// The aura-slot watcher is the shared trigger for BOTH halves of a state kit, so the CharProc half's
+// own tests (`crate::aura_visual`) drive it directly rather than re-deriving the slot diff.
+#[cfg(test)]
+pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
     held_strike_sound, FxClass, KitPush, MissileSpawn, SpellKitFx, SpellKitSound, SpellVisuals,
 };
@@ -699,6 +703,9 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<SpellKitFx>()
             .add_message::<MissileSpawn>()
             .add_message::<KitPush>()
+            // The aura CharProc edges the slot watcher emits alongside its effect-model ones —
+            // drained by `crate::aura_visual`, which owns the body's alpha/tint for an aura's life.
+            .add_message::<crate::aura_visual::AuraProc>()
             .add_message::<HardLanding>()
             .add_systems(
                 Startup,

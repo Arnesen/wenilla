@@ -12,8 +12,10 @@
 //! (u32 — the pickup/place sound group; byte-verified `0x458008: mov eax,[edx+0x2c]`, wow-re
 //! `system/sound/scratch/item-pickup-place-sound.md`, corroborated 20513/20513 valid ids on the
 //! real DBC) · `12`/`13` helm-vis (u32) · `14`-`21` the 8 body-region textures, in **ArmUpper,
-//! ArmLower, Hand, TorsoUpper, TorsoLower, LegUpper, LegLower, Foot** order (string) · `22`
-//! unpinned int (unread).
+//! ArmLower, Hand, TorsoUpper, TorsoLower, LegUpper, LegLower, Foot** order (string) · `22` the
+//! **`ItemVisuals.dbc` id** — the item's intrinsic glow (i32; byte-verified `0x47a200: mov
+//! edx,[esi+0x58]`, the held-item attach handing it on — decision 0805,
+//! [`crate::ItemVisualCatalog`]).
 //!
 //! **Trap, load-bearing:** `model` and `model_texture` are **independently-resolved basenames** in
 //! the same `Item\ObjectComponents\<dir>\` folder — never derive one from the other. Real
@@ -74,6 +76,12 @@ pub struct ItemDisplay {
     /// `0` on every non-ranged display; only three distinct nonzero ids exist across the real
     /// table (thrown 98 · bow 5 · gun/rifle 224).
     pub spell_visual: u32,
+    /// The `ItemVisuals.dbc` id (col 22) — the display's **intrinsic glow**: the permanent weapon
+    /// glows, resolved to up to five `Spells\Enchantments\*.mdx` models by
+    /// [`crate::ItemVisualCatalog`] (decision 0805). **Signed**, because the client reads it that
+    /// way (`0x4798c0`'s `jle` gate): `0` = none on 29 239 of the 29 604 rows, and **five shipped
+    /// rows carry `-1`**, which is also none.
+    pub item_visual: i32,
 }
 
 impl ItemDisplay {
@@ -178,7 +186,7 @@ pub(crate) fn item_display_info_schema() -> Schema {
     ] {
         s.add_field(SchemaField::new(name, FieldType::String));
     }
-    s.add_field(SchemaField::new("Unk22", FieldType::UInt32));
+    s.add_field(SchemaField::new("ItemVisualID", FieldType::UInt32));
     s
 }
 
@@ -203,6 +211,7 @@ fn catalog_from_records(rs: RecordSet) -> ItemDisplayCatalog {
         let icon = str_at(&rs, r, 5).map(|i| format!("Interface\\Icons\\{i}"));
         let group_sounds = u32_at(r, 11).unwrap_or(0);
         let spell_visual = u32_at(r, 10).unwrap_or(0);
+        let item_visual = u32_at(r, 22).unwrap_or(0) as i32;
         displays.insert(
             id,
             ItemDisplay {
@@ -214,6 +223,7 @@ fn catalog_from_records(rs: RecordSet) -> ItemDisplayCatalog {
                 icon,
                 group_sounds,
                 spell_visual,
+                item_visual,
             },
         );
     }
@@ -337,7 +347,7 @@ mod tests {
         for _ in 0..8 {
             rec.extend(u32le(OFF_EMPTY)); // region textures — this row paints none
         }
-        rec.extend(u32le(0)); // Unk22
+        rec.extend(u32le(0)); // ItemVisualID
         assert_eq!(rec.len(), RECORD_SIZE as usize);
 
         let bytes = build_wdbc(1, FIELD_COUNT, RECORD_SIZE, &rec, &strings.0);

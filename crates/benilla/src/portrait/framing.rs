@@ -124,7 +124,7 @@ fn bind_bone_global(skeleton: &benilla_assets::ModelSkeleton, bone: u16) -> Opti
 /// A model attachment's **bind-pose position** in Bevy model space (its bone's pivot + the
 /// bind-relative offset) — the glue background scenes anchor the create character on their
 /// attachment 0 this way (the stage spot sitting on camera 0's axis in every UI_* scene audited).
-pub(super) fn attachment_point(
+pub(crate) fn attachment_point(
     skeleton: &benilla_assets::ModelSkeleton,
     attachments: &[benilla_assets::ModelAttachment],
     id: u16,

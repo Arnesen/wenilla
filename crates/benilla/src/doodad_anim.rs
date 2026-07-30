@@ -563,7 +563,7 @@ pub(crate) fn playing_seq(
 /// gate, far-clip) still lands right on re-appear, and the reference animation-evaluates the tracks
 /// every frame regardless of the cull (wow-re `m2-alpha-combine-cull`). Runs before the visibility
 /// authority so the tag it composes is this frame's value.
-fn sample_mat_anim(
+pub(crate) fn sample_mat_anim(
     time: Res<Time>,
     hosts: Query<(&AnimationPlayer, &ModelAnimations)>,
     mut q: Query<&mut MatAnim>,

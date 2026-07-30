@@ -14,7 +14,26 @@ pub(super) struct BoothPart {
     pub(super) skinned: Option<Handle<Mesh>>,
     pub(super) static_mesh: Handle<Mesh>,
     pub(super) material: Handle<WowModelMaterial>,
+    /// The batch's **animated material alpha** (`ModelSubmesh::alpha_anim`) — a time-varying
+    /// colour-alpha/weight loop or, far more often here, a plain authored dimming *constant*. Every
+    /// world lane has sampled this into the render-alpha `MeshTag` since decision 0130 phase 2; the
+    /// booths never did, so a booth batch drew at alpha 1.0 whatever the artist authored (decision
+    /// 0807 — B121's black corners were UI_Tauren's 0.55 `LENSALPHA` vignette at full strength).
+    /// `None` for the overwhelming majority of batches, which are opaque.
+    pub(super) alpha_anim: Option<std::sync::Arc<benilla_formats::AlphaAnim>>,
 }
+
+/// Marks a booth part whose render-alpha `MeshTag` is driven by its own
+/// [`MatAnim`](crate::doodad_anim::MatAnim) sample — the booth twin of the world lane's writer.
+///
+/// The world path's writer is the *visibility authority* (`debug_panel::apply_model_visibility`),
+/// which is scoped to `ModelPart` + `GlobalTransform` and culls by distance to the **world** camera.
+/// A booth part must never enter that query — it would be far-clipped against a camera it has
+/// nothing to do with — so the booth owns this one small writer instead
+/// ([`push_booth_mat_alpha`]). Marker-scoped rather than inferred from "has no `ModelPart`", so the
+/// two lanes cannot silently overlap.
+#[derive(Component)]
+pub(super) struct BoothMatAlpha;
 
 /// One bone rider headed into a booth bake ([`PortraitRider`], studio-lit).
 pub(super) struct BoothRider {
@@ -104,13 +123,23 @@ pub(super) fn spawn_booth_model(
     )>();
     let Some((skeleton, ibp, anims)) = rig.filter(|(s, _, _)| !s.joints.is_empty()) else {
         for p in parts {
-            commands.spawn((
+            let mut child = commands.spawn((
                 Mesh3d(p.static_mesh.clone()),
                 MeshMaterial3d(p.material.clone()),
                 Transform::IDENTITY,
                 layer.clone(),
                 ChildOf(root),
             ));
+            // The authored material alpha reaches the boneless bake too — it is a property of the
+            // batch, not of the rig.
+            if let Some(anim) = &p.alpha_anim {
+                let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
+                child.insert((
+                    bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
+                    mat_anim,
+                    BoothMatAlpha,
+                ));
+            }
         }
         return Vec::new();
     };
@@ -182,13 +211,30 @@ pub(super) fn spawn_booth_model(
             layer.clone(),
             ChildOf(root),
         ));
-        if use_rig {
+        // The batch's authored material alpha, sampled onto the render-alpha tag field — the same
+        // `MatAnim` the world lanes use, in its self-driving form (`drives_tag`: nothing else writes
+        // a booth part's alpha). The rig field rides the same tag, so compose rather than overwrite;
+        // `alpha_bits` floors a true zero at ≈0 so the shader's whole-payload-`0` *untagged ⇒
+        // opaque* sentinel can't fire on a batch the artist authored invisible.
+        let rig_tag = if use_rig {
+            crate::mesh_tag::rig_bits(rig_slot)
+        } else {
+            0
+        };
+        if let Some(anim) = &p.alpha_anim {
+            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), 0.0, None);
             child.insert((
-                crate::rig_palette::RigPart(root),
-                bevy::mesh::MeshTag(
-                    crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
-                ),
+                bevy::mesh::MeshTag(rig_tag | crate::mesh_tag::alpha_bits(mat_anim.current)),
+                mat_anim,
+                BoothMatAlpha,
             ));
+        } else if use_rig {
+            child.insert(bevy::mesh::MeshTag(
+                rig_tag | crate::mesh_tag::alpha_bits(1.0),
+            ));
+        }
+        if use_rig {
+            child.insert(crate::rig_palette::RigPart(root));
         }
     }
     for r in riders {
@@ -289,5 +335,112 @@ pub(super) fn face_booth_billboards(
             *cam.up(),
         );
         tf.rotation = joint.rotation().inverse() * basis;
+    }
+}
+
+/// Push each booth part's sampled material alpha onto its render-alpha `MeshTag` field — the booth's
+/// own tiny twin of the world visibility authority's write (see [`BoothMatAlpha`] for why the world
+/// one can't serve here).
+///
+/// `doodad_anim::sample_mat_anim` already ticks **every** `MatAnim` in the world, booth parts
+/// included, so this only moves the sampled value onto the channel: `with_alpha` writes the alpha
+/// field alone, so the rig slot (and the probe slot the rig lane reads from the same tag) ride
+/// through untouched. Write-on-change, so the overwhelmingly common case — an authored *constant*
+/// like UI_Tauren's 0.55 vignette — costs one compare per part per frame and never re-batches.
+pub(super) fn push_booth_mat_alpha(
+    mut parts: Query<(&crate::doodad_anim::MatAnim, &mut bevy::mesh::MeshTag), With<BoothMatAlpha>>,
+) {
+    for (anim, mut tag) in &mut parts {
+        let bits = crate::mesh_tag::with_alpha(tag.0, anim.current);
+        if tag.0 != bits {
+            tag.0 = bits;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doodad_anim::MatAnim;
+
+    /// A constant authored alpha, the shape every glue scene actually uses (UI_Tauren's vignette is
+    /// `0.55..0.55`, its ground shadow `0.99..0.99`).
+    fn constant_alpha(v: f32) -> std::sync::Arc<benilla_formats::AlphaAnim> {
+        std::sync::Arc::new(
+            benilla_formats::AlphaAnim::new(vec![benilla_formats::AlphaSeq {
+                color: None,
+                weight: Some(benilla_formats::ScalarAnim {
+                    period: 0.0,
+                    step: true,
+                    keys: vec![(0.0, v)],
+                }),
+            }])
+            .expect("a dimming constant is worth carrying"),
+        )
+    }
+
+    /// The writer moves the sampled alpha onto the tag **and leaves the rig slot alone** — the whole
+    /// reason it goes through `with_alpha` rather than assigning the field. A booth part is skinned,
+    /// so a writer that clobbered bits 19..=29 would silently unbind its palette.
+    #[test]
+    fn the_booth_alpha_writer_preserves_the_rig_slot() {
+        let mut app = App::new();
+        app.add_systems(Update, push_booth_mat_alpha);
+        let rig_slot = 7u16;
+        let anim = MatAnim::driving_tag(constant_alpha(0.55), 0.0, None);
+        let part = app
+            .world_mut()
+            .spawn((
+                bevy::mesh::MeshTag(
+                    crate::mesh_tag::rig_bits(rig_slot) | crate::mesh_tag::alpha_bits(1.0),
+                ),
+                anim,
+                BoothMatAlpha,
+            ))
+            .id();
+        app.update();
+
+        let tag = app
+            .world()
+            .entity(part)
+            .get::<bevy::mesh::MeshTag>()
+            .unwrap();
+        assert_eq!(
+            crate::mesh_tag::rig_of(tag.0),
+            rig_slot,
+            "the palette slot must survive an alpha write"
+        );
+        let alpha = crate::mesh_tag::alpha_of(tag.0);
+        assert!(
+            (alpha - 0.55).abs() <= 1.0 / 63.0,
+            "authored 0.55 reached the tag (got {alpha})"
+        );
+    }
+
+    /// An unmarked part is not ours to write: the world lane's parts carry `MatAnim` too, and their
+    /// alpha is composed by the visibility authority against the fade and the interior classifier.
+    #[test]
+    fn the_booth_alpha_writer_ignores_unmarked_parts() {
+        let mut app = App::new();
+        app.add_systems(Update, push_booth_mat_alpha);
+        let part = app
+            .world_mut()
+            .spawn((
+                bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(1.0)),
+                MatAnim::driving_tag(constant_alpha(0.1), 0.0, None),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            crate::mesh_tag::alpha_of(
+                app.world()
+                    .entity(part)
+                    .get::<bevy::mesh::MeshTag>()
+                    .unwrap()
+                    .0
+            ),
+            1.0,
+            "no BoothMatAlpha marker ⇒ untouched"
+        );
     }
 }

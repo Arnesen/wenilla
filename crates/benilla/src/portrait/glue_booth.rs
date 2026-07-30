@@ -306,6 +306,20 @@ pub(crate) struct PreviewBillboard {
     pub(crate) kind: benilla_formats::BillboardKind,
 }
 
+/// One **item glow** on the assembled preview (decision 0805): the `Spells\Enchantments\*.mdx`
+/// effect a held weapon's `ItemVisuals` id hangs on the weapon's own attachment point. Carried as
+/// the glow model's particle emitters — all but three of the 35 shipped glow models are pure
+/// emitters — plus the composed seat: the BODY bone the weapon rides, and the offset of the
+/// weapon's own attachment point expressed in that bone's frame. The booth spawns one host there
+/// and owns the emitters off it, exactly as [`sync_glue_scene`] does for a backdrop's braziers; a
+/// glow's rare geometry rides the ordinary [`PreviewRider`] list at the same seat.
+#[derive(Clone)]
+pub(crate) struct PreviewGlow {
+    pub(crate) bone: u16,
+    pub(crate) offset: Vec3,
+    pub(crate) emitters: Vec<benilla_assets::ModelEmitter>,
+}
+
 /// The entities-side builder's output (decisions 0423 + 0465): the geoset-filtered, composited
 /// parts for the current look (+ its equipment riders for a Select look), plus the body displayId
 /// (for the booth's framing/rig) and a revision that bumps on every real change — a new successful
@@ -317,6 +331,8 @@ pub(crate) struct GluePreviewBake {
     pub(crate) display_id: u32,
     pub(crate) parts: Vec<PreviewPart>,
     pub(crate) riders: Vec<PreviewRider>,
+    /// The held items' glow effects (decision 0805) — see [`PreviewGlow`].
+    pub(crate) glows: Vec<PreviewGlow>,
     /// The look's character billboard batches (the eye-glow) — geoset-gated like `parts`, but seated
     /// on their billboard bone's joint and camera-faced by the booth, not drawn as plain body meshes.
     pub(crate) billboards: Vec<PreviewBillboard>,
@@ -585,6 +601,11 @@ pub(super) fn sync_glue_scene(
                     skinned: Some(s.skinned_mesh.clone()),
                     static_mesh: s.mesh.clone(),
                     material,
+                    // The scene's authored per-batch material alpha (decision 0807). UI_Tauren
+                    // alone: a 0.55 `LENSALPHA` corner vignette, a 0.99 `GROUNDSHADOW` decal, 0.15
+                    // `CLOUDS`, a 0.73 gradient. Drawn at 1.0 the vignette blacked out the frame
+                    // corners — B121.
+                    alpha_anim: s.alpha_anim.clone(),
                 }
             })
             .collect();
@@ -787,6 +808,11 @@ pub(super) fn sync_glue_booth(
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
                 material: relight(&p.material, &mut scene, &mut booth_light, &mut materials),
+                // `None`, and a KNOWN GAP (decision 0807): a mirrored `PreviewPart` doesn't carry
+                // the batch's alpha loops, so a character batch with an authored dimming constant
+                // previews at 1.0 here. Closing it means threading `alpha_anim` through the
+                // appearance-assembly layer — deliberately not folded into the B121 fix.
+                alpha_anim: None,
             });
         }
         // The equipment riders (a Select look — helm/shoulders/sheathed weapons, decision 0465):
@@ -814,7 +840,7 @@ pub(super) fn sync_glue_booth(
             })
             .collect();
         commands.entity(booth.root).despawn_related::<Children>();
-        spawn_booth_model(
+        let joints = spawn_booth_model(
             &mut commands,
             &mut palettes,
             booth.root,
@@ -829,6 +855,55 @@ pub(super) fn sync_glue_booth(
             bake.grip,         // close each hand that draws a weapon (the ref's paperdoll rule)
             &booth_billboards,
         );
+        // The held items' glows (decision 0805): one host per glow at its weapon's attachment
+        // point, with the effect model's emitters owned by it — the scene-brazier recipe (0539
+        // §5), so they billboard against THIS camera and fog on the scene's own light. Children
+        // of the booth root through their joint, so the next re-bake's `despawn_related` reaps
+        // them. The reference glows a weapon at character select through the very same attach
+        // primitive it uses in the world (`0x472c91` → `0x47a0c0` → `0x4798c0`), and the enum
+        // carries no enchant, so what shows here is the item's intrinsic visual only.
+        let mut glow_emitters = 0usize;
+        for glow in &bake.glows {
+            let Some(&joint) = joints.get(glow.bone as usize) else {
+                continue;
+            };
+            let host = commands
+                .spawn((
+                    Transform::from_translation(glow.offset),
+                    Visibility::default(),
+                    ChildOf(joint),
+                    booth.layer.clone(),
+                ))
+                .id();
+            for em in &glow.emitters {
+                let Some(e) = crate::particles::spawn_emitter(
+                    &mut commands,
+                    em,
+                    Transform::IDENTITY,
+                    Some((host, [0.0; 3])), // whole-model owner: a glow model poses at rest
+                    Some(host),             // an attached model — it swings with the weapon
+                    Some(host),
+                    crate::particles::EmitClock::Pinned, // the glow loops forever
+                ) else {
+                    continue;
+                };
+                commands
+                    .entity(e)
+                    .insert((booth.layer.clone(), ChildOf(host)));
+                if let Some(buf) = &scene_buf {
+                    commands
+                        .entity(e)
+                        .insert(crate::particles::buffer::EffectLightOverride(buf.clone()));
+                }
+                glow_emitters += 1;
+            }
+        }
+        if glow_emitters > 0 {
+            info!(
+                "glue booth: {glow_emitters} item-glow emitter(s) up on {} glow instance(s)",
+                bake.glows.len()
+            );
+        }
         // The character-only fallback framing (no scene up — art missing / still loading): the
         // body-frame transform with an aspect-aware projection, because the booth target is
         // window-sized now (the square-true `WowPortraitProjection` would stretch on it). While a

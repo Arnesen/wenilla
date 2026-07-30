@@ -25,6 +25,7 @@ mod area_trigger;
 mod art_scope;
 mod asset_churn;
 mod assets;
+mod aura_visual;
 mod bgwin;
 mod billboard;
 mod blob_shadow;
@@ -56,6 +57,7 @@ mod go_anim;
 mod go_templates;
 mod ground_fx;
 mod hover_log;
+mod instance_tint;
 mod interact;
 mod interior;
 mod items;
@@ -456,6 +458,9 @@ fn main() -> AppExit {
     // The owned skin palette (decision 0720): every skinned rig's joint matrices, computed by
     // us and skinned in wow_model.wgsl — Bevy's SkinnedMesh lane is fully replaced.
     .add_plugins(rig_palette::plugin)
+    // The per-instance body tint (decision 0812), on the same slot index as that palette: the aura
+    // state kit's CharProc-1 colour, uploaded to its own region of the shared light buffer.
+    .add_plugins(instance_tint::plugin)
     .add_plugins(BowstringPlugin)
     .add_plugins(QuestMarkersPlugin)
     // Frame-time HUD + diagnostics — the performance standard.

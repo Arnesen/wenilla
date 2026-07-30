@@ -140,6 +140,20 @@ pub struct ModelEmitter {
     /// about the pivot, so the static path (`placement · position`) is the exact special case.
     /// `[0; 3]` when the bone index is out of range (or the model is boneless).
     pub bone_pivot: [f32; 3],
+    /// The **billboard frame** this emitter rides, when its bone chain reaches a billboard bone
+    /// (`benilla_formats::Skeleton::billboard_host`): that bone's arm and its pivot, **raw WoW
+    /// model space**. The emitter's live origin is then camera-dependent —
+    /// `pivot + camBasis·(def.position − pivot)` — because the reference folds the record position
+    /// through the *replaced* palette matrix (wow-re `part-anchoring-live-bone.md` §1 row 3,
+    /// `billboard-bone-law.md`'s "children multiply onto this").
+    ///
+    /// A RIGGED host needs nothing from this: its joint palette already carries the replacement
+    /// (`billboard::billboard_joint_palette`) and the emitter rides the joint. It exists for the
+    /// spawn paths with no rig — an equipped item's model (helm/shoulders/held), where the whole
+    /// affected population's chains are otherwise rest-pose (corpus-verified: 95 item models / 197
+    /// emitters ride a billboard chain, **zero** with an animating one — `benilla-extract bbscan`).
+    /// `None` for the ordinary case.
+    pub billboard: Option<(benilla_formats::BillboardKind, [f32; 3])>,
     /// The **recursion model** (`def.recursion_model`) as a loaded dependency: its own emitters
     /// become this emitter's CHILD emitters (wow-re `part-child-recursion.md`), wired by the
     /// app's particle system once the asset resolves. `None` when unauthored.
@@ -345,10 +359,16 @@ impl AssetLoader for M2ModelLoader {
                     .geometry_model
                     .as_deref()
                     .map(|p| ctx.load::<M2Model>(m2_dep_url(p)));
+                // The billboard frame the emitter's bone chain inherits, if any (see the field).
+                let billboard = skeleton_raw.billboard_host(def.bone).and_then(|h| {
+                    let b = skeleton_raw.bones.get(h)?;
+                    Some((b.billboard?, b.pivot))
+                });
                 ModelEmitter {
                     def,
                     texture,
                     bone_pivot,
+                    billboard,
                     recursion,
                     geometry,
                     owner_reach,

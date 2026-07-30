@@ -32,7 +32,13 @@
 //!   immediate in the client's slot loop (`0x60edf0`, byte-cited push sites — wow-re
 //!   `spell-visual-apply.md` §1.3) and a **direct M2 `AttachmentID`**: in kit-field order,
 //!   [`KIT_SLOT_TAGS`]. Field 12 is the missile effect slot (phase 4), field 14 a visual-group
-//!   fallback id — neither is read here.
+//!   fallback id — neither is read here. **Fields 15–34 are the four `CharProc` slots** — the
+//!   *character* half of a kit (the body's own alpha/tint, as opposed to the attach-point emitters):
+//!   five parallel 4-element arrays, `CharProcType[4]` @+0x3c then `CharParamZero/One/Two/Three[4]`
+//!   @+0x4c/+0x5c/+0x6c/+0x7c (wow-re `spellvisual-schema.md`, byte-pinned: all 20 consumed by the
+//!   dispatcher `0x60d7c0`, which `lea edi,[kit+0x6c]` walks four times reading `[edi-0x30]` as the
+//!   type key). Read here as [`VisualKit::char_procs`]; the type semantics are
+//!   [`char_proc_type`]'s.
 //! - **SpellVisualEffectName**: 5 fields × 20 B. Field 0 = id; field 1 = a name string — a debug
 //!   label, and the lookup key for the client's boot-time HARDCODED-effect matcher (`0x61f5b0`
 //!   over a 14-string table: loot art, footsteps, breath, level-up…; wow-re
@@ -65,7 +71,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use benilla_dbc::{FieldType, Schema, SchemaField};
 
-use crate::dbc::{parse, str_at, u32_at};
+use crate::dbc::{f32_at, i32_at, parse, str_at, u32_at};
 use crate::Chain;
 
 const SPELL_VISUAL: &str = "DBFilesClient\\SpellVisual.dbc";
@@ -92,6 +98,40 @@ pub const MISSILE_ATTACH_TABLE: [u16; 11] = [
 /// The DBC's alternate "no value" encoding for a foreign-key-ish column (module docs) — folded to
 /// `None` alongside plain `0`.
 const NONE_SENTINEL: u32 = u32::MAX;
+
+/// The four parallel `CharProc` slots a `SpellVisualKit` row carries (module docs; the client's
+/// dispatcher `0x60d7c0` walks exactly four).
+pub const KIT_CHAR_PROCS: usize = 4;
+
+/// One of a kit's four `CharProc` slots: a **type key + its four float params**, the character-half
+/// of a kit (the body's own render properties, not an attach-point emitter). The client's dispatcher
+/// `0x60d7c0` switches on [`Self::ty`] through a byte translation table (`0x60dc20`) into a 9-case
+/// jump table (`0x60dbfc`); each case reads whichever params it wants — the alpha and tint procs
+/// both read `params[0]` (wow-re `ghost-death-visuals.md` §2.3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CharProc {
+    /// `CharProcType[i]` — the dispatch key ([`char_proc_type`] names the ones we model). Never a
+    /// none-sentinel: an empty slot is `None` at the [`VisualKit::char_procs`] level.
+    pub ty: i32,
+    /// `CharParamZero/One/Two/Three[i]`, in that order — float columns (the client loads them with
+    /// `fld` and rounds where it wants an integer, as the tint proc does with its packed RGB).
+    pub params: [f32; 4],
+}
+
+/// The `CharProc` type keys benilla models, by name. The full key space is the dispatcher's 9 cases
+/// (`0x60d7c0`); these are the ones a live 5875 **state** kit uses — every other key is either
+/// cast-stage-only or unused by the shipped table (see `charprocs` in `benilla-extract`).
+pub mod char_proc_type {
+    /// **Body TINT** (`0x60d840`): `round(params[0])` is a packed `0x00RRGGBB`, OR'd with
+    /// `0xff000000` into the tint node (`node+0x7c`), list `unit+0xce0`. Per-frame the head node's
+    /// RGB goes `×1/255` into `model+0x184/188/18c` (the ghost's pale blue-white `0xFF8CB9FD`).
+    pub const TINT: i32 = 1;
+    /// **Body TRANSLUCENCY** (`0x60d972`): `params[0]` is this aura's alpha factor, stored in a
+    /// spell-id-keyed node (`node+0x78`) on the unit's list `unit+0xb50`. The unit's effective alpha
+    /// is `baseAlpha × Π(node alphas)` (`0x60d180`), ramped to over 1000 ms by
+    /// `StartAlphaFade 0x614f80`. Stealth's 0.3 and the ghost aura's 0.5 are both this proc.
+    pub const ALPHA: i32 = 14;
+}
 
 /// One `SpellVisual.dbc` row: the five lifecycle-stage `SpellVisualKit` ids a cast may fire
 /// through (`0` = no kit at that stage, this crate's usual absent-FK convention) + the missile
@@ -144,6 +184,7 @@ pub struct VisualStages {
 
 /// One `SpellVisualKit.dbc` row's body-animation + sound + the nine attach-point emitter slots
 /// (the columns consumed through decision 0099 phase 3; see the module doc for what remains).
+// No `Eq`: the `CharProc` params are floats (the client's own `fld` columns).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VisualKit {
     /// The `AnimationData.dbc` id this kit plays on the unit (`None` = no animation for this kit
@@ -155,23 +196,31 @@ pub struct VisualKit {
     /// order — slot `i` attaches at [`KIT_SLOT_TAGS`]`[i]`. Both none-sentinels fold to `None`
     /// like [`Self::anim_id`]. Iterate populated slots via [`Self::effects`].
     pub effect_slots: [Option<u32>; 9],
-    /// The four CharProc blocks — `CharProcType` (fields 15–18, int) with `CharParamZero`
-    /// (19–22, f32) and `CharParamOne` (23–26, f32). The dynobj emitter chain scans for the
-    /// FIRST type **9** slot: param0 encodes the shard-model table index (the exact small-int
-    /// decode `bits(param0 + 512.0) >> 14 & 0xff`, `0x5d55c0`), param1 is the emit rate the
-    /// graphics-quality factor multiplies (wow-re `dynobject-visual-machine.md`).
-    pub char_procs: [KitCharProc; 4],
-}
-
-/// One `SpellVisualKit` CharProc block (see [`VisualKit::char_procs`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct KitCharProc {
-    pub proc_type: u32,
-    pub param0: f32,
-    pub param1: f32,
+    /// The four `CharProc` slots (kit fields 15–34, transposed out of the five parallel arrays).
+    /// An unfilled slot is `None` — see [`char_proc_slot`] for the sentinel law; iterate the filled
+    /// ones via [`Self::char_procs`]. **Two consumers, two halves of the same table:** the *body*
+    /// procs an aura's state kit installs (type 14 translucency / type 1 tint — `benilla`'s
+    /// `aura_visual`, decision 0806), and the **dynobj emitter chain**, which scans for the FIRST
+    /// type **9** slot — there `params[0]` encodes the shard-model table index (the exact small-int
+    /// decode `bits(params[0] + 512.0) >> 14 & 0xff`, `0x5d55c0`) and `params[1]` is the emit rate
+    /// the graphics-quality factor multiplies (wow-re `dynobject-visual-machine.md`, decision 0797).
+    pub char_proc_slots: [Option<CharProc>; KIT_CHAR_PROCS],
 }
 
 impl VisualKit {
+    /// The filled `CharProc` slots, in slot order. The client walks all four unconditionally and
+    /// lets the dispatch table drop the unnamed keys; we drop the empty *slots* here and leave the
+    /// key switch to the consumer.
+    pub fn char_procs(&self) -> impl Iterator<Item = CharProc> + '_ {
+        self.char_proc_slots.iter().flatten().copied()
+    }
+
+    /// The `params[0]` of this kit's first `CharProc` slot of type `ty`, if any — the shape both
+    /// modelled procs want (a single float: the alpha factor, the packed tint).
+    pub fn char_proc_param(&self, ty: i32) -> Option<f32> {
+        self.char_procs().find(|p| p.ty == ty).map(|p| p.params[0])
+    }
+
     /// The populated emitter slots as `(M2 attachment id, SpellVisualEffectName id)` pairs, in
     /// kit-field order — the client fires **all** populated slots at **every** stage (stage sets
     /// lifetime policy only, wow-re `spell-visual-apply.md` §1.3).
@@ -243,6 +292,14 @@ impl SpellVisualCatalog {
         self.visuals.is_empty()
     }
 
+    /// Every loaded `SpellVisualKit` id, ascending — for whole-table census instruments
+    /// (`benilla-extract charprocs`). Runtime consumers resolve a kit by id through [`Self::kit`].
+    pub fn kit_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        let mut ids: Vec<u32> = self.kits.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+    }
+
     /// The number of `SpellVisualKit` rows loaded.
     pub fn kit_len(&self) -> usize {
         self.kits.len()
@@ -299,6 +356,48 @@ fn effect_name_schema() -> Schema {
     s
 }
 
+/// `SpellVisualKit`'s 35-field schema: fields 0–14 are the ids/FKs (`u32`), **15–18 the signed
+/// `CharProcType` keys** and **19–34 the four float param arrays** — the client loads the params
+/// with `fld` (wow-re `spellvisual-schema.md`), so they are typed here rather than bit-cast at
+/// every read.
+fn kit_schema() -> Schema {
+    let mut s = Schema::new("SpellVisualKit");
+    for i in 0..SPELL_VISUAL_KIT_FIELDS {
+        let ty = match i {
+            CHAR_PROC_TYPE_FIELD..CHAR_PROC_PARAM_FIELD => FieldType::Int32,
+            f if f >= CHAR_PROC_PARAM_FIELD => FieldType::Float32,
+            _ => FieldType::UInt32,
+        };
+        s.add_field(SchemaField::new(format!("F{i}"), ty));
+    }
+    s
+}
+
+/// Kit field 15 — `CharProcType[0]`, the first of the four type keys (@+0x3c).
+const CHAR_PROC_TYPE_FIELD: usize = 15;
+/// Kit field 19 — `CharParamZero[0]`, the first param column (@+0x4c); `CharParamOne/Two/Three[0]`
+/// follow every [`KIT_CHAR_PROCS`] fields (@+0x5c/+0x6c/+0x7c).
+const CHAR_PROC_PARAM_FIELD: usize = CHAR_PROC_TYPE_FIELD + KIT_CHAR_PROCS;
+
+/// One kit's `CharProc` slot `i`, transposed out of the five parallel arrays.
+///
+/// **The empty-slot sentinel, read off the real table:** the type column uses **both** `-1` and `0`
+/// for "no proc" — the same dual none-encoding this table already shows on its anim/sound FKs
+/// (module docs). Every filled slot in 5875 carries a positive key, and the dispatcher's translation
+/// table (`0x60dc20`) sends everything it doesn't name to the no-op case, so folding `<= 0` to
+/// `None` here is behaviour-identical and keeps consumers from switching on a sentinel.
+fn char_proc_slot(r: &benilla_dbc::Record, i: usize) -> Option<CharProc> {
+    let ty = i32_at(r, CHAR_PROC_TYPE_FIELD + i)?;
+    if ty <= 0 {
+        return None;
+    }
+    let mut params = [0.0; 4];
+    for (p, param) in params.iter_mut().enumerate() {
+        *param = f32_at(r, CHAR_PROC_PARAM_FIELD + p * KIT_CHAR_PROCS + i).unwrap_or(0.0);
+    }
+    Some(CharProc { ty, params })
+}
+
 /// Fold the DBC's dual none-encoding (module docs) to `Option<u32>`.
 fn some_unless_none(v: u32) -> Option<u32> {
     (v != 0 && v != NONE_SENTINEL).then_some(v)
@@ -341,11 +440,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
     let svk_bytes = chain
         .read_file(SPELL_VISUAL_KIT)
         .context("reading SpellVisualKit.dbc")?;
-    let svk_set = parse(
-        &svk_bytes,
-        n_u32_schema("SpellVisualKit", SPELL_VISUAL_KIT_FIELDS),
-        "SpellVisualKit.dbc",
-    )?;
+    let svk_set = parse(&svk_bytes, kit_schema(), "SpellVisualKit.dbc")?;
     let mut kits = HashMap::with_capacity(svk_set.records().len());
     for r in svk_set.records() {
         let Some(id) = u32_at(r, 0) else { continue };
@@ -355,21 +450,17 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
         for (i, slot) in effect_slots.iter_mut().enumerate() {
             *slot = u32_at(r, 3 + i).and_then(some_unless_none);
         }
-        // The four CharProc blocks: type (int column) + two f32 param columns, read as the
-        // client does — param0/param1 are IEEE floats in the file (the `fadd 512.0` decode and
-        // the emit-rate multiply are float ops at `0x5d55c0`/`0x6eb930`).
-        let char_procs = std::array::from_fn(|i| KitCharProc {
-            proc_type: u32_at(r, 15 + i).unwrap_or(0),
-            param0: u32_at(r, 19 + i).map(f32::from_bits).unwrap_or(0.0),
-            param1: u32_at(r, 23 + i).map(f32::from_bits).unwrap_or(0.0),
-        });
+        let mut char_proc_slots = [None; KIT_CHAR_PROCS];
+        for (i, slot) in char_proc_slots.iter_mut().enumerate() {
+            *slot = char_proc_slot(r, i);
+        }
         kits.insert(
             id,
             VisualKit {
                 anim_id,
                 sound,
                 effect_slots,
-                char_procs,
+                char_proc_slots,
             },
         );
     }
@@ -812,8 +903,8 @@ mod ground_fx_data_tests {
         );
         let k = visuals.kit(609).unwrap();
         assert_eq!(k.sound, Some(7));
-        let proc = k.char_procs.iter().find(|p| p.proc_type == 9).unwrap();
-        assert_eq!((proc.param0, proc.param1), (0.0, 5.0));
+        let proc = k.char_procs().find(|p| p.ty == 9).unwrap();
+        assert_eq!((proc.params[0], proc.params[1]), (0.0, 5.0));
 
         // Flamestrike 2120 → visual 33: its own model + sound, NO type-9 proc (a burning
         // patch has no falling shards) — the emitter half is data-absent, not code-gated.
@@ -831,7 +922,7 @@ mod ground_fx_data_tests {
         );
         let k = visuals.kit(695).unwrap();
         assert_eq!(k.sound, Some(3077));
-        assert!(k.char_procs.iter().all(|p| p.proc_type != 9));
+        assert!(k.char_procs().all(|p| p.ty != 9));
 
         // Rain of Fire 5740 → visual 329: shard-table index 1 (its own model again), rate 5/s.
         let v = visuals.stages(catalog.get(5740).unwrap().visual).unwrap();
@@ -839,12 +930,10 @@ mod ground_fx_data_tests {
         let proc = visuals
             .kit(v.area_kit)
             .unwrap()
-            .char_procs
-            .iter()
-            .find(|p| p.proc_type == 9)
-            .copied()
+            .char_procs()
+            .find(|p| p.ty == 9)
             .unwrap();
-        assert_eq!((proc.param0, proc.param1), (1.0, 5.0));
+        assert_eq!((proc.params[0], proc.params[1]), (1.0, 5.0));
 
         // All three pass the GO dest one-shot gate (field 6 == 0 ∧ field 12 ≠ 0) — the burst
         // fires for each; Fireball (missile_gate 1, pinned in the loader test above) does not.

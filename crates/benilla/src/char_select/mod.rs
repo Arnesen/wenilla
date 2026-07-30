@@ -255,6 +255,24 @@ fn apply_roster_policy(
             let sel = roster.selected.unwrap_or(0).min(roster.chars.len() - 1);
             roster.selected = Some(sel);
         }
+        // `WOW_CHARSELECT_PICK=<name>` — **select** that row and stay on the screen, the
+        // deliberate opposite of `WOW_CHAR`'s enter-the-world fast path. Without it the screen is
+        // only ever reachable on its default first row, which makes every "what does this
+        // character look like at select?" check hostage to the account's create order (it cost
+        // this session's item-glow verification a run). An unknown name leaves the default.
+        if let Ok(name) = std::env::var("WOW_CHARSELECT_PICK") {
+            match roster
+                .chars
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(&name))
+            {
+                Some(row) => {
+                    info!("char select: WOW_CHARSELECT_PICK={name} — selecting row {row}");
+                    roster.selected = Some(row);
+                }
+                None => warn!("char select: WOW_CHARSELECT_PICK={name} not on this account"),
+            }
+        }
         if let Some(guid) = roster.pending_pick {
             // We already chose this session (in-world reconnect, or a pick raced a dying socket):
             // re-answer without showing the screen.

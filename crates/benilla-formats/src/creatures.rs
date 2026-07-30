@@ -100,6 +100,13 @@ struct DisplayRow {
     /// `BloodLevel` (field 10) — a per-display UnitBloodLevels override; 0 = fall through to the
     /// model's `BloodID`.
     blood_level: u32,
+    /// `CreatureModelAlpha` (field 5, @+0x14) — the display's **base render opacity**, 0..=255.
+    /// This is the `baseAlpha` of the reference's per-unit alpha product (`0x60d2d0`, the CGUnit
+    /// vtbl+0x6c getter: `CreatureDisplayInfo+0x14 × (1/255)`; wow-re `ghost-death-visuals.md`
+    /// §2.3) — an authored translucency 445 of the 10534 shipped displays carry (wisps, spirits,
+    /// ghosts; the modal non-opaque value is 128). Players are not on this chain (the getter
+    /// returns a flat 1.0 for them).
+    model_alpha: u32,
 }
 
 /// One CreatureModelData row (the parts we use).
@@ -131,6 +138,16 @@ impl CreatureCatalog {
     /// id misses.
     pub fn display_scale(&self, display_id: u32) -> Option<f32> {
         self.display.get(&display_id).map(|r| r.scale)
+    }
+
+    /// A display's **base render alpha** in `0.0..=1.0` — `CreatureDisplayInfo.CreatureModelAlpha`
+    /// / 255 ([`DisplayRow::model_alpha`]). The first factor of the unit alpha product the aura
+    /// CharProc nodes multiply into (`crate::aura_visual`). `None` for an unknown display; a known
+    /// display with no authored translucency reads `1.0`.
+    pub fn display_base_alpha(&self, display_id: u32) -> Option<f32> {
+        self.display
+            .get(&display_id)
+            .map(|r| f32::from(r.model_alpha.min(255) as u8) / 255.0)
     }
 
     /// A display's **collision height** in raw model units — `CreatureModelData.collisionHeight`,
@@ -308,6 +325,7 @@ pub fn load_creature_catalog(chain: &mut Chain) -> Result<CreatureCatalog> {
                         scale: f32_at(r, 4).unwrap_or(1.0),
                         textures: [str_at(&rs, r, 6), str_at(&rs, r, 7), str_at(&rs, r, 8)],
                         blood_level: u32_at(r, 10).unwrap_or(0),
+                        model_alpha: u32_at(r, 5).unwrap_or(255),
                     },
                 );
             }

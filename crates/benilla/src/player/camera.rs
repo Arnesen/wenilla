@@ -510,7 +510,7 @@ pub(super) fn seat_camera(
 #[allow(clippy::type_complexity)]
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
-    self_player: Query<Entity, With<SelfPlayer>>,
+    self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<SelfPlayer>>,
     children_of: Query<&Children>,
     mut parts: Query<
         (
@@ -541,22 +541,29 @@ pub(crate) fn apply_self_model_fade(
         // Steady opaque: nothing to author and nothing to release.
         return;
     }
-    let Ok(root) = self_player.single() else {
+    let Ok((root, aura)) = self_player.single() else {
         *was_fading = false;
         return;
     };
+    // Our own live aura translucency (stealth, invisibility, ghost — `crate::aura_visual`) is a
+    // FACTOR of this fade, not a rival author: this system runs last on the self body and writes the
+    // alpha field verbatim, so a zoom-in while stealthed must carry the aura's term or the feather
+    // would silently re-opaque the character to 1.0 × the camera ramp. Folding it in here also makes
+    // the release edge honest — it releases at the *product*, so a fade ending while still stealthed
+    // hands the material back only if the body is genuinely opaque again.
+    let feather = rig.self_fade_alpha * crate::aura_visual::root_alpha(aura);
     // The walked set doubles as "which anchors belong to this model" for the card pass — built only
     // while fading, so the steady state (the early return above) never pays for it.
     let mut walked = EntityHashSet::default();
     apply_self_fade_to_descendants(
         root,
-        rig.self_fade_alpha,
+        feather,
         &children_of,
         &mut parts,
         &mut reauthor,
         &mut walked,
     );
-    let alpha = rig.self_fade_alpha.clamp(0.0, 1.0);
+    let alpha = feather.clamp(0.0, 1.0);
     for (card, mut tag, anim) in &mut cards {
         if !card
             .follows()
@@ -747,7 +754,6 @@ mod tests {
         let info = BillboardInfo {
             bone: 0,
             pivot: Vec3::new(0.0, 2.14, 0.0), // the eye-glow bone, head height
-            normal: Vec3::Z,
             kind: BillboardKind::Spherical,
             scale_anim: None,
             seq_translations: vec![],

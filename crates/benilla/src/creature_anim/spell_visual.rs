@@ -15,6 +15,7 @@ use benilla_formats::{SpellVisualCatalog, VisualKit, VisualStages, MISSILE_ATTAC
 use benilla_protocol::EntityKind;
 
 use crate::assets::{LockRecover, WorldAssets};
+use crate::aura_visual::AuraProc;
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, NetEntity, ObjectStore};
@@ -888,11 +889,22 @@ pub(super) fn route_cast_visuals(
 /// An aura refresh keeps its slot id present (no edge); a re-apply that flickers remove→add
 /// across frames reaps then re-begins — the drain's replace-on-persistent-begin keeps even the
 /// same-frame corner single-instanced.
-pub(super) fn arm_aura_state_fx(
+/// A state kit has **two halves** and this watcher owns the slot diff for both: the attach-point
+/// effect *models* above, and the kit's `CharProc` columns — what the aura does to the body itself
+/// (its translucency, its tint), emitted as [`AuraProc`] edges for [`crate::aura_visual`]. One diff
+/// and one kit resolve feed both fan-outs, the same way [`KitOut`] bundles a discrete play's writers,
+/// so the two halves of a kit can never disagree about when an aura came or went.
+///
+/// **The arm predicate is "this kit does *anything*", not "this kit has effect models"** — B114 was
+/// exactly that bug: Stealth's kit 312 carries no models, no anim and no attach at all (its whole
+/// visual is one proc-14 CharProc), so an effects-only test dropped it and the character showed
+/// nothing.
+pub(crate) fn arm_aura_state_fx(
     units: Query<(Entity, &ObjectStore)>,
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut fx: MessageWriter<SpellKitFx>,
+    mut procs: MessageWriter<AuraProc>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
 ) {
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
@@ -912,6 +924,7 @@ pub(super) fn arm_aura_state_fx(
                     spell_id,
                     class: FxClass::AuraState,
                 });
+                procs.write(AuraProc::Reap { entity, spell_id });
             }
         }
         let mut next = Vec::with_capacity(prev.len());
@@ -924,16 +937,29 @@ pub(super) fn arm_aura_state_fx(
                 continue; // no state kit — not this watcher's aura
             };
             let effects = resolve_kit_effects(&visuals.0, &kit);
-            if effects.is_empty() {
-                continue;
+            let nodes: Vec<crate::aura_visual::AuraNode> = kit
+                .char_procs()
+                .filter_map(crate::aura_visual::node_for)
+                .collect();
+            if effects.is_empty() && nodes.is_empty() {
+                continue; // a state kit that does nothing we model — nothing to arm or reap
             }
-            fx.write(SpellKitFx::Begin {
-                entity,
-                spell_id,
-                persistent: true,
-                class: FxClass::AuraState,
-                effects,
-            });
+            if !effects.is_empty() {
+                fx.write(SpellKitFx::Begin {
+                    entity,
+                    spell_id,
+                    persistent: true,
+                    class: FxClass::AuraState,
+                    effects,
+                });
+            }
+            if !nodes.is_empty() {
+                procs.write(AuraProc::Begin {
+                    entity,
+                    spell_id,
+                    nodes,
+                });
+            }
             next.push(spell_id);
         }
         *prev = next;

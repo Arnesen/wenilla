@@ -1,0 +1,136 @@
+//! `charprocs`: census the `SpellVisualKit` **CharProc** columns (fields 15–34) — the character-half
+//! of a kit: what a kit does to the *body* (its alpha, its tint) rather than at an attach point.
+//!
+//! The scope instrument for the aura-state CharProc system (B114 — "Stealth shows nothing on the
+//! character"). It answers, from the shipped table rather than from expectation: which proc **types**
+//! exist, how many kits carry each, which **lifecycle stage** reaches them from a live spell, and —
+//! for the state stage, whose kits live for an aura's whole life — exactly which spells reach which
+//! proc with which parameter. A type that shows up only behind `cast`/`impact` is a discrete-play
+//! concern; a type behind `state` is an aura-lifetime one.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::Result;
+use benilla_formats::{char_proc_type, Chain, SpellVisualCatalog, VisualStages};
+
+/// A `SpellVisual` stage's column selector — one of the five lifecycle-kit fields.
+type StagePick = fn(&VisualStages) -> u32;
+
+/// The five `SpellVisual` lifecycle stages, in field order — the label plus its column selector.
+const STAGES: [(&str, StagePick); 5] = [
+    ("precast", |s| s.precast),
+    ("cast", |s| s.cast),
+    ("impact", |s| s.impact),
+    ("state", |s| s.state),
+    ("channel", |s| s.channel),
+];
+
+/// A human label for the proc types benilla models by name.
+fn type_name(ty: i32) -> &'static str {
+    match ty {
+        char_proc_type::TINT => "TINT (body RGB)",
+        char_proc_type::ALPHA => "ALPHA (body translucency)",
+        _ => "(unmodelled)",
+    }
+}
+
+/// Census every kit's CharProc slots, then reachability per stage, then the state-stage detail.
+pub fn run(chain: &mut Chain) -> Result<()> {
+    let spells = benilla_formats::load_spell_catalog(chain)?;
+    let visuals = benilla_formats::load_spell_visual_catalog(chain)?;
+
+    // 1. The raw table census: proc type → the kits carrying it.
+    let mut by_type: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
+    let mut kits_with_any = 0usize;
+    for kit_id in visuals.kit_ids() {
+        let Some(kit) = visuals.kit(kit_id) else {
+            continue;
+        };
+        let mut any = false;
+        for proc in kit.char_procs() {
+            by_type.entry(proc.ty).or_default().insert(kit_id);
+            any = true;
+        }
+        kits_with_any += usize::from(any);
+    }
+    println!(
+        "SpellVisualKit: {} rows, {kits_with_any} carry at least one CharProc",
+        visuals.kit_len(),
+    );
+    println!("\nproc type census (all kits):");
+    for (ty, kits) in &by_type {
+        println!(
+            "  type {ty:>3}  {:>4} kit(s)   {}",
+            kits.len(),
+            type_name(*ty)
+        );
+    }
+
+    // 2. Reachability: which stage of which spell's visual actually reaches each proc type. A kit
+    //    nobody's visual chain names is authored-but-dead as far as the client is concerned.
+    let mut by_stage: BTreeMap<(&str, i32), BTreeSet<u32>> = BTreeMap::new();
+    // The state stage's detail rows: (spell id, name, kit, proc type, params[0]).
+    let mut state_rows: Vec<(u32, String, u32, i32, f32)> = Vec::new();
+    for (spell_id, display) in spells.iter() {
+        let Some(stages) = visuals.stages(display.visual) else {
+            continue;
+        };
+        for (label, pick) in STAGES {
+            let kit_id = pick(stages);
+            let Some(kit) = visuals.kit(kit_id) else {
+                continue;
+            };
+            for proc in kit.char_procs() {
+                by_stage.entry((label, proc.ty)).or_default().insert(kit_id);
+                if label == "state" {
+                    state_rows.push((
+                        spell_id,
+                        display.name.clone(),
+                        kit_id,
+                        proc.ty,
+                        proc.params[0],
+                    ));
+                }
+            }
+        }
+    }
+    println!("\nreached from a live Spell.dbc visual chain, by stage:");
+    for ((label, ty), kits) in &by_stage {
+        println!(
+            "  {label:8} type {ty:>3}  {:>4} kit(s)   {}",
+            kits.len(),
+            type_name(*ty)
+        );
+    }
+
+    // 3. The state stage in full — these are the aura-lifetime procs, one line per (spell, proc).
+    println!(
+        "\nSTATE-stage CharProcs — the aura-lifetime set ({} spell/proc pair(s)):",
+        state_rows.len()
+    );
+    state_rows.sort_by_key(|r| (r.3, r.2, r.0));
+    for (spell_id, name, kit_id, ty, param) in &state_rows {
+        println!(
+            "  spell {spell_id:>6} {name:<28} kit {kit_id:<5} type {ty:>3} param0 {param:<12} {}",
+            type_name(*ty)
+        );
+    }
+    Ok(())
+}
+
+/// The kits a spell's visual chain reaches, printed as one line per stage — the per-spell view of
+/// the census above (used by `spellvis`'s CharProc lines; kept here beside the type names).
+pub fn print_kit_procs(visuals: &SpellVisualCatalog, kit_id: u32, indent: &str) {
+    let Some(kit) = visuals.kit(kit_id) else {
+        return;
+    };
+    for (i, proc) in kit.char_proc_slots.iter().enumerate() {
+        let Some(proc) = proc else { continue };
+        println!(
+            "{indent}charproc[{i}] type {:>3} params {:?}  {}",
+            proc.ty,
+            proc.params,
+            type_name(proc.ty)
+        );
+    }
+}

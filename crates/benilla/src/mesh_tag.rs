@@ -195,6 +195,16 @@ pub(crate) fn with_shade(tag: u32, shade: u8) -> u32 {
     (tag & !(ALPHA_MASK | SHADE_MASK)) | carried_alpha(tag) | (u32::from(shade) << SHADE_SHIFT)
 }
 
+/// Read back the alpha field of a tag as a fraction — the decoder twin of [`alpha_bits`], for a
+/// writer's change gate and for the tests that assert what actually reached an instance. A whole
+/// payload of `0` is the shader's *untagged ⇒ opaque* sentinel, so it reads `1.0`.
+pub(crate) fn alpha_of(tag: u32) -> f32 {
+    if tag == 0 {
+        return 1.0;
+    }
+    (tag & ALPHA_MASK) as f32 / ALPHA_MAX
+}
+
 /// Read back the shade byte of an exterior-payload tag (the shade writer's change gate).
 pub(crate) fn shade_of(tag: u32) -> u8 {
     ((tag & SHADE_MASK) >> SHADE_SHIFT) as u8
@@ -222,7 +232,7 @@ pub(crate) fn describe(tag: u32) -> String {
     };
     format!(
         "{tag:#010x}{flags} α {:.3} shade {} / slot {} rig {}",
-        (tag & ALPHA_MASK) as f32 / ALPHA_MAX,
+        alpha_of(tag),
         shade_of(tag),
         (tag & PROBE_MASK) >> PROBE_SHIFT,
         rig_of(tag),

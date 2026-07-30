@@ -13,8 +13,9 @@ use crate::particles;
 /// Bevy `PointLight` intensity (lumens) for an M2 light of unit `diffuse_intensity`. Bevy stores the GPU
 /// colour as `linear_color × intensity/(4π)` (bevy_pbr light.rs), so `4π` makes the shader read exactly
 /// `diffuse_color × diffuse_intensity` — a clean, predictable base. `wow_model.wgsl` then applies the
-/// faithful WoW falloff `1/(0.7d+0.03d²)` (decision 0016) and the director gain (`sh_c16.w`); tune the
-/// look via that gain, not here.
+/// faithful WoW falloff `1/(0.7d+0.03d²)` (decision 0016). There is no gain dial any
+/// more: the 0273 `sh_c16.w` gain is retired and the commit is the reference's raw product
+/// (`global_light::commit_raw`).
 const POINT_LIGHT_INTENSITY: f32 = 4.0 * std::f32::consts::PI;
 /// The packed per-light `range` (yd) — since 0285 this is the ≤3-nearest **selection-candidacy**
 /// radius around the receiving unit's anchor, not an evaluation cutoff (a committed GL light has

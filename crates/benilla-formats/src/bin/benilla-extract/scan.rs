@@ -247,6 +247,90 @@ fn facet_x(s: &benilla_formats::RenderSubmesh) -> Option<f32> {
     (len > 1e-9).then(|| n[0] / len)
 }
 
+/// Sweep every `.m2` and census its **attachment addressing**: how many records it authors, how
+/// many attach ids its AttachLookup resolves, and — the point of the report — where the two
+/// disagree, i.e. where "scan the table for a record with this id" answers differently from the
+/// reference's `lookup[id]` (`0x710310`).
+///
+/// Built for decision 0805 (item glows hang on the item model's ids 0..4) to answer the question
+/// that decides whether the lookup can be adopted globally: which models change hands? One line
+/// per divergent model — `+id` = an id only the lookup reaches, `-id` = an id only a table scan
+/// reaches (a record the reference cannot address at all), `id:a→b` = same id, different record.
+pub fn attachscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut with_points, mut divergent) = (0u32, 0u32, 0u32);
+    let mut by_family: BTreeMap<String, u32> = BTreeMap::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let Ok(format) = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes)) else {
+            continue;
+        };
+        let model = format.model();
+        scanned += 1;
+        if model.attachments.is_empty() && model.attach_lookup.is_empty() {
+            continue;
+        }
+        with_points += 1;
+        // What a table scan would answer (first record per id — the pre-0805 rule) against what
+        // the lookup answers, compared by the record each id lands on.
+        let mut scan: BTreeMap<u16, usize> = BTreeMap::new();
+        for (i, a) in model.attachments.iter().enumerate() {
+            scan.entry(a.id).or_insert(i);
+        }
+        let lookup: BTreeMap<u16, usize> = (0..model.attach_lookup.len())
+            .filter_map(|id| {
+                let idx = *model.attach_lookup.get(id)?;
+                (idx != 0xffff && (idx as usize) < model.attachments.len())
+                    .then_some((id as u16, idx as usize))
+            })
+            .collect();
+        let mut diffs: Vec<String> = Vec::new();
+        for (&id, &idx) in &lookup {
+            match scan.get(&id) {
+                Some(&s) if s != idx => diffs.push(format!("{id}:{s}→{idx}")),
+                Some(_) => {}
+                None => diffs.push(format!("+{id}")),
+            }
+        }
+        for &id in scan.keys() {
+            if !lookup.contains_key(&id) {
+                diffs.push(format!("-{id}"));
+            }
+        }
+        if !diffs.is_empty() {
+            divergent += 1;
+            *by_family.entry(model_key(&name)).or_default() += 1;
+            println!(
+                "{:<62} recs {:>2}  lookup {:>2}  {}",
+                name,
+                model.attachments.len(),
+                lookup.len(),
+                diffs.join(" ")
+            );
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {with_points} with attachment data, \
+         {divergent} where a table scan disagrees with the lookup"
+    );
+    for (family, n) in by_family {
+        eprintln!("  {family}: {n}");
+    }
+    Ok(())
+}
+
 /// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters.
 pub fn ribbonscan(chain: &mut Chain) -> Result<()> {
     let names: Vec<String> = chain
@@ -373,7 +457,11 @@ pub fn partscan(chain: &mut Chain, mask: u32, prefix: Option<&str>) -> Result<()
 /// Sweep every `.m2` (under `prefix`, if given) and classify its billboard usage — see the
 /// `Bbscan` command doc. Output per model: the authored arms and how many vertices ride each
 /// DIRECTLY (primary bone is the billboard bone — the card path) vs INHERITED (primary bone
-/// descends from one — the joint-palette path, decision 0205).
+/// descends from one — the joint-palette path, decision 0205), then the same question for the
+/// model's **particle emitters and ribbons** (`fx[…]`) — the population behind decision 0813: an
+/// emitter on (or under) a billboard bone has a camera-dependent origin, because the reference
+/// folds the record position through the *replaced* palette matrix
+/// (wow-re `part-anchoring-live-bone.md` §1 row 3 · `m2emitspine::particle_bone_xform`).
 pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
     let names: Vec<String> = chain
@@ -396,6 +484,9 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     // Corpus totals: models exercising each arm, split by how the geometry rides it.
     let mut direct_models: HashMap<&'static str, u32> = HashMap::new();
     let mut inherited_models: HashMap<&'static str, u32> = HashMap::new();
+    // …and the effect riders (particles/ribbons on a billboard chain).
+    let mut fx_models = 0u32;
+    let mut fx_total: HashMap<String, u32> = HashMap::new();
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -445,12 +536,46 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             v.sort();
             v.join(" ")
         };
+        // The EFFECT riders: a particle emitter / ribbon whose bone chain reaches a billboard
+        // bone has a camera-dependent live frame (its record position rides the replaced palette
+        // matrix), so a consumer that places it at the rest pose puts it in the wrong place.
+        // `d` = the effect's own bone is the billboard bone, `i` = it descends from one.
+        let mut fx: HashMap<String, u32> = HashMap::new();
+        let mut tally = |tag: &str, bone: u16| {
+            if let Some((direct, k)) = ancestor_arm(bone as usize) {
+                let key = format!("{tag}{}{}", if direct { "d" } else { "i" }, arm(k));
+                *fx.entry(key).or_default() += 1;
+            }
+        };
+        for e in benilla_formats::parse_m2_particle_emitters(&bytes)
+            .unwrap_or_default()
+            .iter()
+        {
+            tally("p", e.bone);
+        }
+        for r in benilla_formats::parse_m2_ribbon_emitters(&bytes)
+            .unwrap_or_default()
+            .iter()
+        {
+            tally("r", r.bone);
+        }
+        let fx_counts = {
+            let mut v: Vec<String> = fx.iter().map(|(k, n)| format!("{k}:{n}")).collect();
+            v.sort();
+            v.join(" ")
+        };
         let bones: String = kinds.iter().flatten().map(|&k| arm(k)).collect();
         println!(
-            "{bones:>4}  direct[{}]  inherited[{}]  {name}",
+            "{bones:>4}  direct[{}]  inherited[{}]  fx[{fx_counts}]  {name}",
             fmt_counts(&direct),
             fmt_counts(&inherited)
         );
+        if !fx.is_empty() {
+            fx_models += 1;
+            for (k, n) in &fx {
+                *fx_total.entry(k.clone()).or_default() += n;
+            }
+        }
         for k in direct.keys() {
             *direct_models
                 .entry(match *k {
@@ -477,8 +602,13 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         v.sort();
         v.join(" ")
     };
+    let fx_tot = {
+        let mut v: Vec<String> = fx_total.iter().map(|(k, n)| format!("{k}:{n}")).collect();
+        v.sort();
+        v.join(" ")
+    };
     eprintln!(
-        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]",
+        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]; {fx_models} with EFFECTS on a billboard chain [{fx_tot}]",
         tot(&direct_models),
         tot(&inherited_models)
     );

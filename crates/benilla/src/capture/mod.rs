@@ -652,8 +652,24 @@ fn drive_capture(
     game_time: Res<Time>,
     mut clock: ResMut<Time<Virtual>>,
 ) {
-    let resident =
-        progress.total > 0 && progress.ready == progress.total && progress.focus_resident;
+    // Residency, on the STRONGEST term the streamer publishes (0810). `ready == total` counts desired
+    // tiles spawned, and `focus_resident` only that the tile under the focus exists — neither says the
+    // tile's *placements* are up. `scene_ready` does exactly that (the focus tile and its 8 neighbours
+    // spawned with every WMO/doodad/prop they reference — `loading_screen`, 0737), and
+    // `placements_pending` is its outstanding count. The entity-count quiescence test below cannot
+    // cover the gap either: a placement that has not spawned yet moves no count, so the window can
+    // elapse while one is still arriving.
+    //
+    // **This is a gate correction, NOT the fix for the capture flake** (`creature-{sun,shade}-rear`
+    // still flip under `visual.sh selfcheck` at MAE ~4.27 with this in). 0810 has the open defect and,
+    // more importantly, the protocol: consecutive captures of ONE scenario share a warm asset cache
+    // and converge on a single state, so they always look deterministic. Test with a full-sweep
+    // selfcheck, never with repetition — that mistake produced three wrong diagnoses in a row.
+    let resident = progress.total > 0
+        && progress.ready == progress.total
+        && progress.focus_resident
+        && progress.scene_ready
+        && progress.placements_pending == 0;
     // Both fixture viewers (fxview / waterfx) share the settle→arm→age→shoot flow; only the
     // requested age differs.
     let fixture_age = fx_req

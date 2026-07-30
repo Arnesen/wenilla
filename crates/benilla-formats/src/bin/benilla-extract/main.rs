@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use benilla_formats::open_chain;
 use clap::{Parser, Subcommand};
 
+mod charprocs;
 mod m2dump;
 mod scan;
 mod spellvis;
@@ -65,6 +66,11 @@ enum Command {
         /// The `Spell.dbc` id (e.g. 133 = Fireball).
         spell_id: u32,
     },
+    /// Census the `SpellVisualKit` **CharProc** columns (a kit's effect on the BODY — its alpha,
+    /// its tint): which proc types the shipped table carries, which lifecycle stage reaches each
+    /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
+    /// for the aura-state CharProc system.
+    Charprocs,
     /// Dump an M2's collision hull as the mover collides with it: vertex/triangle counts, the
     /// model-space AABB (WoW axes, Z up), and its extents — the "what does walking into this
     /// actually hit" instrument (the step-up climb-vs-slide asset question, decision 0195; a
@@ -127,6 +133,13 @@ enum Command {
     M2alpha {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
+    },
+    /// Sweep every `.m2` and report where **addressing an attachment by id** through the model's
+    /// AttachLookup (the reference's `0x710310`) disagrees with scanning its record table — the
+    /// duplicate-id census behind decision 0805 (item glows hang on ids 0..4 of the item model).
+    Attachscan {
+        /// Optional path prefix to restrict the sweep (e.g. `Item\ObjectComponents\Weapon`).
+        prefix: Option<String>,
     },
     /// Sweep every `.m2` in the chain and list the models carrying RIBBON emitters (header
     /// `0x134`) — the population instrument for the ribbon subsystem (weapon trails, streamers):
@@ -543,6 +556,7 @@ fn main() -> Result<()> {
         Command::M2bones { internal_path } => m2dump::m2bones(&mut chain, &internal_path)?,
         Command::M2batch { internal_path } => m2dump::m2batch(&mut chain, &internal_path)?,
         Command::M2alpha { internal_path } => m2dump::m2alpha(&mut chain, &internal_path)?,
+        Command::Attachscan { prefix } => scan::attachscan(&mut chain, prefix.as_deref())?,
         Command::Ribbonscan => scan::ribbonscan(&mut chain)?,
         Command::Cellscan => scan::cellscan(&mut chain)?,
         Command::Blendscan { prefix } => scan::blendscan(&mut chain, prefix.as_deref())?,
@@ -619,6 +633,7 @@ fn main() -> Result<()> {
         } => scan::doodadscan(&mut chain, &map, center_x, center_y, tile_radius)?,
         Command::Shadeat { map, x, y } => scan::shadeat(&mut chain, &map, x, y)?,
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
+        Command::Charprocs => charprocs::run(&mut chain)?,
     }
 
     Ok(())

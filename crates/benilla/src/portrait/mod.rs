@@ -77,14 +77,14 @@ use crate::target::Selection;
 use crate::terrain::WowModelMaterial;
 
 mod framing;
+pub(crate) use framing::{attachment_point, head_anchor, PortraitAnchors};
 use framing::{body_frame, frame, PORTRAIT_FOV};
-pub(crate) use framing::{head_anchor, PortraitAnchors};
 mod booth;
 use booth::{spawn_booth_model, BoothBillboardSpec, BoothMotion, BoothPart, BoothRider};
 mod glue_booth;
 pub(crate) use glue_booth::{
-    CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard, PreviewPart,
-    PreviewRider, SelectLook, GLUE_SLOT,
+    CreateLook, GlueLook, GluePreview, GluePreviewBake, GlueScene, PreviewBillboard, PreviewGlow,
+    PreviewPart, PreviewRider, SelectLook, GLUE_SLOT,
 };
 mod light;
 use light::{material_variant, model_pane_light_rows, studio_light_rows, BoothLight};
@@ -398,6 +398,13 @@ impl Plugin for PortraitPlugin {
             // Re-face each booth's eye-glow cards to its own camera (reads last-propagate joint
             // globals; unordered w.r.t. the syncs — a fresh card just faces forward one frame).
             .add_systems(Update, booth::face_booth_billboards)
+            // The booth twin of the world visibility authority's render-alpha write (decision 0807):
+            // push each booth part's sampled `MatAnim` onto its tag. Ordered after the shared
+            // sampler, the only producer of `MatAnim::current`, so it moves THIS frame's value.
+            .add_systems(
+                Update,
+                booth::push_booth_mat_alpha.after(crate::doodad_anim::sample_mat_anim),
+            )
             // The phase-3 preview instrument (`WOW_CREATE_TEST`, decision 0423): inert without the env.
             .add_systems(Update, glue_booth::drive_create_test)
             // `WOW_BOOTH_DUMP=<token>:<path>:<secs>` — photograph a booth's render target to disk
@@ -407,8 +414,8 @@ impl Plugin for PortraitPlugin {
     }
 }
 
-/// A fresh transparent render-target image (RGBA8 sRGB) of `size²`, usable as a camera target and
-/// sampled by the UI. Portrait slots pass [`PORTRAIT_SIZE`]; the paper doll passes [`PAPERDOLL_SIZE`].
+/// A fresh transparent render-target image of `size²`, usable as a camera target and sampled by the
+/// UI. Portrait slots pass [`PORTRAIT_SIZE`]; the paper doll passes [`PAPERDOLL_SIZE`].
 fn new_target_image(size: u32) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
@@ -417,11 +424,24 @@ fn new_target_image(size: u32) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0, 0, 0, 0],
-        // NON-sRGB on purpose, measured (see the Hdr note below): with an Srgb label the composited
-        // portrait read one net sRGB-decode too dark vs the world render of the same model. Raw bytes
-        // + the swapchain's single encode lands the bake at world parity, pixel-verified.
-        TextureFormat::Rgba8Unorm,
+        &[0; 8],
+        // **Un-encoded on purpose, and at float precision — the two are separate choices.**
+        //
+        // Un-encoded (no `…Srgb` label) is measured: with an Srgb label the composited portrait read
+        // one net sRGB-decode too dark vs the world render of the same model, because the UI arc
+        // composites in GAMMA bytes and does its one decode at the end (`ui_gamma`, decisions
+        // 0254/0541) — a booth target that pre-encodes lands a second encode in that chain. So the
+        // target holds the booth's own un-encoded values and the UI shader encodes them.
+        //
+        // FLOAT, not `Rgba8Unorm`, is B126 (decision 0804). Quantizing *un-encoded* values to 8 bits
+        // is a precision collapse exactly where the eye is most sensitive: the only display levels
+        // reachable below display byte 100 are `srgb(k/255)` = 0, 13, 22, 28, 34, 38, … — ~25 steps
+        // where the 8-bit gamma backbuffer this feeds has 100. That is the reported "colors are 16
+        // bit instead of 32" banding on the glue screens' trees and skybox, measured on the
+        // histogram of a char-select capture (15 of 16 predicted ladder values hit). The pipeline's
+        // *semantics* are unchanged by this — same values, same single encode downstream, just not
+        // rounded to a 256-step linear grid on the way through.
+        TextureFormat::Rgba16Float,
         RenderAssetUsages::default(),
     );
     image.texture_descriptor.usage =
@@ -788,6 +808,9 @@ fn sync_portraits(
                     skinned: p.skinned_mesh.clone(),
                     static_mesh: p.static_mesh.clone(),
                     material: booth_light.studio.variant(&p.material, &mut wow_mats),
+                    // `None` — the same known gap as the glue preview's (decision 0807): a
+                    // mirrored `PortraitPart` doesn't carry the batch's alpha loops.
+                    alpha_anim: None,
                 })
                 .collect();
             let booth_riders: Vec<BoothRider> = riders
@@ -1035,6 +1058,8 @@ fn sync_body_booth(
                 skinned: p.skinned_mesh.clone(),
                 static_mesh: p.static_mesh.clone(),
                 material: booth_light.pane.variant(&p.material, wow_mats),
+                // `None` — the same known gap as the glue preview's (decision 0807).
+                alpha_anim: None,
             })
             .collect();
         let booth_riders: Vec<BoothRider> = riders
