@@ -18,19 +18,25 @@
 //! act on the body:
 //!
 //! - **proc 14 = translucency** (`0x60d972`): the param becomes a node keyed by spell id
-//!   (`node+0x18`, value at `node+0x78`) on the unit's list `unit+0xb50`. The unit's effective alpha
-//!   is then recomputed by `0x60d180` as **`baseAlpha × Π(node alphas)`** — `baseAlpha` from the
-//!   CGUnit vtbl+0x6c getter `0x60d2d0` (`CreatureDisplayInfo+0x14 × 1/255`; a flat `1.0` for
-//!   players) — and handed to **`0x614f80` StartAlphaFade(target, 1000 ms)**, the same ramp block
-//!   (`+0xec..0x100`) and the same `clamp01(t)³` ease (`0x614a90`) our appear-fade already rides
-//!   ([`crate::model_fade::fade_alpha`]). Per frame `model+0x180 = baseRenderAlpha × fade`
+//!   (`node+0x18`, value at `node+0x78`), linked at the HEAD of the unit's list `unit+0xb50`. The
+//!   unit's effective alpha is then recomputed by `0x60d180` as **`baseAlpha × the head node's
+//!   factor`** — at most one node term, never a product over the chain (wow-re
+//!   `base-render-alpha.md` §4, correcting this note's earlier `Π` gloss) — `baseAlpha` from the
+//!   vtbl+0x6c getter `0x60d2d0` (`CreatureDisplayInfo+0x14 × 1/255`, the SAME slot in the unit
+//!   and player vtables: "players 1.0" was the data talking, not a type fork — §6) — and handed
+//!   to **`0x614f80` StartAlphaFade(target, 1000 ms)**, the same ramp block (`+0xec..0x100`) and
+//!   the same `clamp01(t)³` ease (`0x614a90`) our appear-fade already rides
+//!   ([`crate::model_fade::fade_alpha`]). Per frame `model+0x180 = master × fade`
 //!   (`0x614baa → 0x710cb0`), which multiplies into the per-batch alpha (`0x707680`).
+//!   The recompute has a second, aura-free caller: the DISPLAYID watcher's refresh (`0x60abe0 →
+//!   0x60ad9f`), which is how a display whose row says `CreatureModelAlpha < 255` — Ghost Wolf's
+//!   4613 = 102 — renders translucent by itself; [`refresh_base_alpha`] is that leg.
 //! - **proc 1 = tint** (`0x60d840`): `round(param)` is a packed `0x00RRGGBB` OR'd with `0xff000000`
 //!   into a tint node (list `unit+0xce0`); per frame the head node goes `×1/255` into
 //!   `model+0x184/188/18c`.
 //!
 //! Removal is the mirror image: the aura leaves the slot → `0x5ff290` drops that spell's nodes and
-//! recomputes, so the alpha **ramps back** to the new product over the same 1000 ms.
+//! recomputes, so the alpha **ramps back** to the new target over the same 1000 ms.
 //!
 //! The vis-flag is a decoy and must not be used here: `UNIT_FIELD_BYTES_1` byte 3's CREEP (stealth)
 //! and GHOST bits drive **no** body render at all — an exhaustive census of every `+0x213` reference
@@ -51,7 +57,7 @@
 //!
 //! ## What is built here, and what is not
 //!
-//! **Proc 14 ships whole** — nodes, the `baseAlpha × Π` product, the 1000 ms cubic ramp both ways,
+//! **Proc 14 ships whole** — nodes, the `baseAlpha × head node` target, the 1000 ms cubic ramp both ways,
 //! and the render composition below.
 //!
 //! **Proc 1 ships too** (decision 0812): its nodes live here ([`AuraNodes::tint`], head-node-wins as
@@ -104,7 +110,7 @@ const ALPHA_EPS: f32 = 1.0 / 128.0;
 /// reference keys `node+0x18`. Held in [`AuraNodes`]; a `Reap` for that spell id removes it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum AuraNode {
-    /// Proc 14: this aura's alpha factor (`node+0x78`), one term of the unit's alpha product.
+    /// Proc 14: this aura's alpha factor (`node+0x78`) — the target's node term while it is the head.
     Alpha(f32),
     /// Proc 1: this aura's body tint, unpacked from the param's `0x00RRGGBB`. Modelled, not yet
     /// rendered (module docs).
@@ -112,7 +118,7 @@ pub(crate) enum AuraNode {
 }
 
 /// The CharProc node lists of one unit — the ECS twin of the reference's per-unit `unit+0xb50`
-/// (alpha) and `unit+0xce0` (tint) lists, plus the ramp `0x614f80` drives from their product.
+/// (alpha) and `unit+0xce0` (tint) lists, plus the ramp `0x614f80` drives from their heads.
 ///
 /// Lives on the **net entity root**, like [`crate::entity_shade::GroundShade`]: the reference has one
 /// of these per CGUnit and every attached model (held item, helm, shoulder) renders off the owner's,
@@ -120,13 +126,17 @@ pub(crate) enum AuraNode {
 /// direct children.
 #[derive(Component, Debug, Default)]
 pub(crate) struct AuraNodes {
-    /// `(spell id, factor)` — proc-14 nodes. The product of these times [`Self::base`] is the target.
+    /// `(spell id, factor)` — proc-14 nodes, newest at the front (the reference links a fresh node
+    /// at the list head). The HEAD times [`Self::base`] is the target — never a product.
     alpha: Vec<(u32, f32)>,
-    /// `(spell id, rgb)` — proc-1 nodes, insertion-ordered so the front is the reference's head node
-    /// (the one its per-frame apply reads). No renderer yet; see the module docs.
+    /// `(spell id, rgb)` — proc-1 nodes, newest at the front like the alpha list; the head is what
+    /// the per-frame apply reads.
     tint: Vec<(u32, [u8; 3])>,
-    /// `baseAlpha`: `CreatureDisplayInfo.CreatureModelAlpha / 255` for a creature, `1.0` for a player
-    /// (`0x60d2d0`). Seeded when the first node arrives — by then the display id has landed.
+    /// `baseAlpha`: the display row's `CreatureModelAlpha / 255` — for EVERY unit, players
+    /// included; the getter `0x60d2d0` has no type fork, a normal character's row just says 255
+    /// (`base-render-alpha.md` §6, correcting the "players 1.0" gloss). Owned by
+    /// [`refresh_base_alpha`], which re-resolves it on every display-id change (a shapeshift
+    /// swaps it live) and ramps to the new value.
     base: f32,
     /// Where the ramp is now — what the parts actually render at.
     current: f32,
@@ -155,15 +165,16 @@ impl AuraNodes {
         }
     }
 
-    /// The reference's `0x60d180`: `baseAlpha × Π(node alphas)`, clamped to a sane `[0, 1]`.
+    /// The reference's `0x60d180`: `baseAlpha × the HEAD alpha node's factor` — at most ONE node
+    /// term, skipped entirely when the list is empty (`0x60d195 je`), never a product over the
+    /// chain (wow-re `base-render-alpha.md` §4, correcting `ghost-death-visuals.md`'s `Π` gloss).
+    /// Nodes are linked at the head as they install, so the newest one is the term that counts.
     fn target(&self) -> f32 {
-        self.alpha
-            .iter()
-            .fold(self.base, |acc, (_, f)| acc * f)
-            .clamp(0.0, 1.0)
+        let head = self.alpha.first().map_or(1.0, |(_, f)| *f);
+        (self.base * head).clamp(0.0, 1.0)
     }
 
-    /// Point the ramp at the current product, from wherever it is now. A no-op when the target
+    /// Point the ramp at the current target, from wherever it is now. A no-op when the target
     /// hasn't moved, so an aura refresh (or a node whose factor equals the live one) doesn't restart
     /// the ease.
     fn retarget(&mut self, now: f32) {
@@ -295,11 +306,12 @@ pub(crate) fn node_for(proc: benilla_formats::CharProc) -> Option<AuraNode> {
 
 /// Apply this frame's [`AuraProc`] edges to the units' node lists, then re-aim every live ramp.
 ///
-/// `base_alpha` is resolved once per unit, when its first node arrives: a player is a flat `1.0`
-/// (the reference's getter has no display lookup for them), a creature is its display's
-/// `CreatureModelAlpha`. A unit whose display is unknown falls back to `1.0` — opaque, i.e. the
-/// aura's factor alone, which is the safe direction (the alternative would hide a unit whose row
-/// simply failed to load).
+/// `base_alpha` here only SEEDS a node set created by an aura edge — its steady-state owner is
+/// [`refresh_base_alpha`], which re-resolves it on every display change. The getter is the same
+/// for players and creatures (the display row's `CreatureModelAlpha`; `base-render-alpha.md` §6).
+/// A unit whose display is unknown falls back to `1.0` — opaque, i.e. the aura's factor alone,
+/// which is the safe direction (the alternative would hide a unit whose row simply failed to
+/// load).
 pub(crate) fn drain_aura_procs(
     mut edges: MessageReader<AuraProc>,
     time: Res<Time>,
@@ -330,7 +342,7 @@ pub(crate) fn drain_aura_procs(
                     // that streams in already carrying two aura procs (or gets two in one packet
                     // burst) emits two Begins this frame and the second would `get_mut` the
                     // still-absent component, build a *fresh* set, and insert over the first —
-                    // silently keeping only the last aura's factor. Staging makes the product of a
+                    // silently keeping only the last aura's factor. Staging makes the outcome of a
                     // same-frame burst come out right, which is the common case for a unit observed
                     // mid-buff, not a corner.
                     let n = fresh.entry(*entity).or_insert_with(|| {
@@ -358,7 +370,8 @@ pub(crate) fn drain_aura_procs(
     }
 }
 
-/// Drop every node one spell installed (`0x5ff290`) and re-aim the ramp at the new product.
+/// Drop every node one spell installed (`0x5ff290`) and re-aim the ramp at the new target
+/// (the next head node down, or the bare base).
 fn reap(n: &mut AuraNodes, spell_id: u32, now: f32) {
     n.alpha.retain(|(s, _)| *s != spell_id);
     n.tint.retain(|(s, _)| *s != spell_id);
@@ -367,20 +380,23 @@ fn reap(n: &mut AuraNodes, spell_id: u32, now: f32) {
 
 /// Install one spell's nodes, replacing any it already had (an aura re-applied by a second caster
 /// holds a second slot but installs one node set — the reference's own per-spell-id keying).
+/// New nodes link **at the head** (`base-render-alpha.md` §4: the newest node is the one the
+/// recompute reads), which is why both lists insert at the front here and both readers take
+/// `.first()`.
 fn install(n: &mut AuraNodes, spell_id: u32, procs: &[AuraNode], now: f32) {
     n.alpha.retain(|(s, _)| *s != spell_id);
     n.tint.retain(|(s, _)| *s != spell_id);
     for node in procs {
         match *node {
-            AuraNode::Alpha(f) => n.alpha.push((spell_id, f)),
-            AuraNode::Tint(rgb) => n.tint.push((spell_id, rgb)),
+            AuraNode::Alpha(f) => n.alpha.insert(0, (spell_id, f)),
+            AuraNode::Tint(rgb) => n.tint.insert(0, (spell_id, rgb)),
         }
     }
     n.retarget(now);
 }
 
 /// The layer's instrument (`WOW_MOVE_TRACE=<path>`, tag `aur`) — one line per node edge, carrying
-/// the spell, the nodes it installed, and the product the ramp is now aiming at.
+/// the spell, the nodes it installed, and the target the ramp is now aiming at.
 ///
 /// This is how "stealth shows nothing" is *reproduced and then closed* without eyeballing a capture
 /// (`method.md` §5/§6): with the aura layer dead the trace is silent on `.cast 1784`; with it live
@@ -407,7 +423,12 @@ fn trace_edge(what: &str, entity: Entity, spell_id: u32, n: &AuraNodes) {
     );
 }
 
-/// `baseAlpha` for a unit: `1.0` for a player, else its display's `CreatureModelAlpha / 255`.
+/// `baseAlpha` for a unit — the getter `0x60d2d0`: its CURRENT display row's
+/// `CreatureModelAlpha / 255`, for **every** unit kind. There is no player override — the same
+/// vtable slot in both classes, byte-identical (`base-render-alpha.md` §6); an unshifted
+/// character reads 1.0 only because its row (49, 50, …) says 255, and a shaman wearing Ghost
+/// Wolf's display 4613 reads 102/255 = 0.4 through exactly this path. No row → 1.0 (the
+/// `0x60d2e4` NULL fallback).
 fn base_alpha(
     entity: Entity,
     units: &Query<&crate::net::NetEntity>,
@@ -416,12 +437,73 @@ fn base_alpha(
     let Ok(net) = units.get(entity) else {
         return 1.0;
     };
-    if net.kind != EntityKind::Player {
-        if let (Some(c), Some(display)) = (creatures, net.display_id) {
-            return c.display_base_alpha(display).unwrap_or(1.0);
+    display_base_alpha(net, creatures)
+}
+
+/// The display-row half of [`base_alpha`], for callers already holding the `NetEntity`.
+fn display_base_alpha(
+    net: &crate::net::NetEntity,
+    creatures: Option<&crate::entities::Creatures>,
+) -> f32 {
+    if !matches!(net.kind, EntityKind::Unit | EntityKind::Player) {
+        return 1.0;
+    }
+    match (creatures, net.display_id) {
+        (Some(c), Some(display)) => c.display_base_alpha(display).unwrap_or(1.0),
+        _ => 1.0,
+    }
+}
+
+/// Re-resolve every unit's base alpha when its display changes — the reference's DISPLAYID
+/// watcher path (`base-render-alpha.md` §5: `0x604990 → 0x60abe0 → 0x60afb0` caches the row →
+/// `0x60ad9f → 0x60d180 → StartAlphaFade(target, 1000 ms)`), self-gated on a real record change
+/// (`0x60ae10`). This is what makes a unit with `CreatureModelAlpha < 255` translucent with **no
+/// aura in play** — the shifted shaman's ghost look — and what ramps it back to opaque when the
+/// display swaps home. The 1000 ms cubic fade is part of the mechanism: a display swap always
+/// eases to the new alpha, never snaps.
+///
+/// `Changed<NetEntity>` is our `0x60ae10`: [`crate::entities`]' live-display refresh writes
+/// `net.display_id` only on an actual swap (and insertion covers the create path). The base
+/// compare keeps a scale-only mutation from restarting anything.
+pub(crate) fn refresh_base_alpha(
+    time: Res<Time>,
+    creatures: Option<Res<crate::entities::Creatures>>,
+    mut commands: Commands,
+    mut units: Query<
+        (Entity, &crate::net::NetEntity, Option<&mut AuraNodes>),
+        Changed<crate::net::NetEntity>,
+    >,
+) {
+    let now = time.elapsed_secs();
+    for (entity, net, nodes) in &mut units {
+        let base = display_base_alpha(net, creatures.as_deref());
+        match nodes {
+            Some(mut n) => {
+                if (n.base - base).abs() > f32::EPSILON {
+                    debug!(
+                        "aura_visual: e={entity} display {:?} base alpha {:.2} -> {base:.2} (1 s ramp)",
+                        net.display_id, n.base
+                    );
+                    n.base = base;
+                    n.retarget(now);
+                }
+            }
+            // A unit that never carried a node set needs one exactly when its display is
+            // authored translucent — created settled at opaque so the retarget rides the same
+            // 1000 ms ramp down a fresh aura node would.
+            None if base < 1.0 => {
+                debug!(
+                    "aura_visual: e={entity} display {:?} authors base alpha {base:.2} (1 s ramp)",
+                    net.display_id
+                );
+                let mut n = AuraNodes::new(1.0);
+                n.base = base;
+                n.retarget(now);
+                commands.entity(entity).try_insert(n);
+            }
+            None => {}
         }
     }
-    1.0
 }
 
 /// The fadeable-part view [`apply_aura_alpha`] authors through: the part's material pair and tag,

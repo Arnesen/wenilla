@@ -61,7 +61,7 @@ use crate::creature_anim::{
 use crate::model_render::m2_url;
 
 use super::equipment::ItemDisplays;
-use super::spell_fx::{attach_effect_visuals, SpellFx};
+use super::spell_fx::{attach_effect_visuals, EffectHost, SpellFx};
 use super::{BoneAttach, DisplayModel, ModelHandle};
 
 /// The anim-event idents that release queued missiles — the dispatcher's drain arms (`0x5ffbd0`:
@@ -561,7 +561,9 @@ pub(super) fn attach_missile_models(
             dm,
             time.elapsed_secs(),
             false, // a missile flies — its flat quads are geometry, never ground decals
-            None,  // a missile is a FREE world model — its trail stays world-frozen
+            // A missile is a FREE world model: its trail stays world-frozen, and its pool
+            // finishes in place when it impacts (0202's drain).
+            EffectHost::default(),
             &mut wow_materials,
             &mut tint_reg,
             &ibps,

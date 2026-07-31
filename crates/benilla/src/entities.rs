@@ -57,7 +57,7 @@ use carried_light::spawn_carried_lights;
 /// helm/shoulder resolution, all resolved from the unit descriptor + ItemDisplayInfo and spawned as
 /// children of the body's attach-point joints.
 mod equipment;
-use equipment::{attach_held_items, refresh_player_looks, resolve_equipment};
+use equipment::{attach_held_items, resolve_equipment};
 
 /// Item / enchant glow effects (decision 0805): the `Spells\Enchantments\*.mdx` models an item's
 /// `ItemVisuals` id hangs on the item's OWN attachment points — the permanent weapon glows and
@@ -455,9 +455,10 @@ impl Plugin for EntitiesPlugin {
                     // Fire each live instance's crossed event keyframes (decision 0304) — after
                     // attach so a just-spawned instance's head window [0, cur] fires this frame.
                     spell_fx::fire_fx_anim_events,
-                    // A gear change tears the visual down; attach rebuilds it next frame with the
-                    // new composite (fade-skipped — a shirt swap isn't a spawn).
-                    refresh_player_looks,
+                    // A gear change re-dresses the standing visual in place — a re-composited atlas
+                    // on the same parts, the equipment geosets re-selected, every attachment left
+                    // alone (decision 0835, the reference's own shape).
+                    attach::redress_player_looks,
                     // A mount transition does the same (decision 0441): the field diff tears the
                     // visual down, attach rebuilds it mounted (or dismounted) next frame(s).
                     refresh_mounts,
@@ -505,6 +506,10 @@ impl Plugin for EntitiesPlugin {
             .add_systems(
                 Update,
                 (
+                    // The display's own base alpha first (the reference's DISPLAYID-watcher leg
+                    // of the same recompute, `base-render-alpha.md` §5 — no aura needed), so a
+                    // same-frame aura edge retargets from the already-updated base.
+                    crate::aura_visual::refresh_base_alpha,
                     crate::aura_visual::drain_aura_procs,
                     // The tint publish only needs the drain ahead of it (it writes a resource, not
                     // the alpha channel), so it rides the same chain rather than earning its own.
@@ -542,7 +547,10 @@ impl Plugin for EntitiesPlugin {
             .add_systems(
                 PostUpdate,
                 crate::model_fade::publish_model_alpha.before(crate::billboard::BillboardPlace),
-            );
+            )
+            // The depth-prime twins (decision 0831 — the reference's `M2UseZFill`): PostUpdate too,
+            // after the same Update-side tag writers, so a twin arms on its episode's first frame.
+            .add_systems(PostUpdate, crate::zfill::sync_zfill_twins);
     }
 }
 
@@ -688,6 +696,7 @@ fn update_display_models(
     mut spell_fx: Option<ResMut<spell_fx::SpellFx>>,
     mut glows: Option<ResMut<ItemGlows>>,
     model_assets: (Res<Assets<M2Model>>, Res<Assets<WmoModel>>),
+    mut forms: ResMut<crate::model_forms::ModelForms>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut entity_mats: ResMut<EntityMaterials>,
@@ -738,6 +747,7 @@ fn update_display_models(
                             dm,
                             m2s,
                             wmos,
+                            &mut forms,
                             &asset_server,
                             &mut materials,
                             cache,
@@ -761,6 +771,7 @@ fn update_display_models(
                             dm,
                             m2s,
                             wmos,
+                            &mut forms,
                             &asset_server,
                             &mut materials,
                             cache,
@@ -783,6 +794,7 @@ fn update_display_models(
                     dm,
                     m2s,
                     wmos,
+                    &mut forms,
                     &asset_server,
                     &mut materials,
                     cache,
@@ -802,6 +814,7 @@ fn update_display_models(
                     dm,
                     m2s,
                     wmos,
+                    &mut forms,
                     &asset_server,
                     &mut materials,
                     cache,
@@ -821,6 +834,7 @@ fn update_display_models(
                     dm,
                     m2s,
                     wmos,
+                    &mut forms,
                     &asset_server,
                     &mut materials,
                     cache,

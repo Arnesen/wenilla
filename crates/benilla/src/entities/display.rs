@@ -28,9 +28,15 @@ pub(super) enum ModelHandle {
 }
 
 /// One spawn part of a display model: a submesh's mesh + its built `WowModelMaterial` + blend (for the
-/// `ModelPart` toggle). Built once the model asset loads.
+/// `ModelPart` toggle). Built once the model asset loads **and** the model-forms furnisher has
+/// built its render forms (decision 0834 — the handles here come from the app-side cache, not the
+/// loader).
 pub(super) struct EntityPart {
     pub(super) mesh: Handle<Mesh>,
+    /// The static form's build-time `Aabb` (decision 0834): the static mesh is `RENDER_WORLD`-only,
+    /// so a consumer that used to compute a bound from its main-world data (the attach path's
+    /// picker-volume fallback) reads this instead. `None` for degenerate geometry.
+    pub(super) aabb: Option<bevy::camera::primitives::Aabb>,
     /// The skinned twin of [`Self::mesh`] (decision 0019), present for every M2 part. An animated
     /// instance (a creature, or a GameObject that runs the state machine / loops a loader-idle seq)
     /// renders this, skinned through its palette slot's rows (decision 0720); a truly static
@@ -56,6 +62,14 @@ pub(super) struct EntityPart {
     /// the entity feathers in on this while `α < 1`, then swaps back to `material`. `Some` for M2 parts
     /// (creatures + M2 GameObjects, the CGObjects that appear-fade); `None` for WMO-display parts.
     pub(super) fade_blend: Option<Handle<WowModelMaterial>>,
+    /// The **depth-prime twin** material ([`crate::model_render::zfill_material`] — the reference's
+    /// `M2UseZFill` clone, wow-re `m2-blend-promotion-zfill.md` §4). While the part draws
+    /// translucent, `model_fade::sync_zfill_twins` spawns a child mesh on this: colour-masked,
+    /// blend-off, z-writing, sorted before the colour parts — one blended layer everywhere, no
+    /// self-overlap darkening on a stealthed or fading body. `None` when the batch's material
+    /// disables z-write/z-test (the reference's own `(flags & 0x10) == 0` twin gate) or cannot
+    /// fade at all (Mod/Mod2x), and for WMO-display parts.
+    pub(super) zfill: Option<Handle<WowModelMaterial>>,
     pub(super) blend: ModelBlend,
     /// Whether this part blends **additively** (M2 blend mode 3 `NoAlphaAdd` / 4 `Add`).
     /// [`ModelBlend`] deliberately folds "alpha-blended / additive" into its single `Blend`
@@ -300,6 +314,10 @@ pub(super) fn build_parts(
     dm: &mut DisplayModel,
     m2s: &Assets<M2Model>,
     wmos: &Assets<WmoModel>,
+    // The app-built render forms (decision 0834): parts wait for the furnisher exactly as they
+    // wait for the asset. Entity displays request at priority 0 — a mob walking into view never
+    // queues behind a city crossing's scenery (whose placements request at 16+).
+    forms: &mut crate::model_forms::ModelForms,
     asset_server: &AssetServer,
     materials: &mut Assets<WowModelMaterial>,
     cache: &mut MaterialCache,
@@ -330,6 +348,14 @@ pub(super) fn build_parts(
             let Some(model) = m2s.get(h) else {
                 return; // still loading
             };
+            // Every M2 entity lane can rig (creatures, animated GameObjects, held items with
+            // billboard chains), so both forms are requested; the static form still serves the
+            // truly static instances and the billboard cards.
+            let key = crate::model_forms::ModelKey::from(h);
+            let want = crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED;
+            if !forms.require(key, want, 0) {
+                return; // forms still building — same retry-next-frame as the asset itself
+            }
             emitters = model.emitters.clone();
             ribbons = model.ribbons.clone();
             lights = model.lights.clone();
@@ -381,10 +407,13 @@ pub(super) fn build_parts(
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
+            let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
+            let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
             model
                 .submeshes
                 .iter()
-                .map(|sub| {
+                .enumerate()
+                .map(|(pi, sub)| {
                     let texture = resolve_skin(
                         sub,
                         &dm.dir,
@@ -425,6 +454,26 @@ pub(super) fn build_parts(
                     // batch (Mod/Mod2x) gets NO twin: its blend equation reads no alpha, so it cannot
                     // fade — the reference's instanceAlpha ramp leaves the sheen at full strength while
                     // the base fades under it (decision 0528); `None` spawns the part Steady.
+                    // The depth-prime twin (wow-re `m2-blend-promotion-zfill.md` §4): every batch
+                    // that can fade AND writes depth gets one. `cutout` mirrors what the part's
+                    // colour pass discards while translucent — the fade twin's hard 224/255 for
+                    // Opaque/AlphaKey sources, nothing for authored-Blend sources (their colour
+                    // pass is the plain blend material) — so depth and colour coverage agree.
+                    let zfill = if sub.no_depth_write || sub.no_depth_test {
+                        None
+                    } else {
+                        match sub.blend {
+                            ModelBlend::Mod | ModelBlend::Mod2x => None,
+                            b => Some(crate::model_render::zfill_material(
+                                cache,
+                                materials,
+                                texture.clone(),
+                                sub.two_sided,
+                                b != ModelBlend::Blend,
+                                light,
+                            )),
+                        }
+                    };
                     let fade_blend = match sub.blend {
                         ModelBlend::Mod | ModelBlend::Mod2x => None,
                         ModelBlend::Blend => Some(exterior.clone()),
@@ -544,13 +593,20 @@ pub(super) fn build_parts(
                         light,
                     );
                     EntityPart {
-                        mesh: sub.mesh.clone(),
-                        skinned_mesh: Some(sub.skinned_mesh.clone()),
+                        // Index-parallel with the submeshes by the forms contract; a miss is a
+                        // broken contract — a default (dead) handle draws nothing rather than panic.
+                        mesh: stat_forms
+                            .get(pi)
+                            .map(|(h, _)| h.clone())
+                            .unwrap_or_default(),
+                        aabb: stat_forms.get(pi).and_then(|(_, a)| *a),
+                        skinned_mesh: skin_forms.get(pi).cloned(),
                         material: exterior,
                         material_interior: Some(interior),
                         material_interior_bake: interior_bake,
                         material_interior_bake_blend: interior_bake_blend,
                         fade_blend,
+                        zfill,
                         blend: sub.blend,
                         additive: sub.additive,
                         two_sided: sub.two_sided,
@@ -568,14 +624,25 @@ pub(super) fn build_parts(
             let Some(model) = wmos.get(h) else {
                 return;
             };
+            // WMO-display GameObjects never skin — static forms only.
+            let key = crate::model_forms::ModelKey::from(h);
+            if !forms.require(key, crate::model_forms::WANT_STATIC, 0) {
+                return;
+            }
             if gameobject {
                 collider = model.collision.as_ref().and_then(model_local_collider);
             }
+            let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
             model
                 .submeshes
                 .iter()
-                .map(|sub| EntityPart {
-                    mesh: sub.mesh.clone(),
+                .enumerate()
+                .map(|(pi, sub)| EntityPart {
+                    mesh: stat_forms
+                        .get(pi)
+                        .map(|(h, _)| h.clone())
+                        .unwrap_or_default(),
+                    aabb: stat_forms.get(pi).and_then(|(_, a)| *a),
                     geoset_id: sub.geoset_id, // 0 for WMO — no geoset selection
                     char_slot: None,          // WMO is never a character body
                     skinned_mesh: None,       // WMO-display GameObjects don't skin (no skeleton)
@@ -606,6 +673,7 @@ pub(super) fn build_parts(
                     material_interior_bake: None, // …and never the M2 footprint lane
                     material_interior_bake_blend: None,
                     fade_blend: None, // WMO-display GameObjects don't appear-fade (rare; M2 only)
+                    zfill: None,      // …so they never need the depth-prime twin either
                     blend: sub.blend,
                     additive: false, // WMO MOMT carries no additive mode (`RenderSubmesh::additive`)
                     two_sided: sub.two_sided,

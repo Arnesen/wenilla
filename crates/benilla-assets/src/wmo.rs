@@ -6,8 +6,9 @@
 //! [`ModelSubmesh`] per group render batch with its texture resolved against the root's material
 //! tables.
 //!
-//! Same app-independent shape as the M2 loader (meshes + texture handles + metadata; materials at
-//! spawn). WMOs don't size-fade, so there are no bounds.
+//! Same app-independent shape as the M2 loader (geometry + texture handles + metadata; meshes are
+//! built paced app-side — decision 0834 — and materials at spawn). WMOs don't size-fade, so there
+//! are no bounds.
 
 use crate::column_grid::ColumnGrid;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 
-use crate::model::{build_submesh_mesh, ModelSubmesh};
+use crate::model::ModelSubmesh;
 
 /// Per-WMO-group navigation data for the portal visibility cull (`crate::wmo_portal`): the group's
 /// MOGP flags (the EXTERIOR `0x8` bit the flood defers on), its bounding box (WMO model space, WoW
@@ -596,9 +597,11 @@ impl AssetLoader for WmoModelLoader {
             if let Some(slot) = group_liquids.get_mut(gi as usize) {
                 *slot = wmo_group_liquid_mesh(&gbytes);
             }
-            for (j, sub) in subs.iter().enumerate() {
-                let mesh =
-                    ctx.add_labeled_asset(format!("group{gi}_sub{j}"), build_submesh_mesh(sub));
+            for sub in subs {
+                // No meshes built here (decision 0834): a city root's ~thousands of group batches
+                // as labeled sub-assets landed in ONE frame — the geometry ships on the submesh
+                // and the app builds each batch's mesh paced (`benilla`'s `model_forms`).
+                //
                 // Lowercase the path: Bevy's loader lookup is case-sensitive and these tables carry
                 // uppercase `.BLP`, so an uppercase extension falls back to type-based resolution —
                 // ambiguous with Bevy's built-in image loader, which spams a "Multiple AssetLoaders
@@ -610,8 +613,6 @@ impl AssetLoader for WmoModelLoader {
                     ))
                 });
                 submeshes.push(ModelSubmesh {
-                    skinned_mesh: mesh.clone(), // WMO never skins; alias the static mesh (unused)
-                    mesh,
                     texture,
                     skin_slot: sub.skin_slot, // always None for WMO groups (no creature skins)
                     geoset_id: 0,             // WMO has no M2 geoset concept
@@ -632,6 +633,7 @@ impl AssetLoader for WmoModelLoader {
                     rgb_anim: None,             // …nor M2Color tints
                     wmo_batch: sub.wmo_batch, // the MOBA section — an interior group's lighting law
                     ground_quad: None,        // the fx decal lane is M2-only
+                    geometry: std::sync::Arc::new(sub),
                 });
                 submesh_group.push(gi as u16);
             }

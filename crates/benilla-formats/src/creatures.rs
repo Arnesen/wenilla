@@ -121,6 +121,10 @@ struct ModelRow {
 }
 
 /// Display/model tables loaded from the DBCs, resolving `displayId` → [`CreatureModel`].
+///
+/// `Default` is the **empty** catalog — the same thing "the DBC failed to load" already means to
+/// every consumer (every lookup misses and the caller takes its documented fallback).
+#[derive(Default)]
 pub struct CreatureCatalog {
     /// CreatureDisplayInfo: displayId → row.
     display: HashMap<u32, DisplayRow>,

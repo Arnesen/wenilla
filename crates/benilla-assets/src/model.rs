@@ -47,20 +47,20 @@ pub struct BillboardInfo {
     pub seq_translations: Vec<(u16, BoneScaleAnim)>,
 }
 
-/// One render batch of a loaded model (an M2 batch or a WMO group batch): geometry as a Bevy `Mesh`
-/// sub-asset, the batch's albedo texture (WorldArt), and its blend/sidedness. Carries handles +
-/// metadata only — the material is built at spawn (an app concern).
+/// One render batch of a loaded model (an M2 batch or a WMO group batch): the decoded geometry,
+/// the batch's albedo texture (WorldArt), and its blend/sidedness. Carries data + metadata only —
+/// **no `Mesh` assets** (decision 0834, the model-lane twin of 0832's terrain rule): a labeled
+/// mesh sub-asset lands the instant the decode completes and the render world ingests the whole
+/// model in ONE frame, which is the city first-contact spike. The app builds each batch's render
+/// form paced (`benilla`'s `model_forms`) via [`submesh_to_static_mesh`] /
+/// [`submesh_to_skinned_mesh`]; the material stays a spawn-site concern as before.
 #[derive(Clone)]
 pub struct ModelSubmesh {
-    /// Geometry, baked to Bevy space (a labeled sub-asset of the model). The **static** mesh — no
-    /// joint attributes — used by doodads/GameObjects (which never skin).
-    pub mesh: Handle<Mesh>,
-    /// The **skinned** twin of [`Self::mesh`] (decision 0019): the same geometry plus the per-vertex
-    /// `JOINT_INDEX`/`JOINT_WEIGHT` attributes, so Bevy's mesh pipeline takes the `SKINNED` path. Used
-    /// only by the skinned creature path (which also attaches a `SkinnedMesh` + joint hierarchy); a
-    /// static instance must use [`Self::mesh`] instead, since a skinned-layout mesh with no
-    /// `SkinnedMesh` component indexes the joint buffer out of bounds (garbage, not bind pose).
-    pub skinned_mesh: Handle<Mesh>,
+    /// The batch's decoded geometry (model space, WoW axes) — everything the mesh builders below
+    /// need, shared across every instance of the model. `Arc` keeps the submesh clone cheap and is
+    /// the model's single resident CPU copy of the vertex data (the static render form is
+    /// GPU-only; see [`submesh_to_static_mesh`]).
+    pub geometry: std::sync::Arc<RenderSubmesh>,
     /// Embedded albedo texture, if any. `None` for creature skin slots (filled at spawn from the
     /// display's skin variation — see [`Self::skin_slot`]).
     pub texture: Option<Handle<Image>>,
@@ -138,7 +138,12 @@ pub struct ModelSubmesh {
 /// applied here at the render boundary. Prefers the authored normals (soft, outward — how WoW lights
 /// foliage); recomputes flat ones only when absent. WMO per-vertex MOCV colour is folded in when
 /// present (M2 has none). The WoW→Bevy map is a pure rotation, so it applies to normals too.
-pub(crate) fn build_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
+///
+/// `usages` is the caller's lane split (decision 0834): the **static** form is `RENDER_WORLD`-only
+/// (nothing reads it main-side; the render world takes the buffers at extract, no resident CPU
+/// copy), while the **skinned** twin keeps the default `MAIN_WORLD | RENDER_WORLD` because the
+/// mouseover picker rays its vertices on the main world (`target::hover::ray_posed_mesh`).
+fn build_submesh_mesh(sub: &RenderSubmesh, usages: RenderAssetUsages) -> Mesh {
     // A billboard batch is built centred at its bone pivot, so the spawn site can rotate it about that
     // point to face the camera (the entity transform then re-places it at the pivot in the world).
     let center = sub
@@ -150,10 +155,7 @@ pub(crate) fn build_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
         .iter()
         .map(|p| (wow_to_bevy(*p) - center).to_array())
         .collect();
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
     mesh.insert_indices(Indices::U32(sub.indices.clone()));
@@ -209,13 +211,24 @@ pub const ATTRIBUTE_WOW_JOINT_WEIGHT: bevy::mesh::MeshVertexAttribute =
         bevy::render::render_resource::VertexFormat::Float32x4,
     );
 
-/// Build the **skinned** twin of [`build_submesh_mesh`]: the same baked geometry plus the
+/// The app-facing **static** mesh build (decision 0834): geometry only, `RENDER_WORLD`-only
+/// usages — the render world takes the vertex buffers at extract and the main world keeps no
+/// copy. Consumers must pair it with an explicit `Aabb` computed at build time (the exterior
+/// cull fails OPEN on a missing bound, and `RENDER_WORLD` races Bevy's `calculate_bounds` —
+/// the same rule 0832 set for terrain cells).
+pub fn submesh_to_static_mesh(sub: &RenderSubmesh) -> Mesh {
+    build_submesh_mesh(sub, RenderAssetUsages::RENDER_WORLD)
+}
+
+/// Build the **skinned** twin of [`submesh_to_static_mesh`]: the same baked geometry plus the
 /// per-vertex [`ATTRIBUTE_WOW_JOINT_INDEX`] + [`ATTRIBUTE_WOW_JOINT_WEIGHT`]. These two
 /// attributes are the entire trigger for the owned-palette skinning path (decisions 0019/0720).
 /// When the submesh carries no skin (WMO / a boneless batch) this is identical to the static
-/// mesh — harmless, but the creature path is the only consumer regardless.
-pub(crate) fn build_skinned_submesh_mesh(sub: &RenderSubmesh) -> Mesh {
-    let mut mesh = build_submesh_mesh(sub);
+/// mesh — harmless, but the rigged paths are the only consumers regardless. Keeps the default
+/// `MAIN_WORLD | RENDER_WORLD` usages: the mouseover picker skins these vertices on the CPU
+/// (`target::hover`), so the main-world copy is read, not waste.
+pub fn submesh_to_skinned_mesh(sub: &RenderSubmesh) -> Mesh {
+    let mut mesh = build_submesh_mesh(sub, RenderAssetUsages::default());
     if sub.joints.len() == sub.positions.len() && !sub.joints.is_empty() {
         mesh.insert_attribute(
             ATTRIBUTE_WOW_JOINT_INDEX,

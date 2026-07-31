@@ -973,16 +973,29 @@ fn kind_index(kind: crate::debug_panel::ModelKind) -> usize {
 /// `drawn_beyond_wall` on the summary line. That is the numeric form of "effects render at
 /// unlimited distance" (bug B39): emitters still ticking and drawing past the wall that has already
 /// discarded the terrain beneath them. **It must read 0**; a non-zero value is the bug, live.
+///
+/// **`WOW_PARTICLE_CENSUS=+<secs>` fires that long after the world is first SHOWN** (the loading
+/// screen dropping) instead of after app start. Everything that rides the appear ramp — decision
+/// 0827/0833's `alpha` column above all — lives in a 2-second window whose start moves by *seconds*
+/// between a warm and a cold load, and a wall-clock timer either lands in it or does not: three
+/// runs in a row missed it while the question was "does a weapon glow ramp with its wearer?". A
+/// probe should not be a dice roll, and the ramp's own trigger is the thing to time from.
 pub(crate) struct ParticleCensusPlugin;
 
 impl Plugin for ParticleCensusPlugin {
     fn build(&self, app: &mut App) {
-        let at = std::env::var("WOW_PARTICLE_CENSUS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10.0);
-        app.insert_resource(ParticleCensus { at, fired: false })
-            .add_systems(Update, fire_particle_census);
+        let spec = std::env::var("WOW_PARTICLE_CENSUS").unwrap_or_default();
+        let after_shown = spec.starts_with('+');
+        let at = spec
+            .trim_start_matches('+')
+            .parse()
+            .unwrap_or(if after_shown { 1.0 } else { 10.0 });
+        app.insert_resource(ParticleCensus {
+            at,
+            after_shown,
+            fired: false,
+        })
+        .add_systems(Update, fire_particle_census);
     }
 }
 
@@ -990,11 +1003,15 @@ impl Plugin for ParticleCensusPlugin {
 #[derive(Resource)]
 struct ParticleCensus {
     at: f32,
+    /// `at` is measured from the world being shown, not from app start — and is rewritten into an
+    /// absolute time the first frame the loading screen stops covering.
+    after_shown: bool,
     fired: bool,
 }
 
 fn fire_particle_census(
     mut probe: ResMut<ParticleCensus>,
+    screen: Res<crate::loading_screen::LoadingScreen>,
     time: ProbeClock,
     view: Res<crate::view::ViewDistance>,
     cam: Query<&GlobalTransform, With<crate::player::WorldCamera>>,
@@ -1004,6 +1021,15 @@ fn fire_particle_census(
         Option<&bevy::camera::visibility::RenderLayers>,
     )>,
 ) {
+    // Latch the shown-relative deadline the first frame the screen drops (and only then: while it
+    // still covers there is no ramp to be relative to).
+    if probe.after_shown {
+        if screen.covering() {
+            return;
+        }
+        probe.at += time.elapsed_secs();
+        probe.after_shown = false;
+    }
     if probe.fired || time.elapsed_secs() < probe.at {
         return;
     }
@@ -1101,13 +1127,17 @@ fn fire_particle_census(
             })
             .unwrap_or_default();
         println!(
-            "PARTICLE_CENSUS_EMITTER blend={:?} flags={:#06x} rate=[{}] life={:.2} tex={} live={}{dist}{plane}",
+            "PARTICLE_CENSUS_EMITTER blend={:?} flags={:#06x} rate=[{}] life={:.2} tex={} live={} alpha={:.2}{dist}{plane}",
             d.blend,
             d.flags,
             rate_keys.join(","),
             d.lifespan,
             d.texture.as_deref().unwrap_or("-"),
             e.live(),
+            // The frame's composed MODEL alpha (decision 0827/0833) — the number that answers
+            // "this cloud is drawing, why can't I see it / why is it full strength?". An effect on
+            // a unit that has not appeared yet reads ~0; one with no model above it reads 1.
+            e.render_alpha(),
         );
         total += e.live();
         n += 1;

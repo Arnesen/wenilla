@@ -69,6 +69,7 @@ mod map_proj;
 mod mesh_tag;
 mod minimap;
 mod model_fade;
+mod model_forms;
 mod model_render;
 mod modkeys;
 mod nameplates;
@@ -145,6 +146,7 @@ mod wmo_portal;
 mod wmo_sky;
 mod world_map;
 mod world_state;
+mod zfill;
 
 use assets::AssetPlugin;
 use avian3d::prelude::*;

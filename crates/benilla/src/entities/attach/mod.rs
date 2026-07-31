@@ -9,23 +9,17 @@
 
 use avian3d::prelude::RigidBody;
 use benilla_assets::ModelSkeleton;
-use benilla_formats::CharSkinSlot;
 use benilla_protocol::EntityKind;
-use bevy::camera::primitives::MeshAabb;
-use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::assets::WorldAssets;
-use crate::billboard::BillboardCard;
 use bevy::animation::transition::AnimationTransitions;
 
 use crate::creature_anim::AnimDriver;
-use crate::debug_panel::{ModelKind, ModelPart};
+use crate::debug_panel::ModelKind;
 use crate::interact::WorldObject;
-use crate::interior::part_interior_lit;
 use crate::lighting::SharedLightBuffer;
-use crate::model_fade::{FadeMaterials, PendingAppearFade};
+use crate::model_fade::JoinedFade;
 use crate::net::{NetEntity, ObjectStore};
 use crate::particles;
 use crate::player::CameraPivot;
@@ -39,8 +33,12 @@ use super::{
 
 mod char_skin;
 use char_skin::{build_char_skin_materials, equip_geosets, resolve_char_look, resolve_worn_equip};
+mod dress;
+use dress::{spawn_part, PartDress};
 mod glue_preview;
 pub(super) use glue_preview::build_glue_preview;
+mod redress;
+pub(super) use redress::redress_player_looks;
 
 /// Set up the skinned + animated instance shared by creatures/players (decision 0019) and animated
 /// GameObjects (decision 0242): the per-instance joints, the billboard glow rig, and — when the model
@@ -277,7 +275,6 @@ pub(super) fn attach_entity_visuals(
         ResMut<Assets<WowModelMaterial>>,
         ResMut<EntityMaterials>,
     ),
-    meshes: Res<Assets<Mesh>>,
     // The owned skin-palette table (decision 0720): every skinned instance claims a rig slot.
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
@@ -670,9 +667,6 @@ pub(super) fn attach_entity_visuals(
             // instance's identity rather than a skinning detail (decision 0812).
             let inst_slot = skin.as_ref().map_or(0, |rb| rb.slot);
             let rig_tag = crate::mesh_tag::rig_bits(inst_slot);
-            // Billboard batches (the brazier/lantern glow card) collected for the world-root card
-            // spawn below — inside the loop we only plant their anchor child.
-            let mut billboard_parts = Vec::new();
             // The armed idle's **authored** CAaBox (decision 0637) — the mouseover picker's
             // volume for a skinned part, NOT a culling volume (skinned entity parts are never
             // frustum-culled; see the `NoFrustumCulling` note at the insert below). The bind-pose
@@ -688,284 +682,51 @@ pub(super) fn attach_entity_visuals(
                     bevy::camera::primitives::Aabb::from_min_max(clip.bounds_min, clip.bounds_max)
                 })
             });
-            commands.entity(entity).with_children(|parent| {
-                for part in parts {
-                    // Skip a geoset this character doesn't show (an unselected hair/facial/body variant).
-                    if visible_geosets
-                        .as_ref()
-                        .is_some_and(|vis| !vis.contains(&part.geoset_id))
-                    {
-                        continue;
-                    }
-                    // A billboard batch (glow card / chain) can't spawn as an ordinary child: its
-                    // mesh is centred at the bone pivot and its transform belongs to the billboard
-                    // system — as a plain child it renders at the model ORIGIN (the brazier glow on
-                    // the ground, decision 0153). A skinned host's card rides its billboard bone's
-                    // live JOINT (the mount's lights follow the gait — the joint frame bakes the
-                    // pivot, 0130 rig identity); a rest-pose host (GameObject, boneless) gets an
-                    // empty ANCHOR child at the root (lifecycle matches the sibling meshes exactly).
-                    // The world-root card FOLLOWING it spawns below.
-                    if let Some(info) = &part.billboard {
-                        let joint = skin
-                            .as_ref()
-                            .and_then(|rb| rb.anchors.get(&info.bone).copied());
-                        // A mirror carrier under the unit for the eye-glow: the portrait / paper-doll
-                        // booths mirror the unit's dressed DESCENDANTS, but the visible world card
-                        // spawned below is a ROOT entity — never a descendant — so it can't be
-                        // mirrored. This lightweight anchor rides the unit's tree tagged with the
-                        // glow's quad/material/bone so those booths rebuild it as a booth card
-                        // (`crate::portrait::PortraitBillboard`). It doubles as the boneless host's
-                        // card follow-anchor; a skinned host follows its live joint, leaving the
-                        // anchor mirror-only.
-                        let anchor = parent
-                            .spawn((
-                                Transform::default(),
-                                Visibility::default(),
-                                crate::portrait::PortraitBillboard {
-                                    mesh: part.mesh.clone(),
-                                    material: part.material.clone(),
-                                    bone: info.bone,
-                                    // This host IS rigged, so its billboard bone's booth joint
-                                    // already bakes the pivot (the 0130 rig identity) — and the
-                                    // batch belongs to the host's body, so a mount's own glow card
-                                    // prunes with the mount (`DressedLook::collect`).
-                                    seat: crate::portrait::PortraitSeat::Body,
-                                    kind: info.kind,
-                                },
-                            ))
-                            .id();
-                        let (owner, at_joint) = match joint {
-                            Some(j) => (j, true),
-                            None => (anchor, false),
-                        };
-                        billboard_parts.push((info.clone(), part, owner, at_joint));
-                        continue;
-                    }
-                    // On a player's character-slot part, swap in the per-appearance material variants
-                    // (steady / interior-matte / fade / interior-bake): the body atlas for a body
-                    // batch — at the batch's own sidedness (the robe skirt is two-sided; the closed
-                    // body isn't) — the hair texture for a hair batch, the worn cape for an object
-                    // (type 2) batch, the extra-skin fur (per flavor: opaque core / alpha-cut fringe)
-                    // for a type-8 batch; every other part keeps its built ones.
-                    let slot_mats =
-                        match part.char_slot {
-                            Some(CharSkinSlot::Body) => char_mats
-                                .0
-                                .as_ref()
-                                .map(|(single, two)| if part.two_sided { two } else { single }),
-                            Some(CharSkinSlot::Hair) => char_mats.1.as_ref(),
-                            Some(CharSkinSlot::Object) => char_mats.2.as_ref(),
-                            Some(CharSkinSlot::SkinExtra) => {
-                                let (single, two) = &char_mats.3;
-                                if part.two_sided { two } else { single }.as_ref()
-                            }
-                            None => None,
-                        };
-                    let (mat, mat_interior, fade_blend, mat_bake, mat_bake_blend) = match slot_mats
-                    {
-                        Some((ext, int, fade, bake, bake_blend)) => {
-                            (ext, Some(int), Some(fade), Some(bake), Some(bake_blend))
-                        }
-                        None => (
-                            &part.material,
-                            part.material_interior.as_ref(),
-                            part.fade_blend.as_ref(),
-                            part.material_interior_bake.as_ref(),
-                            part.material_interior_bake_blend.as_ref(),
-                        ),
-                    };
-                    // A freshly-streamed CGObject appear-fades in (decision 0032): spawn already on the
-                    // blend twin with a ≈0 `MeshTag`, so it doesn't flash opaque for a frame before
-                    // `apply_render_fade` ramps `α = t³`. WMO-display parts (no `fade_blend`) spawn steady.
-                    let (init_mat, fading) = match fade_blend {
-                        Some(b) => (b.clone(), true),
-                        None => (mat.clone(), false),
-                    };
-                    // The tag's slot field identifies the **instance**, not this part's skinning: it
-                    // is the UNIT's slot on every part, even a boneless geoset. The vertex stage only
-                    // reads it under `WOW_RIG_SKIN`, which `WowModelExt::specialize` keys on the
-                    // mesh's own joint attributes — so a static mesh carrying a slot is not skinned
-                    // by it — while the fragment stage reads it for the per-instance body tint
-                    // (decision 0812). Giving it to every part is what makes a tinted unit tint
-                    // *whole*, which is the reference's own rule: an attached/chained model inherits
-                    // the parent CM2's computed colours (`0x714000` recursion). Hoisted above the
-                    // loop — it is a property of the unit, not of the part.
-                    //
-                    // A skinned creature part draws its skinned-mesh twin (the WOW joint
-                    // attributes → the owned-palette WOW_RIG_SKIN shader path, decision 0720);
-                    // everything else — and the palette-full fallback (slot 0) — the static mesh.
-                    // Keyed on the part having a twin, which the slot alone no longer implies.
-                    let skinned = inst_slot != 0 && part.skinned_mesh.is_some();
-                    let mesh = match &part.skinned_mesh {
-                        Some(sm) if skinned => sm.clone(),
-                        _ => part.mesh.clone(),
-                    };
-                    let mut child = parent.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(init_mat),
-                        Transform::default(),
-                        ModelPart {
-                            kind,
-                            blend: part.blend,
-                        },
-                        // The portrait booth mirrors this part ([`crate::portrait`]): both mesh
-                        // twins — the booth poses the skinned twin at Stand on its own throwaway
-                        // skeleton (the ref bake, wow-re §4 D2), falling back to the static
-                        // bind-pose twin for a boneless model — + the steady exterior material
-                        // (not the appear-fade/interior variant the child may wear now).
-                        crate::portrait::PortraitPart {
-                            static_mesh: part.mesh.clone(),
-                            skinned_mesh: part.skinned_mesh.clone(),
-                            material: mat.clone(),
-                        },
-                        object.clone(),
-                    ));
-                    // Every part gets a tag: the instance slot above plus the live alpha field. It is
-                    // unconditional because the slot is now a per-instance identity every part needs
-                    // (the tint) rather than a skinning detail only skinned parts have — and because
-                    // the two conditional writers that used to seed it (the interior classifier, the
-                    // animated-alpha compose) each covered only their own subset, so a part in
-                    // neither carried no tag at all. The alpha honours `fading` like those two did:
-                    // the old unconditional `1.0` here was overwritten by them on the parts they
-                    // covered, and left a one-frame opaque flash on the parts they didn't.
-                    child.insert(MeshTag(
-                        rig_tag | crate::mesh_tag::alpha_bits(if fading { 0.0 } else { 1.0 }),
-                    ));
-                    // `RigPart` stays gated on actually being skinned by that rig — it is the
-                    // CPU-side link for the mouseover picker's skinned ray test (decision 0720),
-                    // which has nothing to say about a static part.
-                    if skinned {
-                        child.insert(crate::rig_palette::RigPart(entity));
-                    }
-                    if let (Some(_), Some(_)) = (&skin, &part.skinned_mesh) {
-                        // A streamed entity's M2 is **never view-culled** — the reference registers
-                        // entity render records with effectively-infinite bounds (≈1e7) and the one
-                        // frustum cull in its machinery is map-doodad-only (wow-re
-                        // `unit-anim-visibility-gate.md` §2/§4: "doodads get the faithful
-                        // frustum/occlusion/distance cull; units do not"). Bevy's bind-pose `Aabb`
-                        // is the wrong stand-in — an armed idle can leave the bind box entirely
-                        // (the duel flag plants itself 9 yd below it, so it culled away at every
-                        // ground-level camera) — and a better box inserted here is stomped anyway:
-                        // `calculate_bounds`' update query rewrites the `Aabb` of any entity whose
-                        // `Mesh3d` changed (spawn tick, async mesh load) back to the bind pose.
-                        // So the renderer gets the faithful `NoFrustumCulling`, and the `Aabb` we
-                        // insert beside it serves ONE master: the mouseover picker
-                        // (`target/hover.rs`) — the armed idle's authored CAaBox when it has one
-                        // (it tracks the drawn pose), else the bind box. Both `calculate_bounds`
-                        // queries skip `NoFrustumCulling` entities, so this box survives.
-                        let picker_aabb = idle_aabb
-                            .or_else(|| meshes.get(&part.mesh).and_then(MeshAabb::compute_aabb));
-                        if let Some(aabb) = picker_aabb {
-                            child.insert((aabb, NoFrustumCulling));
-                        }
-                    }
-                    // M2 parts can light off a WMO room they stand in: a `MeshTag` + the classifier
-                    // pick the law by location (0354: the day/night state rides the intensity byte
-                    // on the SAME exterior material; only the footprint bake swaps to the probe
-                    // variant). While the appear-fade is live the tag carries its alpha (≈0 here)
-                    // and the classifier yields ([`RenderFade`]); once the fade latches the
-                    // classifier reclaims the tag and the steady material. `mat_interior` (the
-                    // interior-capable build) stays the gate for which parts classify at all.
-                    // Anchored at the unit root: every part shares the root's verdict, so a body
-                    // never splits across the interior/exterior light laws. The indoor LAW is one
-                    // for every entity M2 — unit, player, GameObject alike take the footprint-MOCV
-                    // bake (the reference registers each with the same entity-node fill, wow-re
-                    // `unit-m2-shader-light.md`, superseding 0315's class split); the matte ×1.0
-                    // stays as the bake's miss fallback.
-                    if let Some(lit) =
-                        part_interior_lit(mat, mat_interior, mat_bake, bake_center, entity)
-                    {
-                        // The tag itself is already seeded above, with this same value — the
-                        // classifier composes into it rather than owning it.
-                        child.insert(lit);
-                    }
-                    // The batch's **animated material alpha** (the verified combine's runtime half,
-                    // wow-re `m2-alpha-combine-cull.md`): a creature's colour-alpha/transparency
-                    // tracks are authored PER SEQUENCE, so which of its batches draw is a function
-                    // of what it is playing — a voidwalker's two upper armour pieces are weight 0
-                    // in Stand/Walk/Run and 1 only in Death. Sampling follows this unit's own
-                    // `AnimationPlayer` (the root, `entity`), so the alpha stays in phase with the
-                    // pose. The `A <= 0` cull lands through the `Visibility` authority; the partial
-                    // factor through `entities::apply_unit_mat_alpha`. Nothing is inserted for the
-                    // overwhelming majority of batches, which author no tracks at all.
-                    if let Some(anim) = &part.alpha_anim {
-                        // The compose needs a tag to write into; every part has one now (above).
-                        child.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
-                    }
-                    // Queue the appear-fade on M2 parts — `arm_appear_fade` starts the ramp once the world
-                    // is on-screen (not behind the loading screen), so it plays where the player sees it.
-                    // `FadeMaterials` persists the material pair so the despawn fade-out can re-arm later.
-                    // Skipped on a gear-change rebuild (`Reattached`) — a shirt swap isn't a spawn.
-                    if let (Some(blend), false) = (fade_blend, reattached) {
-                        unit_will_fade = true;
-                        child.insert((
-                            PendingAppearFade { since: now },
-                            FadeMaterials {
-                                cutout: mat.clone(),
-                                blend: blend.clone(),
-                                bake_blend: mat_bake_blend.cloned(),
-                            },
-                        ));
-                    }
-                }
-            });
-            // The billboard cards (decision 0153): world-root entities following their anchor —
-            // the facing system re-seats each from the anchor's live global transform every frame
-            // (camera-facing around the authored bone pivot, exactly like the doodad path) and
-            // despawns it with the anchor.
-            for (info, part, owner, at_joint) in billboard_parts {
-                let card_follow = if at_joint {
-                    BillboardCard::following_joint(&info, owner)
+            // Everything one part's spawn reads from this unit, gathered once (`attach::dress`) —
+            // the same context the gear-change **re-dress** feeds `spawn_part`, so a body built at
+            // stream-in and a geoset that appears when a belt is swapped are dressed by one law.
+            let no_anchors = std::collections::HashMap::new();
+            let dress = PartDress {
+                unit: entity,
+                kind,
+                char_mats: &char_mats,
+                object: &object,
+                rig_tag,
+                inst_slot,
+                rigged: skin.is_some(),
+                anchors: skin.as_ref().map_or(&no_anchors, |rb| &rb.anchors),
+                bake_center,
+                idle_aabb,
+                now,
+                // A fresh visual arms the appear-fade on every fade-capable part (decision 0032).
+                // A rebuild that is NOT a spawn — a mount transition, a display swap — spawns
+                // steady: `Reattached` says the unit was already standing there.
+                fade: if reattached {
+                    JoinedFade::Steady
                 } else {
-                    BillboardCard::following(&info, owner)
-                };
-                let mut card = commands.spawn((
-                    Mesh3d(part.mesh.clone()),
-                    MeshMaterial3d(part.material.clone()),
-                    Transform::default(),
-                    ModelPart {
-                        kind,
-                        blend: part.blend,
-                    },
-                    object.clone(),
-                    card_follow,
-                ));
-                // A card takes its MODEL's indoor law, through the same constructor as the sibling
-                // meshes it was split out of (decision 0778). No char-slot variants are consulted:
-                // a body/hair/cape/skin-extra batch is never a billboard batch, so the slot lookup
-                // living past the `continue` above costs a card nothing.
-                //
-                // A card carries the unit's INSTANCE slot like every sibling part, even though it is
-                // never skinned by it (it draws the static mesh whatever its host — that is what the
-                // vertex stage's attribute gate is for): it is a batch of the unit's own model, so a
-                // tinted unit tints its eye-glow and torch cards too (decision 0812). Seeded
-                // unconditionally for the same reason as the mesh parts — the two writers below cover
-                // only their own subsets.
-                card.insert(MeshTag(rig_tag | crate::mesh_tag::alpha_bits(1.0)));
-                if let Some(lit) = part_interior_lit(
-                    &part.material,
-                    part.material_interior.as_ref(),
-                    part.material_interior_bake.as_ref(),
-                    bake_center,
-                    entity,
-                ) {
-                    card.insert(lit);
+                    JoinedFade::Pending { since: now }
+                },
+            };
+            for (i, part) in parts.iter().enumerate() {
+                // Skip a geoset this character doesn't show (an unselected hair/facial/body
+                // variant, or a body region its worn gear replaces). The equipment half of that
+                // selection is re-run in place on a gear change (`attach::redress`); this is the
+                // same predicate, evaluated once at build.
+                if visible_geosets
+                    .as_ref()
+                    .is_some_and(|vis| !vis.contains(&part.geoset_id))
+                {
+                    continue;
                 }
-                // A card shares its batch's per-sequence alpha loops (the billboard split copies
-                // them onto every group), sampled off the same unit clock as the mesh parts — a
-                // creature's eye glow is authored to vanish in the sequences that hide its eyes.
-                // The classifier composes into the same tag rather than stomping it
-                // (`write_part_law` rewrites only the interior bits), so the tag is seeded here
-                // just for the batches that classified out above.
-                if let Some(anim) = &part.alpha_anim {
-                    card.insert(crate::doodad_anim::MatAnim::following(anim.clone(), entity));
-                }
+                unit_will_fade |= spawn_part(&mut commands, part, i, &dress);
             }
             // Mirror the appear-fade clock onto the unit root (see `unit_will_fade` above): a held item
             // / helm / shoulder attaching later reads this to join the same ramp
-            // (`entities::equipment::attach_held_items`). A gear-change rebuild (`Reattached`) abandons
-            // any in-flight fade outright — matching the body parts it just rebuilt steady, "a shirt
-            // swap isn't a spawn" — so anything spawned for that same rebuild also spawns steady.
+            // (`entities::equipment::attach_held_items`). A `Reattached` rebuild — a mount
+            // transition, a display swap — abandons any in-flight fade outright, matching the body
+            // parts it just rebuilt steady, so anything spawned for that same rebuild is steady too.
+            // (A GEAR change no longer reaches here at all: it re-dresses in place, and the parts it
+            // spawns join this clock instead of clearing it — `attach::redress`.)
             if unit_will_fade {
                 commands
                     .entity(entity)
@@ -988,8 +749,8 @@ pub(super) fn attach_entity_visuals(
             } else {
                 Transform::default()
             };
-            // The equipment this visual was dressed with (decision 0074): `refresh_player_looks`
-            // diffs it against the live resolution and rebuilds the visual on a gear change.
+            // The equipment this visual was dressed with (decision 0074): `redress_player_looks`
+            // diffs it against the live resolution and re-dresses the standing visual on a change.
             if let (EntityKind::Player, Some(e)) = (net.kind, equipment) {
                 commands
                     .entity(entity)

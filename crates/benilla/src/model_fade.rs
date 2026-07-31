@@ -157,8 +157,61 @@ pub fn fade_alpha(from: f32, to: f32, t: f32) -> f32 {
 /// An **attached** model inherits its parent's, which is why an item's effects read their WEARER's
 /// (the `0x714000` recursion: a child model with `[model+0x1cc] ≠ 0` composes onto the parent's
 /// computed colours and alpha — wow-re `selection-circle.md` §scope, `0x714260`'s `[ebp+0x14]`).
+/// That inheritance is [`ParentModel`] + [`ModelAlphas`], never a spawn site pointing at the top
+/// of the chain by hand (decision 0833).
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct ModelAlpha(pub f32);
+
+/// The model instance this one is **chained to** — the reference's `[model+0x1cc]` parent link,
+/// set on a model that was attached to another model (`0x712f70 CM2Model::attachChild`). An item
+/// root's parent is its wearer; a weapon's enchant-glow instance's parent is that item root; a
+/// spell kit hung on a unit's is the unit.
+///
+/// It exists because composition is **recursive** in the reference (`0x714000` walks the chain and
+/// composes each child onto its parent's *computed* colour and alpha) and every spawn site knows
+/// exactly one thing for certain: who it just attached itself to. Asking a site for the far end of
+/// the chain instead is what left a weapon's glow — two links down — with no alpha source at all,
+/// blazing at full strength over a character that had not faded in yet (decision 0833).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct ParentModel(pub Entity);
+
+/// How far [`ModelAlphas`] follows [`ParentModel`] before giving up. The real chains are 1–3 links
+/// (unit → item → glow); the bound is a cycle backstop, not a policy.
+const MAX_MODEL_CHAIN: usize = 8;
+
+/// The composed render alpha of a model instance — [`ModelAlpha`] multiplied along the
+/// [`ParentModel`] chain, i.e. the reference's `0x714000` recursion as a lookup. This is the number
+/// an effect multiplies into its vertex alpha; **an effect passes its OWN instance root** and the
+/// chain supplies everything above it.
+///
+/// Missing components read as opaque throughout: an entity with no `ModelAlpha` and no parent is
+/// `1.0`, which is why the steady-state world pays nothing for this.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ModelAlphas<'w, 's> {
+    chain: Query<'w, 's, (Option<&'static ModelAlpha>, Option<&'static ParentModel>)>,
+}
+
+impl ModelAlphas<'_, '_> {
+    /// `instance`'s composed alpha. A despawned link ends the walk (its effects are being freed
+    /// this frame anyway — [`crate::particles::OwnerLoss::Free`]).
+    pub fn get(&self, instance: Entity) -> f32 {
+        let mut alpha = 1.0;
+        let mut at = instance;
+        for _ in 0..MAX_MODEL_CHAIN {
+            let Ok((own, parent)) = self.chain.get(at) else {
+                break;
+            };
+            if let Some(a) = own {
+                alpha *= a.0;
+            }
+            match parent {
+                Some(p) => at = p.0,
+                None => break,
+            }
+        }
+        alpha
+    }
+}
 
 /// The render alpha of one streamed model instance this frame — pure, so the composition is pinned
 /// by tests without an ECS (the `model_fade` pattern):
@@ -166,7 +219,12 @@ pub struct ModelAlpha(pub f32);
 /// - the **appear** ramp: none ⇒ opaque; pending ⇒ 0 (the entity is not being shown yet, so its
 ///   effects must not be either — this is the login symptom); live ⇒ the cubic ramp,
 /// - × the **despawn** ramp (our stream-out look, 0032/0067) once armed,
-/// - × the **self-avatar** zoom feather, which applies to the player's own body alone.
+/// - × the **self-avatar** zoom feather, which applies to the player's own body alone,
+/// - × the **aura** alpha (`crate::aura_visual` — stealth's 0.3, invisibility's 0.5, …): the ramped
+///   CharProc-14 product. In the reference this is not a separate channel at all — the aura
+///   recompute drives the SAME `StartAlphaFade` slot the appear-fade uses (`0x60d180` →
+///   `0x614f80` → `obj+0xf4` → `+0x180` → `+0x19c` → `emitter+0x1a8`), which is exactly why a
+///   stealthed unit's weapon-glow particles and ribbons dim with it.
 ///
 /// The product is the reference's own shape: it multiplies the transition alpha into the same
 /// `+0x180` slot rather than keeping a second channel.
@@ -175,6 +233,7 @@ pub fn model_render_alpha(
     appear: Option<UnitAppearFade>,
     despawn_started: Option<f32>,
     self_fade: f32,
+    aura: f32,
 ) -> f32 {
     let appear = match appear {
         None => 1.0,
@@ -186,7 +245,7 @@ pub fn model_render_alpha(
     let despawn = despawn_started.map_or(1.0, |started| {
         fade_alpha(1.0, 0.0, (now - started) / APPEAR_FADE_SECS)
     });
-    (appear * despawn * self_fade).clamp(0.0, 1.0)
+    (appear * despawn * self_fade * aura).clamp(0.0, 1.0)
 }
 
 /// Publish [`ModelAlpha`] on every streamed object each frame. Runs in `PostUpdate`, after every
@@ -208,13 +267,14 @@ pub(crate) fn publish_model_alpha(
             Option<&UnitAppearFade>,
             Option<&DespawnFade>,
             Has<crate::net::SelfPlayer>,
+            Option<&crate::aura_visual::AuraNodes>,
             Option<&mut ModelAlpha>,
         ),
         With<crate::net::NetEntity>,
     >,
 ) {
     let now = time.elapsed_secs();
-    for (entity, appear, despawn, is_self, current) in &mut units {
+    for (entity, appear, despawn, is_self, aura, current) in &mut units {
         let alpha = model_render_alpha(
             now,
             appear.copied(),
@@ -225,6 +285,11 @@ pub(crate) fn publish_model_alpha(
             } else {
                 1.0
             },
+            // The aura ramp ticked this frame in Update (`apply_aura_alpha` — this system runs
+            // PostUpdate), so `current` is fresh. `self_fade()` above is the bare zoom feather
+            // (the mesh-side writer folds the aura factor separately), so this is not a double
+            // application on the self body.
+            crate::aura_visual::root_alpha(aura),
         );
         match current {
             Some(mut c) => {
@@ -484,6 +549,13 @@ pub struct FadeMaterials {
     /// this so its light stays the room's probe through the feather instead of jumping to the
     /// exterior twin's lit-outdoor intensity (0355). `None` for parts without a bake variant.
     pub bake_blend: Option<Handle<WowModelMaterial>>,
+    /// The depth-prime twin material ([`crate::model_render::zfill_material`] — the reference's
+    /// `M2UseZFill` clone, wow-re `m2-blend-promotion-zfill.md` §4, decision 0831). While this
+    /// part's instance alpha sits in `(0, 1)`, [`sync_zfill_twins`] keeps a colour-masked,
+    /// z-writing child mesh alive on it, drawn before the model's colour parts — one blended layer
+    /// everywhere, no self-overlap darkening. `None` for a batch whose material disables
+    /// z-write/z-test (the reference's own twin gate).
+    pub zfill: Option<Handle<WowModelMaterial>>,
 }
 
 impl FadeMaterials {
@@ -598,6 +670,57 @@ fn arm_despawn_descendants(
 mod tests {
     use super::*;
 
+    /// The `0x714000` recursion as a lookup (decision 0833). A weapon's enchant glow is **two**
+    /// links from the body wearing it — glow → item → wearer — and the director's report is what
+    /// happens when a lane has no expression for that at all: the glow's particles blazed at full
+    /// strength over a character that was still at alpha 0, because the site that spawned them
+    /// could name only its immediate host and was asked for the far end of the chain.
+    ///
+    /// The `dimmed` case pins the composition as the reference's **product** (own × parent's), not
+    /// a pick of one — that is what makes a fading item on a fading wearer behave.
+    #[test]
+    fn an_attached_models_alpha_composes_through_the_whole_chain() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let wearer = world.spawn(ModelAlpha(0.25)).id();
+        let item = world.spawn(ParentModel(wearer)).id();
+        let glow = world.spawn(ParentModel(item)).id();
+        let dimmed = world.spawn((ModelAlpha(0.5), ParentModel(wearer))).id();
+        let loose = world.spawn_empty().id();
+        let gone = world.spawn(ParentModel(wearer)).id();
+        world.despawn(gone);
+
+        let mut state: SystemState<ModelAlphas> = SystemState::new(&mut world);
+        let alphas = state.get(&world);
+        assert_eq!(alphas.get(wearer), 0.25, "the unit's own");
+        assert_eq!(alphas.get(item), 0.25, "an item takes its wearer's");
+        assert_eq!(alphas.get(glow), 0.25, "…and its glow takes the item's");
+        assert_eq!(alphas.get(dimmed), 0.125, "own × parent's — a product");
+        assert_eq!(alphas.get(loose), 1.0, "chained to nothing ⇒ opaque");
+        assert_eq!(
+            alphas.get(gone),
+            1.0,
+            "a despawned instance never gates a draw"
+        );
+    }
+
+    /// The cycle backstop: [`MAX_MODEL_CHAIN`] bounds the walk, so a link that somehow closes on
+    /// itself costs a few lookups instead of hanging the frame. Nothing builds one today — that is
+    /// exactly why the guard is worth a test rather than a comment.
+    #[test]
+    fn a_looping_chain_terminates() {
+        use bevy::ecs::system::SystemState;
+
+        let mut world = World::new();
+        let a = world.spawn_empty().id();
+        let b = world.spawn(ParentModel(a)).id();
+        world.entity_mut(a).insert(ParentModel(b));
+
+        let mut state: SystemState<ModelAlphas> = SystemState::new(&mut world);
+        assert_eq!(state.get(&world).get(a), 1.0);
+    }
+
     /// The 0200 login crash, reproduced at the seam: [`arm_appear_fade`]'s query sees the entity
     /// alive, a wire despawn applies first, and only then do the system's own commands land — the
     /// `try_*` contract makes that a no-op instead of a panic. `SystemState::apply` after the
@@ -650,6 +773,7 @@ mod tests {
             cutout: cutout.clone(),
             blend: blend.clone(),
             bake_blend: Some(bake_blend.clone()),
+            zfill: None,
         };
 
         // Unclassified (no `InteriorLit` at all — a WMO-display part): the exterior pair.
@@ -675,6 +799,7 @@ mod tests {
         // dropping the feather.
         let no_twin = FadeMaterials {
             bake_blend: None,
+            zfill: None,
             ..fm.clone()
         };
         assert_eq!(*no_twin.material_for(Some(&lit), true), blend);
@@ -838,13 +963,21 @@ mod tests {
                 10.0,
                 Some(UnitAppearFade::Pending { since: 9.0 }),
                 None,
+                1.0,
                 1.0
             ),
             0.0,
             "pending: the unit is not on screen, and neither are its effects"
         );
-        let live =
-            |now| model_render_alpha(now, Some(UnitAppearFade::Live { started: 10.0 }), None, 1.0);
+        let live = |now| {
+            model_render_alpha(
+                now,
+                Some(UnitAppearFade::Live { started: 10.0 }),
+                None,
+                1.0,
+                1.0,
+            )
+        };
         assert_eq!(live(10.0), 0.0, "the ramp starts at nothing");
         assert!(
             (live(11.0) - fade_alpha(0.0, 1.0, 0.5)).abs() < 1e-6,
@@ -852,7 +985,7 @@ mod tests {
         );
         assert_eq!(live(12.0), 1.0, "…and latches opaque at the duration");
         assert_eq!(
-            model_render_alpha(10.0, None, None, 1.0),
+            model_render_alpha(10.0, None, None, 1.0, 1.0),
             1.0,
             "no fade: opaque"
         );
@@ -864,19 +997,34 @@ mod tests {
     #[test]
     fn the_render_alpha_multiplies_its_writers() {
         // Zooming to first person: the body is opaque-by-appear but the feather is 0.
-        assert_eq!(model_render_alpha(20.0, None, None, 0.0), 0.0);
-        assert!((model_render_alpha(20.0, None, None, 0.5) - 0.5).abs() < 1e-6);
+        assert_eq!(model_render_alpha(20.0, None, None, 0.0, 1.0), 0.0);
+        assert!((model_render_alpha(20.0, None, None, 0.5, 1.0) - 0.5).abs() < 1e-6);
         // Streaming out: the despawn ramp eases the same channel to nothing.
-        assert_eq!(model_render_alpha(10.0, None, Some(10.0), 1.0), 1.0);
-        assert_eq!(model_render_alpha(12.0, None, Some(10.0), 1.0), 0.0);
+        assert_eq!(model_render_alpha(10.0, None, Some(10.0), 1.0, 1.0), 1.0);
+        assert_eq!(model_render_alpha(12.0, None, Some(10.0), 1.0, 1.0), 0.0);
         // Both at once stay a product, and the result can never leave [0, 1].
         let both = model_render_alpha(
             11.0,
             Some(UnitAppearFade::Live { started: 10.0 }),
             Some(10.0),
             0.5,
+            1.0,
         );
         assert!((0.0..=1.0).contains(&both) && both > 0.0);
+    }
+
+    /// **The stealth-particle symptom, at its cause**: the aura CharProc alpha (stealth 0.3,
+    /// invisibility 0.5) is a factor of the SAME render-alpha slot in the reference (`0x60d180`'s
+    /// recompute drives the same `StartAlphaFade` the appear-fade uses), which is what carries a
+    /// stealthed rogue's weapon-enchant glow and kit particles down with the body. Before this
+    /// factor existed, `ModelAlpha` stayed 1.0 under stealth and every emitter burned at full
+    /// brightness beside a 30 %-alpha body.
+    #[test]
+    fn the_aura_alpha_is_a_factor_of_the_effect_render_alpha() {
+        assert!((model_render_alpha(20.0, None, None, 1.0, 0.3) - 0.3).abs() < 1e-6);
+        // …and it composes with the other writers as a product, never a replacement.
+        assert!((model_render_alpha(20.0, None, None, 0.5, 0.3) - 0.15).abs() < 1e-6);
+        assert_eq!(model_render_alpha(20.0, None, Some(20.0), 1.0, 0.3), 0.3);
     }
 
     #[test]

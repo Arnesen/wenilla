@@ -469,13 +469,16 @@ pub(super) fn sync_glue_scene(
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
     // The scene's particle-emitter spawn wiring (decision 0539 §5) + the skin-palette table and
-    // its mirror registry (decision 0720) — one tuple param (the 16-SystemParam ceiling).
+    // its mirror registry (decision 0720) + the model-forms cache and mesh store (decision 0834)
+    // — one tuple param (the 16-SystemParam ceiling).
     particle_assets: (
         ResMut<crate::rig_palette::RigPalettes>,
         ResMut<crate::rig_palette::RigPaletteMirrors>,
+        ResMut<crate::model_forms::ModelForms>,
+        ResMut<Assets<Mesh>>,
     ),
 ) {
-    let (mut palettes, mut mirrors) = particle_assets;
+    let (mut palettes, mut mirrors, mut forms, mut mesh_assets) = particle_assets;
     let Some(booth) = booths.0.get(GLUE_SLOT) else {
         return;
     };
@@ -597,10 +600,26 @@ pub(super) fn sync_glue_scene(
             rig.probe[1].w,
             rig.probe[2].w,
         );
+        // The scene model's render forms, built NOW (decision 0834): one backdrop model, behind
+        // the glue screen — the booth-lane exception to the paced rule.
+        let scene_key = scene
+            .handle
+            .as_ref()
+            .map(crate::model_forms::ModelKey::from)
+            .expect("scene.handle is Some — `model` above came from it");
+        forms.ensure_now(
+            scene_key,
+            crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
+            &model.submeshes,
+            &mut mesh_assets,
+        );
+        let stat_forms = forms.static_meshes(scene_key).unwrap_or(&[]);
+        let skin_forms = forms.skinned_meshes(scene_key).unwrap_or(&[]);
         let scene_parts: Vec<BoothPart> = model
             .submeshes
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(pi, s)| {
                 let material = crate::model_render::model_material(
                     &mut cache,
                     &mut materials,
@@ -625,8 +644,11 @@ pub(super) fn sync_glue_scene(
                     &light,
                 );
                 BoothPart {
-                    skinned: Some(s.skinned_mesh.clone()),
-                    static_mesh: s.mesh.clone(),
+                    skinned: skin_forms.get(pi).cloned(),
+                    static_mesh: stat_forms
+                        .get(pi)
+                        .map(|(h, _)| h.clone())
+                        .unwrap_or_default(),
                     material,
                     // The scene's authored per-batch material alpha (decision 0807). UI_Tauren
                     // alone: a 0.55 `LENSALPHA` corner vignette, a 0.99 `GROUNDSHADOW` decal, 0.15

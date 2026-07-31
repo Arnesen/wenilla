@@ -199,9 +199,10 @@ pub(in crate::entities) fn equip_geosets(
 }
 
 /// One per-appearance material set for a character runtime texture slot: (steady, interior-matte,
-/// appear-fade-blend, interior-bake, interior-bake-blend). `model_material` dedups by
-/// texture+blend, so all players of one look share them.
+/// appear-fade-blend, interior-bake, interior-bake-blend, depth-prime twin). `model_material` /
+/// `zfill_material` dedup by texture+blend, so all players of one look share them.
 pub(super) type MatQuint = (
+    Handle<WowModelMaterial>,
     Handle<WowModelMaterial>,
     Handle<WowModelMaterial>,
     Handle<WowModelMaterial>,
@@ -233,6 +234,17 @@ fn build_char_materials(
     materials: &mut Assets<WowModelMaterial>,
     cache: &mut MaterialCache,
 ) -> MatQuint {
+    // The depth-prime twin (decision 0831): body/hair batches are opaque/alpha-cut and always
+    // z-writing, so every character part twins; `cutout` mirrors the colour twin's 224/255
+    // discard exactly as the model-built parts' twins do. Built before `mk` captures the caches.
+    let zfill = crate::model_render::zfill_material(
+        cache,
+        materials,
+        Some(tex.clone()),
+        two_sided,
+        blend != ModelBlend::Blend,
+        light,
+    );
     let mut mk = |blend, shade: ShadeSel, fade, probe| {
         model_material(
             cache,
@@ -273,6 +285,7 @@ fn build_char_materials(
         mk(ModelBlend::Blend, ShadeSel::Lit, true, false),
         mk(blend, ShadeSel::Matte, false, true),
         mk(ModelBlend::Blend, ShadeSel::Matte, true, true),
+        zfill,
     )
 }
 

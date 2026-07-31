@@ -55,6 +55,11 @@ pub(crate) fn spawn_model_entities(
     palettes: &mut crate::rig_palette::RigPalettes,
     light: &Buffer,
     submeshes: &[ModelSubmesh],
+    // The model's app-built render forms (decision 0834), index-parallel with `submeshes`: the
+    // static handle + its build-time `Aabb` per batch, and the skinned twins when this model's
+    // lane rigs (`None` otherwise). Callers gate on `ModelForms::require`, so by the time a
+    // placement spawns these are complete.
+    forms: crate::model_forms::FormSlices<'_>,
     transform: Transform,
     is_wmo: bool,
     // The static terrain-shade selector for every batch (the MCSH sample at this placement's base →
@@ -127,6 +132,11 @@ pub(crate) fn spawn_model_entities(
     }
     let mut skinned_meshes: Vec<Entity> = Vec::new();
     for (wmo_batch_idx, sub) in submeshes.iter().enumerate() {
+        // The batch's app-built render form (decision 0834). Callers gate spawning on the forms
+        // being complete, so a miss here is a broken contract — skip the batch rather than panic.
+        let Some((stat_mesh, stat_aabb)) = forms.stat.get(wmo_batch_idx) else {
+            continue;
+        };
         // WMO batches carry their authored order (index + 1; 0 = non-WMO) into the material so the
         // pipeline can bias coplanar layers to resolve in MOBA file order — the byte-verified client
         // behaviour (wow-5875-re models/scratch/wmo-batch-blend-depth-state.md). Every WMO batch gets
@@ -265,50 +275,60 @@ pub(crate) fn spawn_model_entities(
                     None => BillboardCard::new(info, transform),
                 },
             };
-            (
-                commands
-                    .spawn((
-                        Mesh3d(sub.mesh.clone()),
-                        MeshMaterial3d(cutout.clone()),
-                        Transform::from_translation(transform.transform_point(info.pivot)),
-                        ModelPart {
-                            kind,
-                            blend: sub.blend,
-                        },
-                        mesh_tag,
-                        card,
-                    ))
-                    .id(),
-                Vec3::ZERO,
-            )
+            let mut card_entity = commands.spawn((
+                Mesh3d(stat_mesh.clone()),
+                MeshMaterial3d(cutout.clone()),
+                Transform::from_translation(transform.transform_point(info.pivot)),
+                ModelPart {
+                    kind,
+                    blend: sub.blend,
+                },
+                mesh_tag,
+                card,
+            ));
+            // The build-time Aabb, inserted explicitly: the static form is `RENDER_WORLD`-only,
+            // so Bevy's `calculate_bounds` can race extraction — and the exterior cull fails
+            // OPEN on a missing bound (0832's rule, extended to the model lane).
+            if let Some(aabb) = stat_aabb {
+                card_entity.insert(*aabb);
+            }
+            (card_entity.id(), Vec3::ZERO)
         } else {
             // An animated doodad's ordinary submesh draws the skinned twin bound to the placement's
             // palette rig (decision 0720 — the rig slot in the tag; the entity keeps the placement
             // transform — culling/fade read it; the skinned draw itself is palette-driven).
             // Everything else — and the palette-full fallback (slot 0) — draws the static mesh.
-            let use_rig = skin.is_some() && rig_slot != 0;
-            let mesh = if use_rig {
-                sub.skinned_mesh.clone()
-            } else {
-                sub.mesh.clone()
-            };
+            // The twin comes from the app-built forms (0834); a lane that didn't request it
+            // (or a contract break) falls back to the static form, un-rigged, rather than warn
+            // the picker with a joint-less "skinned" mesh.
+            let skinned_mesh = (skin.is_some() && rig_slot != 0)
+                .then(|| forms.skin.and_then(|s| s.get(wmo_batch_idx)).cloned())
+                .flatten();
+            let use_rig = skinned_mesh.is_some();
             let part_tag = if use_rig {
                 MeshTag(crate::mesh_tag::rig_bits(rig_slot) | mesh_tag.0)
             } else {
                 mesh_tag
             };
-            let entity = commands
-                .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(cutout.clone()),
-                    transform,
-                    ModelPart {
-                        kind,
-                        blend: sub.blend,
-                    },
-                    part_tag,
-                ))
-                .id();
+            let mut part_entity = commands.spawn((
+                Mesh3d(skinned_mesh.unwrap_or_else(|| stat_mesh.clone())),
+                MeshMaterial3d(cutout.clone()),
+                transform,
+                ModelPart {
+                    kind,
+                    blend: sub.blend,
+                },
+                part_tag,
+            ));
+            // Static parts carry the build-time Aabb (the RENDER_WORLD rule above); a rigged
+            // part's skinned mesh keeps main-world data, so `calculate_bounds` covers it as
+            // before.
+            if !use_rig {
+                if let Some(aabb) = stat_aabb {
+                    part_entity.insert(*aabb);
+                }
+            }
+            let entity = part_entity.id();
             if skin.is_some() {
                 if let Some(root) = rig_root {
                     commands

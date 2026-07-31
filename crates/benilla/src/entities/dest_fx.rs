@@ -291,7 +291,9 @@ pub(super) fn attach_ground_fx_models(
                 dm,
                 now,
                 true, // a dest-anchored area model's flat quads ARE ground decals
-                None, // a free world model — any trail stays world-frozen
+                // A free world model standing at the point, chained to nothing: its trail stays
+                // world-frozen and its pool finishes in place when the effect ends.
+                super::spell_fx::EffectHost::default(),
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,

@@ -137,6 +137,18 @@ pub(crate) struct AnimHostSpawn {
     pub anim_id: Option<u16>,
 }
 
+/// Whether [`spawn_anim_host`] would rig this model — the model-forms requester's twin of the
+/// spawn gate (decision 0834), so the skinned twins are built exactly for the placed models that
+/// will draw them. Mirrors both of the host's gates: the tier, and the capture freeze (captures
+/// keep every doodad static, so they need no twins either).
+pub(crate) fn wants_rig(m: &M2Model) -> bool {
+    !crate::capture::scenario_active()
+        && !matches!(
+            classify(&m.skeleton, m.animations.as_ref()),
+            DoodadAnimTier::Static
+        )
+}
+
 /// Spawn the animation host for one placed M2, if [`classify`] says it animates: an anim-root entity
 /// at the placement transform, the joint hierarchy as its children (so despawning the root cascades),
 /// and — per tier — an `AnimationPlayer` looping the **loader-idle seed's** clip (the client's

@@ -15,8 +15,8 @@ use bevy::pbr::{
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, CompareFunction,
-    RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, ColorWrites,
+    CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError,
 };
 use bevy::shader::ShaderRef;
 
@@ -65,6 +65,10 @@ pub struct WowModelKey {
     /// orders draws for batching, not authorship, so coplanar ties were unstable (the run-to-run
     /// "pale film" on buildings); the bias reproduces the authored layering deterministically.
     wmo_batch_order: u16,
+    /// Depth-prime twin (`clutter_fade.z` bit 9 — `model_render::zfill_material`, the reference's
+    /// `M2UseZFill` clone command, wow-re `m2-blend-promotion-zfill.md` §4): `specialize` masks the
+    /// colour writes off, turns blend off, and forces depth-write ON.
+    zfill: bool,
 }
 
 impl From<&WowModelExt> for WowModelKey {
@@ -79,6 +83,7 @@ impl From<&WowModelExt> for WowModelKey {
             modulate: markers & 0x80 != 0,
             modulate2x: markers & 0x100 != 0,
             wmo_batch_order: e.sun_scale.y as u16,
+            zfill: markers & 0x200 != 0,
         }
     }
 }
@@ -277,6 +282,26 @@ impl MaterialExtension for WowModelExt {
                         operation: BlendOperation::Add,
                     },
                 });
+            }
+        }
+        if key.bind_group_data.zfill {
+            // The depth-prime twin (`model_render::zfill_material` — the reference's `M2UseZFill`
+            // clone, wow-re `m2-blend-promotion-zfill.md` §4): a translucent model's z-writing
+            // batches draw once colour-masked-off, blend-off, z-write ON, sorted before its colour
+            // batches (the material's negative sort bias) — so each colour fragment passes
+            // GreaterEqual only at the model's own nearest surface, and interior/overlapped layers
+            // fail. One blended layer everywhere: no self-overlap darkening on a stealthed body.
+            // The fragment still runs its discards (farclip, the cutout when `model_flags.y`);
+            // its colour output is computed and masked (an early return would be the natural
+            // spelling, but naga's MSL backend miscompiles the dead tail — see the shader note).
+            if let Some(frag) = descriptor.fragment.as_mut() {
+                if let Some(target) = frag.targets.get_mut(0).and_then(|t| t.as_mut()) {
+                    target.blend = None;
+                    target.write_mask = ColorWrites::empty();
+                }
+            }
+            if let Some(ds) = descriptor.depth_stencil.as_mut() {
+                ds.depth_write_enabled = true;
             }
         }
         let key = &key.bind_group_data;

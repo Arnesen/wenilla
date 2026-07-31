@@ -30,6 +30,8 @@ pub(super) fn sync_test_portraits(
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
+    mut forms: ResMut<crate::model_forms::ModelForms>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
 ) {
     if !test_mode(&mut env_cache) || *test_done {
         return;
@@ -42,6 +44,8 @@ pub(super) fn sync_test_portraits(
         &path,
         &asset_server,
         &m2s,
+        &mut forms,
+        &mut mesh_assets,
         &mut wow_mats,
         &booth_light,
         &mut test_cache,
@@ -65,6 +69,8 @@ fn bake_test(
     path: &str,
     asset_server: &AssetServer,
     m2s: &Assets<M2Model>,
+    forms: &mut crate::model_forms::ModelForms,
+    mesh_assets: &mut Assets<Mesh>,
     wow_mats: &mut Assets<WowModelMaterial>,
     booth_light: &BoothLight,
     cache: &mut crate::model_render::MaterialCache,
@@ -99,13 +105,24 @@ fn bake_test(
                 p.replace('\\', "/").to_ascii_lowercase()
             ))
         });
+    // The test model's render forms, built NOW (decision 0834) — a dev harness bake, one model.
+    let key = crate::model_forms::ModelKey::from(&handle);
+    forms.ensure_now(
+        key,
+        crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
+        &model.submeshes,
+        mesh_assets,
+    );
+    let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
+    let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
     let parts_against = |light: &bevy::render::render_resource::Buffer,
                          cache: &mut crate::model_render::MaterialCache,
                          wow_mats: &mut Assets<WowModelMaterial>| {
         model
             .submeshes
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(pi, s)| {
                 let mat = crate::model_render::model_material(
                     cache,
                     wow_mats,
@@ -130,8 +147,11 @@ fn bake_test(
                     light,
                 );
                 BoothPart {
-                    skinned: Some(s.skinned_mesh.clone()),
-                    static_mesh: s.mesh.clone(),
+                    skinned: skin_forms.get(pi).cloned(),
+                    static_mesh: stat_forms
+                        .get(pi)
+                        .map(|(h, _)| h.clone())
+                        .unwrap_or_default(),
                     material: mat,
                     // The harness parses submeshes straight off the model, so the authored alpha is
                     // right here — an eyeball bake should show the batch dimming the artist wrote.

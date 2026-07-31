@@ -55,7 +55,7 @@ use crate::model_render::m2_url;
 use crate::terrain::WowModelMaterial;
 
 use super::equipment::{ItemDisplays, ItemModelKind};
-use super::spell_fx::{attach_effect_visuals, FxTintAnims};
+use super::spell_fx::{attach_effect_visuals, EffectHost, FxTintAnims};
 use super::{DisplayModel, ModelHandle};
 
 /// The glow chain's data + the effect-model cache: the two joined DBC catalogs, plus a
@@ -286,8 +286,15 @@ pub(super) fn attach_item_glows(
                 instance,
                 dm,
                 now,
-                false,          // a weapon glow is never ground-anchored
-                Some(instance), // an attached model in the client's sense — it rides the item
+                false, // a weapon glow is never ground-anchored
+                // An attached model in the client's sense — it rides the ITEM (`0x712f70`), so it
+                // is chained to that item root and through it to the wearer: the glow fades in
+                // with the body instead of blazing over a character that has not appeared yet,
+                // and it dies with the weapon instead of hanging in the air behind it (0833).
+                EffectHost {
+                    attached: true,
+                    parent: Some(root),
+                },
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,

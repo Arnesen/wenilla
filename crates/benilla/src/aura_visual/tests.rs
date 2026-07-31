@@ -79,13 +79,15 @@ fn the_dispatch_names_only_the_verified_procs() {
     }
 }
 
-// ── The product and the ramp ─────────────────────────────────────────────────────────────────────
+// ── The target and the ramp ──────────────────────────────────────────────────────────────────────
 
-/// `0x60d180`: the target is `baseAlpha × Π(node alphas)` — every live aura multiplies, and the
-/// display's own authored opacity is the first term. Stacking stealth (0.3) with invisibility (0.5)
-/// on a half-opaque display (0.5) is 0.075, not "whichever landed last".
+/// `0x60d180`: the target is `baseAlpha × the HEAD node's factor` — at most one node term, the
+/// newest (nodes link at the list head as they install), never a product over the chain (wow-re
+/// `base-render-alpha.md` §4, correcting the earlier `Π` reading). Stacking stealth (0.3) then the
+/// ghost aura (0.5) reads 0.5 — whichever landed last — and dropping the head hands the term to
+/// the next node down.
 #[test]
-fn the_target_is_the_product_of_base_and_every_node() {
+fn the_target_is_base_times_the_newest_node() {
     let mut n = AuraNodes::new(1.0);
     assert_eq!(n.target(), 1.0, "no nodes → opaque");
 
@@ -93,17 +95,49 @@ fn the_target_is_the_product_of_base_and_every_node() {
     assert!((n.target() - 0.3).abs() < 1e-6);
 
     install(&mut n, GHOST, &[AuraNode::Alpha(0.5)], 0.0);
-    assert!((n.target() - 0.15).abs() < 1e-6, "two nodes multiply");
+    assert!(
+        (n.target() - 0.5).abs() < 1e-6,
+        "the newest node is the term"
+    );
 
-    // A display authored translucent (CreatureModelAlpha 128/255) is the product's first term.
-    let mut half = AuraNodes::new(128.0 / 255.0);
+    // Reaping the head hands the term back to the older node.
+    n.alpha.retain(|(s, _)| *s != GHOST);
+    n.retarget(0.0);
+    assert!((n.target() - 0.3).abs() < 1e-6);
+
+    // A display authored translucent (CreatureModelAlpha 128/255) multiplies the head term —
+    // and stands alone when no node is live (the display-set leg, no aura anywhere).
+    let mut half = AuraNodes::new(1.0);
+    half.base = 128.0 / 255.0;
     install(&mut half, STEALTH, &[AuraNode::Alpha(0.3)], 0.0);
     assert!((half.target() - (128.0 / 255.0) * 0.3).abs() < 1e-6);
-
-    // Reaping one node leaves the other's factor, not opaque.
-    half.alpha.retain(|(s, _)| *s != STEALTH);
+    half.alpha.clear();
     half.retarget(0.0);
     assert!((half.target() - 128.0 / 255.0).abs() < 1e-6);
+}
+
+/// The display-swap leg ([`refresh_base_alpha`]'s retarget): a base change rides the same 1000 ms
+/// cubic ramp an aura node does — Ghost Wolf's 102/255 eases in from opaque, and swapping home
+/// eases back — never snaps (`base-render-alpha.md` §5: the fade is part of the mechanism).
+#[test]
+fn a_base_change_rides_the_same_ramp() {
+    let wolf = 102.0 / 255.0;
+    let mut n = AuraNodes::new(1.0);
+    n.base = wolf;
+    n.retarget(0.0);
+    assert!((n.tick(0.0) - 1.0).abs() < 1e-6, "starts where it was");
+    assert!(
+        (n.tick(AURA_ALPHA_FADE_SECS) - wolf).abs() < 1e-6,
+        "arrives"
+    );
+    assert!(n.translucent());
+
+    // The swap home: base back to 1.0, eased up from the live value.
+    n.base = 1.0;
+    n.retarget(AURA_ALPHA_FADE_SECS);
+    assert!((n.from - wolf).abs() < 1e-6);
+    assert!((n.tick(2.0 * AURA_ALPHA_FADE_SECS) - 1.0).abs() < 1e-6);
+    assert!(!n.translucent(), "settled opaque again");
 }
 
 /// A re-applied aura installs ONE node set, not a second copy — the reference keys its nodes by spell
@@ -171,14 +205,17 @@ fn a_retarget_to_the_same_value_does_not_restart_the_ease() {
     assert!((n.tick(10.0) - 0.3).abs() < 1e-6, "and stays arrived");
 }
 
-/// Proc 1's nodes are held head-node-first (`unit+0xce0`), so the tint the reference's per-frame
-/// apply would read is deterministic — the layer is complete even though no renderer consumes it yet.
+/// Proc 1's nodes link at the head like the alpha list's (`unit+0xce0`), so the tint the per-frame
+/// apply reads is the NEWEST aura's — deterministic under stacking.
 #[test]
-fn the_tint_head_node_is_the_first_installed() {
+fn the_tint_head_node_is_the_newest_installed() {
     let mut n = AuraNodes::new(1.0);
     assert_eq!(n.head_tint(), None);
     install(&mut n, GHOST, &[AuraNode::Tint([0x8C, 0xB9, 0xFD])], 0.0);
     install(&mut n, 12881, &[AuraNode::Tint([0x00, 0xFF, 0x00])], 0.0);
+    assert_eq!(n.head_tint(), Some([0x00, 0xFF, 0x00]));
+    // The newest dropping hands the head back.
+    n.tint.retain(|(s, _)| *s != 12881);
     assert_eq!(n.head_tint(), Some([0x8C, 0xB9, 0xFD]));
     assert_eq!(n.target(), 1.0, "a tint node is not an alpha term");
 }
@@ -319,8 +356,8 @@ fn a_kit_with_both_procs_installs_both_nodes() {
     assert_eq!(n.head_tint(), Some([0x8C, 0xB9, 0xFD]));
 }
 
-/// Two auras on one unit stack multiplicatively through the live edges, and reaping just one leaves
-/// the other's translucency behind rather than snapping the body opaque.
+/// Two auras on one unit: the newest node holds the head (the reference's link-at-head list), and
+/// reaping the other leaves it untouched — the body never snaps opaque while any alpha aura lives.
 #[test]
 fn two_auras_stack_and_unstack_through_the_slots() {
     let mut app = app_with_chains();
@@ -328,7 +365,10 @@ fn two_auras_stack_and_unstack_through_the_slots() {
     let unit = app.world_mut().spawn(crate::net::ObjectStore(both)).id();
     app.update();
     let n = app.world().entity(unit).get::<AuraNodes>().unwrap();
-    assert!((n.target() - 0.15).abs() < 1e-6, "0.3 × 0.5");
+    assert!(
+        (n.target() - 0.5).abs() < 1e-6,
+        "the ghost node installed last → it is the head term"
+    );
 
     // Stealth alone drops (slot 0 cleared, slot 1 still occupied).
     app.world_mut()
@@ -415,6 +455,7 @@ fn the_author_owns_the_tree_then_releases_at_opaque() {
         cutout: cutout.clone(),
         blend: blend.clone(),
         bake_blend: None,
+        zfill: None,
     };
     // root → body part, and root → joint → held weapon (the depth the walk must reach).
     let mut nodes = AuraNodes::new(1.0);

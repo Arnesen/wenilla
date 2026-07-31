@@ -33,8 +33,9 @@ pub(super) struct AppliedMount(pub(super) u32);
 /// Rebuild a unit's visual when its mount field changes (decision 0441): 0→id (mount up), id→0
 /// (dismount — the reference tears the secondary model down on the spot, byte-verified
 /// `0x607ce0`: detach body, `SetMountModel(0)`, body to Stand, no transition anim), id→id′ (a
-/// re-mount). The transition is the gear-swap teardown (`refresh_player_looks`' exact shape):
-/// children — mount child, joints, parts, held roots — despawn, the visual components strip, and
+/// re-mount). The transition is a full teardown — a mount is a second SKELETON the rider's own
+/// rig re-roots under, so there is nothing to re-dress in place the way a gear change is
+/// (`attach::redress`): children — mount child, joints, parts, held roots — despawn, the visual components strip, and
 /// `attach_entity_visuals` rebuilds next frame(s) in the right configuration, fade-skipped via
 /// `Reattached` (mounting up isn't a spawn).
 pub(super) fn refresh_mounts(

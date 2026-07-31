@@ -30,12 +30,10 @@
 use std::collections::HashMap;
 
 use benilla_formats::ItemDisplayCatalog;
-use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
 use super::{DisplayModel, ModelHandle};
 use crate::model_render::m2_url;
-use crate::net::NetEntity;
 
 mod resolve;
 pub(in crate::entities) use resolve::placement;
@@ -118,7 +116,7 @@ impl ItemDisplays {
 /// every non-empty visible-item entry has resolved through the template cache (hit or recorded
 /// miss) — the attach path waits for it so a player composites dressed, not naked-then-flicker.
 /// Players only; a character-model NPC's armor ships pre-baked (decision 0060).
-#[derive(Component, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) struct Equipment {
     pub(crate) bodyslots: [u32; 8],
     /// The back slot's display id (0 = no cloak) — a geoset + runtime cape texture, no body region.
@@ -129,56 +127,19 @@ pub(crate) struct Equipment {
     pub(crate) settled: bool,
 }
 
-/// The [`Equipment`] a player's attached visual was built with (its composite key's equip half).
-/// [`refresh_player_looks`] diffs it against the live resolution and re-attaches on change.
+/// The [`Equipment`] a player's attached visual was **dressed** with (its composite key's equip
+/// half). [`super::attach::redress_player_looks`] diffs it against the live resolution and re-dresses
+/// the standing visual in place on a change — the reference's own shape, and the reason a weapon
+/// glow no longer blinks when a belt is swapped (decision 0835, superseding 0074's teardown).
 #[derive(Component)]
-pub(super) struct AppliedEquipment(pub(super) Equipment);
+pub(in crate::entities) struct AppliedEquipment(pub(in crate::entities) Equipment);
 
-/// Marks a player whose visual was torn down by [`refresh_player_looks`] (a gear change): the
-/// re-attach skips the appear-fade — changing a shirt isn't a spawn.
+/// Marks a unit whose visual was torn down and is being rebuilt for something **other** than a
+/// spawn: the re-attach skips the appear-fade. A mount transition ([`super::mount`]) and a live
+/// display swap ([`super::live_display`]) are the two remaining tear-downs; a gear change is not one
+/// of them any more (decision 0835).
 #[derive(Component)]
 pub(super) struct Reattached;
-
-/// Rebuild a player's visual when their worn equipment changes (decision 0074): the composite atlas
-/// (and, later, the equipment geosets) are baked into the attached children, so a gear change tears
-/// the visual down — every child (parts, joints, held-item roots) plus the per-instance visual
-/// components — and lets [`super::attach_entity_visuals`] re-run next frame with the new
-/// [`Equipment`], fade-skipped via [`Reattached`]. Players only: a creature's look never changes
-/// this way (weapon swaps ride [`HeldItems`]' own diff, no teardown).
-pub(super) fn refresh_player_looks(
-    mut commands: Commands,
-    players: Query<
-        (Entity, &NetEntity, &Equipment, &AppliedEquipment),
-        With<super::VisualAttached>,
-    >,
-) {
-    for (entity, net, live, applied) in &players {
-        if net.kind != EntityKind::Player || !live.settled || *live == applied.0 {
-            continue;
-        }
-        commands
-            .entity(entity)
-            .despawn_related::<Children>()
-            .remove::<(
-                super::VisualAttached,
-                AppliedEquipment,
-                AnimationPlayer,
-                bevy::animation::transition::AnimationTransitions,
-                AnimationGraphHandle,
-                benilla_assets::ModelAnimations,
-                crate::creature_anim::AnimDriver,
-                (
-                    crate::creature_anim::RigPose,
-                    crate::creature_anim::BodyTwist,
-                    crate::creature_anim::GlobalSeqDrive,
-                ),
-                crate::rig_palette::RigSkin,
-                BoneAttach,
-                HeldAttached,
-            )>()
-            .insert(Reattached);
-    }
-}
 
 /// Player equipment slots feeding the armor composite → their bodyslot−2 index (decision 0074):
 /// shirt(3) chest(4) waist(5) legs(6) feet(7) wrists(8) hands(9) tabard(18). The visible-item block

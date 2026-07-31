@@ -256,7 +256,15 @@ fn spawn_slot(
     let &(bone, offset) = bones.points.get(&hs.attach)?;
     let joint = bones.anchor(bone)?;
     let root = commands
-        .spawn((Transform::from_translation(offset), Visibility::default()))
+        .spawn((
+            Transform::from_translation(offset),
+            Visibility::default(),
+            // This item model is CHAINED to the body wearing it (`0x712f70` attach → the
+            // `[model+0x1cc]` parent link): the wearer's computed render alpha multiplies
+            // everything this root carries, and everything chained below it in turn — its glow
+            // instances included (decision 0833).
+            crate::model_fade::ParentModel(entity),
+        ))
         .id();
     commands.entity(joint).add_child(root);
     // The item/enchant glow (decision 0805): its instances hang off the ITEM's own
@@ -360,6 +368,11 @@ fn spawn_slot(
             // the ground-shade ramp that darkens its wielder; both now follow the body, which
             // is the same light-collector aliasing the comment above describes.
             child.insert(MeshTag(rig_tag | crate::mesh_tag::alpha_bits(tag_alpha)));
+            // The item part's build-time bound (decision 0834): `calculate_bounds` can no longer
+            // derive one from the `RENDER_WORLD`-only static form's data.
+            if let Some(aabb) = part.aabb {
+                child.insert(aabb);
+            }
             if let Some(lit) = part_interior_lit(
                 &part.material,
                 part.material_interior.as_ref(),
@@ -377,6 +390,7 @@ fn spawn_slot(
                     cutout: part.material.clone(),
                     blend: blend.clone(),
                     bake_blend: part.material_interior_bake_blend.clone(),
+                    zfill: part.zfill.clone(),
                 });
             }
             match effective {
@@ -427,6 +441,10 @@ fn spawn_slot(
             },
             BillboardCard::following(&info, root),
         ));
+        // The card's build-time bound (decision 0834) — same rule as its mesh siblings above.
+        if let Some(aabb) = part.aabb {
+            card.insert(aabb);
+        }
         // Same interior-light membership the item's mesh parts get above, through the same
         // constructor and anchored at the same WEARER (decision 0778) — so a held torch's
         // glow card can never split from the arm holding it. Spawned at a steady alpha: a
@@ -521,10 +539,11 @@ fn spawn_slot(
                 // the air behind the character (decision 0826). A sheath swap no longer comes
                 // through here at all: the root is MOVED, and this pool rides it.
                 on_owner_loss: crate::particles::OwnerLoss::Free,
-                // An ATTACHED model inherits its parent's computed alpha (`0x714000`), so the
-                // sparkle on a pauldron fades in with the body wearing it and vanishes with the
-                // avatar in first person — decision 0827. The WEARER, never the item root.
-                alpha: Some(entity),
+                // This emitter's own model instance is the item root; `ParentModel` above chains
+                // it to the wearer, and the chain is what an ATTACHED model's composed alpha is
+                // (`0x714000`) — so the sparkle on a pauldron fades in with the body wearing it
+                // and vanishes with the avatar in first person (0827/0833).
+                alpha: Some(root),
             },
             // A held item spawns no rig; its emitters run the item model's own slot-0
             // loop on the spawn clock (the torch burns always — the doodad law).
@@ -551,9 +570,9 @@ fn spawn_slot(
             false,
             ctx.scale,
             Some(0),
-            // An attached model inherits the WEARER's render alpha, so an enchant streamer is
-            // gone with the avatar in first person and absent until the body is shown (0827).
-            Some(entity),
+            // Its own model instance — chained to the wearer above — so an enchant streamer is
+            // gone with the avatar in first person and absent until the body is shown (0827/0833).
+            Some(root),
         );
     }
     debug!(
@@ -579,12 +598,14 @@ mod tests {
     fn part(interior: bool) -> EntityPart {
         EntityPart {
             mesh: Handle::default(),
+            aabb: None,
             skinned_mesh: None,
             material: Handle::default(),
             material_interior: interior.then(Handle::default),
             material_interior_bake: None,
             material_interior_bake_blend: None,
             fade_blend: None,
+            zfill: None,
             blend: benilla_formats::ModelBlend::Opaque,
             additive: false,
             two_sided: false,
@@ -956,5 +977,42 @@ mod tests {
             "the old model is destroyed, not left behind"
         );
         assert_eq!(after[4], Some(shoulder_root), "the shoulders are untouched");
+    }
+
+    /// The chain's first link, on the real spawn path (decision 0833): an item model is CHAINED to
+    /// the body wearing it, and the emitters it spawns point at **their own** root rather than at
+    /// the wearer. Both halves matter — the item's own sparkle would fade correctly either way,
+    /// but a glow instance hung on this root two links down can only reach the wearer through it,
+    /// and that is the link the enchant-glow lane never had.
+    ///
+    /// It survives the sheath MOVE for the same reason the pool does: the root is re-parented, not
+    /// rebuilt.
+    #[test]
+    fn an_item_model_is_chained_to_its_wearer() {
+        use crate::model_fade::ParentModel;
+
+        let (mut app, wearer) = dress_a_wearer();
+        let shoulder = roots_of(&app, wearer)[4].expect("shoulder");
+        assert_eq!(
+            app.world()
+                .entity(shoulder)
+                .get::<ParentModel>()
+                .map(|p| p.0),
+            Some(wearer),
+            "the item chains to the body wearing it"
+        );
+
+        let mut items = app.world_mut().entity_mut(wearer);
+        let mut items = items.get_mut::<HeldItems>().unwrap();
+        items.slots[0].as_mut().unwrap().attach = SHEATH_BACK;
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(shoulder)
+                .get::<ParentModel>()
+                .map(|p| p.0),
+            Some(wearer),
+            "…and a sheath swap elsewhere leaves that link alone"
+        );
     }
 }

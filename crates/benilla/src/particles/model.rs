@@ -41,9 +41,12 @@ pub(super) struct ModelInstance {
 /// Grow + position each model-particle emitter's instance pool from its freshly-simulated
 /// pool. Runs after [`super::sim::simulate_particles`] in the same set, so instances land on
 /// this frame's positions (the anchored-exactness rule).
+#[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 pub(super) fn update_model_particles(
     mut commands: Commands,
     models: Res<Assets<M2Model>>,
+    mut forms: ResMut<crate::model_forms::ModelForms>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     light: Res<crate::lighting::SharedLightBuffer>,
     mut emitters: Query<&mut ParticleEmitter>,
@@ -64,14 +67,26 @@ pub(super) fn update_model_particles(
         let Some(model) = models.get(&geometry) else {
             continue; // still loading — particles simulate meanwhile, nothing draws yet
         };
+        // The geometry model's render forms, built NOW rather than paced (decision 0834): a
+        // spell's visual must not lag its cast, and a particle-geometry model is a handful of
+        // tiny batches — the booth-lane exception, not the streaming rule.
+        let key = crate::model_forms::ModelKey::from(&geometry);
+        forms.ensure_now(
+            key,
+            crate::model_forms::WANT_STATIC,
+            &model.submeshes,
+            &mut mesh_assets,
+        );
         // Grow the pool to the live count (bounded).
         let rung = emitter.owner_rung();
         let want = emitter.particles.len().min(MAX_INSTANCES);
         while emitter.model_instances.len() < want {
+            let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
             let meshes = model
                 .submeshes
                 .iter()
-                .map(|sub| {
+                .enumerate()
+                .map(|(pi, sub)| {
                     // A fresh (never-deduped) material per instance — its `tint` is mutated
                     // every frame by the over-life ramp, so instances must not share.
                     let mut throwaway = MaterialCache::default();
@@ -113,7 +128,12 @@ pub(super) fn update_model_particles(
                     }
                     let entity = commands
                         .spawn((
-                            Mesh3d(sub.mesh.clone()),
+                            Mesh3d(
+                                stat_forms
+                                    .get(pi)
+                                    .map(|(h, _)| h.clone())
+                                    .unwrap_or_default(),
+                            ),
                             MeshMaterial3d(material.clone()),
                             Transform::IDENTITY,
                             Visibility::Hidden,

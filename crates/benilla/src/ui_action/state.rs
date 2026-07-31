@@ -194,6 +194,9 @@ pub(super) fn feed_action_state(
     let (pending, queued_melee, channel) = &cast_state;
     let me = self_q.iter().next();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
+    let form_byte = me
+        .map(|(s, _, _, _)| s.0.unit_shapeshift_form())
+        .unwrap_or(0);
     let casting_spell = me.and_then(|(_, _, _, c)| c.map(|c| c.spell_id));
     let current_cast = pending.current(now).or(casting_spell);
     let self_reach = me.map_or(1.5, |(s, _, _, _)| s.0.unit_combat_reach());
@@ -225,14 +228,20 @@ pub(super) fn feed_action_state(
                 // spell while it is our in-flight cast OR our queued on-next-swing strike OR our
                 // running channel (the ref reads one inflight id `0xceca88` — which a queued
                 // Heroic Strike *occupies* until the swing fires it — plus the channel id
-                // `0xceac58`; our model splits the queue into its own slot, same observable).
-                // The form/stance legs stay unmodeled.
+                // `0xceac58`; our model splits the queue into its own slot, same observable) —
+                // OR the shapeshift arm (`IsCurrentAction`'s predicate `0x4e53a0` @ `0x4e5556`,
+                // wow-re `action-spell-icon-apis.md` §5): a MOD_SHAPESHIFT spell whose form ==
+                // the player's form byte reads checked. Deliberately NOT the icon's aura-scan
+                // predicate — the two are different functions in the binary and the asymmetry
+                // is load-bearing (a form granted by a different spell lights the check without
+                // swapping the icon).
                 st.current = if st.is_attack {
                     engaged
                 } else {
                     current_cast == Some(button.action)
                         || queued_melee.current() == Some(button.action)
                         || channel.current(now) == Some(button.action)
+                        || (form_byte != 0 && d.shapeshift_form == Some(u32::from(form_byte)))
                 };
                 st.auto_repeat = auto_repeat.0 == Some(button.action);
                 // The full usable walk (`0x6e3d60` §2a — [`super::usable`]): reagents, forms,

@@ -242,14 +242,18 @@ pub(super) fn feed_actions(
         for (slot, button) in &actions.buttons {
             let (texture, count) = match button.kind {
                 ACTION_KIND_SPELL => {
-                    // The melee auto-attack shows the equipped weapon icon, not spell 6603's `Temp`
-                    // placeholder (decision 0230); every other spell uses its own icon.
-                    let d = spells.as_ref().and_then(|s| s.catalog.get(button.action));
-                    let icon = d
-                        .and_then(|d| {
-                            auto_attack_icon(d, store, &mut items, icons.as_deref(), &commands)
-                        })
-                        .or_else(|| d.and_then(|d| d.icon.clone()));
+                    let icon = spells.as_ref().and_then(|sp| {
+                        let d = sp.catalog.get(button.action)?;
+                        spell_action_icon(
+                            button.action,
+                            d,
+                            sp,
+                            store,
+                            &mut items,
+                            icons.as_deref(),
+                            &commands,
+                        )
+                    });
                     (icon, 0)
                 }
                 ACTION_KIND_ITEM => {
@@ -328,29 +332,39 @@ pub(super) fn feed_actions(
                     }
                     changed
                 }
-                // A weapon-substituting icon tracks the equipped weapon — main-hand for Attack
-                // (decision 0230), the ranged slot for Auto Shot / wand Shoot (decision 0231's
-                // ranged case) — which a swap changes without touching the action table, so
-                // refresh it too. A normal spell's icon is stable, so it's skipped.
+                // Two icon families track live character state, not the action table, so they
+                // refresh every frame: a weapon-substituting icon follows the equipped weapon
+                // AND the current form (Attack's `0x4e6870` — decisions 0230/0231 + the form
+                // face), and a toggle spell with a nonzero ActiveIconID swaps faces with its own
+                // aura (`0x4e6a50`'s `0x4e6bbd` predicate — a shift in/out never touches
+                // SMSG_ACTION_BUTTONS). A plain spell's icon is stable, so it's skipped.
                 ACTION_KIND_SPELL => {
-                    let d = spells.as_ref().and_then(|s| s.catalog.get(slot.action));
-                    match d.filter(|d| substitutes_weapon_icon(d)) {
-                        Some(d) => {
-                            let fresh = auto_attack_icon(
+                    let d = spells
+                        .as_ref()
+                        .and_then(|s| s.catalog.get(slot.action))
+                        .filter(|d| substitutes_weapon_icon(d) || d.active_icon_id != 0);
+                    match (d, spells.as_ref()) {
+                        (Some(d), Some(sp)) => {
+                            let fresh = spell_action_icon(
+                                slot.action,
                                 d,
+                                sp,
                                 Some(store),
                                 &mut items,
                                 icons.as_deref(),
                                 &commands,
-                            )
-                            .or_else(|| d.icon.clone());
+                            );
                             let changed = fresh != slot.texture;
                             if changed {
+                                debug!(
+                                    "ui_action: live icon swap slot {action} ({}) -> {fresh:?}",
+                                    slot.action
+                                );
                                 slot.texture = fresh;
                             }
                             changed
                         }
-                        None => false,
+                        _ => false,
                     }
                 }
                 _ => false,
@@ -364,4 +378,38 @@ pub(super) fn feed_actions(
             }
         }
     }
+}
+
+/// The whole SPELL-slot icon rule — the reference's `GetActionTexture` resolver `0x4e6a50`
+/// (wow-re `action-spell-icon-apis.md` §3, §5-verified), arms in its execution order:
+///
+/// 1. The **pre-emptive arms** ([`auto_attack_icon`]): Attack serves the current form's face /
+///    the main-hand weapon (`0x4e6870`), an auto-repeat shot the ranged weapon (`0x4e6990`) —
+///    before the spell's own icon fields are ever read.
+/// 2. The **active-toggle swap** (`0x4e6bbd → 0x4e6bc6`): `ActiveIconID` while the button's OWN
+///    spell id sits live-and-cancelable in the player's aura slots — the literal `0x4e55f0`
+///    predicate `UseAction`'s cancel fork rides ([`super::toggle::active_action_toggle`]; the
+///    same function in the binary, by call-target address). Ghost Wolf's swirl while shifted.
+/// 3. The spell's own `SpellIconID` face.
+///
+/// The spellbook's `GetSpellTexture` (`0x4b3f50`) deliberately runs ONLY arms 1 and 3 — it never
+/// serves `ActiveIconID` (proof by exhaustion in the note). `ui_spellbook` keeps that asymmetry;
+/// do not "fix" it to match the bar.
+#[allow(clippy::too_many_arguments)] // the resolver's full input set, twice-called above
+fn spell_action_icon(
+    spell_id: u32,
+    d: &benilla_formats::SpellDisplay,
+    spells: &super::Spells,
+    store: Option<&crate::net::ObjectStore>,
+    items: &mut Items,
+    icons: Option<&ItemDisplays>,
+    commands: &NetCommands,
+) -> Option<String> {
+    auto_attack_icon(d, store, &spells.forms, items, icons, commands)
+        .or_else(|| {
+            store
+                .filter(|s| super::toggle::active_action_toggle(spell_id, d, s))
+                .and_then(|_| d.active_icon.clone())
+        })
+        .or_else(|| d.icon.clone())
 }

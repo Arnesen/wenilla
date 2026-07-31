@@ -224,6 +224,18 @@ pub(crate) fn shade_of(tag: u32) -> u8 {
     ((tag & SHADE_MASK) >> SHADE_SHIFT) as u8
 }
 
+/// Whether this tag's instance draws **translucent** (`0 < α < 1`) — the depth-prime twin's
+/// activation rule ([`crate::zfill`], decision 0831), decoding exactly as the shader does: the
+/// flag bits split off first, a whole payload of `0` is the *untagged ⇒ opaque* sentinel, and a
+/// full alpha field (63) is opaque. The field is never legitimately `0` ([`alpha_bits`] floors at
+/// `1`), so there is no "invisible" branch to exclude — bits `1..=62` are the whole translucent
+/// band, matching the reference's twin gate (any batch whose evaluated `A < 0.99999` routes to the
+/// transparent lists and clones a twin; only `A ≤ 0` culls the batch outright).
+pub(crate) fn translucent(tag: u32) -> bool {
+    let payload = tag & !(HIGHLIGHT_BIT | INTERIOR_FOG_BIT);
+    payload != 0 && matches!(payload & ALPHA_MASK, 1..=62)
+}
+
 /// Human-readable decode of a `MeshTag`, for the probes (`WOW_PICK`'s per-frame shading dump).
 ///
 /// It lives **here** because this module owns the bit conventions: a probe that re-derived the masks

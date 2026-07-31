@@ -154,6 +154,11 @@ pub(super) fn spawn_emitters_for(
                 owner,
                 attach: None, // placed doodads/props are never attached models
                 anchor: None, // anchor at the placement: an animated bone never drags the cloud
+                // An animated doodad's rig goes when its placement unloads, and that IS this
+                // model being destroyed — free the pool with it, the same rule the WMO-prop lane
+                // beside this one already states (0826, missed here: a tile crossing left the
+                // brazier's flame draining at the old spot).
+                on_owner_loss: particles::OwnerLoss::Free,
                 ..default()
             },
             // A placed doodad's arm is NOT one-time: it re-rolls its variation every play-window

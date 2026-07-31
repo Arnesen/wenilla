@@ -62,6 +62,11 @@ pub(crate) struct MatKey {
     sidn: Option<[u8; 3]>,
     /// The WMO MOMT WINDOW flag — an interior-group batch on the brighter midpoint light.
     window: bool,
+    /// This material is a **depth-prime twin** ([`zfill_material`] — the reference's `M2UseZFill`
+    /// clone command, wow-re `m2-blend-promotion-zfill.md` §4): colour writes masked off, blend off,
+    /// z-write on, drawn before its model's colour batches. Its own key axis so a twin can never
+    /// dedupe onto a colour material.
+    zfill: bool,
 }
 
 /// The per-material static terrain-shade **selector** baked into `sun_scale.x` — NOT an intensity
@@ -119,8 +124,10 @@ impl ShadeSel {
 pub(crate) type MaterialCache = crate::art_scope::SpatialCache<MatKey, Handle<WowModelMaterial>>;
 
 /// Build (or fetch the deduped) [`WowModelMaterial`] for a model batch: a `StandardMaterial` base
-/// carrying the texture/alpha/cull, plus the `WowModelExt` shared-light extension. `fade_variant` is
-/// the `AlphaMode::Blend` twin used by the doodad distance-fade feather pass (entities pass `false`).
+/// carrying the texture/alpha/cull, plus the `WowModelExt` shared-light extension. `fade_variant`
+/// marks the `AlphaMode::Blend` twin every feather pass rides — the doodad distance fade AND the
+/// entity appear/despawn/aura fades (`entities::display` builds its twins with it too); steady
+/// materials pass `false`. `specialize` keys depth-write-ON on this bit for the twin.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_material(
     cache: &mut MaterialCache,
@@ -168,6 +175,7 @@ pub(crate) fn model_material(
         wmo_class,
         sidn,
         window,
+        zfill: false,
     };
     if let Some(h) = cache.fetch(&key) {
         return h;
@@ -323,6 +331,99 @@ pub(crate) fn model_material(
                     if window { 1.0 } else { 0.0 },
                 )
             },
+            light_buf: light.clone(),
+        },
+    });
+    cache.insert(key, handle.clone());
+    handle
+}
+
+/// `clutter_fade.z` marker bit 9: this material is a depth-prime twin ([`zfill_material`]).
+pub(crate) const ZFILL_MARKER: u16 = 1 << 9;
+
+/// The twin's `Transparent3d` sort bias (yards; **negative = drawn earlier** — the sign law is
+/// `sky_order`'s module doc). It must clear the spread of one model's part AABB centres, so **all**
+/// of a fading model's twins draw before **any** of its colour parts — the reference achieves the
+/// same by tying every command of one instance to a single sort key (`cmd+0x14 = model+0x84`) and
+/// putting twins first inside the tie (`m2-blend-promotion-zfill.md` §4/§6). 8 yd covers every
+/// humanoid and mount; the residue (a model taller than 8 yd may keep a little self-overlap
+/// darkening at its extremities, and transparent scene content sorting within 8 yd behind a fading
+/// body draws after the prime and is depth-clipped where the body covers it) is recorded in
+/// decision 0831. The same field doubles as the rasterizer depth bias in relative ULPs — at −8 that
+/// is ~2⁻²⁰ relative, and its direction (twin marginally farther) only makes the colour pass's
+/// GreaterEqual test safer against cross-pipeline ULP noise.
+pub(crate) const ZFILL_SORT_BIAS: f32 = -8.0;
+
+/// Build (or fetch) the **depth-prime twin** material for one fadeable entity batch — the
+/// reference's `M2UseZFill` clone (wow-re `m2-blend-promotion-zfill.md` §4, VERIFIED): while a
+/// model draws translucent (`0 < A < 1`), a colour-masked, blend-off, z-writing copy of each of its
+/// depth-writing batches draws first, so every colour fragment behind the model's own nearest
+/// surface fails the depth test — one blended layer everywhere, no self-overlap darkening.
+///
+/// `cutout` mirrors what the part's COLOUR pass discards, and must keep mirroring it: a twin that
+/// writes depth where the colour pass discards leaves an invisible depth wall inside the cutout
+/// holes. Opaque/AlphaKey sources ride the fade twin's hard 224/255 cutout (`model_flags.y`);
+/// authored-Blend sources discard nothing (their colour pass is the plain blend material).
+///
+/// Everything that shapes only the *colour* (lighting lane, shade, fog, tint) is canonicalized so
+/// twins dedupe maximally — the `WOW_ZFILL` fragment returns before any of it.
+pub(crate) fn zfill_material(
+    cache: &mut MaterialCache,
+    materials: &mut Assets<WowModelMaterial>,
+    texture: Option<Handle<Image>>,
+    two_sided: bool,
+    cutout: bool,
+    light: &Buffer,
+) -> Handle<WowModelMaterial> {
+    let key = MatKey {
+        texture: texture.as_ref().map(Handle::id),
+        blend: if cutout {
+            ModelBlend::AlphaTest
+        } else {
+            ModelBlend::Blend
+        },
+        two_sided,
+        is_wmo: false,
+        is_interior: false,
+        is_emissive: false,
+        is_additive: false,
+        fade_variant: cutout,
+        no_depth_write: false,
+        no_depth_test: false,
+        fog_policy: benilla_formats::FogPolicy::Scene,
+        shade: ShadeSel::Lit,
+        wmo_batch_order: 0,
+        uv_anim: None,
+        rgb_anim: None,
+        wmo_class: None,
+        sidn: None,
+        window: false,
+        zfill: true,
+    };
+    if let Some(h) = cache.fetch(&key) {
+        return h;
+    }
+    let cull_mode = if two_sided { None } else { Some(Face::Back) };
+    let base = StandardMaterial {
+        base_color_texture: texture,
+        // Blend keeps the twin in the transparent pass, where the sort bias can place it before
+        // the colour parts; `specialize` masks the colour writes off and turns blend off.
+        alpha_mode: AlphaMode::Blend,
+        depth_bias: ZFILL_SORT_BIAS,
+        double_sided: two_sided,
+        cull_mode,
+        ..default()
+    };
+    let handle = materials.add(ExtendedMaterial {
+        base,
+        extension: WowModelExt {
+            clutter_fade: Vec4::new(0.0, 0.0, f32::from(ZFILL_MARKER), 0.0),
+            // `model_flags.y` (the fade-twin bit) drives the shader's hard 224/255 cutout — set
+            // exactly when the colour pass discards, so depth and colour coverage agree.
+            model_flags: Vec4::new(0.0, if cutout { 1.0 } else { 0.0 }, 0.0, 0.0),
+            sun_scale: Vec4::new(ShadeSel::Lit.selector(), 0.0, 0.0, 0.0),
+            tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
+            sidn: Vec4::ZERO,
             light_buf: light.clone(),
         },
     });

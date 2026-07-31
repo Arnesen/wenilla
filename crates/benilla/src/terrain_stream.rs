@@ -15,7 +15,6 @@
 //! [`crate::clutter::ClutterPlugin`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use benilla_assets::coords::{bevy_to_wow, placement_rotation, wow_to_bevy};
@@ -40,11 +39,18 @@ use crate::world_map::{CurrentMap, MapCatalogRes};
 use crate::SPAWN_XY;
 
 mod collider;
+mod furnish;
 mod queries;
 mod spawn;
 
 use collider::{finish_colliders, terrain_collider_data};
+use furnish::furnish_tile_cells;
+use spawn::prop_light::WmoDoodadInst;
 use spawn::spawn_loaded_placements;
+// The WMO prop-light machinery lives spawn-side (0830's named carve, executed in 0832); the two
+// outside consumers — `crate::interior` and `crate::entities`' `wmo_props` — keep their
+// `terrain_stream::X` paths, same as the `queries` items below.
+pub(crate) use spawn::prop_light::{fold_interior_probe, PropLobeLight};
 // The shared placed-model assembler + the off-thread collider build — also the WMO-gameobject
 // doodad-prop path's spawner (`crate::entities`' `wmo_props`: the ship's sails ride the streamed
 // gameobject entity, and its cargo hulls ride the boat's kinematic body).
@@ -75,6 +81,9 @@ pub(crate) struct TerrainStreamer {
     /// The map directory the loaded tiles are for (e.g. `"Azeroth"`); a change means a cross-map
     /// teleport, so every tile is dropped and re-streamed for the new map.
     map_dir: Option<String>,
+    /// The focus tile [`stream_terrain`] last streamed around — the furnisher's nearest-first
+    /// ordering key, published here so it never recomputes the focus ladder a second time.
+    focus: (i32, i32),
     /// The current map's WDT tile index (decision 0476), requested with the map: ADT requests wait
     /// for it and consult its `MAIN` grid — open ocean authors no tiles to ask for.
     wdt: Option<Handle<WdtIndex>>,
@@ -94,10 +103,10 @@ pub(crate) struct TerrainStreamer {
 const GLOBAL_WMO_UID: u32 = u32::MAX;
 
 impl TerrainStreamer {
-    /// Residency counts for the debug panel's World readout: `(spawned, requested)` — tiles whose
-    /// terrain entity exists vs. every tile in the stream window (spawned + still loading).
+    /// Residency counts for the debug panel's World readout: `(spawned, requested)` — tiles fully
+    /// up (root + cells furnished) vs. every tile in the stream window (up + loading/furnishing).
     pub(crate) fn residency(&self) -> (usize, usize) {
-        let spawned = self.tiles.values().filter(|t| t.entity.is_some()).count();
+        let spawned = self.tiles.values().filter(|t| t.furnished).count();
         (spawned, self.tiles.len())
     }
 }
@@ -105,9 +114,19 @@ impl TerrainStreamer {
 /// One loaded tile: the resident asset handle, the terrain entity, and the placement ids it references.
 struct TileState {
     handle: Handle<AdtTile>,
-    /// `None` until the `AdtTile` finishes loading and the terrain mesh entity is spawned (which is also
+    /// `None` until the `AdtTile` finishes loading and the terrain root entity is spawned (which is also
     /// when this tile's placements are registered).
     entity: Option<Entity>,
+    /// The tile's terrain material, made at root spawn and shared by every cell the furnisher hangs
+    /// off the root (one material per tile — the loader's arrays make that possible).
+    material: Option<Handle<TerrainMaterial>>,
+    /// The furnishing cursor: the next `AdtTile::chunks` index whose cell [`furnish::furnish_tile_cells`]
+    /// should build. Cells land a few per frame while live (decision 0832) — the mesh-asset creation
+    /// IS the pacing point; everything downstream (extract, prepare, upload) follows its rate.
+    next_cell: usize,
+    /// `true` once every cell is up (or cells are ablated off): the "this tile is really resident"
+    /// bit the loading-screen accounting reads, so a reveal never shows a root with bare ground.
+    furnished: bool,
     /// uniqueIds of the doodad/WMO placements this tile references — registered once the tile's `AdtTile`
     /// loads, refcount-released when the tile unloads.
     placements: Vec<u32>,
@@ -153,81 +172,6 @@ struct Placement {
     portal_instance: Option<Entity>,
     /// How many loaded tiles reference this placement; despawned when it hits zero.
     refs: u32,
-}
-
-/// One WMO doodad prop instance: its M2 handle and the **world** transform (the WMO instance
-/// transform composed with the doodad's WMO-local transform), spawned once the M2 asset loads.
-struct WmoDoodadInst {
-    handle: Handle<M2Model>,
-    transform: Transform,
-    /// Every WMO group whose MODR names this prop — the portal-cull key, so a prop is hidden with
-    /// the rooms it furnishes and drawn while any one of them is visible. Empty for a MODD no group
-    /// references (the reference never instantiates one at all; we still show it, uncullable,
-    /// rather than change what draws today).
-    groups: Arc<[u16]>,
-    /// The prop's lighting ([`PropLight`], from `WmoModel::doodad_base` composed with this
-    /// placement): exterior sky-lit, or the interior MODD-colour base + its owning group's MOLR
-    /// lights placed in world space — folded into the prop's SH probe once its M2 loads (the fold
-    /// reference point needs the M2 bounds).
-    light: PropLight,
-    spawned: bool,
-}
-
-/// A WMO prop's placement-resolved lighting: the asset-level [`DoodadBase`] with the owning group's
-/// MOLR lights already transformed to WORLD (Bevy) space — so the spawn-time SH fold needs only the
-/// loaded M2's bounds (its reference point) and nothing from the WMO asset.
-enum PropLight {
-    Exterior,
-    Interior {
-        /// `cap96(MODD.colour)` — the ambient word (0–1 RGB).
-        ambient: [f32; 3],
-        /// `floor112(MODD.colour)` — the diffuse word, committed on the fixed interior axis.
-        diffuse: [f32; 3],
-        /// The owning group's MOLR omni lights: world (Bevy) position, colour × intensity, and the
-        /// disk `attenStart`/`attenEnd` window (the fold's range gate).
-        lights: Vec<PropLobeLight>,
-    },
-}
-
-/// One MOLR-referenced light as the interior fold consumes it (world Bevy space, colour
-/// pre-multiplied by the authored intensity). Shared by the MODD prop spawn fold and the
-/// GameObject footprint lane ([`crate::interior`] via [`crate::wmo_portal`]'s verdict).
-pub(crate) struct PropLobeLight {
-    pub(crate) pos: Vec3,
-    pub(crate) color_i: [f32; 3],
-    pub(crate) atten_start: f32,
-    pub(crate) atten_end: f32,
-}
-
-/// Fold one interior committed light into its 7-row SH probe: the ambient word + the diffuse word
-/// as a directional on the FIXED interior axis + each MOLR lobe windowed by its disk
-/// attenStart/attenEnd from `ref_point` (the byte-verified `0x69e1c0` falloff: d ≤ start → 1;
-/// d ≥ end → excluded; else linear). One definition for both interior lanes — the MODD prop
-/// (spawn-time, MODD-colour words) and the GameObject footprint (classify-time, MOCV-derived
-/// words); the SH closed form itself is [`prop_probe_coeffs`].
-pub(crate) fn fold_interior_probe(
-    ambient: [f32; 3],
-    diffuse: [f32; 3],
-    ref_point: Vec3,
-    lights: &[PropLobeLight],
-) -> [bevy::math::Vec4; 7] {
-    // Toward-light, Bevy space: wow (0.30822, 0.30822, 0.9) → (−y, z, −x).
-    let mut lobes: Vec<(Vec3, [f32; 3])> = vec![(Vec3::new(-0.30822, 0.9, -0.30822), diffuse)];
-    for l in lights {
-        let dv = l.pos - ref_point;
-        let dist = dv.length();
-        let gain = if dist <= l.atten_start {
-            1.0
-        } else if dist >= l.atten_end || l.atten_end <= l.atten_start {
-            0.0
-        } else {
-            1.0 - (dist - l.atten_start) / (l.atten_end - l.atten_start)
-        };
-        if gain > 0.0 {
-            lobes.push((dv / dist.max(1e-4), l.color_i.map(|c| c * gain)));
-        }
-    }
-    crate::lighting::prop_probe_coeffs(ambient, &lobes)
 }
 
 /// **Where the world streams from**, in WoW coordinates — one rule, shared by the detailed
@@ -297,6 +241,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainStreamer>()
             .init_resource::<Placements>()
+            .init_resource::<crate::model_forms::ModelForms>()
             .init_resource::<CurrentArea>()
             // **The streaming chain lives in `WorldStage::Stream`** — the load-bearing half of the
             // frame ordering contract (schedule.rs): the teleport snap (Input) → the streamer
@@ -312,6 +257,7 @@ impl Plugin for TerrainPlugin {
                 (
                     finish_colliders,
                     stream_terrain,
+                    furnish_tile_cells,
                     spawn_loaded_placements,
                     sync_interior_volumes,
                 )
@@ -322,6 +268,17 @@ impl Plugin for TerrainPlugin {
                     // no collider to finish and no WMO volume to mirror, and gating the head alone
                     // would leave three systems walking empty queries to prove it every frame.
                     .run_if(crate::schedule::world_is_live),
+            )
+            // The model-forms furnisher (decision 0834) runs UNGATED, unlike the chain above: the
+            // glue screens' character preview requests forms pre-world (`update_display_models`
+            // serves the glue stage too), and a world-live gate would starve it forever. Ordered
+            // before the placement spawner so a form completed this frame can land this frame;
+            // everything it does is demand-driven, so with no requests it is a no-op.
+            .add_systems(
+                Update,
+                crate::model_forms::furnish_model_forms
+                    .in_set(WorldStage::Stream)
+                    .before(spawn_loaded_placements),
             )
             // Leaving the world releases it. Without this, a `/logout` back to character select
             // would leave the whole streamed world resident and unowned — the gate above stops it
@@ -472,6 +429,7 @@ fn stream_terrain(
     let tiling = cfg.as_ref().map(|c| c.tex_tiles).unwrap_or(8.0);
     let (cx, cy) = world_to_tile(center[0], center[1]);
     let (cx, cy) = (cx as i32, cy as i32);
+    state.focus = (cx, cy);
 
     // Desired set: the (2r+1)² square around the focus, clamped to the 64×64 tile grid — and
     // filtered to tiles the WDT says exist (open ocean authors none). The filter also fixes the
@@ -571,6 +529,9 @@ fn stream_terrain(
                     handle: asset_server
                         .load(format!("mpq://World/Maps/{dir}/{dir}_{tx}_{ty}.adt")),
                     entity: None,
+                    material: None,
+                    next_cell: 0,
+                    furnished: false,
                     placements: Vec::new(),
                     liquid: Vec::new(),
                     clutter: Vec::new(),
@@ -612,27 +573,13 @@ fn stream_terrain(
         // exterior-scene cull needs (decision 0780; a 533 yd slab the camera stands on intersects
         // every portal window, so it could never be hidden), and it also gives Bevy's own frustum cull
         // something smaller than half a kilometre to reject. Despawning the root takes the cells.
+        //
+        // The cells themselves do NOT spawn here (decision 0832): a whole row of tiles finishes
+        // decoding in one frame, and spawning ~1300 loader-built cell meshes at once handed the
+        // render world their entire extract/prepare/upload as one 80–105 ms (process-CPU) frame —
+        // the B181 first-contact spike. `furnish_tile_cells` (chained right after this system)
+        // builds them from `AdtTile::chunks` + `shading` a few per frame while live.
         let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
-        // Ablation switch (`WOW_NO_TILE_CELLS=1`): spawn the tile — asset residency, collider,
-        // placements, liquid, clutter — without its per-chunk cell entities, isolating the
-        // render-entity lane from the asset lane when measuring a streaming cost. The B181 carve
-        // ran on it (a crossing's spike survived zero cells, exonerating the entity lane); the
-        // `WOW_NO_LIQUID`/`WOW_NO_PARTICLES` family's pattern.
-        if std::env::var("WOW_NO_TILE_CELLS").is_err() {
-            tile_ent.with_children(|cells| {
-                for mesh in &adt.chunk_meshes {
-                    cells.spawn((
-                        Mesh3d(mesh.clone()),
-                        MeshMaterial3d(material.clone()),
-                        Transform::IDENTITY, // chunk meshes are already in absolute world coords
-                        // ADT terrain is exterior scene: from inside a WMO a cell draws only through a
-                        // portal window (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see
-                        // `crate::exterior_cull`).
-                        crate::exterior_cull::ExteriorScene,
-                    ));
-                }
-            });
-        }
         if let Some((verts, tris)) = collider_data {
             // `GroundDecalSurface`: terrain receives the selection ring (see `crate::collision`).
             // `PickOccluder`: terrain clamps the mouse pick (the reference's world trace).
@@ -643,6 +590,7 @@ fn stream_terrain(
             ));
         }
         tile.entity = Some(tile_ent.id());
+        tile.material = Some(material);
         activity.tiles_spawned += 1;
 
         // Register this tile's doodad/WMO placements (deduped + refcounted by uniqueId across tiles).
@@ -702,13 +650,14 @@ fn stream_terrain(
     // focus tile that doesn't exist (map edge) counts as resident so we never get stuck waiting
     // for ground that isn't there.
     if let Some(p) = load_progress.as_mut() {
-        let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.entity.is_some());
+        // "Spawned" means FURNISHED (root + every cell): the furnisher is uncapped while the
+        // cover is up, so this costs entry nothing — but it keeps a reveal from ever showing a
+        // root whose ground is still landing (`furnished` lags root spawn by one frame here,
+        // since the furnisher runs after this system in the same chain).
+        let spawned = |c: &(i32, i32)| state.tiles.get(c).is_some_and(|t| t.furnished);
         p.total = desired.len();
         p.ready = desired.iter().filter(|c| spawned(c)).count();
-        p.focus_resident = state
-            .tiles
-            .get(&(cx, cy))
-            .is_none_or(|t| t.entity.is_some());
+        p.focus_resident = state.tiles.get(&(cx, cy)).is_none_or(|t| t.furnished);
         // The focus neighbourhood's placements join the accounting (bar + scene term). A placement
         // is *up* once its own model spawned AND its WMO props (each an M2 arriving on its own
         // schedule) have — the furniture the reveal would otherwise pop in. Placements of tiles not
@@ -722,7 +671,7 @@ fn stream_terrain(
                     continue; // off-grid or WDT says no tile — nothing to wait for
                 }
                 match state.tiles.get(&c) {
-                    Some(t) if t.entity.is_some() => {
+                    Some(t) if t.furnished => {
                         for uid in &t.placements {
                             if let Some(pl) = placements.by_id.get(uid) {
                                 let up = pl.spawned && pl.doodads.iter().all(|d| d.spawned);
@@ -896,6 +845,7 @@ fn release_world(
     mut commands: Commands,
     mut state: ResMut<TerrainStreamer>,
     mut placements: ResMut<Placements>,
+    mut forms: ResMut<crate::model_forms::ModelForms>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
     mut activity: ResMut<crate::perf::StreamActivity>,
 ) {
@@ -906,6 +856,10 @@ fn release_world(
         "terrain: leaving the world — releasing {} tiles",
         state.tiles.len()
     );
+    // The model-form cache frees per asset on `Unused` events; leaving the world drops the whole
+    // cache in one deterministic sweep instead — nothing world-scoped may survive a logout, and
+    // an entry whose asset another holder keeps resident would otherwise pin its meshes forever.
+    forms.clear();
     drop_streamed_world(&mut commands, &mut state, &mut placements, &mut activity);
     state.map_dir = None;
     state.wdt = None;

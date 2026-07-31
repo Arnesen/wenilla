@@ -13,8 +13,8 @@
 //! handler instead **eases the render scale over 2 s with a cosine smoothstep** (byte-verified,
 //! `0x614bbf`). All wow-re: `questgiver-marker.md` §W6, `w2d2.md` §2.x, `object-layer.md`.
 //!
-//! Our shape is the house diff-and-rebuild ([`super::mount::refresh_mounts`] /
-//! [`super::equipment::refresh_player_looks`]): the visual was BUILT with [`AppliedDisplay`], the
+//! Our shape is the house diff-and-rebuild ([`super::mount::refresh_mounts`]): the visual was
+//! BUILT with [`AppliedDisplay`], the
 //! live truth is the descriptor store, and a difference tears the visual down for
 //! `attach_entity_visuals` to rebuild — fade-skipped (a shapeshift isn't a spawn), waiting out the
 //! new model's async load rather than flashing a cube. The collision height restamps **in the same

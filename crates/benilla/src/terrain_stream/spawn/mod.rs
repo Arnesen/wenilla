@@ -5,6 +5,7 @@
 
 mod assemble;
 mod fx;
+pub(crate) mod prop_light;
 
 pub(crate) use assemble::spawn_model_entities;
 pub(crate) use fx::point_light;
@@ -15,24 +16,26 @@ use std::time::Instant;
 
 use benilla_assets::coords::{wmo_doodad_local, wow_to_bevy};
 use benilla_assets::{AdtTile, DoodadBase, M2Model, WmoModel};
-use benilla_formats::M2Bounds;
+use benilla_formats::{world_to_tile, M2Bounds};
 use bevy::prelude::*;
 
 use crate::collision::{camera_layers, walk_layers, GroundDecalSurface, PickOccluder};
 use crate::debug_panel::ModelKind;
+use crate::doodad_anim::wants_rig;
 use crate::interact::WorldObject;
 use crate::lighting::SharedLightBuffer;
 use crate::lighting::{PropProbeSlot, PropProbes};
 use crate::liquid::{spawn_wmo_liquids, LiquidAssets};
+use crate::model_forms::{FormSlices, ModelForms, ModelKey, WANT_SKINNED, WANT_STATIC};
 use crate::model_render::{m2_url, ShadeSel};
 use crate::terrain::WowModelMaterial;
 use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 
 use super::collider::{build_collider_task, placement_collider_data, PendingCollider};
 use super::{
-    doodad_ground_shade, fold_interior_probe, ModelHandle, Placements, PropLight, PropLobeLight,
-    ShadeResolve, TerrainStreamer, WmoDoodadInst, SPAWN_BUDGET,
+    doodad_ground_shade, ModelHandle, Placements, ShadeResolve, TerrainStreamer, SPAWN_BUDGET,
 };
+use prop_light::{fold_interior_probe, PropLight, PropLobeLight, WmoDoodadInst};
 
 /// Placements (models or WMO props) spawned per frame while live — the count half of the landing
 /// budget; see the cap's comment in [`spawn_loaded_placements`]. ~150 × the measured ~50 µs
@@ -43,6 +46,17 @@ const SPAWN_COUNT_CAP: usize = 150;
 /// Spawn the submesh entities for any placement whose model asset has finished loading. Each submesh
 /// gets the production [`WowModelMaterial`] (cutout + blend twin) and the same `ModelPart`/`DoodadFade`/
 /// `MeshTag` components the old spawn used — so the existing visibility/fade/lighting systems take over.
+/// The nested resource tuple of [`spawn_loaded_placements`] (the 16-SystemParam ceiling): the
+/// prop-probe table, the skin-palette table (0720), the stream-trace counters, the live/settling
+/// state the landing cap reads, and the model-forms cache (0834).
+type SpawnTables<'w> = (
+    ResMut<'w, PropProbes>,
+    ResMut<'w, crate::rig_palette::RigPalettes>,
+    ResMut<'w, crate::perf::StreamActivity>,
+    Option<Res<'w, crate::player::Player>>,
+    ResMut<'w, ModelForms>,
+);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_loaded_placements(
     mut commands: Commands,
@@ -65,15 +79,10 @@ pub(super) fn spawn_loaded_placements(
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
     // Nested to stay inside Bevy's 16-element system-param tuple limit: the prop-probe table +
     // the skin-palette table (decision 0720) + the stream-trace counters + the live/settling
-    // state the landing cap reads.
-    tables: (
-        ResMut<PropProbes>,
-        ResMut<crate::rig_palette::RigPalettes>,
-        ResMut<crate::perf::StreamActivity>,
-        Option<Res<crate::player::Player>>,
-    ),
+    // state the landing cap reads + the model-forms cache (decision 0834).
+    tables: SpawnTables,
 ) {
-    let (mut probes, mut palettes, mut activity, player) = tables;
+    let (mut probes, mut palettes, mut activity, player, mut forms) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -116,6 +125,18 @@ pub(super) fn spawn_loaded_placements(
                     let Some(m) = m2s.get(h) else {
                         continue; // model still loading (or missing) — try next frame
                     };
+                    // The model's app-built render forms (decision 0834): request static — plus
+                    // the skinned twins iff the anim host will rig this model — and wait for the
+                    // paced furnisher, exactly as the placement waits for the asset itself.
+                    let key = ModelKey::from(h);
+                    let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
+                    if !forms.require(
+                        key,
+                        kinds,
+                        placement_priority(&streamer, p.transform.translation),
+                    ) {
+                        continue;
+                    }
                     // Resolve the MCSH ground-shade the reference way: a GLOBAL world→tile→chunk lookup at
                     // the doodad's origin, independent of which tile registered it or in what order. An ADT
                     // map doodad on lit ground takes the boosted ADT sun level (`ShadeSel::Lit` — the
@@ -136,6 +157,10 @@ pub(super) fn spawn_loaded_placements(
                         &mut palettes,
                         light,
                         &m.submeshes,
+                        FormSlices {
+                            stat: forms.static_meshes(key).unwrap_or(&[]),
+                            skin: forms.skinned_meshes(key),
+                        },
                         p.transform,
                         false,
                         shade,
@@ -217,6 +242,14 @@ pub(super) fn spawn_loaded_placements(
                     let Some(m) = wmos.get(h) else {
                         continue;
                     };
+                    // The building's app-built render forms (0834): static only — WMO group
+                    // geometry never skins. A city root's thousands of batches are exactly the
+                    // burst the paced furnisher exists to spread.
+                    let key = ModelKey::from(h);
+                    let prio = placement_priority(&streamer, p.transform.translation);
+                    if !forms.require(key, WANT_STATIC, prio) {
+                        continue;
+                    }
                     // WMOs carry no authored bounds → never size-fade (∞ radius), rely on the far-clip.
                     // (`m2: None` ⇒ no anim host, so the joint half of the return is always empty.)
                     let (mut ents, _) = spawn_model_entities(
@@ -226,6 +259,10 @@ pub(super) fn spawn_loaded_placements(
                         &mut palettes,
                         light,
                         &m.submeshes,
+                        FormSlices {
+                            stat: forms.static_meshes(key).unwrap_or(&[]),
+                            skin: None,
+                        },
                         p.transform,
                         true,
                         ShadeSel::Matte, // WMO lights on the FFP N·L path — the selector is unread
@@ -425,6 +462,16 @@ pub(super) fn spawn_loaded_placements(
             let Some(m) = m2s.get(&d.handle) else {
                 continue; // this prop's M2 still loading
             };
+            // The prop's app-built render forms (0834) — same gate as its owning placement's.
+            let key = ModelKey::from(&d.handle);
+            let kinds = WANT_STATIC | if wants_rig(m) { WANT_SKINNED } else { 0 };
+            if !forms.require(
+                key,
+                kinds,
+                placement_priority(&streamer, d.transform.translation),
+            ) {
+                continue;
+            }
             // The verified MODD lighting: an EXTERIOR-group WMO prop samples the terrain MCSH at
             // its footprint like the reference's per-frame refresh `0x698c50` — plain matte (sun
             // ×1.0) on lit ground, the shaded level on MCSH-shadowed ground, and NEVER the ADT 2.5
@@ -476,6 +523,10 @@ pub(super) fn spawn_loaded_placements(
                 &mut palettes,
                 light,
                 &m.submeshes,
+                FormSlices {
+                    stat: forms.static_meshes(key).unwrap_or(&[]),
+                    skin: forms.skinned_meshes(key),
+                },
                 d.transform,
                 false,
                 shade,
@@ -642,6 +693,18 @@ fn resolve_wmo_doodads(
 
 /// A model handle's source path as a readable label for the object inspector (the asset path without
 /// the `mpq://` source prefix). Empty if the handle carries no path.
+/// A placement's model-forms build priority (decision 0834): its Chebyshev tile distance to the
+/// stream focus, scaled to leave the band below for the entity lane — a mob walking into view
+/// never queues behind a city's scenery. `translation` is Bevy space (the placement transform);
+/// `world_to_tile` wants WoW ground coords, the inverse of decision 0002's rotation.
+fn placement_priority(streamer: &TerrainStreamer, translation: Vec3) -> i32 {
+    let (tx, ty) = world_to_tile(-translation.z, -translation.x);
+    let d = (tx as i32 - streamer.focus.0)
+        .abs()
+        .max((ty as i32 - streamer.focus.1).abs());
+    16 + d * 16
+}
+
 fn handle_label<A: Asset>(handle: &Handle<A>) -> String {
     handle
         .path()

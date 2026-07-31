@@ -45,16 +45,28 @@ fn main_hand_weapon_icon(
 }
 
 /// The character's melee auto-attack icon (decision 0231; the client's melee helper `0x4e6870`):
-/// the equipped main-hand weapon's icon, or [`SPELL_RESET_ICON`] when unarmed. Character-level —
-/// independent of WHICH auto-attack spell (they all show this), so the spellbook can pre-resolve it
-/// once for its whole page. (The verdict's ranged auto-repeat / shapeshift-form / disarmed cases
-/// are deferred — see decision 0231; this covers the common melee, armed-or-unarmed case.)
+/// the **current shapeshift form's own attack face** when its `SpellShapeshiftForm` row carries
+/// one (the `+0x34` AttackIconID read, `0x4e68af`–`0x4e68da` — a cat's paw, a bear's swipe; wow-re
+/// `action-spell-icon-apis.md` §3.3, closing decision 0231's deferred form case), else the
+/// equipped main-hand weapon's icon, else [`SPELL_RESET_ICON`]. Character-level — independent of
+/// WHICH auto-attack spell (they all show this), so the spellbook can pre-resolve it once for its
+/// whole page.
 pub(crate) fn melee_auto_attack_icon(
     store: &ObjectStore,
+    forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> String {
+    let form = store.0.unit_shapeshift_form();
+    if form != 0 {
+        if let Some(icon) = forms
+            .get(&u32::from(form))
+            .and_then(|f| f.attack_icon.clone())
+        {
+            return icon;
+        }
+    }
     main_hand_weapon_icon(store, items, icons, commands)
         .unwrap_or_else(|| SPELL_RESET_ICON.to_string())
 }
@@ -98,13 +110,14 @@ pub(super) fn substitutes_weapon_icon(spell: &SpellDisplay) -> bool {
 pub(super) fn auto_attack_icon(
     spell: &SpellDisplay,
     store: Option<&ObjectStore>,
+    forms: &std::collections::HashMap<u32, benilla_formats::ShapeshiftForm>,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
     commands: &NetCommands,
 ) -> Option<String> {
     let store = store?;
     if spell.is_melee_auto_attack() {
-        return Some(melee_auto_attack_icon(store, items, icons, commands));
+        return Some(melee_auto_attack_icon(store, forms, items, icons, commands));
     }
     if spell.ranged_icon_substitution() {
         return ranged_weapon_icon(store, items, icons, commands);

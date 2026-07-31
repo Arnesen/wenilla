@@ -254,6 +254,8 @@ fn build_markers(
     mut commands: Commands,
     mut roots: Query<(Entity, &mut QuestMarkerRoot)>,
     m2s: Res<Assets<M2Model>>,
+    mut forms: ResMut<crate::model_forms::ModelForms>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     light: Res<SharedLightBuffer>,
@@ -270,6 +272,16 @@ fn build_markers(
         let Some(model) = m2s.get(&marker.handle) else {
             continue; // marker M2 still loading
         };
+        // The marker's render forms, built NOW (decision 0834): two tiny models per map, on the
+        // booth-lane exception — a marker popping a frame late over a questgiver would be a
+        // regression nothing here needs.
+        let key = crate::model_forms::ModelKey::from(&marker.handle);
+        forms.ensure_now(
+            key,
+            crate::model_forms::WANT_STATIC | crate::model_forms::WANT_SKINNED,
+            &model.submeshes,
+            &mut mesh_assets,
+        );
         // The unit's joint set + attachment table — absent while its own model still loads (or
         // forever on a boneless/model-less unit, which then simply never shows a marker).
         let Some((unit, anchor)) = index
@@ -329,7 +341,9 @@ fn build_markers(
         // The client arms the marker's animation at status receive — the cards' bob loop starts
         // its cursor here (the same clock `face_billboards` samples).
         let arm_ms = time.elapsed().as_millis() as u32;
-        for sub in &model.submeshes {
+        let stat_forms = forms.static_meshes(key).unwrap_or(&[]);
+        let skin_forms = forms.skinned_meshes(key).unwrap_or(&[]);
+        for (pi, sub) in model.submeshes.iter().enumerate() {
             let material = model_material(
                 &mut cache,
                 &mut materials,
@@ -362,7 +376,12 @@ fn build_markers(
                     // world placement each frame; the armed loop plays the bob at the pivot.
                     let child = commands
                         .spawn((
-                            Mesh3d(sub.mesh.clone()),
+                            Mesh3d(
+                                stat_forms
+                                    .get(pi)
+                                    .map(|(h, _)| h.clone())
+                                    .unwrap_or_default(),
+                            ),
                             MeshMaterial3d(material),
                             MeshTag(alpha_bits(1.0)),
                             Transform::IDENTITY,
@@ -380,9 +399,12 @@ fn build_markers(
                     // including the palette-full fallback (slot 0).
                     let use_rig = host.as_ref().is_some_and(|h| h.slot != 0);
                     let mesh = if use_rig {
-                        sub.skinned_mesh.clone()
+                        skin_forms.get(pi).cloned().unwrap_or_default()
                     } else {
-                        sub.mesh.clone()
+                        stat_forms
+                            .get(pi)
+                            .map(|(h, _)| h.clone())
+                            .unwrap_or_default()
                     };
                     let rig_tag = host
                         .as_ref()

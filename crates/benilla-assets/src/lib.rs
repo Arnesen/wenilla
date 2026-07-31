@@ -26,14 +26,15 @@ pub mod minimap_grid;
 
 mod model;
 pub use model::{
-    bone_target_id, AnimClip, BillboardInfo, GlobalBone, GlobalSeqChannel, ModelAnimations,
-    ModelAttachment, ModelJoint, ModelMarker, ModelSkeleton, ModelSubmesh, PoseBone, PoseClip,
-    PoseNode, PoseSource, PoseTrack, ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
+    bone_target_id, submesh_to_skinned_mesh, submesh_to_static_mesh, AnimClip, BillboardInfo,
+    GlobalBone, GlobalSeqChannel, ModelAnimations, ModelAttachment, ModelJoint, ModelMarker,
+    ModelSkeleton, ModelSubmesh, PoseBone, PoseClip, PoseNode, PoseSource, PoseTrack,
+    ATTRIBUTE_WOW_JOINT_INDEX, ATTRIBUTE_WOW_JOINT_WEIGHT,
 };
 mod adt;
 mod terrain;
 mod wdt;
-pub use adt::{AdtLoader, AdtTile};
+pub use adt::{chunk_to_mesh, AdtLoader, AdtTile, ChunkShading};
 pub use wdt::{WdtIndex, WdtIndexLoader};
 mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
@@ -186,6 +187,7 @@ pub fn register_asset_loaders(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::camera::primitives::MeshAabb;
     use bevy::tasks::block_on;
 
     /// crates/benilla-assets -> repo root -> WoW/Data (gitignored; test skips when absent).
@@ -428,25 +430,35 @@ mod tests {
         for _ in 0..600 {
             app.update();
             if let Some(m) = app.world().resource::<Assets<M2Model>>().get(&handle) {
-                let meshes: Vec<Handle<Mesh>> =
-                    m.submeshes.iter().map(|s| s.mesh.clone()).collect();
+                let geometries: Vec<_> = m.submeshes.iter().map(|s| s.geometry.clone()).collect();
                 let textured = m.submeshes.iter().filter(|s| s.texture.is_some()).count();
-                info = Some((meshes, textured, m.bounds.is_some()));
+                info = Some((geometries, textured, m.bounds.is_some()));
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let (meshes, textured, has_bounds) =
+        let (geometries, textured, has_bounds) =
             info.expect("the campfire M2 should load via mpq:// + M2ModelLoader within 600 ticks");
-        assert!(!meshes.is_empty(), "campfire should have render batches");
+        assert!(
+            !geometries.is_empty(),
+            "campfire should have render batches"
+        );
         assert!(has_bounds, "M2 carries authored bounds");
         assert!(textured > 0, "campfire batches reference embedded textures");
 
-        // Each submesh mesh sub-asset is present and non-empty (baked to Bevy space).
-        let mesh_assets = app.world().resource::<Assets<Mesh>>();
-        for h in &meshes {
-            let mesh = mesh_assets.get(h).expect("submesh mesh sub-asset present");
+        // The loader ships geometry, no meshes (decision 0834) — the app builds the render form.
+        // Exercise both builders per batch: non-empty, and the static form must yield the Aabb
+        // the spawn side inserts explicitly (RENDER_WORLD meshes race `calculate_bounds`).
+        for g in &geometries {
+            let mesh = submesh_to_static_mesh(g);
             assert!(mesh.count_vertices() > 0, "submesh has vertices");
+            assert!(mesh.compute_aabb().is_some(), "static form yields an Aabb");
+            let skinned = submesh_to_skinned_mesh(g);
+            assert_eq!(
+                skinned.count_vertices(),
+                mesh.count_vertices(),
+                "the skinned twin bakes the same geometry"
+            );
         }
     }
 
@@ -475,26 +487,26 @@ mod tests {
         for _ in 0..600 {
             app.update();
             if let Some(m) = app.world().resource::<Assets<WmoModel>>().get(&handle) {
-                let meshes: Vec<Handle<Mesh>> =
-                    m.submeshes.iter().map(|s| s.mesh.clone()).collect();
+                let geometries: Vec<_> = m.submeshes.iter().map(|s| s.geometry.clone()).collect();
                 let textured = m.submeshes.iter().filter(|s| s.texture.is_some()).count();
-                info = Some((meshes, textured));
+                info = Some((geometries, textured));
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let (meshes, textured) =
+        let (geometries, textured) =
             info.expect("the Goldshire Inn WMO should load via mpq:// + WmoModelLoader");
         assert!(
-            !meshes.is_empty(),
+            !geometries.is_empty(),
             "the inn has render batches across its groups"
         );
         assert!(textured > 0, "WMO batches reference textures");
 
-        let mesh_assets = app.world().resource::<Assets<Mesh>>();
-        for h in &meshes {
-            let mesh = mesh_assets.get(h).expect("group submesh sub-asset present");
+        // Geometry, no meshes (decision 0834): the static build is the WMO's one render form.
+        for g in &geometries {
+            let mesh = submesh_to_static_mesh(g);
             assert!(mesh.count_vertices() > 0, "group submesh has vertices");
+            assert!(mesh.compute_aabb().is_some(), "static form yields an Aabb");
         }
     }
 
@@ -532,7 +544,12 @@ mod tests {
             app.update();
             if let Some(t) = app.world().resource::<Assets<AdtTile>>().get(&handle) {
                 info = Some((
-                    t.chunk_meshes.clone(),
+                    t.chunks
+                        .iter()
+                        .zip(&t.shading)
+                        .map(|(c, s)| (c.clone(), *s))
+                        .collect::<Vec<_>>(),
+                    t.shading.len(),
                     t.layer_array.clone(),
                     t.alpha_array.clone(),
                     t.shadow_array.clone(),
@@ -542,24 +559,34 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let (chunk_hs, layer_h, alpha_h, shadow_h, n_doodads) =
+        let (cells, n_shading, layer_h, alpha_h, shadow_h, n_doodads) =
             info.expect("the ADT tile should load via mpq:// + AdtLoader");
 
         // One drawn mesh per MCNK cell, never one merged slab (decision 0780) — the exterior-scene
         // cull's unit is the chunk, and a tile that loads as a single object cannot be culled from
-        // inside a building. Every cell must be non-empty and a 145-vertex 9×9+8×8 grid.
-        let meshes = app.world().resource::<Assets<Mesh>>();
+        // inside a building. The loader ships the shading (index-parallel with the chunks); the
+        // mesh itself is the app's paced `chunk_to_mesh` build — exercised per cell here. Every
+        // drawn cell must be a 145-vertex 9×9+8×8 grid.
+        assert_eq!(n_shading, cells.len(), "one ChunkShading per decoded chunk");
+        let drawn: Vec<Mesh> = cells
+            .iter()
+            .filter_map(|(c, s)| chunk_to_mesh(c, s))
+            .collect();
         assert!(
-            (1..=256).contains(&chunk_hs.len()),
+            (1..=256).contains(&drawn.len()),
             "a tile draws as its MCNK cells, got {} meshes",
-            chunk_hs.len()
+            drawn.len()
         );
-        for h in &chunk_hs {
-            let vc = meshes
-                .get(h)
-                .expect("chunk mesh sub-asset present")
-                .count_vertices();
-            assert_eq!(vc, 145, "an MCNK cell is 9×9 + 8×8 vertices");
+        for mesh in &drawn {
+            assert_eq!(
+                mesh.count_vertices(),
+                145,
+                "an MCNK cell is 9×9 + 8×8 vertices"
+            );
+            assert!(
+                mesh.compute_aabb().is_some(),
+                "a cell mesh must yield the Aabb the exterior cull fails open without"
+            );
         }
 
         let images = app.world().resource::<Assets<Image>>();
@@ -577,7 +604,7 @@ mod tests {
         // Placement lists are carried as data (count is tile-dependent — some tiles are bare).
         eprintln!(
             "ADT tile loaded: {} MCNK cells, {n_doodads} doodad placements",
-            chunk_hs.len()
+            drawn.len()
         );
     }
 }

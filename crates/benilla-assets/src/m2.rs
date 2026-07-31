@@ -1,10 +1,14 @@
 //! M2 → model asset loader.
 //!
-//! Decodes a WoW M2 (`*.m2`) into an [`M2Model`]: one [`ModelSubmesh`] per render batch, each carrying
-//! a [`Mesh`](bevy::mesh::Mesh) **labeled sub-asset** (baked to Bevy space via [`crate::coords`]) plus
-//! the batch's texture as a `Handle<Image>` **dependency** (through the `mpq://` source).
+//! Decodes a WoW M2 (`*.m2`) into an [`M2Model`]: one [`ModelSubmesh`] per render batch, each
+//! carrying the batch's **decoded geometry** plus its texture as a `Handle<Image>` **dependency**
+//! (through the `mpq://` source). **The loader ships no meshes** (decision 0834, the model-lane
+//! twin of 0832's terrain rule): a labeled mesh sub-asset lands the whole model's render form in
+//! ONE frame — the city first-contact spike — so the app builds each batch's `Mesh` paced at the
+//! spawn side (`benilla`'s `model_forms`, via [`submesh_to_static_mesh`](crate::submesh_to_static_mesh)
+//! / [`submesh_to_skinned_mesh`](crate::submesh_to_skinned_mesh)).
 //!
-//! Deliberately app-independent: builds **meshes + texture handles + metadata only**, not materials
+//! Deliberately app-independent: ships **geometry + texture handles + metadata only**, not materials
 //! (the WoW lighting material is an app concern built at spawn) — so this asset is shared verbatim by
 //! doodads, creatures, GameObjects, and the star model. Creature **skin variations** (`Monster1/2/3`)
 //! are blank here (no `skins` passed) and resolved at the spawn site from `CreatureDisplayInfo`; this
@@ -31,9 +35,8 @@ use crate::bone_target_id;
 use crate::coords::wow_to_bevy;
 use crate::model::{
     arm_subtree_roots, billboard_info, build_animation_clip, build_attachments, build_global_bones,
-    build_grip_clip, build_skeleton, build_skinned_submesh_mesh, build_submesh_mesh,
-    finger_subtree_roots, in_subtree, skeleton_pivots, upper_subtree_root, AnimClip,
-    ModelAnimations, ModelAttachment, ModelSkeleton, ModelSubmesh,
+    build_grip_clip, build_skeleton, finger_subtree_roots, in_subtree, skeleton_pivots,
+    upper_subtree_root, AnimClip, ModelAnimations, ModelAttachment, ModelSkeleton, ModelSubmesh,
 };
 
 /// A loaded M2 model: its render batches + authored bounds (the distance-fade size source) + the
@@ -276,16 +279,11 @@ impl AssetLoader for M2ModelLoader {
             .filter(|c| !c.is_empty());
 
         let mut submeshes = Vec::with_capacity(subs.len());
-        for (i, sub) in subs.iter().enumerate() {
-            let mesh = ctx.add_labeled_asset(format!("submesh{i}"), build_submesh_mesh(sub));
-            // The skinned twin (decision 0019): same geometry + JOINT_INDEX/JOINT_WEIGHT. Built for
-            // every M2 (the loader can't know the model's role); only the creature path uses it, so a
-            // doodad/GameObject model carries an unused skinned mesh — a bounded interim cost (the first
-            // deferred optimisation is building this lazily, or unifying all M2s onto the skinned path).
-            let skinned_mesh = ctx.add_labeled_asset(
-                format!("submesh{i}_skinned"),
-                build_skinned_submesh_mesh(sub),
-            );
+        for sub in subs {
+            // No meshes built here (decision 0834): the geometry ships on the submesh and the app
+            // builds the render form paced — the static mesh on demand, the skinned twin only for
+            // the lanes that rig (which also retires the old always-built, mostly-unused twin).
+            //
             // Embedded texture → an mpq:// dependency (WorldArt, the loader default). Lowercase the
             // path: Bevy's loader lookup is case-sensitive, and these tables carry uppercase `.BLP`
             // (the `BlpImageLoader` registers `blp`), so an uppercase extension silently falls back to
@@ -298,8 +296,6 @@ impl AssetLoader for M2ModelLoader {
                 .as_deref()
                 .map(|t| ctx.load::<Image>(crate::texture_url(t, (sub.wrap_x, sub.wrap_y))));
             submeshes.push(ModelSubmesh {
-                mesh,
-                skinned_mesh,
                 texture,
                 skin_slot: sub.skin_slot,
                 geoset_id: sub.geoset_id,
@@ -314,12 +310,13 @@ impl AssetLoader for M2ModelLoader {
                 no_depth_write: sub.no_depth_write, // M2 render flag 0x10
                 no_depth_test: sub.no_depth_test, // M2 render flag 0x08
                 fog_policy: sub.fog_policy, // M2 render flag 0x02 / the per-blend fog table
-                billboard: billboard_info(sub), // glow cards / chains face the camera
+                billboard: billboard_info(&sub), // glow cards / chains face the camera
                 alpha_anim: sub.alpha_anim.clone().map(std::sync::Arc::new),
                 uv_anim: sub.uv_anim.clone().map(std::sync::Arc::new),
                 rgb_anim: sub.rgb_anim.clone().map(std::sync::Arc::new),
                 wmo_batch: None,                // M2 batches have no MOBA section
                 ground_quad: sub.ground_quad(), // flat ground-ring quads → the fx decal lane
+                geometry: std::sync::Arc::new(sub),
             });
         }
         // M2 light blocks (raw — wow-m2's light parse reads the wrong vanilla record shape). The spawn

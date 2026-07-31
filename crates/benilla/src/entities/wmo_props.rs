@@ -184,6 +184,7 @@ pub(super) fn resolve_wmo_gameobject_props(
 pub(super) fn spawn_wmo_gameobject_props(
     mut commands: Commands,
     m2s: Res<Assets<M2Model>>,
+    mut forms: ResMut<crate::model_forms::ModelForms>,
     shared_light: Option<Res<SharedLightBuffer>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut entity_mats: ResMut<EntityMaterials>,
@@ -211,6 +212,18 @@ pub(super) fn spawn_wmo_gameobject_props(
             let Some(m) = m2s.get(&prop.handle) else {
                 return true; // still loading — retry next frame
             };
+            // The prop's app-built render forms (decision 0834): a transport's cabin props are
+            // the entity lane — priority 0, same as any creature walking into view.
+            let key = crate::model_forms::ModelKey::from(&prop.handle);
+            let kinds = crate::model_forms::WANT_STATIC
+                | if crate::doodad_anim::wants_rig(m) {
+                    crate::model_forms::WANT_SKINNED
+                } else {
+                    0
+                };
+            if !forms.require(key, kinds, 0) {
+                return true; // forms still building — retry next frame
+            }
             // A boneless prop's glow card follows an ANCHOR child at the prop's placement (the
             // card itself stays a world root the billboard pass writes absolutely). Only spawned
             // when the model has billboard batches — one lantern per ship, not 134 empty entities.
@@ -257,6 +270,10 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut palettes,
                 light,
                 &m.submeshes,
+                crate::model_forms::FormSlices {
+                    stat: forms.static_meshes(key).unwrap_or(&[]),
+                    skin: forms.skinned_meshes(key),
+                },
                 prop.local, // doodad-LOCAL — the parent composes the world pose
                 false,
                 // Deck props: plain matte, like a terrain exterior prop on lit ground (a boat is

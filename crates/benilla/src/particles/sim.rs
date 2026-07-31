@@ -202,8 +202,9 @@ pub(super) fn simulate_particles(
     // The ground-snap probe (file 0x2000 births): terrain + WMO/doodad geometry, the walking
     // collision audience.
     spatial: SpatialQuery,
-    // The per-model render alpha an entity-owned cloud is multiplied by (decision 0827).
-    model_alphas: Query<&crate::model_fade::ModelAlpha>,
+    // The per-model render alpha an entity-owned cloud is multiplied by (decision 0827), composed
+    // along the attached-model chain (0833).
+    model_alphas: crate::model_fade::ModelAlphas,
     // `Without<WorldCamera>`: the `&mut GlobalTransform` must be provably disjoint from the
     // camera read above too (an emitter never rides the camera entity).
     mut emitters: Query<
@@ -484,13 +485,12 @@ pub(super) fn simulate_particles(
         }
         // The MODEL's render alpha for this frame (decision 0827 — the reference's per-frame
         // `emitter+0x1a8 = Model+0x19c` copy at `0x718960` @`0x719073`). Two disjoint sources, the
-        // same slot the reference writes both through: an entity-owned cloud takes its model
-        // instance's [`crate::model_fade::ModelAlpha`] (an item's is its WEARER's — an attached
-        // model inherits the parent's), and a placed doodad's takes its own distance fade, whose
-        // cutoff the draw-set gate above already applies as a hard stop.
-        *alpha = alpha_src
-            .and_then(|e| model_alphas.get(e).ok())
-            .map_or(1.0, |a| a.0)
+        // same slot the reference writes both through: an entity-owned cloud takes its OWN model
+        // instance's composed alpha ([`crate::model_fade::ModelAlphas`] walks the attached-model
+        // chain, so a weapon glow's reaches the item's and the item's the wearer's — 0833), and a
+        // placed doodad's takes its own distance fade, whose cutoff the draw-set gate above
+        // already applies as a hard stop.
+        *alpha = alpha_src.map_or(1.0, |e| model_alphas.get(e))
             * fade.map_or(1.0, |f| f.distance_alpha(cam_pos));
         let attach_inv = attach_rot.inverse();
         // The cloud anchor (see the field doc): the model's live translation, or the last-known

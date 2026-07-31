@@ -288,7 +288,12 @@ pub(crate) fn drive_fx_view(
             &fx.models[&req.model_path],
             time.elapsed_secs(),
             true, // the fixture plants at a world point — ground quads decal onto the terrain
-            Some(root), // the fixture previews kit effects, which are attached models
+            // The fixture previews kit effects, which are attached models — but it hangs on
+            // nothing (there is no host model in a preview), so its pool keeps the drain.
+            EffectHost {
+                attached: true,
+                parent: None,
+            },
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
@@ -298,6 +303,24 @@ pub(crate) fn drive_fx_view(
             state.attached_at = Some(time.elapsed_secs());
         }
     }
+}
+
+/// Where an effect-model instance sits in the client's **model graph** — the two facts every
+/// caller of [`attach_effect_visuals`] states, together, because they are one fact seen from two
+/// sides and a lane that answered only the first is what left a weapon's enchant glow with no
+/// alpha source and no owner (decision 0833).
+#[derive(Clone, Copy, Default)]
+pub(super) struct EffectHost {
+    /// Is this an **attached** model in the client's sense (`[model+0x17c] ≠ 0`)? It sets the
+    /// emitters' attach frame `A`: a kit effect on a unit and the `fxview` fixture are attached
+    /// (the cloud fans with the host's motion), a missile is not — its trail stays world-frozen
+    /// (wow-re `part-kit-effect-attach-orient.md`).
+    pub attached: bool,
+    /// The model instance this one is **chained to** ([`crate::model_fade::ParentModel`]): the
+    /// unit a kit effect is hung on, the item root a weapon glow rides. `None` for a model that
+    /// belongs to no other — a missile, the fixture preview — which is also what keeps the 0202
+    /// drain for the impacting trail.
+    pub parent: Option<Entity>,
 }
 
 /// Attach one effect model's full visual set to `root` — THE one body for every effect-model
@@ -311,11 +334,10 @@ pub(crate) fn drive_fx_view(
 /// instance (`ground_anchor`: the kit slot resolved to the base point `0x13` or the unit root),
 /// each flat ground-plane quad part as a projected surface decal ([`crate::ground_fx`]) riding
 /// its joint, so Battle Shout's crescents drape sloped terrain instead of being buried by it.
-/// `attach` is the emitters' attach frame — `Some(root)` for an instance that is an ATTACHED
-/// model in the client's sense (a kit effect on a unit, the fxview fixture), `None` for a
-/// free world model (a missile: its trail stays world-frozen, wow-re
-/// `part-kit-effect-attach-orient.md`). Returns `false` while the model's parts are still
-/// building — call again next frame.
+/// `host` says where the instance sits in the model graph ([`EffectHost`]) — which decides its
+/// emitters' attach frame, whose render alpha they inherit, and what becomes of them when the
+/// instance goes. Returns `false` while the model's parts are still building — call again next
+/// frame.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attach_effect_visuals(
     commands: &mut Commands,
@@ -323,7 +345,7 @@ pub(super) fn attach_effect_visuals(
     dm: &DisplayModel,
     now: f32,
     ground_anchor: bool,
-    attach: Option<Entity>,
+    host: EffectHost,
     wow_materials: &mut Assets<WowModelMaterial>,
     tint_reg: &mut FxTintAnims,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
@@ -332,6 +354,24 @@ pub(super) fn attach_effect_visuals(
 ) -> bool {
     let Some(parts) = dm.parts.as_ref() else {
         return false; // still loading — attach on a later pass
+    };
+    let attach = host.attached.then_some(root);
+    // Chain this instance onto the model it hangs from, so its effects compose through the
+    // parent's computed alpha the way `0x714000` does — a weapon's glow through the item, the
+    // item through its wearer (decision 0833).
+    if let Some(parent) = host.parent {
+        commands
+            .entity(root)
+            .insert(crate::model_fade::ParentModel(parent));
+    }
+    // …and, from the same fact, what losing the owner means: an instance hung on another model is
+    // part of that model's tree, so its pool is freed with it (the reference's dtor) instead of
+    // being left to finish in world space — the ghost clouds a gear change used to strand at the
+    // body. A free-standing instance (a missile) keeps the 0202 drain.
+    let on_owner_loss = if host.parent.is_some() {
+        crate::particles::OwnerLoss::Free
+    } else {
+        crate::particles::OwnerLoss::Drain
     };
     let is_ground_decal = |part: &EntityPart| ground_anchor && part.ground_quad.is_some();
     // Per-part materials for THIS instance (a tint clone where the RGB animates), resolved
@@ -439,6 +479,11 @@ pub(super) fn attach_effect_visuals(
             },
             card,
         ));
+        // The card's build-time bound (decision 0834): `calculate_bounds` can no longer derive
+        // one from the `RENDER_WORLD`-only static form's data.
+        if let Some(aabb) = part.aabb {
+            spawned.insert(aabb);
+        }
         // A card shares its batch's material-alpha loops (the billboard split copies them).
         if let Some(anim) = &part.alpha_anim {
             let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
@@ -509,9 +554,12 @@ pub(super) fn attach_effect_visuals(
                 // The cloud anchors at the instance root — the emitter's bone only composes births
                 // (the food sparkle's bone orbits; the risen stars must not swirl with it).
                 anchor: Some(root),
-                // An effect instance that ends mid-flight leaves its live particles to finish
-                // (the impacting missile's trail) — the DRAIN default.
-                ..default()
+                // Free with the model when this instance belongs to one, drain when it stands
+                // alone (the impacting missile's trail — 0202's case). See `on_owner_loss` above.
+                on_owner_loss,
+                // This instance IS the model these particles belong to; its chain (set above)
+                // carries the host's fade down to them — decision 0833.
+                alpha: Some(root),
             },
             // The effect's rig arms ONE clip; the emitters' rate/enabled windows ride that slot
             // (a missile's InFlight is not file-order-first), on the instance's own spawn clock.
@@ -538,8 +586,9 @@ pub(super) fn attach_effect_visuals(
             // families land on the same draw-order rung, which is the property that matters.
             1.0,
             played_anim,
-            // No model-alpha source: a placed prop / effect instance is always drawn (0827).
-            None,
+            // This instance's own model alpha, chained to its host (0827/0833): a standalone
+            // instance has none above it and draws exactly as before.
+            Some(root),
         );
     }
     true
@@ -800,7 +849,13 @@ pub(super) fn attach_spell_fx(
                 dm,
                 now,
                 ground_anchor,
-                Some(root), // a kit instance on a unit is an attached model
+                // A kit instance on a unit is an attached model, chained to that unit: it fades
+                // with the body it is cast on, and it is freed with it (0833) — where before, a
+                // gear change that tore the unit's visual down left its cloud in the air.
+                EffectHost {
+                    attached: true,
+                    parent: Some(unit),
+                },
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,

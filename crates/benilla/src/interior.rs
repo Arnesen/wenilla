@@ -278,6 +278,28 @@ impl InteriorLit {
         }
     }
 
+    /// Re-point a standing part's law variants at a freshly-built material set, and answer what it
+    /// should now draw — the character **re-dress** (`entities::attach::redress`): a gear change
+    /// re-composites the body atlas and re-resolves the cape texture, so every variant's handle
+    /// changes while the part, the room and therefore the *law* stay exactly as they were.
+    ///
+    /// The applied law is deliberately KEPT, which is what makes this a re-point rather than a
+    /// re-classification: nothing moved, so re-running the down-ray would answer the same thing at
+    /// the cost of a frame on the wrong material. A part's `kind` cannot change under it either —
+    /// bake-capability is a property of the batch's build, and a re-dress never changes which batch
+    /// a part is.
+    pub(crate) fn repoint(
+        &mut self,
+        exterior: &Handle<WowModelMaterial>,
+        bake: Option<&Handle<WowModelMaterial>>,
+    ) -> &Handle<WowModelMaterial> {
+        self.exterior = exterior.clone();
+        if let (InteriorKind::Bake { material, .. }, Some(b)) = (&mut self.kind, bake) {
+            *material = b.clone();
+        }
+        self.steady_material()
+    }
+
     pub(crate) fn new(kind: InteriorKind, exterior: Handle<WowModelMaterial>) -> Self {
         Self {
             kind,
@@ -1188,6 +1210,7 @@ mod tests {
                     cutout: Handle::default(),
                     blend: exterior_blend.clone(),
                     bake_blend: Some(bake_blend.clone()),
+                    zfill: None,
                 },
                 crate::model_fade::RenderFade {
                     started: 0.0,

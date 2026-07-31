@@ -524,6 +524,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     if (m.model_flags.y > 0.5 && base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
+    // DEPTH-PRIME TWIN (the zfill pipeline variant — terrain.rs `specialize`, the reference's
+    // M2UseZFill clone command, wow-re m2-blend-promotion-zfill.md §4): colour writes are masked
+    // off at the pipeline, so on that variant only the discards above (farclip wall, the
+    // model_flags.y cutout) shape what depth gets written; the lighting/fog below is computed and
+    // thrown away. (A shader-def early return here would be the natural spelling, but naga's MSL
+    // backend miscompiles the dead tail — "redefinition of '_tmp'" — so the twin pays the colour
+    // math instead. Episodes are transient; the cost is bounded.)
     // Blend source alpha = texel alpha × fade (translucent fade of the fixed cutout shape). For steady
     // cutout/opaque draws blend is off so this is ignored; for the fade twin it drives the feather.
     let faded_alpha = base_color.a * obj_fade;

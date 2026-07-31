@@ -154,6 +154,12 @@ pub(crate) fn shadow_array_image(size: u32, layer_count: u32, data: Vec<u8>) -> 
 
 /// Build a `2d_array` `Image` from concatenated per-layer bytes, with a `D2Array` view so the
 /// `dimension = "2d_array"` bindings resolve.
+///
+/// `RenderAssetUsages::RENDER_WORLD`: the render world takes the bytes on extract — a tile's
+/// three arrays are megabytes each, and nothing reads them main-side (they flow into the terrain
+/// material as handles; the minimap, collider, clutter all derive from other sources). The
+/// default usage cloned every array on landing AND kept a main-world copy resident per tile —
+/// pure cost on both the B181 landing frame and the resident-set memory.
 fn array_image(size: u32, layer_count: u32, data: Vec<u8>, format: TextureFormat) -> Image {
     let mut image = Image::new(
         Extent3d {
@@ -164,7 +170,7 @@ fn array_image(size: u32, layer_count: u32, data: Vec<u8>, format: TextureFormat
         TextureDimension::D2,
         data,
         format,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),

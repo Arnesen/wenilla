@@ -569,6 +569,15 @@ fn real_spell_catalog_reads_usable_walk_columns() {
     // Stance carries 0, which is what keeps a stance un-cancelable on the plain paths.
     assert_ne!(ghost_wolf.active_icon_id, 0);
     assert_eq!(cat.get(2457).unwrap().active_icon_id, 0, "Battle Stance");
+
+    // The form's AttackIconID column (field 13, `0x4e6870`'s `+0x34` read — wow-re
+    // `action-spell-icon-apis.md` §3.3), resolved through SpellIcon.dbc at load: Cat Form
+    // carries its own attack face, Ghost Wolf's column is 0 → the weapon fall-through.
+    assert_eq!(
+        forms.get(&1).unwrap().attack_icon.as_deref(),
+        Some("Interface\\Icons\\Ability_Druid_CatFormAttack")
+    );
+    assert_eq!(wolf_row.attack_icon, None);
 }
 
 /// The tooltip-arc columns (decision 0274 P2) on the real build-5875 `Spell.dbc`, pinned

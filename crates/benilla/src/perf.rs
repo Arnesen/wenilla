@@ -118,14 +118,21 @@ pub(crate) struct StreamActivity {
     pub(crate) placement_entities_dropped: u32,
     /// New ADT asset requests fired.
     pub(crate) tiles_requested: u32,
-    /// Loaded tiles spawned (terrain mesh + placements registered + liquid + clutter).
+    /// Loaded tiles spawned (root + collider kicked off + placements registered + liquid + clutter).
     pub(crate) tiles_spawned: u32,
+    /// MCNK cell meshes built + spawned by the paced furnisher (decision 0832).
+    pub(crate) cells_spawned: u32,
+    /// Model submesh render forms built by the paced model furnisher (decision 0834).
+    pub(crate) model_meshes_built: u32,
     /// Placements (or WMO props) whose model landed and spawned.
     pub(crate) placements_spawned: u32,
     /// Off-thread colliders attached.
     pub(crate) colliders_attached: u32,
-    /// Self-time of `stream_terrain` / `spawn_loaded_placements` / `finish_colliders` (ms).
+    /// Self-time of `stream_terrain` / `furnish_tile_cells` / `furnish_model_forms` /
+    /// `spawn_loaded_placements` / `finish_colliders` (ms).
     pub(crate) stream_ms: f32,
+    pub(crate) furnish_ms: f32,
+    pub(crate) mfurnish_ms: f32,
     pub(crate) spawn_ms: f32,
     pub(crate) collider_ms: f32,
 }
@@ -138,6 +145,8 @@ impl StreamActivity {
             + self.placements_dropped
             + self.tiles_requested
             + self.tiles_spawned
+            + self.cells_spawned
+            + self.model_meshes_built
             + self.placements_spawned
             + self.colliders_attached
             > 0
@@ -169,10 +178,11 @@ struct StreamTrace {
     prev_cpu_secs: Option<f64>,
 }
 
-const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,spawn_ms,collider_ms,\
-                                   tiles_dropped,pl_dropped,pl_ents_dropped,tiles_req,\
-                                   tiles_spawned,pl_spawned,attached,adt_freed,meshes_freed,\
-                                   images_freed\n";
+const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,furnish_ms,mfurnish_ms,\
+                                   spawn_ms,collider_ms,tiles_dropped,pl_dropped,pl_ents_dropped,\
+                                   tiles_req,tiles_spawned,cells_spawned,mmeshes_built,pl_spawned,\
+                                   attached,adt_freed,meshes_freed,images_freed,adt_added,\
+                                   meshes_added,images_added\n";
 
 #[allow(clippy::too_many_arguments)]
 fn trace_stream(
@@ -196,31 +206,38 @@ fn trace_stream(
         _ => String::new(),
     };
     trace.prev_cpu_secs = cpu_now;
-    let freed = |n: usize| n as u32;
-    let removed_adt = freed(
-        adt_events
-            .read()
-            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
-            .count(),
-    );
-    let removed_mesh = freed(
-        mesh_events
-            .read()
-            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
-            .count(),
-    );
-    let removed_img = freed(
-        image_events
-            .read()
-            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
-            .count(),
-    );
+    // One pass per reader: `Added` beside `Unused` — B181's recurring spike was the free wave's
+    // family, but the first-contact head frame is the ADD wave (a landed tile's cell meshes +
+    // texture arrays hitting the render world's prepare at once), invisible until counted.
+    //
+    // The freed columns count `Unused` (last strong handle dropped), not `Removed`: a
+    // `RENDER_WORLD`-only asset (chunk-cell meshes, the tile arrays — decision 0832) leaves the
+    // main store at *extract* via the untracked path, so `Removed` never fires for it; `Unused`
+    // is the release signal both usage kinds emit exactly once, and it is what actually frees
+    // the GPU copy.
+    fn count_events<A: bevy::asset::Asset>(
+        events: &mut MessageReader<bevy::asset::AssetEvent<A>>,
+    ) -> (u32, u32) {
+        let (mut added, mut unused) = (0u32, 0u32);
+        for e in events.read() {
+            match e {
+                bevy::asset::AssetEvent::Added { .. } => added += 1,
+                bevy::asset::AssetEvent::Unused { .. } => unused += 1,
+                _ => {}
+            }
+        }
+        (added, unused)
+    }
+    let (added_adt, removed_adt) = count_events(&mut adt_events);
+    let (added_mesh, removed_mesh) = count_events(&mut mesh_events);
+    let (added_img, removed_img) = count_events(&mut image_events);
     let delta_ms = time.delta_secs() * 1000.0;
-    if a.any_event() || removed_adt > 0 {
+    if a.any_event() || removed_adt > 0 || added_adt > 0 {
         trace.log_until = trace.frame + TRACE_TAIL_FRAMES;
     }
     if !(a.any_event()
         || removed_adt > 0
+        || added_adt > 0
         || delta_ms > TRACE_FRAME_MS
         || trace.frame <= trace.log_until)
     {
@@ -230,11 +247,13 @@ fn trace_stream(
         let _ = std::fs::write(&trace.path, STREAM_TRACE_HEADER);
     }
     let line = format!(
-        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img}\n",
+        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img},{added_adt},{added_mesh},{added_img}\n",
         trace.frame,
         time.elapsed_secs(),
         entities.iter().len(),
         a.stream_ms,
+        a.furnish_ms,
+        a.mfurnish_ms,
         a.spawn_ms,
         a.collider_ms,
         a.tiles_dropped,
@@ -242,6 +261,8 @@ fn trace_stream(
         a.placement_entities_dropped,
         a.tiles_requested,
         a.tiles_spawned,
+        a.cells_spawned,
+        a.model_meshes_built,
         a.placements_spawned,
         a.colliders_attached,
     );

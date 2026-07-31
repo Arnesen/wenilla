@@ -189,8 +189,9 @@ pub(crate) fn simulate_ribbons(
     transforms: Query<&GlobalTransform, Without<RibbonTrail>>,
     images: Res<Assets<Image>>,
     mut quads: ResMut<EffectQuads>,
-    // The owning model's render alpha — the trail's draw gate (decision 0827).
-    model_alphas: Query<&crate::model_fade::ModelAlpha>,
+    // The owning model's render alpha — the trail's draw gate (decision 0827), composed along the
+    // attached-model chain (0833).
+    model_alphas: crate::model_fade::ModelAlphas,
     // Trails belong to the world lane (no booth ribbons; a booth-parked owner's strip is eaten
     // by the shader's farclip wall, exactly as on the material path).
     world_cam: Query<Entity, With<WorldCamera>>,
@@ -289,10 +290,7 @@ pub(crate) fn simulate_ribbons(
         // model's render alpha and drops the draw below a threshold (decision 0827). This is what
         // takes your own weapon's enchant trail out of your face in first person, and keeps a
         // not-yet-shown unit's trail off the screen while its body is still at alpha 0.
-        if alpha_src
-            .and_then(|e| model_alphas.get(e).ok())
-            .is_some_and(|a| a.0 <= 1e-3)
-        {
+        if alpha_src.is_some_and(|e| model_alphas.get(e) <= 1e-3) {
             continue;
         }
         let n = edges.len() + usize::from(head.is_some());

@@ -33,6 +33,13 @@ pub struct ShapeshiftForm {
     /// predicates. `<= 0` reads Humanoid (the resolver's fallback; vmangos's own row comment).
     /// Consumed by the tracking dots (decision 0564).
     pub creature_type: i32,
+    /// **AttackIconID** (field 13, the byte-carved `+0x34` read — wow-re
+    /// `action-spell-icon-apis.md` §3.3): the form's own attack icon, resolved through
+    /// `SpellIcon.dbc` at load. The Attack action's icon resolver (`0x4e6870`) serves the
+    /// CURRENT form's icon before the main-hand weapon's, on both the action bar and the
+    /// spellbook. `None` = column 0, no form icon — fall through to the weapon (5875 data:
+    /// warrior stances and bear forms carry one; Ghost Wolf and Moonkin are 0).
+    pub attack_icon: Option<String>,
 }
 
 impl ShapeshiftForm {
@@ -74,6 +81,10 @@ pub fn load_shapeshift_forms(chain: &mut Chain) -> Result<HashMap<u32, Shapeshif
         }
     }
     let set = parse(&bytes, schema, "SpellShapeshiftForm.dbc")?;
+    // The AttackIconID column resolves through SpellIcon.dbc like a spell's own icon does
+    // (`0x4e6870`'s `0x4e68af`–`0x4e68da` id → path hop). 1033 tiny records — loading the map
+    // here keeps every call site's signature (six of them) untouched.
+    let icons = crate::dbc::load_spell_icon_map(chain)?;
     let mut map = HashMap::new();
     for r in set.records() {
         if let Some(id) = u32_at(r, 0) {
@@ -84,6 +95,9 @@ pub fn load_shapeshift_forms(chain: &mut Chain) -> Result<HashMap<u32, Shapeshif
                     name: str_at(&set, r, 2).unwrap_or_default(),
                     flags: u32_at(r, 11).unwrap_or(0),
                     creature_type: i32_at(r, 12).unwrap_or(0),
+                    attack_icon: u32_at(r, 13)
+                        .filter(|&i| i != 0)
+                        .and_then(|i| icons.get(&i).cloned()),
                 },
             );
         }
