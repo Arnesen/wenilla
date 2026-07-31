@@ -377,6 +377,15 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     out.world_position =
         mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
+    // WMO authored batch order (`m.sun_scale.y`; 0 = non-WMO ⇒ exact no-op): the client resolves
+    // coplanar batches (wall + decal/trim) by strict MOBA draw order under depth-write + LEQUAL
+    // (wow-5875-re `wmo-batch-blend-depth-state.md`, byte-verified); Bevy orders draws for
+    // batching, so a later batch must instead WIN the reverse-Z GreaterEqual test. Scaling clip z
+    // by (1 + n·2⁻²³) raises the interpolated depth z/w by exactly n ULP-steps per fragment —
+    // the same one-unit-per-index nudge the old fixed-function `DepthBiasState` constant applied,
+    // but as uniform DATA: as pipeline state it made every batch index its own pipeline, and a
+    // first city sight synchronously compiled ~3000 of them on the render thread (decision 0837).
+    out.position.z *= 1.0 + m.sun_scale.y * 1.1920929e-7;
 #endif
 
 #ifdef VERTEX_UVS_A

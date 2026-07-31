@@ -9,23 +9,23 @@ use bevy::prelude::*;
 use crate::billboard::BillboardCard;
 use crate::debug_panel::{ModelKind, ModelPart};
 use crate::interior::part_interior_lit;
-use crate::model_fade::{
-    fade_alpha, join_unit_appear_fade, FadeMaterials, JoinedFade, PendingAppearFade, RenderFade,
-    UnitAppearFade, APPEAR_FADE_SECS,
-};
+use crate::model_fade::{join_unit_appear_fade, FadeSet, JoinedFade, PartFade, UnitAppearFade};
 
 use super::super::{item_glow::ItemGlow, spawn_carried_lights};
 use super::{
     attach_id, BoneAttach, HeldAttached, HeldItems, HeldSlot, ItemDisplays, ATTACH_SLOTS, NO_GLOW,
 };
 
-/// A held-item part's resolved appear-fade join state for this spawn, folding [`JoinedFade`] with
-/// whether the part itself is fade-capable ([`super::EntityPart::fade_blend`]).
-#[derive(Clone, Copy)]
-enum PartFade {
-    Steady,
-    Pending(f32),
-    Live(f32),
+/// The three material handles one attach-model batch fades through — the item lane's
+/// [`FadeSet`], read straight off the built part (an item batch never carries a character
+/// runtime slot the way a body batch does).
+fn item_fade_set(part: &super::super::EntityPart) -> FadeSet<'_> {
+    FadeSet {
+        steady: &part.material,
+        blend: part.fade_blend.as_ref(),
+        bake_blend: part.material_interior_bake_blend.as_ref(),
+        zfill: part.zfill.as_ref(),
+    }
 }
 
 /// Everything one slot's spawn needs from its WEARER, read once per unit — the context
@@ -312,24 +312,11 @@ fn spawn_slot(
                 continue;
             }
             // Per-part join decision: `joined` (the unit's clock) combined with whether this
-            // part is fade-capable at all (`fade_blend` — WMO-display parts have none, though
-            // held items are always M2). Steady = spawn opaque now, exactly as before this fix.
-            let effective = match (joined, part.fade_blend.is_some()) {
-                (_, false) => PartFade::Steady,
-                (JoinedFade::Steady, true) => PartFade::Steady,
-                (JoinedFade::Pending { since }, true) => PartFade::Pending(since),
-                (JoinedFade::Live { started }, true) => PartFade::Live(started),
-            };
-            let (init_mat, tag_alpha) = match effective {
-                PartFade::Steady => (part.material.clone(), 1.0),
-                PartFade::Pending(_) => (part.fade_blend.clone().unwrap(), 0.0),
-                // Compute the *current* alpha (not 0) so a late joiner doesn't flash invisible
-                // for a frame before `apply_render_fade` catches up — it's already mid-ramp.
-                PartFade::Live(started) => (
-                    part.fade_blend.clone().unwrap(),
-                    fade_alpha(0.0, 1.0, (now - started) / APPEAR_FADE_SECS),
-                ),
-            };
+            // part is fade-capable at all. A pending part opens on the blend twin at ≈0 and a
+            // joiner at the ramp's *current* alpha, so neither flashes for a frame.
+            let set = item_fade_set(part);
+            let effective = PartFade::resolve(joined, &set);
+            let (init_mat, tag_alpha) = effective.seed(&set, now);
             let mut child = parent.spawn((
                 Mesh3d(part.mesh.clone()),
                 MeshMaterial3d(init_mat),
@@ -382,31 +369,18 @@ fn spawn_slot(
             ) {
                 child.insert(lit);
             }
-            // `FadeMaterials` is persistent bookkeeping (self-avatar zoom fade, decision 0032's
-            // despawn-fade-out), not tied to whether *this* spawn happens to join an in-flight
-            // unit fade — attach it whenever the part is fade-capable at all, steady or not.
-            if let Some(blend) = &part.fade_blend {
-                child.insert(FadeMaterials {
-                    cutout: part.material.clone(),
-                    blend: blend.clone(),
-                    bake_blend: part.material_interior_bake_blend.clone(),
-                    zfill: part.zfill.clone(),
-                });
+            // The batch's authored **material alpha** — the verified combine's `colourAlpha ×
+            // weight` (wow-re `m2-alpha-combine-cull.md`). An attach model spawns no rig of its
+            // own and rests in its file's first sequence, so its loops are PINNED there (the
+            // doodad lane's clock) while the tag compose stays the unit lane's, ordered against
+            // the appear-fade and the interior classifier exactly like the wearer's own batches.
+            // Skipping this drew every one of the 321 item models that dim a batch at full
+            // strength — the Hungering Cold's five glow cards blaze at 1.0 where the file says
+            // 0.30 (decision 0836).
+            if let Some(anim) = &part.alpha_anim {
+                child.insert(crate::doodad_anim::MatAnim::resting(anim.clone()));
             }
-            match effective {
-                PartFade::Steady => {}
-                PartFade::Pending(since) => {
-                    child.insert(PendingAppearFade { since });
-                }
-                PartFade::Live(started) => {
-                    child.insert(RenderFade {
-                        started,
-                        duration: APPEAR_FADE_SECS,
-                        from: 0.0,
-                        to: 1.0,
-                    });
-                }
-            }
+            effective.dress(&mut child, &set);
         }
     });
     // The billboard cards (decision 0153): world-root entities FOLLOWING `root` — it sits
@@ -431,9 +405,17 @@ fn spawn_slot(
                 kind: info.kind,
             },
         ));
+        // A card is a batch of the item's model and joins the wearer's appear-fade exactly like
+        // its mesh siblings above — same [`PartFade`], same seed, same arm. It used to spawn at
+        // a flat opaque with neither `RenderFade` nor `FadeMaterials`, which is why a weapon's
+        // glowing gems were already blazing before the character carrying them had faded in
+        // (director-reported on the Hungering Cold; decision 0836).
+        let set = item_fade_set(part);
+        let effective = PartFade::resolve(joined, &set);
+        let (init_mat, tag_alpha) = effective.seed(&set, now);
         let mut card = commands.spawn((
             Mesh3d(part.mesh.clone()),
-            MeshMaterial3d(part.material.clone()),
+            MeshMaterial3d(init_mat),
             Transform::default(),
             ModelPart {
                 kind: ModelKind::Creature,
@@ -447,12 +429,9 @@ fn spawn_slot(
         }
         // Same interior-light membership the item's mesh parts get above, through the same
         // constructor and anchored at the same WEARER (decision 0778) — so a held torch's
-        // glow card can never split from the arm holding it. Spawned at a steady alpha: a
-        // card joins no appear-fade today (it carries neither `RenderFade` nor
-        // `FadeMaterials`), and the classifier preserves the alpha field regardless.
-        // …and the wearer's instance slot, like its mesh siblings: a tinted body colours the
-        // torch's glow card too (decision 0812).
-        card.insert(MeshTag(rig_tag | crate::mesh_tag::alpha_bits(1.0)));
+        // glow card can never split from the arm holding it. …and the wearer's instance slot,
+        // like its mesh siblings: a tinted body colours the torch's glow card too (0812).
+        card.insert(MeshTag(rig_tag | crate::mesh_tag::alpha_bits(tag_alpha)));
         if let Some(lit) = part_interior_lit(
             &part.material,
             part.material_interior.as_ref(),
@@ -462,6 +441,12 @@ fn spawn_slot(
         ) {
             card.insert(lit);
         }
+        // The card's own share of the authored material alpha (the Hungering Cold's gems are
+        // keyed 0.30) — same pinned lane as the mesh parts.
+        if let Some(anim) = &part.alpha_anim {
+            card.insert(crate::doodad_anim::MatAnim::resting(anim.clone()));
+        }
+        effective.dress(&mut card, &set);
     }
     // The item's own particle emitters — the held torch's flame (0130 phase 4: the same
     // owner-follow rider as doodad emitters). `root` sits at the attach offset under the
@@ -799,6 +784,114 @@ mod tests {
         assert!(
             published[0].emitters[0].billboard.is_some(),
             "the billboard-chain arm survives the carry — it is what the booth builds a frame from",
+        );
+    }
+
+    /// **The director's report on the Hungering Cold** (decision 0836): a weapon's glowing gems
+    /// were already blazing at full strength before the character carrying them had faded in.
+    /// The sword authors five camera-facing `GENERICGLOW1` batches, and a card used to spawn with
+    /// neither `RenderFade` nor `FadeMaterials` — a batch that pops. It is a batch of the item's
+    /// model like any other, so it joins the wearer's ramp with the mesh parts.
+    ///
+    /// The same spawn also pins the batch's **authored** alpha: the sword's cards are keyed
+    /// `weight 0.30` and every item batch drew at 1.0, because no attach-model part ever carried a
+    /// `MatAnim` at all (321 of the 2681 shipped item models dim a batch this way).
+    #[test]
+    fn an_items_card_joins_the_wearers_fade_and_keeps_its_authored_alpha() {
+        const KIND: ItemModelKind = ItemModelKind::Weapon;
+        const SINCE: f32 = 3.0;
+        let blend: Handle<crate::terrain::WowModelMaterial> = Handle::Uuid(
+            bevy::asset::uuid::Uuid::from_u128(99),
+            std::marker::PhantomData,
+        );
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        let mut displays = ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(HashMap::new()),
+        );
+        let mut dm = empty_display();
+        let mut card = part(false);
+        card.fade_blend = Some(blend.clone());
+        card.alpha_anim = benilla_formats::AlphaAnim::new(vec![benilla_formats::AlphaSeq {
+            color: None,
+            weight: Some(benilla_formats::ScalarAnim {
+                period: 0.0,
+                step: false,
+                wrap: true,
+                keys: vec![(0.0, 0.3)],
+            }),
+        }])
+        .map(std::sync::Arc::new);
+        card.billboard = Some(benilla_assets::BillboardInfo {
+            pivot: Vec3::ZERO,
+            bone: 1,
+            kind: benilla_formats::BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: Vec::new(),
+        });
+        dm.parts = Some(vec![card]);
+        displays.models.insert((7, KIND), dm);
+        app.insert_resource(displays);
+
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let bones = BoneAttach {
+            anchors: HashMap::from([(3u16, joint)]),
+            points: HashMap::from([(attach_id::HAND_RIGHT, (3u16, Vec3::ZERO))]),
+            markers: HashMap::new(),
+        };
+        let mut items = HeldItems::default();
+        items.slots[0] = Some(HeldSlot {
+            display: 7,
+            kind: KIND,
+            attach: attach_id::HAND_RIGHT,
+            visual: NO_GLOW,
+        });
+        // The wearer is mid-login: its own ramp is still pending, so everything attaching to it
+        // must join that ramp rather than open opaque beside it.
+        app.world_mut().spawn((
+            items,
+            bones,
+            Transform::default(),
+            UnitAppearFade::Pending { since: SINCE },
+        ));
+        app.add_systems(Update, attach_held_items);
+        app.update();
+
+        let mut q = app.world_mut().query::<(
+            &BillboardCard,
+            &MeshTag,
+            &MeshMaterial3d<crate::terrain::WowModelMaterial>,
+            Option<&crate::model_fade::FadeMaterials>,
+            Option<&crate::model_fade::PendingAppearFade>,
+            Option<&crate::doodad_anim::MatAnim>,
+        )>();
+        let found: Vec<_> = q.iter(app.world()).collect();
+        assert_eq!(found.len(), 1, "the one camera-facing batch spawned a card");
+        let (_, tag, mat, fm, pending, anim) = found[0];
+        assert_eq!(
+            pending.map(|p| p.since),
+            Some(SINCE),
+            "the card joined the wearer's pending ramp",
+        );
+        assert_eq!(
+            fm.map(|f| f.blend.clone()),
+            Some(blend.clone()),
+            "…carrying the material record the ramp (and the zoom feather) re-arm from",
+        );
+        assert_eq!(mat.0, blend, "…and opens ON the blend twin, not the cutout");
+        assert!(
+            crate::mesh_tag::alpha_of(tag.0) <= 1.0 / 63.0,
+            "…at the encoder's ≈0 floor, so it never flashes opaque for a frame",
+        );
+        let anim = anim.expect("the batch's authored alpha rides the card");
+        assert!(
+            (anim.current - 0.3).abs() < 1e-6,
+            "the file's 0.30 weight, not 1.0",
+        );
+        assert!(
+            anim.composes_unit_tag(),
+            "an attach model's compose is the UNIT lane's — ordered against the wearer's fade",
         );
     }
 

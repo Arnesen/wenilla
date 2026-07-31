@@ -291,8 +291,12 @@ pub(crate) fn model_material(
             // 0.2 shaded; shader thresholds at 0.85 and 0.5) that chooses which live sun LEVEL scales the
             // FFP matte's diffuse term. Static per material (a doodad doesn't move), so it dedups the
             // variants; moving entities are Lit here and mix per instance via the `MeshTag` shade byte.
-            // y = the WMO authored batch order (shader-unread; read back by `WowModelKey` to drive the
-            // per-batch pipeline depth bias — the byte-verified MOBA draw-order determinism).
+            // y = the WMO authored batch order, read by `wow_model.wgsl`'s VERTEX stage: it scales
+            // clip z by (1 + y·2⁻²³) so a later coplanar batch wins the reverse-Z depth test in any
+            // draw order — the byte-verified MOBA draw-order determinism. Uniform data by design:
+            // as a `WowModelKey` axis driving a fixed-function depth bias it made every batch index
+            // its own PIPELINE, and a first city sight compiled ~3000 of them synchronously on the
+            // render thread (decision 0837). `WOW_WMO_BIAS=0` (B38's A/B diagnostic) zeroes it here.
             // zw = the batch's live **UV-animation offset** (decision 0130 phase 3, wow-re
             // `m2-texanim-uv`: the real client adds the sampled translation to the stage UVs —
             // translation is un-pivoted, and no placed doodad uses rotation/scaling). Seeded at
@@ -300,7 +304,12 @@ pub(crate) fn model_material(
             // shared clock (frozen in captures).
             sun_scale: {
                 let uv0 = uv_anim.map_or([0.0, 0.0], |a| a.sample(0.0));
-                Vec4::new(shade.selector(), f32::from(wmo_batch_order), uv0[0], uv0[1])
+                let order = if matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
+                    0.0
+                } else {
+                    f32::from(wmo_batch_order)
+                };
+                Vec4::new(shade.selector(), order, uv0[0], uv0[1])
             },
             // The animated M2Color tint's first key (identity white for static batches — their
             // constant tint rides the vertex colours instead). A lane that never re-samples this

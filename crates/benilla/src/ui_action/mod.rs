@@ -48,6 +48,16 @@ pub(crate) mod targeting;
 pub(crate) mod toggle;
 mod weapon_icon;
 
+/// The cooldown-event cut: [`state::feed_action_state`] fires the store-change flush trio
+/// (`ACTIONBAR_UPDATE_COOLDOWN`/`SPELL_UPDATE_COOLDOWN`/`BAG_UPDATE_COOLDOWN`) **synchronously**
+/// (`UiScript::fire_event` walks the handlers inline), so every feed that pushes cooldown
+/// triples the handlers re-read (the container feed's slot cooldowns, the spellbook feed's) must
+/// run `.before(CooldownEvents)` — or a handler reads last frame's triples and the pie stays
+/// missing until the next store change. The action states themselves are safe by construction
+/// (pushed by the same system, before it fires).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CooldownEvents;
+
 pub(crate) use cast_send::send_spell_cast;
 pub(crate) use errors::{
     attack_mounted_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
@@ -223,6 +233,7 @@ impl Plugin for UiActionPlugin {
                     feed::feed_actions.in_set(UnitFeed).before(UiInput),
                     state::feed_action_state
                         .in_set(UnitFeed)
+                        .in_set(CooldownEvents)
                         .after(feed::feed_actions)
                         .before(UiInput),
                     drain::drain_action_sets.after(UiInput),

@@ -58,17 +58,15 @@ pub struct WowModelKey {
     /// values, so the hardware multiply IS the reference's byte multiply.
     modulate: bool,
     modulate2x: bool,
-    /// WMO authored batch index + 1 (0 = not a WMO batch), packed into `sun_scale.y` (shader-unread).
-    /// Drives a per-batch pipeline depth bias in `specialize`: the client draws WMO batches in strict
-    /// MOBA file order with depth-write ON + LEQUAL, so a later coplanar batch (wall decal/trim) wins
-    /// by ORDER (wow-5875-re `models/scratch/wmo-batch-blend-depth-state.md`, byte-verified). Bevy
-    /// orders draws for batching, not authorship, so coplanar ties were unstable (the run-to-run
-    /// "pale film" on buildings); the bias reproduces the authored layering deterministically.
-    wmo_batch_order: u16,
     /// Depth-prime twin (`clutter_fade.z` bit 9 — `model_render::zfill_material`, the reference's
     /// `M2UseZFill` clone command, wow-re `m2-blend-promotion-zfill.md` §4): `specialize` masks the
     /// colour writes off, turns blend off, and forces depth-write ON.
     zfill: bool,
+    // NB: the WMO authored batch order is deliberately NOT a key axis. It used to be (a
+    // per-batch-index `DepthBiasState` constant), which made every batch index its own pipeline —
+    // the city first-sight compile stall (decision 0837). The coplanar-layering nudge now rides
+    // `sun_scale.y` into `wow_model.wgsl`'s vertex stage as uniform data; `model_render::MatKey`
+    // still dedups materials per order, so per-batch identity is intact.
 }
 
 impl From<&WowModelExt> for WowModelKey {
@@ -82,7 +80,6 @@ impl From<&WowModelExt> for WowModelKey {
             no_depth_test: markers & 2 != 0,
             modulate: markers & 0x80 != 0,
             modulate2x: markers & 0x100 != 0,
-            wmo_batch_order: e.sun_scale.y as u16,
             zfill: markers & 0x200 != 0,
         }
     }
@@ -210,33 +207,14 @@ impl MaterialExtension for WowModelExt {
             if key.bind_group_data.no_depth_test {
                 ds.depth_compare = CompareFunction::Always;
             }
-            // WMO authored batch order (see `WowModelKey::wmo_batch_order`): a constant pipeline depth
-            // bias per batch index. The client resolves coplanar batches (wall + decal/trim layers) by
-            // strict MOBA draw order under depth-write+LEQUAL; Bevy's draw order is batching-defined,
-            // so we bias later batches to win the depth test instead. Bevy renders reverse-Z
-            // (GreaterEqual): a POSITIVE constant raises the depth value = nearer = a later batch beats
-            // an earlier coplanar one, in any draw order. One unit per index is the minimum resolvable
-            // depth step — decisive for coplanar ties, negligible (sub-mm) against real separation.
-            let order = key.bind_group_data.wmo_batch_order;
-            if order != 0 {
-                // DIAGNOSTIC (B38): `WOW_WMO_BIAS=0` drops the bias entirely, so the "both batches
-                // saturate to depth 1.0" theory can be tested. The log proves the branch was taken.
-                // `WOW_WMO_BIAS=0` drops the per-batch bias, the A/B that says whether a given
-                // flicker is this bias resolving (or failing to resolve) a tie. It answered B38:
-                // the flip is bit-identical with the bias gone, which also settles what the Metal
-                // backend does with the constant — `wgpu-hal` hands `bias.constant` to
-                // `setDepthBias` raw, and were that raw value ADDED to a reverse-Z depth (~0.02
-                // here) every WMO batch would clamp to 1.0 and tie, so removing it could not
-                // possibly leave the picture unchanged. It does, so the constant is being scaled by
-                // the depth format's ULP and the comment above means what it says.
-                let on = !matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0"));
-                ds.bias.constant = if on { i32::from(order) } else { 0 };
-                debug!(
-                    "wmo batch order {order}: bias {}  compare {:?}  depth_write {}",
-                    ds.bias.constant, ds.depth_compare, ds.depth_write_enabled,
-                );
-            }
         }
+        // The WMO authored-batch-order depth nudge (the coplanar MOBA layering determinism) is NOT
+        // here any more: as a fixed-function `DepthBiasState` constant it made every batch index its
+        // own PIPELINE — Stormwind alone queued ~3000 variants of this one shader, each a
+        // synchronous render-thread compile on macOS (the city first-sight stall, decision 0837).
+        // The nudge now lives in `wow_model.wgsl`'s vertex stage, an exact relative scale of clip z
+        // driven by `sun_scale.y` (uniform DATA, no pipeline axis) — same one-ULP-per-index
+        // semantics, byte-verified intent unchanged (wow-5875-re wmo-batch-blend-depth-state.md).
         if key.bind_group_data.fade {
             // The distance-fade blend twin needs depth-write ON so near geometry occludes far within the
             // same fading model — force it regardless of the per-flag rule above.

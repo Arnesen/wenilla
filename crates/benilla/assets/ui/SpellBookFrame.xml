@@ -39,16 +39,21 @@
             flash (`SpellBookTabFlashFrame`, `CheckButtonGlow`) is dropped with it — no such event
             exists yet (no "just learned a spell" signal split out of the general `SPELLS_CHANGED`
             diff).
-          - Cooldowns (`GetSpellCooldown`/`CooldownFrameTemplate`) and pet autocast
-            (`GetSpellAutocast`/`ToggleSpellAutocast`/`UI-AutoCastableOverlay`/the `AutoCast`
-            model): no cooldown feed exists (the same named gap as CharacterFrame's own item
-            cooldowns), and autocast is pet-only. Right-click pet-autocast toggle
+          - Pet autocast (`GetSpellAutocast`/`ToggleSpellAutocast`/`UI-AutoCastableOverlay`/the
+            `AutoCast` model): pet-only, no pet book. Right-click pet-autocast toggle
             (`SpellButton_OnClick`'s `arg1 ~= "LeftButton"` branch) is out of scope this slice
-            per the same brief — every click routes straight to cast/pickup.
-          - The "currently casting" checked ring (`SpellButton_UpdateSelection`/`IsCurrentCast`,
-            `CURRENT_SPELL_CAST_CHANGED`): no cast-selection tracking exists for the spellbook
-            yet — the `CheckedTexture` art ships (harmless, matches the ref) but nothing ever
-            calls `SetChecked(1)` on a spell button this slice.
+            per the same brief — every click routes straight to cast/pickup. (Cooldowns —
+            originally deferred here alongside autocast for want of a feed — are LIVE:
+            `GetSpellCooldown` + the native Cooldown child + `SPELL_UPDATE_COOLDOWN`, ref
+            `SpellButton_UpdateButton` l.359-365; the app feed stamps each slot's triple from
+            the one cooldown store, `benilla::ui_spellbook`. CharacterFrame's item cooldowns
+            remain that file's own named gap.)
+          - The CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE legs of the checked ring: the ring
+            itself is LIVE (`BenillaSpellButton_UpdateSelection`/`IsCurrentCast` over the
+            app-resolved slot verdict — the shapeshift arm makes Ghost Wolf's/a druid form's
+            slot glow while its form is up), but the trade-skill-window arm of the engine
+            predicate is unmodeled (the same named gap `ui_action`'s IsCurrentAction carries),
+            so those four events would re-read an arm that never fires — omitted with it.
           - The MacroFrame branch (`SpellButton_OnClick`'s shift-click "already in a macro editor"
             fork): no macro window exists — shift-click always falls to the ref's own "else"
             (`PickupSpell`), exactly what the ref itself does whenever no MacroFrame is visible.
@@ -193,21 +198,36 @@
         end
 
         -- ── The spell button (ref SpellButton_*, l.206-404) ──────────────────────────────────────
-        -- CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE/PET_BAR_UPDATE/CURRENT_SPELL_CAST_CHANGED/
-        -- SPELL_UPDATE_COOLDOWN are all OMITTED (header comment: no craft/trade-skill window, no
-        -- pet bar, no cast-selection tracking, no cooldown feed) — SPELLS_CHANGED alone drives a
-        -- refresh.
+        -- CRAFT_SHOW/_CLOSE/TRADE_SKILL_SHOW/_CLOSE/PET_BAR_UPDATE are OMITTED (header comment:
+        -- no craft/trade-skill window arm, no pet bar); SPELLS_CHANGED and SPELL_UPDATE_COOLDOWN
+        -- drive the full refresh (the ref's own shared branch, l.221) and
+        -- CURRENT_SPELL_CAST_CHANGED the checked ring (ref SpellButton_OnEvent's own split).
         function BenillaSpellButton_OnLoad(button)
             button:RegisterEvent("SPELLS_CHANGED")
+            button:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            button:RegisterEvent("SPELL_UPDATE_COOLDOWN")
             button:RegisterForDrag("LeftButton")
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             BenillaSpellButton_UpdateButton(button)
         end
 
         function BenillaSpellButton_OnEvent(button)
-            if event == "SPELLS_CHANGED" then
+            if event == "SPELLS_CHANGED" or event == "SPELL_UPDATE_COOLDOWN" then
                 BenillaSpellButton_UpdateButton(button)
+            elseif event == "CURRENT_SPELL_CAST_CHANGED" then
+                BenillaSpellButton_UpdateSelection(button)
             end
+        end
+
+        -- ref SpellButton_UpdateSelection (l.292-306): the checked ring — `IsCurrentCast` over
+        -- the app-resolved verdict (the ACTIVE shapeshift form's own spell — Ghost Wolf glows
+        -- while the shaman is the wolf, a druid form likewise; the engine predicate `0x4b3600`
+        -- deliberately has NO casting-now arm, so an ordinary cast never lights a book slot).
+        -- The ref's out-of-tab bounds fork collapses into the one SetChecked: IsCurrentCast
+        -- answers nil past the book's end already.
+        function BenillaSpellButton_UpdateSelection(button)
+            local id = BenillaSpellBook_GetSpellID(button:GetID())
+            button:SetChecked(IsCurrentCast(id, BenillaSpellBookFrame.bookType))
         end
 
         -- ref SpellButton_OnEnter (l.235-244): the engine's SetSpell — the byte-verified spell
@@ -237,13 +257,14 @@
                 PickupSpell(id, BenillaSpellBookFrame.bookType)
             else
                 CastSpell(id, BenillaSpellBookFrame.bookType)
-                -- SpellButton_UpdateSelection() OMITTED — header comment, no cast-selection ring.
+                BenillaSpellButton_UpdateSelection(button) -- ref l.288: the ring re-reads at once
             end
         end
 
-        -- ref SpellButton_UpdateButton (l.307-404): the cooldown sweep, autocast overlay/model,
-        -- and the "currently casting" checked-ring call are all OMITTED (header comment). Passive
-        -- gates CastSpell engine-side (spellbook.rs), not here — this only grays the presentation.
+        -- ref SpellButton_UpdateButton (l.307-404): the autocast overlay/model is OMITTED
+        -- (header comment); the cooldown sweep (l.359-365) and the checked-ring tail call are
+        -- LIVE. Passive gates CastSpell engine-side (spellbook.rs), not here — this only grays
+        -- the presentation.
         function BenillaSpellButton_UpdateButton(button)
             if not button:IsVisible() then
                 return
@@ -263,11 +284,13 @@
             local iconTexture = getglobal(name .. "IconTexture")
             local spellString = getglobal(name .. "SpellName")
             local subSpellString = getglobal(name .. "SubSpellName")
+            local cooldown = getglobal(name .. "Cooldown")
             if id > (offset + numSpells) then
                 button:Disable()
                 iconTexture:Hide()
                 spellString:Hide()
                 subSpellString:Hide()
+                cooldown:Hide()
                 button:SetChecked(0)
                 getglobal(name .. "NormalTexture"):SetVertexColor(1.0, 1.0, 1.0)
                 return
@@ -281,10 +304,21 @@
                 iconTexture:Hide()
                 spellString:Hide()
                 subSpellString:Hide()
+                cooldown:Hide()
                 highlightTexture:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
                 button:SetChecked(0)
                 normalTexture:SetVertexColor(1.0, 1.0, 1.0)
                 return
+            end
+            -- The cooldown sweep + the enable-keyed icon dim (ref l.359-365): enable == 0 is an
+            -- on-hold cooldown (Stealth/Feign Death parked until SMSG_COOLDOWN_EVENT) — the
+            -- widget stays hidden (CooldownFrame_SetTimer's own gate) and the icon reads 40%.
+            local start, duration, enable = GetSpellCooldown(id, BenillaSpellBookFrame.bookType)
+            CooldownFrame_SetTimer(cooldown, start, duration, enable)
+            if enable == 1 then
+                iconTexture:SetVertexColor(1.0, 1.0, 1.0)
+            else
+                iconTexture:SetVertexColor(0.4, 0.4, 0.4)
             end
             local spellName, subSpellName = GetSpellName(id, BenillaSpellBookFrame.bookType)
             local isPassive = IsSpellPassive(id, BenillaSpellBookFrame.bookType)
@@ -298,7 +332,6 @@
                 spellString:SetTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b)
             end
             iconTexture:SetTexture(texture)
-            iconTexture:SetVertexColor(1.0, 1.0, 1.0) -- no cooldown/enable feed: always full bright
             spellString:SetText(spellName)
             subSpellString:SetText(subSpellName)
             if subSpellName and subSpellName ~= "" then
@@ -309,6 +342,7 @@
             iconTexture:Show()
             spellString:Show()
             subSpellString:Show()
+            BenillaSpellButton_UpdateSelection(button) -- ref l.403: every full refresh re-reads the ring
         end
 
         -- ── Page turn (ref PrevPageButton_OnClick/NextPageButton_OnClick, l.406-434) ─────────────
@@ -425,9 +459,10 @@
         The spell button (ref SpellButtonTemplate, l.74-201): 37x37, the UI-Spellbook-SpellBackground
         64x64 backdrop offset (-3,3), the icon (setAllPoints, hidden until fed), the name/rank
         FontStrings anchored off the button's own RIGHT edge, the UI-Quickslot2 ring + Depress push +
-        ADD highlight + the (currently-unused, header comment) CheckedTexture ring. Cooldown
-        ($parentCooldown, CooldownFrameTemplate) and the AutoCast overlay/model are OMITTED (this
-        file's header comment — no cooldown feed, pet-only autocast).
+        ADD highlight + the CheckedTexture ring (`IsCurrentCast`'s glow), and the Cooldown child
+        (ref l.136: $parentCooldown inherits CooldownFrameTemplate — ours is the native Cooldown
+        widget at the template's own 36x36 CENTER (0,-1), the ActionBar/BagFrame transcription).
+        The AutoCast overlay/model is OMITTED (this file's header comment — pet-only autocast).
     -->
     <CheckButton name="BenillaSpellButtonTemplate" virtual="true">
         <Size><AbsDimension x="37" y="37"/></Size>
@@ -459,6 +494,14 @@
                 </FontString>
             </Layer>
         </Layers>
+        <Frames>
+            <Cooldown name="$parentCooldown" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                </Anchors>
+            </Cooldown>
+        </Frames>
         <Scripts>
             <OnLoad>BenillaSpellButton_OnLoad(self)</OnLoad>
             <OnEvent>BenillaSpellButton_OnEvent(self)</OnEvent>

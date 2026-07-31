@@ -228,6 +228,96 @@ pub fn load_m2_mesh_skinned(
     parse_m2_render_submeshes(&bytes, &dir, skins).with_context(|| format!("parsing M2 {path}"))
 }
 
+/// The model's billboard bones that are **not** rigidly separable — the population the card split
+/// declines to claim, read through the renderer's own predicate so the census can't drift from it
+/// (`benilla-extract bbscan`'s `SEAM` column). Empty for a model with no billboard bones, and for
+/// one whose every card is an ordinary detached quad.
+pub fn non_separable_billboard_bones(bytes: &[u8]) -> Vec<u16> {
+    let Ok(format) = parse_m2(&mut Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let model = format.model();
+    let Ok(skin) = model.parse_embedded_skin(bytes, 0) else {
+        return Vec::new();
+    };
+    let separable = separable_billboard_bones(model, skin.triangles(), skin.indices());
+    model
+        .bones
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| b.is_billboard() && !separable.get(*i).copied().unwrap_or(false))
+        .map(|(i, _)| i as u16)
+        .collect()
+}
+
+/// Per bone: may the per-batch card split claim it? `true` for every non-billboard bone (the split
+/// never looks at those) and for a billboard bone whose geometry is rigidly **separable** — see the
+/// call site for why that condition is the whole difference between a card and a torn flap.
+///
+/// Separable means both halves of "nothing else moves with it":
+///
+/// 1. **No partial weight.** Every vertex with any influence from the bone is influenced *only* by
+///    it (weight 255/255). A 50/50 vertex is half a rigid body's worth of motion, which no rigid
+///    group can produce.
+/// 2. **No shared triangle.** Every triangle touching such a vertex has all three fully on the same
+///    bone — otherwise the triangle spans the bone and its static neighbour, and rigidly moving it
+///    rips it off whatever it was welded to. Checked over the whole skin, not per batch: a flap's
+///    seam ring routinely lands in the *body's* batch while its tip sits in the billboard one
+///    (`LShoulder_Plate_PVPAlliance_A_01`, bone 1 — 5 pure vertices in one batch, 8 seam vertices
+///    in another), so a batch-local test would call it separable and tear it anyway.
+fn separable_billboard_bones(
+    model: &benilla_m2::M2Model,
+    tris: &[u16],
+    lookup: &[u16],
+) -> Vec<bool> {
+    let mut separable = vec![true; model.bones.len()];
+    let mut deny = |b: usize| {
+        if let Some(s) = separable.get_mut(b) {
+            *s = false;
+        }
+    };
+    // (1) any partial weight on a bone disqualifies it outright.
+    for v in &model.vertices {
+        for i in 0..4 {
+            let w = v.bone_weights[i];
+            if w != 0 && w != u8::MAX {
+                deny(v.bone_indices[i] as usize);
+            }
+        }
+    }
+    // The bone a vertex is *wholly* on, if any — the only vertex a rigid group can own.
+    let sole_bone = |g: usize| -> Option<usize> {
+        let v = model.vertices.get(g)?;
+        (0..4)
+            .find(|&i| v.bone_weights[i] == u8::MAX)
+            .map(|i| v.bone_indices[i] as usize)
+    };
+    // (2) a triangle whose vertices don't all sit wholly on one bone disqualifies every bone it
+    // touches — including the hard (weight-1 vs weight-1) straddle that check (1) can't see.
+    for t in tris.chunks_exact(3) {
+        let g: Vec<usize> = t
+            .iter()
+            .filter_map(|&i| lookup.get(i as usize).map(|&x| x as usize))
+            .collect();
+        let [a, b, c] = g[..] else { continue };
+        let (sa, sb, sc) = (sole_bone(a), sole_bone(b), sole_bone(c));
+        if sa.is_some() && sa == sb && sb == sc {
+            continue; // wholly one bone: a rigid group can own this triangle
+        }
+        for &v in &[a, b, c] {
+            let Some(vert) = model.vertices.get(v) else {
+                continue;
+            };
+            for i in 0..4 {
+                if vert.bone_weights[i] != 0 {
+                    deny(vert.bone_indices[i] as usize);
+                }
+            }
+        }
+    }
+    separable
+}
+
 /// Parse an **in-memory** M2 into render submeshes. `dir` is the model's directory (to resolve its
 /// relative texture references); `skins` fill the `Monster1/2/3` texture slots (creature variations).
 /// The bytes-in entry point used by the Bevy `AssetLoader`; [`load_m2_mesh_skinned`] is the
@@ -265,6 +355,31 @@ pub fn parse_m2_render_submeshes(
             .filter(|&g| (g as usize) < model.vertices.len())
             .collect()
     };
+
+    // **Which billboard bones the per-batch card split is allowed to claim.**
+    //
+    // A card is a RIGID body: the split below pulls a billboard bone's triangles out as their own
+    // submesh and the renderer rotates that whole group about the bone's pivot. The reference has
+    // no card concept at all — it skins every vertex through the bone palette (`m2_vertex_skin`
+    // `0x71a460`), where a billboard bone's camera-replaced matrix (wow-re `billboard-bone-law.md`
+    // §5) is simply one more matrix in a per-vertex weighted blend. The two agree exactly when — and
+    // only when — the bone's geometry is rigidly **separable**: nothing shares a vertex or a
+    // triangle with the rest of the model.
+    //
+    // Where it isn't, a rigid group cannot express the answer *at all*, and the failure is not a
+    // small error: a vertex weighted half to the flap and half to the body has to be placed wholly
+    // on one side, so a flap authored welded to its model is **torn in two** — the free half
+    // sweeping with the camera, the welded half frozen, a detached triangle between them and a
+    // z-fight where the swung half grazes the body. That is the Field Marshal pauldron the director
+    // reported (decision 0839): its two spikes each ride a spherical bone through a 50/50 seam ring.
+    //
+    // So the split takes only the separable bones, and everything else stays ordinary geometry —
+    // whole, in one submesh. On a **rigged** spawn that submesh is the skinned form, so the joint
+    // palette (which already applies the same billboard replacement, `billboard_joint_palette`)
+    // reproduces the reference exactly; on a rig-less spawn the flap holds still instead of bending.
+    // Corpus-wide this claims 16 models of 9691 (236 vertices) — `benilla-extract bbscan`'s SEAM
+    // column — so every ordinary glow card is untouched.
+    let separable = separable_billboard_bones(model, tris, lookup);
 
     // Every sequence's (anim id, absolute time band, loops): entry stride 0x44, anim id u16 at
     // +0x00, band start/end u32 at +0x04/+0x08, flags u32 at +0x10 (bit 0 CLEAR = the band loops —
@@ -473,11 +588,9 @@ pub fn parse_m2_render_submeshes(
         // appearance order and preserving triangle order within each group.
         let primary_billboard_bone = |g: u32| -> Option<usize> {
             let b = model.vertices.get(g as usize)?.bone_indices[0] as usize;
-            model
-                .bones
-                .get(b)
-                .is_some_and(|bone| bone.is_billboard())
-                .then_some(b)
+            (model.bones.get(b).is_some_and(|bone| bone.is_billboard())
+                && separable.get(b).copied().unwrap_or(false))
+            .then_some(b)
         };
         let mut groups: Vec<(Option<usize>, Vec<u32>)> = Vec::new();
         for tri in global_indices.chunks_exact(3) {
@@ -766,6 +879,75 @@ mod tests {
         assert_eq!(reflect.blend, ModelBlend::Mod2x);
         assert!(!reflect.additive, "Mod2x is a multiply, not an add");
         assert!(reflect.no_depth_write, "render flag 0x10");
+    }
+
+    /// The Field Marshal pauldron (`LShoulder_Plate_PVPAlliance_A_01.m2`), the director's report:
+    /// its two little spikes each ride a spherical-billboard bone through a **50/50 seam ring**, so
+    /// neither bone is rigidly separable and neither may be split into a card. The whole model must
+    /// come out as ONE welded batch — the spikes' own vertices, the seam ring, and the body.
+    ///
+    /// The seam ring is the point. Bone 1's five fully-weighted vertices sat in their own batch
+    /// while its eight 50/50 vertices sat in the *body's*, so the split saw a clean card, tore the
+    /// spike off the shoulder and swung it with the camera (decision 0839). A batch-local
+    /// separability test would still see a clean card here; only the model-wide one catches it.
+    #[test]
+    fn a_welded_billboard_spike_is_never_split_into_a_card() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let path = "Item\\ObjectComponents\\Shoulder\\LShoulder_Plate_PVPAlliance_A_01.m2";
+        let subs = load_m2_mesh(&mut chain, path).expect("parse LShoulder_Plate_PVPAlliance_A_01");
+        assert_eq!(subs.len(), 1, "body + both spikes stay one welded batch");
+        assert!(
+            subs[0].billboard.is_none(),
+            "a welded bone is never claimed by the card split"
+        );
+        assert_eq!(subs[0].positions.len(), 152, "every vertex is present");
+        // …and the welded batch really does carry the seam — otherwise this test would still pass
+        // on a build that simply dropped the spikes.
+        let seam = subs[0]
+            .weights
+            .iter()
+            .filter(|w| w.iter().any(|&x| x > 0.0 && x < 0.999))
+            .count();
+        assert_eq!(
+            seam, 16,
+            "the two 8-vertex 50/50 seam rings are in the mesh"
+        );
+        // The renderer's predicate, read directly: both billboard bones are the denied ones.
+        let bytes = chain.read_file(path).expect("read the m2");
+        assert_eq!(non_separable_billboard_bones(&bytes), vec![1, 2]);
+    }
+
+    /// The counter-anchor: an ordinary **detached** glow card is untouched by that rule. The PVP
+    /// two-hander's two hilt glows are 4-vertex quads wholly on their own spherical bone, sharing
+    /// no triangle with the blade — exactly the shape the card split exists for, and 4372 of the
+    /// corpus's billboard batches are like this. If separability ever over-denies, this is what
+    /// goes dark first.
+    #[test]
+    fn a_detached_glow_card_is_still_split_out() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let path = "Item\\ObjectComponents\\Weapon\\Sword_2H_PVPAlliance_A_01.m2";
+        let subs = load_m2_mesh(&mut chain, path).expect("parse Sword_2H_PVPAlliance_A_01");
+        let cards: Vec<_> = subs.iter().filter(|s| s.billboard.is_some()).collect();
+        assert_eq!(cards.len(), 2, "both hilt glows stay cards");
+        assert!(
+            cards.iter().all(|c| c.positions.len() == 4),
+            "each is its own 4-vertex quad"
+        );
+        let bytes = chain.read_file(path).expect("read the m2");
+        assert!(
+            non_separable_billboard_bones(&bytes).is_empty(),
+            "nothing on this model is welded"
+        );
     }
 
     /// The questgiver `?` marker, straight off the real client data: ONE cylindrical-billboard

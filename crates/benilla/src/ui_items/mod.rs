@@ -646,7 +646,14 @@ impl Plugin for UiItemsPlugin {
             .add_systems(
                 Update,
                 (
-                    feed_containers.in_set(UnitFeed).before(UiInput),
+                    // `.before(CooldownEvents)`: the slot cooldown triples must be in the VM
+                    // before `feed_action_state`'s synchronous `BAG_UPDATE_COOLDOWN` makes the
+                    // bag handlers re-read them (the set's own doc — else a fresh cooldown's
+                    // pie waits for the NEXT store change).
+                    feed_containers
+                        .in_set(UnitFeed)
+                        .before(crate::ui_action::CooldownEvents)
+                        .before(UiInput),
                     // The shared item-tooltip store: answer stat asks before the input pass so a
                     // re-hover the very next frame already sees them.
                     feed_item_stats.in_set(UnitFeed).before(UiInput),

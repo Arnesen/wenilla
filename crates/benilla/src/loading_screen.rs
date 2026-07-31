@@ -352,6 +352,9 @@ fn drive_loading_screen(
     >,
     player: Option<Res<crate::player::Player>>,
     time: Res<Time>,
+    // The 0837 warm pass: the cover holds until the menagerie's pipelines have compiled — the
+    // point of the cover is that NOTHING first-sight-compiles after it lifts.
+    warm: Res<crate::pipe_warm::WarmPass>,
     // The lifecycle edges (decisions 0737/0738), all observed from what the net bridge already
     // publishes — this module owns the whole state machine, nothing else is instrumented for it.
     edges: (
@@ -451,6 +454,7 @@ fn drive_loading_screen(
             && progress.presentable()
             && !screen.awaiting_snap
             && !player_settling
+            && warm.satisfied()
         {
             screen.ready_frames += 1;
             if screen.ready_frames >= CLEAR_AFTER_READY_FRAMES {
@@ -471,7 +475,7 @@ fn drive_loading_screen(
                 screen.last_wait_log = now;
                 info!(
                     "loading screen: waiting {:.1}s — {}/{} resident, {} placements pending, \
-                     {} colliders pending, awaiting_snap={}, settling={}",
+                     {} colliders pending, awaiting_snap={}, settling={}, warm={}",
                     now - screen.active_since,
                     progress.ready,
                     progress.total,
@@ -479,6 +483,7 @@ fn drive_loading_screen(
                     progress.colliders_pending,
                     screen.awaiting_snap,
                     player_settling,
+                    warm.satisfied(),
                 );
             }
         }

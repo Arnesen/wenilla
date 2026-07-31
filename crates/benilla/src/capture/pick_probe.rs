@@ -104,14 +104,22 @@ fn parse_pixels(spec: &str) -> Vec<Vec2> {
         .collect()
 }
 
+/// The filter deciding what a cast may hit — see [`fire_pick`]'s `objects` for why it is both.
+type Pickable = Or<(With<WorldObject>, With<crate::debug_panel::ModelPart>)>;
+
 /// What a hit entity is asked for: its identity, the batch class it draws as, the material
 /// carrying the WMO batch order, and its per-instance `MeshTag` (`Option` because a hit need not be a
-/// model batch at all).
+/// model batch at all — and an equipped item's batch carries no [`WorldObject`]).
 type HitIdentity = (
-    &'static WorldObject,
+    Option<&'static WorldObject>,
     Option<&'static crate::debug_panel::ModelPart>,
     Option<&'static MeshMaterial3d<WowModelMaterial>>,
     Option<&'static MeshTag>,
+    // Is this hit a camera-FACING batch (decision 0153's world-root card) or the model's own
+    // geometry? The two are indistinguishable in the pixels and lead to completely different
+    // diagnoses — a card that should be culled vs a submesh drawn with the wrong texture — so the
+    // cast says which. (`card` in the line below.)
+    Has<crate::billboard::BillboardCard>,
 );
 
 /// Every shading input the batch actually has, as text — the five packed uniform rows and the base
@@ -172,7 +180,15 @@ fn fire_pick(
     time: ProbeClock,
     window: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
-    objects: Query<Entity, With<WorldObject>>,
+    // What the ray may hit. `WorldObject` is the world's identity tag (doodads, WMOs, unit BODY
+    // parts) — but an EQUIPPED item carries none: the item lane spawns its parts and cards without
+    // one, because that component also feeds the mouseover/targeting fallback and a weapon is not a
+    // target. So the probe would answer "what is at this pixel" for a character's skin and silently
+    // skip its helm, its pauldrons, its weapon and every camera-facing card hanging off them —
+    // exactly the geometry a "this bit of my gear looks wrong" report is about (found chasing the
+    // Field Marshal pauldron, decision 0836). `ModelPart` rides every drawn batch in the client, so
+    // the probe keys on it too and stays a pure instrument: nothing outside this file reads it.
+    objects: Query<Entity, Pickable>,
     names: HitNames,
     mut ray_cast: MeshRayCast,
 ) {
@@ -239,7 +255,7 @@ fn fire_pick(
                 )
             });
             previous = Some((hit.distance, hit.point, hit.normal));
-            let Ok((obj, part, mat, tag)) = names.identity.get(*entity) else {
+            let Ok((obj, part, mat, tag, card)) = names.identity.get(*entity) else {
                 info!("  {i:2}  {:9.4} yd  <untagged>{gap}", hit.distance);
                 continue;
             };
@@ -262,15 +278,26 @@ fn fire_pick(
             // behind wins a pixel is decided by sub-pixel coverage rather than by depth — a
             // completely different defect from a depth fight, and indistinguishable in the pixels.
             let incidence = ray.direction.dot(hit.normal).abs().clamp(0.0, 1.0).asin();
+            // An untagged batch — an equipped item's part or its billboard card — has no world
+            // identity of its own; it is named by its blend + material + texture, which is what
+            // separates "the pauldron's plate" from "the pauldron's camera-facing trim".
+            let (kind, id, label) = obj.map_or_else(
+                || ("<worn>".to_string(), String::new(), String::new()),
+                |o| {
+                    (
+                        format!("{:?}", o.kind),
+                        format!("#{}", o.id),
+                        o.label.clone(),
+                    )
+                },
+            );
             info!(
-                "  {i:2}  {:9.4} yd  {:?} #{:<10} bias {batch:3}  {:?}  {:5.1}° to the ray  mat {:?}  tex {tex}  {}{gap}",
+                "  {i:2}  {:9.4} yd  {kind} {id:<10} bias {batch:3}  {:?}{}  {:5.1}° to the ray  mat {:?}  tex {tex}  {label}{gap}",
                 hit.distance,
-                obj.kind,
-                obj.id,
                 part.map(|p| p.blend),
+                if card { " CARD" } else { "" },
                 incidence.to_degrees(),
                 mat.map(|m| m.0.id()),
-                obj.label,
             );
             // The contents, not the identity — the whole point (see [`shading_of`]). Printed for
             // every hit on every cast: with `WOW_PICK_EVERY=0` that is a per-frame record of every

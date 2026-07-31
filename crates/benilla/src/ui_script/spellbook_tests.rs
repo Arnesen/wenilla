@@ -50,6 +50,8 @@ fn book() -> SpellBookState {
                 rank: Some("Rank 1".into()),
                 texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
                 passive: false,
+                current: false,
+                cooldown: None,
             },
             SpellSlotView {
                 spell_id: 2136,
@@ -57,6 +59,8 @@ fn book() -> SpellBookState {
                 rank: Some("Rank 1".into()),
                 texture: Some("Interface\\Icons\\Spell_Fire_FireBolt02".into()),
                 passive: false,
+                current: false,
+                cooldown: None,
             },
             SpellSlotView {
                 spell_id: 168,
@@ -64,13 +68,16 @@ fn book() -> SpellBookState {
                 rank: Some("Rank 1".into()),
                 texture: Some("Interface\\Icons\\Spell_Frost_FrostArmor02".into()),
                 passive: false,
+                current: false,
+                cooldown: None,
             },
         ],
     }
 }
 
 /// The loader itself: every file the window depends on parses and materializes with no errors —
-/// the window + close + prev/next page buttons + 12 spell buttons + 8 skill-line tabs = 24 frames.
+/// the window + close + prev/next page buttons + 12 spell buttons (each with a Cooldown child)
+/// + 8 skill-line tabs = 36 frames.
 #[test]
 fn shipped_spellbook_loads_clean() {
     let s = UiScript::new().unwrap();
@@ -89,8 +96,9 @@ fn shipped_spellbook_loads_clean() {
         report.errors
     );
     assert_eq!(
-        report.frames, 24,
-        "window + close + prev/next + 12 spell buttons + 8 skill-line tabs"
+        report.frames, 36,
+        "window + close + prev/next + 12 spell buttons (each with a Cooldown child) + 8 \
+         skill-line tabs"
     );
 }
 
@@ -193,6 +201,83 @@ fn shipped_spellbook_drives_end_to_end() {
     assert!(s.cursor_payload().is_none(), "placed — cursor clears");
     assert!(s.eval::<bool>("return HasAction(1)").unwrap());
     assert_eq!(s.take_action_sets(), vec![(1, 133)]); // 0x00<<24 | 133
+}
+
+/// The cooldown pie through the REAL shipped XML (the once-deferred half of slice 5): a pushed
+/// per-slot triple + `SPELL_UPDATE_COOLDOWN` arms the button's Cooldown widget mid-sweep (ref
+/// SpellButton_UpdateButton l.359-360), and an on-hold triple (enable 0 — Stealth/Feign Death
+/// parked until SMSG_COOLDOWN_EVENT) keeps the widget hidden and dims the icon to 40% (l.361-365).
+#[test]
+fn shipped_spellbook_shows_the_cooldown_pie() {
+    use benilla_ui::script::QuadContent;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "GameTooltip.xml",
+        "Cooldown.xml",
+        "SpellBookFrame.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s.set_spellbook(book());
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    s.tick(10.0); // GetTime = 10
+
+    // A running 10 s cooldown started at t=6 (6 s left): the event re-read arms the sweep.
+    let mut b = book();
+    b.slots[0].cooldown = Some((6_000, 10_000, true));
+    s.set_spellbook(b);
+    s.fire_event("SPELL_UPDATE_COOLDOWN", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let sweep = s.extract().into_iter().find_map(|q| {
+        if s.quad_owner_name(q.target).as_deref() != Some("BenillaSpellButton1Cooldown") {
+            return None;
+        }
+        match q.content {
+            QuadContent::Cooldown { fraction, flash } => Some((fraction, flash)),
+            _ => None,
+        }
+    });
+    let (fraction, flash) = sweep.expect("BenillaSpellButton1's Cooldown widget is showing");
+    assert!(
+        (fraction - 0.4).abs() < 1e-3,
+        "4 s elapsed of 10 ⇒ the sweep sits at 40%, got {fraction}"
+    );
+    assert_eq!(flash, None);
+
+    // An on-hold triple: no sweep (CooldownFrame_SetTimer's enable gate), the icon dims to 40%.
+    let mut b = book();
+    b.slots[0].cooldown = Some((6_000, 10_000, false));
+    s.set_spellbook(b);
+    s.fire_event("SPELL_UPDATE_COOLDOWN", vec![]);
+    s.resolve();
+    let quads = s.extract();
+    assert!(
+        !quads.iter().any(|q| {
+            s.quad_owner_name(q.target).as_deref() == Some("BenillaSpellButton1Cooldown")
+        }),
+        "an on-hold cooldown draws no sweep"
+    );
+    let icon_color = quads.iter().find_map(|q| {
+        if s.quad_owner_name(q.target).as_deref() != Some("BenillaSpellButton1") {
+            return None;
+        }
+        match &q.content {
+            QuadContent::Texture {
+                path: Some(p),
+                color,
+                ..
+            } if p.contains("Spell_Fire_FlameBolt") => Some(*color),
+            _ => None,
+        }
+    });
+    let c = icon_color.expect("icon quad").expect("vertex color set");
+    assert_eq!((c[0], c[1], c[2]), (0.4, 0.4, 0.4), "the on-hold 40% dim");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
 /// The empty-slot LOOK, pinned at the quad level (the regression that shipped with slice 5): a

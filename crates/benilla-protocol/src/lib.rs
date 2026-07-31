@@ -31,6 +31,10 @@ use benilla_srp::{NormalizedString, PublicKey, SrpClientChallenge, SESSION_KEY_L
 pub const AUTH_PORT: u16 = 3724;
 /// The 1.12.1 client build we present to the server.
 pub const CLIENT_BUILD: u16 = 5875;
+/// How many logon challenges [`logon`] will ask for while looking for a `B` both serialization
+/// conventions read the same way (see the redial comment there). One dial in ~137 comes back
+/// ambiguous, so eight is already a probability of about 10⁻¹⁷ of running out.
+const MAX_CHALLENGE_DIALS: u32 = 8;
 
 /// Split an optional `:port` off a host string (`play.example.com:3724`). A bare host — or one
 /// whose suffix isn't a port, e.g. a raw IPv6 address like `::1` — comes back intact with
@@ -72,23 +76,43 @@ pub fn logon(host: &str, username: &str, password: &str) -> Result<Logon> {
     // `host` may carry an explicit `:port` (`WOW_HOST=play.example.com:3724`); bare hosts get
     // [`AUTH_PORT`].
     let (host, port) = host_port(host, AUTH_PORT);
-    let mut stream =
-        TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
 
-    // 1. Logon challenge — the account name is sent uppercased (matching the SRP6 calculation).
-    auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
-        .context("sending logon challenge")?;
-
-    // 2. Server challenge → SRP6 inputs.
-    let reply = auth::read_challenge_reply(&mut stream).context("reading logon challenge reply")?;
-
-    // 3. SRP6 (WoW flavor) — compute A, M1, and the session key.
     let username_n =
         NormalizedString::new(username).map_err(|e| anyhow!("invalid username: {e}"))?;
     let password_n =
         NormalizedString::new(password).map_err(|e| anyhow!("invalid password: {e}"))?;
-    let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
-        .map_err(|e| anyhow!("invalid server public key: {e}"))?;
+
+    // 1-2. Logon challenge → the server's SRP6 inputs. The account name is sent uppercased (matching
+    // the SRP6 calculation).
+    //
+    // `B` is the one hashed value benilla does not draw, and ~1 in 137 of them is one the client and
+    // the mangos family serialize differently — a correct password answered with 0x04 (see
+    // `benilla-srp`, "Encoding-unambiguous handshakes"). Redial for a fresh `B` when that lands: the
+    // challenge is abandoned before any proof goes out, and realmd counts nothing at this stage for a
+    // known account (`AuthSocket::_HandleLogonChallenge`), so a redial is free and invisible.
+    let (mut stream, reply, server_public_key) = {
+        let mut dialed = None;
+        for _ in 0..MAX_CHALLENGE_DIALS {
+            let mut stream = TcpStream::connect((host, port))
+                .with_context(|| format!("connecting to {host}:{port}"))?;
+            auth::write_logon_challenge(&mut stream, &username.to_uppercase(), CLIENT_BUILD)
+                .context("sending logon challenge")?;
+            let reply =
+                auth::read_challenge_reply(&mut stream).context("reading logon challenge reply")?;
+            let server_public_key = PublicKey::from_le_bytes(reply.server_public_key)
+                .map_err(|e| anyhow!("invalid server public key: {e}"))?;
+            let stable = server_public_key.is_width_stable();
+            dialed = Some((stream, reply, server_public_key));
+            if stable {
+                break;
+            }
+        }
+        // Every dial ran out ambiguous (p ≈ 10⁻¹⁷): send the last anyway rather than inventing a
+        // failure the server never gave us.
+        dialed.expect("MAX_CHALLENGE_DIALS is non-zero")
+    };
+
+    // 3. SRP6 (WoW flavor) — compute A, M1, and the session key.
     let challenge = SrpClientChallenge::new(
         username_n,
         password_n,

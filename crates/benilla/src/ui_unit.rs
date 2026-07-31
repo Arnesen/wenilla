@@ -32,9 +32,13 @@ use crate::target::{ring_reaction, Factions, Selection};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
 use crate::ui_script::UiInput;
 
-/// The feed pass — runs before [`UiInput`] so the snapshot + events it produces are in place when the
-/// VM ticks and dispatches this frame. A named set so the demo override ([`crate::ui_script`]) can
-/// order itself after it.
+/// The feed pass — runs **after [`crate::schedule::WorldStage::Net`]** (the feeds snapshot state
+/// the net apply writes; unordered, `apply_net_updates` could land BETWEEN two feeds, and a
+/// synchronous event fired by the later one then re-read the earlier one's pre-mutation push —
+/// the spellbook's cooldown pie stayed cold until a manual reopen, reproduced live 2026-07-31)
+/// and before [`UiInput`], so the snapshot + events it produces are in place when the VM ticks
+/// and dispatches this frame. A named set so the demo override ([`crate::ui_script`]) can order
+/// itself after it. Configured in [`UiUnitPlugin`] — the set's home.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UnitFeed;
 
@@ -112,22 +116,26 @@ pub(crate) struct UiUnitPlugin;
 
 impl Plugin for UiUnitPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UnitFeedState>()
-            .add_message::<UnitCombatFeedback>()
-            .add_message::<CombatTextEvent>()
-            .add_systems(
-                Update,
-                (
-                    feed_units,
-                    melee_unit_combat,
-                    fire_unit_combat,
-                    fire_combat_text,
-                )
-                    .chain()
-                    .in_set(UnitFeed)
-                    .before(UiInput),
+        app.configure_sets(
+            Update,
+            UnitFeed.after(crate::schedule::WorldStage::Net), // the set's own doc: the why
+        )
+        .init_resource::<UnitFeedState>()
+        .add_message::<UnitCombatFeedback>()
+        .add_message::<CombatTextEvent>()
+        .add_systems(
+            Update,
+            (
+                feed_units,
+                melee_unit_combat,
+                fire_unit_combat,
+                fire_combat_text,
             )
-            .add_systems(Update, drain_pvp_toggles.after(UiInput));
+                .chain()
+                .in_set(UnitFeed)
+                .before(UiInput),
+        )
+        .add_systems(Update, drain_pvp_toggles.after(UiInput));
     }
 }
 

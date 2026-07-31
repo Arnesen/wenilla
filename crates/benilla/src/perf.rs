@@ -86,6 +86,7 @@ impl Plugin for PerfPlugin {
             frame: 0,
             log_until: 0,
             prev_cpu_secs: None,
+            prev_pipes_created: 0,
         })
         .add_systems(
             Update,
@@ -176,13 +177,16 @@ struct StreamTrace {
     /// on this machine wall frame time moves with whoever else is compiling (0711; a parallel
     /// build polluted this instrument's first A/B).
     prev_cpu_secs: Option<f64>,
+    /// `PipeWatch::created` at the previous frame, so `pipes_new` is per-frame like every other
+    /// counter (the render world bumps the shared atomic; ±1 frame skew is inherent and fine).
+    prev_pipes_created: usize,
 }
 
 const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,furnish_ms,mfurnish_ms,\
                                    spawn_ms,collider_ms,tiles_dropped,pl_dropped,pl_ents_dropped,\
                                    tiles_req,tiles_spawned,cells_spawned,mmeshes_built,pl_spawned,\
                                    attached,adt_freed,meshes_freed,images_freed,adt_added,\
-                                   meshes_added,images_added\n";
+                                   meshes_added,images_added,pipes_new,pipes_pending\n";
 
 #[allow(clippy::too_many_arguments)]
 fn trace_stream(
@@ -193,9 +197,15 @@ fn trace_stream(
     mut adt_events: MessageReader<bevy::asset::AssetEvent<benilla_assets::AdtTile>>,
     mut mesh_events: MessageReader<bevy::asset::AssetEvent<Mesh>>,
     mut image_events: MessageReader<bevy::asset::AssetEvent<bevy::image::Image>>,
+    pipes: Res<crate::pipe_warm::PipeWatch>,
 ) {
     // Taken every frame — the counters are per-frame by contract, tracing or not.
     let a = std::mem::take(&mut *activity);
+    let pipes_created = pipes.0.created.load(std::sync::atomic::Ordering::Relaxed);
+    let pipes_settled = pipes.0.settled.load(std::sync::atomic::Ordering::Relaxed);
+    let pipes_new = pipes_created.saturating_sub(trace.prev_pipes_created);
+    let pipes_pending = pipes_created.saturating_sub(pipes_settled);
+    trace.prev_pipes_created = pipes_created;
     trace.frame += 1;
     if trace.path.is_empty() {
         return;
@@ -232,12 +242,13 @@ fn trace_stream(
     let (added_mesh, removed_mesh) = count_events(&mut mesh_events);
     let (added_img, removed_img) = count_events(&mut image_events);
     let delta_ms = time.delta_secs() * 1000.0;
-    if a.any_event() || removed_adt > 0 || added_adt > 0 {
+    if a.any_event() || removed_adt > 0 || added_adt > 0 || pipes_new > 0 {
         trace.log_until = trace.frame + TRACE_TAIL_FRAMES;
     }
     if !(a.any_event()
         || removed_adt > 0
         || added_adt > 0
+        || pipes_new > 0
         || delta_ms > TRACE_FRAME_MS
         || trace.frame <= trace.log_until)
     {
@@ -247,7 +258,7 @@ fn trace_stream(
         let _ = std::fs::write(&trace.path, STREAM_TRACE_HEADER);
     }
     let line = format!(
-        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img},{added_adt},{added_mesh},{added_img}\n",
+        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img},{added_adt},{added_mesh},{added_img},{pipes_new},{pipes_pending}\n",
         trace.frame,
         time.elapsed_secs(),
         entities.iter().len(),

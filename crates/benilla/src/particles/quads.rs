@@ -175,13 +175,12 @@ pub(super) fn expand_quads(
         // fading in fades its effects in with it, and a first-person avatar's torch stops burning
         // in your face.
         rgba[3] *= frame.alpha;
-        // RAW authored RGB — the gamma-space decode happens ONCE, in the lane's fragment
-        // (`wow_effect.wgsl`, decision 0152), where it also covers the texture term that a
-        // CPU-side vertex linearisation (0150) could not reach. Alpha is a blend weight — raw
-        // everywhere. The remaining bonfire-CORE brightness gap vs the reference is the
-        // additive-composite-space question (0148 open item: the reference sums gamma bytes in
-        // an LDR framebuffer; we sum linear and encode once), NOT a colour-space bug — do not
-        // "fix" it here again.
+        // RAW authored RGB — the gamma-space decode happens ONCE, at the FFX combine
+        // (decision 0161's gamma lane; 0152/0150 are its shader-placement ancestry). Alpha is
+        // a blend weight — raw everywhere. Additive stacks sum in gamma like the reference's
+        // bytes; the byte buffer's SATURATION (a stack can never exceed 255) is restored at
+        // the FFX chain's scene reads (`ffx_glow.wgsl`, the Frost Nova mist diagnosis) — a
+        // too-bright additive stack is never this ramp's bug, do not "fix" it here.
         // Anchored positions ride the emitter's live translation — through the CURRENT attach
         // rotation on an attached model (`DrawMx = A·Translate·V`, the heading-since-birth
         // fan); model mode folds the whole live placement transform (the reference's rt-0x100

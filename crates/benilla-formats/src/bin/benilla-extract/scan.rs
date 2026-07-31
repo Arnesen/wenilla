@@ -173,9 +173,13 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         })
         .collect();
     let (mut scanned, mut cards) = (0u32, 0u32);
-    // The four populations. `away_single` is the one the renderer's forced-two-sided override
+    // The four card populations. `away_single` is the one the renderer's forced-two-sided override
     // changes: those and only those become visible when a card is not allowed to be culled.
     let (mut toward, mut away_single, mut away_two, mut edge_on) = (0u32, 0u32, 0u32, 0u32);
+    // …and the batches that are not cards at all. A facing only exists for a batch that IS one
+    // plane; a closed solid has faces every way round, backface culling never hides it, and
+    // sampling its first triangle answers a question it doesn't have (see `plane_normal`).
+    let mut solid = 0u32;
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -189,6 +193,11 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         for (i, s) in subs.iter().enumerate() {
             let Some(bb) = &s.billboard else { continue };
             cards += 1;
+            // Not one plane ⇒ not a card. Counted apart rather than classified by a triangle.
+            if s.plane_normal().is_none() {
+                solid += 1;
+                continue;
+            }
             // The winding normal's X component: +1 faces the viewer, −1 faces away.
             let Some(fx) = facet_x(s) else {
                 edge_on += 1;
@@ -223,7 +232,7 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     eprintln!(
         "{scanned} models scanned, {cards} billboard batch(es): {toward} toward, \
          {away_single} away+single-sided (reference culls these), {away_two} away+two-sided, \
-         {edge_on} edge-on/degenerate"
+         {edge_on} edge-on/degenerate, {solid} NOT PLANAR (3-D geometry — no facing to decide)"
     );
     Ok(())
 }
@@ -487,6 +496,8 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     // …and the effect riders (particles/ribbons on a billboard chain).
     let mut fx_models = 0u32;
     let mut fx_total: HashMap<String, u32> = HashMap::new();
+    // …and the seam population (see the classification below).
+    let (mut seam_models, mut seam_bones) = (0u32, 0u32);
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -531,6 +542,13 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                 None => {}
             }
         }
+        // SEAM bones: billboard bones whose geometry is welded to the rest of the model — by a
+        // partial vertex weight, or by a triangle it shares with a static neighbour. The reference
+        // skins per vertex, so such geometry BENDS (a flap's root stays on the body while its tip
+        // swings to the camera); a rigid card cannot express that at all, and moving the group
+        // rigidly tears the flap in two. These are the bones the split declines (decision 0839),
+        // read through the renderer's own predicate so this census cannot drift from it.
+        let seam = benilla_formats::non_separable_billboard_bones(&bytes);
         let fmt_counts = |m: &HashMap<&str, u32>| {
             let mut v: Vec<String> = m.iter().map(|(k, n)| format!("{k}:{n}")).collect();
             v.sort();
@@ -565,8 +583,21 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             v.join(" ")
         };
         let bones: String = kinds.iter().flatten().map(|&k| arm(k)).collect();
+        let seam_col = if seam.is_empty() {
+            String::new()
+        } else {
+            seam_models += 1;
+            seam_bones += seam.len() as u32;
+            format!(
+                "  SEAM[{}]",
+                seam.iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         println!(
-            "{bones:>4}  direct[{}]  inherited[{}]  fx[{fx_counts}]  {name}",
+            "{bones:>4}  direct[{}]  inherited[{}]  fx[{fx_counts}]{seam_col}  {name}",
             fmt_counts(&direct),
             fmt_counts(&inherited)
         );
@@ -608,7 +639,7 @@ pub fn bbscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         v.join(" ")
     };
     eprintln!(
-        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]; {fx_models} with EFFECTS on a billboard chain [{fx_tot}]",
+        "{scanned} models scanned, {hits} with billboard bones; models by arm — direct(card) [{}]  inherited(palette) [{}]; {fx_models} with EFFECTS on a billboard chain [{fx_tot}]; {seam_models} with SEAM billboard bones ({seam_bones} total) — geometry welded to the model, which a rigid card tears",
         tot(&direct_models),
         tot(&inherited_models)
     );

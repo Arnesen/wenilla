@@ -523,8 +523,10 @@ pub(crate) fn apply_self_model_fade(
         (
             Without<RenderFade>,
             Without<PendingAppearFade>,
-            // Disjointness for the card query below (both want `&mut MeshTag`); a card never
-            // carries `FadeMaterials`, so this excludes nothing.
+            // Disjointness for the card query below (both want `&mut MeshTag`). A card carries
+            // `FadeMaterials` too since 0836, so this now genuinely diverts them — into the loop
+            // at the end, which applies the same law without touching `Visibility` (a card's own
+            // hidden-owner mirror authors that in a different system).
             Without<crate::billboard::BillboardCard>,
         ),
     >,
@@ -532,6 +534,9 @@ pub(crate) fn apply_self_model_fade(
         &crate::billboard::BillboardCard,
         &mut MeshTag,
         Option<&crate::doodad_anim::MatAnim>,
+        Option<&FadeMaterials>,
+        Option<&mut MeshMaterial3d<WowModelMaterial>>,
+        Option<&crate::interior::InteriorLit>,
     )>,
     mut reauthor: ResMut<crate::interior::InteriorReauthor>,
     mut was_fading: Local<bool>,
@@ -564,7 +569,7 @@ pub(crate) fn apply_self_model_fade(
         &mut walked,
     );
     let alpha = feather.clamp(0.0, 1.0);
-    for (card, mut tag, anim) in &mut cards {
+    for (card, mut tag, anim, fm, mat, lit) in &mut cards {
         if !card
             .follows()
             .is_some_and(|anchor| walked.contains(&anchor))
@@ -579,6 +584,18 @@ pub(crate) fn apply_self_model_fade(
         let bits = crate::mesh_tag::with_alpha(tag.0, authored * alpha);
         if tag.0 != bits {
             tag.0 = bits;
+        }
+        // …and the blend twin while feathering, exactly as a mesh part does. The alpha alone is
+        // enough for an ADDITIVE card (`wow_model.wgsl` folds it into the colour, so α 0 is black
+        // is gone), but an OPAQUE one — a pauldron's camera-facing trim, a chain link — ignores it
+        // entirely and stayed solid in first person until the card carried a twin to swap to
+        // (decision 0836). No `Visibility` here: that channel belongs to the card's hidden-owner
+        // mirror in another system.
+        if let (Some(fm), Some(mut mat)) = (fm, mat) {
+            let want = fm.material_for(lit, alpha < 1.0);
+            if mat.0 != *want {
+                mat.0 = want.clone();
+            }
         }
     }
     *was_fading = fading;

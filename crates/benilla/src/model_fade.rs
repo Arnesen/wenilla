@@ -476,15 +476,25 @@ pub(crate) fn arm_appear_fade(
     time: Res<Time>,
     screen: Res<crate::loading_screen::LoadingScreen>,
     mut commands: Commands,
-    q: Query<(Entity, &PendingAppearFade)>,
+    q: Query<(
+        Entity,
+        &PendingAppearFade,
+        Has<crate::billboard::BillboardCard>,
+    )>,
     mut units: Query<&mut UnitAppearFade>,
 ) {
     let now = time.elapsed_secs();
     let shown = !screen.covering();
     let mut armed = 0usize;
-    for (entity, pending) in &q {
+    // Of those, the world-ROOT billboard cards (decision 0836). Called out separately because a
+    // card reaches this system through nothing but its own spawn — no tree walk can find it — so
+    // "how many cards armed" is the one readout that separates "the cards fade" from "the cards
+    // are simply absent from the ramp", which is what they were.
+    let mut armed_cards = 0usize;
+    for (entity, pending, is_card) in &q {
         if shown || now - pending.since > PENDING_TIMEOUT_SECS {
             armed += 1;
+            armed_cards += usize::from(is_card);
             // `try_*`, like every fade command here: these entities are **wire-owned** — a net
             // destroy can apply at any sync point between this system's query and its own
             // commands, so fade bookkeeping on an already-dead entity is a no-op, never an error.
@@ -508,7 +518,10 @@ pub(crate) fn arm_appear_fade(
     // indoor entity's light law used to land only AFTER the ramp latched (2 s of exterior light,
     // then a pop); a run where the two instants coincide is the observable that closes it.
     if armed > 0 && std::env::var_os("WOW_INTERIOR_LOG").is_some() {
-        eprintln!("[fade-arm] t {now:.2} armed {armed} parts (world shown: {shown})");
+        eprintln!(
+            "[fade-arm] t {now:.2} armed {armed} parts ({armed_cards} billboard cards) \
+             (world shown: {shown})"
+        );
     }
 }
 
@@ -583,6 +596,101 @@ impl FadeMaterials {
     }
 }
 
+/// The material handles one batch fades *through*, as a spawn site borrows them — the inputs
+/// [`FadeMaterials`] is built from. `blend: None` means the batch cannot feather at all (a MULTIPLY
+/// batch's blend equation reads no alpha — decision 0528 — and a WMO-display batch builds no twin),
+/// which is the one legitimate reason for a part to spawn opaque while its unit is still ramping.
+pub(crate) struct FadeSet<'a> {
+    pub(crate) steady: &'a Handle<WowModelMaterial>,
+    pub(crate) blend: Option<&'a Handle<WowModelMaterial>>,
+    pub(crate) bake_blend: Option<&'a Handle<WowModelMaterial>>,
+    /// The depth-prime twin (decision 0831). Carried here for the same reason as the rest of the
+    /// set: it is needed exactly while the batch is feathering — which a card now does too.
+    pub(crate) zfill: Option<&'a Handle<WowModelMaterial>>,
+}
+
+/// One batch's appear-fade membership for a spawn: the unit's clock ([`JoinedFade`]) folded with
+/// whether the batch is fade-capable at all.
+///
+/// **Every** batch spawn resolves it here and dresses through [`Self::dress`] — the body's mesh
+/// parts and its billboard cards, a held item's mesh parts and its cards. The law is a property of
+/// the *model*, not of how benilla happens to parent a batch: the reference has one instance alpha
+/// (`CM2Model+0x19c`) that every batch of the model draws through, billboard batches included, so a
+/// lane that skips this is a batch that pops opaque over a body still fading in. Both card lanes did
+/// exactly that until decision 0836.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PartFade {
+    /// No ramp to join (unit already appeared, or the batch cannot feather): open opaque.
+    Steady,
+    /// Join the unit's still-pending ramp — arm together with it once the world is on screen.
+    Pending(f32),
+    /// Join the ramp already running, at its current position.
+    Live(f32),
+}
+
+impl PartFade {
+    /// Fold the unit's join decision with the batch's own fade-capability.
+    pub(crate) fn resolve(joined: JoinedFade, set: &FadeSet<'_>) -> Self {
+        match (joined, set.blend) {
+            (_, None) | (JoinedFade::Steady, _) => Self::Steady,
+            (JoinedFade::Pending { since }, _) => Self::Pending(since),
+            (JoinedFade::Live { started }, _) => Self::Live(started),
+        }
+    }
+
+    /// The material and `MeshTag` alpha the spawn should OPEN on. A pending part opens on the blend
+    /// twin at ≈0 so it never flashes opaque for a frame before [`apply_render_fade`] takes over; a
+    /// joiner opens at the ramp's *current* alpha so it doesn't flash invisible either.
+    pub(crate) fn seed(self, set: &FadeSet<'_>, now: f32) -> (Handle<WowModelMaterial>, f32) {
+        match self {
+            Self::Steady => (set.steady.clone(), 1.0),
+            Self::Pending(_) => (set.blend.cloned().unwrap_or_default(), 0.0),
+            Self::Live(started) => (
+                set.blend.cloned().unwrap_or_default(),
+                fade_alpha(0.0, 1.0, (now - started) / APPEAR_FADE_SECS),
+            ),
+        }
+    }
+
+    /// Dress the spawned batch: the persistent [`FadeMaterials`] record whenever it is fade-capable
+    /// at all — that is a *material record*, not a record of having armed a fade, and the stream-out
+    /// fade and the self-avatar zoom feather both re-arm from it — plus the arm itself when this
+    /// spawn is joining the unit's ramp. Returns whether it armed, which the attach path mirrors
+    /// onto the unit root so a later-resolving attachment can join the same ramp.
+    pub(crate) fn dress(
+        self,
+        child: &mut bevy::ecs::system::EntityCommands,
+        set: &FadeSet<'_>,
+    ) -> bool {
+        if let Some(blend) = set.blend {
+            child.insert(FadeMaterials {
+                cutout: set.steady.clone(),
+                blend: blend.clone(),
+                bake_blend: set.bake_blend.cloned(),
+                zfill: set.zfill.cloned(),
+            });
+        }
+        match self {
+            Self::Steady => false,
+            // `arm_appear_fade` starts the ramp once the world is on-screen (not behind the loading
+            // screen), so it plays where the player can actually see it.
+            Self::Pending(since) => {
+                child.insert(PendingAppearFade { since });
+                true
+            }
+            Self::Live(started) => {
+                child.insert(RenderFade {
+                    started,
+                    duration: APPEAR_FADE_SECS,
+                    from: 0.0,
+                    to: 1.0,
+                });
+                true
+            }
+        }
+    }
+}
+
 /// Marks a streamed entity (the parent) that went out of range: instead of popping it out,
 /// [`apply_despawn_fade`] fades it out then despawns it. **Our** stream-out look, not a verified
 /// mechanism — the wow-re teardown RE found no fade-out in the binary (a *destroyed* object pops
@@ -608,18 +716,39 @@ impl Default for DespawnFade {
 /// weapon / helm / shoulder is a child of a **joint** entity several levels down
 /// ([`crate::entities::BoneAttach`]) — the fade is a per-*unit* property (decision 0032's shape), so
 /// the whole tree fades as one instead of the body thinning around a still-opaque weapon.
+///
+/// **And the tree is not the whole model.** A BILLBOARD batch is a world ROOT that merely *follows*
+/// an anchor inside the tree (decision 0153), so the walk cannot reach it — the cards are picked up
+/// by testing their follow-anchor against the walked set, the same idiom
+/// [`crate::player::apply_self_model_fade`] uses (decision 0836).
 pub(crate) fn apply_despawn_fade(
     time: Res<Time>,
     mut commands: Commands,
     mut q: Query<(Entity, &mut DespawnFade)>,
     children_of: Query<&Children>,
     fm: Query<(), With<FadeMaterials>>,
+    cards: Query<(Entity, &crate::billboard::BillboardCard), With<FadeMaterials>>,
 ) {
     let now = time.elapsed_secs();
     for (parent, mut df) in &mut q {
         if df.started < 0.0 {
             let mut any = false;
-            arm_despawn_descendants(parent, now, &mut commands, &children_of, &fm, &mut any);
+            let mut walked = bevy::ecs::entity::EntityHashSet::default();
+            arm_despawn_descendants(
+                parent,
+                now,
+                &mut commands,
+                &children_of,
+                &fm,
+                &mut any,
+                &mut walked,
+            );
+            for (card, follow) in &cards {
+                if follow.follows().is_some_and(|a| walked.contains(&a)) {
+                    any = true;
+                    arm_fade_out(card, now, &mut commands);
+                }
+            }
             if any {
                 df.started = now;
             } else {
@@ -631,9 +760,30 @@ pub(crate) fn apply_despawn_fade(
     }
 }
 
+/// Arm one fadeable entity's `{from: 1, to: 0}` ramp. No material is chosen here:
+/// [`apply_render_fade`] resolves it per frame from the part's live law (0755), so a
+/// bake-classified part fades out probe-lit — and keeps doing so if it re-classifies mid-ramp,
+/// which a pair latched at this instant could not express. `try_*`: a child (a held item
+/// mid-re-resolve, a gear swap) can be despawned by its own owner in the same frame — the
+/// lifetime contract in [`arm_appear_fade`].
+fn arm_fade_out(entity: Entity, now: f32, commands: &mut Commands) {
+    commands
+        .entity(entity)
+        .try_insert(RenderFade {
+            started: now,
+            duration: APPEAR_FADE_SECS,
+            from: 1.0,
+            to: 0.0,
+        })
+        .try_remove::<PendingAppearFade>();
+}
+
 /// Depth-first helper for [`apply_despawn_fade`]: arm the fade-out on `entity` if it carries
 /// [`FadeMaterials`], and recurse into its children either way (a joint / held-item root carries none
-/// itself but has fadeable meshes beneath it).
+/// itself but has fadeable meshes beneath it). Every entity visited — parts, joints, attach roots,
+/// billboard anchors alike — is recorded in `walked`, which the caller uses to recognise the
+/// world-root billboard cards that follow this model.
+#[allow(clippy::too_many_arguments)]
 fn arm_despawn_descendants(
     entity: Entity,
     now: f32,
@@ -641,27 +791,16 @@ fn arm_despawn_descendants(
     children_of: &Query<&Children>,
     fm: &Query<(), With<FadeMaterials>>,
     any: &mut bool,
+    walked: &mut bevy::ecs::entity::EntityHashSet,
 ) {
+    walked.insert(entity);
     if fm.contains(entity) {
         *any = true;
-        // No material is chosen here: `apply_render_fade` resolves it per frame from the part's
-        // live law (0755), so a bake-classified part fades out probe-lit — and keeps doing so if
-        // it re-classifies mid-ramp, which a pair latched at this instant could not express.
-        // `try_*`: a child (a held item mid-re-resolve, a gear swap) can be despawned by its own
-        // owner in the same frame — the lifetime contract in `arm_appear_fade`.
-        commands
-            .entity(entity)
-            .try_insert(RenderFade {
-                started: now,
-                duration: APPEAR_FADE_SECS,
-                from: 1.0,
-                to: 0.0,
-            })
-            .try_remove::<PendingAppearFade>();
+        arm_fade_out(entity, now, commands);
     }
     if let Ok(children) = children_of.get(entity) {
         for &child in children {
-            arm_despawn_descendants(child, now, commands, children_of, fm, any);
+            arm_despawn_descendants(child, now, commands, children_of, fm, any, walked);
         }
     }
 }
@@ -740,7 +879,11 @@ mod tests {
             Res<Time>,
             Res<crate::loading_screen::LoadingScreen>,
             Commands,
-            Query<(Entity, &PendingAppearFade)>,
+            Query<(
+                Entity,
+                &PendingAppearFade,
+                Has<crate::billboard::BillboardCard>,
+            )>,
             Query<&mut UnitAppearFade>,
         )> = SystemState::new(&mut world);
         let (time, screen, commands, q, units) = state.get_mut(&mut world);
@@ -1049,5 +1192,73 @@ mod tests {
         let far = self_model_fade_alpha(nc + 1.4, nc, SELF_FADE_WINDOW);
         assert!(near < far);
         assert!((0.0..=1.0).contains(&near) && (0.0..=1.0).contains(&far));
+    }
+
+    /// **The stream-out half of decision 0836.** The arm walk descends `Children`, and a billboard
+    /// card is a world ROOT that only *follows* an anchor inside the tree — so a unit fading out
+    /// left its eye glow / gem cards at full strength for the whole 2 s and then blinked them out
+    /// with the despawn. They're picked up by their follow-anchor, exactly as the self-avatar
+    /// feather picks them up.
+    ///
+    /// The second card, following nothing of this unit's, is the negative half: the sweep is by
+    /// membership, not "every card on screen".
+    #[test]
+    fn a_despawn_fade_reaches_the_models_billboard_cards() {
+        let fm = || FadeMaterials {
+            cutout: Handle::default(),
+            blend: Handle::default(),
+            bake_blend: None,
+            zfill: None,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let unit = app.world_mut().spawn((Transform::default(), fm())).id();
+        // A joint under the unit, an attach root under it, and the card following that root —
+        // the real held-item shape, three levels deep.
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let root = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut().entity_mut(unit).add_child(joint);
+        app.world_mut().entity_mut(joint).add_child(root);
+        let info = benilla_assets::BillboardInfo {
+            pivot: Vec3::ZERO,
+            bone: 1,
+            kind: benilla_formats::BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: Vec::new(),
+        };
+        let mine = app
+            .world_mut()
+            .spawn((
+                crate::billboard::BillboardCard::following(&info, root),
+                fm(),
+            ))
+            .id();
+        let stranger = app.world_mut().spawn(Transform::default()).id();
+        let theirs = app
+            .world_mut()
+            .spawn((
+                crate::billboard::BillboardCard::following(&info, stranger),
+                fm(),
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(DespawnFade::default());
+        app.add_systems(Update, apply_despawn_fade);
+        app.update();
+
+        let out = |e: Entity| {
+            app.world()
+                .entity(e)
+                .get::<RenderFade>()
+                .map(|f| (f.from, f.to))
+        };
+        assert_eq!(
+            out(unit),
+            Some((1.0, 0.0)),
+            "the body arms, as it always did"
+        );
+        assert_eq!(out(mine), Some((1.0, 0.0)), "…and so does its own card");
+        assert_eq!(out(theirs), None, "a stranger's card is left alone");
     }
 }

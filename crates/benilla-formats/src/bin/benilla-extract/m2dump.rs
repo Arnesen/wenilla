@@ -473,6 +473,24 @@ pub fn m2anim(chain: &mut Chain, internal_path: &str) -> Result<()> {
             println!("  color {i}: interp {}, keys {:?}", t.interp, t.keys);
         }
     }
+    // The RGB half of the same M2Colors: the per-batch tint the client multiplies into the vertex
+    // colour. An effect that reads white where the reference reads coloured is usually visible
+    // right here (the Frost Nova purple-mist diagnosis).
+    if m.color_rgb_tracks.iter().any(|t| t.keys.len() > 1) {
+        println!("=== color rgb tracks (per M2Color) ===");
+        for (i, t) in m.color_rgb_tracks.iter().enumerate() {
+            let keys: Vec<String> = t
+                .keys
+                .iter()
+                .map(|(ms, v)| format!("{ms} ms [{:.3} {:.3} {:.3}]", v[0], v[1], v[2]))
+                .collect();
+            println!(
+                "  color {i}: interp {}, keys [{}]",
+                t.interp,
+                keys.join(", ")
+            );
+        }
+    }
     if !m.transparency_tracks.is_empty() {
         println!("=== transparency (texture-weight) tracks ===");
         for (i, t) in m.transparency_tracks.iter().enumerate() {
@@ -663,6 +681,78 @@ fn winding(s: &benilla_formats::RenderSubmesh) -> Option<String> {
     ))
 }
 
+/// Which BONES a batch's vertices actually ride, and — for a billboard batch — whether the batch is
+/// a rigid card at all.
+///
+/// The reference skins **per vertex**: every vertex is placed by its own (up to four) bone matrices
+/// and weights, so a batch that straddles a billboard bone and a static one *deforms* — the static
+/// end stays welded to the body while the billboard end swings to the camera. benilla instead splits
+/// a batch into per-billboard-bone submeshes keyed on each **triangle's first vertex** and rotates
+/// each group rigidly about that bone's pivot. The two agree only when a group's vertices are all
+/// 100% on the one billboard bone; where they aren't, we tear geometry off the model that the
+/// reference keeps attached. `MIXED` is exactly that condition, and `SPLIT-W` the softer form (a
+/// vertex blended across bones, which a rigid group cannot express at all).
+fn skin_census(s: &benilla_formats::RenderSubmesh) -> Option<String> {
+    if s.joints.is_empty() {
+        return None;
+    }
+    // Vertices per PRIMARY bone (`bone_indices[0]` — the key our batch split groups on), in
+    // ascending bone order so two models' lines compare by eye.
+    let mut per_bone: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
+    for j in &s.joints {
+        *per_bone.entry(j[0]).or_default() += 1;
+    }
+    let split = s
+        .weights
+        .iter()
+        .filter(|w| w[0] < 0.999 && w[0] > 0.0)
+        .count();
+    let bones = per_bone
+        .iter()
+        .map(|(b, n)| format!("bone {b}×{n}"))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let mut verdict = String::new();
+    if let Some(bb) = &s.billboard {
+        let off = s.joints.len() - per_bone.get(&bb.bone).copied().unwrap_or(0);
+        if off > 0 {
+            verdict.push_str(&format!(
+                "  MIXED: {off}/{} verts off billboard bone {}",
+                s.joints.len(),
+                bb.bone
+            ));
+        }
+    }
+    if split > 0 {
+        verdict.push_str(&format!("  SPLIT-W: {split} verts blended across bones"));
+    }
+    // The distinct skin TUPLES with their vertex counts — a rigid group is one tuple at weight 1;
+    // anything else names the seam the split has to cut along. Capped so a 300-vert creature batch
+    // can't drown the dump (the question only ever has a handful of answers on a card-sized batch).
+    let mut tuples: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (j, w) in s.joints.iter().zip(&s.weights) {
+        let key = (0..4)
+            .filter(|&i| w[i] > 0.0)
+            .map(|i| format!("{}@{:.2}", j[i], w[i]))
+            .collect::<Vec<_>>()
+            .join("+");
+        *tuples.entry(key).or_default() += 1;
+    }
+    let detail = if tuples.len() <= 8 {
+        format!(
+            "\n      skin tuples: {}",
+            tuples
+                .iter()
+                .map(|(k, n)| format!("[{k}]×{n}"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        )
+    } else {
+        format!("\n      skin tuples: {} distinct (elided)", tuples.len())
+    };
+    Some(format!("skin: {bones}{verdict}{detail}"))
+}
+
 pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
     let name = normalize(internal_path);
     let data = chain
@@ -841,6 +931,11 @@ pub fn m2batch(chain: &mut Chain, internal_path: &str) -> Result<()> {
         // culled from the side the author lit.
         if let Some(w) = winding(s) {
             println!("      {w}");
+        }
+        // Which bones the batch's vertices ride — and whether a billboard group is a rigid card or
+        // a strip we tore off a static neighbour (see [`skin_census`]).
+        if let Some(k) = skin_census(s) {
+            println!("      {k}");
         }
     }
     Ok(())

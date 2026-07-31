@@ -363,25 +363,39 @@ impl RenderSubmesh {
     /// A card authored edge-on to the camera axis has no facing to correct, matching
     /// `bbfacescan`'s away/edge-on split.
     pub fn billboard_card_faces_away(&self) -> bool {
+        self.billboard.is_some() && self.plane_normal().is_some_and(|n| n[0] < -Self::EDGE_ON_X)
+    }
+
+    /// A normal whose |x| is under this is edge-on to the billboard law's camera axis: it faces
+    /// neither toward the viewer nor away, so there is nothing to decide.
+    const EDGE_ON_X: f32 = 1e-3;
+
+    /// The single plane every authored vertex normal of this batch shares — `None` when they do
+    /// not, i.e. the batch is **3-D geometry**, not a card.
+    ///
+    /// This is the gate that separates the two things a "billboard batch" can be, and getting it
+    /// wrong is expensive in both directions. A flat card has one facing, so which way it points
+    /// decides whether the reference ever shows it (decision 0629) and which side to light
+    /// (decision 0788). A closed solid — the questgiver `?`'s 353 verts, a pauldron's little
+    /// spike — has normals pointing every way: no single facing exists, backface culling can never
+    /// hide it, and a per-batch normal flip would gut its shading. Sampling *one* triangle of such
+    /// a batch and reporting the answer as the batch's facing is how decision 0836 concluded the
+    /// reference culls a shoulder flap it in fact draws.
+    pub fn plane_normal(&self) -> Option<[f32; 3]> {
         /// Cosine floor for "these two normals are the same plane" — one authored card, allowing
         /// for unnormalised//soft-averaged authoring.
         const SAME_PLANE_COS: f32 = 0.999;
-        /// A normal with |x| under this is edge-on to the camera axis: nothing to correct.
-        const EDGE_ON_X: f32 = 1e-3;
-        if self.billboard.is_none() {
-            return false;
-        }
         let unit = |n: &[f32; 3]| {
             let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             (l > 1e-6).then(|| [n[0] / l, n[1] / l, n[2] / l])
         };
-        let Some(n0) = self.normals.first().and_then(unit) else {
-            return false;
-        };
-        n0[0] < -EDGE_ON_X
-            && self.normals.iter().all(|n| {
+        let n0 = self.normals.first().and_then(unit)?;
+        self.normals
+            .iter()
+            .all(|n| {
                 unit(n).is_some_and(|n| n[0] * n0[0] + n[1] * n0[1] + n[2] * n0[2] > SAME_PLANE_COS)
             })
+            .then_some(n0)
     }
 
     /// Detect the flat **ground-plane quad** shape ([`GroundQuad`]) — `None` for everything that

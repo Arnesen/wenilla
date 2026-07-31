@@ -156,11 +156,13 @@ pub(super) fn feed_action_state(
     mut cooldowns: ResMut<Cooldowns>,
     auto_repeat: Res<AutoRepeatActive>,
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
-    // guard, the queued on-next-swing strike, and the running channel.
+    // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
+    // ground targeting.
     cast_state: (
         Res<crate::ui_cast::PendingCast>,
         Res<crate::ui_cast::QueuedMeleeSpell>,
         Res<crate::ui_cast::ActiveChannel>,
+        Res<super::SpellTargeting>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -191,7 +193,7 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel) = &cast_state;
+    let (pending, queued_melee, channel, targeting) = &cast_state;
     let me = self_q.iter().next();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
@@ -241,6 +243,9 @@ pub(super) fn feed_action_state(
                     current_cast == Some(button.action)
                         || queued_melee.current() == Some(button.action)
                         || channel.current(now) == Some(button.action)
+                        // The awaiting-target arm (`0x4e53a0` @ `0x4e54d0`: the `0x6e48e0`
+                        // targeting-spell read) — checked while the ground click is pending.
+                        || targeting.spell() == Some(button.action)
                         || (form_byte != 0 && d.shapeshift_form == Some(u32::from(form_byte)))
                 };
                 st.auto_repeat = auto_repeat.0 == Some(button.action);

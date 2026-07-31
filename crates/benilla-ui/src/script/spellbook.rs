@@ -73,6 +73,20 @@ pub struct SpellSlotView {
     /// transcribed XML and refuses both [`CastSpell`]-family casts (this module) and, faithfully,
     /// nothing else: a passive can still be picked up/placed on a bar (the ref never blocks that).
     pub passive: bool,
+    /// The `IsCurrentCast` verdict for this slot — the checked ring (`SpellButton_UpdateSelection`'s
+    /// gold glow). The delegate `0x4b3600` has exactly two arms (wow-re
+    /// `spellbook-checked-predicate.md`): a shapeshift spell whose form is the player's current
+    /// form byte, or the open trade-skill window's own spell — never an ordinary in-flight cast.
+    /// App-resolved (`benilla::ui_spellbook`), pushed with the book; the app fires
+    /// `CURRENT_SPELL_CAST_CHANGED` on its edges.
+    pub current: bool,
+    /// The spell's running cooldown as `(start_ms on the GetTime clock, duration_ms, enabled)` —
+    /// the same app-computed triple [`super::ActionState::cooldown`] and the container slots
+    /// carry, resolved by the ONE cooldown store (`benilla::cooldowns::Cooldowns::info` — id,
+    /// category and GCD reads alike); `GetSpellCooldown` answers the reference's
+    /// `(start, duration, enable)`. `None` = cold. Frame-stable per arm (the absolute start), so
+    /// a running cooldown never churns the book diff.
+    pub cooldown: Option<(i64, u32, bool)>,
 }
 
 /// The player's known-spell book: tabs (skill lines) + the flat slot list every tab indexes into
@@ -235,6 +249,53 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // IsCurrentCast(id, bookType) — the spellbook button's checked ring (binding `0x4b4370` →
+    // delegate `0x4b3600`; ref
+    // `SpellButton_UpdateSelection` SetChecks on it). The verdict itself is app-resolved per slot
+    // ([`SpellSlotView::current`]); this only reads it back.
+    g.set(
+        "IsCurrentCast",
+        lua.create_function(|lua, (id, book_type): (u32, String)| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let current = slot_index(id, &book_type)
+                .and_then(|i| model.spellbook.slots.get(i))
+                .is_some_and(|s| s.current);
+            // The ref's binding convention: 1 or nil, never false.
+            match current {
+                true => Ok(Value::Integer(1)),
+                false => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // GetSpellCooldown(id, bookType) → start, duration, enable — the book twin of
+    // `GetActionCooldown`/`GetContainerItemCooldown`, identical conventions: `GetTime`-clock
+    // `(seconds, seconds, 0/1)`, enable 0 = an on-hold record (parked, full duration), and the
+    // cold-at-expiry guard so an event-driven re-feed can never replay the finish flash. Pet or
+    // out-of-range answers the cold `(0, 0, 1)` — the ref's own no-cooldown shape.
+    g.set(
+        "GetSpellCooldown",
+        lua.create_function(|lua, (id, book_type): (u32, String)| {
+            let now: f64 = lua.globals().get("__benilla_now").unwrap_or(0.0);
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let cooldown = slot_index(id, &book_type)
+                .and_then(|i| model.spellbook.slots.get(i))
+                .and_then(|s| s.cooldown);
+            Ok(match cooldown {
+                Some((start_ms, duration_ms, enabled)) => {
+                    let (start, duration) =
+                        (start_ms as f64 / 1000.0, f64::from(duration_ms) / 1000.0);
+                    if start + duration > now || !enabled {
+                        (start, duration, i32::from(enabled))
+                    } else {
+                        (0.0, 0.0, 1)
+                    }
+                }
+                None => (0.0, 0.0, 1),
+            })
+        })?,
+    )?;
+
     g.set(
         "IsSpellPassive",
         lua.create_function(|lua, (id, book_type): (u32, String)| {
@@ -365,6 +426,8 @@ mod tests {
                     rank: Some("Rank 1".into()),
                     texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
                     passive: false,
+                    current: false,
+                    cooldown: None,
                 },
                 SpellSlotView {
                     spell_id: 2136,
@@ -372,6 +435,8 @@ mod tests {
                     rank: Some("Rank 1".into()),
                     texture: Some("Interface\\Icons\\Spell_Fire_FireBolt02".into()),
                     passive: true, // artificial: exercises the refusal gate
+                    current: false,
+                    cooldown: None,
                 },
                 SpellSlotView {
                     spell_id: 168,
@@ -379,9 +444,89 @@ mod tests {
                     rank: Some("Rank 1".into()),
                     texture: Some("Interface\\Icons\\Spell_Frost_FrostArmor02".into()),
                     passive: false,
+                    current: false,
+                    cooldown: None,
                 },
             ],
         }
+    }
+
+    /// `IsCurrentCast` reads the app-resolved per-slot verdict back as the ref's 1-or-nil.
+    #[test]
+    fn is_current_cast_reads_the_slot_verdict() {
+        let mut s = UiScript::new().unwrap();
+        assert!(s
+            .eval::<bool>("return IsCurrentCast(1, BOOKTYPE_SPELL) == nil")
+            .unwrap());
+        let mut b = book();
+        b.slots[0].current = true;
+        s.set_spellbook(b);
+        assert_eq!(
+            s.eval::<i64>("return IsCurrentCast(1, BOOKTYPE_SPELL)")
+                .unwrap(),
+            1
+        );
+        assert!(s
+            .eval::<bool>("return IsCurrentCast(2, BOOKTYPE_SPELL) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return IsCurrentCast(1, BOOKTYPE_PET) == nil")
+            .unwrap());
+        assert!(s
+            .eval::<bool>("return IsCurrentCast(99, BOOKTYPE_SPELL) == nil")
+            .unwrap());
+    }
+
+    /// `GetSpellCooldown` reads the app-pushed per-slot triple back as the ref's GetTime-clock
+    /// `(start, duration, enable)` — cold `(0, 0, 1)` for absent/pet/out-of-range, enable 0 for
+    /// an on-hold record regardless of expiry, and the cold-at-expiry guard once
+    /// `start + duration` passes (`GetActionCooldown`'s own conventions, the book twin).
+    #[test]
+    fn get_spell_cooldown_reads_the_slot_triple() {
+        let mut s = UiScript::new().unwrap();
+        s.set_spellbook(book());
+        s.tick(20.0); // GetTime = 20
+
+        // Cold slot: the ref's no-cooldown shape.
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(1, BOOKTYPE_SPELL)")
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
+
+        let mut b = book();
+        b.slots[0].cooldown = Some((14_000, 10_000, true)); // running: 4 s elapsed of 10
+        b.slots[1].cooldown = Some((2_000, 8_000, false)); // on hold: parked since t=2
+        b.slots[2].cooldown = Some((5_000, 10_000, true)); // elapsed at t=15 — cold
+        s.set_spellbook(b);
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(1, BOOKTYPE_SPELL)")
+                .unwrap(),
+            (14.0, 10.0, 1)
+        );
+        // On hold survives the expiry guard (enable 0 = the parked "hasn't begun").
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(2, BOOKTYPE_SPELL)")
+                .unwrap(),
+            (2.0, 8.0, 0)
+        );
+        // Elapsed goes cold — an event-driven re-feed can never replay the finish flash.
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(3, BOOKTYPE_SPELL)")
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
+        // The pet deferral and out-of-range answer cold too.
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(1, BOOKTYPE_PET)")
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
+        assert_eq!(
+            s.eval::<(f64, f64, i64)>("return GetSpellCooldown(99, BOOKTYPE_SPELL)")
+                .unwrap(),
+            (0.0, 0.0, 1)
+        );
     }
 
     #[test]

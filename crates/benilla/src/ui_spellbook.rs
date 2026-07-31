@@ -78,7 +78,13 @@ impl Plugin for UiSpellbookPlugin {
                     // Feed rides with the unit feed like ui_action's own (before UiInput, so
                     // P-key-open-this-frame already sees a populated book); the cast drain runs
                     // after UiInput so a click's CastSpell goes out the same frame.
-                    feed_spellbook.in_set(UnitFeed).before(UiInput),
+                    // `.before(CooldownEvents)`: the per-slot cooldown triples must be in the VM
+                    // before `feed_action_state`'s synchronous `SPELL_UPDATE_COOLDOWN` makes the
+                    // book buttons re-read them (that set's own doc).
+                    feed_spellbook
+                        .in_set(UnitFeed)
+                        .before(crate::ui_action::CooldownEvents)
+                        .before(UiInput),
                     drain_spell_casts.after(UiInput),
                 ),
             );
@@ -122,6 +128,7 @@ fn feed_spellbook(
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
+    cooldowns: Res<crate::cooldowns::Cooldowns>,
     mut memory: Local<FeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -148,7 +155,7 @@ fn feed_spellbook(
     // serves the page.
     let ranged_icon =
         store.and_then(|s| ranged_weapon_icon(s, &mut items, icons.as_deref(), &commands));
-    let fresh = build_book(
+    let mut fresh = build_book(
         &actions.spells,
         &spells.catalog,
         skill_lines.as_deref().map(|s| &s.catalog),
@@ -157,15 +164,65 @@ fn feed_spellbook(
         attack_icon,
         ranged_icon,
     );
+    // The `IsCurrentCast` verdict per slot — the delegate `0x4b3600` (wow-re
+    // `spellbook-checked-predicate.md`, §5-verified): its OWN function, NOT the action bar's
+    // `0x4e53a0`, and deliberately narrower — TWO arms only. The shapeshift arm is built here: a
+    // MOD_SHAPESHIFT spell reads current exactly while the player's form byte equals its form id
+    // (keyed on the FORM, so any spell/rank granting it reads true — Ghost Wolf's slot glows
+    // while shifted, a druid form's likewise). The other arm (the open trade-skill window) stays
+    // unmodeled with the trade-skill session itself. The action predicate's casting-now /
+    // awaiting-target / item / attack arms are ABSENT in the binary — a book slot must NOT light
+    // during an ordinary cast (the verdict's load-bearing negative).
+    let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
+    if form_byte != 0 {
+        for slot in &mut fresh.slots {
+            slot.current = spells
+                .catalog
+                .get(slot.spell_id)
+                .is_some_and(|d| d.shapeshift_form == Some(u32::from(form_byte)));
+        }
+    }
+    // Each slot's cooldown triple — the ONE store's per-spell read (`Cooldowns::info`, the
+    // `GetCooldownInfo 0x6e13e0` resolve: id, category, and GCD spread alike), converted to the
+    // GetTime clock exactly like the action/bag feeds (`CooldownInfo::ui_triple` is frame-stable
+    // per arm, so a running cooldown never churns this diff). The XML's SPELL_UPDATE_COOLDOWN
+    // handler re-reads these through `GetSpellCooldown` — the plugin's `.before(CooldownEvents)`
+    // guarantees they're pushed before that event fires.
+    let now = std::time::Instant::now();
+    let ui_now = script.now();
+    for slot in &mut fresh.slots {
+        slot.cooldown = cooldowns
+            .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), now)
+            .ui_triple(now, ui_now);
+    }
     if fresh != memory.pushed {
+        // Two event edges off one diff: the ref fires CURRENT_SPELL_CAST_CHANGED for a checked-
+        // ring move and SPELLS_CHANGED for the book itself; a same-frame both fires both.
+        let ring_moved = fresh.slots.len() != memory.pushed.slots.len()
+            || fresh
+                .slots
+                .iter()
+                .zip(&memory.pushed.slots)
+                .any(|(a, b)| a.current != b.current);
+        let book_changed = fresh.tabs != memory.pushed.tabs
+            || fresh.slots.len() != memory.pushed.slots.len()
+            || fresh.slots.iter().zip(&memory.pushed.slots).any(|(a, b)| {
+                (a.spell_id, &a.name, &a.rank, &a.texture, a.passive)
+                    != (b.spell_id, &b.name, &b.rank, &b.texture, b.passive)
+            });
         debug!(
-            "ui_spellbook: fed {} tab(s), {} spell(s)",
+            "ui_spellbook: fed {} tab(s), {} spell(s) (book {book_changed}, ring {ring_moved})",
             fresh.tabs.len(),
             fresh.slots.len()
         );
         script.set_spellbook(fresh.clone());
         memory.pushed = fresh;
-        script.fire_event("SPELLS_CHANGED", vec![]);
+        if book_changed {
+            script.fire_event("SPELLS_CHANGED", vec![]);
+        }
+        if ring_moved {
+            script.fire_event("CURRENT_SPELL_CAST_CHANGED", vec![]);
+        }
     }
 }
 
@@ -248,6 +305,10 @@ fn build_book(
                 rank: d.and_then(|d| d.rank.clone()),
                 texture,
                 passive: d.is_some_and(|d| d.passive),
+                // The IsCurrentCast verdict and the cooldown triple are stamped by the feed
+                // after the build (they need the live form/cooldown state, not the catalog).
+                current: false,
+                cooldown: None,
             });
         }
         tabs.push(SpellTabView {

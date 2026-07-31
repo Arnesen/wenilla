@@ -6,9 +6,11 @@
 //   out    = lerp(screen, blur, z) + w · blur²                          (FFXGlow.bls, exact)
 //
 // `w` is the per-zone LightParams glow weight (authored data — ≈0.647 in Elwynn), `z` is the haze
-// mix (0 in the standard glow pass). The reference runs this in GAMMA bytes; our buffer is linear
-// HDR, so the combine encodes both terms, does the byte math, clamps (the reference's saturating
-// byte add), and decodes once — the present-encode then lands the reference's exact byte.
+// mix (0 in the standard glow pass). The reference runs this in GAMMA bytes, and since 0161 the
+// whole frame composites in gamma too — but in a FLOAT buffer, which unlike the reference's byte
+// buffer does not saturate at 1.0 per draw. Every read of the scene RT below therefore clamps to
+// 1.0 first (the byte semantics restored at the read), does the byte math, and decodes once — the
+// present-encode then lands the reference's exact byte.
 // The blur² is the whole character of the vanilla glow: mid-tones (0.5 → 0.25) barely bloom,
 // highlights bloom fully — a square-law a linear-composite bloom cannot express (decision 0158).
 //
@@ -29,13 +31,21 @@
 
 // The reference's ONE downsample: full → ¼ directly, via Box4 — 4 bilinear taps at source-texel
 // offsets {−1.5, +0.5}² (a 4×4 footprint; byte-pinned table 0xce89cc, wow-re blur-geometry.md).
+//
+// Each tap clamps to 1.0 BEFORE the average: the reference reads a BYTE scene RT, where an
+// additive stack saturated at 255 draw by draw — our float buffer keeps summing past 1.0, and an
+// unclamped read here feeds that super-white into `w·blur²`, which squares it into a huge hard
+// glow disc (the Frost Nova mist stack — ~400 additive puffs — reaches ~5–10 in-buffer). The
+// clamp is the byte buffer's saturating-add semantics applied at the lane's read (0161's own
+// premise: the framebuffer holds bytes).
 @fragment
 fn fs_downsample(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let texel = 1.0 / vec2<f32>(textureDimensions(in_tex));
-    return (textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, -1.5) * texel)
-        + textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, -1.5) * texel)
-        + textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, 0.5) * texel)
-        + textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, 0.5) * texel))
+    let one = vec4<f32>(1.0);
+    return (min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, -1.5) * texel), one)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, -1.5) * texel), one)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(0.5, 0.5) * texel), one)
+        + min(textureSample(in_tex, in_samp, in.uv + vec2<f32>(-1.5, 0.5) * texel), one))
         * 0.25;
 }
 
@@ -81,7 +91,10 @@ fn fs_combine(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // the reference's byte RTs) and the combine is raw byte math. The single srgb_to_linear here
     // is THE frame's one decode: the sRGB present-encode then restores every byte exactly.
     let scene = textureSample(in_tex, in_samp, in.uv);
-    let sg = max(scene.rgb, vec3<f32>(0.0));
+    // Clamped to [0, 1] like the downsample's taps: the byte framebuffer this term stands for
+    // could never exceed 255, and an unclamped super-white here keeps the whole additive stack
+    // hard-white after the min() below — the screen term must saturate BEFORE the glow add.
+    let sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     let bg = max(textureSample(blur_tex, in_samp, in.uv).rgb, vec3<f32>(0.0));
     let glowed = sg + glow.x * bg * bg;
     // The scene alpha rides through untouched: the window surface ignores it and the opaque-clear

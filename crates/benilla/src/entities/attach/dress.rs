@@ -20,9 +20,7 @@ use crate::billboard::BillboardCard;
 use crate::debug_panel::{ModelKind, ModelPart};
 use crate::interact::WorldObject;
 use crate::interior::part_interior_lit;
-use crate::model_fade::{
-    fade_alpha, FadeMaterials, JoinedFade, PendingAppearFade, RenderFade, APPEAR_FADE_SECS,
-};
+use crate::model_fade::{FadeSet, JoinedFade, PartFade};
 use crate::terrain::WowModelMaterial;
 
 use super::super::EntityPart;
@@ -105,6 +103,19 @@ pub(super) fn part_materials<'a>(
     }
 }
 
+impl<'a> PartMaterials<'a> {
+    /// The three handles the appear/despawn ramps feather through — this batch's slice of
+    /// [`FadeSet`], so the spawn and the fade can never disagree about which twin it wears.
+    pub(super) fn fade_set(&self) -> FadeSet<'a> {
+        FadeSet {
+            steady: self.steady,
+            blend: self.fade_blend,
+            bake_blend: self.bake_blend,
+            zfill: self.zfill,
+        }
+    }
+}
+
 /// Everything one part's spawn reads from its UNIT — gathered once per visual so the per-part body
 /// isn't a twenty-argument call, and so the spawn path and the re-dress path provably feed it the
 /// same things.
@@ -140,15 +151,6 @@ pub(super) struct PartDress<'a> {
     pub(super) fade: JoinedFade,
 }
 
-/// One part's resolved appear-fade for this spawn: [`JoinedFade`] folded with whether the part is
-/// fade-capable at all (a WMO-display batch has no blend twin).
-#[derive(Clone, Copy)]
-enum PartFade {
-    Steady,
-    Pending(f32),
-    Live(f32),
-}
-
 /// Spawn one part of `dress.unit`'s model as a child of it, dressed by [`part_materials`]. Returns
 /// whether it armed an appear-fade — the attach path mirrors that onto the unit root so a held item
 /// resolving later can join the same ramp.
@@ -164,29 +166,16 @@ pub(super) fn spawn_part(
     dress: &PartDress,
 ) -> bool {
     if let Some(info) = &part.billboard {
-        spawn_billboard_part(commands, part, index, info, dress);
-        return false;
+        return spawn_billboard_part(commands, part, index, info, dress);
     }
     let mats = part_materials(part, dress.char_mats);
-    // Per-part join decision: the unit's clock combined with whether this part is fade-capable.
-    let effective = match (dress.fade, mats.fade_blend) {
-        (_, None) => PartFade::Steady,
-        (JoinedFade::Steady, _) => PartFade::Steady,
-        (JoinedFade::Pending { since }, _) => PartFade::Pending(since),
-        (JoinedFade::Live { started }, _) => PartFade::Live(started),
-    };
+    let set = mats.fade_set();
     // A freshly-streamed CGObject appear-fades in (decision 0032): spawn already on the blend twin
     // with a ≈0 `MeshTag`, so it doesn't flash opaque for a frame before `apply_render_fade` ramps
     // `α = t³`. A joiner computes the ramp's *current* alpha rather than 0, so it doesn't flash
     // invisible for a frame either.
-    let (init_mat, tag_alpha) = match effective {
-        PartFade::Steady => (mats.steady.clone(), 1.0),
-        PartFade::Pending(_) => (mats.fade_blend.cloned().unwrap_or_default(), 0.0),
-        PartFade::Live(started) => (
-            mats.fade_blend.cloned().unwrap_or_default(),
-            fade_alpha(0.0, 1.0, (dress.now - started) / APPEAR_FADE_SECS),
-        ),
-    };
+    let effective = PartFade::resolve(dress.fade, &set);
+    let (init_mat, tag_alpha) = effective.seed(&set, dress.now);
     // A skinned creature part draws its skinned-mesh twin (the WOW joint attributes → the
     // owned-palette `WOW_RIG_SKIN` shader path, decision 0720); everything else — and the
     // palette-full fallback (slot 0) — the static mesh. Keyed on the part having a twin, which the
@@ -280,50 +269,21 @@ pub(super) fn spawn_part(
             dress.unit,
         ));
     }
-    // `FadeMaterials` is persistent bookkeeping — the self-avatar zoom feather and decision 0032's
-    // despawn fade-out both re-arm from it — not a record of whether *this* spawn happened to join
-    // an in-flight ramp. Attach it whenever the part is fade-capable at all, steady or not; the item
-    // lane (`equipment::spawn`) has always done it this way, and gating it on the arm is what left a
-    // player who had ever swapped a shirt unable to fade out on stream-out.
-    if let Some(blend) = mats.fade_blend {
-        child.insert(FadeMaterials {
-            cutout: mats.steady.clone(),
-            blend: blend.clone(),
-            bake_blend: mats.bake_blend.cloned(),
-            zfill: mats.zfill.cloned(),
-        });
-    }
-    match effective {
-        PartFade::Steady => false,
-        PartFade::Pending(since) => {
-            // `arm_appear_fade` starts the ramp once the world is on-screen (not behind the loading
-            // screen), so it plays where the player can see it.
-            child.insert(PendingAppearFade { since });
-            true
-        }
-        PartFade::Live(started) => {
-            child.insert(RenderFade {
-                started,
-                duration: APPEAR_FADE_SECS,
-                from: 0.0,
-                to: 1.0,
-            });
-            true
-        }
-    }
+    effective.dress(&mut child, &set)
 }
 
 /// The camera-facing half of [`spawn_part`]: a mirror anchor under the unit (so the portrait /
 /// paper-doll booths can rebuild the batch — the visible card is a world ROOT and can never be
 /// mirrored) plus the card itself, following the batch's live joint when the unit is rigged and the
-/// anchor otherwise.
+/// anchor otherwise. Returns whether the card armed the unit's appear-fade, exactly as a mesh part
+/// does: the batch is the model's, so it fades with the model (decision 0836).
 fn spawn_billboard_part(
     commands: &mut Commands,
     part: &EntityPart,
     index: usize,
     info: &benilla_assets::BillboardInfo,
     dress: &PartDress,
-) {
+) -> bool {
     let anchor = commands
         .spawn((
             Transform::default(),
@@ -350,9 +310,22 @@ fn spawn_billboard_part(
     } else {
         BillboardCard::following(info, owner)
     };
+    // A card is a batch of the unit's own model, so it joins the unit's appear-fade like any other
+    // batch of it — the reference has ONE instance alpha per model and every batch draws through it
+    // (decision 0836). Splitting the batch into a world-root entity is benilla's parenting detail;
+    // it is not a reason for the glow on a weapon's gems to blaze at full strength over a body that
+    // has not appeared yet.
+    let set = FadeSet {
+        steady: &part.material,
+        blend: part.fade_blend.as_ref(),
+        bake_blend: part.material_interior_bake_blend.as_ref(),
+        zfill: part.zfill.as_ref(),
+    };
+    let effective = PartFade::resolve(dress.fade, &set);
+    let (init_mat, tag_alpha) = effective.seed(&set, dress.now);
     let mut card = commands.spawn((
         Mesh3d(part.mesh.clone()),
-        MeshMaterial3d(part.material.clone()),
+        MeshMaterial3d(init_mat),
         Transform::default(),
         ModelPart {
             kind: dress.kind,
@@ -366,7 +339,9 @@ fn spawn_billboard_part(
     // even though it is never skinned by it — it is a batch of the unit's own model, so a tinted
     // unit tints its eye-glow and torch cards too (decision 0812). No char-slot variants are
     // consulted: a body/hair/cape/skin-extra batch is never a billboard batch.
-    card.insert(MeshTag(dress.rig_tag | crate::mesh_tag::alpha_bits(1.0)));
+    card.insert(MeshTag(
+        dress.rig_tag | crate::mesh_tag::alpha_bits(tag_alpha),
+    ));
     // The card's build-time bound (decision 0834) — `calculate_bounds` can no longer derive one
     // from the `RENDER_WORLD`-only static form's data.
     if let Some(aabb) = part.aabb {
@@ -389,6 +364,7 @@ fn spawn_billboard_part(
             dress.unit,
         ));
     }
+    let armed = effective.dress(&mut card, &set);
     let card = card.id();
     // The card follows the JOINT when the unit is rigged, so it does not cascade with the anchor's
     // despawn — the re-dress has to name it to reap it (see [`DressedPart::card`]).
@@ -396,11 +372,13 @@ fn spawn_billboard_part(
         index: index as u32,
         card: Some(card),
     });
+    armed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_fade::{FadeMaterials, PendingAppearFade};
 
     /// One synthetic batch at `char_slot`/`two_sided`, carrying its own (distinguishable) built
     /// material set so the fallback arm is visible in the assertions.
@@ -532,6 +510,87 @@ mod tests {
         assert_eq!(found.len(), 1, "the record is kept even with no ramp");
         assert_eq!(found[0].0, mat(99), "…and names the part's own blend twin");
         assert!(!found[0].1, "…without arming an appear fade");
+    }
+
+    /// **A camera-facing batch fades with its model** (decision 0836): the split into a world-ROOT
+    /// card is benilla's parenting detail (0153), not a law — the reference has one instance alpha
+    /// per `CM2Model` and every batch draws through it, billboard batches included. The card used
+    /// to open at a flat opaque with no arm and no record, which is a night-elf's eye glow and an
+    /// undead's shoulder wisps burning at full strength over a body still at α 0.
+    ///
+    /// Asserted on the CARD, not the anchor: the anchor is a bare mirror carrier with no geometry.
+    #[test]
+    fn a_billboard_card_joins_the_units_appear_fade() {
+        const SINCE: f32 = 5.0;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>();
+        let unit = app.world_mut().spawn(Transform::default()).id();
+        let mut card = part(None, false);
+        card.fade_blend = Some(mat(99));
+        card.billboard = Some(benilla_assets::BillboardInfo {
+            pivot: Vec3::ZERO,
+            bone: 1,
+            kind: benilla_formats::BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: Vec::new(),
+        });
+        let anchors = std::collections::HashMap::new();
+        let object = WorldObject {
+            kind: ModelKind::Creature,
+            label: String::new(),
+            id: 0,
+            detail: String::new(),
+        };
+        let empty: CharSkinMaterials = (None, None, None, (None, None));
+        let dress = PartDress {
+            unit,
+            kind: ModelKind::Creature,
+            char_mats: &empty,
+            object: &object,
+            rig_tag: 0,
+            inst_slot: 0,
+            rigged: false,
+            anchors: &anchors,
+            bake_center: Vec3::ZERO,
+            idle_aabb: None,
+            now: 0.0,
+            fade: JoinedFade::Pending { since: SINCE },
+        };
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let armed = {
+            let world = app.world();
+            let mut commands = Commands::new(&mut queue, world);
+            spawn_part(&mut commands, &card, 0, &dress)
+        };
+        queue.apply(app.world_mut());
+        assert!(
+            armed,
+            "a card arms the ramp like a mesh part — the attach path mirrors that onto the root",
+        );
+        let mut q = app.world_mut().query::<(
+            &BillboardCard,
+            &MeshTag,
+            &MeshMaterial3d<WowModelMaterial>,
+            &FadeMaterials,
+            &PendingAppearFade,
+        )>();
+        let found: Vec<_> = q
+            .iter(app.world())
+            .map(|(_, t, m, fm, p)| (t.0, m.0.clone(), fm.blend.clone(), p.since))
+            .collect();
+        assert_eq!(found.len(), 1, "one billboard batch, one card");
+        assert_eq!(found[0].3, SINCE, "joined the unit's own pending clock");
+        assert_eq!(
+            found[0].2,
+            mat(99),
+            "the record names the batch's blend twin"
+        );
+        assert_eq!(found[0].1, mat(99), "…and the card OPENS on it");
+        assert!(
+            crate::mesh_tag::alpha_of(found[0].0) <= 1.0 / 63.0,
+            "…at the encoder's ≈0 floor",
+        );
     }
 
     /// A batch with no character slot — and a slot whose row the appearance didn't resolve (a bald

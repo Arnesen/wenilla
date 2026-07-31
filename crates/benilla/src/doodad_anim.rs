@@ -485,6 +485,14 @@ pub(crate) struct MatAnim {
     /// bits 0..=15 since the 0355 re-lane) — and on the unit lane, whose own compose is
     /// [`crate::entities::apply_unit_mat_alpha`].
     pub(crate) drives_tag: bool,
+    /// This instance belongs to the **unit lane's** tag compose
+    /// ([`crate::entities::apply_unit_mat_alpha`]) even though it has no [`Self::host`] to read a
+    /// sequence from: the ATTACH-MODEL case (a held weapon, a helm, a pauldron). Such a model
+    /// spawns no rig — it rests in its file's first sequence, so its loops are pinned like a
+    /// placed doodad's — but it hangs off a unit, so the compose has to be the one ordered against
+    /// the wearer's appear-fade and interior classifier rather than the world-model visibility
+    /// authority's. See [`Self::resting`].
+    unit_lane: bool,
     /// The last sampled combined factor (colour-alpha × weight), read by the visibility authority.
     pub current: f32,
 }
@@ -503,6 +511,7 @@ impl MatAnim {
             spawned_at: now,
             frozen,
             drives_tag: false,
+            unit_lane: false,
             current,
         }
     }
@@ -537,10 +546,26 @@ impl MatAnim {
         }
     }
 
+    /// The **attach-model** constructor (a held weapon, a helm, a pauldron): the loops are pinned
+    /// to the file's first sequence — an item model spawns no rig and rests there, the same reason
+    /// its emitters and ribbons read Stand — while the tag compose stays the unit lane's, ordered
+    /// against the wearer's appear-fade and interior classifier.
+    ///
+    /// Its clock is irrelevant in practice (a rest-pose model's tracks are the constants the file
+    /// authors) so it takes no `now`; sampling still runs every frame like every other lane, so a
+    /// keyed track on a rest sequence animates rather than latching at its first key.
+    pub(crate) fn resting(anim: std::sync::Arc<benilla_formats::AlphaAnim>) -> Self {
+        Self {
+            unit_lane: true,
+            ..Self::new(anim, 0.0, false)
+        }
+    }
+
     /// Whether this instance's tag alpha is the unit lane's to compose (see
-    /// [`crate::entities::apply_unit_mat_alpha`]).
+    /// [`crate::entities::apply_unit_mat_alpha`]) — a hosted creature/player batch, or an
+    /// attach model's batch ([`Self::resting`]), and never a self-driving effect part.
     pub(crate) fn composes_unit_tag(&self) -> bool {
-        self.host.is_some() && !self.drives_tag
+        (self.host.is_some() || self.unit_lane) && !self.drives_tag
     }
 }
 

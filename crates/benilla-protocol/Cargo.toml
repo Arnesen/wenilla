@@ -10,3 +10,9 @@ anyhow.workspace = true
 clap.workspace = true
 benilla-srp = { path = "../benilla-srp" }
 flate2 = "1.0"
+
+[dev-dependencies]
+# The SRP probes re-derive the handshake by hand (to vary what `benilla-srp` fixes) — examples only.
+num-bigint = "0.4.6"
+rand = "0.8.6"
+sha1 = "0.10.6"

@@ -79,6 +79,7 @@ mod npc_text;
 mod particles;
 mod pending_item_ops;
 mod perf;
+mod pipe_warm;
 mod player;
 mod portrait;
 mod preflight;
@@ -468,6 +469,9 @@ fn main() -> AppExit {
     // Frame-time HUD + diagnostics — the performance standard.
     // After DebugPanelPlugin so the egui plugin/context it sets up already exists. Toggle: P.
     .add_plugins(PerfPlugin)
+    // Pipeline-compile counters + the live-compile tripwire (decision 0837: macOS builds every
+    // pipeline synchronously on the render thread, so a live compile is a felt stall).
+    .add_plugins(pipe_warm::plugin)
     .add_plugins(hover_log::HoverLogPlugin)
     .add_plugins(asset_churn::AssetChurnPlugin)
     // Within-map art residency (decision 0793): the dedup caches expire by DISTANCE, so a
