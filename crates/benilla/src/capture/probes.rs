@@ -1001,7 +1001,6 @@ fn fire_particle_census(
     emitters: Query<(
         &crate::particles::ParticleEmitter,
         Option<&crate::particles::EmitterFade>,
-        &Visibility,
         Option<&bevy::camera::visibility::RenderLayers>,
     )>,
 ) {
@@ -1037,7 +1036,7 @@ fn fire_particle_census(
     let mut drawn_beyond_wall_live = 0usize;
     let mut booth = 0usize;
     let mut max_drawn_depth = f32::NEG_INFINITY;
-    for (e, fade, vis, layers) in &emitters {
+    for (e, fade, layers) in &emitters {
         let world_layer =
             layers.is_none_or(|l| l.intersects(&bevy::camera::visibility::RenderLayers::default()));
         // Depth to the OWNER's fade sphere where there is one (the gate's own subject), else the
@@ -1047,7 +1046,7 @@ fn fire_particle_census(
             let radius = fade.map_or(0.0, |f| f.radius);
             (center - t.translation()).dot(Vec3::from(t.forward())) - radius
         });
-        let drawn = *vis != Visibility::Hidden;
+        let drawn = e.drawn();
         if !world_layer {
             booth += 1;
         }

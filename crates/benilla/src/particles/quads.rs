@@ -64,6 +64,9 @@ pub(super) struct DrawFrame {
     pub anchored: bool,
     pub anchor: Vec3,
     pub attach_rot: Quat,
+    /// The owning MODEL's render alpha, folded into every particle's alpha channel — the
+    /// reference's `emitter+0x1a8` (decision 0827). 1.0 for a model that isn't fading.
+    pub alpha: f32,
 }
 
 /// One particle's world-space quad centre — THE point [`expand_quads`] rasterizes around, factored
@@ -165,7 +168,13 @@ pub(super) fn expand_quads(
         }
         let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
         let ol = def.over_life.sample(u_age);
-        let (rgba, size) = (ol.color, ol.size);
+        let (mut rgba, size) = (ol.color, ol.size);
+        // The MODEL's render alpha, folded into the ALPHA channel only — exactly where and how the
+        // reference does it: the sampler `0x7b9b10` takes it as its second argument and applies it
+        // at `0x7b9b42 fmul` to the alpha byte alone, RGB untouched (decision 0827). So a unit
+        // fading in fades its effects in with it, and a first-person avatar's torch stops burning
+        // in your face.
+        rgba[3] *= frame.alpha;
         // RAW authored RGB — the gamma-space decode happens ONCE, in the lane's fragment
         // (`wow_effect.wgsl`, decision 0152), where it also covers the texture term that a
         // CPU-side vertex linearisation (0150) could not reach. Alpha is a blend weight — raw
@@ -285,7 +294,8 @@ pub(super) fn expand_quads(
 
 #[cfg(test)]
 mod tests {
-    use super::spin_angle;
+    use super::{expand_quads, spin_angle, CamBasis, DrawFrame, Particle};
+    use bevy::prelude::{Quat, Transform, Vec3};
 
     /// The `0x7b2dda` negate: only a NEGATIVE angle on a bit-5 particle flips — a negative-spin
     /// emitter counter-rotates exactly its bit-5 half, a positive-spin one never splits.
@@ -300,5 +310,53 @@ mod tests {
         );
         assert_eq!(spin_angle(3.0, 0.5, 0x1f), 1.5);
         assert_eq!(spin_angle(0.0, 0.5, 0xff), 0.0);
+    }
+
+    /// **The model's render alpha reaches its particles, and ONLY their alpha** (decision 0827).
+    /// The reference folds `emitter+0x1a8` (a per-frame copy of the model's `CM2Model+0x19c`)
+    /// inside the over-life sampler `0x7b9b10`, at `0x7b9b42 fmul` — which writes the **alpha byte
+    /// alone** (`mov [eax+3],cl`); R/G/B never see it (`part-additive-combine.md` §6.1, the
+    /// refutation of `part-scene-multipliers.md` §4's old negative). A fold into RGB would look
+    /// almost right on an additive quad and be wrong on every alpha-blended one, so the channel
+    /// split is what this pins.
+    #[test]
+    fn the_models_render_alpha_scales_particle_alpha_and_nothing_else() {
+        let mut def = crate::particles::tests::plain_def();
+        def.over_life.color = [[0.8, 0.4, 0.2, 0.5]; 3];
+        let pool = [Particle {
+            pos: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            age: 0.0,
+            phase: 0,
+            fresh: false,
+            quat: Quat::IDENTITY,
+            angvel: Vec3::ZERO,
+        }];
+        let cam = CamBasis {
+            right: Vec3::X,
+            up: Vec3::Y,
+        };
+        let shoot = |alpha| {
+            let frame = DrawFrame {
+                anchored: true,
+                anchor: Vec3::ZERO,
+                attach_rot: Quat::IDENTITY,
+                alpha,
+            };
+            let mut out = Vec::new();
+            expand_quads(&def, &pool, &frame, &Transform::IDENTITY, &cam, &mut out);
+            out[0].color
+        };
+
+        let opaque = shoot(1.0);
+        assert_eq!(opaque, [0.8, 0.4, 0.2, 0.5], "no fade: the authored ramp");
+        let half = shoot(0.5);
+        assert_eq!(
+            [half[0], half[1], half[2]],
+            [0.8, 0.4, 0.2],
+            "RGB is untouched by the model alpha"
+        );
+        assert!((half[3] - 0.25).abs() < 1e-6, "alpha halves: {half:?}");
+        assert_eq!(shoot(0.0)[3], 0.0, "an invisible model draws nothing");
     }
 }

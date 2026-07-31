@@ -414,6 +414,10 @@ pub(crate) struct RenderConfig {
     pub(crate) tile_radius: u32,
     /// Ground-texture repeats per chunk (`$WOW_TEX_TILES`, default 8).
     pub(crate) tex_tiles: f32,
+    /// Stale tiles released per frame on a within-map window shift (`$WOW_TILE_UNLOAD`,
+    /// default 1; `0` = unbudgeted — the whole trailing row in one frame, the pre-B181
+    /// behaviour, kept as the controlled A/B leg on one build).
+    pub(crate) unload_budget: usize,
 }
 
 /// Startup ordering seam: [`AssetPlugin`] opens the patch chain in this set so every other
@@ -484,9 +488,16 @@ fn open_world_assets(mut commands: Commands, device: Res<RenderDevice>) {
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
         .unwrap_or(8.0);
+    // See the field doc: the tile-unload budget (B181). Default 1 — even the fastest focus
+    // (boosted free-fly, ~1 stale row/s) produces stale tiles far slower than 60/s drains them.
+    let unload_budget = std::env::var("WOW_TILE_UNLOAD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     commands.insert_resource(RenderConfig {
         tile_radius,
         tex_tiles,
+        unload_budget,
     });
 
     // The one shared global-light buffer, created here (RenderDevice is live by Startup) so it exists

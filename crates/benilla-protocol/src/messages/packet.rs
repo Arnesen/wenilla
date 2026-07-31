@@ -6,14 +6,14 @@ use crate::wire::Vector3d;
 
 use super::{
     ActionButton, AttackerState, CastOutcome, ChannelNotify, Character, ChatMessage,
-    CorpseLocation, DamageShield, EnvironmentalDamageLog, FriendEntry, FriendStatusUpdate,
-    GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry, InitWorldStates, ItemInfo,
-    ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem, LootRoll, LootRollWon,
-    LootStartRoll, MailListEntry, Object, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete,
-    QuestDetails, QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
-    ResurrectRequestBody, SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo,
-    SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended,
-    TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
+    FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
+    InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
+    LootRoll, LootRollWon, LootStartRoll, MailListEntry, Object, PartyMemberStatsInfo,
+    PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
+    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellCooldown,
+    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
+    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -508,6 +508,9 @@ pub enum ServerPacket {
     /// `SMSG_LOG_XPGAIN` — an XP award, kill or non-kill (decision 0137 phase 2; layout in
     /// [`super::progression::read_xp_gain`]).
     XpGain(XpGain),
+    /// `SMSG_EXPLORATION_EXPERIENCE` — a first visit to an area: the discovered area id + its XP
+    /// award (decision 0828; layout in [`super::progression::read_exploration_xp`]).
+    ExplorationXp(ExplorationXp),
     /// `SMSG_LEVELUP_INFO` — our own ding, self-addressed only (decision 0304; layout in
     /// [`super::progression::read_level_up_info`]).
     LevelUp(LevelUpInfo),
@@ -1093,6 +1096,7 @@ impl ServerPacket {
             ServerPacket::EnvironmentalDamageLog(_) => "SMSG_ENVIRONMENTALDAMAGELOG".into(),
             ServerPacket::SpellLogMiss(_) => "SMSG_SPELLLOGMISS".into(),
             ServerPacket::XpGain(_) => "SMSG_LOG_XPGAIN".into(),
+            ServerPacket::ExplorationXp(_) => "SMSG_EXPLORATION_EXPERIENCE".into(),
             ServerPacket::LevelUp(_) => "SMSG_LEVELUP_INFO".into(),
             ServerPacket::QuestGiverStatus { .. } => "SMSG_QUESTGIVER_STATUS".into(),
             ServerPacket::QuestGiverQuestList(_) => "SMSG_QUESTGIVER_QUEST_LIST".into(),

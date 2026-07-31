@@ -178,6 +178,22 @@ pub(super) fn drain_action_uses(
                     errors.2.clear();
                     continue;
                 }
+                // The active-action toggle (`0x4e55f0` → the `0x4e60c1` cancel; wow-re
+                // `shapeshift-plaincast-toggle.md`): a live ActiveIconID spell re-pressed on
+                // its button cancels its own aura — Ghost Wolf, the druid forms, Stealth. The
+                // form-match toggle is deliberately NOT here (the ref's `UseAction` has no such
+                // leg — the `CastSpell` dispatcher alone carries it; keep the asymmetry).
+                if let Some(d) = spells.as_ref().and_then(|s| s.catalog.get(b.action)) {
+                    if let Some(store) = targeting.self_store.iter().next() {
+                        if super::toggle::active_action_toggle(b.action, d, store) {
+                            debug!("ui_action: cast {} re-pressed — aura cancels", b.action);
+                            let _ = commands
+                                .0
+                                .send(crate::net::ClientCommand::CancelAura { spell_id: b.action });
+                            continue;
+                        }
+                    }
+                }
                 debug!("ui_action: cast {} (target {:?})", b.action, selection.guid);
                 send_spell_cast(
                     b.action,

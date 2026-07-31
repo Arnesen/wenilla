@@ -313,12 +313,19 @@ pub(super) fn spawn_wmo_gameobject_props(
                         &mut commands,
                         em,
                         placement,
-                        Some(owner),
-                        None, // a placed prop is never an attached model
-                        // The cloud anchors at the PROP: the boat carries the risen flame (the
-                        // reference re-anchors every cloud to the emitter's live position), while
-                        // an animated bone still never drags it.
-                        Some(root),
+                        particles::EmitterFrames {
+                            owner: Some(owner),
+                            attach: None, // a placed prop is never an attached model
+                            // The cloud anchors at the PROP: the boat carries the risen flame (the
+                            // reference re-anchors every cloud to the emitter's live position),
+                            // while an animated bone still never drags it.
+                            anchor: Some(root),
+                            // A placed prop's model is destroyed when its placement unloads.
+                            on_owner_loss: particles::OwnerLoss::Free,
+                            // A placed prop carries no fade component of its own; its emitters
+                            // take the doodad distance fade in the sim instead (0827).
+                            alpha: None,
+                        },
                         // A placed prop: the doodad law — which is NOT one arm for life. It re-rolls
                         // its variation every play-window (decision 0768), so the emitter resolves
                         // the slot + clip time off the host's live player each frame.
@@ -347,6 +354,8 @@ pub(super) fn spawn_wmo_gameobject_props(
                         owner,
                         use_pivot,
                         placement.scale.max_element(),
+                        None,
+                        // No model-alpha source: a placed prop / effect instance is always drawn (0827).
                         None,
                     )
                     .is_some()

@@ -147,6 +147,31 @@ pub(crate) fn send_spell_cast(
         cast_errors.0.push((spell_id, 0x39));
         return;
     }
+    // The shapeshift-form leg of the SAME requirement validator (`0x6094f0` at `0x609e49` →
+    // the form gate `0x612480`; wow-re `shapeshift-plaincast-toggle.md` §Q3, which corrected
+    // `mounted-action-gate.md`'s `0x609ca2` gloss — that address is the POSTURE gate, reason
+    // 0x3e NOT_STANDING; vmangos corroborates the reason split,
+    // `SpellEntry::GetErrorAtShapeshiftedCast`): a form-blocked press refuses locally with the
+    // gate's own red line — 0x3d "Can't do that while shapeshifted" / 0x56 needs-a-form — and
+    // never sends, exactly like the mounted leg above. This is the whole Ghost Wolf experience:
+    // ordinary spells carry NOT_SHAPESHIFT (verified in the 5875 data), so a shifted shaman's
+    // every press lands here.
+    if let Some(d) = def {
+        let form = ctx
+            .rel
+            .self_store
+            .map(|s| s.0.unit_shapeshift_form())
+            .unwrap_or(0);
+        let form_is_stance = spells
+            .and_then(|s| s.forms.get(&u32::from(form)))
+            .is_some_and(|f| f.is_stance());
+        if let Some(refusal) = d.form_refusal(form, form_is_stance) {
+            let reason = refusal.reason();
+            debug!("ui_action: cast {spell_id} refused locally — the form gate ({reason:#x})");
+            cast_errors.0.push((spell_id, reason));
+            return;
+        }
+    }
     // The pre-send totem/reagent possession check (`CheckReagentsAndTotems 0x6e4000`, TryCast's
     // `0x6e4ded` — decision 0552): a missing tool (Mining Pick) or a short reagent refuses HERE
     // with the client's own 0x78/0x5c red line and NEVER sends. The gate must be local: vmangos

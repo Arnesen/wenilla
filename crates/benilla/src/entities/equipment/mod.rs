@@ -206,7 +206,7 @@ pub(super) struct HeldItems {
 
 /// Total attach sub-model slots: the 3 held + helm + shoulder L/R + the nocked ammo + the
 /// worn quiver (self-only, ranged-drawn — wow-re `nocked-ammo-cancel.md` §H).
-const ATTACH_SLOTS: usize = 8;
+pub(super) const ATTACH_SLOTS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HeldSlot {
@@ -215,9 +215,20 @@ struct HeldSlot {
     attach: u16,
     /// The `ItemVisuals.dbc` id this item glows with — its display's intrinsic visual, else its
     /// first enchant's (decision 0805, [`super::item_glow`]). `0` on the overwhelming majority.
-    /// Part of the diff key on purpose: applying or losing an enchant re-spawns the item so the
-    /// glow follows, exactly like a sheath change does.
+    /// Part of the diff key on purpose: applying or losing an enchant is a different MODEL set, so
+    /// the item is rebuilt and the glow follows. (A sheath change is not — same item, new attach
+    /// point: that one MOVES the spawned root instead, decision 0826.)
     visual: i32,
+}
+
+impl HeldSlot {
+    /// The same item model, wherever it hangs — the test that separates a **move** (the sheath
+    /// swap: one item, a new attach point, so the spawned root is re-parented and everything
+    /// riding it comes along — decision 0826) from a **rebuild** (a different display, model
+    /// variant, or glow, which is a different model and must be built from scratch).
+    fn same_item(&self, other: &Self) -> bool {
+        self.display == other.display && self.kind == other.kind && self.visual == other.visual
+    }
 }
 
 /// Which of an item display's models a slot shows, and where its file lives (decision 0074 slice 3c
@@ -270,11 +281,13 @@ impl BoneAttach {
 }
 
 /// The held-item children currently spawned for a unit: the [`HeldItems`] they were built from (the
-/// diff key) + the spawned root entities (one per slot, despawned recursively on change).
+/// diff key) + the spawned root entity **per slot** — indexed, not a flat list, because the diff is
+/// per slot (decision 0826): a slot that didn't change keeps its root, and a slot that only changed
+/// attach point has its root moved. Only a slot whose item really changed is despawned and rebuilt.
 #[derive(Component, Default)]
 pub(super) struct HeldAttached {
     applied: HeldItems,
-    spawned: Vec<Entity>,
+    spawned: [Option<Entity>; ATTACH_SLOTS],
 }
 
 /// The glow id of a slot the reference never glows: **helm (attach 11), shoulders (5/6) and the

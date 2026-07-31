@@ -122,7 +122,7 @@ mod tokens;
 
 pub use cast_times::{load_spell_cast_times, SpellCastTime, SpellCastTimeCatalog};
 pub use dispel_types::{load_spell_dispel_types, SpellDispelTypes};
-pub use display::{OpenLock, SpellDisplay};
+pub use display::{FormRefusal, OpenLock, SpellDisplay};
 pub use duration::{load_spell_durations, SpellDuration, SpellDurationCatalog};
 pub use forms::{load_shapeshift_forms, ShapeshiftForm};
 pub use radius::{load_spell_radii, SpellRadius, SpellRadiusCatalog};
@@ -632,6 +632,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                         .then(|| u32_at(r, COL_EFFECT_MISC_1 + i).unwrap_or(0))
                 }),
                 stance_bar_order: u32_at(r, COL_STANCE_BAR_ORDER).unwrap_or(0) as i32,
+                active_icon_id: u32_at(r, COL_ACTIVE_ICON_ID).unwrap_or(0),
                 active_icon: u32_at(r, COL_ACTIVE_ICON_ID)
                     .filter(|&i| i != 0)
                     .and_then(|i| icons.get(&i).cloned()),

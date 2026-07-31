@@ -150,9 +150,12 @@ pub(super) fn spawn_emitters_for(
             commands,
             em,
             transform,
-            owner,
-            None, // placed doodads/props are never attached models
-            None, // anchor at the placement: an animated bone never drags the risen cloud
+            particles::EmitterFrames {
+                owner,
+                attach: None, // placed doodads/props are never attached models
+                anchor: None, // anchor at the placement: an animated bone never drags the cloud
+                ..default()
+            },
             // A placed doodad's arm is NOT one-time: it re-rolls its variation every play-window
             // (decision 0768), so the emitters read the slot AND the clip time off the host's live
             // player each frame — the same lane units and GameObjects use, and what the reference's
@@ -202,6 +205,8 @@ pub(super) fn spawn_ribbons_for(
             owner,
             use_pivot,
             transform.scale.max_element(),
+            None,
+            // No model-alpha source: a placed prop / effect instance is always drawn (0827).
             None,
         );
     }

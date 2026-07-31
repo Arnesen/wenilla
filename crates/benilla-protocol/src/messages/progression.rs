@@ -44,6 +44,27 @@ pub(super) fn read_xp_gain(r: &mut impl Read) -> io::Result<XpGain> {
     })
 }
 
+/// One decoded `SMSG_EXPLORATION_EXPERIENCE` — a first visit to an area: the newly explored
+/// `AreaTable.dbc` row **id** (not the explore-flag bit) and the XP the discovery granted
+/// (vmangos `WorldPackets::Misc::ExplorationExperience`, `Server/Packets/Misc.h:838-846` +
+/// `Misc.cpp:552-556`; filled by `Player::CheckAreaExploreAndOutdoor`, Player.cpp:6228-6341,
+/// which sends it **even when xp is 0** — max level, or an area with no level). The XP itself
+/// also rides a separate non-kill [`XpGain`]; this packet is what names the area. Decision 0828.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExplorationXp {
+    /// The `AreaTable.dbc` row id of the area just discovered.
+    pub area_id: u32,
+    /// The exploration XP awarded (0 at max level / unleveled areas).
+    pub xp: u32,
+}
+
+/// Read `SMSG_EXPLORATION_EXPERIENCE`: areaId u32 · xp u32 (8 bytes, `Misc.cpp:552-556`).
+pub(super) fn read_exploration_xp(r: &mut impl Read) -> io::Result<ExplorationXp> {
+    let area_id = read_u32_le(r)?;
+    let xp = read_u32_le(r)?;
+    Ok(ExplorationXp { area_id, xp })
+}
+
 /// Body of `CMSG_LEARN_TALENT` (vmangos `Server/Packets/Skill.h:10-19` +
 /// `Player::LearnTalent`, Player.cpp:20807): `u32 talentId` (a `Talent.dbc` row id) +
 /// `u32 requestedRank`, **0-based** — requesting rank k learns *up to* k (the server spends

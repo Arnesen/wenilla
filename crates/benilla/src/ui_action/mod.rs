@@ -45,6 +45,7 @@ mod feed;
 mod feed_tests;
 mod state;
 pub(crate) mod targeting;
+pub(crate) mod toggle;
 mod weapon_icon;
 
 pub(crate) use cast_send::send_spell_cast;

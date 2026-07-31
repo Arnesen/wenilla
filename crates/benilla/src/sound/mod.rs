@@ -41,6 +41,7 @@ pub(crate) use glue::GlueSound;
 pub(crate) use greeting::NpcGreetingRequest;
 pub(crate) use mixer::Mixer;
 pub(crate) use ui::{AutoEquipSound, LootPickupSound};
+pub(crate) use zone::ExplorationSounds;
 
 /// Player-facing audio config — always-on, player-faithful defaults (decision 0026: no
 /// gameplay→dev coupling; the debug panel edits this, it doesn't own it).

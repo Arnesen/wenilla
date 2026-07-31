@@ -141,6 +141,11 @@ pub(super) fn apply_net_updates(
             // The pending logout/quit (decision 0674): the server's response and cancel-ack land
             // here, and `crate::ui_logout` turns them into the countdown dialog.
             ResMut<crate::ui_logout::LogoutState>,
+            // The shared AreaTable catalog — the exploration arm's area-id → name resolve
+            // (decision 0828) — and the race-keyed discovery-jingle catalog (decision 0829).
+            // Either absent if its DBC failed to load.
+            Option<Res<crate::area::AreaTableRes>>,
+            Option<Res<crate::sound::ExplorationSounds>>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -269,6 +274,8 @@ pub(super) fn apply_net_updates(
             mut duel,
             mut social,
             mut logout,
+            area_table,
+            exploration_sounds,
         ),
     ) = caches;
     let (
@@ -891,6 +898,16 @@ pub(super) fn apply_net_updates(
             SessionEvent::XpGain(x) => {
                 combat_log::xp_gain(x, &index, &self_guid, &mut audio.7, &mut chat_log)
             }
+            SessionEvent::ExplorationXp(x) => combat_log::exploration_xp(
+                x,
+                area_table.as_deref(),
+                exploration_sounds.as_deref(),
+                &index,
+                &self_guid,
+                &stores,
+                &mut audio.0,
+                &mut chat_log,
+            ),
             SessionEvent::LevelUp(l) => combat_log::level_up(l, &mut chat_log),
             SessionEvent::SpellStart {
                 caster,

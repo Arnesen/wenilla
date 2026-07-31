@@ -167,6 +167,21 @@ fn xp_gain_lines_pick_the_reference_form() {
 }
 
 #[test]
+fn exploration_lines_pick_the_reference_form() {
+    // ERR_ZONE_EXPLORED (GlobalStrings :1925) — the toast, fired on EVERY exploration packet
+    // (UIErrorsFrame); ERR_ZONE_EXPLORED_XP (:1926) — the chat system line that rides
+    // additionally iff xp > 0 (byte-verified branch `0x5e422f`; decisions 0828/0829).
+    assert_eq!(
+        super::feed::exploration_toast("Westfall"),
+        "Discovered: Westfall"
+    );
+    assert_eq!(
+        super::feed::exploration_line("Westfall", 85),
+        "Discovered Westfall: 85 experience gained"
+    );
+}
+
+#[test]
 fn monster_lines_use_the_bare_inline_name() {
     assert_eq!(
         compose(&ev(K::MonsterSay, "Intruders!", "Guard"), K::MonsterSay).unwrap(),

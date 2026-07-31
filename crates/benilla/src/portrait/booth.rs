@@ -168,9 +168,16 @@ pub(super) fn spawn_booth_effects(
                 commands,
                 em,
                 Transform::IDENTITY,
-                Some(owner),
-                Some(host), // an attached model — its fan swings with the item
-                Some(host), // the cloud anchors at the MODEL; the bone composes births only
+                crate::particles::EmitterFrames {
+                    owner: Some(owner),
+                    attach: Some(host), // an attached model — its fan swings with the item
+                    anchor: Some(host), // the cloud anchors at the MODEL; bones compose births only
+                    // A booth rider's host is torn down with the bake it belongs to.
+                    on_owner_loss: crate::particles::OwnerLoss::Free,
+                    // A booth bake has no appear/despawn ramp and no self-avatar feather — its
+                    // riders are always opaque (0827).
+                    alpha: None,
+                },
                 crate::particles::EmitClock::Pinned, // an item's effects loop forever
             ) else {
                 continue;

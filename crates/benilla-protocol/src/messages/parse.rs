@@ -479,6 +479,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             ServerPacket::SpellLogMiss(combat_log::read_spell_log_miss(&mut r)?)
         }
         opcode::SMSG_LOG_XPGAIN => ServerPacket::XpGain(progression::read_xp_gain(&mut r)?),
+        opcode::SMSG_EXPLORATION_EXPERIENCE => {
+            ServerPacket::ExplorationXp(progression::read_exploration_xp(&mut r)?)
+        }
         opcode::SMSG_LEVELUP_INFO => {
             ServerPacket::LevelUp(progression::read_level_up_info(&mut r)?)
         }

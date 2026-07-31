@@ -533,6 +533,42 @@ fn real_spell_catalog_reads_usable_walk_columns() {
     assert!(!fireball.usable_in_form(1, false));
     assert!(execute.usable_in_form(17, true));
     assert!(!execute.usable_in_form(18, true));
+
+    // Ghost Wolf on the real rows (the shaman lockout, verified 2026-07-31): form 16 is a true
+    // shapeshift and cancelable; the spell carries NOT_SHAPESHIFT (bit 16) AND the stance-bar
+    // exclusion (ex2 0x2 — the shipped carrier: a shaman gets no stance bar). In the form,
+    // an ordinary spell refuses 0x3d; a form-requiring spell out of its form refuses 0x56.
+    let ghost_wolf = cat.get(2645).unwrap();
+    assert_eq!(ghost_wolf.shapeshift_form, Some(16));
+    assert_ne!(ghost_wolf.attributes & 0x1_0000, 0);
+    assert_ne!(ghost_wolf.attributes_ex2 & 0x2, 0);
+    let wolf_row = forms.get(&16).unwrap();
+    assert!(!wolf_row.is_stance());
+    assert!(wolf_row.cancelable());
+    use crate::FormRefusal;
+    let bolt = cat.get(403).unwrap();
+    assert_eq!(
+        bolt.form_refusal(16, false),
+        Some(FormRefusal::NotShapeshift)
+    );
+    assert_eq!(bolt.form_refusal(0, false), None);
+    assert_eq!(
+        claw.form_refusal(0, false),
+        Some(FormRefusal::OnlyShapeshift)
+    );
+    assert_eq!(
+        ghost_wolf.form_refusal(16, false),
+        Some(FormRefusal::NotShapeshift),
+        "re-pressing Ghost Wolf in the form draws the gate too (the cancel is a separate branch)"
+    );
+    assert_eq!(FormRefusal::NotShapeshift.reason(), 0x3d);
+    assert_eq!(FormRefusal::OnlyShapeshift.reason(), 0x56);
+
+    // The active-action toggle's raw-column gate (wow-re shapeshift-plaincast-toggle.md):
+    // Ghost Wolf carries a nonzero ActiveIconID, so its button press-again cancels; Battle
+    // Stance carries 0, which is what keeps a stance un-cancelable on the plain paths.
+    assert_ne!(ghost_wolf.active_icon_id, 0);
+    assert_eq!(cat.get(2457).unwrap().active_icon_id, 0, "Battle Stance");
 }
 
 /// The tooltip-arc columns (decision 0274 P2) on the real build-5875 `Spell.dbc`, pinned

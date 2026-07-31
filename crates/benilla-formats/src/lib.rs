@@ -114,7 +114,7 @@ pub use wmo_area::{load_wmo_area_catalog, WmoArea, WmoAreaCatalog};
 mod spells;
 pub use spells::{
     load_shapeshift_forms, load_spell_cast_times, load_spell_catalog, load_spell_dispel_types,
-    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, OpenLock,
+    load_spell_durations, load_spell_radii, load_spell_ranges, substitute, FormRefusal, OpenLock,
     ShapeshiftForm, SpellCastTime, SpellCastTimeCatalog, SpellCatalog, SpellDispelTypes,
     SpellDisplay, SpellDuration, SpellDurationCatalog, SpellRadius, SpellRadiusCatalog, SpellRange,
     SpellRangeCatalog, TokenContext, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT,
@@ -196,6 +196,8 @@ mod area_poi;
 pub use area_poi::{load_area_poi_catalog, AreaPoi, AreaPoiCatalog};
 mod area_table;
 pub use area_table::{load_area_table_catalog, AreaTableCatalog, AreaTableRow};
+mod race_sound;
+pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 mod zone_map;
 pub use zone_map::{load_zone_map, ZONE_MAP_EDGE};
 

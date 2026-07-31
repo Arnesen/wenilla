@@ -143,6 +143,103 @@ pub fn fade_alpha(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t * t * t
 }
 
+/// One model instance's live **render alpha** — the reference's `CM2Model+0x19c`, and the single
+/// slot every fade in the client writes through (wow-re object-layer/`appear-fade` §"the alpha
+/// slot"): `+0x19c = argAlpha · +0x180`, with `+0x180 = obj+0x100 (master) · obj+0xf4 (the appear
+/// ramp)` for a CGObject and the distance fade for a map doodad.
+///
+/// benilla keeps that alpha on the MESH side in the per-part `MeshTag` (the appear/despawn ramp,
+/// the self-avatar feather, the doodad fade — three writers, one channel). This component is the
+/// same number published **per model instance**, for the consumers that are not meshes and cannot
+/// read a `MeshTag`: an emitter's particles and a ribbon's strip, whose alpha is per-vertex colour
+/// (decision 0827). Missing ⇒ `1.0`.
+///
+/// An **attached** model inherits its parent's, which is why an item's effects read their WEARER's
+/// (the `0x714000` recursion: a child model with `[model+0x1cc] ≠ 0` composes onto the parent's
+/// computed colours and alpha — wow-re `selection-circle.md` §scope, `0x714260`'s `[ebp+0x14]`).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct ModelAlpha(pub f32);
+
+/// The render alpha of one streamed model instance this frame — pure, so the composition is pinned
+/// by tests without an ECS (the `model_fade` pattern):
+///
+/// - the **appear** ramp: none ⇒ opaque; pending ⇒ 0 (the entity is not being shown yet, so its
+///   effects must not be either — this is the login symptom); live ⇒ the cubic ramp,
+/// - × the **despawn** ramp (our stream-out look, 0032/0067) once armed,
+/// - × the **self-avatar** zoom feather, which applies to the player's own body alone.
+///
+/// The product is the reference's own shape: it multiplies the transition alpha into the same
+/// `+0x180` slot rather than keeping a second channel.
+pub fn model_render_alpha(
+    now: f32,
+    appear: Option<UnitAppearFade>,
+    despawn_started: Option<f32>,
+    self_fade: f32,
+) -> f32 {
+    let appear = match appear {
+        None => 1.0,
+        Some(UnitAppearFade::Pending { .. }) => 0.0,
+        Some(UnitAppearFade::Live { started }) => {
+            fade_alpha(0.0, 1.0, (now - started) / APPEAR_FADE_SECS)
+        }
+    };
+    let despawn = despawn_started.map_or(1.0, |started| {
+        fade_alpha(1.0, 0.0, (now - started) / APPEAR_FADE_SECS)
+    });
+    (appear * despawn * self_fade).clamp(0.0, 1.0)
+}
+
+/// Publish [`ModelAlpha`] on every streamed object each frame. Runs in `PostUpdate`, after every
+/// Update-side fade writer and the camera controller that computes the self feather, and before the
+/// effect sims that consume it ([`crate::particles`], [`crate::ribbons`]).
+///
+/// Opaque is the default and costs nothing: an entity that has never faded gets no component at all
+/// (a missing one reads `1.0`), so the steady-state world carries none of these.
+#[allow(clippy::type_complexity)] // one query, five optional facets of the same entity
+pub(crate) fn publish_model_alpha(
+    time: Res<Time>,
+    // `Option`: the rig is the world app's (a booth-only or test app has none) — the same shape
+    // `blob_shadow` and `nameplates` read the self feather through.
+    rig: Option<Res<crate::player::CameraControl>>,
+    mut commands: Commands,
+    mut units: Query<
+        (
+            Entity,
+            Option<&UnitAppearFade>,
+            Option<&DespawnFade>,
+            Has<crate::net::SelfPlayer>,
+            Option<&mut ModelAlpha>,
+        ),
+        With<crate::net::NetEntity>,
+    >,
+) {
+    let now = time.elapsed_secs();
+    for (entity, appear, despawn, is_self, current) in &mut units {
+        let alpha = model_render_alpha(
+            now,
+            appear.copied(),
+            despawn.map(|d| d.started).filter(|s| *s >= 0.0),
+            if is_self {
+                rig.as_deref()
+                    .map_or(1.0, crate::player::CameraControl::self_fade)
+            } else {
+                1.0
+            },
+        );
+        match current {
+            Some(mut c) => {
+                if c.0 != alpha {
+                    c.0 = alpha;
+                }
+            }
+            None if alpha >= 1.0 => {}
+            None => {
+                commands.entity(entity).insert(ModelAlpha(alpha));
+            }
+        }
+    }
+}
+
 /// The camera-to-target span (yd) over which the **player's own** avatar fades from hidden (camera near)
 /// to opaque (camera out) as you zoom into first-person. VERIFIED from `WoW.exe` 5875 (`0x8089b0`; the
 /// self-model transparency setter `0x5b7bb0`, recorded in wow-re `system/ui/scratch/follow-camera.md`).
@@ -727,6 +824,59 @@ mod tests {
             let item_alpha = fade_alpha(0.0, 1.0, (now - joined_started) / APPEAR_FADE_SECS);
             assert_eq!(body_alpha, item_alpha);
         }
+    }
+
+    /// **The login symptom, at its cause** (decision 0827): a unit whose appear-fade has not been
+    /// armed yet is not being shown at all, so its render alpha is **0** — and the item sparkle
+    /// that reads this number is therefore invisible too, instead of burning at full strength in
+    /// front of a body that hasn't faded in. Then the ramp: the same cubic the mesh parts run, so
+    /// the pauldron's glow and the pauldron arrive together rather than 2 s apart.
+    #[test]
+    fn a_units_render_alpha_is_zero_until_it_is_shown_then_rides_the_same_cubic() {
+        assert_eq!(
+            model_render_alpha(
+                10.0,
+                Some(UnitAppearFade::Pending { since: 9.0 }),
+                None,
+                1.0
+            ),
+            0.0,
+            "pending: the unit is not on screen, and neither are its effects"
+        );
+        let live =
+            |now| model_render_alpha(now, Some(UnitAppearFade::Live { started: 10.0 }), None, 1.0);
+        assert_eq!(live(10.0), 0.0, "the ramp starts at nothing");
+        assert!(
+            (live(11.0) - fade_alpha(0.0, 1.0, 0.5)).abs() < 1e-6,
+            "mid-ramp is the mesh parts' own cubic, not a second curve"
+        );
+        assert_eq!(live(12.0), 1.0, "…and latches opaque at the duration");
+        assert_eq!(
+            model_render_alpha(10.0, None, None, 1.0),
+            1.0,
+            "no fade: opaque"
+        );
+    }
+
+    /// The other two writers of the same slot compose as a PRODUCT — the reference multiplies the
+    /// transition alpha into `+0x180` rather than keeping a second channel. The self-avatar feather
+    /// is what takes a held torch's flame out of your face in first person (ledger F05).
+    #[test]
+    fn the_render_alpha_multiplies_its_writers() {
+        // Zooming to first person: the body is opaque-by-appear but the feather is 0.
+        assert_eq!(model_render_alpha(20.0, None, None, 0.0), 0.0);
+        assert!((model_render_alpha(20.0, None, None, 0.5) - 0.5).abs() < 1e-6);
+        // Streaming out: the despawn ramp eases the same channel to nothing.
+        assert_eq!(model_render_alpha(10.0, None, Some(10.0), 1.0), 1.0);
+        assert_eq!(model_render_alpha(12.0, None, Some(10.0), 1.0), 0.0);
+        // Both at once stay a product, and the result can never leave [0, 1].
+        let both = model_render_alpha(
+            11.0,
+            Some(UnitAppearFade::Live { started: 10.0 }),
+            Some(10.0),
+            0.5,
+        );
+        assert!((0.0..=1.0).contains(&both) && both > 0.0);
     }
 
     #[test]

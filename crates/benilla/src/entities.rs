@@ -533,6 +533,15 @@ impl Plugin for EntitiesPlugin {
                     retire_unit_appear_fade,
                 )
                     .chain(),
+            )
+            // …and publish those same ramps as ONE number per model instance, for the consumers
+            // that are not meshes and so cannot read a `MeshTag`: an emitter's particles and a
+            // ribbon's strip (decision 0827 — the reference's `CM2Model+0x19c`). PostUpdate, so
+            // every Update-side fade writer and the camera controller's self feather have already
+            // run this frame, and before the effect sims that read it.
+            .add_systems(
+                PostUpdate,
+                crate::model_fade::publish_model_alpha.before(crate::billboard::BillboardPlace),
             );
     }
 }

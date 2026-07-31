@@ -58,6 +58,15 @@ pub struct RibbonTrail {
     /// active flag before destroy, or hard-cuts at animation end, is the one OPEN half
     /// (CEffect-side, flagged in decision 0206).
     owner: Option<Entity>,
+    /// The MODEL INSTANCE whose [`crate::model_fade::ModelAlpha`] decides whether this trail is
+    /// drawn at all (decision 0827). The reference's ribbon render leg reads the owning model's
+    /// render alpha (`block+0x3c × Model+0x19c`) and **drops the draw** below a threshold (wow-re
+    /// `ribbon-emitter-spec.md` §5) — so an invisible model has no streamer, which is what a
+    /// first-person avatar's enchant trail needs (ledger F05). Only the drop is implemented: the
+    /// note does not say the model alpha scales the strip's vertex colour the way it does a
+    /// particle's, and inventing a ramp on top of a gate would be building past the evidence.
+    /// `None` ⇒ always drawn (a placed prop, an effect instance).
+    alpha_src: Option<Entity>,
     /// Committed edges, newest at the back. The live head (the current node) is appended at
     /// render time only, so the trail always connects to the emitter between commits.
     edges: VecDeque<Edge>,
@@ -95,7 +104,7 @@ impl RibbonTrail {
 /// model-local [`ModelRibbon::owner_reach`] takes it to reach world yards, which is what the
 /// draw-order rung is measured in. `None` if the trail has no resolved texture, degenerate
 /// emission, or is dark in that sequence.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // the spawn's full wiring, `alpha_src` included
 pub fn spawn_ribbon(
     commands: &mut Commands,
     ribbon: &ModelRibbon,
@@ -103,6 +112,7 @@ pub fn spawn_ribbon(
     use_pivot: bool,
     owner_scale: f32,
     current_anim: Option<u16>,
+    alpha_src: Option<Entity>,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES also spawns no ribbons (one switch, whole family).
     if std::env::var_os("WOW_NO_PARTICLES").is_some() {
@@ -153,6 +163,7 @@ pub fn spawn_ribbon(
                     local_offset: wow_to_bevy(local),
                     def,
                     owner: Some(owner),
+                    alpha_src,
                     edges: VecDeque::new(),
                     accumulator: 0.0,
                     age: 0.0,
@@ -169,6 +180,7 @@ pub fn spawn_ribbon(
 
 /// Per-frame: place the node from the owner's live transform, commit/expire edges, sag by
 /// gravity, and write the strip into the shared effect-quad stream.
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn simulate_ribbons(
     time: Res<Time>,
     mut commands: Commands,
@@ -177,6 +189,8 @@ pub(crate) fn simulate_ribbons(
     transforms: Query<&GlobalTransform, Without<RibbonTrail>>,
     images: Res<Assets<Image>>,
     mut quads: ResMut<EffectQuads>,
+    // The owning model's render alpha — the trail's draw gate (decision 0827).
+    model_alphas: Query<&crate::model_fade::ModelAlpha>,
     // Trails belong to the world lane (no booth ribbons; a booth-parked owner's strip is eaten
     // by the shader's farclip wall, exactly as on the material path).
     world_cam: Query<Entity, With<WorldCamera>>,
@@ -197,6 +211,7 @@ pub(crate) fn simulate_ribbons(
             def,
             local_offset,
             owner,
+            alpha_src,
             edges,
             accumulator,
             age,
@@ -268,6 +283,16 @@ pub(crate) fn simulate_ribbons(
         // strip yet, or a non-resident texture — pushes nothing and commits nothing: the old
         // "don't rewrite an already-empty mesh" guard is now the structure itself.
         if !images.contains(&*texture) {
+            continue;
+        }
+        // An invisible MODEL has no streamer: the reference's ribbon render leg reads the owning
+        // model's render alpha and drops the draw below a threshold (decision 0827). This is what
+        // takes your own weapon's enchant trail out of your face in first person, and keeps a
+        // not-yet-shown unit's trail off the screen while its body is still at alpha 0.
+        if alpha_src
+            .and_then(|e| model_alphas.get(e).ok())
+            .is_some_and(|a| a.0 <= 1e-3)
+        {
             continue;
         }
         let n = edges.len() + usize::from(head.is_some());

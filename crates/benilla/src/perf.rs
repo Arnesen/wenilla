@@ -80,15 +80,178 @@ impl Plugin for PerfPlugin {
         ))
         .init_resource::<FrameStats>()
         .init_resource::<PerfHud>()
+        .init_resource::<StreamActivity>()
+        .insert_resource(StreamTrace {
+            path: std::env::var("WOW_STREAM_TRACE").unwrap_or_default(),
+            frame: 0,
+            log_until: 0,
+            prev_cpu_secs: None,
+        })
         .add_systems(
             Update,
             // `toggle_hud` needs no ordering against the UI keyboard feed any more: its Ctrl+Cmd+P
             // chord can't be typed text, so there's no `UiKeyboardCapture` to read (decision 0585).
             (toggle_hud, sample_frame_time),
         )
+        // `Last`, so a row carries everything this frame's Stream chain did — and the reset runs
+        // whether or not anything is tracing, or the counters would accumulate forever.
+        .add_systems(Last, trace_stream)
         .add_systems(EguiPrimaryContextPass, perf_hud_ui);
         #[cfg(target_os = "macos")]
         stall_sample::plugin(app);
+    }
+}
+
+/// Per-frame terrain-streamer activity, bumped by the `WorldStage::Stream` chain as it works
+/// (a handful of integer adds + three self-timers — maintained unconditionally, zeroed by
+/// [`trace_stream`] every frame). Exists because B181's symptom — a frame spike on every ADT
+/// tile-boundary crossing — is keyed to *what the streamer did that frame*, which no 1 Hz journal
+/// row can attribute: the spike frame needs its own row saying what was dropped, requested and
+/// spawned beside what the frame cost.
+#[derive(Resource, Default)]
+pub(crate) struct StreamActivity {
+    /// Tiles whose owned entities (terrain root + cells, liquid, clutter) were despawned.
+    pub(crate) tiles_dropped: u32,
+    /// Shared placements whose refcount hit zero (their entities despawned with them).
+    pub(crate) placements_dropped: u32,
+    /// Entity handles despawned with those placements (submeshes, colliders, lights, props).
+    pub(crate) placement_entities_dropped: u32,
+    /// New ADT asset requests fired.
+    pub(crate) tiles_requested: u32,
+    /// Loaded tiles spawned (terrain mesh + placements registered + liquid + clutter).
+    pub(crate) tiles_spawned: u32,
+    /// Placements (or WMO props) whose model landed and spawned.
+    pub(crate) placements_spawned: u32,
+    /// Off-thread colliders attached.
+    pub(crate) colliders_attached: u32,
+    /// Self-time of `stream_terrain` / `spawn_loaded_placements` / `finish_colliders` (ms).
+    pub(crate) stream_ms: f32,
+    pub(crate) spawn_ms: f32,
+    pub(crate) collider_ms: f32,
+}
+
+impl StreamActivity {
+    /// Did the streamer *do* anything this frame? (The self-timers don't count: the desired-set
+    /// scan runs every frame and would make every row an "event".)
+    fn any_event(&self) -> bool {
+        self.tiles_dropped
+            + self.placements_dropped
+            + self.tiles_requested
+            + self.tiles_spawned
+            + self.placements_spawned
+            + self.colliders_attached
+            > 0
+    }
+}
+
+/// A frame past this is logged even with no streamer activity — catches a spike whose cost lands
+/// outside the Stream chain (command application, render extraction, asset frees frames later).
+const TRACE_FRAME_MS: f32 = 25.0;
+/// Frames still logged after the last streamer event: the despawn commands apply after the system,
+/// the asset frees land when the last handle drops, and the render world reacts a frame later —
+/// the tail is where the cost shows, so the window must outlive the event.
+const TRACE_TAIL_FRAMES: u64 = 10;
+
+/// The STREAM TRACE (`WOW_STREAM_TRACE=<csv path>`) — B181's instrument. One row per frame in
+/// which the terrain streamer did anything (plus a [`TRACE_TAIL_FRAMES`] tail, plus any frame over
+/// [`TRACE_FRAME_MS`]): what was dropped/requested/spawned, the Stream chain's own self-times, and
+/// the frame's wall delta beside it. **The off-by-one to remember reading it: `delta_ms` on a row
+/// is the interval that *ended* at this frame's start, so frame N's cost appears in row N+1.**
+#[derive(Resource)]
+struct StreamTrace {
+    path: String,
+    frame: u64,
+    log_until: u64,
+    /// [`process_cpu_secs`] at the previous frame — the row's `cpu_ms` is this frame's process-CPU
+    /// delta (user+system, all threads): the load-robust cost meter beside the wall delta, because
+    /// on this machine wall frame time moves with whoever else is compiling (0711; a parallel
+    /// build polluted this instrument's first A/B).
+    prev_cpu_secs: Option<f64>,
+}
+
+const STREAM_TRACE_HEADER: &str = "frame,t,delta_ms,cpu_ms,ents,stream_ms,spawn_ms,collider_ms,\
+                                   tiles_dropped,pl_dropped,pl_ents_dropped,tiles_req,\
+                                   tiles_spawned,pl_spawned,attached,adt_freed,meshes_freed,\
+                                   images_freed\n";
+
+#[allow(clippy::too_many_arguments)]
+fn trace_stream(
+    mut trace: ResMut<StreamTrace>,
+    mut activity: ResMut<StreamActivity>,
+    time: Res<Time<Real>>,
+    entities: Query<()>,
+    mut adt_events: MessageReader<bevy::asset::AssetEvent<benilla_assets::AdtTile>>,
+    mut mesh_events: MessageReader<bevy::asset::AssetEvent<Mesh>>,
+    mut image_events: MessageReader<bevy::asset::AssetEvent<bevy::image::Image>>,
+) {
+    // Taken every frame — the counters are per-frame by contract, tracing or not.
+    let a = std::mem::take(&mut *activity);
+    trace.frame += 1;
+    if trace.path.is_empty() {
+        return;
+    }
+    let cpu_now = process_cpu_secs();
+    let cpu_ms = match (trace.prev_cpu_secs, cpu_now) {
+        (Some(t0), Some(t1)) => format!("{:.2}", (t1 - t0) * 1000.0),
+        _ => String::new(),
+    };
+    trace.prev_cpu_secs = cpu_now;
+    let freed = |n: usize| n as u32;
+    let removed_adt = freed(
+        adt_events
+            .read()
+            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
+            .count(),
+    );
+    let removed_mesh = freed(
+        mesh_events
+            .read()
+            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
+            .count(),
+    );
+    let removed_img = freed(
+        image_events
+            .read()
+            .filter(|e| matches!(e, bevy::asset::AssetEvent::Removed { .. }))
+            .count(),
+    );
+    let delta_ms = time.delta_secs() * 1000.0;
+    if a.any_event() || removed_adt > 0 {
+        trace.log_until = trace.frame + TRACE_TAIL_FRAMES;
+    }
+    if !(a.any_event()
+        || removed_adt > 0
+        || delta_ms > TRACE_FRAME_MS
+        || trace.frame <= trace.log_until)
+    {
+        return;
+    }
+    if trace.frame == 1 || !std::path::Path::new(&trace.path).exists() {
+        let _ = std::fs::write(&trace.path, STREAM_TRACE_HEADER);
+    }
+    let line = format!(
+        "{},{:.2},{delta_ms:.2},{cpu_ms},{},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{removed_adt},{removed_mesh},{removed_img}\n",
+        trace.frame,
+        time.elapsed_secs(),
+        entities.iter().len(),
+        a.stream_ms,
+        a.spawn_ms,
+        a.collider_ms,
+        a.tiles_dropped,
+        a.placements_dropped,
+        a.placement_entities_dropped,
+        a.tiles_requested,
+        a.tiles_spawned,
+        a.placements_spawned,
+        a.colliders_attached,
+    );
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&trace.path)
+    {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 

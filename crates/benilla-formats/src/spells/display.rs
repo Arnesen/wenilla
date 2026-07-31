@@ -41,8 +41,10 @@ pub struct SpellDisplay {
     /// `AttributesEx` (column 7, `SpellRec+0x1c`) — only bit `0x10000000` is consumed
     /// ([`Self::hidden_from_aura_bar`]'s `SPELL_ATTR_EX_NO_AURA_ICON` half).
     pub attributes_ex: u32,
-    /// `AttributesEx2` (column 8, module docs) — only bit `0x20` is consumed
-    /// ([`Self::ranged_attack`]).
+    /// `AttributesEx2` (column 8, module docs) — bit `0x20` is consumed by
+    /// [`Self::ranged_attack`], bit 19 (`0x0008_0000`, allow-while-not-shapeshifted) by the form
+    /// gate [`Self::form_refusal`]; the stance-bar admission bits (`0x2`/`0x10`) are read raw by
+    /// `benilla::ui_shapeshift`.
     pub attributes_ex2: u32,
     /// `AttributesEx3` (column 9, `SpellRec+0x24`) — only bit `0x8000` is consumed
     /// ([`Self::melee_white_damage`]).
@@ -142,6 +144,11 @@ pub struct SpellDisplay {
     /// `ActiveIconID`'s resolved texture path ([`COL_ACTIVE_ICON_ID`]) — shown on the stance
     /// button while this form is active, when present (druid forms); `None` falls back to `icon`.
     pub active_icon: Option<String>,
+    /// `ActiveIconID` raw ([`COL_ACTIVE_ICON_ID`]) — the plain-path active-action toggle's gate
+    /// (`0x4e55f0`/`0x4b36f0` test the COLUMN, not the resolved texture; wow-re
+    /// `shapeshift-plaincast-toggle.md`): a nonzero id marks the spell press-again-to-cancel
+    /// while its own aura is live (`benilla::ui_action::toggle`).
+    pub active_icon_id: u32,
     /// `Description` enUS (column 138, module docs) — the tooltip body, raw `$`-token text
     /// un-substituted (decision 0274 P2's engine resolves the tokens; this is the source text).
     /// `None` when the column is empty.
@@ -252,6 +259,7 @@ impl Default for SpellDisplay {
             shapeshift_form: None,
             stance_bar_order: 0,
             active_icon: None,
+            active_icon_id: 0,
             description: None,
             aura_description: None,
             duration_index: 0,
@@ -491,30 +499,69 @@ impl SpellDisplay {
             .any(|a| TRACKING_AURA_TYPES.contains(a))
     }
 
-    /// The shapeshift-form gate — the usable walk's leg 6 (`0x612480`, wow-re §2a: reads the
-    /// caster form, builds `1 << (form-1)`, tests **StancesNot** then **Stances**, then the
-    /// Attributes-bit-16 / AttributesEx2-bit-19 composition). The composition over the form's
-    /// stance flag is the vmangos corroboration (`SpellEntry::GetErrorAtShapeshiftedCast`,
-    /// `SpellEntry.cpp:1030` — anchored to exactly the byte-named fields): a *stance*-flagged
-    /// form (warrior stances, stealth — `SpellShapeshiftForm.flags1 & 1`) does not count as
-    /// "shapeshifted", so ordinary spells stay usable in it; a true shapeshift (cat, bear)
-    /// blocks NOT_SHAPESHIFT spells; and a form-requiring spell out of its form is unusable
-    /// unless AttributesEx2 bit 19 waives the requirement.
+    /// The shapeshift-form gate as a boolean — the usable walk's leg 6. See
+    /// [`Self::form_refusal`], the reason-carrying transcription this wraps.
     pub fn usable_in_form(&self, form: u8, form_is_stance: bool) -> bool {
+        self.form_refusal(form, form_is_stance).is_none()
+    }
+
+    /// The shapeshift-form gate — `0x612480` (wow-re §2a: reads the caster form, builds
+    /// `1 << (form-1)`, tests **StancesNot** then **Stances**, then the Attributes-bit-16 /
+    /// AttributesEx2-bit-19 composition), which both the usable walk's leg 6 and the TryCast
+    /// requirement validator (`0x6094f0`, the leg right after the mounted block) run. The
+    /// composition over the form's stance flag — and the reason split — is the vmangos
+    /// corroboration (`SpellEntry::GetErrorAtShapeshiftedCast`, `SpellEntry.cpp` — anchored to
+    /// exactly the byte-named fields): a *stance*-flagged form (warrior stances, stealth —
+    /// `SpellShapeshiftForm.flags1 & 1`) does not count as "shapeshifted", so ordinary spells
+    /// stay usable in it; a true shapeshift (cat, bear, Ghost Wolf) blocks NOT_SHAPESHIFT
+    /// spells; and a form-requiring spell out of its form is refused unless AttributesEx2
+    /// bit 19 waives the requirement. `None` = castable in this form.
+    pub fn form_refusal(&self, form: u8, form_is_stance: bool) -> Option<FormRefusal> {
         let stance_bit = if form == 0 { 0 } else { 1u32 << (form - 1) };
         if self.stances_not & stance_bit != 0 {
-            return false;
+            return Some(FormRefusal::NotShapeshift);
         }
         if self.stances & stance_bit != 0 {
-            return true;
+            return None;
         }
         if form != 0 && !form_is_stance {
-            // A true shapeshift: NOT_SHAPESHIFT spells are blocked; a spell needing some
-            // other form is too.
-            self.attributes & ATTR_NOT_SHAPESHIFT == 0 && self.stances == 0
+            // A true shapeshift: NOT_SHAPESHIFT spells are blocked (0x3d); a spell needing
+            // some other form is too (0x56).
+            if self.attributes & ATTR_NOT_SHAPESHIFT != 0 {
+                Some(FormRefusal::NotShapeshift)
+            } else if self.stances != 0 {
+                Some(FormRefusal::OnlyShapeshift)
+            } else {
+                None
+            }
+        } else if self.stances != 0
+            && self.attributes_ex2 & ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED == 0
+        {
+            // Unshifted (or a stance): a form-requiring spell is refused here unless waived.
+            Some(FormRefusal::OnlyShapeshift)
         } else {
-            // Unshifted (or a stance): a form-requiring spell is unusable here unless waived.
-            self.stances == 0 || self.attributes_ex2 & ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED != 0
+            None
+        }
+    }
+}
+
+/// A [`SpellDisplay::form_refusal`] verdict — which cast-fail reason `0x612480` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormRefusal {
+    /// `SPELL_FAILED_NOT_SHAPESHIFT` (0x3d, "Can't do that while shapeshifted"): blocked by the
+    /// current form — a StancesNot hit, or a NOT_SHAPESHIFT spell in a true shapeshift.
+    NotShapeshift,
+    /// `SPELL_FAILED_ONLY_SHAPESHIFT` (0x56, "Must be in %s"): the spell requires a form the
+    /// caster is not in.
+    OnlyShapeshift,
+}
+
+impl FormRefusal {
+    /// The wire/cast-fail reason byte (the `SPELL_FAILED_*` table index).
+    pub fn reason(self) -> u8 {
+        match self {
+            FormRefusal::NotShapeshift => 0x3d,
+            FormRefusal::OnlyShapeshift => 0x56,
         }
     }
 }

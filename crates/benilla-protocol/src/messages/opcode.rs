@@ -179,6 +179,9 @@ pub const SMSG_UPDATE_AURA_DURATION: u16 = 0x0137; // 311
 /// (`Player::GiveLevel` builds it with no guid and sends straight to the leveling session). Body
 /// in [`super::progression::read_level_up_info`] — decision 0304.
 pub const SMSG_LEVELUP_INFO: u16 = 0x01D4; // 468
+/// A newly explored area — area id + the XP it granted (0 at max level). Body
+/// in [`super::progression::read_exploration_xp`] — decision 0828.
+pub const SMSG_EXPLORATION_EXPERIENCE: u16 = 0x01F8; // 504 (VERIFIED vmangos `Opcodes_1_12_1.h:505`)
 
 // The combat-log wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 464/587/590/591/592) — decision 0137
 // phase 2's floating-combat-text data feed. Bodies in [`super::spells`].

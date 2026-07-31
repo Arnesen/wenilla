@@ -669,9 +669,16 @@ pub(super) fn sync_glue_scene(
                 &mut commands,
                 em,
                 Transform::IDENTITY,
-                Some(owner),
-                None, // a backdrop scene is never an attached model
-                Some(scene.root),
+                crate::particles::EmitterFrames {
+                    owner: Some(owner),
+                    attach: None, // a backdrop scene is never an attached model
+                    anchor: Some(scene.root),
+                    // The scene root is torn down and rebuilt as a whole.
+                    on_owner_loss: crate::particles::OwnerLoss::Free,
+                    // A booth bake has no appear/despawn ramp and no self-avatar feather — its
+                    // riders are always opaque (0827).
+                    alpha: None,
+                },
                 // A glue scene loops its one authored clip forever — the doodad law.
                 crate::particles::EmitClock::Pinned,
             ) {

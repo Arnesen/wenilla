@@ -52,6 +52,12 @@ use super::{AudioListener, SoundConfig, SoundOutput};
 #[derive(Resource)]
 pub(crate) struct AreaSounds(pub(crate) AreaSoundCatalog);
 
+/// The race → exploration-jingle catalog (`ChrRaces.dbc` column 3) — the discovery sound
+/// `net::apply`'s `SMSG_EXPLORATION_EXPERIENCE` arm plays (decision 0829). Absent when the
+/// client data didn't load.
+#[derive(Resource)]
+pub(crate) struct ExplorationSounds(pub(crate) benilla_formats::ExplorationSoundCatalog);
+
 /// Day iff 05:30 ≤ clock < 21:00 (module docs — the client's hard step, B4-verified).
 /// Index into the `[day, night]` DBC pairs.
 fn phase(clock: &GameClock) -> usize {
@@ -210,6 +216,20 @@ fn load_area_sounds(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
             commands.insert_resource(AreaSounds(cat));
         }
         Err(e) => warn!("sound: zone-audio catalog failed to load: {e:#}"),
+    }
+    let loaded = {
+        let mut chain = assets.chain.lock_recover();
+        benilla_formats::load_exploration_sound_catalog(&mut chain)
+    };
+    match loaded {
+        Ok(cat) => {
+            info!(
+                "sound: {} races in the exploration-sound catalog",
+                cat.len()
+            );
+            commands.insert_resource(ExplorationSounds(cat));
+        }
+        Err(e) => warn!("sound: exploration-sound catalog failed to load: {e:#}"),
     }
 }
 

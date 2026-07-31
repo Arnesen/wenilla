@@ -6,9 +6,11 @@
 //! - **Admission** (the list build `0x4b25b0`): a KNOWN spell joins the bar when
 //!   `AttributesEx2 & 0x2 == 0` AND (it carries a `SPELL_AURA_MOD_SHAPESHIFT` apply-aura effect
 //!   OR `AttributesEx2 & 0x10` force-admits it). 5875 data: warrior stances (`ex2 0x1`), druid
-//!   forms (`0x0`), and Stealth (`0x200000`) all pass the exclusion bit; no shipped spell needs
-//!   the force-admit bit, so its aura-scan `isActive` leg reads `false` here (a named gap, not a
-//!   divergence — there is no spell to diverge on).
+//!   forms (`0x0`), and Stealth (`0x200000`) all pass the exclusion bit; **Ghost Wolf 2645
+//!   (`ex2 0x2`) is the shipped carrier of the exclusion** — a shaman faithfully gets NO stance
+//!   bar, and cancels the form at the buff frame instead (verified in the data, 2026-07-31). No
+//!   shipped spell needs the force-admit bit, so its aura-scan `isActive` leg reads `false` here
+//!   (a named gap, not a divergence — there is no spell to diverge on).
 //! - **Order** (comparator `0x4b2bb0`): ascending `Spell.dbc` `StanceBarOrder`, negative last,
 //!   spell id tiebreak. (Battle 0 / Def 1 / Berserker 2; Bear 0 … Moonkin 4; Stealth −1 → last.)
 //! - **texture**: the form SPELL's icon — `ActiveIconID` while active when nonzero (druid forms'
@@ -46,7 +48,8 @@ use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 /// `AttributesEx2` bit `0x2` — EXCLUDES a spell from the stance bar (the `0x4b25b0` gate's
-/// first leg). No shipped form spell carries it; the gate is real in the binary regardless.
+/// first leg). Ghost Wolf 2645 is the shipped carrier (module docs) — the reason a shaman has
+/// no stance bar.
 const ATTR_EX2_STANCE_BAR_EXCLUDE: u32 = 0x2;
 /// `AttributesEx2` bit `0x10` — FORCE-ADMITS a spell without a MOD_SHAPESHIFT effect (the
 /// gate's or-leg). No shipped 5875 spell uses it either.
@@ -208,19 +211,20 @@ fn drain_shapeshift_casts(
             .map(|s| s.0.unit_shapeshift_form())
             .unwrap_or(0);
         let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
-        let active =
-            form_byte != 0 && d.and_then(|d| d.shapeshift_form) == Some(u32::from(form_byte));
-        if active {
-            // The 0x4b4963 guard: a non-cancelable form (warrior stances) is a silent no-op.
-            let cancelable = spells
-                .as_ref()
-                .and_then(|s| s.forms.get(&u32::from(form_byte)))
-                .is_some_and(|r| r.cancelable());
-            if cancelable {
+        // The active-form fork — shared with the plain `CastSpell` dispatcher's twin
+        // (`crate::ui_action::toggle`): cancel unless the `0x4b4963` flags1-&-0x2 guard makes
+        // it a silent no-op (warrior stances).
+        let row = spells
+            .as_ref()
+            .and_then(|s| s.forms.get(&u32::from(form_byte)));
+        match d.and_then(|d| crate::ui_action::toggle::form_recast_disposition(d, form_byte, row)) {
+            Some(true) => {
                 debug!("ui_shapeshift: cancel form aura {spell_id}");
                 let _ = commands.0.send(ClientCommand::CancelAura { spell_id });
+                continue;
             }
-            continue;
+            Some(false) => continue,
+            None => {}
         }
         debug!("ui_shapeshift: cast form {spell_id}");
         send_spell_cast(

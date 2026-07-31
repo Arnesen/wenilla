@@ -204,6 +204,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::EnvironmentalDamageLog(s) => vec![SessionEvent::EnvironmentalDamageLog(s)],
         ServerPacket::SpellLogMiss(s) => vec![SessionEvent::SpellLogMiss(s)],
         ServerPacket::XpGain(s) => vec![SessionEvent::XpGain(s)],
+        ServerPacket::ExplorationXp(s) => vec![SessionEvent::ExplorationXp(s)],
         ServerPacket::LevelUp(l) => vec![SessionEvent::LevelUp(l)],
         ServerPacket::GossipMessage {
             npc,

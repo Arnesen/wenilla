@@ -11,13 +11,13 @@
 
 use crate::messages::{
     ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
-    EnvironmentalDamageLog, FriendEntry, FriendStatusUpdate, GossipOption, GroupLootInfo,
-    GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
-    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MonsterMoveFacing, ObjectFields,
-    PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
-    QuestOfferReward, QuestRequestItems, QuestTemplate, SpellDamageLog, SpellEnergizeLog,
-    SpellHealLog, SpellLogMiss, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
-    TransportPose, VendorItem, WhoResults, XpGain,
+    EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
+    GroupLootInfo, GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
+    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete,
+    QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate,
+    SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -587,6 +587,9 @@ pub enum SessionEvent {
     SpellLogMiss(SpellLogMiss),
     /// An XP award, kill or non-kill (`SMSG_LOG_XPGAIN`) — decision 0137 phase 2.
     XpGain(XpGain),
+    /// A first visit to an area (`SMSG_EXPLORATION_EXPERIENCE`) — the discovered area id + its
+    /// XP award; the "Discovered …" chat line's data (decision 0828).
+    ExplorationXp(ExplorationXp),
     /// Our own ding (`SMSG_LEVELUP_INFO`, self-addressed only) — decision 0304.
     LevelUp(LevelUpInfo),
     /// A gossip menu opened on an NPC (`SMSG_GOSSIP_MESSAGE`, answering our `CMSG_GOSSIP_HELLO`):

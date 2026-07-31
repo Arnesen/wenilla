@@ -17,8 +17,8 @@
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{
-    DamageShield, LevelUpInfo, PeriodicAuraLog, PeriodicTick, SpellDamageLog, SpellEnergizeLog,
-    SpellHealLog, SpellLogMiss, XpGain,
+    DamageShield, ExplorationXp, LevelUpInfo, PeriodicAuraLog, PeriodicTick, SpellDamageLog,
+    SpellEnergizeLog, SpellHealLog, SpellLogMiss, XpGain,
 };
 
 use crate::combat_text::{damage_color, miss_word, spell_text, CombatTextSpawn, DamageSource};
@@ -586,6 +586,60 @@ pub(super) fn xp_gain(
         });
     }
     chat_log.push_xp_gain(&x);
+}
+
+/// `SMSG_EXPLORATION_EXPERIENCE` → the discovery announcement (decision 0828; surfaces and
+/// sound byte-verified by the 0829 RE, wow-re `system/net/net.md`). Three legs, mirroring the
+/// real handler's case body `[0x5e41d2, 0x5e42bb]`:
+/// - the ERR_ZONE_EXPLORED toast + (xp > 0) the ERR_ZONE_EXPLORED_XP chat line, queued via
+///   [`ChatLog::push_exploration`] — the area name is the packet's `AreaTable.dbc` row id
+///   resolved through the shared catalog; a miss (no catalog, or an id the DBC doesn't know)
+///   shows no message, faithfully;
+/// - the race-keyed discovery jingle (`ChrRaces.dbc` col 3 → SoundEntries), played
+///   **unconditionally** — even when the area id resolves to nothing — through the same 2D-kit
+///   path as `SMSG_PLAY_SOUND`.
+///
+/// No floating text (the XP itself still arrives via the non-kill `SMSG_LOG_XPGAIN`).
+#[allow(clippy::too_many_arguments)] // one arm of the dispatch — its param list IS its input set
+pub(super) fn exploration_xp(
+    x: ExplorationXp,
+    area_table: Option<&crate::area::AreaTableRes>,
+    sounds: Option<&crate::sound::ExplorationSounds>,
+    index: &GuidIndex,
+    self_guid: &SelfGuid,
+    stores: &Query<&mut ObjectStore>,
+    sound_out: &mut MessageWriter<super::super::ServerSoundMessage>,
+    chat_log: &mut ChatLog,
+) {
+    let race = self_guid
+        .0
+        .as_ref()
+        .and_then(|g| index.0.get(g))
+        .and_then(|&e| stores.get(e).ok())
+        .and_then(|s| s.0.unit_race());
+    let kit = race.and_then(|r| sounds.and_then(|s| s.0.kit(u32::from(r))));
+    if let Some(kit) = kit {
+        sound_out.write(super::super::ServerSoundMessage {
+            kind: super::super::ServerSoundKind::Sound2d,
+            sound_id: kit,
+            source: None,
+        });
+    }
+    match area_table.and_then(|t| t.0.name(x.area_id)) {
+        Some(name) => {
+            info!(
+                "exploration: discovered {name} (area {}, {} xp, jingle kit {})",
+                x.area_id,
+                x.xp,
+                kit.unwrap_or(0)
+            );
+            chat_log.push_exploration(name, x.xp);
+        }
+        None => warn!(
+            "exploration: discovered area {} has no AreaTable name — no message (sound only)",
+            x.area_id
+        ),
+    }
 }
 
 /// `SMSG_LEVELUP_INFO` → the ding's chat lines (decision 0304). The talent-count arg is not on the

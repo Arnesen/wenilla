@@ -155,7 +155,9 @@ pub(in crate::entities) struct ItemGlow {
 
 /// Set once an item root's glow instances are spawned (or resolved to nothing) — the once-only
 /// gate. The instances are children of the root, so they need no lifetime bookkeeping of their
-/// own: a gear change, a sheath swap, or the unit despawning takes the root and them with it.
+/// own: a gear change or the unit despawning takes the root and them with it. A **sheath swap**
+/// keeps them: it moves the root to the new attach point (decision 0826), so a glowing weapon
+/// keeps its glow — and its live particles — across the draw.
 #[derive(Component)]
 pub(super) struct ItemGlowAttached;
 

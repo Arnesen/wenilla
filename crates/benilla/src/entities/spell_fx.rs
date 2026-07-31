@@ -503,11 +503,16 @@ pub(super) fn attach_effect_visuals(
             commands,
             em,
             Transform::IDENTITY,
-            Some(owner),
-            attach,
-            // The cloud anchors at the instance root — the emitter's bone only composes births
-            // (the food sparkle's bone orbits; the risen stars must not swirl with it).
-            Some(root),
+            particles::EmitterFrames {
+                owner: Some(owner),
+                attach,
+                // The cloud anchors at the instance root — the emitter's bone only composes births
+                // (the food sparkle's bone orbits; the risen stars must not swirl with it).
+                anchor: Some(root),
+                // An effect instance that ends mid-flight leaves its live particles to finish
+                // (the impacting missile's trail) — the DRAIN default.
+                ..default()
+            },
             // The effect's rig arms ONE clip; the emitters' rate/enabled windows ride that slot
             // (a missile's InFlight is not file-order-first), on the instance's own spawn clock.
             played_seq.map_or(
@@ -533,6 +538,8 @@ pub(super) fn attach_effect_visuals(
             // families land on the same draw-order rung, which is the property that matters.
             1.0,
             played_anim,
+            // No model-alpha source: a placed prop / effect instance is always drawn (0827).
+            None,
         );
     }
     true

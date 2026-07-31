@@ -310,6 +310,39 @@ fn drain_spell_casts(
         return;
     };
     for spell_id in script.take_spell_casts() {
+        // The `CastSpell` dispatcher's two press-again-to-cancel forks (`0x4b3300`, wow-re
+        // `shapeshift-plaincast-toggle.md`), in the ref's own order: the active-action toggle
+        // (`0x4b36f0` → cancel `0x4b3466`), then the shapeshift form-match fork
+        // (`0x4b348b`–`0x4b35e5`) with its non-cancelable silent no-op (`0x4b35cf`). This is the
+        // leg `UseAction` does NOT have — a druid's `/cast Cat Form` powershift-out and a
+        // shaman's Ghost Wolf re-cast both land here.
+        if let (Some(sp), Some(store)) = (spells.as_ref(), targeting.self_store.iter().next()) {
+            if let Some(d) = sp.catalog.get(spell_id) {
+                if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
+                    debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
+                    let _ = commands
+                        .0
+                        .send(crate::net::ClientCommand::CancelAura { spell_id });
+                    continue;
+                }
+                let form = store.0.unit_shapeshift_form();
+                let row = sp.forms.get(&u32::from(form));
+                match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
+                    Some(true) => {
+                        debug!("ui_spellbook: cast {spell_id} — the active form cancels");
+                        let _ = commands
+                            .0
+                            .send(crate::net::ClientCommand::CancelAura { spell_id });
+                        continue;
+                    }
+                    Some(false) => {
+                        debug!("ui_spellbook: cast {spell_id} — non-cancelable form, silent no-op");
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+        }
         debug!(
             "ui_spellbook: cast {spell_id} (target {:?})",
             targeting.selection.guid

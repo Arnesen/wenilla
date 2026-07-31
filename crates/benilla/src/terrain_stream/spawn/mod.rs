@@ -34,6 +34,12 @@ use super::{
     ShadeResolve, TerrainStreamer, WmoDoodadInst, SPAWN_BUDGET,
 };
 
+/// Placements (models or WMO props) spawned per frame while live — the count half of the landing
+/// budget; see the cap's comment in [`spawn_loaded_placements`]. ~150 × the measured ~50 µs
+/// downstream cost per landed placement ≈ half a 60 Hz frame of render-side work, and a fresh
+/// Undercity row (~3900 placements) fully furnishes in under half a second, two tiles out.
+const SPAWN_COUNT_CAP: usize = 150;
+
 /// Spawn the submesh entities for any placement whose model asset has finished loading. Each submesh
 /// gets the production [`WowModelMaterial`] (cutout + blend twin) and the same `ModelPart`/`DoodadFade`/
 /// `MeshTag` components the old spawn used — so the existing visibility/fade/lighting systems take over.
@@ -58,13 +64,31 @@ pub(super) fn spawn_loaded_placements(
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
     // Nested to stay inside Bevy's 16-element system-param tuple limit: the prop-probe table +
-    // the skin-palette table (decision 0720).
-    tables: (ResMut<PropProbes>, ResMut<crate::rig_palette::RigPalettes>),
+    // the skin-palette table (decision 0720) + the stream-trace counters + the live/settling
+    // state the landing cap reads.
+    tables: (
+        ResMut<PropProbes>,
+        ResMut<crate::rig_palette::RigPalettes>,
+        ResMut<crate::perf::StreamActivity>,
+        Option<Res<crate::player::Player>>,
+    ),
 ) {
-    let (mut probes, mut palettes) = tables;
+    let (mut probes, mut palettes, mut activity, player) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
+    let t0 = Instant::now();
+    // The landing COUNT cap (B181), on top of the time budget below. The clock gates main-thread
+    // cost — but ~1000 one-submesh doodads pass a 4 ms budget in 2.5 ms and hand the render world
+    // their whole extract/specialize/upload wave in one frame: the measured 60–80 ms landing
+    // frame when a fresh Undercity row streams in. Counting bounds the downstream wave the clock
+    // cannot see. Idle until the body is live-and-settled — the entry/teleport cover exists to
+    // absorb exactly this burst, and capping under it would only lengthen the reveal.
+    let count_cap = match player.as_deref() {
+        Some(p) if p.active && !p.settling && !p.world_stale => SPAWN_COUNT_CAP,
+        _ => usize::MAX,
+    };
+    let mut spawned_n = 0usize;
     // The animated-doodad clock origin (decision 0130): per-instance phase = spawn time, as in the
     // reference (the arm-time cursor offset), and the draw gate seeks against it on resume.
     let now = time.elapsed_secs();
@@ -380,9 +404,11 @@ pub(super) fn spawn_loaded_placements(
             };
             p.spawned = true;
             p.entities = entities;
+            activity.placements_spawned += 1;
+            spawned_n += 1;
             // Spent the frame's spawn budget on this model (a WMO with two collider meshes is the
             // costly case) — defer the rest, including this placement's WMO props, to next frame.
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline || spawned_n >= count_cap {
                 break 'placements;
             }
         }
@@ -531,11 +557,14 @@ pub(super) fn spawn_loaded_placements(
             );
             p.entities.extend(ents);
             d.spawned = true;
-            if Instant::now() >= deadline {
+            activity.placements_spawned += 1;
+            spawned_n += 1;
+            if Instant::now() >= deadline || spawned_n >= count_cap {
                 break 'placements;
             }
         }
     }
+    activity.spawn_ms += t0.elapsed().as_secs_f32() * 1000.0;
 }
 
 /// Resolve a WMO instance's visible doodad props: the global set (0, always shown) plus the

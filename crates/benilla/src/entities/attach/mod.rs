@@ -1026,9 +1026,20 @@ pub(super) fn attach_entity_visuals(
                         &mut commands,
                         em,
                         placement,
-                        Some(owner),
-                        None, // a unit's OWN model is not an attached model (`[model+0x17c]` = 0)
-                        Some(entity), // the cloud anchors at the unit; bones compose births only
+                        particles::EmitterFrames {
+                            owner: Some(owner),
+                            // A unit's OWN model is not an attached model (`[model+0x17c]` = 0).
+                            attach: None,
+                            // The cloud anchors at the unit; bones compose births only.
+                            anchor: Some(entity),
+                            // The unit's model going away IS this emitter's model going away
+                            // (stream-out, a visual rebuild) — free the pool with it (0826).
+                            on_owner_loss: particles::OwnerLoss::Free,
+                            // The unit IS the model instance here, so its own render alpha
+                            // (appear ramp, stream-out ramp, the self-avatar feather) multiplies
+                            // its clouds — decision 0827.
+                            alpha: Some(entity),
+                        },
                         // The emitters' rate/enabled read this instance's PLAYING sequence — a
                         // unit's or GameObject's `AnimationPlayer` on the root. A quest object's
                         // explosion is authored inside its one-shot clips with an OFF window at
@@ -1066,6 +1077,8 @@ pub(super) fn attach_entity_visuals(
                         use_pivot,
                         placement.scale.max_element(),
                         None,
+                        // The unit's own render alpha gates its trail (0827).
+                        Some(entity),
                     );
                 }
             }

@@ -11,7 +11,7 @@ use super::buffer::{EffectDrawSpec, EffectFog, EffectLightOverride, EffectQuads}
 use super::quads::{expand_quads, CamBasis, DrawFrame};
 use super::{
     accumulate_emission, emit_local, next_u32, rand01, rand_s11, ChildDraw, ChildEmitter,
-    EmitterFade, Particle, ParticleEmitter, ParticleTuning, MAX_PARTICLES,
+    EmitterFade, OwnerLoss, Particle, ParticleEmitter, ParticleTuning, MAX_PARTICLES,
 };
 
 /// The emitter-constant inputs of one integrator step ([`integrate_particle`]).
@@ -162,19 +162,26 @@ fn drive_child(
     }
 }
 
+/// The **draw-set gate's** scene inputs, bundled: the far-clip wall the gate bounds emitters at
+/// (0678) and the exterior-window test a WMO interior applies to everything outside it (0786),
+/// with the camera's own room as its one exemption. One `SystemParam` because they are read
+/// together, at one place, and Bevy caps a system at 16 parameters.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SceneGates<'w> {
+    view: Res<'w, crate::view::ViewDistance>,
+    exterior_windows: Res<'w, crate::wmo_portal::ExteriorWindows>,
+    camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
+}
+
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
 /// stream ([`super::buffer::EffectQuads`]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn simulate_particles(
     time: Res<Time>,
     tuning: Res<ParticleTuning>,
-    // The far-clip wall — the emitter draw-set gate's depth bound (see the gate below).
-    view: Res<crate::view::ViewDistance>,
-    // …and the gate's exterior-window term (0786): from inside a WMO, a doodad outside is not in
-    // the frame's worklist, so its emitter must not tick. `camera_claim` carries the one exemption —
-    // a prop of the building the camera is standing in.
-    exterior_windows: Res<crate::wmo_portal::ExteriorWindows>,
-    camera_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
+    // The draw-set gate's scene inputs — the far-clip wall (0678) and the exterior window test
+    // (0786); see [`SceneGates`].
+    gates: SceneGates,
     mut commands: Commands,
     cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
@@ -195,6 +202,8 @@ pub(super) fn simulate_particles(
     // The ground-snap probe (file 0x2000 births): terrain + WMO/doodad geometry, the walking
     // collision audience.
     spatial: SpatialQuery,
+    // The per-model render alpha an entity-owned cloud is multiplied by (decision 0827).
+    model_alphas: Query<&crate::model_fade::ModelAlpha>,
     // `Without<WorldCamera>`: the `&mut GlobalTransform` must be provably disjoint from the
     // camera read above too (an emitter never rides the camera entity).
     mut emitters: Query<
@@ -248,9 +257,11 @@ pub(super) fn simulate_particles(
     let cam_fwd = Vec3::from(cam_tf.forward());
     // The exterior gate, built once for the whole emitter walk — the same value the model
     // visibility authority and `exterior_cull` ask (0784/0786: one spelling of the window test).
-    let exterior_gate =
-        crate::exterior_cull::ExteriorGate::build(&exterior_windows, Some((cam_tf, projection)));
-    let camera_instance = camera_claim.0.map(|c| c.room.instance);
+    let exterior_gate = crate::exterior_cull::ExteriorGate::build(
+        &gates.exterior_windows,
+        Some((cam_tf, projection)),
+    );
+    let camera_instance = gates.camera_claim.0.map(|c| c.room.instance);
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
     let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
 
@@ -296,7 +307,7 @@ pub(super) fn simulate_particles(
             let in_set = f.in_draw_set(
                 cam_pos,
                 cam_fwd,
-                view.farclip,
+                gates.view.farclip,
                 // Lateral planes only (`intersect_far = false`) — the depth bound is the farclip
                 // term inside `in_draw_set`, deliberately; see `view::within_farclip`.
                 frustum.intersects_sphere(
@@ -357,7 +368,7 @@ pub(super) fn simulate_particles(
                 None => Some(emitter.anchor_pos),
             };
             if let Some(at) = subject {
-                if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, at, 0.0) {
+                if !crate::view::within_farclip(gates.view.farclip, cam_pos, cam_fwd, at, 0.0) {
                     if !emitter.gated {
                         emitter.gated = true;
                         for slot in &emitter.model_instances {
@@ -377,9 +388,12 @@ pub(super) fn simulate_particles(
             def,
             placement,
             owner,
+            on_owner_loss,
             draining,
             attach,
             attach_rot,
+            alpha_src,
+            alpha,
             anchor,
             anchor_pos,
             particles,
@@ -416,7 +430,38 @@ pub(super) fn simulate_particles(
                 Ok(gt) => *placement = gt.compute_transform(),
                 Err(_) => {
                     *owner = None;
-                    *draining = true;
+                    match *on_owner_loss {
+                        // The owner MODEL is gone, so its effects go with it — the reference frees
+                        // a model's emitters at its dtor (decision 0826). Nothing to drain: an
+                        // unequipped torch's flame does not stay behind in the air.
+                        OwnerLoss::Free => {
+                            for slot in model_instances.iter() {
+                                for (e, _) in &slot.meshes {
+                                    commands.entity(*e).despawn();
+                                }
+                            }
+                            commands.entity(entity).despawn();
+                            continue;
+                        }
+                        OwnerLoss::Drain => {
+                            *draining = true;
+                            // The ghost-cloud event, named so a run can count it: this pool now
+                            // lives out its lifespans FROZEN in world space. Right for an effect
+                            // that ended in place (a missile impact), and the reason `Free` exists
+                            // for everything that is a model teardown.
+                            if !particles.is_empty() {
+                                debug!(
+                                    "fx orphan: emitter {entity} ({}) lost its owner with {} \
+                                     live particles frozen at {:?}",
+                                    texture
+                                        .path()
+                                        .map_or_else(|| "<no path>".into(), |p| p.to_string()),
+                                    particles.len(),
+                                    *anchor_pos
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -437,6 +482,16 @@ pub(super) fn simulate_particles(
                 *attach_rot = rot;
             }
         }
+        // The MODEL's render alpha for this frame (decision 0827 — the reference's per-frame
+        // `emitter+0x1a8 = Model+0x19c` copy at `0x718960` @`0x719073`). Two disjoint sources, the
+        // same slot the reference writes both through: an entity-owned cloud takes its model
+        // instance's [`crate::model_fade::ModelAlpha`] (an item's is its WEARER's — an attached
+        // model inherits the parent's), and a placed doodad's takes its own distance fade, whose
+        // cutoff the draw-set gate above already applies as a hard stop.
+        *alpha = alpha_src
+            .and_then(|e| model_alphas.get(e).ok())
+            .map_or(1.0, |a| a.0)
+            * fade.map_or(1.0, |f| f.distance_alpha(cam_pos));
         let attach_inv = attach_rot.inverse();
         // The cloud anchor (see the field doc): the model's live translation, or the last-known
         // one while the pool drains. A whole-model owner keeps anchor == owner — identical math.
@@ -743,6 +798,7 @@ pub(super) fn simulate_particles(
             anchored,
             anchor,
             attach_rot: *attach_rot,
+            alpha: *alpha,
         };
         let cam = CamBasis {
             right: e_right,

@@ -365,6 +365,7 @@ fn stream_terrain(
         ResMut<Assets<Mesh>>,
         Res<Assets<WdtIndex>>,
         Res<Time>,
+        ResMut<crate::perf::StreamActivity>,
     ),
     liquid_assets: Option<Res<LiquidAssets>>,
     clutter: Option<Res<GroundClutter>>,
@@ -383,13 +384,14 @@ fn stream_terrain(
     ),
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
 ) {
-    let (mut materials, mut meshes, wdts, time) = asset_stores;
+    let (mut materials, mut meshes, wdts, time, mut activity) = asset_stores;
     let (current_map, map_catalog, roster) = location;
     // The shared light buffer + map catalog are set up by other plugins' startup; until they exist
     // there's nothing to stream against, so idle.
     let (Some(shared_light), Some(map_catalog)) = (shared_light, map_catalog) else {
         return;
     };
+    let t0 = Instant::now();
     let placements = placements.into_inner();
     let map_id = focus_map(
         current_map.map(|m| m.0),
@@ -412,7 +414,7 @@ fn stream_terrain(
             state.map_dir,
             state.tiles.len()
         );
-        drop_streamed_world(&mut commands, &mut state, placements);
+        drop_streamed_world(&mut commands, &mut state, placements, &mut activity);
         state.map_dir = Some(dir.clone());
         state.wdt = Some(asset_server.load(format!("mpq://World/Maps/{dir}/{dir}.wdt")));
         state.wdt_ungated = false;
@@ -488,18 +490,53 @@ fn stream_terrain(
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
     }
 
-    // Unload tiles no longer desired: despawn the terrain entity, release the placements, drop the handle.
-    let stale: Vec<(i32, i32)> = state
-        .tiles
-        .keys()
-        .copied()
-        .filter(|c| !desired.contains(c))
-        .collect();
+    // Unload tiles no longer desired: despawn the terrain entity, release the placements, drop the
+    // handle. **Budgeted per frame** (B181): dropping the whole trailing row on the crossing frame
+    // freed ~1300 mesh assets — each tile's 256 chunk cells, CPU copies included — plus the tiles'
+    // decoded chunks and their placements' models, all in one frame. Measured (`WOW_STREAM_TRACE`,
+    // Emerald Dream flat-map pin): that free wave is the 2–3-dropped-interval spike on every ADT
+    // boundary crossing, while this chain's own systems — request, spawn, collider attach, each
+    // already budgeted — stayed under 3 ms. So the drop lane gets the same treatment: at most
+    // `unload_budget` tiles release per frame, farthest from the focus first. The un-drained
+    // remainder just stays resident a few frames longer — behind the direction of travel, and a
+    // re-cross inside the drain window finds its tile still loaded (no re-decode, no re-spawn).
+    // A cross-map swap is NOT budgeted (`drop_streamed_world` above): the loading screen covers
+    // it, and holding a dead map's tiles through a fresh map's IO burst helps nothing.
+    // **The keep-band** (B181): a tile is requested inside `radius` but released only past
+    // `radius + 1` — one tile of hysteresis. Without it, a body straddling a tile line cycles a
+    // whole row per step: the reporter's own minimal repro (`.go` half a yard across, and back)
+    // re-decoded and re-spawned five tiles each way, and the row's landing — not the streamer's
+    // own budgeted systems — is the frame spike (a fresh Undercity row lands ~3900 placements
+    // and ~1300 mesh assets). A band tile stays fully resident, so a re-cross finds it and
+    // streams NOTHING; the band's dedup entries need no art-sweep accommodation (0793's
+    // `radius_floor` is about art the streamer will re-fetch — a band tile is already spawned
+    // and never re-consults the caches).
+    //
+    // Ablation switch (`WOW_NO_TILE_DROP=1`): never release stale tiles — a crossing becomes a
+    // pure asset-ADD event and a re-cross a pure no-op, separating the load lane from the free
+    // lane when measuring a streaming cost. Residency grows for the life of the run; dev-only.
+    let unload_budget = cfg.as_ref().map(|c| c.unload_budget).unwrap_or(1);
+    let keep = radius + 1;
+    let mut stale: Vec<(i32, i32)> = if std::env::var("WOW_NO_TILE_DROP").is_ok() {
+        Vec::new()
+    } else {
+        state
+            .tiles
+            .keys()
+            .copied()
+            .filter(|&(tx, ty)| (tx - cx).abs().max((ty - cy).abs()) > keep)
+            .collect()
+    };
+    if unload_budget > 0 && stale.len() > unload_budget {
+        stale.sort_by_key(|&(tx, ty)| std::cmp::Reverse((tx - cx).abs().max((ty - cy).abs())));
+        stale.truncate(unload_budget);
+    }
     for c in stale {
         if let Some(t) = state.tiles.remove(&c) {
             despawn_tile_owned(&mut commands, &t);
+            activity.tiles_dropped += 1;
             for uid in t.placements {
-                release_placement(&mut commands, placements, uid);
+                release_placement(&mut commands, placements, uid, &mut activity);
             }
         }
     }
@@ -507,15 +544,38 @@ fn stream_terrain(
     // Request newly-desired tiles (the `AssetServer` dedups, so re-requesting a loaded one is
     // free) — only once the WDT has answered (or failed into the ungated fallback): a request
     // fired before the index lands could probe a tile that doesn't exist.
+    //
+    // **Staggered while live** (B181): a whole fresh row requested in one frame decodes in
+    // parallel and LANDS near-together — ~1300 mesh assets plus the texture arrays hitting the
+    // render world's prepare in one or two frames, a wave no app-side budget downstream of the
+    // request can spread. One fresh request per frame, nearest first, staggers the landings for
+    // the only cost of the window edge (~2 tiles out, in fog) filling over a few frames. World
+    // entry and teleports stay unstaggered: the loading screen exists to absorb that burst, and
+    // the settle release waits on exactly these tiles.
     if wdt_index.is_some() || state.wdt_ungated {
-        for &(tx, ty) in &desired {
-            state.tiles.entry((tx, ty)).or_insert_with(|| TileState {
-                handle: asset_server.load(format!("mpq://World/Maps/{dir}/{dir}_{tx}_{ty}.adt")),
-                entity: None,
-                placements: Vec::new(),
-                liquid: Vec::new(),
-                clutter: Vec::new(),
-            });
+        let live = player.active && !player.settling && !player.world_stale;
+        let mut fresh: Vec<(i32, i32)> = desired
+            .iter()
+            .copied()
+            .filter(|c| !state.tiles.contains_key(c))
+            .collect();
+        if live && fresh.len() > 1 {
+            fresh.sort_by_key(|&(tx, ty)| (tx - cx).abs().max((ty - cy).abs()));
+            fresh.truncate(1);
+        }
+        for (tx, ty) in fresh {
+            activity.tiles_requested += 1;
+            state.tiles.insert(
+                (tx, ty),
+                TileState {
+                    handle: asset_server
+                        .load(format!("mpq://World/Maps/{dir}/{dir}_{tx}_{ty}.adt")),
+                    entity: None,
+                    placements: Vec::new(),
+                    liquid: Vec::new(),
+                    clutter: Vec::new(),
+                },
+            );
         }
     }
 
@@ -553,19 +613,26 @@ fn stream_terrain(
         // every portal window, so it could never be hidden), and it also gives Bevy's own frustum cull
         // something smaller than half a kilometre to reject. Despawning the root takes the cells.
         let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
-        tile_ent.with_children(|cells| {
-            for mesh in &adt.chunk_meshes {
-                cells.spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::IDENTITY, // chunk meshes are already in absolute world coords
-                    // ADT terrain is exterior scene: from inside a WMO a cell draws only through a
-                    // portal window (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see
-                    // `crate::exterior_cull`).
-                    crate::exterior_cull::ExteriorScene,
-                ));
-            }
-        });
+        // Ablation switch (`WOW_NO_TILE_CELLS=1`): spawn the tile — asset residency, collider,
+        // placements, liquid, clutter — without its per-chunk cell entities, isolating the
+        // render-entity lane from the asset lane when measuring a streaming cost. The B181 carve
+        // ran on it (a crossing's spike survived zero cells, exonerating the entity lane); the
+        // `WOW_NO_LIQUID`/`WOW_NO_PARTICLES` family's pattern.
+        if std::env::var("WOW_NO_TILE_CELLS").is_err() {
+            tile_ent.with_children(|cells| {
+                for mesh in &adt.chunk_meshes {
+                    cells.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        Transform::IDENTITY, // chunk meshes are already in absolute world coords
+                        // ADT terrain is exterior scene: from inside a WMO a cell draws only through a
+                        // portal window (`0x683bf0`, fed solely by the per-window walk `0x682fa0` — see
+                        // `crate::exterior_cull`).
+                        crate::exterior_cull::ExteriorScene,
+                    ));
+                }
+            });
+        }
         if let Some((verts, tris)) = collider_data {
             // `GroundDecalSurface`: terrain receives the selection ring (see `crate::collision`).
             // `PickOccluder`: terrain clamps the mouse pick (the reference's world trace).
@@ -576,6 +643,7 @@ fn stream_terrain(
             ));
         }
         tile.entity = Some(tile_ent.id());
+        activity.tiles_spawned += 1;
 
         // Register this tile's doodad/WMO placements (deduped + refcounted by uniqueId across tiles).
         // The MCSH ground-shade is NOT sampled here: a doodad straddles several tiles and this one may
@@ -719,6 +787,7 @@ fn stream_terrain(
             }
         }
     }
+    activity.stream_ms += t0.elapsed().as_secs_f32() * 1000.0;
 }
 
 /// Register one M2 doodad placement: bump the refcount if it's already known, else load its model and
@@ -791,15 +860,17 @@ fn drop_streamed_world(
     commands: &mut Commands,
     state: &mut TerrainStreamer,
     placements: &mut Placements,
+    activity: &mut crate::perf::StreamActivity,
 ) {
     for ((_tx, _ty), t) in state.tiles.drain() {
         despawn_tile_owned(commands, &t);
+        activity.tiles_dropped += 1;
         for uid in t.placements {
-            release_placement(commands, placements, uid);
+            release_placement(commands, placements, uid, activity);
         }
     }
     if std::mem::take(&mut state.global_wmo) {
-        release_placement(commands, placements, GLOBAL_WMO_UID);
+        release_placement(commands, placements, GLOBAL_WMO_UID, activity);
     }
     placements.materials.clear();
 }
@@ -826,6 +897,7 @@ fn release_world(
     mut state: ResMut<TerrainStreamer>,
     mut placements: ResMut<Placements>,
     mut progress: Option<ResMut<WorldLoadProgress>>,
+    mut activity: ResMut<crate::perf::StreamActivity>,
 ) {
     if state.tiles.is_empty() && state.map_dir.is_none() {
         return;
@@ -834,7 +906,7 @@ fn release_world(
         "terrain: leaving the world — releasing {} tiles",
         state.tiles.len()
     );
-    drop_streamed_world(&mut commands, &mut state, &mut placements);
+    drop_streamed_world(&mut commands, &mut state, &mut placements, &mut activity);
     state.map_dir = None;
     state.wdt = None;
     state.wdt_ungated = false;
@@ -872,7 +944,12 @@ fn sync_interior_volumes(placements: Res<Placements>, mut vols: ResMut<WmoReside
 
 /// A tile referencing this placement unloaded: drop one ref, despawning its entities (render submeshes
 /// + the avian collider entity) at zero — the collider rides the placement's entity lifecycle.
-fn release_placement(commands: &mut Commands, placements: &mut Placements, uid: u32) {
+fn release_placement(
+    commands: &mut Commands,
+    placements: &mut Placements,
+    uid: u32,
+    activity: &mut crate::perf::StreamActivity,
+) {
     let drop_it = match placements.by_id.get_mut(&uid) {
         Some(p) => {
             p.refs -= 1;
@@ -882,6 +959,8 @@ fn release_placement(commands: &mut Commands, placements: &mut Placements, uid: 
     };
     if drop_it {
         if let Some(p) = placements.by_id.remove(&uid) {
+            activity.placements_dropped += 1;
+            activity.placement_entities_dropped += p.entities.len() as u32;
             for e in p.entities {
                 commands.entity(e).try_despawn();
             }

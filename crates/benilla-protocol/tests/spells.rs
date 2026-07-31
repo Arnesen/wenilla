@@ -590,8 +590,8 @@ fn spell_go_surfaces_the_gameobject_target() {
 #[test]
 fn combat_log_wire_golden() {
     use benilla_protocol::messages::{
-        DamageShield, EnvironmentalDamageLog, LevelUpInfo, PeriodicAuraLog, PeriodicTick,
-        SpellDamageLog, SpellLogMiss, XpGain,
+        DamageShield, EnvironmentalDamageLog, ExplorationXp, LevelUpInfo, PeriodicAuraLog,
+        PeriodicTick, SpellDamageLog, SpellLogMiss, XpGain,
     };
 
     let creature = 0xF130_0000_4500_002Au64; // packs mask 0xC9 (same fixture guid as elsewhere)
@@ -857,6 +857,31 @@ fn combat_log_wire_golden() {
     match decode(packet).pop().unwrap() {
         SessionEvent::XpGain(x) => assert_eq!((x.victim, x.total, x.kill), (0, 50, false)),
         other => panic!("xp gain event, got {other:?}"),
+    }
+
+    // SMSG_EXPLORATION_EXPERIENCE: areaId u32 (an AreaTable.dbc row id) + xp u32 — exactly
+    // 8 bytes (VERIFIED vmangos Misc.cpp:552-556; sent even when xp is 0). The vector is
+    // Westfall (area 40) worth 85 xp.
+    let mut body = 40u32.to_le_bytes().to_vec();
+    body.extend_from_slice(&85u32.to_le_bytes());
+    assert_eq!(body.len(), 8);
+    let packet =
+        messages::parse_server(messages::opcode::SMSG_EXPLORATION_EXPERIENCE, &body).unwrap();
+    match &packet {
+        ServerPacket::ExplorationXp(x) => {
+            assert_eq!(
+                x,
+                &ExplorationXp {
+                    area_id: 40,
+                    xp: 85,
+                }
+            );
+        }
+        other => panic!("exploration xp, got {}", other.name()),
+    }
+    match decode(packet).pop().unwrap() {
+        SessionEvent::ExplorationXp(x) => assert_eq!((x.area_id, x.xp), (40, 85)),
+        other => panic!("exploration xp event, got {other:?}"),
     }
 
     // SMSG_LEVELUP_INFO: twelve u32 — level, healthGain, powerGains[5] (mana..happiness),

@@ -117,8 +117,12 @@ pub struct ParticleEmitter {
     /// moving prop) and **drains** once the owner is gone. `None` for terrain doodads, which carry
     /// a fixed placement and despawn with their placement instead.
     owner: Option<Entity>,
-    /// The owner died (missile impacted, effect reaped): emission stops, the pool lives out its
-    /// lifespans at the frozen placement, and the emitter despawns itself when empty — live
+    /// What losing [`Self::owner`] means for this emitter — the spawn site's call, because only it
+    /// knows whether the owner entity going away is a MODEL BEING DESTROYED or an effect ending
+    /// (see [`OwnerLoss`]).
+    on_owner_loss: OwnerLoss,
+    /// The owner died and this emitter is [`OwnerLoss::Drain`]: emission stops, the pool lives out
+    /// its lifespans at the frozen placement, and the emitter despawns itself when empty — live
     /// particles finish instead of popping. Byte ground (wow-re
     /// `ribbon-basis-emitter-lifecycle`, the 0202 dispatch's fold-back): the reference frees
     /// emitters synchronously at the model dtor, its fade coming from the model staying alive
@@ -137,6 +141,16 @@ pub struct ParticleEmitter {
     /// The live attach rotation (identity when [`Self::attach`] is `None` or gone) — refreshed
     /// each frame before births/draw.
     attach_rot: Quat,
+    /// The model instance whose [`crate::model_fade::ModelAlpha`] this cloud is multiplied by —
+    /// the reference's `emitter+0x1a8`, a per-frame copy of that model's `+0x19c` (`0x718960`
+    /// @`0x719073`), folded into each particle's ALPHA by the over-life sampler (`0x7b9b10`
+    /// @`0x7b9b42`; wow-re `part-scene-multipliers.md` §4's REFUTED negative + `part-additive-
+    /// combine.md` §6.1). For an ATTACHED model — a held item, a helm, a pauldron — it is the
+    /// WEARER's, because an attached model inherits its parent's computed alpha (decision 0827).
+    /// `None` ⇒ 1.0: a placed doodad instead multiplies its own distance fade ([`EmitterFade`]).
+    alpha_src: Option<Entity>,
+    /// This frame's value of that alpha (1.0 until read).
+    alpha: f32,
     /// The **cloud anchor** for anchored mode: the entity whose live translation carries the
     /// live pool (the MODEL — a creature root, an effect-instance root, a held item's root),
     /// NOT the emitter's bone joint. The joint composes each particle's birth (position and
@@ -245,13 +259,49 @@ impl ChildEmitter {
     }
 }
 
+/// What becomes of a live pool when its owner entity goes away — the distinction the sim itself
+/// cannot make, because from inside it a despawned owner looks the same either way (decision 0826).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OwnerLoss {
+    /// The owner MODEL was destroyed: **free the emitter with it**, live particles and all. This
+    /// is the reference's own rule — a model's emitters are released synchronously at its dtor
+    /// (wow-re `ribbon-basis-emitter-lifecycle`) — and it is what an equipped item that is
+    /// replaced/unequipped, or a unit that streams out, must do. Draining instead left the cloud
+    /// hanging in world space for a whole lifespan while the character walked away from it.
+    Free,
+    /// The owner was reaped but the effect should finish: emission stops and the pool lives out
+    /// its lifespans at the frozen placement (a missile that impacted, a spell effect that
+    /// ended — the reference's model outliving its emitters while they drain). The default,
+    /// because it is what every pre-0826 caller got.
+    #[default]
+    Drain,
+}
+
+/// The live frames an emitter rides — bundled so a call site names each one instead of passing a
+/// row of positional `Option<Entity>`s (they are easy to swap and impossible to tell apart at the
+/// call). See the matching [`ParticleEmitter`] fields for what each frame does.
+#[derive(Clone, Copy, Default)]
+pub struct EmitterFrames {
+    /// The entity whose live transform is this emitter's placement: `(entity, [0; 3])` for a
+    /// streamed creature/GameObject/held item (the whole model rides), or `(joint, bone_pivot)`
+    /// for an emitter riding its animated bone (0130 phase 4 — the pivot rebases the model-space
+    /// `def.position` into the joint's own frame, so an unanimated chain reproduces the static
+    /// path exactly). `None` for a static doodad (fixed placement, despawned by the placement's
+    /// own entity list).
+    pub owner: Option<(Entity, [f32; 3])>,
+    /// The attachment matrix `A` frame ([`ParticleEmitter::attach`]).
+    pub attach: Option<Entity>,
+    /// The cloud anchor — the MODEL, never the bone ([`ParticleEmitter::anchor`]).
+    pub anchor: Option<Entity>,
+    /// The MODEL INSTANCE whose render alpha multiplies these particles
+    /// ([`ParticleEmitter::alpha_src`]).
+    pub alpha: Option<Entity>,
+    /// What losing `owner` means ([`OwnerLoss`]).
+    pub on_owner_loss: OwnerLoss,
+}
+
 /// Spawn an emitter entity for one [`ModelEmitter`] at `placement`. `None` if the emitter has no
-/// resolved texture (nothing to draw). `owner` ties the emitter to a live entity's frame — it follows
-/// that entity's transform each frame and despawns with it: `(entity, [0; 3])` for a streamed
-/// creature/GameObject (the whole model rides), or `(joint, bone_pivot)` for a doodad emitter riding
-/// its animated bone (0130 phase 4 — the pivot rebases the model-space `def.position` into the
-/// joint's own frame, so an unanimated chain reproduces the static path exactly). Pass `None` for a
-/// static doodad (fixed placement, despawned by the placement's own entity list).
+/// resolved texture (nothing to draw); `frames` ties it to the live entities it rides.
 impl ParticleEmitter {
     /// Live particle count — read by the perf probe ([`crate::capture`]).
     pub(crate) fn live(&self) -> usize {
@@ -279,6 +329,22 @@ impl ParticleEmitter {
     /// of a model's emitters in the one bracket; sharing this number is what says so.
     pub(super) fn owner_rung(&self) -> f32 {
         owner_last_bias(self.owner_reach)
+    }
+
+    /// Is this emitter in the frame's draw set — i.e. did the draw-set gate let it tick and push
+    /// quads this frame? The instrument-side spelling of [`Self::gated`], read by the particle
+    /// census probe. (It read the entity's `Visibility` until slice P2 (0733) moved the family onto
+    /// the shared stream and emitter entities stopped carrying one — after which the probe's query
+    /// matched NOTHING and every column it printed, including B39's `drawn_beyond_wall` guard, was
+    /// a vacuous zero.)
+    pub(crate) fn drawn(&self) -> bool {
+        !self.gated
+    }
+
+    /// This frame's MODEL render alpha ([`Self::alpha_src`]) — read by the MODEL-particle lane,
+    /// whose instances carry their alpha in a `MeshTag` rather than a vertex colour.
+    pub(super) fn render_alpha(&self) -> f32 {
+        self.alpha
     }
 
     /// The cloud's live world anchor — the census probe's fallback distance subject for an emitter
@@ -376,6 +442,16 @@ pub struct EmitterFade {
 }
 
 impl EmitterFade {
+    /// This owner's distance-fade ALPHA (not the cutoff): the reference writes it into the
+    /// doodad's `CM2Model+0x180`, so it multiplies that model's particles exactly as it does its
+    /// batches (`FUN_00683f80` → `+0x180` → `+0x19c` → `emitter+0x1a8`, decision 0827). The
+    /// [`Self::in_draw_set`] gate is the same curve's zero crossing — this is the feather before
+    /// it, which is why a small prop's flame now thins out over its band instead of cutting.
+    pub fn distance_alpha(&self, cam_pos: Vec3) -> f32 {
+        let (dx, dz) = (self.center.x - cam_pos.x, self.center.z - cam_pos.z);
+        crate::model_fade::doodad_fade_alpha(self.radius, (dx * dx + dz * dz).sqrt())
+    }
+
     /// The **draw-set admission rule** in one place: is the owner doodad in the frame's scene
     /// worklist, and therefore does its emitter tick and draw this frame?
     ///
@@ -428,14 +504,11 @@ impl EmitterFade {
     }
 }
 
-#[allow(clippy::too_many_arguments)] // the spawn's full wiring: the owner/attach/anchor frames
 pub fn spawn_emitter(
     commands: &mut Commands,
     emitter: &ModelEmitter,
     placement: Transform,
-    owner: Option<(Entity, [f32; 3])>,
-    attach: Option<Entity>,
-    anchor: Option<Entity>,
+    frames: EmitterFrames,
     clock: EmitClock,
 ) -> Option<Entity> {
     // Perf-bisect kill-switch: $WOW_NO_PARTICLES spawns no emitters at all.
@@ -451,7 +524,7 @@ pub fn spawn_emitter(
         None => return None,
     };
     let mut def = emitter.def.clone();
-    let owner = owner.map(|(entity, pivot)| {
+    let owner = frames.owner.map(|(entity, pivot)| {
         // Rebase the model-space emitter origin into the owner frame (bone-local for a joint owner;
         // pivot = 0 leaves it model-space for a whole-model owner). Same raw WoW axes throughout —
         // the sim composes `def.position` with the owner's live transform at each birth.
@@ -491,10 +564,13 @@ pub fn spawn_emitter(
                     def,
                     placement,
                     owner,
+                    on_owner_loss: frames.on_owner_loss,
                     draining: false,
-                    attach,
+                    attach: frames.attach,
                     attach_rot: Quat::IDENTITY,
-                    anchor,
+                    alpha_src: frames.alpha,
+                    alpha: 1.0,
+                    anchor: frames.anchor,
                     anchor_pos: placement.translation,
                     particles: Vec::new(),
                     accumulator: 0.0,

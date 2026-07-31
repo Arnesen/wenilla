@@ -85,6 +85,7 @@ pub(super) fn finish_colliders(
     // The walk itself covers the whole set regardless (it is the ~0.005 ms part) — it also yields
     // the queue-depth publish below.
     const READY_SCAN_CAP: usize = 2048;
+    let t0 = Instant::now();
     let mut ready: Vec<Entity> = Vec::new();
     let mut pending = 0usize;
     for (entity, mut pc) in state.get_mut(world).iter_mut() {
@@ -110,12 +111,17 @@ pub(super) fn finish_colliders(
         progress.colliders_pending = pending;
     }
     if ready.is_empty() {
+        // `get_`: the unit tests below drive this system on a minimal App without the perf layer.
+        if let Some(mut activity) = world.get_resource_mut::<crate::perf::StreamActivity>() {
+            activity.collider_ms += t0.elapsed().as_secs_f32() * 1000.0;
+        }
         return;
     }
 
     // Pass 2 — the main-thread cost. The budget is checked *after* each attach so one oversized
     // collider still makes progress rather than stalling the queue forever (the rule
     // `stream_terrain` already applies to its tile spawns).
+    let mut attached = 0u32;
     let deadline = Instant::now() + ATTACH_BUDGET;
     for entity in ready {
         // The entity may have streamed out (despawned) while its collider was building, or had its
@@ -136,9 +142,14 @@ pub(super) fn finish_colliders(
         if let Some(layers) = pc.layers {
             entity_mut.insert(layers);
         }
+        attached += 1;
         if Instant::now() >= deadline {
             break;
         }
+    }
+    if let Some(mut activity) = world.get_resource_mut::<crate::perf::StreamActivity>() {
+        activity.colliders_attached += attached;
+        activity.collider_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
 }
 

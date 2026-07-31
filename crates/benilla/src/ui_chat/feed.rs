@@ -51,6 +51,9 @@ enum Pending {
         bonus: u32,
         tries: u16,
     },
+    /// An area discovery (`SMSG_EXPLORATION_EXPERIENCE`): the toast + conditional chat line pair
+    /// (the drain fires them — the toast needs the script, which only [`feed_chat`] holds).
+    Discovery { area: String, xp: u32 },
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
 }
@@ -139,6 +142,18 @@ impl ChatLog {
         }
     }
 
+    /// Queue an area discovery's announcement (`SMSG_EXPLORATION_EXPERIENCE`; decision 0828,
+    /// surfaces corrected by the 0829 RE): the ERR_ZONE_EXPLORED toast fires on **every** packet
+    /// (UIErrorsFrame, via `UI_INFO_MESSAGE` — never chat), and the ERR_ZONE_EXPLORED_XP chat
+    /// system line rides **additionally** iff `xp > 0`. The caller resolved `area_name` from
+    /// `AreaTable.dbc` by the packet's area id.
+    pub(crate) fn push_exploration(&mut self, area_name: &str, xp: u32) {
+        self.pending.push(Pending::Discovery {
+            area: area_name.to_string(),
+            xp,
+        });
+    }
+
     /// Queue our ding's chat lines (`SMSG_LEVELUP_INFO` → the reference PLAYER_LEVEL_UP handler;
     /// decision 0304). `talent_points` is the handler's arg4, client-derived (the packet
     /// carries none).
@@ -205,6 +220,20 @@ pub(super) fn xp_gain_line(victim: Option<&str>, total: u32, bonus: u32) -> Stri
         Some(name) => format!("{name} dies, you gain {total} experience."),
         None => format!("You gain {total} experience."),
     }
+}
+
+/// The discovery toast — GlobalStrings ERR_ZONE_EXPLORED ("Discovered: %s"), fired on every
+/// exploration packet to the UIErrorsFrame (byte-verified: error-table route 1 →
+/// `AddErrorMessage 0x4945b0` → UI_INFO_MESSAGE; decisions 0828/0829).
+pub(super) fn exploration_toast(area_name: &str) -> String {
+    format!("Discovered: {area_name}")
+}
+
+/// The discovery chat line — GlobalStrings ERR_ZONE_EXPLORED_XP ("Discovered %s: %d experience
+/// gained"), fired **in addition to** the toast iff the packet carried XP (byte-verified: the
+/// signed `jle` skip at `0x5e422f`; route 0 → CHAT_MSG_SYSTEM; decisions 0828/0829).
+pub(super) fn exploration_line(area_name: &str, xp: u32) -> String {
+    format!("Discovered {area_name}: {xp} experience gained")
 }
 
 /// Build the event a channel notice becomes: JOINED/LEFT → the member-line kinds; the rest →
@@ -494,6 +523,22 @@ pub(super) fn feed_chat(
                         xp_gain_line(Some(&name), total, bonus),
                     ),
                 );
+            }
+            Pending::Discovery { area, xp } => {
+                // The toast fires every time; the chat line only rides XP (decisions 0828/0829).
+                script.fire_event(
+                    "UI_INFO_MESSAGE",
+                    vec![benilla_ui::script::ScriptValue::Str(exploration_toast(
+                        &area,
+                    ))],
+                );
+                if xp > 0 {
+                    route(
+                        &mut script,
+                        &mut windows,
+                        &ChatEvent::text_only(ChatEventKind::System, exploration_line(&area, xp)),
+                    );
+                }
             }
         }
     }

@@ -148,7 +148,10 @@ pub(super) fn update_model_particles(
             let u = (p.age / emitter.def.lifespan).clamp(0.0, 1.0);
             // 3-D model particles carry no texture atlas — only colour and size reach them.
             let ol = emitter.def.over_life.sample(u);
-            let (rgba, size) = (ol.color, ol.size);
+            let (mut rgba, size) = (ol.color, ol.size);
+            // The owning model's render alpha, same fold as the quad lane (decision 0827) — here
+            // into the instance's `MeshTag` alpha, which is where a 3-D particle carries it.
+            rgba[3] *= emitter.render_alpha();
             let tf = if anchored {
                 Transform {
                     translation: emitter.anchor_pos + emitter.attach_rot * p.pos,
