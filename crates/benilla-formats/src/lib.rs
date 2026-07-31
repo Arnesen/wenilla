@@ -132,7 +132,7 @@ pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX
 mod spell_visual;
 pub use spell_visual::{
     char_proc_type, load_spell_visual_catalog, CharProc, SpellVisualCatalog, VisualKit,
-    VisualStages, KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE,
+    VisualStages, KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
 };
 mod emit_timing;
 pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};

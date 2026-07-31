@@ -7,9 +7,9 @@
 //! been hand-assembling it out of GM commands. Mined from 507 MB of this project's own session
 //! transcripts, the standing tax is: `.go xyz` 750×, `.additem` 434×, `.modify` 345×, `.gm off`
 //! 257×, `.revive` **121×**, `.learn <one spell id>` a few dozen times — while
-//! `.character premade` (86 ready-made BiS/twink gear + talent templates sitting in this deploy's
-//! world DB, every class at 19/29/39/49/60) has been used **zero** times, because nobody knew it
-//! was there. That is the shape of the problem: the primitives exist and are undiscoverable, so
+//! `.character premade` (96 ready-made BiS/twink **gear** templates plus 53 **talent** ones sitting
+//! in this deploy's world DB, every class at 19/29/39/49/60) has been used **zero** times, because
+//! nobody knew it was there. That is the shape of the problem: the primitives exist and are undiscoverable, so
 //! each session re-derives a worse version of them.
 //!
 //! The rig is the one verb that hides all of it: name a body, get a body.
@@ -61,6 +61,15 @@
 //! make the server *list* the templates its class has instead of applying one — the discovery path,
 //! since the catalog lives in the world DB and not in any client data.
 //!
+//! **Two things about `gear:` that have each cost a session.** First, the templates are not all full
+//! sets: of the 96 in this deploy, `pvp-r14-hunter-fx` holds 5 items and the priest/warrior
+//! `heal-r14`/`tank-r14` hold 8, against a 16.8 mean — so a sparse body can be exactly what the
+//! template says, and only a body under `GEAR_FLOOR` is evidence of a refusal. Second, applying gear
+//! **strips before it dresses** (`ApplyPremadeGearTemplateToPlayer` unequips all 19 slots, then
+//! `StoreNewItemInBestSlots` per item), so re-dressing a body leaves the old copy in its bags and
+//! mails the overflow once they fill. Repeated rigs on one character accumulate; a fresh rig-named
+//! character (give `WOW_RIG` a race+class) starts with empty bags and is the cheaper path.
+//!
 //! Non-combat throughout: the rig creates, configures, places and stops. It never fights, so the
 //! unattended-combat ban (method.md) is untouched.
 
@@ -85,6 +94,23 @@ const STEP_SECS: f32 = 0.8;
 /// Grace after the last GM line before reading the result back — the level-up, the equip sweep and
 /// the teleport all land as descriptor deltas a frame or two later.
 const VERIFY_SECS: f32 = 2.0;
+
+/// The fewest items any real gear template in this deploy's world DB actually holds, so a body that
+/// wears fewer than this after a `gear:` **cannot** be the template landing — something refused.
+///
+/// Derived, not invented: `SELECT COUNT(*) … player_premade_item GROUP BY entry` over the 96 rows of
+/// `player_premade_item_template` runs 5…23 (mean 16.8). Only three templates are partial —
+/// `pvp-r14-hunter-fx` (5), and the priest/warrior `heal-r14`/`tank-r14` (8 each) — so a **low but
+/// legitimate** count is a real outcome and this floor deliberately sits under it: the warning fires
+/// only for a body that is essentially naked. (Entry 910 has one item row and no template row at
+/// all — an orphan; asking for it by entry errors server-side.)
+const GEAR_FLOOR: usize = 5;
+
+/// Did a `gear:` ask come back with a body that cannot be wearing the template? `gear:?` is the
+/// discovery path — it lists and dresses nothing, so it never counts as a refusal.
+fn gear_was_refused(gear: Option<&str>, equipped: usize) -> bool {
+    gear.is_some_and(|g| g != "?") && equipped < GEAR_FLOOR
+}
 
 pub(crate) struct ProbeRigPlugin;
 
@@ -425,6 +451,22 @@ fn drive_rig(
                     );
                 }
             }
+            // The other failure that reads as success: `.character premade gear` went out, the body
+            // came back wearing almost nothing, and every later reading is of the wrong body. The
+            // server unequips all 19 slots *before* it equips (`ApplyPremadeGearTemplateToPlayer` →
+            // `AutoUnequipItemFromSlot` → `StoreNewItemInBestSlots`, vmangos `ObjectMgr.cpp`), so a
+            // near-naked body means the equip half was refused while the strip half already ran —
+            // the set is in the bags, or mailed if they were full. A session that misses this line
+            // measures a probe in its underwear.
+            if gear_was_refused(rig.spec.gear.as_deref(), equipped) {
+                warn!(
+                    "rig: asked for gear but the body wears only {equipped} item(s) — the leanest \
+                     real template in this deploy holds {GEAR_FLOOR}, so the equip half was \
+                     refused (the strip half runs first, so the set is in the bags or was mailed). \
+                     Cheapest fix: rig a FRESH body — give WOW_RIG a race+class so it creates a \
+                     new character with empty bags, rather than re-dressing this one."
+                );
+            }
             rig.phase = RigPhase::Done;
         }
         RigPhase::Done => {}
@@ -610,6 +652,21 @@ fn class_id(word: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_naked_body_after_a_gear_ask_is_a_refusal_but_a_lean_template_is_not() {
+        // The three partial templates this deploy really ships (5 and 8 items) must stay quiet —
+        // the floor exists to catch a stripped body, not to second-guess the world DB.
+        assert!(!gear_was_refused(Some("pvp-r14-hunter-fx"), 5));
+        assert!(!gear_was_refused(Some("tank-r14"), 8));
+        assert!(
+            gear_was_refused(Some("dps-preraid-bis"), 1),
+            "a lone bow is the trap"
+        );
+        assert!(gear_was_refused(Some("dps-preraid-bis"), 0));
+        assert!(!gear_was_refused(Some("?"), 0), "discovery dresses nothing");
+        assert!(!gear_was_refused(None, 0), "no gear asked, no claim made");
+    }
 
     #[test]
     fn a_body_spec_parses_in_any_order() {

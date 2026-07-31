@@ -143,7 +143,9 @@ pub(crate) fn scenario_active() -> bool {
 /// fixture ON the terrain via a down-ray — required to see a ground-anchored effect's projected
 /// surface decals, `crate::ground_fx`; default 0 = the mid-air point), `WOW_FX_HOLD` (=1 keeps
 /// the fixture alive past one sequence pass — previewing a persistent HOLD kit's steady state;
-/// default 0 = the game's discrete-instance reap at one pass, then the pool drains).
+/// default 0 = the game's discrete-instance reap at one pass, then the pool drains),
+/// `WOW_FX_UP` (yards to raise the fixture above its resolved seat — for models authored below
+/// their anchor, whose opening frames the terrain otherwise swallows; default 0).
 #[derive(Resource)]
 pub(crate) struct FxViewRequest {
     pub(crate) model_path: String,
@@ -168,6 +170,11 @@ pub(crate) struct FxViewRequest {
     pub(crate) ground: bool,
     /// See `WOW_FX_HOLD` above.
     pub(crate) hold: bool,
+    /// `WOW_FX_UP` — raise the fixture this many yards above its resolved seat (default 0).
+    /// The escape hatch for models authored BELOW their anchor (Arcane Intellect's star cluster
+    /// starts 1.6 yd under its attach point): at the default seat the terrain swallows the
+    /// opening of the animation, and no camera angle can look through the ground.
+    pub(crate) up: f32,
 }
 
 /// The fixture's live state, written by `entities::spell_fx::drive_fx_view` and the phase
@@ -415,6 +422,7 @@ impl Plugin for CapturePlugin {
                 turn: knob("WOW_FX_TURN", 0.0),
                 ground: knob("WOW_FX_GROUND", 0.0) > 0.5,
                 hold: knob("WOW_FX_HOLD", 0.0) > 0.5,
+                up: knob("WOW_FX_UP", 0.0),
             })
             .init_resource::<FxViewState>();
             Scenario {

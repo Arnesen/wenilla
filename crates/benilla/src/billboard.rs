@@ -107,9 +107,19 @@ impl BillboardCard {
     /// Build a card riding a live JOINT — an animated host's billboard bone (the swinging lamp,
     /// the mount's lights). The joint's frame already bakes the bone pivot (the 0130 rig identity
     /// `joint = root · M_bone · T(pivot)`), so the card's local pivot is the joint origin.
+    ///
+    /// The joint also already carries the bone's global-sequence scale — every joint/anchor lane
+    /// runs a [`crate::creature_anim::GlobalSeqDrive`] over the same bone list, and `re_place`
+    /// reads the composed result back as [`Self::scale`] — so the card must NOT sample its own
+    /// copy of the track. Keeping it multiplied the twinkle in twice, at two different clocks
+    /// (the drive's spawn clock × the card's position-hash phase): squared peaks at random
+    /// alignment — Arcane Intellect's sometimes-2.5-yd lens flare (decision 0851). The sampler
+    /// stays on the rigless lanes ([`Self::new`]/[`Self::following`]), where the card is the only
+    /// thing animating.
     pub fn following_joint(info: &BillboardInfo, joint: Entity) -> Self {
         let mut card = Self::following(info, joint);
         card.local_pivot = Vec3::ZERO;
+        card.scale_anim = None;
         card
     }
 
@@ -441,6 +451,8 @@ pub(crate) fn face_billboards(
             &mut Visibility,
             // Whether the exterior-scene cull owns this card's `Visibility` — see the mirror below.
             Has<crate::exterior_cull::ExteriorScene>,
+            // Read for the trace probe below (the tag's low bits are the card's render alpha).
+            Option<&bevy::mesh::MeshTag>,
         ),
         Without<WorldCamera>,
     >,
@@ -452,12 +464,29 @@ pub(crate) fn face_billboards(
     // for every billboard; never a per-pivot aim).
     let (fwd, right, up) = (*cam_tf.forward(), *cam_tf.right(), *cam_tf.up());
     let elapsed_ms = time.elapsed().as_millis() as u32;
-    for (entity, mut card, mut tf, mut global, mut visibility, gated) in &mut cards {
+    for (entity, mut card, mut tf, mut global, mut visibility, gated, tag) in &mut cards {
         if let Some(owner) = card.follow {
             match owners.get(owner) {
                 Ok((gt, vis)) => {
                     let pivot = card.local_pivot;
                     card.re_place(gt.compute_transform(), pivot);
+                    // The card-provenance trace (`WOW_MOVE_TRACE`, ~2 Hz): where each following
+                    // card sits, how big it renders, and at what alpha. An invisible spell-fx
+                    // card has exactly three possible causes — placement, scale, alpha — and a
+                    // screenshot cannot tell them apart; this line does (it split Arcane
+                    // Intellect's "missing" stars into scale ✓ / place ✓ / alpha ×0.3 — the
+                    // faithful stealth-aura compose, not a defect).
+                    if crate::dbg_trace::enabled() && elapsed_ms % 512 < 20 {
+                        crate::dbg_trace::line(
+                            "card",
+                            &format!(
+                                "card={entity} owner={owner} scale={:.3} a={:.2} pivot={:.2?}",
+                                card.scale,
+                                tag.map_or(-1.0, |t| crate::mesh_tag::alpha_of(t.0)),
+                                card.world_pivot
+                            ),
+                        );
+                    }
                     // A card is visually part of its owner — mirror a HIDDEN owner, because the
                     // card is a world root and inherits nothing. The live case: the sea-crossing
                     // transport's off-map leg hides the boat subtree (`tick_transports`); without
@@ -609,6 +638,69 @@ mod tests {
         assert!(
             app.world().get_entity(card).is_err(),
             "card despawns with its owner"
+        );
+    }
+
+    /// A JOINT-lane card takes the global-sequence twinkle from the joint ALONE (decision 0851):
+    /// every joint/anchor lane runs a `GlobalSeqDrive` that writes the bone's scale track onto
+    /// the joint, and `re_place` reads the composed result back as the card's scale — a card that
+    /// also sampled its own copy multiplied the twinkle in twice, at two clocks offset by the
+    /// position-hash phase (Arcane Intellect's sometimes-2.5-yd lens flare). The rigless lanes
+    /// keep the sampler: there the card is the only thing animating.
+    #[test]
+    fn joint_lane_takes_the_twinkle_from_the_joint_alone() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        app.add_systems(Update, face_billboards);
+        app.world_mut().spawn((
+            crate::player::WorldCamera,
+            GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 10.0)),
+        ));
+        // The twinkle track, a flat ×2 — visible wherever it is applied.
+        let info = BillboardInfo {
+            bone: 0,
+            pivot: Vec3::ZERO,
+            kind: BillboardKind::Spherical,
+            scale_anim: Some(BoneScaleAnim {
+                duration_ms: 1000,
+                interp: false,
+                keys: vec![(0, [2.0, 2.0, 2.0])],
+            }),
+            seq_translations: vec![],
+        };
+        // The joint arrives already composed by the rig: drive-written twinkle ×2 × parent
+        // flare ×3 = 6. Sampling the track again on top would render ×12.
+        let joint = app
+            .world_mut()
+            .spawn(GlobalTransform::from(Transform::from_scale(Vec3::splat(
+                6.0,
+            ))))
+            .id();
+        let joint_card = app
+            .world_mut()
+            .spawn((
+                BillboardCard::following_joint(&info, joint),
+                Transform::IDENTITY,
+            ))
+            .id();
+        // The rigless lane: a plain anchor at scale 1 — the card's own sampler is the only
+        // twinkle writer.
+        let anchor = app.world_mut().spawn(GlobalTransform::IDENTITY).id();
+        let rigless_card = app
+            .world_mut()
+            .spawn((BillboardCard::following(&info, anchor), Transform::IDENTITY))
+            .id();
+        app.update();
+        let scale = |e: Entity| app.world().entity(e).get::<Transform>().unwrap().scale;
+        assert_eq!(
+            scale(joint_card),
+            Vec3::splat(6.0),
+            "joint lane: the composed joint scale, once — no self-sample on top"
+        );
+        assert_eq!(
+            scale(rigless_card),
+            Vec3::splat(2.0),
+            "rigless lane: the card's own sampler still runs"
         );
     }
 

@@ -194,6 +194,7 @@ pub(crate) fn drive_fx_view(
             ) {
                 pos.y -= hit.distance;
             }
+            pos.y += req.up;
             return commands
                 .spawn((
                     crate::net::Guid(FXVIEW_UNIT_GUID),
@@ -230,6 +231,7 @@ pub(crate) fn drive_fx_view(
                 pos.y -= hit.distance;
             }
         }
+        pos.y += req.up;
         commands
             .spawn((
                 Transform::from_translation(pos)
@@ -657,7 +659,8 @@ struct FxInstance {
     /// Which owner's reap can kill a persistent instance (cast router vs aura watcher) — the
     /// client's reap-walk discriminator next to the spell id ([`FxClass`]).
     class: FxClass,
-    /// The M2 attachment id to hang from ([`benilla_formats::KIT_SLOT_TAGS`]).
+    /// The M2 attachment id to hang from ([`benilla_formats::KIT_SLOT_TAGS`]), or
+    /// [`benilla_formats::WORLD_EFFECT_TAG`] for the field-12 world-plant slot (0848/0850).
     tag: u16,
     /// The model-cache key.
     path: String,
@@ -672,6 +675,69 @@ struct FxInstance {
 #[derive(Component, Default)]
 pub(super) struct FxAttached {
     instances: Vec<FxInstance>,
+}
+
+/// A **world-planted** kit instance root (the field-12 slot, decisions 0848/0850): a free world
+/// entity, NOT a scene child of its owner — so [`tend_world_plants`] owns the two jobs the tree
+/// would otherwise do. Byte law (wow-re `kit30-effect-slot.md`): planted once at the owner's
+/// position × yaw × scale; a **root-aura** spell's plant (`EffectApplyAuraName` 26 anywhere in
+/// the spell — the client's flag 0x4000) re-plants when the owner is displaced (knockback,
+/// blink), re-baking facing and scale.
+#[derive(Component)]
+pub(super) struct WorldPlantFx {
+    /// The unit the instance belongs to — despawn tracking (the client's node dies with its
+    /// owner) and the re-plant source.
+    owner: Entity,
+    /// Re-plant on owner displacement (the 0x4000 leg) — root-aura persistents only.
+    follow: bool,
+}
+
+/// The client's re-plant displacement gate: distance² > 1e-3 (`0x620580`'s squared-distance
+/// compare; world units).
+const REPLANT_EPS_SQ: f32 = 1e-3;
+
+/// The plant transform (`0x620a90`): `translate(owner position) × yaw(owner facing about the up
+/// axis) × scale(owner scale)` — yaw ONLY (a swimming or mount-tilted body plants level), baked
+/// at spawn.
+fn world_plant_transform(owner: &GlobalTransform) -> Transform {
+    let (scale, rotation, translation) = owner.to_scale_rotation_translation();
+    let (yaw, _, _) = rotation.to_euler(EulerRot::YXZ);
+    Transform {
+        translation,
+        rotation: Quat::from_rotation_y(yaw),
+        scale,
+    }
+}
+
+/// Whether any of the spell's three `EffectApplyAuraName` slots is `SPELL_AURA_MOD_ROOT` (26) —
+/// the client's `spellRec+0x16c[0..2] == 0x1a` scan that arms the re-plant flag 0x4000 (wow-re
+/// `kit30-effect-slot.md`; the column *name* is INFERRED there, the byte behaviour VERIFIED).
+/// Exactly the field-12 state family: Frost Nova, Net, Web, Entangling Roots, Frostbite.
+fn spell_has_root_aura(spells: Option<&crate::ui_action::Spells>, spell_id: u32) -> bool {
+    const SPELL_AURA_MOD_ROOT: u32 = 26;
+    spells
+        .and_then(|s| s.catalog.get(spell_id))
+        .is_some_and(|d| d.effect_apply_aura.contains(&SPELL_AURA_MOD_ROOT))
+}
+
+/// Tend the live world plants: despawn a plant whose owner is gone (a scene child would get this
+/// from the tree; a free root must be swept), and re-plant a `follow` instance whose owner was
+/// displaced past [`REPLANT_EPS_SQ`] — the client's `0x620580` per-frame leg, which re-bakes
+/// position, facing AND scale on displacement.
+pub(super) fn tend_world_plants(
+    mut commands: Commands,
+    mut plants: Query<(Entity, &WorldPlantFx, &mut Transform)>,
+    owners: Query<&GlobalTransform>,
+) {
+    for (root, plant, mut t) in &mut plants {
+        let Ok(owner) = owners.get(plant.owner) else {
+            commands.entity(root).despawn();
+            continue;
+        };
+        if plant.follow && owner.translation().distance_squared(t.translation) > REPLANT_EPS_SQ {
+            *t = world_plant_transform(owner);
+        }
+    }
 }
 
 /// Consume the router's [`SpellKitFx`] edges: `Begin` records instances (and creates their model
@@ -772,12 +838,20 @@ pub(super) fn resolve_spell_fx(
 
 /// Spawn pending instances whose model finished building, and run the self-termination clock.
 /// The instance root is a child of the attach joint at the attachment offset (the cascade above),
-/// so the whole effect — meshes and particle emitters alike — rides the animating bone.
+/// so the whole effect — meshes and particle emitters alike — rides the animating bone. The one
+/// exception is the kit's **world-plant slot** ([`benilla_formats::WORLD_EFFECT_TAG`], kit field
+/// 12): its root is a free world entity at the owner's position/facing/scale, [`WorldPlantFx`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attach_spell_fx(
     mut commands: Commands,
-    mut units: Query<(Entity, &mut FxAttached, Option<&BoneAttach>)>,
+    mut units: Query<(
+        Entity,
+        &mut FxAttached,
+        Option<&BoneAttach>,
+        &GlobalTransform,
+    )>,
     fx: Option<Res<SpellFx>>,
+    spells: Option<Res<crate::ui_action::Spells>>,
     time: Res<Time>,
     mut wow_materials: ResMut<Assets<WowModelMaterial>>,
     mut tint_reg: ResMut<FxTintAnims>,
@@ -788,7 +862,7 @@ pub(super) fn attach_spell_fx(
         return;
     };
     let now = time.elapsed_secs();
-    for (unit, mut att, bones) in &mut units {
+    for (unit, mut att, bones, unit_gt) in &mut units {
         att.instances.retain_mut(|inst| {
             // Self-termination (the cast-release flash ran its span).
             if let Some(expires) = inst.expires {
@@ -821,25 +895,51 @@ pub(super) fn attach_spell_fx(
             if dm.parts.is_none() {
                 return true; // model still loading — spawn on a later pass
             }
-            // The attach cascade: the slot's tag, the client's two fallbacks, else the unit root.
-            let point = bones.and_then(|b| {
-                std::iter::once(inst.tag)
-                    .chain(ATTACH_FALLBACKS)
-                    .find_map(|tag| b.points.get(&tag).copied().map(|p| (tag, p)))
-                    .and_then(|(tag, (bone, offset))| {
-                        b.anchor(bone).map(|joint| (tag, joint, offset))
-                    })
-            });
-            // Ground-anchored: the cascade landed on the model's BASE point (`0x13`) or fell
-            // through to the unit root — the two feet-level anchors. A hand/head/chest-anchored
-            // instance keeps its flat quads as ordinary geometry (the ProtectionFrom* chest
-            // shields author flat quads too — they must NOT decal to the ground).
-            let ground_anchor = point.is_none_or(|(tag, ..)| tag == 0x13);
-            let (parent, offset) = point.map_or((unit, Vec3::ZERO), |(_, j, o)| (j, o));
-            let root = commands
-                .spawn((Transform::from_translation(offset), Visibility::default()))
-                .id();
-            commands.entity(parent).add_child(root);
+            // The world-plant slot (kit field 12, decisions 0848/0850): the client passes NO
+            // attach tag (`0x61fcf0` pushes −1), skips the bone pipeline entirely and plants the
+            // model once, world-space, at the owner's position × yaw × scale (`0x620c86` via
+            // `0x620a90`) — it does not ride a bone and does not turn with the unit afterwards.
+            // A root-aura spell's plant additionally re-plants on owner displacement
+            // ([`tend_world_plants`] — the client's 0x4000 flag leg).
+            let planted = inst.tag == benilla_formats::WORLD_EFFECT_TAG;
+            // Ground-anchored: a world plant sits at the feet by construction; otherwise the
+            // cascade landed on the model's BASE point (`0x13`) or fell through to the unit
+            // root — the feet-level anchors. A hand/head/chest-anchored instance keeps its flat
+            // quads as ordinary geometry (the ProtectionFrom* chest shields author flat quads
+            // too — they must NOT decal to the ground).
+            let (root, ground_anchor) = if planted {
+                let follow =
+                    inst.persistent && spell_has_root_aura(spells.as_deref(), inst.spell_id);
+                let root = commands
+                    .spawn((
+                        world_plant_transform(unit_gt),
+                        Visibility::default(),
+                        WorldPlantFx {
+                            owner: unit,
+                            follow,
+                        },
+                    ))
+                    .id();
+                (root, true)
+            } else {
+                // The attach cascade: the slot's tag, the client's two fallbacks, else the unit
+                // root.
+                let point = bones.and_then(|b| {
+                    std::iter::once(inst.tag)
+                        .chain(ATTACH_FALLBACKS)
+                        .find_map(|tag| b.points.get(&tag).copied().map(|p| (tag, p)))
+                        .and_then(|(tag, (bone, offset))| {
+                            b.anchor(bone).map(|joint| (tag, joint, offset))
+                        })
+                });
+                let ground_anchor = point.is_none_or(|(tag, ..)| tag == 0x13);
+                let (parent, offset) = point.map_or((unit, Vec3::ZERO), |(_, j, o)| (j, o));
+                let root = commands
+                    .spawn((Transform::from_translation(offset), Visibility::default()))
+                    .id();
+                commands.entity(parent).add_child(root);
+                (root, ground_anchor)
+            };
             // The one shared effect-visuals body — rig, skinned parts, joint-riding
             // cards/emitters/ribbons, ground decals, material animation. Parts were checked
             // ready above, so this always attaches.

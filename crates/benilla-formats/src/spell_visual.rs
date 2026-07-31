@@ -31,8 +31,18 @@
 //!   decision 0099 phase 3, read here since that phase). Each slot's attach tag is a compile-time
 //!   immediate in the client's slot loop (`0x60edf0`, byte-cited push sites — wow-re
 //!   `spell-visual-apply.md` §1.3) and a **direct M2 `AttachmentID`**: in kit-field order,
-//!   [`KIT_SLOT_TAGS`]. Field 12 is the missile effect slot (phase 4), field 14 a visual-group
-//!   fallback id — neither is read here. **Fields 15–34 are the four `CharProc` slots** — the
+//!   [`KIT_SLOT_TAGS`]. **Field 12 (`kit+0x30`) is a TENTH effect slot** — read here as
+//!   [`VisualKit::world_effect`] (decision 0848): wow-re pinned its consumer as "the missile
+//!   slot" (`0x60edf0` plays it inline via `0x61fcf0`, a `CEffect`-family node stamped with a
+//!   missile marker — `spell-visual-apply.md` §1.4), but the shipped table's population is
+//!   **body/ground state models**, never projectiles: the aura-state family the nine slots miss
+//!   (Frost Nova's kit 285 → `Frost_Nova_state.mdx`, Net's 744 → `Net_State.mdx`, Entangling
+//!   Roots' 66, Web's 746) plus caster-feet rings on cast/impact kits (Thunderclap's 349,
+//!   Flamestrike's 420, Vanish's 389). Same `CEffect` lifecycle as the nine (spell-id-tagged on
+//!   the unit's `+0xb4` list, the stage sets lifetime — §1.5). Placement is byte-pinned (wow-re
+//!   `kit30-effect-slot.md`, folded back 0850): no bone — a one-time **world plant** at the
+//!   owner's position/facing/scale, [`WORLD_EFFECT_TAG`]. Field 14 is a visual-group fallback
+//!   id — not read here. **Fields 15–34 are the four `CharProc` slots** — the
 //!   *character* half of a kit (the body's own alpha/tint, as opposed to the attach-point emitters):
 //!   five parallel 4-element arrays, `CharProcType[4]` @+0x3c then `CharParamZero/One/Two/Three[4]`
 //!   @+0x4c/+0x5c/+0x6c/+0x7c (wow-re `spellvisual-schema.md`, byte-pinned: all 20 consumed by the
@@ -86,6 +96,16 @@ const SPELL_VISUAL_KIT_FIELDS: usize = 35;
 /// `spell-visual-apply.md` §1.3), each a **direct M2 `AttachmentID`**: Head(0x14), Chest(0x22),
 /// Base(0x13), LeftHand(0x15), RightHand(0x16), Breath(0x11), Special1–3(0x17–0x19).
 pub const KIT_SLOT_TAGS: [u16; 9] = [0x14, 0x22, 0x13, 0x15, 0x16, 0x11, 0x17, 0x18, 0x19];
+
+/// The sentinel tag [`VisualKit::effects`] yields for [`VisualKit::world_effect`] (kit field
+/// 12) — the client's own **−1**: `0x61fcf0` passes no attach tag at all (`0x61fd23: push -1`,
+/// `node+0x24` stays the ctor's −1), which in the placement walk `0x620be0` skips the entire
+/// bone pipeline and instead triggers a **one-time world plant** (`0x620c86`): transform =
+/// `translate(owner position) × yaw(owner facing) × scale(owner scale)`, baked at spawn — the
+/// model does NOT ride a bone and does not turn with the unit afterwards (wow-re
+/// `kit30-effect-slot.md`, §5 byte-arbitrated; decision 0848). Consumers key on this tag to
+/// plant in world space rather than attach.
+pub const WORLD_EFFECT_TAG: u16 = u16::MAX;
 
 /// The missile **destination-attachment** ordinal table — the client's `0x860a18`, dumped
 /// byte-for-byte (wow-re `spell-visual-apply.md` §5, 11 live entries): [`KIT_SLOT_TAGS`] in
@@ -196,6 +216,13 @@ pub struct VisualKit {
     /// order — slot `i` attaches at [`KIT_SLOT_TAGS`]`[i]`. Both none-sentinels fold to `None`
     /// like [`Self::anim_id`]. Iterate populated slots via [`Self::effects`].
     pub effect_slots: [Option<u32>; 9],
+    /// Kit field 12 (`kit+0x30`) — the **tenth effect slot** (module docs; decision 0848). The
+    /// client plays it inline in `PlaySpellVisualKit` via `0x61fcf0`, same `CEffect` lifecycle as
+    /// the nine bone-attach slots. On the shipped table it carries the kit's body/ground **state
+    /// model** — the frozen ice, the net, the roots, the Thunderclap ring — never a projectile
+    /// (the real missile is `SpellVisual` field 7's, [`VisualStages::missile_model`]). Folded
+    /// into [`Self::effects`] at [`WORLD_EFFECT_TAG`].
+    pub world_effect: Option<u32>,
     /// The four `CharProc` slots (kit fields 15–34, transposed out of the five parallel arrays).
     /// An unfilled slot is `None` — see [`char_proc_slot`] for the sentinel law; iterate the filled
     /// ones via [`Self::char_procs`]. **Two consumers, two halves of the same table:** the *body*
@@ -223,12 +250,14 @@ impl VisualKit {
 
     /// The populated emitter slots as `(M2 attachment id, SpellVisualEffectName id)` pairs, in
     /// kit-field order — the client fires **all** populated slots at **every** stage (stage sets
-    /// lifetime policy only, wow-re `spell-visual-apply.md` §1.3).
+    /// lifetime policy only, wow-re `spell-visual-apply.md` §1.3) — then [`Self::world_effect`]
+    /// last, under the [`WORLD_EFFECT_TAG`] world-plant sentinel (decisions 0848/0850).
     pub fn effects(&self) -> impl Iterator<Item = (u16, u32)> + '_ {
         self.effect_slots
             .iter()
             .enumerate()
             .filter_map(|(i, e)| e.map(|id| (KIT_SLOT_TAGS[i], id)))
+            .chain(self.world_effect.map(|id| (WORLD_EFFECT_TAG, id)))
     }
 }
 
@@ -460,6 +489,7 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
                 anim_id,
                 sound,
                 effect_slots,
+                world_effect: u32_at(r, 12).and_then(some_unless_none),
                 char_proc_slots,
             },
         );
@@ -548,15 +578,17 @@ mod tests {
     }
 
     /// One `SpellVisualKit` row: id, an unpinned field 1, anim (field 2), nine zeroed emitter
-    /// slots (3..12), sound (field 13), then zeroed trailing columns to fill 35 fields.
-    fn spell_visual_kit_row(id: u32, anim: u32, sound: u32) -> Vec<u8> {
+    /// slots (3..11), the world-effect slot (field 12), sound (field 13), then zeroed trailing
+    /// columns to fill 35 fields.
+    fn spell_visual_kit_row(id: u32, anim: u32, sound: u32, world: u32) -> Vec<u8> {
         let mut rec = Vec::new();
         rec.extend(u32le(id));
         rec.extend(u32le(0)); // field 1, unpinned
         rec.extend(u32le(anim)); // field 2
-        for _ in 3..13 {
-            rec.extend(u32le(0)); // fields 3..12 (9 emitter slots + missile)
+        for _ in 3..12 {
+            rec.extend(u32le(0)); // fields 3..11 (9 emitter slots)
         }
+        rec.extend(u32le(world)); // field 12
         rec.extend(u32le(sound)); // field 13
         for _ in 14..SPELL_VISUAL_KIT_FIELDS {
             rec.extend(u32le(0));
@@ -572,7 +604,7 @@ mod tests {
         // SPELL_VISUAL_FIELDS/SPELL_VISUAL_KIT_FIELDS.
         let sv = spell_visual_row(1, 0, 0, 0, 0, 0, 0, 0);
         assert_eq!(sv.len(), SPELL_VISUAL_FIELDS * 4, "64B record");
-        let svk = spell_visual_kit_row(1, 0, 0);
+        let svk = spell_visual_kit_row(1, 0, 0, 0);
         assert_eq!(svk.len(), SPELL_VISUAL_KIT_FIELDS * 4, "140B record");
     }
 
@@ -639,9 +671,9 @@ mod tests {
     #[test]
     fn kit_anim_and_sound_fold_both_none_sentinels_to_none() {
         let mut records = Vec::new();
-        records.extend(spell_visual_kit_row(38, 53, 1484)); // Fireball's cast kit
-        records.extend(spell_visual_kit_row(1, 0, 0)); // plain-zero "none"
-        records.extend(spell_visual_kit_row(2, u32::MAX, u32::MAX)); // the -1 "none" form
+        records.extend(spell_visual_kit_row(38, 53, 1484, 0)); // Fireball's cast kit
+        records.extend(spell_visual_kit_row(1, 0, 0, 0)); // plain-zero "none"
+        records.extend(spell_visual_kit_row(2, u32::MAX, u32::MAX, u32::MAX)); // the -1 "none" form
         let bytes = build_wdbc(3, SPELL_VISUAL_KIT_FIELDS as u32, &records);
         let rs = parse(
             &bytes,
@@ -701,6 +733,24 @@ mod tests {
             "LeftHand then RightHand, kit-field order"
         );
         assert_eq!(VisualKit::default().effects().count(), 0);
+    }
+
+    /// The tenth slot (field 12, decision 0848) rides `effects()` after the nine, at the interim
+    /// Base anchor — one iterator, so every kit consumer (the aura-state watcher, kit pushes,
+    /// cast/impact plays) picks it up without knowing it exists.
+    #[test]
+    fn kit_world_effect_joins_effects_at_base() {
+        let kit = VisualKit {
+            // Frost Nova's state-kit shape: Head sparkle (slot 0) + the feet ice in field 12.
+            effect_slots: [Some(54), None, None, None, None, None, None, None, None],
+            world_effect: Some(284),
+            ..Default::default()
+        };
+        assert_eq!(
+            kit.effects().collect::<Vec<_>>(),
+            vec![(0x14, 54), (WORLD_EFFECT_TAG, 284)],
+            "the nine first, then the world-plant slot"
+        );
     }
 
     /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent) — this
@@ -830,6 +880,29 @@ mod tests {
             Some("Spells\\Fire_Precast_Hand.mdx"),
             "SpellVisualEffectName field 2 = the effect model path"
         );
+
+        // The tenth slot (field 12, decision 0848) on the real table — the root/snare state
+        // family the nine slots miss. Frost Nova (spell 122 → visual 17): state kit 285's feet
+        // ice; Net (spell 6533 → visual 683): state kit 744's net wrap, a kit with NO ordinary
+        // slots at all.
+        let frost_nova_state = cat
+            .kit(cat.stages(17).expect("Frost Nova's visual").state)
+            .expect("Frost Nova's state kit");
+        assert_eq!(frost_nova_state.world_effect, Some(284));
+        assert_eq!(
+            cat.effect_path(284),
+            Some("Spells\\Frost_Nova_state.mdx"),
+            "the frozen-feet model rides field 12"
+        );
+        let net_state = cat
+            .kit(cat.stages(683).expect("Net's visual").state)
+            .expect("Net's state kit");
+        assert_eq!(
+            net_state.effects().collect::<Vec<_>>(),
+            vec![(WORLD_EFFECT_TAG, 594)],
+            "the net wrap is the kit's ONLY effect — invisible without field 12"
+        );
+        assert_eq!(cat.effect_path(594), Some("Spells\\Net_State.mdx"));
         // The impact kit's chest burst — the phase-4 arrival hand-off will play this.
         assert_eq!(
             cat.kit(stages.impact)

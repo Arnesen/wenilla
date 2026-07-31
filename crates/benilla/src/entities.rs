@@ -447,8 +447,14 @@ impl Plugin for EntitiesPlugin {
                     // is at `chain()`'s 20-element ceiling.
                     (attach_item_glows, attach_spell_fx),
                     // One nested (unordered) element — two independent free-model attach
-                    // passes; the outer tuple is at `chain()`'s 20-element ceiling.
-                    (attach_missile_models, attach_ground_fx_models),
+                    // passes, plus the world-plant tender (0850: sweeps orphaned plants,
+                    // re-plants root-aura ones on owner displacement); the outer tuple is at
+                    // `chain()`'s 20-element ceiling.
+                    (
+                        attach_missile_models,
+                        attach_ground_fx_models,
+                        spell_fx::tend_world_plants,
+                    ),
                     // Tick the live per-instance tint clones AFTER the attach passes registered
                     // them, so a clone's first drawn frame is already on its own clock.
                     spell_fx::tick_fx_tint,

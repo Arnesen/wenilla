@@ -64,6 +64,21 @@ fn main() {
                     q[0], q[1], q[2], q[3]
                 );
             }
+            // T/S values too, not just counts — for a flare or a rise the VALUES are the
+            // effect (the gseqdump lesson, here for sequence keys), and per-axis (non-)uniformity
+            // of a scale key is load-bearing for the billboard law's per-axis preserve.
+            for (t, v) in bk.translation.iter().take(8) {
+                println!(
+                    "    trans t={t:.3} ({:+.3},{:+.3},{:+.3})",
+                    v[0], v[1], v[2]
+                );
+            }
+            for (t, v) in bk.scale.iter().take(8) {
+                println!(
+                    "    scale t={t:.3} ({:+.3},{:+.3},{:+.3})",
+                    v[0], v[1], v[2]
+                );
+            }
         }
     }
 }
