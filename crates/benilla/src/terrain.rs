@@ -35,7 +35,8 @@ pub type WowModelMaterial = ExtendedMaterial<StandardMaterial, WowModelExt>;
 /// reference (`RECONCILE-fade-render-state.md` / `-clutter-fade-render-state.md`):
 /// - `fade` (`model_flags.y`) = the **M2-doodad** fade blend twin: `AlphaMode::Blend` (transparent pass,
 ///   depth-write normally OFF) → `specialize` forces depth-write back ON so a fading haystack's near
-///   cross-quads occlude its far ones. Silhouette stable (the shader re-applies the 224/255 cutout).
+///   cross-quads occlude its far ones. Silhouette stable for an AlphaKey source (the shader re-applies
+///   the 224/255 cutout via `clutter_fade.z` bit 10 — an Opaque source never alpha-tests; 0842).
 /// - `clutter` (`clutter_fade.w`) = ground clutter: an `AlphaMode::Mask` (alpha-mask pass, depth-write
 ///   already ON) that the reference also **blends** (prog 201: `SRC_ALPHA/ONE_MINUS_SRC_ALPHA`) so the
 ///   ~70 yd ramp fades opacity. `specialize` forces that over-blend on in place; the 128/255 discard +
@@ -103,8 +104,9 @@ pub struct WowModelExt {
     pub clutter_fade: Vec4,
     /// Per-material flags (set at material creation, NOT light). `x` = **is_wmo** (>0.5 ⇒ FFP directional
     /// `ambient + sun·N·L` × MOCV at sun-scale 1, no exterior terrain-shade). `y` = **fade variant** (>0.5 ⇒
-    /// the distance-fade BLEND twin → the shader re-applies the hard 224/255 cutout for a stable silhouette
-    /// and `specialize` forces depth-write ON; see [`WowModelKey`]). `zw` reserved.
+    /// the distance-fade BLEND twin → `specialize` forces depth-write ON; the 224/255 stable-silhouette
+    /// cutout rides `clutter_fade.z` bit 10 separately, set only for AlphaKey sources — 0842; see
+    /// [`WowModelKey`]). `zw` reserved.
     #[uniform(100)]
     pub model_flags: Vec4,
     /// Per-material MCSH terrain-shade **selector** (`wow_model.wgsl`, the exterior doodad matte). `x` picks
@@ -269,7 +271,7 @@ impl MaterialExtension for WowModelExt {
             // batches (the material's negative sort bias) — so each colour fragment passes
             // GreaterEqual only at the model's own nearest surface, and interior/overlapped layers
             // fail. One blended layer everywhere: no self-overlap darkening on a stealthed body.
-            // The fragment still runs its discards (farclip, the cutout when `model_flags.y`);
+            // The fragment still runs its discards (farclip, the bit-10 twin cutout);
             // its colour output is computed and masked (an early return would be the natural
             // spelling, but naga's MSL backend miscompiles the dead tail — see the shader note).
             if let Some(frag) = descriptor.fragment.as_mut() {

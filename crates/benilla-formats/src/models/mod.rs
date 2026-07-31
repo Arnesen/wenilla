@@ -99,6 +99,7 @@ fn remap_submesh(
             no_depth_test: false,  // set by the M2 path from render flag 0x08
             fog_policy: FogPolicy::Scene, // refined by the M2 path (flag 0x02 + the blend table); WMO batches fog with the scene
             billboard: None,              // set by the M2 path after detecting the batch's bone
+            welded_billboard: false,      // set by the M2 path from the separability gate (0839)
             alpha_anim: None, // set by the M2 path from the batch's colour/weight tracks
             uv_anim: None,    // set by the M2 path from the batch's texture transform
             rgb_anim: None,   // set by the M2 path from the batch's colour RGB track

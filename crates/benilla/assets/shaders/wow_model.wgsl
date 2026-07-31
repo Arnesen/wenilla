@@ -487,8 +487,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     // VERIFIED reference behaviour (`RECONCILE-fade-render-state.md`): a fading doodad is the SAME draw
     // as the steady cutout — the alpha-test ref scales WITH the fade so the effective cutoff stays a
     // constant `tex0.a < 224/255` (STABLE silhouette, never grows/snaps) — with blend on and source
-    // alpha = `tex0.a × fade`. On the blend twin (`model_flags.y`) `AlphaMode::Blend` does no discard,
-    // so we re-apply that hard cutout here on the UNFADED alpha; `specialize` keeps depth-write ON.
+    // alpha = `tex0.a × fade`. On the blend twin `AlphaMode::Blend` does no discard, so we re-apply
+    // that hard cutout here on the UNFADED alpha — but ONLY for a twin whose SOURCE batch alpha-tests
+    // (clutter_fade.z bit 10, model_render's TWIN_CUTOUT_MARKER): the reference keys ALPHAREF on the
+    // STORED blend mode (m2-blend-promotion-zfill.md §2), so a fading/stealthed OPAQUE batch blends
+    // with no alpha test at all. Keying the discard on the twin bit itself cut every texel under
+    // 224/255 out of promoted Opaque batches — Gressil's blade body erased to its rune pattern under
+    // stealth (decision 0842). `specialize` keeps depth-write ON for every twin (`model_flags.y`).
     // The payload is TYPED (mesh_tag.rs, decisions 0173/0720): bits 0-5 = the fade alpha (6-bit
     // fraction; a whole payload of 0 = the untagged ⇒ opaque sentinel), bits 19-29 = the skin
     // rig slot (vertex-stage concern — the fragment never reads it, but it rides every payload,
@@ -530,13 +535,13 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
         vec3<f32>(1.0),
         tint_word == 0u,
     );
-    if (m.model_flags.y > 0.5 && base_color.a < VANILLA_ALPHA_KEY) {
+    if ((u32(m.clutter_fade.z) & 1024u) != 0u && base_color.a < VANILLA_ALPHA_KEY) {
         discard;
     }
     // DEPTH-PRIME TWIN (the zfill pipeline variant — terrain.rs `specialize`, the reference's
     // M2UseZFill clone command, wow-re m2-blend-promotion-zfill.md §4): colour writes are masked
     // off at the pipeline, so on that variant only the discards above (farclip wall, the
-    // model_flags.y cutout) shape what depth gets written; the lighting/fog below is computed and
+    // bit-10 twin cutout) shape what depth gets written; the lighting/fog below is computed and
     // thrown away. (A shader-def early return here would be the natural spelling, but naga's MSL
     // backend miscompiles the dead tail — "redefinition of '_tmp'" — so the twin pays the colour
     // math instead. Episodes are transient; the cost is bounded.)

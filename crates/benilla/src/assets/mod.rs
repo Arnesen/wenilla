@@ -383,8 +383,8 @@ impl WorldAssets {
             base,
             extension: WowModelExt {
                 clutter_fade,
-                // x = WMO (FFP N·L × MOCV, not SH); y = distance-fade blend variant (depth-write-on +
-                // stable cutout via `specialize`/the shader — see WowModelKey).
+                // x = WMO (FFP N·L × MOCV, not SH); y = distance-fade blend variant (depth-write-on
+                // via `specialize` — see WowModelKey; no live caller passes it here).
                 model_flags: Vec4::new(
                     if is_wmo { 1.0 } else { 0.0 },
                     if is_fade_variant { 1.0 } else { 0.0 },

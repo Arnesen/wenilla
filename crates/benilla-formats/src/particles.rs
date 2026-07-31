@@ -41,7 +41,7 @@ use std::io::Cursor;
 use anyhow::Result;
 use benilla_m2::{parse_m2, M2ScalarTrack};
 
-use crate::emit_timing::EmitTiming;
+use crate::emit_timing::{EmitParams, EmitTiming};
 use crate::models::SeqSlot;
 
 /// Emitter spawn shape (file `emitterType` @ +0x2a). Only `Plane` is needed for campfires/torches;
@@ -345,29 +345,16 @@ pub struct ParticleEmitterDef {
     pub tile_cols: u16,
     /// 0 = head (camera quad), 1 = tail (speed-stretched), 2 = both. We render head first.
     pub head_tail: u8,
-    // --- emission params: value[0] of each emission M2Track (the runtime's own load-time bake) ---
-    /// Initial particle speed (yards/sec).
-    pub emission_speed: f32,
-    /// Fractional random speed spread (`speed·(1 ± var·noise)`).
-    pub speed_variation: f32,
-    /// Half-angle of the emission cone, radians (small = a tight upward jet).
-    pub vertical_range: f32,
-    /// Azimuthal spread, radians (`2π` = full circle around the up axis).
-    pub horizontal_range: f32,
-    /// Downward acceleration (yards/sec²); small/zero for a buoyant flame.
-    pub gravity: f32,
-    /// Particle lifetime (seconds) — killed at this age.
-    pub lifespan: f32,
     /// The two per-frame-sampled emission tracks — spawn rate (`+0xdc`) and the ON/OFF gate
-    /// (`+0x1dc`) — baked **one loop per sequence** ([`EmitTiming`]). The other nine emission
-    /// M2Tracks stay `value[0]`-baked: constant in every model this renderer draws (verified
-    /// across the spurt family + the ambient props; a named residual if a model ever authors one).
+    /// (`+0x1dc`) — baked **one loop per sequence** ([`EmitTiming`]).
     pub timing: EmitTiming,
-    /// Plane emitter full extents (yards); spawn points are drawn from the `±½·extent` rectangle.
-    pub area_length: f32,
-    pub area_width: f32,
-    /// zSource / gravity2 — a pull toward a point above the emitter (0 = unused).
-    pub z_source: f32,
+    /// The other NINE emission M2Tracks (speed, speedVar, latitude, longitude, gravity, lifespan,
+    /// areaLength, areaWidth, zSource — bases `+0x34..+0x130`), baked the same way and sampled by
+    /// the sim **each frame on the emitter's clock** ([`EmitParams`]). These animate for real:
+    /// Frost Nova rides its emission radius 0.19 → 13.2 yd out with the expanding ring, Arcane
+    /// Explosion 0 → 7.2 yd with the growing dome — the retired `value[0]` flatten birthed both
+    /// entirely at the caster's feet (decision 0844).
+    pub params: EmitParams,
     /// Velocity **drag** (file +0x194; a plain scalar, not a track — the builder copies it straight to
     /// the runtime emitter's `+0x1e0` at `m2-decomp.c:8950`, *outside* the ten track setters). Each
     /// frame the runtime applies `vel −= min(dt·drag, 1)·vel` (verified `particle_integrate` @
@@ -572,21 +559,6 @@ fn le_f32(b: &[u8], o: usize) -> f32 {
 }
 fn le_vec3(b: &[u8], o: usize) -> [f32; 3] {
     [le_f32(b, o), le_f32(b, o + 4), le_f32(b, o + 8)]
-}
-
-/// Read value[0] of a vanilla M2Track (28 bytes) whose record begins at `track`. Track tail:
-/// `values{count @ +0x14, offset @ +0x18}`, values are `f32`. Returns `default` if the track is empty
-/// or points out of range (the runtime's load-time bake reads exactly this first value).
-fn track_first(b: &[u8], track: usize, default: f32) -> f32 {
-    if track + 0x1c > b.len() {
-        return default;
-    }
-    let n = le_u32(b, track + 0x14);
-    let ofs = le_u32(b, track + 0x18) as usize;
-    if n == 0 || ofs + 4 > b.len() {
-        return default;
-    }
-    le_f32(b, ofs)
 }
 
 /// Read one raw vanilla M2Track (28 bytes at `track`) into the shared typed shape — **absolute**
@@ -805,21 +777,29 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
             tile_rows: tiles.0,
             tile_cols: tiles.1,
             head_tail: bytes[e + 0x2c],
-            emission_speed: track_first(bytes, e + 0x34, 0.0),
-            speed_variation: track_first(bytes, e + 0x50, 0.0),
-            vertical_range: track_first(bytes, e + 0x6c, 0.0),
-            horizontal_range: track_first(bytes, e + 0x88, 0.0),
-            gravity: track_first(bytes, e + 0xa4, 0.0),
-            lifespan: track_first(bytes, e + 0xc0, 1.0),
             timing: EmitTiming::bake(
                 &read_raw_track(bytes, e + 0xdc, 4, le_f32),
                 &read_raw_track(bytes, e + 0x1dc, 1, |b, o| f32::from(b[o] != 0)),
                 &seq_slots,
                 &gseq,
             ),
-            area_length: track_first(bytes, e + 0xf8, 0.0),
-            area_width: track_first(bytes, e + 0x114, 0.0),
-            z_source: track_first(bytes, e + 0x130, 0.0),
+            // The nine parameter tracks, full-key ([`EmitParams`] field order — bases 0x1c apart,
+            // the emitter phase's own walk). NOT `value[0]`: several effects animate them.
+            params: EmitParams::bake(
+                [
+                    &read_raw_track(bytes, e + 0x34, 4, le_f32),  // speed
+                    &read_raw_track(bytes, e + 0x50, 4, le_f32),  // speedVar
+                    &read_raw_track(bytes, e + 0x6c, 4, le_f32),  // latitude
+                    &read_raw_track(bytes, e + 0x88, 4, le_f32),  // longitude
+                    &read_raw_track(bytes, e + 0xa4, 4, le_f32),  // gravity
+                    &read_raw_track(bytes, e + 0xc0, 4, le_f32),  // lifespan
+                    &read_raw_track(bytes, e + 0xf8, 4, le_f32),  // areaLength
+                    &read_raw_track(bytes, e + 0x114, 4, le_f32), // areaWidth
+                    &read_raw_track(bytes, e + 0x130, 4, le_f32), // zSource
+                ],
+                &seq_slots,
+                &gseq,
+            ),
             drag: le_f32(bytes, e + 0x194),
             tail_time: le_f32(bytes, e + 0x17c),
             angular_velocity_min: le_vec3(bytes, e + 0x19c),
@@ -984,9 +964,10 @@ mod tests {
             let s = d.spline.as_ref().expect("chain parses");
             assert_eq!(s.points.len() % 3, 1, "3K+1 control points");
             assert!(s.points.len() >= 16);
-            assert_eq!(d.area_length, 0.0, "tMin");
-            assert_eq!(d.area_width, 1.0, "tMax");
-            assert_eq!(d.vertical_range, 0.0, "no tangent spin");
+            let now = d.params.sample(None, 0.0);
+            assert_eq!(now.area_length, 0.0, "tMin");
+            assert_eq!(now.area_width, 1.0, "tMax");
+            assert_eq!(now.vertical_range, 0.0, "no tangent spin");
             assert!(d.burst(), "one puff of standing flames");
             // The chain starts high (the authored descent) — a sane, in-model coordinate.
             assert!(

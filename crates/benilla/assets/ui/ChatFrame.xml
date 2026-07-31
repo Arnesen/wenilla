@@ -186,6 +186,18 @@
             end
         end
 
+        -- A completed left click on the chat body dismisses a held SPELL/ACTION payload
+        -- (decision 0843, the director's call — no ref counterpart: the reference keeps a
+        -- non-item payload on any frame click). Items are deliberately excluded: an item
+        -- dismissal is a destroy, which only the world-drop popup flow may offer.
+        function BenillaChatFrame_DismissCursor(button)
+            if button ~= "LeftButton" then return end
+            local kind = GetCursorInfo()
+            if kind == "spell" or kind == "action" then
+                ClearCursor()
+            end
+        end
+
         -- MessageFrameScrollButton_OnLoad/_OnUpdate + the ref OnClick pair: a press arms the
         -- hold-repeat (initial delay 0), each 0.05s while held scrolls WITHOUT the sound; the
         -- release click scrolls once WITH the sound (ref FloatingChatFrame.xml's DownButton/
@@ -533,6 +545,9 @@
                 -- WoW wheel convention: +1 per notch up, -1 down. Up = older messages.
                 if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
             </OnMouseWheel>
+            <OnClick>
+                BenillaChatFrame_DismissCursor(arg1)
+            </OnClick>
             <OnHyperlinkClick>
                 SetItemRef(arg1, arg2, arg3)
             </OnHyperlinkClick>
@@ -562,6 +577,9 @@
             <OnMouseWheel>
                 if arg1 > 0 then this:ScrollUp() else this:ScrollDown() end
             </OnMouseWheel>
+            <OnClick>
+                BenillaChatFrame_DismissCursor(arg1)
+            </OnClick>
             <OnHyperlinkClick>
                 SetItemRef(arg1, arg2, arg3)
             </OnHyperlinkClick>

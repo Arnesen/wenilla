@@ -80,6 +80,12 @@ struct Particle {
     pos: Vec3,
     vel: Vec3,
     age: f32,
+    /// This particle's lifetime, captured at birth from the emitter's **current sampled**
+    /// lifespan channel (the reference passes it into each spawn as the kernels' `life_param` —
+    /// wow-re `part-shape-kernels.md`; the channel ANIMATES, e.g. Frost Nova 0.47 → 0.80 s, so a
+    /// shared `def.lifespan` is wrong twice over). Kill at `age >= life`; over-life ramps
+    /// normalize by it.
+    life: f32,
     /// Spawn-time random phase for the twinkle LUT index (the reference hashes the particle's
     /// pointer; same role — de-sync the flicker across particles).
     phase: u32,
@@ -538,7 +544,7 @@ pub fn spawn_emitter(
     // Gate on the rate track's PEAK over every sequence, not its first key: a one-shot burst
     // emitter (the blood spurt's starflash/glowball, 0140 fold-back) keys `0 → 200 → 0` — value[0]
     // is 0 but it absolutely emits.
-    if def.lifespan <= 0.0 || def.timing.peak_rate() <= 0.0 {
+    if def.params.peak_lifespan() <= 0.0 || def.timing.peak_rate() <= 0.0 {
         return None; // emits nothing
     }
     let (host, seq) = match clock {
@@ -652,7 +658,7 @@ pub(crate) fn wire_child_emitters(
             .take(4)
             .filter_map(|em| {
                 let texture = em.texture.clone()?;
-                if em.def.lifespan <= 0.0 || em.def.timing.peak_rate() <= 0.0 {
+                if em.def.params.peak_lifespan() <= 0.0 || em.def.timing.peak_rate() <= 0.0 {
                     return None;
                 }
                 Some(ChildEmitter {

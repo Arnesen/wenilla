@@ -175,9 +175,10 @@ pub struct ModelAlpha(pub f32);
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct ParentModel(pub Entity);
 
-/// How far [`ModelAlphas`] follows [`ParentModel`] before giving up. The real chains are 1–3 links
-/// (unit → item → glow); the bound is a cycle backstop, not a policy.
-const MAX_MODEL_CHAIN: usize = 8;
+/// How far a [`ParentModel`] walk goes before giving up — [`ModelAlphas`], and the tint's twin walk
+/// in [`crate::aura_visual`]. The real chains are 1–3 links (unit → item → glow); the bound is a
+/// cycle backstop, not a policy.
+pub(crate) const MAX_MODEL_CHAIN: usize = 8;
 
 /// The composed render alpha of a model instance — [`ModelAlpha`] multiplied along the
 /// [`ParentModel`] chain, i.e. the reference's `0x714000` recursion as a lookup. This is the number

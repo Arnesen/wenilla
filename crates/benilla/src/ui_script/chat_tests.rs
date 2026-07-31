@@ -227,3 +227,122 @@ fn chat_box_arrows_edit_and_history_recalls() {
         "Down past the newest restores the in-progress draft"
     );
 }
+
+/// Decision 0843 — the chat body as a dismiss surface, the director's stuck-spell gesture end to
+/// end through the shipped XML: a spell dragged out of the spellbook and RELEASED over the chat
+/// keeps carrying (a drag release is never a click — 0218's byte-verified trigger), the follow-up
+/// completed LEFT CLICK on the chat body dismisses it, and the same click leaves an ITEM payload
+/// untouched (a silent item dismissal would be a destroy — only the world-drop popup offers that).
+#[test]
+fn chat_click_dismisses_a_stuck_spell_but_not_an_item() {
+    use benilla_ui::script::{
+        ContainerSlot, ContainerState, SpellBookState, SpellSlotView, SpellTabView,
+    };
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    for f in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "GameTooltip.xml",
+        "Cooldown.xml",
+        "ChatFrame.xml",
+        "SpellBookFrame.xml",
+    ] {
+        load_xml(&s, f);
+    }
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.set_spellbook(SpellBookState {
+        tabs: vec![SpellTabView {
+            name: "Fire".into(),
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            offset: 0,
+            num_spells: 1,
+        }],
+        slots: vec![SpellSlotView {
+            spell_id: 133,
+            name: "Fireball".into(),
+            rank: Some("Rank 1".into()),
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            passive: false,
+            current: false,
+            cooldown: None,
+        }],
+    });
+    s.run("ToggleSpellBook(BOOKTYPE_SPELL)").unwrap();
+    s.resolve();
+
+    // Drag Fireball off its book button (press → past the 4px threshold → the payload is up).
+    let (l, r, t, b) = (
+        s.eval::<f32>("return BenillaSpellButton1:GetLeft()")
+            .unwrap(),
+        s.eval::<f32>("return BenillaSpellButton1:GetRight()")
+            .unwrap(),
+        s.eval::<f32>("return BenillaSpellButton1:GetTop()")
+            .unwrap(),
+        s.eval::<f32>("return BenillaSpellButton1:GetBottom()")
+            .unwrap(),
+    );
+    let (x1, y1) = ((l + r) * 0.5, (t + b) * 0.5);
+    s.mouse_button(x1, y1, "LeftButton", true);
+    s.mouse_move(x1 + 20.0, y1);
+    assert!(
+        s.cursor_payload().is_some(),
+        "OnDragStart picked the spell up"
+    );
+
+    // Release the DRAG over the chat body: keeps carrying (OnClick never fires on a drag).
+    let (cx, cy) = (200.0, 150.0); // inside ChatFrame1 (BOTTOMLEFT 32,85 + 430×120)
+    s.mouse_move(cx, cy);
+    s.mouse_button(cx, cy, "LeftButton", false);
+    assert!(
+        s.cursor_payload().is_some(),
+        "a drag release over the chat keeps carrying"
+    );
+
+    // The completed click on the chat body dismisses the stuck spell.
+    s.mouse_button(cx, cy, "LeftButton", true);
+    s.mouse_button(cx, cy, "LeftButton", false);
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+    assert!(
+        s.cursor_payload().is_none(),
+        "a chat click dismisses a spell payload"
+    );
+
+    // An ITEM payload survives the same click untouched.
+    let mut slots = std::collections::HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            bar_placeable: true,
+            durability: None,
+            texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
+            count: 5,
+            quality: Some(1),
+            item_id: 117,
+            link: None,
+            locked: false,
+            equip_slots: Vec::new(),
+            cooldown: None,
+            readable: false,
+            creator: None,
+            flags: 0,
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+    assert!(s.cursor_item().is_some(), "fixture: the item is held");
+    s.mouse_button(cx, cy, "LeftButton", true);
+    s.mouse_button(cx, cy, "LeftButton", false);
+    assert!(
+        s.cursor_item().is_some(),
+        "a chat click never touches an item payload"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

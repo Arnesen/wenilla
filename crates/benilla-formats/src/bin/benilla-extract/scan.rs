@@ -180,6 +180,12 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     // plane; a closed solid has faces every way round, backface culling never hides it, and
     // sampling its first triangle answers a question it doesn't have (see `plane_normal`).
     let mut solid = 0u32;
+    // …and the other side of the same gate: batches the split REFUSED because their geometry is
+    // welded to a billboard bone (`RenderSubmesh::welded_billboard`, decisions 0839/0841). These
+    // carry no `billboard` at all, so the card loop below never sees them — they are counted from
+    // the flag the render lanes read, which is what makes this a cross-check of `bbscan`'s SEAM
+    // column (same models, counted from the two ends of the rule) rather than a re-derivation.
+    let (mut welded, mut weld_models) = (0u32, 0u32);
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -190,6 +196,9 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             continue;
         };
         let mut lines = Vec::new();
+        let weld = subs.iter().filter(|s| s.welded_billboard).count() as u32;
+        welded += weld;
+        weld_models += u32::from(weld > 0);
         for (i, s) in subs.iter().enumerate() {
             let Some(bb) = &s.billboard else { continue };
             cards += 1;
@@ -232,7 +241,9 @@ pub fn bbfacescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     eprintln!(
         "{scanned} models scanned, {cards} billboard batch(es): {toward} toward, \
          {away_single} away+single-sided (reference culls these), {away_two} away+two-sided, \
-         {edge_on} edge-on/degenerate, {solid} NOT PLANAR (3-D geometry — no facing to decide)"
+         {edge_on} edge-on/degenerate, {solid} NOT PLANAR (3-D geometry — no facing to decide); \
+         plus {welded} WELDED batch(es) across {weld_models} model(s) the split refused \
+         (skinned, not carded)"
     );
     Ok(())
 }
@@ -773,6 +784,10 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         .collect();
     let (mut scanned, mut hits, mut all_flat, mut mixed) = (0u32, 0u32, 0u32, 0u32);
     let (mut quad_total, mut other_total) = (0u32, 0u32);
+    // The hover census: every ground-quad-SHAPED batch whose uniform plane sits ABOVE z = 0
+    // (any height — the shape test is the renderer's own, the ceiling is lifted), the population
+    // that decides where the decal lane's hover ceiling (`GROUND_HOVER_MAX`) can sit.
+    let mut hovers: Vec<(f32, String)> = Vec::new();
     for name in names {
         let Ok(bytes) = chain.read_file(&name) else {
             continue;
@@ -785,9 +800,16 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         let total_batches = subs.len();
         let (mut flat_count, mut quad_count, mut other_count) = (0u32, 0u32, 0u32);
         let mut blend_modes: Vec<String> = Vec::new();
+        let mut model_hovers: Vec<f32> = Vec::new();
         for s in &subs {
             if s.positions.is_empty() {
                 continue;
+            }
+            if let Some((_, hover)) = s.ground_quad_hover(f32::INFINITY) {
+                if hover > 0.01 {
+                    hovers.push((hover, name.clone()));
+                    model_hovers.push(hover);
+                }
             }
             if !s.positions.iter().all(|v| v[2].abs() <= 0.01) {
                 continue;
@@ -806,7 +828,7 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                 other_count += 1;
             }
         }
-        if flat_count == 0 {
+        if flat_count == 0 && model_hovers.is_empty() {
             continue;
         }
         hits += 1;
@@ -818,14 +840,36 @@ pub fn groundscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             mixed += 1;
         }
         blend_modes.sort();
+        let hover_note = if model_hovers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  hover[{}]",
+                model_hovers
+                    .iter()
+                    .map(|h| format!("{h:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
         println!(
-            "{total_batches:>3} batches  {flat_count:>3} flat ({quad_count:>2} quad-1bone, {other_count:>2} other-flat)  blend[{}]  {name}",
+            "{total_batches:>3} batches  {flat_count:>3} flat ({quad_count:>2} quad-1bone, {other_count:>2} other-flat){hover_note}  blend[{}]  {name}",
             blend_modes.join(" ")
         );
     }
     eprintln!(
         "{scanned} models scanned, {hits} with flat batches ({all_flat} all-flat, {mixed} mixed); flat batches: {quad_total} QUAD-1BONE, {other_total} OTHER-FLAT"
     );
+    if !hovers.is_empty() {
+        hovers.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "{} hovering quad-shaped batches (uniform plane z > 0.01), sorted:",
+            hovers.len()
+        );
+        for (h, name) in &hovers {
+            eprintln!("  z {h:>7.3}  {name}");
+        }
+    }
     Ok(())
 }
 
@@ -1277,9 +1321,10 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             // instrument could LIST that population, so the swapped pairing outlived both audits
             // until Gressil's 0.1 × 1.1 blade smoke drew its curtain across the blade. Bucketed by
             // aspect so a thin curtain (load-bearing) separates from a near-square (invisible).
+            let now = d.params.sample(None, 0.0);
             if d.shape == benilla_formats::ParticleShape::Plane {
-                let lo = d.area_length.abs().min(d.area_width.abs());
-                let hi = d.area_length.abs().max(d.area_width.abs());
+                let lo = now.area_length.abs().min(now.area_width.abs());
+                let hi = now.area_length.abs().max(now.area_width.abs());
                 if hi > 1e-4 {
                     let aspect = if lo > 1e-4 { hi / lo } else { f32::INFINITY };
                     if aspect >= 4.0 {
@@ -1287,6 +1332,29 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                     } else if aspect >= 1.5 {
                         hit("plane-area:anisotropic >=1.5:1");
                     }
+                }
+            }
+            // ANIMATED parameter channels (decision 0844): the population the value[0] flatten
+            // silently mis-rendered — Frost Nova's emission radius riding its ring out, Arcane
+            // Explosion's riding its dome. Tallied per channel so the census names WHICH knob
+            // actually moves in the corpus.
+            const PARAM_KEYS: [&str; 9] = [
+                "param-anim:speed",
+                "param-anim:speedVar",
+                "param-anim:latitude",
+                "param-anim:longitude",
+                "param-anim:gravity",
+                "param-anim:lifespan",
+                "param-anim:areaLength",
+                "param-anim:areaWidth",
+                "param-anim:zSource",
+            ];
+            for (c, (_, slots)) in d.params.channel_views().iter().enumerate() {
+                if slots
+                    .iter()
+                    .any(|k| k.is_some_and(|k| k.len() > 1 && k.iter().any(|&(_, v)| v != k[0].1)))
+                {
+                    hit(PARAM_KEYS[c]);
                 }
             }
             match d.head_tail {
@@ -1349,15 +1417,15 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                     hit("tiles:NON-POW2-COLS");
                 }
             }
-            if d.z_source != 0.0 {
+            if now.z_source != 0.0 {
                 hit("kernel:zSource");
             }
-            if d.gravity < 0.0 {
+            if now.gravity < 0.0 {
                 hit("kernel:negative-gravity");
             }
             if d.shape == benilla_formats::ParticleShape::Sphere
-                && d.vertical_range > 3.0
-                && d.horizontal_range == 0.0
+                && now.vertical_range > 3.0
+                && now.horizontal_range == 0.0
             {
                 hit("kernel:edge-on-ring(lat±π,lon0)");
             }

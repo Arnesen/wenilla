@@ -135,7 +135,7 @@ pub use spell_visual::{
     VisualStages, KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE,
 };
 mod emit_timing;
-pub use emit_timing::EmitTiming;
+pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};
 mod particles;
 pub use particles::{
     parse_m2_particle_emitters, CellRamp, OverLife, OverLifeSample, ParticleBlend,

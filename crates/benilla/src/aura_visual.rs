@@ -72,12 +72,17 @@
 //! the whole stated blocker — the payload has 5 spare bits outdoors and zero indoors) and no material
 //! churn. What it did need was reading our own renderer properly.
 //!
-//! The tint reaches every **skinned** part of a unit, which is the body: skin, face, hair, and every
-//! creature's whole model. Separately-attached M2s (held weapons, shoulders) do not carry the rig
-//! slot and so stay untinted for now — in the reference they inherit the parent's computed colour
-//! (`0x714000` recursion), so this is a real gap; giving them an instance slot means handing them a
-//! `MeshTag` they may not have today, which the ground-shade writer keys on ("matched by carrying a
-//! `MeshTag`"), so it wants its own pass rather than a rider here.
+//! The tint reaches a unit **whole** — the reference's `0x714000` recursion, where an attached model
+//! composes onto its parent CM2's computed colours — by two routes, because benilla has two kinds of
+//! attached model:
+//!
+//! - the ordinary one **borrows its wearer's slot**: an item's parts, cards and boneless geosets all
+//!   spawn carrying the unit's instance bits (decision 0820), so they read the unit's table entry;
+//! - a **rigged** one carries its OWN slot, because the vertex stage indexes the skin palette with
+//!   that same field and cannot borrow it (a spell-effect instance; since 0841, the seven shoulder
+//!   models that weld geometry to a billboard bone). [`chained_tint`] walks such an instance's
+//!   [`crate::model_fade::ParentModel`] link up to the unit — the recursion itself, and the same walk
+//!   `ModelAlphas` already does for alpha.
 //!
 //! Types 2, 7, 8, 11 and 13 also appear on state kits (Berserk/Bloodlust's 2, the Sap/Feign-Death 7,
 //! the Freeze/Ice-Block 11, the "Glowy (Red)" 13) and have **no verified mechanism** — the wow-re
@@ -223,15 +228,16 @@ impl AuraNodes {
 /// went away, not a unit whose last tint aura dropped. (The despawn/rebuild edge is covered
 /// structurally too, in `RigSkin`'s free hook.)
 pub(crate) fn apply_aura_tint(
-    rigs: Query<(Option<&AuraNodes>, &crate::rig_palette::RigSkin)>,
+    rigs: Query<(Entity, &crate::rig_palette::RigSkin)>,
+    chain: Query<(Option<&AuraNodes>, Option<&crate::model_fade::ParentModel>)>,
     mut tints: ResMut<crate::instance_tint::InstanceTints>,
     mut probe_logged: Local<bool>,
 ) {
     let probe = tint_probe();
     let mut painted = 0usize;
-    for (nodes, rig) in &rigs {
+    for (root, rig) in &rigs {
         let word = probe
-            .or_else(|| nodes.and_then(AuraNodes::head_tint))
+            .or_else(|| chained_tint(&chain, root))
             .map_or(crate::instance_tint::IDENTITY, crate::instance_tint::pack);
         tints.set(rig.slot, word);
         painted += 1;
@@ -240,6 +246,32 @@ pub(crate) fn apply_aura_tint(
         *probe_logged = true;
         info!("tint probe: painted {painted} live rig slot(s)");
     }
+}
+
+/// The tint a rig instance renders with: its own head node, else the nearest one **up its
+/// [`crate::model_fade::ParentModel`] chain** — the reference's `0x714000` recursion, which composes
+/// an attached model's colours onto its parent's computed ones (the same walk [`ModelAlphas`] does
+/// for alpha, and the same law `mesh_tag` cites for why an item's parts carry their wearer's slot).
+///
+/// It exists because a rigged **item** carries its own instance slot rather than its wearer's
+/// (decision 0841 — the vertex stage indexes the palette with that field, so it cannot be borrowed):
+/// without the walk, a dwarf's Stoneform tint would stop at exactly the pauldrons the rig was added
+/// for. A despawned link ends the walk.
+fn chained_tint(
+    chain: &Query<(Option<&AuraNodes>, Option<&crate::model_fade::ParentModel>)>,
+    instance: Entity,
+) -> Option<[u8; 3]> {
+    let mut at = instance;
+    for _ in 0..crate::model_fade::MAX_MODEL_CHAIN {
+        let Ok((nodes, parent)) = chain.get(at) else {
+            return None;
+        };
+        if let Some(rgb) = nodes.and_then(AuraNodes::head_tint) {
+            return Some(rgb);
+        }
+        at = parent?.0;
+    }
+    None
 }
 
 /// `WOW_TINT_PROBE=RRGGBB` — paint **every live rig slot** that colour, auras ignored.

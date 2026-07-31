@@ -206,11 +206,14 @@ pub(crate) fn spawn_model_entities(
             ) {
             cutout.clone()
         } else {
+            // The SOURCE blend (Opaque or AlphaKey here) rides into the twin: fade_variant builds
+            // AlphaMode::Blend either way, and the source decides the twin's 224/255 cutout marker
+            // (only an AlphaKey source alpha-tests while fading — decision 0842).
             model_material(
                 mat_cache,
                 materials,
                 sub.texture.clone(),
-                ModelBlend::Blend,
+                sub.blend,
                 two_sided,
                 is_wmo,
                 interior,

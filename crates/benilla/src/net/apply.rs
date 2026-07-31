@@ -221,9 +221,17 @@ pub(super) fn apply_net_updates(
     // self-only `SMSG_UPDATE_AURA_DURATION` lands here keyed by raw slot, timestamped for the
     // `ui_aura` slot-join — plus the ping clock the Pong arm measures round trips against.
     // Grouped as a tuple to stay under Bevy's 16-SystemParam ceiling.
+    //
+    // The stamp clock is `Time<Real>`, NOT the default virtual one, and both its readers
+    // (`aura_duration`, `corpse_reclaim_delay`) are the reason: a span the SERVER sends us counts
+    // down in real seconds, so it must be stamped and read on a real clock. `Time<Virtual>` clamps
+    // at 250 ms per frame (`max_delta`), which is right for simulation — a 2 s hitch must not
+    // teleport animations — and wrong here: every long frame would quietly ADD that much to every
+    // buff timer, so an aura would vanish with seconds still showing on its clock. Measured on a
+    // hitchy run: the virtual clock lost 20 s against real in 33 s (decision 0846).
     mut aura: (
         ResMut<crate::ui_aura::AuraDurations>,
-        Res<Time>,
+        Res<Time<Real>>,
         Res<super::PingShared>,
         Query<&mut super::UnitSpeeds>,
         // The PlayAnimation call-order counter (`creature_anim::PlaySeq`): every

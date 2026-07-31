@@ -457,8 +457,9 @@ pub(super) fn build_parts(
                     // The depth-prime twin (wow-re `m2-blend-promotion-zfill.md` §4): every batch
                     // that can fade AND writes depth gets one. `cutout` mirrors what the part's
                     // colour pass discards while translucent — the fade twin's hard 224/255 for
-                    // Opaque/AlphaKey sources, nothing for authored-Blend sources (their colour
-                    // pass is the plain blend material) — so depth and colour coverage agree.
+                    // AlphaKey sources only (an Opaque source never alpha-tests, steady or
+                    // promoted — §2; decision 0842), nothing for authored-Blend sources (their
+                    // colour pass is the plain blend material) — so depth and colour coverage agree.
                     let zfill = if sub.no_depth_write || sub.no_depth_test {
                         None
                     } else {
@@ -469,7 +470,7 @@ pub(super) fn build_parts(
                                 materials,
                                 texture.clone(),
                                 sub.two_sided,
-                                b != ModelBlend::Blend,
+                                b == ModelBlend::AlphaTest,
                                 light,
                             )),
                         }
@@ -477,11 +478,14 @@ pub(super) fn build_parts(
                     let fade_blend = match sub.blend {
                         ModelBlend::Mod | ModelBlend::Mod2x => None,
                         ModelBlend::Blend => Some(exterior.clone()),
+                        // The SOURCE blend rides into the twin (Opaque or AlphaKey here): with
+                        // fade_variant it still builds AlphaMode::Blend, but the source decides
+                        // the twin's 224/255 cutout marker (decision 0842).
                         _ => Some(model_material(
                             cache,
                             materials,
                             texture.clone(),
-                            ModelBlend::Blend,
+                            sub.blend,
                             sub.two_sided,
                             false,
                             false, // exterior
@@ -540,11 +544,12 @@ pub(super) fn build_parts(
                         match sub.blend {
                             ModelBlend::Mod | ModelBlend::Mod2x => None,
                             ModelBlend::Blend => Some(bake.clone()),
+                            // Source blend through to the twin, like the exterior twin above (0842).
                             _ => Some(model_material(
                                 cache,
                                 materials,
                                 texture.clone(),
-                                ModelBlend::Blend,
+                                sub.blend,
                                 sub.two_sided,
                                 false,
                                 true, // interior-PROP mode — the probe lane

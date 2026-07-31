@@ -1,10 +1,9 @@
 //! The cursor payload (decision 0216, slice 1) — the client's payload-mode global `[0xb4d900]`
 //! as a typed enum, and the drag-gesture mechanics (`RegisterForDrag`/`OnDragStart`/`OnDragStop`/
 //! `OnReceiveDrag`) that transition it. One seam for every surface — bags, the paper doll
-//! ([`doll`], decision 0208 phase 1b), and action bars ([`bar`], decision 0216 §7/0218 §4) today;
-//! the spellbook lands on it in a later slice ([`CursorSpell`] is anticipated by the enum, not
-//! yet produced anywhere) — so sounds, `CURSOR_UPDATE`, grid events, and lock display can't drift
-//! apart per window.
+//! ([`doll`], decision 0208 phase 1b), action bars ([`bar`], decision 0216 §7/0218 §4), and the
+//! spellbook ([`super::spellbook`]'s `PickupSpell`, slice 5 — the [`CursorSpell`] producer) — so
+//! sounds, `CURSOR_UPDATE`, grid events, and lock display can't drift apart per window.
 //!
 //! [`container`](super::container)'s `pickup_container_item`, [`doll`]'s
 //! `pickup_inventory_item`, and [`bar`]'s `pickup_action`/`place_action` (the surface-specific
@@ -41,9 +40,10 @@ pub const EQUIPMENT_BAG: i64 = -100;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// What the cursor carries — the client's payload-mode global [0xb4d900] as a typed enum
-/// (wow-re item-pickup-place-sound.md: 1 = live item; spell/macro and money/preview arms
-/// anticipated, not yet built). One transition seam for every surface, so sounds, CURSOR_UPDATE,
-/// and lock display can't drift apart per window (decision 0216).
+/// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell; our Action arm is the
+/// client's bar-slot pickup; the money/macro/preview arms stay unbuilt). One transition seam for
+/// every surface, so sounds, CURSOR_UPDATE, and lock display can't drift apart per window
+/// (decision 0216).
 #[derive(Clone, Debug, PartialEq)]
 pub enum CursorPayload {
     Item(CursorItem),
@@ -85,9 +85,9 @@ pub struct CursorItem {
     pub bar_placeable: bool,
 }
 
-/// A spell payload (`PickupSpell`, not yet built — anticipated by the enum for the spellbook
-/// slice): the spellbook slot it was picked from, its book (`"spell"`/`"pet"`, the Era
-/// `GetCursorInfo` shape), and the resolved spell id.
+/// A spell payload ([`super::spellbook`]'s `PickupSpell` produces it): the spellbook slot it was
+/// picked from, its book (`"spell"`/`"pet"`, the Era `GetCursorInfo` shape), and the resolved
+/// spell id.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorSpell {
     pub book_slot: u32,
@@ -99,9 +99,9 @@ pub struct CursorSpell {
     pub passive: bool,
 }
 
-/// An action-slot payload (`PickupAction`, not yet built — anticipated by the enum for the
-/// action-bar slice): the source action slot, the packed action's kind byte (SPELL/MACRO/ITEM —
-/// decision 0216's `CMSG_SET_ACTION_BUTTON` type byte), and the action id itself.
+/// An action-slot payload ([`bar`]'s `PickupAction`/`place_action` hop produces it): the source
+/// action slot, the packed action's kind byte (SPELL/MACRO/ITEM — decision 0216's
+/// `CMSG_SET_ACTION_BUTTON` type byte), and the action id itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorAction {
     pub src_slot: u32,
@@ -194,9 +194,10 @@ pub(crate) fn clear_cursor(model: &mut Model) {
 /// [`WorldPick::Nothing`] in tests/captures). Routes the left world-drop
 /// ([`world_drop_click`]): over an `Object` no payload drops at all (the object leg `0x492ce0`
 /// clears only the displayId-PREVIEW gate `[0xb4b41c]` — an arm benilla doesn't carry — and
-/// dispatches SELECT/INTERACT with the payload still held); over `Terrain` only an ITEM drops
-/// (the `DELETE_ITEM_CONFIRM` popup via `0x5e0320` — a spell/action payload survives a ground
-/// click); over `Nothing` the item pops and any other payload silently clears (`0x492d30`).
+/// dispatches SELECT/INTERACT with the payload still held); over `Terrain` an ITEM drops (the
+/// `DELETE_ITEM_CONFIRM` popup via `0x5e0320`) and a spell/action payload clears silently
+/// (decision 0843's deliberate divergence — the reference keeps it there); over `Nothing` the
+/// item pops and any other payload silently clears (`0x492d30`).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum WorldPick {
     /// No world hit at all (sky / beyond the world) — the reference's state 0.
@@ -219,13 +220,15 @@ pub enum WorldPick {
 /// - `Terrain`: an item payload fires `DELETE_ITEM_CONFIRM(name, quality)` and STAYS held (the
 ///   reference popup's `OnAccept` calls `DeleteCursorItem`, `OnCancel` `ClearCursor`, and its
 ///   `OnUpdate` auto-hides when the cursor empties — the engine must not pre-clear); a
-///   spell/action payload SURVIVES a ground click (`0x492c90` clears non-items only on the
-///   right button).
+///   spell/action payload clears silently — a DELIBERATE divergence (decision 0843, the
+///   director's call): the reference's terrain leg keeps a non-item payload on the left click
+///   (`0x492c90`/`0x5e0320` clear non-items only on the right button), which leaves a spell
+///   stuck to the cursor with no left-handed way off it.
 /// - `Nothing`: the item pops the same popup; any other payload clears silently (`0x492d30`'s
-///   non-item arm).
+///   non-item arm — here the reference agrees).
 ///
-/// Returns whether the click was consumed as a drop (an empty cursor, an `Object` pick, or a
-/// surviving non-item payload on `Terrain` consume nothing).
+/// Returns whether the click was consumed as a drop (an empty cursor or an `Object` pick
+/// consume nothing).
 pub(crate) fn world_drop_click(model: &mut Model) -> bool {
     match (&model.cursor, model.world_pick) {
         (Some(CursorPayload::Item(item)), WorldPick::Terrain | WorldPick::Nothing) => {
@@ -233,7 +236,10 @@ pub(crate) fn world_drop_click(model: &mut Model) -> bool {
             queue_delete_item_confirm(model, &item);
             true
         }
-        (Some(CursorPayload::Spell(_) | CursorPayload::Action(_)), WorldPick::Nothing) => {
+        (
+            Some(CursorPayload::Spell(_) | CursorPayload::Action(_)),
+            WorldPick::Terrain | WorldPick::Nothing,
+        ) => {
             clear_cursor(model);
             true
         }
@@ -307,8 +313,8 @@ impl super::UiScript {
         }
     }
 
-    /// The full cursor payload, any arm — for callers that will also draw/react to a spell/action
-    /// drag (not yet built; anticipated for later slices).
+    /// The full cursor payload, any arm — what the app's hardware-cursor drive
+    /// (`benilla::cursor`) and capture stand-in draw, and what the world-click consumers gate on.
     pub fn cursor_payload(&self) -> Option<CursorPayload> {
         self.model_ref().cursor.clone()
     }
@@ -546,36 +552,32 @@ mod tests {
         assert!(s.cursor_payload().is_none());
     }
 
-    /// The world-drop pick routing (decisions 0571 + 0574 — wow-re §11): over `Terrain` an item
-    /// drops (popup) but a spell/action payload SURVIVES the ground click; over `Nothing` the
-    /// non-item arm clears silently.
+    /// The world-drop pick routing (decisions 0571 + 0574 — wow-re §11, amended by 0843): a
+    /// spell/action payload clears silently on BOTH empty-world legs — terrain included, the
+    /// 0843 divergence (the reference keeps it on terrain; the director wants the left click to
+    /// dismiss) — while an item keeps its byte-faithful popup flow.
     #[test]
-    fn world_drop_terrain_keeps_a_spell_payload_nothing_clears_it() {
+    fn world_drop_terrain_and_nothing_both_clear_a_spell_payload() {
         use super::{world_drop_click, WorldPick};
         let mut s = UiScript::new().unwrap();
-        s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
-            passive: false,
-            book_slot: 3,
-            book_type: "spell".into(),
-            spell_id: 133,
-            texture: None,
-        }));
-        s.model_mut().world_pick = WorldPick::Terrain;
-        assert!(
-            !world_drop_click(&mut s.model_mut()),
-            "terrain: a spell payload is not a drop"
-        );
-        assert!(
-            s.cursor_payload().is_some(),
-            "the spell survives the ground click"
-        );
-
-        s.model_mut().world_pick = WorldPick::Nothing;
-        assert!(world_drop_click(&mut s.model_mut()));
-        assert!(
-            s.cursor_payload().is_none(),
-            "over nothing it clears silently"
-        );
+        for pick in [WorldPick::Terrain, WorldPick::Nothing] {
+            s.set_cursor_for_test(CursorPayload::Spell(CursorSpell {
+                passive: false,
+                book_slot: 3,
+                book_type: "spell".into(),
+                spell_id: 133,
+                texture: None,
+            }));
+            s.model_mut().world_pick = pick;
+            assert!(
+                world_drop_click(&mut s.model_mut()),
+                "{pick:?}: the dismiss consumes the click"
+            );
+            assert!(
+                s.cursor_payload().is_none(),
+                "{pick:?}: the spell clears silently"
+            );
+        }
 
         // An item drops (the popup path) on BOTH empty-world legs, never over an object.
         let item = CursorPayload::Item(CursorItem {

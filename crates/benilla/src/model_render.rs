@@ -128,6 +128,14 @@ pub(crate) type MaterialCache = crate::art_scope::SpatialCache<MatKey, Handle<Wo
 /// marks the `AlphaMode::Blend` twin every feather pass rides — the doodad distance fade AND the
 /// entity appear/despawn/aura fades (`entities::display` builds its twins with it too); steady
 /// materials pass `false`. `specialize` keys depth-write-ON on this bit for the twin.
+///
+/// A twin builder passes the **SOURCE batch's blend mode** (never `ModelBlend::Blend`): the twin
+/// always blends — the reference's promotion is transparent-pass membership, not a per-mode state
+/// (`m2-blend-promotion-zfill.md` §1) — but the alpha TEST under promotion keys on the *stored*
+/// blend mode (§2): AlphaKey keeps its 224/255 cutout while blending, Opaque runs with no alpha
+/// test at all. The source blend is what sets [`TWIN_CUTOUT_MARKER`] right (decision 0842: a twin
+/// built as `Blend` cut every texel under 224/255 out of a stealthed Opaque batch, which erased
+/// Gressil's blade body and left only its high-alpha rune pattern).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_material(
     cache: &mut MaterialCache,
@@ -187,17 +195,23 @@ pub(crate) fn model_material(
     // additive marker is `clutter_fade.z` bit 2 — the shader gates the gamma-premultiply on the
     // SAME bit specialize keys on (a stale "model_flags.w == 2.0" claim here once desynced the
     // two: blend went pure-add while the premultiply never fired — the flat-square regression).
-    let alpha_mode = if is_additive {
+    // `WOW_NO_ALPHATEST=1` draws every cutout batch opaque — the A/B for "is the alpha test
+    // itself discarding this surface?", which is otherwise indistinguishable in the pixels
+    // from the surface losing a depth test or never being submitted. (B38: the flip
+    // survives it unchanged, so the cutout is not what removes the awning.) It suppresses the
+    // fade twin's cutout marker too, so the A/B answers the same question mid-fade.
+    let source_cutout =
+        blend == ModelBlend::AlphaTest && std::env::var("WOW_NO_ALPHATEST").is_err();
+    let alpha_mode = if is_additive || fade_variant {
+        // A fade twin blends whatever its source blend is — the reference's promotion is
+        // transparent-pass membership (`m2-blend-promotion-zfill.md` §1); the source blend the
+        // caller passed decides only the cutout marker below.
         AlphaMode::Blend
     } else {
         match blend {
             ModelBlend::Opaque => AlphaMode::Opaque,
-            // `WOW_NO_ALPHATEST=1` draws every cutout batch opaque — the A/B for "is the alpha test
-            // itself discarding this surface?", which is otherwise indistinguishable in the pixels
-            // from the surface losing a depth test or never being submitted. (B38: the flip
-            // survives it unchanged, so the cutout is not what removes the awning.)
-            ModelBlend::AlphaTest if std::env::var("WOW_NO_ALPHATEST").is_ok() => AlphaMode::Opaque,
-            ModelBlend::AlphaTest => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
+            ModelBlend::AlphaTest if source_cutout => AlphaMode::Mask(VANILLA_ALPHA_KEY_REF),
+            ModelBlend::AlphaTest => AlphaMode::Opaque,
             // Mod/Mod2x ride the transparent pass (they multiply what's already drawn, so the
             // scene under them must exist); `specialize` swaps the actual blend state to the
             // byte-verified multiply factors via the marker bits below (decision 0528).
@@ -252,6 +266,12 @@ pub(crate) fn model_material(
                 // Bits 7/8 = the MULTIPLY blends (decision 0528): `specialize` swaps the pipeline
                 // to the byte-verified factors — Mod DST_COLOR/ZERO, Mod2x DST_COLOR/SRC_COLOR
                 // (exact on the 0161 gamma lane: the framebuffer holds gamma, like the reference).
+                // Bit 10 = TWIN CUTOUT (decision 0842): this fade twin's SOURCE batch alpha-tests,
+                // so the shader re-applies the hard 224/255 cutout on the unfaded alpha (the
+                // reference's promoted-AlphaKey ALPHAREF = A×224 — the same fixed silhouette). An
+                // Opaque source sets no bit: the reference disables its alpha test outright, steady
+                // and promoted alike (`m2-blend-promotion-zfill.md` §2 keys ALPHAREF on the STORED
+                // blend mode, mode 0 → ref 0).
                 f32::from(
                     u16::from(no_depth_write)
                         | (u16::from(no_depth_test) << 1)
@@ -263,7 +283,8 @@ pub(crate) fn model_material(
                         ) << 3)
                         | (u16::from(fog_policy as u8) << 4)
                         | (u16::from(blend == ModelBlend::Mod) << 7)
-                        | (u16::from(blend == ModelBlend::Mod2x) << 8),
+                        | (u16::from(blend == ModelBlend::Mod2x) << 8)
+                        | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER),
                 ),
                 0.0,
             ),
@@ -350,6 +371,13 @@ pub(crate) fn model_material(
 /// `clutter_fade.z` marker bit 9: this material is a depth-prime twin ([`zfill_material`]).
 pub(crate) const ZFILL_MARKER: u16 = 1 << 9;
 
+/// `clutter_fade.z` marker bit 10: this twin's SOURCE batch alpha-tests, so the shader re-applies
+/// the hard 224/255 cutout while blending (`wow_model.wgsl`). Set from the source blend mode by
+/// [`model_material`] (fade twins) and [`zfill_material`] (depth-prime twins); never on an
+/// Opaque-source twin — the reference runs mode 0 with the alpha test disabled, steady and
+/// promoted alike (`m2-blend-promotion-zfill.md` §2; decision 0842).
+pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
+
 /// The twin's `Transparent3d` sort bias (yards; **negative = drawn earlier** — the sign law is
 /// `sky_order`'s module doc). It must clear the spread of one model's part AABB centres, so **all**
 /// of a fading model's twins draw before **any** of its colour parts — the reference achieves the
@@ -369,10 +397,12 @@ pub(crate) const ZFILL_SORT_BIAS: f32 = -8.0;
 /// depth-writing batches draws first, so every colour fragment behind the model's own nearest
 /// surface fails the depth test — one blended layer everywhere, no self-overlap darkening.
 ///
-/// `cutout` mirrors what the part's COLOUR pass discards, and must keep mirroring it: a twin that
-/// writes depth where the colour pass discards leaves an invisible depth wall inside the cutout
-/// holes. Opaque/AlphaKey sources ride the fade twin's hard 224/255 cutout (`model_flags.y`);
-/// authored-Blend sources discard nothing (their colour pass is the plain blend material).
+/// `cutout` = **the source batch alpha-tests** (AlphaKey). It mirrors what the part's COLOUR pass
+/// discards, and must keep mirroring it: a twin that writes depth where the colour pass discards
+/// leaves an invisible depth wall inside the cutout holes. Only an AlphaKey source rides the fade
+/// twin's hard 224/255 cutout ([`TWIN_CUTOUT_MARKER`]); Opaque sources never alpha-test
+/// (`m2-blend-promotion-zfill.md` §2/§4 — the reference's twin keeps mode 1's test, mode 0 has
+/// none; decision 0842) and authored-Blend sources discard nothing either.
 ///
 /// Everything that shapes only the *colour* (lighting lane, shade, fog, tint) is canonicalized so
 /// twins dedupe maximally — the `WOW_ZFILL` fragment returns before any of it.
@@ -426,10 +456,17 @@ pub(crate) fn zfill_material(
     let handle = materials.add(ExtendedMaterial {
         base,
         extension: WowModelExt {
-            clutter_fade: Vec4::new(0.0, 0.0, f32::from(ZFILL_MARKER), 0.0),
-            // `model_flags.y` (the fade-twin bit) drives the shader's hard 224/255 cutout — set
+            // Bit 10 (the twin-cutout marker) drives the shader's hard 224/255 cutout — set
             // exactly when the colour pass discards, so depth and colour coverage agree.
-            model_flags: Vec4::new(0.0, if cutout { 1.0 } else { 0.0 }, 0.0, 0.0),
+            clutter_fade: Vec4::new(
+                0.0,
+                0.0,
+                f32::from(ZFILL_MARKER | if cutout { TWIN_CUTOUT_MARKER } else { 0 }),
+                0.0,
+            ),
+            // Not a fade twin (`model_flags.y` = 0): the zfill pipeline branch forces its own
+            // depth-write, and the cutout rides bit 10 above, so the bit has no work here.
+            model_flags: Vec4::ZERO,
             sun_scale: Vec4::new(ShadeSel::Lit.selector(), 0.0, 0.0, 0.0),
             tint: Vec4::new(1.0, 1.0, 1.0, 0.0),
             sidn: Vec4::ZERO,

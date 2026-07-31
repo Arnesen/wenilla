@@ -12,11 +12,20 @@
 //!   a dropped aura closes its gap, a new aura appends at the end.
 //! - **Durations arrive out of band, and before the slot is named.** `SMSG_UPDATE_AURA_DURATION`
 //!   ([`AuraDurations`], filled by the net apply path) is keyed by raw slot and lands *before* the
-//!   `UNIT_FIELD_AURA` delta that says which spell sits there (verified, decision 0257 B6). The feed
-//!   joins a duration to an aura by slot, gated on the aura having appeared no later than the packet
-//!   — so a stale timer left in a recycled slot by a since-expired aura is never shown on the
-//!   permanent aura that took its place (the reference avoids this via a DBC "until cancelled" flag
-//!   we don't parse; the arrival-time gate is our equivalent, decision 0257 §3).
+//!   `UNIT_FIELD_AURA` delta that says which spell sits there (verified, decision 0257 B6; measured
+//!   at one frame, ~50 ms, on a fresh apply — decision 0846). So a stamp's slot is **empty at the
+//!   moment it arrives**, and the only thing that may invalidate it is the aura it would be joined
+//!   to, never the slot's momentary occupancy: the feed keeps every stamp and gates the *join* on
+//!   the aura having appeared no earlier than the packet. That gate is what stops a timer left by a
+//!   since-expired occupant showing on the permanent aura that recycled its slot (the reference
+//!   avoids this via a DBC "until cancelled" flag we don't parse — decision 0257 §3).
+//!
+//! And one thing the bar does **not** get from here: the running countdown. Rust recomputes each
+//! aura's `expirationTime` every frame, but the event this feed fires is the reference's
+//! discrete-change edge (`PLAYER_AURAS_CHANGED`), which a duration refresh does not trip. The
+//! reference resolves that the same way — `BuffButton_OnUpdate` re-reads `GetPlayerBuffTimeLeft`
+//! **every frame** and caches only the buff *index* on the event — and so does `BuffFrame.xml`.
+//! A bar that cached the expiry on the event instead is decision 0846's second defect.
 //!
 //! Scope: the **local player** (decisions 0255/0257) and the **target** (the target frame's aura
 //! rows — 0255's deferred slice). The target's list is the byte-verified *other-unit* law
@@ -46,20 +55,29 @@ use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 /// The self-only aura durations, keyed by raw `UNIT_FIELD_AURA` slot — the decoded
-/// `SMSG_UPDATE_AURA_DURATION` payload, stamped with the Bevy time it arrived. Written by the net
+/// `SMSG_UPDATE_AURA_DURATION` payload, stamped with the real time it arrived. Written by the net
 /// apply path (which owns the event stream), read by [`feed_auras`]. A slot's entry is overwritten
-/// by each fresh packet (apply/refresh) and pruned when the feed sees the slot go empty.
+/// by each fresh packet (apply/refresh) and dropped only when the avatar goes — never per-frame on
+/// slot occupancy, which would delete every stamp in the frame before its own aura arrives
+/// (decision 0846). Bounded by construction: one entry per raw slot, ≤ 48.
 #[derive(Resource, Default)]
 pub(crate) struct AuraDurations {
     by_slot: HashMap<u8, DurationStamp>,
 }
 
 struct DurationStamp {
-    /// Full duration in seconds — the packet's `remaining_ms`, which at apply/refresh is the total.
+    /// The span in seconds the last packet reported. On an apply or a refresh this **is** the
+    /// aura's full duration (vmangos sends `GetAuraDuration()` right after setting it), which is
+    /// what `UnitBuff`'s Era-shaped `duration` return wants. On a re-send it is only the
+    /// *remaining* — `Map::Add` replays every holder's current duration at world entry, and cast
+    /// pushback (`DelaySpellAuraHolder`) reports a shortened one. The 1.12 wire carries no maximum
+    /// at all, for anyone, so there is nothing better to report; the buff bar draws
+    /// [`Self::expires_at`] and never this.
     total: f64,
-    /// The Bevy-clock instant the aura runs out (`received_at + total`).
+    /// The real-clock instant the aura runs out (`received_at + total`). Real, never virtual: see
+    /// the net apply path's aura tuple — a server-sent span counts down in real seconds.
     expires_at: f64,
-    /// The Bevy-clock instant the packet arrived — the freshness gate against a recycled slot.
+    /// The real-clock instant the packet arrived — the freshness gate against a recycled slot.
     received_at: f64,
 }
 
@@ -67,6 +85,11 @@ impl AuraDurations {
     /// Record a `SMSG_UPDATE_AURA_DURATION`. Called from the net apply drain (decision 0257).
     pub(crate) fn set(&mut self, slot: u8, remaining_ms: u32, now: f64) {
         let total = f64::from(remaining_ms) / 1000.0;
+        if trace_period().is_some() {
+            info!(
+                "aura trace: SMSG_UPDATE_AURA_DURATION slot {slot} = {remaining_ms} ms @ {now:.2}"
+            );
+        }
         self.by_slot.insert(
             slot,
             DurationStamp {
@@ -84,7 +107,7 @@ impl AuraDurations {
 struct CachedAura {
     slot: u8,
     spell_id: u32,
-    /// The Bevy-clock instant this aura first entered the cache — the duration freshness gate.
+    /// The real-clock instant this aura first entered the cache — the duration freshness gate.
     appeared_at: f64,
     flags: u8,
     level: u8,
@@ -139,6 +162,12 @@ fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
             c.level = a.level;
             c.stacks = a.stacks;
         } else {
+            if trace_period().is_some() {
+                info!(
+                    "aura trace: slot {} took spell {} (descriptor delta) @ {now:.2}",
+                    a.slot, a.spell_id
+                );
+            }
             cache.push(CachedAura {
                 slot: a.slot,
                 spell_id: a.spell_id,
@@ -169,6 +198,75 @@ struct AuraFeedMemory {
     /// token is cleared). The guid joins the key so a target *switch* re-fires `UNIT_AURA` even
     /// between two units whose lists happen to project identically.
     target_last: Option<(u64, Vec<AuraProjection>)>,
+    /// The Bevy-clock instant [`trace_timers`] last printed (`BENILLA_AURA_TRACE`).
+    traced_at: f64,
+}
+
+/// The `BENILLA_AURA_TRACE` period in seconds, or `None` when the trace is off. A set-but-unparsable
+/// value means "on, at the default 1 Hz" rather than off — a typo shouldn't silently disarm the
+/// instrument you asked for (the `WOW_MOVE_TRACE=1` lesson: a knob that quietly means nothing).
+fn trace_period() -> Option<f64> {
+    static PERIOD: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *PERIOD.get_or_init(|| {
+        let v = std::env::var("BENILLA_AURA_TRACE").ok()?;
+        Some(
+            v.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|p| *p > 0.0)
+                .unwrap_or(1.0),
+        )
+    })
+}
+
+/// One trace tick: for every aura the player's bar is drawing, print the app's remaining time next
+/// to the remaining time the *button's own Lua* would render from what it last cached. The bar's
+/// countdown is a per-frame poll in the reference (`BuffButton_OnUpdate` → `GetPlayerBuffTimeLeft`,
+/// extracted 1.12 `BuffFrame.lua` l.128-130), so these two must agree every frame; a row where they
+/// don't is a stale button, which is exactly the "the timer sticks / never appears" symptom.
+///
+/// The button a given aura lands on is its index *within its own filter* (the bar's ids are
+/// 1-based per filter): helpful auras fill `BuffButton0..15`, harmful `BuffButton16..23`.
+fn trace_timers(script: &UiScript, cache: &[CachedAura], list: &[AuraState], bevy_now: f64) {
+    let script_now = script.now();
+    info!(
+        "aura trace: {} aura(s), GetTime()={script_now:.2} app clock={bevy_now:.2} (skew {:+.2})",
+        list.len(),
+        script_now - bevy_now
+    );
+    let (mut helpful_n, mut harmful_n) = (0usize, 0usize);
+    for (c, a) in cache.iter().zip(list) {
+        let button = if a.helpful {
+            helpful_n += 1;
+            helpful_n - 1
+        } else {
+            harmful_n += 1;
+            15 + harmful_n
+        };
+        let app_left = if a.expiration_time > 0.0 {
+            format!("{:.1}s", a.expiration_time - script_now)
+        } else {
+            "permanent".to_string()
+        };
+        // What the bar is actually DRAWING — the rendered duration string, not an intermediate.
+        // The button holds no expiry of its own (it re-reads one every frame), so the text is the
+        // only readback there is, and it is the right one: it is what the director sees.
+        let lua = script
+            .eval::<String>(&format!(
+                r#"local b = getglobal("BuffButton{button}")
+                   local d = getglobal("BuffButton{button}Duration")
+                   if not b then return "no such button" end
+                   return string.format("shown=%s draws %q",
+                       tostring(b:IsShown()), d and d:GetText() or "")"#
+            ))
+            .unwrap_or_else(|e| format!("<lua error: {e}>"));
+        info!(
+            "  slot {:>2}  spell {:>5}  {:<26}  BuffButton{button:<2}  app left {app_left:<10}  lua {lua}",
+            c.slot,
+            a.spell_id,
+            a.name.as_deref().unwrap_or("<unknown spell>"),
+        );
+    }
 }
 
 fn projection_of(list: &[AuraState]) -> Vec<AuraProjection> {
@@ -225,7 +323,7 @@ fn feed_auras(
     spells: Option<Res<Spells>>,
     mut durations: ResMut<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut mem: Local<AuraFeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -238,6 +336,11 @@ fn feed_auras(
             script.set_auras("target", None);
             script.set_tracking(None);
             cache.auras.clear();
+            // The stamps go with the cache: nothing prunes them per-frame (see the note in the
+            // join below), so losing the avatar is where they are dropped. A stale one could not
+            // survive a re-entry anyway — the freshness gate rejects a stamp older than the aura —
+            // but leaving the map to accumulate across logins would be sloppy state.
+            durations.by_slot.clear();
             *mem = AuraFeedMemory::default();
         }
         return;
@@ -260,13 +363,15 @@ fn feed_auras(
         .collect();
     reconcile(&mut cache.auras, &live, bevy_now);
 
-    // Prune durations for slots that no longer hold any aura — that's the only moment we can be sure
-    // a stamp is stale (a still-occupied slot may legitimately keep a permanent aura with no timer).
-    // Keyed on every OCCUPIED slot, hidden or not: the reference's expiry array is raw-slot state,
-    // independent of the display filter.
-    durations
-        .by_slot
-        .retain(|slot, _| occupied.iter().any(|a| a.slot == *slot));
+    // NOTE: there is deliberately no "prune the stamps of empty slots" pass here. It was the whole
+    // of the "a freshly cast buff shows no timer, ever" defect: the duration packet leads its own
+    // descriptor delta (decision 0257 B6 — measured at one frame, ~50 ms, on a fresh apply), so at
+    // the instant a stamp arrives its slot is still EMPTY, and an occupancy prune deletes it
+    // sub-millisecond later, before the aura it belongs to can appear. Staleness belongs to the
+    // freshness gate below, which compares a stamp against the aura it would be joined to rather
+    // than against a slot's momentary emptiness — the defence 0257 §3 built for exactly this.
+    // The map cannot grow: it is keyed by raw slot (≤ 48), each entry overwritten by the next
+    // packet for that slot, and cleared with the rest of the aura state when the avatar goes.
 
     let script_now = script.now();
 
@@ -275,16 +380,12 @@ fn feed_auras(
         .iter()
         .map(|c| {
             let display = catalog.and_then(|cat| cat.get(c.spell_id));
-            // A duration counts only if it arrived no earlier than this aura appeared (minus a
-            // tick's slack): a stamp older than the aura belongs to a since-expired occupant of the
-            // recycled slot (decision 0257 §3). Apply/refresh sends the packet just before the
-            // descriptor delta, so a live aura's stamp is always within that slack.
-            let (duration, expiration_time) = durations
-                .by_slot
-                .get(&c.slot)
-                .filter(|d| d.received_at >= c.appeared_at - DURATION_SLACK)
-                .map(|d| (d.total, script_now + (d.expires_at - bevy_now)))
-                .unwrap_or((0.0, 0.0));
+            let (duration, expiration_time) = join_duration(
+                durations.by_slot.get(&c.slot),
+                c.appeared_at,
+                bevy_now,
+                script_now,
+            );
             AuraState {
                 spell_id: c.spell_id,
                 name: display.map(|d| d.name.clone()),
@@ -306,6 +407,18 @@ fn feed_auras(
     // from `live` above, before the memory update so its change joins the edge key.
     let tracking = tracking_state_of(catalog, &occupied);
     let tracking_spell = tracking.as_ref().map(|t| t.spell_id);
+
+    // The TIMER trace (`BENILLA_AURA_TRACE=<secs>`, default 1 s): the instrument for "the countdown
+    // is wrong" reports. Every tick it prints, per live aura, the app's own remaining time beside
+    // what the *bar's Lua* actually holds — the two halves that can silently disagree, since the
+    // app recomputes the expiry every frame while a button only re-reads it when something makes it
+    // repaint. A row whose `lua left` has drifted from `app left` is the disagreement, named.
+    if let Some(period) = trace_period() {
+        if bevy_now - mem.traced_at >= period {
+            mem.traced_at = bevy_now;
+            trace_timers(&script, &cache.auras, &list, bevy_now);
+        }
+    }
 
     // Edge-trigger UNIT_AURA on a discrete change (the reference's PLAYER_AURAS_CHANGED), never on
     // the countdown alone — that's a per-frame OnUpdate on the button, not an event. The tracking
@@ -425,10 +538,33 @@ fn feed_auras(
 }
 
 /// The apply/refresh-to-descriptor slack: a duration packet is accepted for an aura if it arrived no
-/// more than this long before the aura appeared. Generous versus the sub-frame lead the server
-/// actually gives (the packet precedes the same-tick descriptor delta), tight versus the seconds a
-/// stale recycled-slot stamp would be off by.
+/// more than this long before the aura appeared. Generous versus the **measured** lead — one client
+/// frame, ~50 ms, on a fresh apply against the live server (decision 0846) — and tight versus the
+/// seconds a stale recycled-slot stamp would be off by.
 const DURATION_SLACK: f64 = 1.0;
+
+/// Join a slot's duration stamp to the aura now sitting in that slot, yielding `UnitBuff`'s
+/// `(duration, expirationTime)` pair on the **script** clock (`0.0, 0.0` = no timer, our "until
+/// cancelled"). This is the *only* thing that may reject a stamp, and it is the right place for it:
+/// the stamp is compared against the aura it would be joined to, never against the slot's momentary
+/// occupancy. `SMSG_UPDATE_AURA_DURATION` leads its own descriptor delta (decision 0257 B6), so at
+/// the instant a stamp arrives its slot is *empty* — a rule phrased on occupancy deletes exactly the
+/// packet that matters, which is decision 0846's first defect.
+///
+/// A stamp that predates the aura by more than [`DURATION_SLACK`] belonged to a since-expired
+/// occupant of a recycled slot, and is dropped (decision 0257 §3 — our stand-in for the reference's
+/// unparsed `SpellDuration.dbc` "until cancelled" flag).
+fn join_duration(
+    stamp: Option<&DurationStamp>,
+    appeared_at: f64,
+    bevy_now: f64,
+    script_now: f64,
+) -> (f64, f64) {
+    stamp
+        .filter(|d| d.received_at >= appeared_at - DURATION_SLACK)
+        .map(|d| (d.total, script_now + (d.expires_at - bevy_now)))
+        .unwrap_or((0.0, 0.0))
+}
 
 /// Drain the spell ids `CancelUnitBuff` queued this frame and send one `CMSG_CANCEL_AURA` each. The
 /// server cancels by spell, not slot (decision 0257 B8); it refuses anything the wire's
@@ -601,22 +737,65 @@ mod tests {
     /// stale-recycled-slot defence — while a stamp from around the apply is accepted.
     #[test]
     fn a_duration_is_joined_only_when_it_is_no_older_than_the_aura() {
-        // A stamp received at t=100 is stale for an aura that only appeared at t=200.
+        // A stamp received at t=100 is stale for an aura that only appeared at t=200 — it belonged
+        // to the slot's previous, since-expired occupant.
         let stale = DurationStamp {
             total: 30.0,
             expires_at: 130.0,
             received_at: 100.0,
         };
-        assert!(
-            stale.received_at < 200.0 - DURATION_SLACK,
-            "a stamp seconds older than the aura is rejected"
+        assert_eq!(
+            join_duration(Some(&stale), 200.0, 200.0, 5000.0),
+            (0.0, 0.0),
+            "a stamp seconds older than the aura is rejected — no timer, not a wrong one"
         );
-        // A stamp received just before the aura appeared (the real apply→descriptor lead) is fresh.
+        // A stamp received just before the aura appeared (the real apply→descriptor lead) joins,
+        // and its expiry is rebased from the Bevy clock onto the script clock Lua counts against.
         let fresh = DurationStamp {
             total: 30.0,
             expires_at: 230.0,
-            received_at: 200.0 - 0.1,
+            received_at: 199.9,
         };
-        assert!(fresh.received_at >= 200.0 - DURATION_SLACK, "accepted");
+        assert_eq!(
+            join_duration(Some(&fresh), 200.0, 200.0, 5000.0),
+            (30.0, 5030.0)
+        );
+        // No stamp at all is a permanent aura: the wire sends no packet for one (decision 0257).
+        assert_eq!(join_duration(None, 200.0, 200.0, 5000.0), (0.0, 0.0));
+    }
+
+    /// **Decision 0846's first defect, pinned.** `SMSG_UPDATE_AURA_DURATION` LEADS the descriptor
+    /// delta that names its slot (0257 B6; live-measured at one client frame, ~50 ms, on a fresh
+    /// apply). So at the instant the stamp arrives its slot is **empty** — and the feed used to run
+    /// a per-frame "drop the stamps of unoccupied slots" pass, which deleted it sub-millisecond
+    /// later, before the aura it belonged to could appear. Every freshly cast buff then showed no
+    /// timer, forever, while a *refresh* (whose slot is already occupied) worked — the "sometimes"
+    /// in the report.
+    ///
+    /// The invariant that replaced it: nothing removes a stamp on occupancy, and the join is what
+    /// decides. Here the aura arrives a frame *after* its stamp, and must still get its timer.
+    #[test]
+    fn a_stamp_that_arrives_one_frame_before_its_aura_still_joins_it() {
+        let mut durations = AuraDurations::default();
+        // t = 15.10 — the packet lands. Nothing occupies slot 0 yet; the cache is empty.
+        durations.set(0, 300_000, 15.10);
+        let mut cache = Vec::new();
+        assert!(cache.is_empty());
+        // t = 15.15 — the next frame's descriptor delta names slot 0.
+        reconcile(&mut cache, &[slot(0, 1126)], 15.15);
+
+        let (total, expiry) = join_duration(
+            durations.by_slot.get(&0),
+            cache[0].appeared_at,
+            15.15,
+            900.0,
+        );
+        assert_eq!(total, 300.0, "the stamp survived the gap");
+        // Script clock 900 + the 300 s that started 50 ms ago: the bar counts down from the
+        // packet's instant, not from the descriptor delta that named the slot.
+        assert!(
+            (expiry - 1199.95).abs() < 1e-9,
+            "expiry rebased onto the script clock, got {expiry}"
+        );
     }
 }

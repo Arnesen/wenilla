@@ -1,7 +1,8 @@
-//! Per-sequence **particle emission timing** — the FN1 bake of the emitter's two
-//! per-frame-sampled M2Tracks (spawn rate `+0xdc`, enabled gate `+0x1dc`), one loop per FILE
-//! sequence slot. Split from [`crate::particles`] (the raw record parse) because it is the
-//! *runtime sampling* face: decision 0641's material-alpha structure, one channel over.
+//! Per-sequence **particle emission timing** — the FN1 bake of the emitter's per-frame-sampled
+//! M2Tracks: spawn rate `+0xdc` + enabled gate `+0x1dc` ([`EmitTiming`]) and the other nine
+//! emission parameters ([`EmitParams`]), one loop per FILE sequence slot. Split from
+//! [`crate::particles`] (the raw record parse) because it is the *runtime sampling* face:
+//! decision 0641's material-alpha structure, one channel over.
 
 use benilla_m2::M2ScalarTrack;
 
@@ -135,6 +136,177 @@ impl EmitTiming {
     }
 }
 
+/// One frame's sampled emitter **parameters** — the nine per-frame-sampled scalar M2Tracks of the
+/// emitter record (bases `+0x34..+0x130`, every one except the rate/enabled pair). The reference's
+/// `m2_animate` emitter phase samples ALL ten scalar tracks into the per-emitter animation block
+/// (`[model+0x3d0]`, stride 0x16c — wow-re `part-emission-rate-animated.md` §1, the rate channel
+/// byte-verified as the template) and pushes them onto the live emitter through its setters each
+/// frame. **These are NOT constants**: `Frost_Nova_area` ramps its emission-sphere radius
+/// 0.19 → 13.2 yd with the expanding ring, `ArcaneExplosion_Base` 0 → 7.2 yd with the growing
+/// dome — flatten either to `value[0]` and every birth lands at the centre (the "born way too
+/// close" bug this type exists to fix).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParamsNow {
+    /// Initial particle speed (yards/sec).
+    pub emission_speed: f32,
+    /// Fractional random speed spread (`speed·(1 ± var·noise)`).
+    pub speed_variation: f32,
+    /// Half-angle of the emission cone, radians (sphere: latitude range; spline: tangent spin ψ).
+    pub vertical_range: f32,
+    /// Azimuthal spread, radians (sphere: longitude range; spline: scatter jitter).
+    pub horizontal_range: f32,
+    /// Downward acceleration (yards/sec²) — a live per-frame emitter field (the integrator reads
+    /// it every frame, `0x7b2680`), so it samples here rather than baking per particle.
+    pub gravity: f32,
+    /// Particle lifetime (seconds). The reference passes the CURRENT value into each spawn
+    /// (`life_param`, the kernels' `ebp+0xc`), so a birth captures it for life.
+    pub lifespan: f32,
+    /// Plane: full x-extent (±½ rect); sphere: MIN radius; spline: tMin.
+    pub area_length: f32,
+    /// Plane: full y-extent; sphere: MAX radius; spline: tMax.
+    pub area_width: f32,
+    /// zSource — velocity pivot at `(0, 0, z)` (0 = unused).
+    pub z_source: f32,
+}
+
+impl Default for ParamsNow {
+    /// The channel defaults a keyless track holds: zeros, except lifespan's loader default 1.0.
+    fn default() -> Self {
+        Self {
+            emission_speed: 0.0,
+            speed_variation: 0.0,
+            vertical_range: 0.0,
+            horizontal_range: 0.0,
+            gravity: 0.0,
+            lifespan: 1.0,
+            area_length: 0.0,
+            area_width: 0.0,
+            z_source: 0.0,
+        }
+    }
+}
+
+/// The nine emitter parameter tracks, baked one loop per FILE sequence slot — the exact
+/// bake/clock/sampling law of [`EmitTiming`]'s rate channel (byte-verified there), applied to its
+/// nine sibling tracks. Sample once per sim frame on the emitter's clock and feed births/kill/
+/// integration the result ([`ParamsNow`]).
+#[derive(Debug, Clone, Default)]
+pub struct EmitParams {
+    /// Per-channel, per-slot baked loops, in [`ParamsNow`] field order; `None` = keyless there
+    /// (the channel default stands).
+    channels: [Vec<Option<ScalarAnim>>; 9],
+}
+
+impl EmitParams {
+    /// Bake the nine tracks (in [`ParamsNow`] field order) against every file sequence slot.
+    pub(crate) fn bake(tracks: [&M2ScalarTrack; 9], slots: &[SeqSlot], gseq: &[u32]) -> Self {
+        Self {
+            channels: tracks.map(|t| {
+                slots
+                    .iter()
+                    .map(|&s| bake_track(t, gseq, Some(s), |v| v, |_| false, |_| false))
+                    .collect()
+            }),
+        }
+    }
+
+    /// Sample every channel `elapsed` seconds into sequence slot `seq` (same slot resolution as
+    /// [`EmitTiming`]: out-of-range degrades to slot 0).
+    pub fn sample(&self, seq: Option<usize>, elapsed: f32) -> ParamsNow {
+        let d = ParamsNow::default();
+        let at = |i: usize, default: f32| -> f32 {
+            let ch = &self.channels[i];
+            let slot = match seq {
+                Some(s) if s < ch.len() => s,
+                _ => 0,
+            };
+            ch.get(slot)
+                .and_then(|o| o.as_ref())
+                .map_or(default, |a| a.sample_or(elapsed, default))
+        };
+        ParamsNow {
+            emission_speed: at(0, d.emission_speed),
+            speed_variation: at(1, d.speed_variation),
+            vertical_range: at(2, d.vertical_range),
+            horizontal_range: at(3, d.horizontal_range),
+            gravity: at(4, d.gravity),
+            lifespan: at(5, d.lifespan),
+            area_length: at(6, d.area_length),
+            area_width: at(7, d.area_width),
+            z_source: at(8, d.z_source),
+        }
+    }
+
+    /// The lifespan channel's peak over every slot — the spawn-cull gate (an animated lifespan
+    /// may open at 0; an emitter is dead only if it NEVER exceeds 0). A keyless channel reads
+    /// the loader default; a keyed one folds its own keys ONLY (folding from the default would
+    /// mask an authored sub-1.0 peak).
+    pub fn peak_lifespan(&self) -> f32 {
+        let mut keys = self.channels[5]
+            .iter()
+            .flatten()
+            .flat_map(|a| a.keys.iter().map(|&(_, v)| v))
+            .peekable();
+        if keys.peek().is_none() {
+            return ParamsNow::default().lifespan;
+        }
+        keys.fold(0.0, f32::max)
+    }
+
+    /// Constant channels from one [`ParamsNow`] — the test/tool constructor, and the shape every
+    /// pre-track consumer had.
+    pub fn constant(now: ParamsNow) -> Self {
+        let ch = |v: f32| {
+            vec![Some(ScalarAnim {
+                period: 0.0,
+                step: true,
+                wrap: true,
+                keys: vec![(0.0, v)],
+            })]
+        };
+        Self {
+            channels: [
+                ch(now.emission_speed),
+                ch(now.speed_variation),
+                ch(now.vertical_range),
+                ch(now.horizontal_range),
+                ch(now.gravity),
+                ch(now.lifespan),
+                ch(now.area_length),
+                ch(now.area_width),
+                ch(now.z_source),
+            ],
+        }
+    }
+
+    /// Per-channel dump view: `(name, per-slot keys)` — `None` = keyless in that slot. The dump
+    /// instruments print any channel whose keys actually move (the view that would have shown
+    /// Frost Nova's 0.19 → 13.2 yd radius ramp instead of hiding it behind `value[0]`).
+    #[allow(clippy::type_complexity)] // a read-only tuple view for the dumps, like `slot_views`
+    pub fn channel_views(&self) -> [(&'static str, Vec<Option<&[(f32, f32)]>>); 9] {
+        const NAMES: [&str; 9] = [
+            "speed",
+            "speedVar",
+            "latitude",
+            "longitude",
+            "gravity",
+            "lifespan",
+            "areaLength",
+            "areaWidth",
+            "zSource",
+        ];
+        let mut i = 0;
+        NAMES.map(|name| {
+            let v = self.channels[i]
+                .iter()
+                .map(|o| o.as_ref().map(|a| a.keys.as_slice()))
+                .collect();
+            i += 1;
+            (name, v)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +413,37 @@ mod tests {
         // The rate is a whole-track constant: same in every slot.
         assert_eq!(t.constant_rate(), Some(20.0));
         assert_eq!(t.peak_rate(), 20.0);
+    }
+
+    /// The ANIMATED-parameter law — Frost Nova's authored shape: the emission-sphere radius
+    /// (areaLength = areaWidth) lerps 0.19 → 13.2 yd over 667 ms and holds, riding the ring
+    /// outward; lifespan ramps beside it. `value[0]` flattening (the bug this bakes away) reads
+    /// 0.19 for ever and births the whole mist at the caster's feet.
+    #[test]
+    fn animated_area_ramp_samples_mid_flight() {
+        let area = track(1, &[(0, 0.1944), (667, 13.1967), (867, 13.1967)], &[]);
+        let life = track(1, &[(0, 0.472), (467, 0.8008), (667, 0.7), (867, 0.7)], &[]);
+        let zero = M2ScalarTrack::default();
+        let p = EmitParams::bake(
+            [
+                &zero, &zero, &zero, &zero, &zero, &life, &area, &area, &zero,
+            ],
+            &slots(&[((0, 867), false)]),
+            &[],
+        );
+        let at = |t: f32| p.sample(None, t);
+        assert!((at(0.0).area_length - 0.1944).abs() < 1e-3, "opens tight");
+        let mid = at(0.3335).area_length;
+        assert!(
+            (mid - (0.1944 + (13.1967 - 0.1944) * 0.5)).abs() < 0.05,
+            "mid-ramp radius ≈ 6.7 yd, got {mid}"
+        );
+        assert!((at(0.8).area_width - 13.1967).abs() < 1e-3, "holds wide");
+        assert!((at(0.2).lifespan - 0.6127).abs() < 5e-3, "lifespan rides");
+        assert_eq!(at(0.5).emission_speed, 0.0, "keyless channel: default");
+        assert!((p.peak_lifespan() - 0.8008).abs() < 1e-4);
+        // The clamped one-shot parks at its tail, never aliasing back to the tight opening.
+        assert!((at(5.0).area_length - 13.1967).abs() < 1e-3);
     }
 
     /// A LOOPING slot wraps its band — a windowed gate re-fires every pass (the precast hold's

@@ -408,6 +408,10 @@ mod macos {
         mut rects_disabled: Local<bool>,
         mut decode_failed: Local<HashSet<String>>,
         mut last_set: Local<Option<String>>,
+        // The raw pointer of the NSCursor we last `set` — the drift detector's baseline
+        // (`WOW_CURSOR_TRACE`). Kept alive by the `cursors`/`payload_cursors` caches, and only
+        // ever compared, never dereferenced.
+        mut last_ptr: Local<usize>,
     ) {
         let Some(cursors) = cursors else {
             return;
@@ -445,11 +449,12 @@ mod macos {
         let stem = mode.0.stem();
         // The held payload's cursor wins over the classified mode (falls back to the mode cursor
         // when nothing is held, or its icon hasn't resolved/decoded this frame). The KEY names what
-        // we chose, so the set below fires only on a real cursor change — `NSCursor::set` is a
-        // WindowServer round-trip that intermittently stalls the main thread for milliseconds, and
-        // asserting it unconditionally every frame was the single biggest line of the 0366
-        // frame-time tail. `disableCursorRects` (below, once) is what makes the one-shot set safe:
-        // AppKit no longer reverts the cursor on mouse-move.
+        // we chose, so the set below fires only on a real cursor change or a detected drift —
+        // `NSCursor::set` is a WindowServer round-trip that intermittently stalls the main thread
+        // for milliseconds, and asserting it unconditionally every frame was the single biggest
+        // line of the 0366 frame-time tail. `disableCursorRects` (below, once) stops AppKit's
+        // cursor-RECT reconciliation (the every-mouse-move revert); the drift check in the set
+        // block below catches what that can't — the other in-process `set` callers.
         let key = held_icon
             .as_ref()
             .filter(|icon| payload_cursors.0.contains_key(icon.as_str()))
@@ -483,10 +488,35 @@ mod macos {
             } else if !looking && *was_looking {
                 NSCursor::unhide();
             }
-            if !looking && last_set.as_deref() != Some(key.as_str()) {
-                if let Some(cursor) = cursor {
-                    cursor.set();
-                    *last_set = Some(key);
+            if !looking {
+                // Assert on a key change OR on detected **drift**. The set is not fire-and-forget:
+                // other in-process actors — winit's AppKit view (tracking-area `cursorUpdate:` /
+                // `mouseEntered:` handlers) and AppKit's own activation resets — call `[NSCursor
+                // set]` with THEIR cursor (the arrow) at unpredictable moments, replacing ours.
+                // The mode cursors self-healed by accident (their `key` churns as the hover
+                // classification changes), but a held payload's key is CONSTANT for the whole
+                // carry, so one usurped set left the icon gone for good while the payload was
+                // still held — the "spell disappears from the cursor but is still stuck to it"
+                // bug (reproduced via WOW_CURSOR_TRACE; the drift fired with no input at all).
+                // `currentCursor` is the app-local top of the cursor stack — a plain ObjC read,
+                // no WindowServer round-trip — so checking it every frame is free, and `set`
+                // still fires only on change-or-drift, preserving the 0366 frame-time rule.
+                let drifted = *last_ptr != 0
+                    && Retained::as_ptr(&NSCursor::currentCursor()) as usize != *last_ptr;
+                if drifted || last_set.as_deref() != Some(key.as_str()) {
+                    if let Some(cursor) = cursor {
+                        cursor.set();
+                        *last_ptr = Retained::as_ptr(cursor) as usize;
+                        // `WOW_CURSOR_TRACE=1` — the assert/usurp timeline instrument.
+                        if std::env::var_os("WOW_CURSOR_TRACE").is_some() {
+                            eprintln!(
+                                "[cursor-trace] set {key} ({:#x}){}",
+                                *last_ptr,
+                                if drifted { " [healed drift]" } else { "" }
+                            );
+                        }
+                        *last_set = Some(key);
+                    }
                 }
             }
         }

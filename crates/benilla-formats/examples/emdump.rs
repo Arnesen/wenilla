@@ -27,6 +27,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .enumerate()
     {
+        let now = e.params.sample(None, 0.0);
         println!(
             "emitter {i}: bone {:>3} flags {:#06x} model_space={} pos ({:.4},{:.4},{:.4}) blend {:?} \
              shape {:?} speed {:.4}±{:.4} grav {:.4} life {:.4} tex {:?}",
@@ -38,10 +39,10 @@ fn main() -> anyhow::Result<()> {
             e.position[2],
             e.blend,
             e.shape,
-            e.emission_speed,
-            e.speed_variation,
-            e.gravity,
-            e.lifespan,
+            now.emission_speed,
+            now.speed_variation,
+            now.gravity,
+            now.lifespan,
             e.texture,
         );
     }

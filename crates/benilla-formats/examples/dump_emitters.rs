@@ -27,16 +27,24 @@ fn main() -> anyhow::Result<()> {
             "  texture {:?} tiles {}x{} head_tail {}",
             e.texture, e.tile_rows, e.tile_cols, e.head_tail
         );
+        let now = e.params.sample(None, 0.0);
         println!(
-            "  speed {} var {} vrange {} hrange {} gravity {} life {} drag {}",
-            e.emission_speed,
-            e.speed_variation,
-            e.vertical_range,
-            e.horizontal_range,
-            e.gravity,
-            e.lifespan,
+            "  speed {} var {} vrange {} hrange {} gravity {} life {} drag {}   (params at t=0)",
+            now.emission_speed,
+            now.speed_variation,
+            now.vertical_range,
+            now.horizontal_range,
+            now.gravity,
+            now.lifespan,
             e.drag
         );
+        for (name, slots) in e.params.channel_views() {
+            for (s, keys) in slots.iter().enumerate() {
+                if let Some(keys) = keys.filter(|k| k.len() > 1) {
+                    println!("  ANIMATED {name}/s{s}: {keys:?}");
+                }
+            }
+        }
         match e.timing.constant_rate() {
             Some(r) => println!("  rate {r}/s (constant, every sequence)"),
             None => {
@@ -52,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         }
         println!(
             "  area {}x{} zsrc {} tail {} spin {}",
-            e.area_length, e.area_width, e.z_source, e.tail_time, e.spin
+            now.area_length, now.area_width, now.z_source, e.tail_time, e.spin
         );
         println!(
             "  twinkle speed {} pct {} min {} max {}",

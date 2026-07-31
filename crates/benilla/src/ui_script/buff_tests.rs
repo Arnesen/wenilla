@@ -322,3 +322,65 @@ fn an_emptied_bar_hides_every_button() {
     assert_eq!(text(&s, "BuffButton0Duration"), "");
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// **Decision 0846's second defect, pinned.** The bar's countdown is a per-frame POLL, not a value
+/// cached when the aura event fires — exactly as the reference does it (`BuffButton_OnUpdate` →
+/// `GetPlayerBuffTimeLeft`, extracted 1.12 `BuffFrame.lua` l.128-130, which caches only the buff
+/// *index* on `PLAYER_AURAS_CHANGED`).
+///
+/// This is what makes a *refresh* work. A recast, a reapplied DoT, cast pushback and the server's
+/// replay of every duration at world entry all change an aura's expiry while changing nothing
+/// discrete about it — same spell, same stacks, same dispel class — so the feed's change key does
+/// not trip and **no aura event fires**. The push below therefore deliberately does NOT fire one.
+/// Against the old event-cached bar the button kept counting the stale expiry down, reached zero
+/// and sat at `"0 s"` for as long as the buff lived (live-measured: `app left 59.9s` beside
+/// `lua left -9.9s`).
+#[test]
+fn a_refreshed_duration_reaches_the_bar_with_no_aura_event() {
+    let mut s = harness();
+    let mark = |expiry: f64| {
+        aura(
+            1126,
+            "Mark of the Wild",
+            "Interface\\Icons\\Spell_Nature_Regeneration",
+            true,
+            1,
+            None,
+            expiry,
+            true,
+        )
+    };
+    // 20s out. After the tick GetTime()=0.1 -> 19.9s -> "19 s" (SecondsToTimeAbbrev floors via %d).
+    push(&mut s, vec![mark(20.0)]);
+    frame(&mut s, 0.1);
+    assert_eq!(text(&s, "BuffButton0Duration"), "19 s");
+
+    // The refresh: a new expiry, everything discrete unchanged — so the feed pushes the list and
+    // fires NOTHING. The button must still pick the new expiry up on its next frame.
+    s.set_auras("player", Some(vec![mark(300.0)]));
+    frame(&mut s, 0.1);
+    assert_eq!(
+        text(&s, "BuffButton0Duration"),
+        "5 m",
+        "the countdown re-reads the aura every frame; it does not wait for an event"
+    );
+    // ...and the flash follows it back out of the warning window (20s pulsed, 300s is solid).
+    assert!(
+        (alpha(&s, "BuffButton0") - 1.0).abs() < 1e-6,
+        "no longer inside the 31s warning window, so full alpha"
+    );
+
+    // The same poll is what shows a timer that arrived AFTER the icon did — the fresh-apply case,
+    // where the duration packet's stamp lands a frame later than the descriptor delta.
+    s.set_auras("player", Some(vec![mark(0.0)])); // icon up, no duration joined yet
+    frame(&mut s, 0.1);
+    assert_eq!(text(&s, "BuffButton0Duration"), "", "no timer yet");
+    s.set_auras("player", Some(vec![mark(60.0)])); // the stamp joins, still no event
+    frame(&mut s, 0.1);
+    assert_eq!(
+        text(&s, "BuffButton0Duration"),
+        "59 s",
+        "a duration that lands after the icon still reaches the bar"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

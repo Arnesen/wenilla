@@ -591,6 +591,95 @@ fn the_ghost_tint_reaches_the_instance_table_and_clears_with_the_aura() {
     assert_eq!(tints.get(slot), crate::instance_tint::IDENTITY);
 }
 
+/// **The chain (decision 0841).** A rigged ATTACHED model — a spell-effect instance, or one of the
+/// seven shoulder models whose welded billboard geometry made the item lane rig — carries its own
+/// instance slot, because the vertex stage indexes the skin palette with that same field and cannot
+/// borrow the wearer's. Its tint therefore has to come up the `ParentModel` link, which is the
+/// reference's own route for an attached model's colours (`0x714000`). Without this walk, adding the
+/// rig would have un-tinted exactly the pauldrons it was added for.
+#[test]
+fn a_rigged_attachment_inherits_its_wearers_tint_through_the_model_chain() {
+    let mut app = app_with_tint_channel();
+    let (body, shoulder) = {
+        let mut palettes = app
+            .world_mut()
+            .resource_mut::<crate::rig_palette::RigPalettes>();
+        let mut alloc = |bones| {
+            crate::rig_palette::RigSkin::allocate_bones(&mut palettes, bones, Handle::default())
+                .expect("a fresh palette has room")
+        };
+        (alloc(8), alloc(3))
+    };
+    let (body_slot, shoulder_slot) = (body.slot, shoulder.slot);
+    assert_ne!(body_slot, shoulder_slot, "two rigs, two slots");
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+            body,
+        ))
+        .id();
+    // The item root: its own rig, no aura nodes of its own, chained to the unit wearing it.
+    app.world_mut()
+        .spawn((shoulder, crate::model_fade::ParentModel(unit)));
+
+    app.update();
+    let tints = app
+        .world()
+        .resource::<crate::instance_tint::InstanceTints>();
+    assert_eq!(tints.get(body_slot), 0xff8c_b9fd, "the body is ghost-blue");
+    assert_eq!(
+        tints.get(shoulder_slot),
+        0xff8c_b9fd,
+        "and so is the pauldron riding it"
+    );
+
+    // The aura drops: both ends of the chain go back to identity, not just the unit's own slot.
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+            95, 0x00,
+        )])));
+    app.update();
+    let tints = app
+        .world()
+        .resource::<crate::instance_tint::InstanceTints>();
+    assert_eq!(tints.get(body_slot), crate::instance_tint::IDENTITY);
+    assert_eq!(tints.get(shoulder_slot), crate::instance_tint::IDENTITY);
+}
+
+/// An unchained rig — a placed doodad, a world effect — has no parent to inherit from and must stay
+/// its own colour. The walk's terminating case, and the guard against a chain lookup that
+/// "helpfully" falls back to some other unit's tint.
+#[test]
+fn an_unchained_rig_inherits_nothing() {
+    let mut app = app_with_tint_channel();
+    let (body, loose) = {
+        let mut palettes = app
+            .world_mut()
+            .resource_mut::<crate::rig_palette::RigPalettes>();
+        let mut alloc = |bones| {
+            crate::rig_palette::RigSkin::allocate_bones(&mut palettes, bones, Handle::default())
+                .expect("a fresh palette has room")
+        };
+        (alloc(8), alloc(3))
+    };
+    let loose_slot = loose.slot;
+    app.world_mut().spawn((
+        crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, GHOST), (95, 0x0E)])),
+        body,
+    ));
+    app.world_mut().spawn(loose);
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<crate::instance_tint::InstanceTints>()
+            .get(loose_slot),
+        crate::instance_tint::IDENTITY,
+        "a tinted unit standing next to it changes nothing"
+    );
+}
+
 /// A tinted unit going away must not leave its colour on the slot for whoever allocates it next —
 /// the leak that would paint an unrelated creature ghost-blue. Covered structurally by `RigSkin`'s
 /// free hook, so it holds for a despawn AND for a gear/display rebuild that replaces the component.

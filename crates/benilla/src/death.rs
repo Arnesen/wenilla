@@ -157,7 +157,10 @@ fn feed_death(
     self_q: Query<(&ObjectStore, &Transform), With<SelfPlayer>>,
     self_guid: Res<SelfGuid>,
     death_net: Res<DeathNet>,
-    time: Res<Time>,
+    // Real, not virtual: this reads a stamp the net apply path wrote on `Time<Real>` (see the
+    // aura tuple there) — a server-sent countdown lives in real seconds, and the two ends of the
+    // comparison must be the same clock.
+    time: Res<Time<Real>>,
     mut feed: ResMut<DeathFeedState>,
     mut names: ResMut<crate::names::NameCache>,
     net: Res<NetCommands>,

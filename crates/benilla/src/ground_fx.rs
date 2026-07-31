@@ -2,8 +2,9 @@
 //! shared decal projector (`decal.rs`), after the selection ring and the unit blob shadow.
 //!
 //! A base-anchored effect model's flat ground-plane quads (Battle Shout's six crescents, the
-//! paladin auras' rings — [`benilla_formats::GroundQuad`], 128 of the 139 flat batches under
-//! `Spells\` per the `groundscan` sweep) author every vertex at z = 0 with depth-test ON: drawn as
+//! paladin auras' rings, Consecration's and Flamestrike's hovering burn discs —
+//! [`benilla_formats::GroundQuad`], the `groundscan` z=0 + hover populations) author every
+//! vertex on one ground-level plane (z = 0, or hovering fractions of a yard above it) with depth-test ON: drawn as
 //! free geometry they are buried per-pixel by the first up-slope and float over the first
 //! down-slope. The real 1.12 client draws them exactly that way (standard M2 batch pipeline —
 //! no ground conform exists in the spell-visual chain); this lane is a deliberate modern

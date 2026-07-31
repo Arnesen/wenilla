@@ -104,9 +104,10 @@ pub(super) fn select_on_click(
         }
         // Clicked nothing targetable → deselect (only sends the clear if we actually had a
         // target). The one exception is a payload held over NOTHING (sky): the ref's
-        // nothing-leg deselect is no-payload-gated. A terrain click deselects even with a
-        // surviving spell/action payload (`0x5e03bb` is target-gated, not payload-gated) —
-        // an item over terrain never reaches here (its press was consumed for the drop).
+        // nothing-leg deselect is no-payload-gated. Since 0843 ANY payload's empty-world left
+        // press is consumed for the drop/dismiss (input.rs's `would_drop`), so a payload
+        // normally never reaches this arm at all — the gate still holds the nothing-leg law
+        // for the residual GameObject-hover case (`Object` pick, unit arm empty).
         _ => {
             if !payload_held.0 || occlusion.distance.is_finite() {
                 clear(&mut selection, &net, engaged);

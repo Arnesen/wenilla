@@ -138,17 +138,14 @@ pub(super) fn feed_ui_input(
                 // byte-verified trigger — but the press is when the world click-pick and
                 // camera orbit-start would act, so they must yield now, exactly as for a
                 // hovered click). "Would drop" mirrors `world_drop_click`'s pick routing
-                // (decisions 0571 + 0574): an item over terrain/nothing, a spell/action over
-                // nothing. Anything else (any payload over an object, a spell/action over
-                // terrain) is NOT consumed — the reference runs SELECT / the terrain deselect
-                // with the payload still held, so the click must reach the world.
+                // (decisions 0571 + 0574, amended by 0843): ANY payload over terrain/nothing
+                // drops (the item's popup, the spell/action's silent dismiss). Only a payload
+                // over an OBJECT is not consumed — the reference runs SELECT with the payload
+                // still held, so that click must reach the world.
                 if btn == MouseButton::Left && hover.0.is_none() {
-                    use benilla_ui::script::{CursorPayload, WorldPick};
-                    let would_drop = match script.cursor_payload() {
-                        Some(CursorPayload::Item(_)) => world_pick != WorldPick::Object,
-                        Some(_) => world_pick == WorldPick::Nothing,
-                        None => false,
-                    };
+                    use benilla_ui::script::WorldPick;
+                    let would_drop =
+                        script.cursor_payload().is_some() && world_pick != WorldPick::Object;
                     if would_drop {
                         click_consumed.0 = true;
                     }

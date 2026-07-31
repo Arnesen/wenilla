@@ -547,20 +547,25 @@ pub(super) fn drive_script(
             }
         }
     }
-    // The item held on the cursor draws last (a 32×32 icon at the mouse, over the whole UI) — but
-    // ONLY in capture mode (decision 0216 §5): a normal run shows it as the hardware cursor
+    // The payload held on the cursor draws last (a 32×32 icon at the mouse, over the whole UI) —
+    // but ONLY in capture mode (decision 0216 §5): a normal run shows it as the hardware cursor
     // instead (`crate::cursor`), which can't appear in a screenshot's pixels, so the quad is the
-    // capture harness's stand-in. Purely visual either way — the drag state lives in the engine;
-    // the wire settles the actual move.
+    // capture harness's stand-in. Any arm, matching the hardware cursor's own `payload_icon`
+    // (item/spell/action alike — the item-only read here predated the spell/action producers).
+    // Purely visual either way — the drag state lives in the engine; the wire settles the move.
     if capture.is_some() {
-        if let (Some(cursor), Some(pos)) = (script.cursor_item(), window.cursor_position()) {
-            if let Some(path) = cursor.texture.as_deref() {
-                if let Some(handle) = assets
-                    .as_mut()
-                    .and_then(|a| a.sprite_texture(path, &mut images))
-                {
-                    out.push(cursor_icon_quad(pos, handle));
-                }
+        use benilla_ui::script::CursorPayload;
+        let texture = script.cursor_payload().and_then(|p| match p {
+            CursorPayload::Item(i) => i.texture,
+            CursorPayload::Spell(s) => s.texture,
+            CursorPayload::Action(a) => a.texture,
+        });
+        if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
+            if let Some(handle) = assets
+                .as_mut()
+                .and_then(|a| a.sprite_texture(&texture, &mut images))
+            {
+                out.push(cursor_icon_quad(pos, handle));
             }
         }
     }

@@ -93,7 +93,7 @@ pub(super) fn draw_gated(def: &ParticleEmitterDef, p: &Particle) -> bool {
 /// over-life samples for other attributes too. **If that expression changes, change this.**
 pub(super) fn particle_half(def: &ParticleEmitterDef, placement: &Transform, p: &Particle) -> f32 {
     let noise = twinkle_noise(def.twinkle_speed, p.age, p.phase);
-    let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
+    let u_age = (p.age / p.life).clamp(0.0, 1.0);
     let scale = if def.scale_size_by_instance() {
         placement.scale.x.max(1e-4)
     } else {
@@ -166,7 +166,7 @@ pub(super) fn expand_quads(
         if def.twinkle_percent < 1.0 && noise > def.twinkle_percent {
             continue;
         }
-        let u_age = (p.age / def.lifespan).clamp(0.0, 1.0);
+        let u_age = (p.age / p.life).clamp(0.0, 1.0);
         let ol = def.over_life.sample(u_age);
         let (mut rgba, size) = (ol.color, ol.size);
         // The MODEL's render alpha, folded into the ALPHA channel only — exactly where and how the
@@ -326,6 +326,7 @@ mod tests {
             pos: Vec3::ZERO,
             vel: Vec3::ZERO,
             age: 0.0,
+            life: 1.0,
             phase: 0,
             fresh: false,
             quat: Quat::IDENTITY,

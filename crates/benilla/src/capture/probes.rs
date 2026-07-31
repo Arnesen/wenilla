@@ -1131,7 +1131,7 @@ fn fire_particle_census(
             d.blend,
             d.flags,
             rate_keys.join(","),
-            d.lifespan,
+            d.params.sample(None, 0.0).lifespan,
             d.texture.as_deref().unwrap_or("-"),
             e.live(),
             // The frame's composed MODEL alpha (decision 0827/0833) — the number that answers

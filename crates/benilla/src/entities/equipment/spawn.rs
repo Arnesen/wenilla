@@ -127,11 +127,11 @@ pub(in crate::entities) fn attach_held_items(
         // writes (`entities::attach`), and the held effects' draw-order rung is measured in the
         // world yards that scale produces.
         Option<&Transform>,
-        // The WEARER's rig, for its instance slot: every part spawned below carries it in its tag so
-        // the wearer's body tint reaches its helm, shoulders and held items (decision 0812 — the
+        // The WEARER's rig, for its instance slot: an item's parts carry it in their tag so the
+        // wearer's body tint reaches its helm, shoulders and held items (decision 0812 — the
         // reference's attached models inherit the parent CM2's computed colours, `0x714000`). Never
-        // used to skin these parts: they are static meshes, and the vertex stage's slot read is gated
-        // on the mesh's own joint attributes.
+        // used to SKIN those parts: they draw the static mesh, and the vertex stage's slot read is
+        // gated on the mesh's own joint attributes — an item model spawns no rig at all (0847).
         Option<&crate::rig_palette::RigSkin>,
     )>,
     held: Option<Res<ItemDisplays>>,
@@ -249,7 +249,7 @@ fn spawn_slot(
     hs: &HeldSlot,
 ) -> Option<Entity> {
     let entity = ctx.wearer;
-    let (bones, joined, now, rig_tag) = (ctx.bones, ctx.joined, ctx.now, ctx.rig_tag);
+    let (bones, joined, now) = (ctx.bones, ctx.joined, ctx.now);
     let dm = held.models.get(&(hs.display, hs.kind))?;
     let parts = dm.parts.as_ref()?;
     // Body model has no such attach point (a non-character skeleton) — hold nothing.
@@ -301,6 +301,15 @@ fn spawn_slot(
             });
         }
     }
+    // **An item model spawns no rig** — including the seven displays whose geometry is welded to a
+    // billboard bone. 0841 gave those a joint palette so the reference's per-vertex blend would
+    // bend them; the director reported the result and the measurement backed them, so it was
+    // WITHDRAWN (decision 0847). The welded flap is a 0.29 yd spike hinged on a pivot that sits in
+    // the plate, and a spherical billboard re-orients it outright — so for a wide band of camera
+    // angles it sweeps *through* the plate it is welded to, and the two opaque surfaces z-fight
+    // along a seam that moves with every step. Whole and still is the shipped look; the open
+    // question is 0847's, not a knob here.
+    let rig_tag = ctx.rig_tag;
     // Billboard batches (the torch's glow card) collected for the world-root card spawn
     // below — as plain children they'd render at the item root (the grip), not the
     // authored pivot (the torch head). Decision 0153.
@@ -603,6 +612,105 @@ mod tests {
         }
     }
 
+    /// A mesh handle distinguishable from the static form's `Handle::default()` — so "which of the
+    /// two forms did the part actually spawn with" is an assertion rather than a guess.
+    fn skinned_handle() -> Handle<Mesh> {
+        Handle::Uuid(
+            bevy::asset::uuid::Uuid::from_u128(0x5c1_11ed),
+            std::marker::PhantomData,
+        )
+    }
+
+    /// Spawn a wearer with one SHOULDER slot whose display carries **everything a rig would need** —
+    /// a billboard-bearing skeleton, bind poses, and a skinned mesh form distinct from the static one
+    /// — and run the attach. Returns the part tags, the wearer's own instance slot, the item root's
+    /// palette slot (`None` when it spawned no rig, which is the law), and the mesh the part drew.
+    fn attach_a_shoulder() -> (Vec<u32>, u16, Option<u16>, Option<Handle<Mesh>>) {
+        const KIND: ItemModelKind = ItemModelKind::ShoulderLeft;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        let mut displays = ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(HashMap::new()),
+        );
+        let mut dm = empty_display();
+        let mut p = part(false);
+        p.skinned_mesh = Some(skinned_handle());
+        dm.parts = Some(vec![p]);
+        // The shoulder's own skeleton: a root plus one spherical-billboard spike, the shape
+        // `LShoulder_Plate_PVPAlliance_A_01` authors. Both halves are needed — the gate is
+        // "welded geometry AND a skeleton to pose it with".
+        dm.skeleton = benilla_assets::ModelSkeleton {
+            joints: vec![
+                benilla_assets::ModelJoint {
+                    parent: -1,
+                    local_translation: Vec3::ZERO,
+                    billboard: None,
+                    ignore_parent_rotation: false,
+                },
+                benilla_assets::ModelJoint {
+                    parent: 0,
+                    local_translation: Vec3::Y,
+                    billboard: Some(benilla_formats::BillboardKind::Spherical),
+                    ignore_parent_rotation: false,
+                },
+            ],
+            spine_bone: None,
+            head_bone: None,
+        };
+        dm.inverse_bindposes = Some(Handle::default());
+        displays.models.insert((7, KIND), dm);
+        app.insert_resource(displays);
+
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let bones = BoneAttach {
+            anchors: HashMap::from([(3u16, joint)]),
+            points: HashMap::from([(attach_id::SHOULDER_LEFT, (3u16, Vec3::ZERO))]),
+            markers: HashMap::new(),
+        };
+        let mut items = HeldItems::default();
+        items.slots[4] = Some(HeldSlot {
+            display: 7,
+            kind: KIND,
+            attach: attach_id::SHOULDER_LEFT,
+            visual: NO_GLOW,
+        });
+        let skin = crate::rig_palette::RigSkin::allocate_bones(
+            app.world_mut()
+                .resource_mut::<crate::rig_palette::RigPalettes>()
+                .as_mut(),
+            8,
+            Handle::default(),
+        )
+        .expect("a fresh palette has room");
+        let wearer_slot = skin.slot;
+        app.world_mut()
+            .spawn((items, bones, Transform::default(), skin));
+        app.add_systems(Update, attach_held_items);
+        app.update();
+
+        let tags: Vec<u32> = app
+            .world_mut()
+            .query::<&MeshTag>()
+            .iter(app.world())
+            .map(|t| t.0)
+            .collect();
+        // The item root's rig is the one that is NOT the wearer's (the wearer holds its own).
+        let item_rig = app
+            .world_mut()
+            .query::<&crate::rig_palette::RigSkin>()
+            .iter(app.world())
+            .map(|r| r.slot)
+            .find(|&s| s != wearer_slot);
+        let mesh = app
+            .world_mut()
+            .query::<&Mesh3d>()
+            .iter(app.world())
+            .map(|m| m.0.clone())
+            .next();
+        (tags, wearer_slot, item_rig, mesh)
+    }
+
     /// Spawn a wearer with one helm slot and run the attach. Returns the spawned parts' tags plus the
     /// wearer's own instance slot (`0` when `rigged` is false — a boneless wearer).
     fn attach_a_helm(rigged: bool, interior: bool) -> (Vec<u32>, u16) {
@@ -697,6 +805,35 @@ mod tests {
         let (tags, _) = attach_a_helm(false, true);
         assert_eq!(tags.len(), 1);
         assert_eq!(crate::mesh_tag::rig_of(tags[0]), 0);
+    }
+
+    /// **The item lane spawns no rig (decision 0847).** 0841 gave the seven displays that weld
+    /// geometry to a billboard bone a joint palette, so the reference's per-vertex blend would bend
+    /// the flap; the director reported the result and the measurement backed them — the flap is a
+    /// 0.29 yd spike hinged on a pivot inside the plate, so a spherical billboard sweeps it *through*
+    /// the plate and the two opaque surfaces z-fight along a seam that moves with every step. It was
+    /// withdrawn, and the lane no longer consults weldedness at all.
+    ///
+    /// Pinned on the input that used to trip it: a display carrying a billboard-bearing skeleton,
+    /// bind poses and a skinned mesh form still allocates **no** palette slot, keeps its WEARER's
+    /// instance slot (0812's tint route) and draws the **static** mesh. A re-land has to delete this
+    /// test, which is the point — 0847's open fidelity question gets answered first, rather than
+    /// rediscovered from a bug report.
+    #[test]
+    fn an_item_spawns_no_rig_even_with_everything_one_would_need() {
+        let (tags, wearer_slot, item_rig, mesh) = attach_a_shoulder();
+        assert!(wearer_slot >= 1, "the wearer really has a rig of its own");
+        assert!(
+            item_rig.is_none(),
+            "no palette slot is allocated for an item"
+        );
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            crate::mesh_tag::rig_of(tags[0]),
+            wearer_slot,
+            "the part indexes the WEARER's slot"
+        );
+        assert_eq!(mesh, Some(Handle::default()), "…and draws the static mesh");
     }
 
     /// **What a booth can see of an equipped item** (decision 0822, `#bugs` B118's paper-doll half).

@@ -17,7 +17,6 @@ use super::{
 /// The emitter-constant inputs of one integrator step ([`integrate_particle`]).
 struct StepEnv {
     dt: f32,
-    lifespan: f32,
     gravity: f32,
     drag: f32,
     anchored: bool,
@@ -40,7 +39,9 @@ struct StepEnv {
 fn integrate_particle(p: &mut Particle, env: &StepEnv) -> bool {
     let (dt, g) = (env.dt, env.gravity);
     p.age += dt;
-    if p.age >= env.lifespan {
+    // Kill at the particle's OWN birth-sampled lifetime (the emitter's lifespan channel
+    // animates — decision 0844; the reference feeds each spawn the current value).
+    if p.age >= p.life {
         return false;
     }
     // FOLLOW-DELTA (file 0x4000, wow-re `part-emitter-motion.md` §2): the shared per-frame
@@ -110,6 +111,7 @@ fn inherit_trigger(accum: &mut f32, held: &mut Vec3, dt: f32, delta: Vec3, live:
 #[allow(clippy::too_many_arguments)] // the birth fold's full frame, same as the parent path
 fn drive_child(
     child: &mut ChildEmitter,
+    now: &benilla_formats::ParamsNow,
     parent: &[Particle],
     rate: f32,
     emitting: bool,
@@ -132,10 +134,9 @@ fn drive_child(
         );
         while child.accumulator >= 1.0 && child.particles.len() < MAX_PARTICLES {
             child.accumulator -= 1.0;
-            let (base, dir) = emit_local(&child.def, &mut child.rng);
+            let (base, dir) = emit_local(&child.def, now, &mut child.rng);
             let local = base - origin;
-            let speed = child.def.emission_speed
-                * (1.0 + child.def.speed_variation * rand_s11(&mut child.rng));
+            let speed = now.emission_speed * (1.0 + now.speed_variation * rand_s11(&mut child.rng));
             let fold = |v: Vec3| {
                 if anchored {
                     attach_inv
@@ -146,13 +147,14 @@ fn drive_child(
             };
             let mut vel = fold(dir * speed);
             if child.def.inherits_emitter_motion() {
-                vel += (1.0 + child.def.speed_variation * rand_s11(&mut child.rng)) * p.vel;
+                vel += (1.0 + now.speed_variation * rand_s11(&mut child.rng)) * p.vel;
             }
             let phase = next_u32(&mut child.rng);
             child.particles.push(Particle {
                 pos: p.pos + fold(local),
                 vel,
                 age: 0.0,
+                life: now.lifespan,
                 phase,
                 fresh: true,
                 quat: Quat::IDENTITY,
@@ -560,6 +562,34 @@ pub(super) fn simulate_particles(
             );
         }
 
+        // The sequence clock (`EmitTiming`, decision 0641's structure one channel over): a HOSTED
+        // emitter reads its host's live playing sequence + clip time each frame — the reference's
+        // `m2_animate` emitter phase samples the CURRENT sequence record, which is why a quest
+        // GameObject's explosion fires in its one-shot clips and reads OFF in every idle window
+        // (bug B27). A host with no live player yet keeps its last slot at that slot's opening
+        // pose. Pinned lanes (doodads, effect rigs, booths) run their slot on the spawn-age
+        // clock; the baked loops wrap a looping band and end-hold a clamped one.
+        let (clock_seq, elapsed_s) = match *host {
+            Some(h) => match hosts
+                .get(h)
+                .ok()
+                .and_then(|(p, a)| crate::doodad_anim::playing_seq(p, a))
+            {
+                Some((s, t)) => {
+                    *seq = Some(s);
+                    (Some(s), t)
+                }
+                None => (*seq, 0.0),
+            },
+            None => (*seq, *age),
+        };
+        // This frame's emitter PARAMETERS — the nine per-frame-sampled channels, on the same
+        // clock as the rate track (the reference's `m2_animate` emitter phase samples all ten;
+        // wow-re `part-emission-rate-animated.md` §1). Frost Nova rides its emission radius
+        // 0.19 → 13.2 yd out with the ring; Arcane Explosion 0 → 7.2 yd with the dome — births
+        // MUST read the frame's values, not `value[0]` (decision 0844).
+        let now = def.params.sample(clock_seq, elapsed_s);
+
         // 1. Age + integrate the live pool. The verified vanilla integrator (`particle_integrate`
         //    @ 0x7b2680): pos += dt·v with the gravity term on the UP axis (up += dt·v_up − ½·g·dt²;
         //    v_up −= g·dt), then **drag**: v −= min(dt·drag, 1)·v (exponential velocity decay,
@@ -568,8 +598,9 @@ pub(super) fn simulate_particles(
         //    stay a ~0.06 yd flicker; without it the particle coasts 3.3 yd to the ceiling. The
         //    frame decides the up axis: WoW +Z in model mode, Bevy +Y in world mode (the math is
         //    frame-independent otherwise — the reference integrates world-space particles with the
-        //    same kernel). Kill at age ≥ lifespan.
-        let g = def.gravity;
+        //    same kernel). Kill at age ≥ the particle's birth-sampled life. Gravity is a LIVE
+        //    per-frame emitter field (the integrator reads it each frame in the reference).
+        let g = now.gravity;
         let drag = def.drag;
         // Sphere KILL-OUTBOUND emitters: the emitter origin in the stored frame — `def.position`
         // composed exactly like a birth (anchored: the live placement/attach fold; model mode:
@@ -586,7 +617,6 @@ pub(super) fn simulate_particles(
         });
         let env = StepEnv {
             dt,
-            lifespan: def.lifespan,
             gravity: g,
             drag,
             anchored,
@@ -613,27 +643,6 @@ pub(super) fn simulate_particles(
         //    one-shot effects' choreography (a 200 ms hand flash inside a 1.0 s clip; the impact
         //    model's six staggered windows). Live particles are untouched — they finish their
         //    lifespans exactly like the drain above.
-        // The sequence clock (`EmitTiming`, decision 0641's structure one channel over): a HOSTED
-        // emitter reads its host's live playing sequence + clip time each frame — the reference's
-        // `m2_animate` emitter phase samples the CURRENT sequence record, which is why a quest
-        // GameObject's explosion fires in its one-shot clips and reads OFF in every idle window
-        // (bug B27). A host with no live player yet keeps its last slot at that slot's opening
-        // pose. Pinned lanes (doodads, effect rigs, booths) run their slot on the spawn-age
-        // clock; `EmitTiming` wraps a looping band and end-holds a clamped one.
-        let (clock_seq, elapsed_s) = match *host {
-            Some(h) => match hosts
-                .get(h)
-                .ok()
-                .and_then(|(p, a)| crate::doodad_anim::playing_seq(p, a))
-            {
-                Some((s, t)) => {
-                    *seq = Some(s);
-                    (Some(s), t)
-                }
-                None => (*seq, 0.0),
-            },
-            None => (*seq, *age),
-        };
         let emitting = !*draining && def.timing.emitting(clock_seq, elapsed_s);
         let rate = def.timing.rate(clock_seq, elapsed_s);
         let dist_lod =
@@ -652,9 +661,9 @@ pub(super) fn simulate_particles(
         }
         while *accumulator >= 1.0 && particles.len() < MAX_PARTICLES {
             *accumulator -= 1.0;
-            let (base, dir) = emit_local(def, rng);
+            let (base, dir) = emit_local(def, &now, rng);
             let speed =
-                def.emission_speed * (1.0 + def.speed_variation * (rand01(rng) * 2.0 - 1.0));
+                now.emission_speed * (1.0 + now.speed_variation * (rand01(rng) * 2.0 - 1.0));
             // Anchored mode bakes the emitter's ROTATION + scale at birth (the reference's
             // `0x7bca80`/`0x7bcb40` birth transforms) but stores relative to its position — the
             // per-frame anchor supplies the translation at render; on an attached model the
@@ -690,7 +699,7 @@ pub(super) fn simulate_particles(
             // flag): `vel += (1 + S11·speedVariation) · inherit`, its own S11 draw, in the
             // stored frame (the block runs after the reference's space fold).
             let vel = if def.inherits_emitter_motion() && *inherit_vel != Vec3::ZERO {
-                vel + (1.0 + def.speed_variation * rand_s11(rng))
+                vel + (1.0 + now.speed_variation * rand_s11(rng))
                     * to_stored(*inherit_vel, attach_inv, placement)
             } else {
                 vel
@@ -735,6 +744,7 @@ pub(super) fn simulate_particles(
                 pos,
                 vel,
                 age: 0.0,
+                life: now.lifespan,
                 phase,
                 fresh: true,
                 quat,
@@ -751,8 +761,10 @@ pub(super) fn simulate_particles(
         for child in children.iter_mut() {
             let c_emitting = !*draining && child.def.timing.emitting(None, *age);
             let c_rate = child.def.timing.rate(None, *age);
+            let c_now = child.def.params.sample(None, *age);
             drive_child(
                 child,
+                &c_now,
                 particles,
                 c_rate,
                 c_emitting,
@@ -764,8 +776,7 @@ pub(super) fn simulate_particles(
             );
             let c_env = StepEnv {
                 dt,
-                lifespan: child.def.lifespan,
-                gravity: child.def.gravity,
+                gravity: c_now.gravity,
                 drag: child.def.drag,
                 anchored,
                 kill_origin: None,
@@ -899,6 +910,7 @@ mod tests {
             pos,
             vel,
             age: 0.0,
+            life: 10.0,
             phase: 0,
             fresh: false,
             quat: Quat::IDENTITY,
@@ -909,7 +921,6 @@ mod tests {
     fn env(kill_origin: Option<Vec3>, follow: Vec3) -> StepEnv {
         StepEnv {
             dt: 0.1,
-            lifespan: 10.0,
             gravity: 0.0,
             drag: 0.0,
             anchored: true,
@@ -1001,13 +1012,18 @@ mod tests {
     #[test]
     fn child_drive_scales_with_the_parent_pool() {
         let mut child = ChildEmitter::bare(benilla_formats::ParticleEmitterDef {
-            emission_speed: 0.0,
-            flags: 0x40,      // inherit the parent particle's velocity
-            area_length: 0.0, // point emitter: births land exactly ON the parent particle
-            area_width: 0.0,
+            flags: 0x40, // inherit the parent particle's velocity
             ..crate::particles::tests::plain_def()
         });
         child.def.timing = benilla_formats::EmitTiming::constant(100.0);
+        // Point emitter, zero own speed: births land exactly ON the parent particle and the
+        // whole birth velocity is the inherited term.
+        let c_now = benilla_formats::ParamsNow {
+            emission_speed: 0.0,
+            area_length: 0.0,
+            area_width: 0.0,
+            ..crate::particles::emit::tests::now()
+        };
         // Two live parents, far apart, distinct velocities.
         let parents = [
             particle(Vec3::X * 10.0, Vec3::Y * 3.0),
@@ -1016,6 +1032,7 @@ mod tests {
         // 100/s × 0.1 s × 2 calls = 20 births per frame.
         super::drive_child(
             &mut child,
+            &c_now,
             &parents,
             100.0,
             true,
@@ -1041,6 +1058,7 @@ mod tests {
         let n = child.particles.len();
         super::drive_child(
             &mut child,
+            &c_now,
             &[],
             100.0,
             true,

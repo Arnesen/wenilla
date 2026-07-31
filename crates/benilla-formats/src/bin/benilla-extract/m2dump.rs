@@ -277,6 +277,11 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
         } else {
             String::new()
         };
+        // The parameter channels sample per frame ([`benilla_formats::EmitParams`]); the compact
+        // line shows their opening values, and any channel that actually MOVES prints its full
+        // keyed ramp below — the view whose absence hid Frost Nova's 0.19 → 13.2 yd emission-
+        // radius ride behind a flat "radius [0.19..0.19]" (decision 0844).
+        let now = d.params.sample(None, 0.0);
         println!(
             "             {:?} {:?} {}  {rate}  life {:.2}s  speed {:.2}  grav {:.2}  drag {:.1}{tail}  twinkle [{:.2}..{:.2}] spd {:.1} pct {:.2}  spin {:.2}",
             d.shape,
@@ -286,9 +291,9 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
                 1 => "tail",
                 _ => "head+tail",
             },
-            d.lifespan,
-            d.emission_speed,
-            d.gravity,
+            now.lifespan,
+            now.emission_speed,
+            now.gravity,
             d.drag,
             d.twinkle_min,
             d.twinkle_max,
@@ -296,13 +301,24 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
             d.twinkle_percent,
             d.spin,
         );
+        for (name, slots) in d.params.channel_views() {
+            for (s, keys) in slots.iter().enumerate() {
+                if let Some(keys) = keys.filter(|k| k.len() > 1) {
+                    let w: Vec<String> = keys
+                        .iter()
+                        .map(|&(t, v)| format!("({t:.3}s, {v:.3})"))
+                        .collect();
+                    println!("             ANIMATED {name}/s{s}: [{}]", w.join(", "));
+                }
+            }
+        }
         // The kernel spread (wow-re part-shape-kernels): a sphere's ranges are latitude/longitude
         // about +X (area = min/max shell radius); a plane's are the ±θ/±φ cone about +Z (area =
         // the spawn rectangle). `(lat ±π, lon ±0)` reads directly as the edge-on ring family.
         let spread = match d.shape {
             benilla_formats::ParticleShape::Sphere => format!(
                 "radius [{:.2}..{:.2}] lat ±{:.2} lon ±{:.2}",
-                d.area_length, d.area_width, d.vertical_range, d.horizontal_range
+                now.area_length, now.area_width, now.vertical_range, now.horizontal_range
             ),
             // Spline repurposing (wow-re part-spline-file-layout): area = tMin/tMax,
             // vRange = tangent-spin ψ, hRange = scatter.
@@ -313,20 +329,20 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
                     s.points[0][0],
                     s.points[0][1],
                     s.points[0][2],
-                    d.area_length,
-                    d.area_width,
-                    d.vertical_range,
-                    d.horizontal_range
+                    now.area_length,
+                    now.area_width,
+                    now.vertical_range,
+                    now.horizontal_range
                 ),
                 None => "spline UNPARSED (degenerate record)".to_string(),
             },
             _ => format!(
                 "area {:.1}x{:.1} cone ±{:.2}/±{:.2}",
-                d.area_length, d.area_width, d.vertical_range, d.horizontal_range
+                now.area_length, now.area_width, now.vertical_range, now.horizontal_range
             ),
         };
-        let zsrc = if d.z_source != 0.0 {
-            format!("  zSource {:.2}", d.z_source)
+        let zsrc = if now.z_source != 0.0 {
+            format!("  zSource {:.2}", now.z_source)
         } else {
             String::new()
         };

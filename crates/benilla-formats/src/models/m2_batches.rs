@@ -634,6 +634,19 @@ pub fn parse_m2_render_submeshes(
                 emissive,
             );
             sub.billboard = bone.and_then(make_billboard);
+            // …and the other side of the same gate: this batch holds geometry on a billboard bone
+            // the split REFUSED, so no rigid placement of it is right and the lane must skin it to
+            // bend it (decision 0841). Read off the same `separable` table the key above is gated
+            // on, so the renderer's "is this a card" and "is this welded" can never disagree.
+            sub.welded_billboard = globals.iter().any(|&g| {
+                let v = &model.vertices[g as usize];
+                (0..4).any(|i| {
+                    let b = v.bone_indices[i] as usize;
+                    v.bone_weights[i] != 0
+                        && model.bones.get(b).is_some_and(|bone| bone.is_billboard())
+                        && !separable.get(b).copied().unwrap_or(false)
+                })
+            });
             sub.additive = additive; // M2 blend mode 3/4 → additive (glow cards)
             sub.no_depth_write = no_depth_write; // M2 render flag 0x10
             sub.no_depth_test = no_depth_test; // M2 render flag 0x08
@@ -917,6 +930,13 @@ mod tests {
             seam, 16,
             "the two 8-vertex 50/50 seam rings are in the mesh"
         );
+        // …and the batch SAYS it is welded — the other half of the same gate, and the flag a lane
+        // reads to decide it must skin this model (decision 0841). A build where the split key and
+        // this flag disagreed would draw the spikes rigid and call it fine.
+        assert!(
+            subs[0].welded_billboard,
+            "the welded batch announces itself to the render lanes"
+        );
         // The renderer's predicate, read directly: both billboard bones are the denied ones.
         let bytes = chain.read_file(path).expect("read the m2");
         assert_eq!(non_separable_billboard_bones(&bytes), vec![1, 2]);
@@ -942,6 +962,10 @@ mod tests {
         assert!(
             cards.iter().all(|c| c.positions.len() == 4),
             "each is its own 4-vertex quad"
+        );
+        assert!(
+            subs.iter().all(|s| !s.welded_billboard),
+            "…so no batch of it asks a lane to skin anything (decision 0841)"
         );
         let bytes = chain.read_file(path).expect("read the m2");
         assert!(

@@ -560,6 +560,7 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         no_depth_test: false,
         fog_policy: FogPolicy::Scene,
         billboard: None,
+        welded_billboard: false,
         alpha_anim: None,
         uv_anim: None,
         rgb_anim: None,

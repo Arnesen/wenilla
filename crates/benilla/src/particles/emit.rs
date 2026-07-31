@@ -50,7 +50,11 @@ pub(super) fn rand_s11(state: &mut u32) -> f32 {
 ///   an optional along-velocity scatter jitter — see the arm's comment.
 /// - Any shape with `zSource ≠ 0`: direction is **radial from the pivot** `(0, 0, zSource)` toward
 ///   the birth point (fountains that arc outward from a point below the basin).
-pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3) {
+pub(super) fn emit_local(
+    def: &ParticleEmitterDef,
+    now: &benilla_formats::ParamsNow,
+    rng: &mut u32,
+) -> (Vec3, Vec3) {
     let origin = Vec3::from(def.position);
     // The emitter-frame R(+Z, 90°) applied at every branch's return — see the law note at the
     // tail. Per the wow-re bytes the prepend is per-EMITTER and subclass-independent ("gated
@@ -67,19 +71,19 @@ pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3
     // falls through to the plane kernel, as before.
     if let (benilla_formats::ParticleShape::Spline, Some(spline)) = (def.shape, &def.spline) {
         let (t0, t1) = (
-            def.area_length.clamp(0.0, 1.0),
-            def.area_width.clamp(0.0, 1.0),
+            now.area_length.clamp(0.0, 1.0),
+            now.area_width.clamp(0.0, 1.0),
         );
         let t = t0 + rand01(rng) * (t1 - t0);
         let mut pos = origin + Vec3::from(spline.eval(t));
-        let dir = if def.z_source != 0.0 {
-            (pos - origin - Vec3::new(0.0, 0.0, def.z_source)).normalize_or(Vec3::Z)
-        } else if def.vertical_range != 0.0 {
+        let dir = if now.z_source != 0.0 {
+            (pos - origin - Vec3::new(0.0, 0.0, now.z_source)).normalize_or(Vec3::Z)
+        } else if now.vertical_range != 0.0 {
             let tangent = Vec3::from(spline.tangent(t)).normalize_or(Vec3::Z);
-            let (s, c) = (rand_s11(rng) * def.vertical_range).sin_cos();
+            let (s, c) = (rand_s11(rng) * now.vertical_range).sin_cos();
             let dir = Vec3::Z * c + tangent.cross(Vec3::Z) * s + tangent * (tangent.z * (1.0 - c));
-            if def.horizontal_range != 0.0 {
-                pos += rand01(rng) * def.horizontal_range * dir;
+            if now.horizontal_range != 0.0 {
+                pos += rand01(rng) * now.horizontal_range * dir;
             }
             dir
         } else {
@@ -93,9 +97,9 @@ pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3
     // ZERO-radius sphere (the fireball impact's plume burst: min = max = 0) spraying uniformly
     // instead of collapsing every direction to the degenerate normalize fallback.
     let (local, shell) = if def.shape == benilla_formats::ParticleShape::Sphere {
-        let r = def.area_length + rand01(rng) * (def.area_width - def.area_length).max(0.0);
-        let lat = rand_s11(rng) * def.vertical_range;
-        let lon = rand_s11(rng) * def.horizontal_range;
+        let r = now.area_length + rand01(rng) * (now.area_width - now.area_length).max(0.0);
+        let lat = rand_s11(rng) * now.vertical_range;
+        let lon = rand_s11(rng) * now.horizontal_range;
         let (slat, clat) = lat.sin_cos();
         let (slon, clon) = lon.sin_cos();
         let shell = Vec3::new(clat * clon, clat * slon, slat); // unit by construction
@@ -106,16 +110,16 @@ pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3
         // rectangle's ORIENTATION but not its distribution; that is the whole bug.
         (
             Vec3::new(
-                rand_s11(rng) * 0.5 * def.area_length,
-                rand_s11(rng) * 0.5 * def.area_width,
+                rand_s11(rng) * 0.5 * now.area_length,
+                rand_s11(rng) * 0.5 * now.area_width,
                 0.0,
             ),
             None,
         )
     };
-    let dir = if def.z_source != 0.0 {
+    let dir = if now.z_source != 0.0 {
         // Radial from the (0, 0, zSource) pivot — degenerate at the pivot itself falls back to +Z.
-        (local - Vec3::new(0.0, 0.0, def.z_source)).normalize_or(Vec3::Z)
+        (local - Vec3::new(0.0, 0.0, now.z_source)).normalize_or(Vec3::Z)
     } else if let Some(shell) = shell {
         if def.sphere_up() {
             Vec3::Z
@@ -123,8 +127,8 @@ pub(super) fn emit_local(def: &ParticleEmitterDef, rng: &mut u32) -> (Vec3, Vec3
             shell // radial outward — the same unit draw as the birth point
         }
     } else {
-        let theta = rand_s11(rng) * def.vertical_range;
-        let phi = rand_s11(rng) * def.horizontal_range;
+        let theta = rand_s11(rng) * now.vertical_range;
+        let phi = rand_s11(rng) * now.horizontal_range;
         let (st, ct) = theta.sin_cos();
         let (sp, cp) = phi.sin_cos();
         Vec3::new(st * cp, st * sp, ct)
@@ -146,7 +150,23 @@ pub(crate) mod tests {
     use super::*;
     use benilla_formats::{CellRamp, OverLife, ParticleShape};
 
-    /// A minimal def for kernel tests — only the fields [`emit_local`] reads matter.
+    /// The kernel-test parameter set (the values the old flattened def carried).
+    pub(crate) fn now() -> benilla_formats::ParamsNow {
+        benilla_formats::ParamsNow {
+            emission_speed: 1.0,
+            speed_variation: 0.0,
+            vertical_range: 0.5,
+            horizontal_range: std::f32::consts::PI,
+            gravity: 0.0,
+            lifespan: 1.0,
+            area_length: 2.0,
+            area_width: 4.0,
+            z_source: 0.0,
+        }
+    }
+
+    /// A minimal def for kernel tests — only the fields [`emit_local`] reads matter; the
+    /// sampled-parameter side is [`now`] (constant-baked into `params` for the sim tests).
     pub(crate) fn def(shape: ParticleShape) -> ParticleEmitterDef {
         ParticleEmitterDef {
             flags: 0,
@@ -158,16 +178,8 @@ pub(crate) mod tests {
             tile_rows: 1,
             tile_cols: 1,
             head_tail: 0,
-            emission_speed: 1.0,
-            speed_variation: 0.0,
-            vertical_range: 0.5,
-            horizontal_range: std::f32::consts::PI,
-            gravity: 0.0,
-            lifespan: 1.0,
             timing: benilla_formats::EmitTiming::constant(10.0),
-            area_length: 2.0,
-            area_width: 4.0,
-            z_source: 0.0,
+            params: benilla_formats::EmitParams::constant(now()),
             drag: 0.0,
             tail_time: 0.0,
             spline: None,
@@ -207,11 +219,12 @@ pub(crate) mod tests {
     #[test]
     fn plane_kernel_rect_bounds_and_symmetric_cone() {
         let d = def(ParticleShape::Plane);
+        let n = now();
         let mut rng = 12345u32;
         let (mut neg, mut pos) = (false, false);
         let (mut max_dx, mut max_dy) = (0.0f32, 0.0f32);
         for _ in 0..256 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             assert!(
                 (p.x - 1.0).abs() <= 2.0 + 1e-4,
                 "x within ±½·width of position (post-R)"
@@ -246,9 +259,10 @@ pub(crate) mod tests {
     #[test]
     fn sphere_kernel_radius_bounds_and_radial_velocity() {
         let d = def(ParticleShape::Sphere);
+        let n = now();
         let mut rng = 99u32;
         for _ in 0..256 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             let rel = p - Vec3::new(1.0, 2.0, 3.0);
             let r = rel.length();
             assert!(
@@ -267,15 +281,16 @@ pub(crate) mod tests {
     /// itself (`0x7b8fba` reuses the sincos pair), never a normalize of the (zero) birth offset.
     #[test]
     fn zero_radius_sphere_still_disperses() {
-        let mut d = def(ParticleShape::Sphere);
-        d.area_length = 0.0;
-        d.area_width = 0.0;
-        d.vertical_range = std::f32::consts::PI; // the MoltenBlast plume: full ±π latitude fan
-        d.horizontal_range = 0.0;
+        let d = def(ParticleShape::Sphere);
+        let mut n = now();
+        n.area_length = 0.0;
+        n.area_width = 0.0;
+        n.vertical_range = std::f32::consts::PI; // the MoltenBlast plume: full ±π latitude fan
+        n.horizontal_range = 0.0;
         let mut rng = 4242u32;
         let (mut up, mut down, mut fwd, mut back) = (false, false, false, false);
         for _ in 0..256 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             assert_eq!(p, Vec3::new(1.0, 2.0, 3.0), "births at the centre");
             assert!((dir.length() - 1.0).abs() < 1e-4, "unit direction");
             assert_eq!(
@@ -307,14 +322,15 @@ pub(crate) mod tests {
             x(2.0),
             x(3.0), // one straight segment along +X
         ]);
-        d.area_length = 0.25; // tMin
-        d.area_width = 0.75; // tMax
-        d.vertical_range = 0.0;
-        d.z_source = 0.0;
+        let mut n = now();
+        n.area_length = 0.25; // tMin
+        n.area_width = 0.75; // tMax
+        n.vertical_range = 0.0;
+        n.z_source = 0.0;
         let mut rng = 31u32;
         // The R(+Z,90°) emitter frame (`emit_local`'s tail) turns the authored +X chain to +Y.
         for _ in 0..64 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             let local = p - Vec3::new(1.0, 2.0, 3.0); // minus the record position
             assert!(
                 (0.75 - 1e-3..=2.25 + 1e-3).contains(&local.y),
@@ -325,11 +341,11 @@ pub(crate) mod tests {
             assert_eq!(dir, Vec3::ZERO, "no spin, no zSource: the flame stands");
         }
         // A spin range fans +Z about the +X tangent — the kernel's YZ fan lands in XZ post-R.
-        d.vertical_range = 1.0;
-        d.horizontal_range = 0.5; // scatter
+        n.vertical_range = 1.0;
+        n.horizontal_range = 0.5; // scatter
         let (mut low, mut high) = (false, false);
         for _ in 0..256 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             assert!(dir.y.abs() < 1e-4, "fan in the XZ plane (post-R)");
             assert!((dir.length() - 1.0).abs() < 1e-4);
             assert!(dir.z > 0.0, "±1 rad about +Z stays upward");
@@ -345,11 +361,12 @@ pub(crate) mod tests {
     /// zSource ≠ 0 redirects any shape's velocity radially away from the (0, 0, zSource) pivot.
     #[test]
     fn z_source_pivots_the_velocity() {
-        let mut d = def(ParticleShape::Plane);
-        d.z_source = -1.0; // pivot below the emitter → births fly up-and-outward
+        let d = def(ParticleShape::Plane);
+        let mut n = now();
+        n.z_source = -1.0; // pivot below the emitter → births fly up-and-outward
         let mut rng = 7u32;
         for _ in 0..64 {
-            let (p, dir) = emit_local(&d, &mut rng);
+            let (p, dir) = emit_local(&d, &n, &mut rng);
             let rel = (p - Vec3::new(1.0, 2.0, 3.0)) - Vec3::new(0.0, 0.0, -1.0);
             assert!(rel.normalize().dot(dir) > 0.999, "radial from the pivot");
         }

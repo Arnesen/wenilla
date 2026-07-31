@@ -172,10 +172,7 @@ pub(super) fn dump_emitter(
         let half = particle_half(def, placement, p);
         // The additive contribution's other factor: the over-life colour this particle's quad
         // carries (raw authored values, as `expand_quads` pushes them).
-        let rgba = def
-            .over_life
-            .sample((p.age / def.lifespan).clamp(0.0, 1.0))
-            .color;
+        let rgba = def.over_life.sample((p.age / p.life).clamp(0.0, 1.0)).color;
         let Some((ndc, viewz)) = project(center) else {
             info!("PARTICLE_DEPTHDUMP f={fidx} p{i} behind the camera");
             continue;

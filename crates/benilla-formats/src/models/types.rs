@@ -297,6 +297,13 @@ pub struct RenderSubmesh {
     /// Set when this batch sits on an M2 **billboard bone** — the renderer faces it to the camera each
     /// frame (around the bone pivot). `None` for ordinary geometry and all WMO batches.
     pub billboard: Option<Billboard>,
+    /// This batch holds geometry bound to a billboard bone the card split **refused** — one whose mesh
+    /// is welded to the rest of the model (`separable_billboard_bones`, decision 0839). No rigid
+    /// placement of such a batch exists: the reference blends it per vertex, so a lane that wants the
+    /// flap to bend must draw the **skinned** form through a joint palette (decision 0841). A lane
+    /// that draws it static gets it whole and still. `false` for every ordinary batch — including
+    /// every separable card, which is split out and faced rigidly — and for all WMO batches.
+    pub welded_billboard: bool,
     /// The batch's **animated material alpha** (decision 0130 phase 2): its time-varying colour-alpha
     /// and/or transparency-weight loops, baked by [`mat_anim`](super::mat_anim). `None` when both
     /// factors are static (baked/culled at build) — the overwhelming majority. The runtime multiplies
@@ -319,15 +326,17 @@ pub struct RenderSubmesh {
     pub wmo_batch: Option<WmoBatchClass>,
 }
 
-/// A render batch that is a single flat **ground-plane quad**: four vertices, all at authored
-/// z ≈ 0 (model space, WoW axes — the plane the model's owner stands on), forming an axis-aligned
-/// rectangle in model XY, every vertex fully weighted to one bone. This is the authoring pattern
-/// of ground-ring spell effects — Battle Shout's six crescents, the paladin auras' rings: flat
-/// quads at the caster's feet that bones slide, spin, and scale outward, and that sloped terrain
-/// buries per-pixel under a normal depth test (the batches author depth-test ON). The `groundscan`
-/// sweep (2026-07-14, full 5875 chain) measures the population: 128 of the 139 flat batches under
-/// `Spells\` are exactly this shape. The entity fx lane re-renders such parts as projected surface
-/// decals (`benilla::ground_fx`) so they drape the terrain like the selection ring does.
+/// A render batch that is a single flat **ground-plane quad**: four vertices sharing one authored
+/// horizontal plane at or hovering just above z = 0 (model space, WoW axes — the plane the
+/// model's owner stands on; hover ≤ [`GROUND_HOVER_MAX`]), forming an axis-aligned rectangle in
+/// model XY, every vertex fully weighted to one bone. This is the authoring pattern of
+/// ground-ring spell effects — Battle Shout's six crescents at exactly z = 0, Consecration's burn
+/// disc hovering at 0.207: flat quads at the owner's feet that bones slide, spin, and scale
+/// outward, and that sloped terrain buries per-pixel under a normal depth test (the batches
+/// author depth-test ON). The `groundscan` sweep (2026-07-14 z=0, 2026-07-31 hover; full 5875
+/// chain) measures the population: 128 of the 139 z=0 flat batches under `Spells\` plus the 108
+/// hovering discs are exactly this shape. The entity fx lane re-renders such parts as projected
+/// surface decals (`benilla::ground_fx`) so they drape the terrain like the selection ring does.
 #[derive(Debug, Clone, Copy)]
 pub struct GroundQuad {
     /// The M2 bone (global bone-array index) all four vertices skin to — the quad's animated
@@ -341,9 +350,19 @@ pub struct GroundQuad {
     pub uvs: [[f32; 2]; 4],
 }
 
-/// Vertices further than this from the model's XY plane disqualify a batch as ground-plane flat
-/// (the real population authors exactly 0.0; the epsilon only absorbs float noise).
+/// Vertices further than this from the quad's own plane disqualify a batch as ground-plane flat
+/// (the real population authors exact planes; the epsilon only absorbs float noise).
 const GROUND_FLAT_EPS: f32 = 0.01;
+
+/// The highest authored **hover** (uniform plane z, model space) a flat quad may sit at and
+/// still be the ground-plane shape. z = 0 is the majority authoring (Battle Shout's crescents);
+/// a minority hovers the disc just above the owner's ground plane to dodge terrain z-fighting.
+/// The `groundscan` hover census (2026-07-31, 5875 chain, `Spells\`) measures the population:
+/// 108 quad-shaped batches hover between 0.014 and 0.518 (the paladin aura/seal rings,
+/// Consecration's 0.207 disc, Flamestrike's 0.097 burn), then clear air up to 1.389 — the two
+/// `GreaterHeal_Low_Base` mid-body glow planes, which must NOT drape to the ground. 1.0 splits
+/// the gap.
+const GROUND_HOVER_MAX: f32 = 1.0;
 
 impl RenderSubmesh {
     /// Is this a **billboard card authored back-to-front** — one flat plane whose normal sits in the
@@ -399,12 +418,21 @@ impl RenderSubmesh {
     }
 
     /// Detect the flat **ground-plane quad** shape ([`GroundQuad`]) — `None` for everything that
-    /// isn't exactly it: more than four vertices, any vertex off the z≈0 plane, a multi-bone or
-    /// partial-weight skin, or corners that don't form an axis-aligned XY rectangle. Billboard
-    /// batches never match (their geometry is camera-facing by construction, not ground-lying).
-    /// Deliberately strict: the 11 `OTHER-FLAT` spell batches the population sweep found (Fist of
-    /// Justice, IceNuke impact) stay on the ordinary render path rather than stretch this shape.
+    /// isn't exactly it: more than four vertices, vertices off one shared horizontal plane, a
+    /// plane hovering above [`GROUND_HOVER_MAX`], a multi-bone or partial-weight skin, or corners
+    /// that don't form an axis-aligned XY rectangle. Billboard batches never match (their
+    /// geometry is camera-facing by construction, not ground-lying). Deliberately strict: the 11
+    /// `OTHER-FLAT` spell batches the population sweep found (Fist of Justice, IceNuke impact)
+    /// stay on the ordinary render path rather than stretch this shape.
     pub fn ground_quad(&self) -> Option<GroundQuad> {
+        self.ground_quad_hover(GROUND_HOVER_MAX).map(|(q, _)| q)
+    }
+
+    /// [`Self::ground_quad`] with the hover ceiling as a parameter, returning the plane's
+    /// authored z alongside the quad — the census entry point (`groundscan` passes `INFINITY` to
+    /// measure the whole hover population with the renderer's own shape test, so the instrument
+    /// cannot drift from the mechanism).
+    pub fn ground_quad_hover(&self, max_hover: f32) -> Option<(GroundQuad, f32)> {
         if self.billboard.is_some()
             || self.positions.len() != 4
             || self.joints.len() != 4
@@ -413,7 +441,16 @@ impl RenderSubmesh {
         {
             return None;
         }
-        if self.positions.iter().any(|p| p[2].abs() > GROUND_FLAT_EPS) {
+        // One shared horizontal plane, at or hovering just above the owner's ground level. The
+        // corners keep their authored z: the decal projection drapes them onto the receiving
+        // surface regardless, exactly as it flattens the z = 0 majority.
+        let hover = self.positions.iter().map(|p| p[2]).sum::<f32>() / 4.0;
+        if !(-GROUND_FLAT_EPS..=max_hover).contains(&hover)
+            || self
+                .positions
+                .iter()
+                .any(|p| (p[2] - hover).abs() > GROUND_FLAT_EPS)
+        {
             return None;
         }
         // One bone, full weight, across all four vertices.
@@ -468,6 +505,6 @@ impl RenderSubmesh {
             corners[slot] = *p;
             uvs[slot] = *uv;
         }
-        Some(GroundQuad { bone, corners, uvs })
+        Some((GroundQuad { bone, corners, uvs }, hover))
     }
 }

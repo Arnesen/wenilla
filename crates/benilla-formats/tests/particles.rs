@@ -32,13 +32,14 @@ fn campfire_emitters_match_real_bytes() {
     for e in &emitters {
         assert_eq!(e.shape, ParticleShape::Plane);
         assert_eq!(e.blend, ParticleBlend::Add);
-        assert!(e.lifespan > 0.0 && e.lifespan.is_finite());
+        let now = e.params.sample(None, 0.0);
+        assert!(now.lifespan > 0.0 && now.lifespan.is_finite());
         let rate = e
             .timing
             .constant_rate()
             .expect("ambient prop rates are constant tracks");
         assert!(rate > 0.0 && rate.is_finite());
-        assert!(e.horizontal_range > 6.0, "campfire emits in a full ring");
+        assert!(now.horizontal_range > 6.0, "campfire emits in a full ring");
         // Texture resolves to a real .blp via the M2 textures table.
         assert!(
             e.texture.as_deref().is_some_and(|t| !t.is_empty()),
@@ -49,10 +50,11 @@ fn campfire_emitters_match_real_bytes() {
 
     // Glow/smoke plume: wide 20° cone, long life, low rate, single cell.
     let glow = &emitters[0];
+    let glow_now = glow.params.sample(None, 0.0);
     assert!(
-        (glow.lifespan - 4.0).abs() < 1e-3,
+        (glow_now.lifespan - 4.0).abs() < 1e-3,
         "glow lifespan ~4.0, got {}",
-        glow.lifespan
+        glow_now.lifespan
     );
     assert!(
         (glow.timing.constant_rate().unwrap() - 6.0).abs() < 1e-3,
@@ -60,14 +62,15 @@ fn campfire_emitters_match_real_bytes() {
         glow.timing.constant_rate()
     );
     assert_eq!((glow.tile_rows, glow.tile_cols), (1, 1));
-    assert!(glow.vertical_range > 0.3, "glow has a wide cone");
+    assert!(glow_now.vertical_range > 0.3, "glow has a wide cone");
 
     // Flame: short life, high rate, narrow cone, 4×4 cell animation.
     let flame = &emitters[1];
+    let flame_now = flame.params.sample(None, 0.0);
     assert!(
-        (flame.lifespan - 1.5).abs() < 1e-3,
+        (flame_now.lifespan - 1.5).abs() < 1e-3,
         "flame lifespan ~1.5, got {}",
-        flame.lifespan
+        flame_now.lifespan
     );
     assert!(
         (flame.timing.constant_rate().unwrap() - 20.0).abs() < 1e-3,
@@ -79,7 +82,10 @@ fn campfire_emitters_match_real_bytes() {
         (4, 4),
         "flame has a 4×4 flicker atlas"
     );
-    assert!(flame.vertical_range < 0.2, "flame is a tight upward jet");
+    assert!(
+        flame_now.vertical_range < 0.2,
+        "flame is a tight upward jet"
+    );
 
     // Drag (file +0x194): the velocity-decay term the verified integrator applies as
     // `vel −= min(dt·drag, 1)·vel`. The campfire's smoke/glow plume carries a gentle 0.5 (contained
@@ -107,9 +113,9 @@ fn campfire_emitters_match_real_bytes() {
             e.shape,
             e.blend,
             e.texture,
-            e.lifespan,
+            e.params.sample(None, 0.0).lifespan,
             e.timing.constant_rate(),
-            e.vertical_range,
+            e.params.sample(None, 0.0).vertical_range,
             e.tile_rows,
             e.tile_cols
         );
