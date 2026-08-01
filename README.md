@@ -56,7 +56,8 @@ Credentials go in at the login screen, or set `WOW_USER` / `WOW_PASS` to skip it
 ## Contributing
 
 benilla is a solo project and isn't taking pull requests for now. Bug reports and questions are
-welcome — open an issue, or bring them to Discord. Comments throughout the code cite numbered
+welcome — bring them to the [Discord](https://discord.gg/wJSJx467G4) (issues are disabled here on
+purpose). Comments throughout the code cite numbered
 decision records and method notes from a private development log; the citations won't resolve
 here, but the reasoning they carry is kept in the comments themselves.
 
