@@ -227,6 +227,7 @@ fn app_with_chains() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_message::<crate::creature_anim::SpellKitFx>();
+    app.add_message::<crate::creature_anim::SpellKitSound>();
     app.add_message::<AuraProc>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([

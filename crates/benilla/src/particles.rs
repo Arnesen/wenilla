@@ -549,7 +549,7 @@ pub fn spawn_emitter(
     }
     let (host, seq) = match clock {
         EmitClock::Pinned => (None, None),
-        EmitClock::PinnedSeq(s) => (None, Some(s)),
+        EmitClock::Effect(s) => (None, s),
         EmitClock::Host(h) => (Some(h), None),
     };
     // The owner's reach is model-local; the rung is a view-space distance, so it takes the
@@ -688,9 +688,10 @@ pub enum EmitClock {
     /// still correct there), the portrait booths, and any lane with no rig to ask.
     #[default]
     Pinned,
-    /// A fixed armed slot on the spawn-age clock — a spell effect's rig arms one clip at spawn
-    /// and the emitters ride it (a missile's InFlight is not file-order-first).
-    PinnedSeq(usize),
+    /// The SPELL-FX lane: the rig's armed slot (a missile's InFlight is not file-order-first;
+    /// `None` = slot 0) on the spawn-age clock, like every pinned lane — the effect instance is
+    /// byte-verified fresh per play (decision 0858), so its gseq loops open at phase 0 with it.
+    Effect(Option<usize>),
     /// A live host's `AnimationPlayer` decides the slot **and the clip time** each frame — units
     /// and GameObjects, whose playing sequence changes; the reference's `m2_animate` emitter
     /// phase samples the CURRENT sequence record (wow-re `part-emission-rate-animated.md` §2).

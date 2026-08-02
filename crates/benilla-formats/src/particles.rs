@@ -872,7 +872,7 @@ mod tests {
         let defs = parse_m2_particle_emitters(&bytes).expect("parse emitters");
         assert_eq!(defs.len(), 4);
         // Emitter 0 — the red spray: starts hot (100/s at t=0), the old bake's one working case.
-        assert_eq!(defs[0].timing.rate(None, 0.0), 100.0);
+        assert_eq!(defs[0].timing.rate(None, 0.0, 0.0), 100.0);
         // Emitter 3 — the starflash: additive, STARFLASH texture, burst-keyed (first key 0,
         // peak 20/s inside the 67–100 ms window, dead again by 133 ms).
         let flash = &defs[3];
@@ -881,17 +881,17 @@ mod tests {
             .as_deref()
             .is_some_and(|t| t.to_ascii_uppercase().contains("STARFLASH")));
         assert_eq!(flash.blend, ParticleBlend::Add);
-        assert_eq!(flash.timing.rate(None, 0.0), 0.0, "silent at t=0");
+        assert_eq!(flash.timing.rate(None, 0.0, 0.0), 0.0, "silent at t=0");
         assert_eq!(flash.timing.peak_rate(), 20.0);
-        assert_eq!(flash.timing.rate(None, 0.080), 20.0);
-        assert_eq!(flash.timing.rate(None, 0.200), 0.0);
+        assert_eq!(flash.timing.rate(None, 0.080, 0.0), 20.0);
+        assert_eq!(flash.timing.rate(None, 0.200, 0.0), 0.0);
         // Emitters 1/2 — the glowball droplets, same burst shape, peaks 200.
         assert_eq!(defs[1].timing.peak_rate(), 200.0);
         assert_eq!(defs[2].timing.peak_rate(), 200.0);
         // The spray's enabled track cuts emission at 500 ms — exactly where its rate track goes
         // negative (the authored tail the old always-on read let the floor-at-0 hide).
-        assert!(defs[0].timing.emitting(None, 0.4));
-        assert!(!defs[0].timing.emitting(None, 0.6));
+        assert!(defs[0].timing.emitting(None, 0.4, 0.0));
+        assert!(!defs[0].timing.emitting(None, 0.6, 0.0));
     }
 
     /// The real `Feint_Impact_Chest.m2` (the Eviscerate/Feint impact) — the BURST-flag split
@@ -921,9 +921,9 @@ mod tests {
         assert!(impact[3].burst(), "crescents are a one-shot burst");
         // The STEP rate law that arms the burst count: silent before the 67 ms key, the full
         // value at it, held past it (where the burst latch keeps it from ever mattering).
-        assert_eq!(impact[0].timing.rate(None, 0.050), 0.0);
-        assert_eq!(impact[0].timing.rate(None, 0.067), 30.0);
-        assert_eq!(impact[0].timing.rate(None, 1.500), 30.0);
+        assert_eq!(impact[0].timing.rate(None, 0.050, 0.0), 0.0);
+        assert_eq!(impact[0].timing.rate(None, 0.067, 0.0), 30.0);
+        assert_eq!(impact[0].timing.rate(None, 1.500, 0.0), 30.0);
         let cast = parse_m2_particle_emitters(
             &chain
                 .read_file("Spells\\Eviscerate_Cast_Hands.m2")
@@ -964,7 +964,7 @@ mod tests {
             let s = d.spline.as_ref().expect("chain parses");
             assert_eq!(s.points.len() % 3, 1, "3K+1 control points");
             assert!(s.points.len() >= 16);
-            let now = d.params.sample(None, 0.0);
+            let now = d.params.sample(None, 0.0, 0.0);
             assert_eq!(now.area_length, 0.0, "tMin");
             assert_eq!(now.area_width, 1.0, "tMax");
             assert_eq!(now.vertical_range, 0.0, "no tangent spin");
@@ -1001,11 +1001,11 @@ mod tests {
         assert_eq!(cast.len(), 3);
         for em in &cast {
             assert!(
-                em.timing.emitting(None, 0.1),
+                em.timing.emitting(None, 0.1, 0.0),
                 "the flash is ON at its start"
             );
             assert!(
-                !em.timing.emitting(None, 0.25),
+                !em.timing.emitting(None, 0.25, 0.0),
                 "and OFF from 200 ms — the 1.0 s clip does not burn through"
             );
         }
@@ -1016,22 +1016,25 @@ mod tests {
         )
         .expect("parse emitters");
         assert_eq!(impact.len(), 6);
-        assert_eq!(impact[0].timing.rate(None, 0.0), 0.0);
+        assert_eq!(impact[0].timing.rate(None, 0.0, 0.0), 0.0);
         assert_eq!(
-            impact[0].timing.rate(None, 0.133),
+            impact[0].timing.rate(None, 0.133, 0.0),
             60.0,
             "the plume bursts at impact"
         );
-        assert!(impact[1].timing.emitting(None, 0.1));
+        assert!(impact[1].timing.emitting(None, 0.1, 0.0));
         assert!(
-            !impact[1].timing.emitting(None, 0.4),
+            !impact[1].timing.emitting(None, 0.4, 0.0),
             "shockwave window is 300 ms"
         );
         assert!(
-            !impact[4].timing.emitting(None, 0.05),
+            !impact[4].timing.emitting(None, 0.05, 0.0),
             "smoke starts staggered…"
         );
-        assert!(impact[4].timing.emitting(None, 0.2));
-        assert!(!impact[4].timing.emitting(None, 0.7), "…and ends by 567 ms");
+        assert!(impact[4].timing.emitting(None, 0.2, 0.0));
+        assert!(
+            !impact[4].timing.emitting(None, 0.7, 0.0),
+            "…and ends by 567 ms"
+        );
     }
 }

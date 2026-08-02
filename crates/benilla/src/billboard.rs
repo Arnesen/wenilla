@@ -49,10 +49,20 @@ pub struct BillboardCard {
     /// The billboard bone's looping scale animation (the lamppost glow "breathe"), sampled each frame
     /// and multiplied into [`Self::scale`]. `None` for a static card (no global-sequence scale track).
     scale_anim: Option<BoneScaleAnim>,
-    /// Per-instance phase offset (ms) into the global sequence, hashed from the world position — so a
-    /// row of identical lampposts breathes out of lockstep (each prop instance arms its own clock) rather
-    /// than blinking in unison. No-op when there's no `scale_anim`.
-    phase_ms: u32,
+    /// The armed-sequence cursor offset (ms, negated so a wrapping ADD subtracts): sampling the
+    /// [`Self::seq_translation`] loop runs on `elapsed − arm_ms` — the reference's per-play
+    /// phase for SEQUENCE tracks (`cursor = clock − startOffset`, re-baked at every arm). `0`
+    /// until [`Self::arm_seq_translation`] arms a loop.
+    arm_neg_ms: u32,
+    /// The gseq [`Self::scale_anim`]'s ATTACH anchor (ms): `None` until the first placement pass
+    /// stamps it — the reference snapshots the scene clock once per model instance at attach
+    /// (`CM2Model+0x68`, wow-re `gseq-anchor.md`; decision 0856), so a row of lampposts streamed
+    /// in on different frames breathes at per-instance phases, while same-frame spawns share
+    /// one. Distinct from [`Self::arm_neg_ms`]: the gseq anchor is stamped once per instance,
+    /// the sequence cursor re-arms per play. (An earlier position-hash de-sync here emulated
+    /// the per-instance spread with an invented mechanism; 0855 briefly removed phase entirely —
+    /// both superseded by the byte law.)
+    gseq_attach_ms: Option<u32>,
     /// The bone's armed first-sequence **translation** loop (the questgiver `?` marker's bob, keys in
     /// Bevy axes) — sampled each frame on the same clock/phase and added at the pivot, rotated by
     /// [`Self::placement_rot`]. `None` (every doodad card today) = the static pivot; only the marker
@@ -78,16 +88,13 @@ impl BillboardCard {
     /// regardless of how the prop is turned).
     pub fn new(info: &BillboardInfo, placement: Transform) -> Self {
         let world_pivot = placement.transform_point(info.pivot);
-        // A stable per-instance phase from the world position (same hashing as the particle RNG seed).
-        let phase_ms = world_pivot.x.to_bits().wrapping_mul(0x9E37_79B9)
-            ^ world_pivot.y.to_bits().rotate_left(11)
-            ^ world_pivot.z.to_bits().rotate_left(22);
         Self {
             world_pivot,
             scale: placement.scale.x,
             kind: info.kind,
             scale_anim: info.scale_anim.clone(),
-            phase_ms,
+            arm_neg_ms: 0,
+            gseq_attach_ms: None,
             seq_translation: None,
             placement_rot: placement.rotation,
             follow: None,
@@ -142,7 +149,8 @@ impl BillboardCard {
             scale: 1.0,
             kind,
             scale_anim: None,
-            phase_ms: 0,
+            arm_neg_ms: 0,
+            gseq_attach_ms: None,
             seq_translation: None,
             placement_rot: Quat::IDENTITY,
             follow: Some(owner),
@@ -152,8 +160,7 @@ impl BillboardCard {
 
     /// Arm the card's first-sequence translation loop (the questgiver `?` bob) with the client's
     /// arm-time cursor: sampling runs on `elapsed − arm_ms` (the loop starts at its first key the
-    /// moment the marker attaches, like the real arm at status receive). Overrides the position-hash
-    /// phase — markers of one NPC swap in place and must not inherit a doodad-flavored phase.
+    /// moment the marker attaches, like the real arm at status receive).
     pub(crate) fn with_seq_translation(mut self, anim: Option<BoneScaleAnim>, arm_ms: u32) -> Self {
         self.arm_seq_translation(anim, arm_ms);
         self
@@ -164,7 +171,7 @@ impl BillboardCard {
     /// [`Self::with_seq_translation`].
     pub(crate) fn arm_seq_translation(&mut self, anim: Option<BoneScaleAnim>, arm_ms: u32) {
         if anim.is_some() {
-            self.phase_ms = arm_ms.wrapping_neg();
+            self.arm_neg_ms = arm_ms.wrapping_neg();
         }
         self.seq_translation = anim;
     }
@@ -519,18 +526,25 @@ pub(crate) fn face_billboards(
                 }
             }
         }
+        // The gseq attach anchor: stamped on the card's first placement pass — the reference's
+        // once-per-instance scene-clock snapshot (decision 0856).
+        let attach_ms = *card.gseq_attach_ms.get_or_insert(elapsed_ms);
         let card = &*card;
         let rotation = billboard_basis(card.kind, card.placement_rot, fwd, right, up);
-        // The bone's global-sequence scale pulse (the lamppost glow "breathe"), sampled at this prop's
-        // own phase into the loop. `Vec3::ONE` (no-op) when the card has no scale track.
+        // The bone's global-sequence scale pulse (the lamppost glow "breathe"), on the instance's
+        // anchored cursor (`sceneNow − attach`): instances stamped on different frames pulse at
+        // per-instance phases, same-frame spawns in phase — the reference's anchor law.
+        // `Vec3::ONE` (no-op) when the card has no scale track.
         let pulse = card.scale_anim.as_ref().map_or(Vec3::ONE, |a| {
-            Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.phase_ms)))
+            Vec3::from_array(a.sample(elapsed_ms.wrapping_sub(attach_ms)))
         });
         // The armed first-sequence translation loop (the questgiver `?` bob): a model-local offset
-        // at the pivot, pointed by the placement rotation and sized by its scale.
+        // at the pivot, pointed by the placement rotation and sized by its scale — on the ARM
+        // cursor (`elapsed − arm_ms`), the sequence-track half of the clock law.
         let bob = card.seq_translation.as_ref().map_or(Vec3::ZERO, |a| {
             card.placement_rot
-                * (Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.phase_ms))) * card.scale)
+                * (Vec3::from_array(a.sample(elapsed_ms.wrapping_add(card.arm_neg_ms)))
+                    * card.scale)
         });
         *tf = Transform {
             translation: card.world_pivot + bob,
@@ -576,6 +590,56 @@ impl Plugin for BillboardPlugin {
 mod tests {
     use super::*;
     use benilla_assets::BillboardInfo;
+
+    /// **Geometry lying along a bone's own axis does not sweep** — the fact decision 0847 got wrong
+    /// and 0853 restored, pinned here in our own basis rather than trusted to algebra.
+    ///
+    /// The R14 pauldron's spikes run along WoW **−Z** (`seamswing`: mean |z| 0.284/0.291 against
+    /// ≤0.06 on x and y, worst vertex 12° off axis), which is Bevy local **−Y**. A spherical
+    /// billboard maps WoW Z to the camera's up, so that direction must come out as **−up — screen
+    /// DOWN — from every camera orientation**, never tracing an arc. 0847 read the spikes' 0.29 yd
+    /// length as a 0.29 yd arc through the plate and withdrew a correct change on it; if that arc
+    /// were real, this test is where it would show up as a direction that moves with the camera.
+    ///
+    /// The `kept_rot` argument is swept too: the spherical arm discards the pre-billboard rotation
+    /// outright (wow-re `billboard-bone-law.md` §1), so the wearer's shoulder yaw must not reach
+    /// the result — which is *also* why the spike stops following the shoulder, the real visible
+    /// difference the arm makes (§6.3).
+    #[test]
+    fn a_spike_along_its_bone_axis_points_screen_down_from_every_angle() {
+        // Bevy local −Y is the pauldron spike's run axis (WoW −Z through coords.rs' X→−Z, Y→−X,
+        // Z→+Y).
+        let spike_local = Vec3::NEG_Y;
+        for (yaw, pitch) in [
+            (0.0, 0.0),
+            (0.7, 0.0),
+            (2.4, 0.0),
+            (-1.9, 0.0),
+            (std::f32::consts::PI, 0.0),
+            (0.0, 0.5),
+            (1.2, -0.6),
+            (-2.8, 0.9),
+        ] {
+            let cam =
+                Transform::from_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch));
+            let (fwd, right, up) = (*cam.forward(), *cam.right(), *cam.up());
+            for kept in [
+                Quat::IDENTITY,
+                Quat::from_rotation_y(1.1),
+                Quat::from_rotation_x(-0.8),
+                Quat::from_rotation_z(2.2),
+            ] {
+                let got =
+                    billboard_basis(BillboardKind::Spherical, kept, fwd, right, up) * spike_local;
+                assert!(
+                    got.distance(-up) < 1e-5,
+                    "spike must point screen-down, not sweep: cam yaw {yaw} pitch {pitch}, \
+                     kept {kept:?} → {got:?}, expected {:?}",
+                    -up
+                );
+            }
+        }
+    }
 
     /// A FOLLOWING card (decision 0153 — the entity-path glow cards) re-seats from its owner's
     /// live global transform each frame and despawns with it: the brazier glow burns at the bowl

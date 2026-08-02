@@ -62,6 +62,12 @@ pub(crate) enum SpellKitSound {
     /// The cast/channel hold ended (GO / fail / channel-clear / a replacing cast) — reap the
     /// unit's tracked hold loop, if any (the client kills the effect's sound at `0x614150`).
     StopHold { entity: Entity },
+    /// Stop exactly `kit_sound`'s channels on this unit — the aura-drop reap of a LOOPING
+    /// **state**-kit sound (wow-re `kit-sound-leg.md`: a looping kit sound rides a tracked,
+    /// spell-id-tagged CEffect on the unit's list, and `0x614150` stops it with a 0.15 s fade
+    /// when the aura leaves). Kit-scoped so an unrelated hold loop on the same unit survives;
+    /// a one-shot kit is never tracked, so for it this is a no-op.
+    StopKit { entity: Entity, kit_sound: u32 },
 }
 
 /// A persistent effect instance's **lifetime class** — which owner's reap can kill it.
@@ -317,9 +323,11 @@ struct KitOut<'a, 'w1, 'w2, 'w3, 'w4> {
 /// - `persistent`: the effect models' lifetime (the precast/channel hold vs self-terminating).
 /// - `effects`: whether the models spawn here at all. `false` for the impact hand-off's STATE
 ///   stage — its models belong to the aura's life and [`arm_aura_state_fx`] owns them.
-/// - `sound`: whether the kit's sound rings. The STATE stage's sound is SELF-ONLY
-///   (byte-verified: the stage-2 play's sound leg is gated on IsActivePlayer, `0x5fa6d0` —
-///   wow-re `state-kit-aura-lifecycle.md`), so observers never hear another unit's buff kit.
+/// - `sound`: whether the kit's sound rings — **ungated and positional at the unit, every
+///   stage** (wow-re `kit-sound-leg.md`, decision 0852: `0x60edf0`'s sound leg carries no self
+///   test; the old "state sound is self-only" reading was `0x5ff43e`'s gate on a *different*
+///   aura-apply cue, and `0x5fa6d0` appears nowhere in the kit play). The flag exists for
+///   plays that deliberately hand the sound to another owner (none today).
 #[derive(Clone, Copy)]
 struct KitPlay {
     persistent: bool,
@@ -380,16 +388,17 @@ fn play_kit(
 /// kit plays its anim + sound only: its **effect models live for the aura's life**, owned by
 /// [`arm_aura_state_fx`]'s slot watcher (a single instance, begun when the aura lands in the
 /// slots and reaped when it leaves — the same packet burst as the GO, so there is no visible
-/// gap). Named approximation: the client's small stage-2 gate `0x61dc20` (37 B, content
-/// unpinned) is not modeled. `weapon_visual` = the CASTER's ranged fallback visual (already
-/// resolved — the caster may be gone by a missile arrival), through which a basic shot's impact
-/// kit resolves. `is_self` gates the state stage's sound (self-only, see [`play_kit`]).
-#[allow(clippy::too_many_arguments)] // one hand-off's full input set
+/// gap). The state sound rings **ungated and positional** (wow-re `kit-sound-leg.md`, decision
+/// 0852: `0x60edf0`'s sound leg has no self test — the old self-only reading belonged to a
+/// different aura-apply cue); the same-frame duplicate against the aura watcher's ADD-edge play
+/// collapses in the sound router. Named approximation: the client's small stage-2 gate
+/// `0x61dc20` (37 B, content unpinned) is not modeled. `weapon_visual` = the CASTER's ranged
+/// fallback visual (already resolved — the caster may be gone by a missile arrival), through
+/// which a basic shot's impact kit resolves.
 fn play_impact(
     entity: Entity,
     spell_id: u32,
     weapon_visual: Option<u32>,
-    is_self: bool,
     seq: u64,
     spells: &crate::ui_action::Spells,
     visuals: &SpellVisualCatalog,
@@ -404,7 +413,6 @@ fn play_impact(
             |s: &VisualStages| s.state,
             KitPlay {
                 effects: false,
-                sound: is_self,
                 ..KitPlay::DISCRETE
             },
         ),
@@ -452,7 +460,7 @@ pub(super) fn route_cast_visuals(
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut weapon_src: WeaponVisualSrc,
-    units: Query<(Entity, &ObjectStore, Has<crate::net::SelfPlayer>)>,
+    units: Query<(Entity, &ObjectStore)>,
     holds: Query<&CastHold>,
     mut channel_cache: Local<EntityHashMap<u32>>,
 ) {
@@ -675,7 +683,6 @@ pub(super) fn route_cast_visuals(
                     ev.entity,
                     ev.spell_id,
                     weapon_visual,
-                    units.get(ev.entity).is_ok_and(|(.., is_self)| is_self),
                     ev.seq,
                     spells,
                     &visuals.0,
@@ -733,7 +740,6 @@ pub(super) fn route_cast_visuals(
                     target,
                     go.spell_id,
                     wv,
-                    units.get(target).is_ok_and(|(.., is_self)| is_self),
                     go.seq,
                     spells,
                     &visuals.0,
@@ -796,7 +802,7 @@ pub(super) fn route_cast_visuals(
     // unit's channel loop (the self-only MSG_CHANNEL_* never carry this — decision 0099). Only
     // *edges* act, so a held channel's clip is started once (the client's dedup guard) and a
     // cleared field releases the hold even when the interrupt had no other wire trace.
-    for (entity, store, _) in &units {
+    for (entity, store) in &units {
         let cur = store.0.unit_channel_spell();
         let prev = channel_cache.get(&entity).copied().unwrap_or(0);
         if cur == prev {
@@ -877,12 +883,14 @@ pub(super) fn route_cast_visuals(
 /// The trigger and reap are byte-verified (wow-re `state-kit-aura-lifecycle.md`, §5 2026-07-14):
 /// the aura watcher `0x604d00 → 0x6123f0 → 0x5ff350` reads `SpellVisual` field 4 and plays the
 /// kit at stage 2 (`0x5ff4c2: push 2`); the remove path `0x612320 → 0x5ff290` reaps with
-/// `0x614150(spellId, force=1)`. The ADD edge's sound is SELF-gated (`0x5fa6d0` IsActivePlayer),
-/// so observers hear nothing — and its body anim is NOT code-suppressed (`0x60edf0`'s tail plays
-/// `kit+0x08` unconditionally). This watcher plays effects only — correct for every state kit
-/// whose anim column is the none-sentinel (food's 409 is), and a **named residual** for a state
-/// kit that carries a real anim: that ADD-edge replay isn't built (no live kit demonstrates it;
-/// build it from the verdict when one shows).
+/// `0x614150(spellId, force=1)`. The ADD edge's kit sound rings **ungated and positional** (wow-re
+/// `kit-sound-leg.md`, decision 0852 — its §5 corrected the earlier "SELF-gated" reading: the
+/// `0x5fa6d0` gate at `0x5ff43e` covers only a separate spellRec-driven aura-apply cue, and both
+/// branches fall through to the ungated kit play at `0x5ff4c6`); a looping kit sound is tracked
+/// and stops with the aura ([`SpellKitSound::StopKit`]). The body anim is NOT code-suppressed
+/// (`0x60edf0`'s tail plays `kit+0x08` unconditionally) — this watcher plays effects + sound,
+/// with a **named residual** for a state kit carrying a real anim: that ADD-edge replay isn't
+/// built (no live kit demonstrates it; build it from the verdict when one shows).
 ///
 /// `armed` tracks exactly the (unit, spell) pairs this watcher began, so the REMOVE edge never
 /// reaps another owner's persistent instances (a channel hold whose spell also rides an aura).
@@ -905,6 +913,7 @@ pub(crate) fn arm_aura_state_fx(
     spells: Option<Res<crate::ui_action::Spells>>,
     mut fx: MessageWriter<SpellKitFx>,
     mut procs: MessageWriter<AuraProc>,
+    mut sounds: MessageWriter<SpellKitSound>,
     mut armed: Local<EntityHashMap<Vec<u32>>>,
 ) {
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
@@ -925,6 +934,14 @@ pub(crate) fn arm_aura_state_fx(
                     class: FxClass::AuraState,
                 });
                 procs.write(AuraProc::Reap { entity, spell_id });
+                // A LOOPING state-kit sound is a tracked hold that dies with the aura
+                // (`0x614150`'s 0.15 s fade — 0852); kit-scoped, a no-op for one-shots.
+                if let Some(kit_sound) =
+                    resolve_kit(spells, &visuals.0, spell_id, |s| s.state, || None)
+                        .and_then(|k| k.sound)
+                {
+                    sounds.write(SpellKitSound::StopKit { entity, kit_sound });
+                }
             }
         }
         let mut next = Vec::with_capacity(prev.len());
@@ -941,7 +958,7 @@ pub(crate) fn arm_aura_state_fx(
                 .char_procs()
                 .filter_map(crate::aura_visual::node_for)
                 .collect();
-            if effects.is_empty() && nodes.is_empty() {
+            if effects.is_empty() && nodes.is_empty() && kit.sound.is_none() {
                 continue; // a state kit that does nothing we model — nothing to arm or reap
             }
             if !effects.is_empty() {
@@ -959,6 +976,14 @@ pub(crate) fn arm_aura_state_fx(
                     spell_id,
                     nodes,
                 });
+            }
+            // The ADD edge rings the kit sound — ungated and positional (0852: the kit play's
+            // sound leg has no self test; the old self-only reading belonged to a different
+            // aura-apply cue). Covers the streamed-in-mid-aura unit no impact play can; the
+            // same-frame duplicate against the impact hand-off's state flash collapses in the
+            // sound router.
+            if let Some(kit_sound) = kit.sound {
+                sounds.write(SpellKitSound::Play { entity, kit_sound });
             }
             next.push(spell_id);
         }

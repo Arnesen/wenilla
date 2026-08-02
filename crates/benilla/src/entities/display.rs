@@ -33,6 +33,11 @@ pub(super) enum ModelHandle {
 /// loader).
 pub(super) struct EntityPart {
     pub(super) mesh: Handle<Mesh>,
+    /// The batch's decoded geometry — the model's resident CPU copy (`ModelSubmesh::geometry`),
+    /// cloned onto every spawned part/card as [`crate::interact::PickMesh`] so the ray pickers read
+    /// triangles from here: the static render form is `RENDER_WORLD`-only (decision 0834), so no
+    /// main-world mesh data exists to ray-cast (decision 0857).
+    pub(super) geometry: std::sync::Arc<benilla_formats::RenderSubmesh>,
     /// The static form's build-time `Aabb` (decision 0834): the static mesh is `RENDER_WORLD`-only,
     /// so a consumer that used to compute a bound from its main-world data (the attach path's
     /// picker-volume fallback) reads this instead. `None` for degenerate geometry.
@@ -104,6 +109,12 @@ pub(super) struct EntityPart {
     /// owned by the billboard system (a following [`crate::billboard::BillboardCard`], decision
     /// 0153: the brazier/torch "glow on the ground" family). `None` for ordinary geometry.
     pub(super) billboard: Option<benilla_assets::BillboardInfo>,
+    /// This part's geometry is **welded** to a billboard bone the card split refused
+    /// ([`benilla_formats::RenderSubmesh::welded_billboard`], decision 0839): a shoulder flap whose
+    /// root ring is half-weighted to the plate and whose tip swings to the camera. It draws right
+    /// only through a joint palette, which is why a display carrying one makes even the **item**
+    /// lane rig ([`DisplayModel::welds_billboard`], decision 0841). `false` for every ordinary part.
+    pub(super) welded_billboard: bool,
     /// The part's animated material-alpha loops (colour-alpha × transparency-weight, decision 0130
     /// phase 2, per-sequence since 0641). The **effect lane** ([`super::spell_fx`]) samples them
     /// per instance on its armed slot; the unit/GameObject lane follows the host's live playing
@@ -221,6 +232,20 @@ pub(super) struct DisplayModel {
     /// from the display's cached row, not the unit's descriptor (wow-re `w2d2.md`'s `0x60c690`
     /// getter family).
     pub(super) is_character_body: bool,
+}
+
+impl DisplayModel {
+    /// Does any built part weld geometry to a billboard bone
+    /// ([`EntityPart::welded_billboard`], decision 0839)? Such a part has no correct rigid
+    /// placement — the reference blends it per vertex — so the lane that draws it must run a joint
+    /// palette even where it otherwise wouldn't. The rigged lanes always do; this is the gate that
+    /// makes the **item** lane rig for the seven shoulder models that need it (decision 0841).
+    /// `false` while the model is still loading, and for the other 9684 models in the game.
+    pub(super) fn welds_billboard(&self) -> bool {
+        self.parts
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|part| part.welded_billboard))
+    }
 }
 
 /// Resolve a creature display id to a [`DisplayModel`]: load its M2 (no skins — the slots are filled at
@@ -421,6 +446,11 @@ pub(super) fn build_parts(
                         dm.object_texture.as_deref(),
                         asset_server,
                     );
+                    // The authored batch order (index + 1), into every variant's transparent sort
+                    // bias — one model's coplanar transparent batches (the Naxx items' Mod2x
+                    // sheen + Blend overlay) draw in file order instead of re-flipping a sort tie
+                    // every frame (`model_render::BATCH_ORDER_SORT_EPS`).
+                    let order = u16::try_from(pi + 1).unwrap_or(u16::MAX);
                     let exterior = model_material(
                         cache,
                         materials,
@@ -440,7 +470,7 @@ pub(super) fn build_parts(
                         // (the MCSH sample at their feet) rides the per-instance MeshTag shade byte
                         // (`entity_shade`), not the shared material.
                         ShadeSel::Lit,
-                        0,
+                        order,
                         None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
                         sub.rgb_anim.as_ref(), // animated M2Color tint, seeded at its first key
                         None, // entity M2: light selection anchors at the instance origin
@@ -496,7 +526,7 @@ pub(super) fn build_parts(
                             sub.no_depth_test,
                             sub.fog_policy,
                             ShadeSel::Lit, // matches the exterior variant above
-                            0,
+                            order,
                             None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
                             sub.rgb_anim.as_ref(),
                             None, // entity M2 fade twin: same instance-origin anchor
@@ -526,7 +556,7 @@ pub(super) fn build_parts(
                         sub.no_depth_test,
                         sub.fog_policy,
                         ShadeSel::Matte, // unread on the probe lane
-                        0,
+                        order,
                         None,
                         sub.rgb_anim.as_ref(),
                         None,
@@ -560,7 +590,7 @@ pub(super) fn build_parts(
                                 sub.no_depth_test,
                                 sub.fog_policy,
                                 ShadeSel::Matte, // unread on the probe lane
-                                0,
+                                order,
                                 None,
                                 sub.rgb_anim.as_ref(),
                                 None,
@@ -589,7 +619,7 @@ pub(super) fn build_parts(
                         sub.no_depth_test,
                         sub.fog_policy,
                         ShadeSel::Matte, // sun ×1.0, the forced indoor intensity — const so it dedups
-                        0,
+                        order,
                         None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
                         sub.rgb_anim.as_ref(),
                         None, // entity M2 interior variant: same instance-origin anchor
@@ -604,6 +634,7 @@ pub(super) fn build_parts(
                             .get(pi)
                             .map(|(h, _)| h.clone())
                             .unwrap_or_default(),
+                        geometry: sub.geometry.clone(),
                         aabb: stat_forms.get(pi).and_then(|(_, a)| *a),
                         skinned_mesh: skin_forms.get(pi).cloned(),
                         material: exterior,
@@ -618,6 +649,7 @@ pub(super) fn build_parts(
                         geoset_id: sub.geoset_id,
                         char_slot: sub.char_slot,
                         billboard: sub.billboard.clone(),
+                        welded_billboard: sub.geometry.welded_billboard,
                         alpha_anim: sub.alpha_anim.clone(),
                         rgb_anim: sub.rgb_anim.clone(),
                         ground_quad: sub.ground_quad,
@@ -647,6 +679,7 @@ pub(super) fn build_parts(
                         .get(pi)
                         .map(|(h, _)| h.clone())
                         .unwrap_or_default(),
+                    geometry: sub.geometry.clone(),
                     aabb: stat_forms.get(pi).and_then(|(_, a)| *a),
                     geoset_id: sub.geoset_id, // 0 for WMO — no geoset selection
                     char_slot: None,          // WMO is never a character body
@@ -682,8 +715,9 @@ pub(super) fn build_parts(
                     blend: sub.blend,
                     additive: false, // WMO MOMT carries no additive mode (`RenderSubmesh::additive`)
                     two_sided: sub.two_sided,
-                    billboard: None,  // WMO groups have no billboard bones
-                    alpha_anim: None, // …nor colour/weight loops
+                    billboard: None,         // WMO groups have no billboard bones
+                    welded_billboard: false, // …so nothing can be welded to one
+                    alpha_anim: None,        // …nor colour/weight loops
                     rgb_anim: None,
                     ground_quad: None, // the fx decal lane is M2-only
                 })

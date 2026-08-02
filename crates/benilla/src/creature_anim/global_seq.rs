@@ -1,15 +1,25 @@
 //! Global-sequence bone channels — free-clock loops *independent* of the playing animation (the
-//! character eye-blink eyelid scale; resting fidget pulses). benilla's per-sequence reader deliberately
-//! drops them: they key off their own global-sequence timer, not the playing sequence's time band
-//! (`benilla_formats::parse_m2_animations`). This samples them on a per-instance clock and writes the
-//! driven joint components *after* the [`AnimationPlayer`] posed the skeleton.
+//! character eye-blink eyelid scale; resting fidget pulses; a spell effect's star twinkles).
+//! benilla's per-sequence reader deliberately drops them: they key off their own global-sequence
+//! timer, not the playing sequence's time band (`benilla_formats::parse_m2_animations`). This
+//! samples them on the instance's global-sequence clock and writes the driven joint components
+//! *after* the [`AnimationPlayer`] posed the skeleton.
 //!
-//! Ground truth (wow-5875-re `animation.md` / `doodad-anim-host.md`): global sequences loop with **zero
-//! arming**, clock-driven off the model's own time field, wrapped modulo each sequence's duration —
-//! `globalSequences[gseq]`. There is no per-frame re-arm; the default-animation op4 and the global
-//! sequences coexist, the latter purely clock-driven. The canonical consumer is the eyelid: its scale is
-//! `0` (lid retracted, eye open) for ~96% of the loop and `1` (lid full, eye shut) for ~100 ms — the
-//! blink. Without this pass the eyelid sits at its default identity scale (full size) forever: eyes shut.
+//! Ground truth (wow-5875-re `gseq-anchor.md`, byte-verified): the cursor is
+//! `(sceneClock − instanceAttachTime) % duration` — ONE free-running per-scene ms clock
+//! (`[scene+0xc]`, advanced once per scene update), snapshotted ONCE per model instance at attach
+//! (`CM2Model+0x68`, written unconditionally at `0x70eae1`). So a fresh instance starts its
+//! global sequences at phase 0, and two instances attached on different frames run at different
+//! phases — per-INSTANCE anchoring, not per-play arming (sequence tracks re-arm per play; the
+//! gseq anchor is stamped once). Spell effects are NOT an exception: the lifecycle is
+//! byte-verified fresh-per-play (wow-re `gseq-instance-lifecycle.md`: CreateModel always
+//! alloc→ctor→attach, teardown is a hard free, no pooling), and the director's own 3-cast
+//! apitrace shows the impact flash at the same +16-frame offset every cast — the apparent
+//! cast-to-cast scatter is particle randomness plus the moving cast-anim hands, not clock
+//! phase (decisions 0855/0856/0858). The canonical creature consumer is the eyelid:
+//! its scale is `0` (lid retracted, eye open) for ~96% of the loop and `1` (lid full, eye shut)
+//! for ~100 ms — the blink. Without this pass the eyelid sits at its default identity scale
+//! (full size) forever: eyes shut.
 
 use bevy::prelude::*;
 
@@ -23,17 +33,21 @@ enum SeqTarget {
 }
 
 /// Per-instance driver for a model's global-sequence bone channels: each channel's write target
-/// paired with its baked channels, plus the free-running clock they wrap on. Attached beside the
+/// paired with its baked channels, plus the instance's clock **anchor** — the attach-time
+/// snapshot of the shared scene clock (`CM2Model+0x68`, module docs). Attached beside the
 /// [`AnimationPlayer`] on a skinned instance whose model carries any global-sequence track.
 #[derive(Component)]
 pub(crate) struct GlobalSeqDrive {
     /// `(write target, its baked global-sequence channels)`.
     bones: Vec<(SeqTarget, GlobalBone)>,
-    /// Seconds since spawn — the model clock each channel wraps (`t mod period`).
-    elapsed: f32,
-    /// Paused: skip sampling entirely (the doodad host gates animation to drawn instances — wow-re
-    /// `doodad-anim-host.md`: the ref's kernel ticks at draw time, so a culled model isn't evaluated).
-    /// Creatures never pause. A resume re-syncs the clock via [`Self::sync`], so pausing is drift-free.
+    /// The attach snapshot of the shared clock (secs): `None` until the first animate tick stamps
+    /// it (the instance's attach — the ref writes `+0x68` once, at attach).
+    anchor: Option<f64>,
+    /// Paused: skip the joint writes (the doodad host gates animation to drawn instances — wow-re
+    /// `doodad-anim-host.md`: the ref's kernel ticks at draw time, so a culled model isn't
+    /// evaluated). Creatures never pause. Resuming needs no re-seek: the cursor is a pure
+    /// function of the shared clock and the attach anchor, so a re-appearing doodad shows the
+    /// pose the clock dictates.
     paused: bool,
 }
 
@@ -52,7 +66,7 @@ impl GlobalSeqDrive {
             .collect();
         (!bones.is_empty()).then_some(Self {
             bones,
-            elapsed: 0.0,
+            anchor: None,
             paused: false,
         })
     }
@@ -67,48 +81,41 @@ impl GlobalSeqDrive {
             .collect();
         (!bones.is_empty()).then_some(Self {
             bones,
-            elapsed: 0.0,
+            anchor: None,
             paused: false,
         })
     }
 
-    /// Pause/resume sampling (the doodad draw gate). While paused the joints hold their last pose.
+    /// Pause/resume the joint writes (the doodad draw gate). While paused the joints hold their
+    /// last pose; resume lands on the anchored cursor with nothing to catch up.
     pub(crate) fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
     }
-
-    /// Re-seat the clock at `elapsed` seconds since spawn — the resume-from-pause seek that keeps the
-    /// channel clock-indexed like the ref's (`cursor = clock − startOffset`): a re-appearing doodad
-    /// shows the pose the shared clock dictates, and same-frame spawns stay in phase across pauses.
-    pub(crate) fn sync(&mut self, elapsed: f32) {
-        self.elapsed = elapsed;
-    }
 }
 
-/// Sample each instance's global-sequence channels on its own clock and write the driven bone —
-/// in the pose post-pass window ([`super::PosePost`], the same as the body twist), so the model
-/// compose folds it. A channel overwrites only its own component; a bone the playing animation
-/// never keyed (the eyelid) keeps its rest translation/rotation and takes only the global scale,
-/// so the eye opens and blinks over whatever gait is playing.
+/// Sample every drive's channels at its anchored cursor (`sharedNow − anchor`, stamping the
+/// anchor on the first tick — the attach) and write the driven bone — in the pose post-pass
+/// window ([`super::PosePost`], the same as the body twist), so the model compose folds it. A
+/// channel overwrites only its own component; a bone the playing animation never keyed (the
+/// eyelid) keeps its rest translation/rotation and takes only the global scale, so the eye opens
+/// and blinks over whatever gait is playing. The cursor wraps per channel in f64 (`t % period`)
+/// so a long-uptime clock keeps millisecond precision through the f32 sampler.
 fn apply_global_sequences(
     time: Res<Time>,
     mut drives: Query<(Entity, &mut GlobalSeqDrive, Has<super::AnimParked>)>,
     mut joints: Query<&mut Transform>,
     mut rigs: Query<&mut super::RigPose>,
 ) {
-    let dt = time.delta_secs();
+    let now = time.elapsed_secs_f64();
     for (host, mut drive, parked) in &mut drives {
-        if drive.paused {
+        // The attach stamp happens even while parked/paused — the ref stamps +0x68 at attach,
+        // not at first draw.
+        let t = now - *drive.anchor.get_or_insert(now);
+        // A parked or paused instance skips only the WRITES — the cursor is absolute
+        // (decision 0448's absolute-clock ruling, now literal: nothing per-instance advances).
+        if drive.paused || parked {
             continue;
         }
-        // A parked unit's channel clock keeps running — only the bone writes stop (decision
-        // 0448: units are absolute-clock, never freeze-and-resume; the doodad lane pauses via
-        // [`GlobalSeqDrive::set_paused`] + [`GlobalSeqDrive::sync`] instead and never parks).
-        drive.elapsed += dt;
-        if parked {
-            continue;
-        }
-        let t = drive.elapsed;
         let mut rig = rigs.get_mut(host).ok();
         for (target, bone) in &drive.bones {
             let tf: &mut Transform = match target {
@@ -127,14 +134,15 @@ fn apply_global_sequences(
                     tf
                 }
             };
+            let at = |period: f32| (t % f64::from(period.max(1e-3))) as f32;
             if let Some(c) = &bone.translation {
-                tf.translation = c.sample(t);
+                tf.translation = c.sample(at(c.period));
             }
             if let Some(c) = &bone.rotation {
-                tf.rotation = c.sample(t);
+                tf.rotation = c.sample(at(c.period));
             }
             if let Some(c) = &bone.scale {
-                tf.scale = c.sample(t);
+                tf.scale = c.sample(at(c.period));
             }
         }
     }
@@ -168,40 +176,77 @@ mod tests {
         }
     }
 
-    /// The driver writes the sampled global-sequence scale onto the mapped joint each tick — the eyelid
-    /// reads `1` (shut) when the clock sits in the blink window and `0` (open) the rest of the loop, so a
-    /// skinned character actually opens and blinks instead of freezing lid-down. Time advances by real
-    /// dt; both clocks sit on a constant plateau of the channel, so the assert is jitter-proof.
+    /// A linear-ramp channel (`scale = t`, long period) — phase differences are visible at any
+    /// absolute elapsed.
+    fn ramp() -> GlobalBone {
+        GlobalBone {
+            bone: 0,
+            translation: None,
+            rotation: None,
+            scale: Some(GlobalSeqChannel {
+                period: 100.0,
+                keys: vec![(0.0, Vec3::ZERO), (100.0, Vec3::splat(100.0))],
+            }),
+        }
+    }
+
+    /// The anchor law (0856): a FRESH drive stamps its attach on its first tick, so a drive
+    /// spawned later reads a SMALLER cursor than one spawned earlier (per-instance phase — two
+    /// creatures attached on different frames blink at different times). Ticks are
+    /// deterministic via `TimeUpdateStrategy::ManualDuration`.
     #[test]
-    fn driver_writes_eyelid_scale_from_the_clock() {
+    fn fresh_drives_anchor_at_attach() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins); // Time
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(60),
+        ));
         app.add_systems(Update, apply_global_sequences);
 
-        // Two instances: one clock parked mid-blink (shut), one parked in the open tail.
-        let shut_joint = app.world_mut().spawn(Transform::default()).id();
-        app.world_mut().spawn(GlobalSeqDrive {
-            bones: vec![(SeqTarget::Joint(shut_joint), eyelid_bone())],
-            elapsed: 0.06, // inside [0.033, 0.100] → scale 1
-            paused: false,
-        });
-        let open_joint = app.world_mut().spawn(Transform::default()).id();
-        app.world_mut().spawn(GlobalSeqDrive {
-            bones: vec![(SeqTarget::Joint(open_joint), eyelid_bone())],
-            elapsed: 3.0, // inside [0.133, 6.633] → scale 0
-            paused: false,
-        });
-
+        let early_joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut()
+            .spawn(GlobalSeqDrive::new(&[ramp()], &[early_joint]).expect("a keyed channel maps"));
+        app.update();
+        app.update();
+        // A drive attached two ticks later.
+        let late_joint = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut()
+            .spawn(GlobalSeqDrive::new(&[ramp()], &[late_joint]).expect("a keyed channel maps"));
+        app.update();
         app.update();
 
-        let scale = |e: Entity| app.world().entity(e).get::<Transform>().unwrap().scale;
+        let s = |e: Entity| app.world().entity(e).get::<Transform>().unwrap().scale.x;
         assert!(
-            scale(shut_joint).abs_diff_eq(Vec3::ONE, 1e-3),
-            "eyelid shut mid-blink"
+            s(early_joint) > s(late_joint),
+            "the later attach reads a smaller cursor (per-instance anchor): early {} vs late {}",
+            s(early_joint),
+            s(late_joint)
         );
         assert!(
-            scale(open_joint).abs_diff_eq(Vec3::ZERO, 1e-3),
-            "eyelid open the rest of the loop"
+            s(late_joint) > 0.0,
+            "the late drive did tick from its own anchor (got {})",
+            s(late_joint)
+        );
+    }
+
+    /// The eyelid channel itself still samples correctly at a given cursor — the blink window
+    /// reads shut, the long tail reads open (the channel sampler is untouched by the anchor
+    /// work; only who supplies `t` changed).
+    #[test]
+    fn eyelid_channel_samples_by_clock_value() {
+        let bone = eyelid_bone();
+        let c = bone.scale.as_ref().unwrap();
+        assert!(
+            c.sample(0.06).abs_diff_eq(Vec3::ONE, 1e-3),
+            "shut mid-blink"
+        );
+        assert!(
+            c.sample(3.0).abs_diff_eq(Vec3::ZERO, 1e-3),
+            "open in the tail"
+        );
+        assert!(
+            c.sample(3.0 + 2.0 * 6.633).abs_diff_eq(Vec3::ZERO, 1e-3),
+            "wraps on its period"
         );
     }
 }

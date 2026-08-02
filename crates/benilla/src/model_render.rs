@@ -20,6 +20,22 @@ use crate::terrain::{WowModelExt, WowModelMaterial};
 /// Source: <https://wowdev.wiki/M2/Rendering> § Alpha Testing.
 pub const VANILLA_ALPHA_KEY_REF: f32 = 224.0 / 255.0;
 
+/// Yards of transparent-pass sort bias per authored batch-order step (`MatKey::batch_order` ×
+/// this, on `StandardMaterial::depth_bias` — bevy adds that field to the phase item's sort
+/// distance; positive = drawn later, the `sky_order` sign law). **Why it exists:** one model's
+/// coplanar transparent batches (the Naxx items' Opaque + Mod2x sheen + Blend overlay triples)
+/// share one mesh centre, so their sort distances TIE, and a tie is re-resolved every frame by
+/// whatever order the queue happens to iterate — in a churning scene (a city) the coplanar layers
+/// swap draw order frame to frame and the composite strobes (Mod2x-then-Blend ≠ Blend-then-Mod2x).
+/// The reference cannot express the bug: it ties every draw command of one instance to a single
+/// sort key and keeps the *authored command order* inside the tie (wow-re
+/// `m2-blend-promotion-zfill.md` §4/§6; MOBA file order for WMO). This epsilon reproduces that
+/// order through bevy's sort. Sized well under [`benilla_formats::owner_last_rung`]'s 1-yd floor
+/// (an effect still draws after every batch of its owner) and far over f32 noise on a ~500 yd
+/// sort distance (~4e-5). Not a pipeline axis: `depth_bias` participates in sorting only
+/// (`WowModelKey` deliberately excludes it — decision 0837).
+pub(crate) const BATCH_ORDER_SORT_EPS: f32 = 1e-3;
+
 /// Material-dedup key: same texture + blend + sidedness + kind + fade-variant → one shared material.
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct MatKey {
@@ -40,10 +56,11 @@ pub(crate) struct MatKey {
     /// The batch's static terrain-shade selector ([`ShadeSel`]). Static per placement, so it dedups a
     /// lit / matte / shaded material variant.
     shade: ShadeSel,
-    /// WMO authored batch index + 1 (0 = non-WMO). Per-batch, so each biased batch is its own
-    /// pipeline variant — see `terrain::WowModelKey::wmo_batch_order` for the why (the byte-verified
-    /// MOBA draw-order determinism, wow-5875-re models/scratch/wmo-batch-blend-depth-state.md).
-    wmo_batch_order: u16,
+    /// Authored batch index + 1 (0 = a legacy/unordered caller). Every ordered batch (M2 and WMO)
+    /// folds it into the material's transparent SORT bias ([`BATCH_ORDER_SORT_EPS`]); WMO batches
+    /// additionally ride it into the vertex-stage clip-z nudge (the byte-verified MOBA draw-order
+    /// determinism, wow-5875-re models/scratch/wmo-batch-blend-depth-state.md).
+    batch_order: u16,
     /// The batch's UV-animation identity (decision 0130 phase 3): the `Arc<UvAnim>` pointer, so
     /// batches scrolling on different loops never share a material (their `sun_scale.zw` offsets
     /// diverge every frame) while every instance of the same model batch does. Sound because the
@@ -152,7 +169,9 @@ pub(crate) fn model_material(
     no_depth_test: bool,
     fog_policy: benilla_formats::FogPolicy,
     shade: ShadeSel,
-    wmo_batch_order: u16,
+    // Authored batch index + 1 (0 = unordered): the transparent-pass ORDER of this batch among its
+    // model's other batches — see [`MatKey::batch_order`] and [`BATCH_ORDER_SORT_EPS`].
+    batch_order: u16,
     uv_anim: Option<&std::sync::Arc<benilla_formats::UvAnim>>,
     rgb_anim: Option<&std::sync::Arc<benilla_formats::RgbAnim>>,
     // The WMO batch's MOBA section (`None` for M2 batches) — with `is_interior`, it picks the
@@ -177,7 +196,7 @@ pub(crate) fn model_material(
         no_depth_test,
         fog_policy,
         shade,
-        wmo_batch_order,
+        batch_order,
         uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
         rgb_anim: rgb_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
         wmo_class,
@@ -220,12 +239,16 @@ pub(crate) fn model_material(
     };
     // Single-sided unless the M2's 0x04 flag is set (many canopy planes are one-directional).
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
+    // The authored batch order as a transparent sort bias ([`BATCH_ORDER_SORT_EPS`]): one model's
+    // coplanar batches draw in file order instead of re-flipping a sort tie every frame.
+    let depth_bias = f32::from(batch_order) * BATCH_ORDER_SORT_EPS;
     let base = match texture {
         Some(image) => StandardMaterial {
             base_color_texture: Some(image),
             alpha_mode,
             double_sided: two_sided,
             cull_mode,
+            depth_bias,
             ..default()
         },
         // No resolved texture → the reference DISABLES the texture stage and draws the batch in
@@ -239,6 +262,7 @@ pub(crate) fn model_material(
             alpha_mode,
             double_sided: two_sided,
             cull_mode,
+            depth_bias,
             ..default()
         },
     };
@@ -325,11 +349,15 @@ pub(crate) fn model_material(
             // shared clock (frozen in captures).
             sun_scale: {
                 let uv0 = uv_anim.map_or([0.0, 0.0], |a| a.sample(0.0));
-                let order = if matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
-                    0.0
-                } else {
-                    f32::from(wmo_batch_order)
-                };
+                // The clip-z nudge stays WMO-only: M2 coplanar layers pass GreaterEqual at exactly
+                // equal depth (same mesh, same transform, same vertex path), and their ORDER is
+                // the sort bias above — nudging their depth would be an unverified extra.
+                let order =
+                    if !is_wmo || matches!(std::env::var("WOW_WMO_BIAS").as_deref(), Ok("0")) {
+                        0.0
+                    } else {
+                        f32::from(batch_order)
+                    };
                 Vec4::new(shade.selector(), order, uv0[0], uv0[1])
             },
             // The animated M2Color tint's first key (identity white for static batches — their
@@ -431,7 +459,7 @@ pub(crate) fn zfill_material(
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
         shade: ShadeSel::Lit,
-        wmo_batch_order: 0,
+        batch_order: 0,
         uv_anim: None,
         rgb_anim: None,
         wmo_class: None,
@@ -533,5 +561,30 @@ mod tests {
         // And the reverse direction: no stray bits invented.
         let out2 = replace_fog_policy(f32::from(0u16), FogPolicy::Grey) as u16;
         assert_eq!(out2, (FogPolicy::Grey as u16) << 4);
+    }
+
+    /// The authored-batch-order sort epsilon sits in its working band: any realistic model's
+    /// last batch still biases UNDER the effect lane's owner-last rung floor (an item's glow
+    /// particles must draw after every batch of the item — 0719/0721), and one step is far above
+    /// f32 noise on a far-scene sort distance (~4e-5 at 500 yd), so the tie actually breaks.
+    /// Pins the constant against a careless resize in either direction — either end failing is
+    /// the Naxx-item strobe (coplanar layers re-flipping a sort tie every frame) or its dual
+    /// (effects interleaving into their owner's batches).
+    #[test]
+    fn batch_order_sort_eps_sits_between_f32_noise_and_the_effect_rung() {
+        // 512 batches is comfortably past any shipped model's batch table.
+        let deepest = super::BATCH_ORDER_SORT_EPS * 512.0;
+        assert!(
+            deepest < benilla_formats::owner_last_rung(0.0),
+            "a model's last batch must still sort before its own effects' rung"
+        );
+        let far_noise = 500.0_f32 * f32::EPSILON;
+        assert!(
+            super::BATCH_ORDER_SORT_EPS > 8.0 * far_noise,
+            "one order step must dominate f32 noise on a far sort distance"
+        );
+        // And bevy's pipeline key truncates it to 0 — the bias may never mint pipelines (0837):
+        // sub-1.0 biases all cast to the same i32 constant.
+        assert_eq!(deepest as i32, 0);
     }
 }

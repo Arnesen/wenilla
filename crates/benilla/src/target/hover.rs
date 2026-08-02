@@ -11,14 +11,13 @@ use benilla_assets::ModelAnimations;
 use benilla_protocol::EntityKind;
 use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, VertexAttributeValues};
-use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::collision::PickOccluder;
 use crate::creature_anim::AnimDriver;
 use crate::debug_panel::ModelKind;
-use crate::interact::WorldObject;
+use crate::interact::{ray_aabb, ray_triangle, world_aabb, PickParts, WorldObject};
 use crate::net::{Guid, NetEntity, ObjectStore, SelfPlayer};
 use crate::player::{CameraControl, WorldCamera};
 use crate::ui_script::PointerOverUi;
@@ -302,8 +301,9 @@ pub(super) fn update_hover(
 
 /// Recompute the **GameObject** under the cursor each frame into [`HoveredObject`] (decision 0236):
 /// a mesh-accurate ray pick against GameObject parts *only*, reusing the inspector's picker
-/// ([`crate::interact::pick_at_cursor`] — bevy `MeshRayCast`, which hits the colliderless props a
-/// physics ray misses). Kept separate from [`update_hover`]'s unit pick because a GameObject is
+/// ([`crate::interact::pick_at_cursor`] — the resident-geometry caster of decision 0857, which hits
+/// the colliderless props a physics ray misses and the `RENDER_WORLD`-only static forms Bevy's
+/// `MeshRayCast` lost at 0834). Kept separate from [`update_hover`]'s unit pick because a GameObject is
 /// usable-but-not-*selected*: this drives the Interact cursor and the right-click USE, never
 /// selection. Inert while mouse-looking (cursor hidden) or over the dev UI, exactly like the unit
 /// pick. Cheap — only the handful of GO parts on screen are in the pick set.
@@ -326,7 +326,7 @@ pub(super) fn update_hovered_object(
     // The faction term of eligibility (decision 0764): the GO's own template reaction toward us.
     factions: Option<Res<super::ring::Factions>>,
     self_q: Query<&ObjectStore, With<crate::net::SelfPlayer>>,
-    mut ray_cast: MeshRayCast,
+    parts: PickParts,
 ) {
     hovered.target = None;
     hovered.guid = None;
@@ -362,7 +362,7 @@ pub(super) fn update_hovered_object(
         return;
     }
     let Some((hit, _point, distance)) =
-        crate::interact::pick_at_cursor(cursor, camera, cam_tf, &pickable, &mut ray_cast)
+        crate::interact::pick_at_cursor(cursor, camera, cam_tf, &pickable, &parts)
     else {
         return;
     };
@@ -497,62 +497,6 @@ fn ray_posed_mesh(
     hits
 }
 
-/// Ray–triangle intersection (Möller–Trumbore), **two-sided**, returning `t ≥ 0` along `dir`
-/// (unnormalized is fine — `t` is in `dir` lengths) or `None` on miss/parallel. Two-sided because a
-/// posed mesh can present back faces at silhouette edges and a generous pick beats a strict one.
-fn ray_triangle(origin: Vec3, dir: Vec3, tri: &[Vec3; 3]) -> Option<f32> {
-    let (e1, e2) = (tri[1] - tri[0], tri[2] - tri[0]);
-    let p = dir.cross(e2);
-    let det = e1.dot(p);
-    if det.abs() < 1e-8 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let s = origin - tri[0];
-    let u = s.dot(p) * inv;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = s.cross(e1);
-    let v = dir.dot(q) * inv;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let t = e2.dot(q) * inv;
-    (t >= 0.0).then_some(t)
-}
-
-/// A mesh's model-local [`Aabb`] transformed into a world-space axis-aligned box `(min, max)` — its 8
-/// corners run through the entity's world transform, then min/max'd. (An AABB of the rotated box: a hair
-/// larger than the true oriented box, which only makes the hover more forgiving.)
-fn world_aabb(aabb: &Aabb, gt: &GlobalTransform) -> (Vec3, Vec3) {
-    let center = Vec3::from(aabb.center);
-    let he = Vec3::from(aabb.half_extents);
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for sx in [-1.0, 1.0] {
-        for sy in [-1.0, 1.0] {
-            for sz in [-1.0, 1.0] {
-                let world = gt.transform_point(center + he * Vec3::new(sx, sy, sz));
-                min = min.min(world);
-                max = max.max(world);
-            }
-        }
-    }
-    (min, max)
-}
-
-/// Ray vs axis-aligned box (the slab test): the entry distance along `dir` if the ray hits, else `None`.
-/// `dir` need not be normalized; a zero component is handled by the infinities `recip` produces.
-fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
-    let inv = dir.recip();
-    let t1 = (min - origin) * inv;
-    let t2 = (max - origin) * inv;
-    let tmin = t1.min(t2).max_element();
-    let tmax = t1.max(t2).min_element();
-    (tmax >= tmin.max(0.0)).then_some(tmin.max(0.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,18 +506,6 @@ mod tests {
         Vec3::new(1.0, 0.0, -1.0),
         Vec3::new(0.0, 0.0, 1.0),
     ];
-
-    #[test]
-    fn ray_triangle_hits_at_the_right_distance() {
-        let t = ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, &TRI).expect("hit");
-        assert!((t - 5.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn ray_triangle_is_two_sided() {
-        // Same triangle hit from below (reversed winding relative to the ray) still connects.
-        assert!(ray_triangle(Vec3::new(0.0, -5.0, 0.0), Vec3::Y, &TRI).is_some());
-    }
 
     /// The picker ↔ mesh-builder attribute contract: `ray_posed_mesh` must read the WOW joint
     /// attributes the skinned twin is authored with ([`benilla_assets::ATTRIBUTE_WOW_JOINT_INDEX`],
@@ -615,15 +547,5 @@ mod tests {
         )
         .expect("the posed pick must hit the WOW-attributed mesh");
         assert!((t - 3.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn ray_triangle_misses_outside_and_behind() {
-        // Outside the triangle's extent.
-        assert!(ray_triangle(Vec3::new(3.0, 5.0, 0.0), Vec3::NEG_Y, &TRI).is_none());
-        // Triangle behind the ray origin (t < 0).
-        assert!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, &TRI).is_none());
-        // Parallel to the plane.
-        assert!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::X, &TRI).is_none());
     }
 }

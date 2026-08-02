@@ -204,6 +204,9 @@ pub(super) fn spawn_part(
             material: mats.steady.clone(),
         },
         dress.object.clone(),
+        // The picker's triangles (decision 0857): the render meshes are `RENDER_WORLD`-only, so
+        // the ray pickers read the model's resident geometry instead.
+        crate::interact::PickMesh(part.geometry.clone()),
         DressedPart {
             index: index as u32,
             card: None,
@@ -332,6 +335,9 @@ fn spawn_billboard_part(
             blend: part.blend,
         },
         dress.object.clone(),
+        // The picker's triangles (decision 0857) — the caster centres a card at its pivot, the
+        // same bake the render form draws with.
+        crate::interact::PickMesh(part.geometry.clone()),
         card_follow,
     ));
     // A card takes its MODEL's indoor law through the same constructor as the sibling meshes it was
@@ -385,8 +391,10 @@ mod tests {
     fn part(char_slot: Option<CharSkinSlot>, two_sided: bool) -> EntityPart {
         EntityPart {
             mesh: Handle::default(),
+            geometry: std::sync::Arc::new(benilla_formats::RenderSubmesh::default()),
             aabb: None,
             skinned_mesh: None,
+            welded_billboard: false,
             material: mat(0),
             material_interior: None,
             material_interior_bake: None,

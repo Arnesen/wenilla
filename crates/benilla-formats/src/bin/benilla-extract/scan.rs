@@ -1321,7 +1321,7 @@ pub fn partcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             // instrument could LIST that population, so the swapped pairing outlived both audits
             // until Gressil's 0.1 × 1.1 blade smoke drew its curtain across the blade. Bucketed by
             // aspect so a thin curtain (load-bearing) separates from a near-square (invisible).
-            let now = d.params.sample(None, 0.0);
+            let now = d.params.sample(None, 0.0, 0.0);
             if d.shape == benilla_formats::ParticleShape::Plane {
                 let lo = now.area_length.abs().min(now.area_width.abs());
                 let hi = now.area_length.abs().max(now.area_width.abs());
@@ -1770,7 +1770,7 @@ pub fn alphascan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         // sampling grid is coarse on purpose — a batch that so much as flickers non-zero is drawn.
         let hidden_in = |sub: &benilla_formats::RenderSubmesh, slot: usize| -> bool {
             sub.alpha_anim.as_ref().is_some_and(|a| {
-                (0..=16u16).all(|k| a.sample(Some(slot), f32::from(k) * 0.25) <= 0.0)
+                (0..=16u16).all(|k| a.sample(Some(slot), f32::from(k) * 0.25, 0.0) <= 0.0)
             })
         };
         let (mut first, mut any, mut varies) = (0usize, 0usize, 0usize);

@@ -32,7 +32,7 @@ fn campfire_emitters_match_real_bytes() {
     for e in &emitters {
         assert_eq!(e.shape, ParticleShape::Plane);
         assert_eq!(e.blend, ParticleBlend::Add);
-        let now = e.params.sample(None, 0.0);
+        let now = e.params.sample(None, 0.0, 0.0);
         assert!(now.lifespan > 0.0 && now.lifespan.is_finite());
         let rate = e
             .timing
@@ -50,7 +50,7 @@ fn campfire_emitters_match_real_bytes() {
 
     // Glow/smoke plume: wide 20° cone, long life, low rate, single cell.
     let glow = &emitters[0];
-    let glow_now = glow.params.sample(None, 0.0);
+    let glow_now = glow.params.sample(None, 0.0, 0.0);
     assert!(
         (glow_now.lifespan - 4.0).abs() < 1e-3,
         "glow lifespan ~4.0, got {}",
@@ -66,7 +66,7 @@ fn campfire_emitters_match_real_bytes() {
 
     // Flame: short life, high rate, narrow cone, 4×4 cell animation.
     let flame = &emitters[1];
-    let flame_now = flame.params.sample(None, 0.0);
+    let flame_now = flame.params.sample(None, 0.0, 0.0);
     assert!(
         (flame_now.lifespan - 1.5).abs() < 1e-3,
         "flame lifespan ~1.5, got {}",
@@ -113,9 +113,9 @@ fn campfire_emitters_match_real_bytes() {
             e.shape,
             e.blend,
             e.texture,
-            e.params.sample(None, 0.0).lifespan,
+            e.params.sample(None, 0.0, 0.0).lifespan,
             e.timing.constant_rate(),
-            e.params.sample(None, 0.0).vertical_range,
+            e.params.sample(None, 0.0, 0.0).vertical_range,
             e.tile_rows,
             e.tile_cols
         );
@@ -461,29 +461,29 @@ fn barrel_explode_emitters_are_off_at_rest_and_fire_in_their_clips() {
         for slot in [1usize, 2] {
             for t in [0.0f32, 0.1, 0.3, 5.0] {
                 assert!(
-                    !e.timing.emitting(Some(slot), t),
+                    !e.timing.emitting(Some(slot), t, 0.0),
                     "emitter {i} must be OFF at rest (slot {slot}, t {t})"
                 );
             }
         }
         // The one-shot explode clip (slot 0, anim 157, 1 s clamped): the choreography fires
         // somewhere inside it…
-        let fires = (0..100).any(|k| e.timing.emitting(Some(0), k as f32 * 0.01));
+        let fires = (0..100).any(|k| e.timing.emitting(Some(0), k as f32 * 0.01, 0.0));
         assert!(fires, "emitter {i} fires inside the explode clip");
         // …and the clamped clock PARKS OFF at/after the clip end — the exact end state the old
         // rebase got wrong (it clamped a later clip's ON key onto the band end).
         assert!(
-            !e.timing.emitting(Some(0), 1.0),
+            !e.timing.emitting(Some(0), 1.0, 0.0),
             "emitter {i} must be off at the clip end"
         );
         assert!(
-            !e.timing.emitting(Some(0), 30.0),
+            !e.timing.emitting(Some(0), 30.0, 0.0),
             "emitter {i} must stay off parked past the clip"
         );
     }
     // The Destroy clip (slot 3, anim 150) fires the explosion too — the quest's actual payoff.
     let destroy_fires = emitters
         .iter()
-        .any(|e| (0..100).any(|k| e.timing.emitting(Some(3), k as f32 * 0.01)));
+        .any(|e| (0..100).any(|k| e.timing.emitting(Some(3), k as f32 * 0.01, 0.0)));
     assert!(destroy_fires, "the Destroy clip plays the explosion");
 }

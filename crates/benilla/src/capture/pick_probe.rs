@@ -37,13 +37,12 @@
 //! `viewport_to_world` works in logical units and a Retina capture is 2× the logical window.
 
 use bevy::mesh::MeshTag;
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::probes::ProbeClock;
-use crate::interact::WorldObject;
+use crate::interact::{cast_pick_ray, PickParts, WorldObject};
 use crate::player::WorldCamera;
 use crate::terrain::WowModelMaterial;
 
@@ -190,7 +189,7 @@ fn fire_pick(
     // the probe keys on it too and stays a pure instrument: nothing outside this file reads it.
     objects: Query<Entity, Pickable>,
     names: HitNames,
-    mut ray_cast: MeshRayCast,
+    parts: PickParts,
 ) {
     if probe.taken >= probe.count || probe.pixels.is_empty() || time.elapsed_secs() < probe.next_at
     {
@@ -210,14 +209,11 @@ fn fire_pick(
             warn!("pick ({}, {}): outside the viewport", pixel.x, pixel.y);
             continue;
         };
-        let filter = |e: Entity| pickable.contains(&e);
-        // `never_early_exit` is the whole reason this exists: the default stops at the first hit,
-        // and the rival surface behind it is exactly what we came for.
-        let settings = MeshRayCastSettings::default()
-            .with_visibility(RayCastVisibility::VisibleInView)
-            .with_filter(&filter)
-            .never_early_exit();
-        let hits = ray_cast.cast_ray(ray, &settings);
+        // `all_hits` is the whole reason this exists: the nearest hit alone cannot name the rival
+        // surface behind it, which is exactly what we came for. The cast reads each part's
+        // RESIDENT geometry (decision 0857) — the render meshes are `RENDER_WORLD`-only since
+        // 0834, so a `MeshRayCast` here reports nothing for any static model.
+        let hits = cast_pick_ray(ray, &pickable, &parts, true);
         // The camera's GLOBAL transform, bit-exact, on the line that carries the cast index — so
         // "did the camera move on this frame?" is answerable against "was this frame dim?" without
         // aligning two logs by hand. It is deliberately *this* transform: it is the one

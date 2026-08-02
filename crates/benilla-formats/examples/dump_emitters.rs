@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
             "  texture {:?} tiles {}x{} head_tail {}",
             e.texture, e.tile_rows, e.tile_cols, e.head_tail
         );
-        let now = e.params.sample(None, 0.0);
+        let now = e.params.sample(None, 0.0, 0.0);
         println!(
             "  speed {} var {} vrange {} hrange {} gravity {} life {} drag {}   (params at t=0)",
             now.emission_speed,

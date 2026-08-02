@@ -281,7 +281,7 @@ fn print_m2anim_summary(s: &M2AnimSummary, bytes: &[u8]) {
         // line shows their opening values, and any channel that actually MOVES prints its full
         // keyed ramp below — the view whose absence hid Frost Nova's 0.19 → 13.2 yd emission-
         // radius ride behind a flat "radius [0.19..0.19]" (decision 0844).
-        let now = d.params.sample(None, 0.0);
+        let now = d.params.sample(None, 0.0, 0.0);
         println!(
             "             {:?} {:?} {}  {rate}  life {:.2}s  speed {:.2}  grav {:.2}  drag {:.1}{tail}  twinkle [{:.2}..{:.2}] spd {:.1} pct {:.2}  spin {:.2}",
             d.shape,
@@ -1157,7 +1157,7 @@ pub fn m2alpha(chain: &mut Chain, internal_path: &str) -> Result<()> {
             let (lo, hi) = match &sub.alpha_anim {
                 None => (1.0, 1.0),
                 Some(a) => (0..=32)
-                    .map(|k| a.sample(Some(i), period * k as f32 / 32.0))
+                    .map(|k| a.sample(Some(i), period * k as f32 / 32.0, 0.0))
                     .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v))),
             };
             let cell = if (hi - lo).abs() < 1e-4 {

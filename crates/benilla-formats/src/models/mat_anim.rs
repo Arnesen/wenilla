@@ -53,10 +53,13 @@ pub struct AlphaSeq {
 }
 
 impl AlphaSeq {
-    /// The combined factor at `elapsed` seconds into this sequence.
-    pub fn sample(&self, elapsed: f32) -> f32 {
-        let c = self.color.as_ref().map_or(1.0, |a| a.sample(elapsed));
-        let w = self.weight.as_ref().map_or(1.0, |a| a.sample(elapsed));
+    /// The combined factor at `elapsed` seconds into this sequence, with `shared_now` the world's
+    /// shared elapsed seconds — each factor routes to its own clock ([`KeyAnim::clock`]: a gseq
+    /// loop reads the shared clock, a band loop the sequence time).
+    pub fn sample(&self, elapsed: f32, shared_now: f64) -> f32 {
+        let at = |a: &ScalarAnim| a.sample(a.clock(elapsed, shared_now));
+        let c = self.color.as_ref().map_or(1.0, at);
+        let w = self.weight.as_ref().map_or(1.0, at);
         c * w
     }
 
@@ -104,9 +107,10 @@ impl AlphaAnim {
             .unwrap_or(IDENTITY)
     }
 
-    /// The combined factor `elapsed` seconds into sequence slot `seq`.
-    pub fn sample(&self, seq: Option<usize>, elapsed: f32) -> f32 {
-        self.seq(seq).sample(elapsed)
+    /// The combined factor `elapsed` seconds into sequence slot `seq` (`shared_now` = the world's
+    /// shared elapsed seconds, for the gseq-clocked factors).
+    pub fn sample(&self, seq: Option<usize>, elapsed: f32, shared_now: f64) -> f32 {
+        self.seq(seq).sample(elapsed, shared_now)
     }
 
     /// Whether ANY sequence can drive this batch's alpha to zero — i.e. whether the batch is ever
@@ -296,21 +300,21 @@ mod tests {
             for step in 0..16u16 {
                 let t = 2.667 * f32::from(step) / 16.0;
                 assert_eq!(
-                    a.sample(Some(STAND), t),
+                    a.sample(Some(STAND), t, 0.0),
                     0.0,
                     "batch {batch} is hidden {t}s into Stand"
                 );
             }
             for slot in [1, 2, 7, 8, 9, 11] {
                 assert_eq!(
-                    a.sample(Some(slot), 0.3),
+                    a.sample(Some(slot), 0.3, 0.0),
                     0.0,
                     "batch {batch}, sequence {slot}"
                 );
             }
             // Death brings it in — the authored reason the geometry exists at all.
             let peak = (0..32u16)
-                .map(|s| a.sample(Some(DEATH), 3.0 * f32::from(s) / 32.0))
+                .map(|s| a.sample(Some(DEATH), 3.0 * f32::from(s) / 32.0, 0.0))
                 .fold(0.0f32, f32::max);
             assert!(
                 peak > 0.9,
@@ -322,7 +326,7 @@ mod tests {
             let drawn = subs[batch]
                 .alpha_anim
                 .as_ref()
-                .is_none_or(|a| a.sample(Some(STAND), 0.5) > 0.0);
+                .is_none_or(|a| a.sample(Some(STAND), 0.5, 0.0) > 0.0);
             assert!(drawn, "batch {batch} draws in Stand");
         }
         // **The nearest-key trap.** Batch 2 (the 271-vertex body) keys 1.0 at 3333 ms and 0.0 at
@@ -333,7 +337,7 @@ mod tests {
         // "nearest".
         let body = subs[2].alpha_anim.as_ref();
         for slot in [5, 6, 7, 8, 9, 12] {
-            let v = body.map_or(1.0, |a| a.sample(Some(slot), 0.5));
+            let v = body.map_or(1.0, |a| a.sample(Some(slot), 0.5, 0.0));
             assert!(
                 v > 0.0,
                 "the voidwalker body draws in sequence {slot} (got {v})"
@@ -378,14 +382,14 @@ mod tests {
                 for step in 0..8u16 {
                     let t = f32::from(step) * 0.4;
                     assert_eq!(
-                        a.sample(Some(slot), t),
+                        a.sample(Some(slot), t, 0.0),
                         0.0,
                         "batch {batch} is hidden {t}s into sequence {slot}"
                     );
                 }
             }
             let peak = (0..64u16)
-                .map(|k| a.sample(Some(DEATH), 4.167 * f32::from(k) / 64.0))
+                .map(|k| a.sample(Some(DEATH), 4.167 * f32::from(k) / 64.0, 0.0))
                 .fold(0.0f32, f32::max);
             assert!(peak > 0.3, "batch {batch} appears on death (peak {peak})");
         }
@@ -397,7 +401,7 @@ mod tests {
             let v = sub
                 .alpha_anim
                 .as_ref()
-                .map_or(1.0, |a| a.sample(Some(0), 0.5));
+                .map_or(1.0, |a| a.sample(Some(0), 0.5, 0.0));
             assert!(v > 0.0, "batch {i} draws while standing (got {v})");
         }
         let face = subs[8]
@@ -405,12 +409,12 @@ mod tests {
             .as_ref()
             .expect("the face batch is alpha-keyed");
         assert_eq!(
-            face.sample(Some(0), 0.5),
+            face.sample(Some(0), 0.5, 0.0),
             0.0,
             "the scream face hides while standing"
         );
         let scream = (0..64u16)
-            .map(|k| face.sample(Some(1), f32::from(k) / 64.0))
+            .map(|k| face.sample(Some(1), f32::from(k) / 64.0, 0.0))
             .fold(0.0f32, f32::max);
         assert!(
             scream > 0.5,
@@ -498,6 +502,32 @@ mod tests {
         assert_eq!(a.period, 1.5);
         assert!((a.sample(0.375) - 0.6).abs() < 1e-4); // linear midpoint
         assert!((a.sample(1.5 + 0.375) - 0.6).abs() < 1e-4); // wraps
+    }
+
+    /// The clock router (decision 0855): a gseq loop reads the SHARED world clock — the
+    /// reference's free-running Phase B cursor, no per-instance arming — pre-wrapped in f64 so a
+    /// long-uptime `shared_now` keeps precision; a band loop keeps the host's clip time. Sampling
+    /// a gseq loop on a spawn-anchored clock is the Arcane Intellect sparkle bug: every cast's
+    /// twinkles land at phase 0.
+    #[test]
+    fn gseq_loops_read_the_shared_clock() {
+        let g = bake_scalar_anim(
+            &track(1, 1, &[(0, 0.2), (750, 1.0), (1500, 0.2)]),
+            &[9999, 1500],
+            None,
+        )
+        .unwrap();
+        assert!(g.gseq);
+        // band_t (first arg) is ignored; the shared clock decides the phase (mid-ramp → 0.6).
+        assert!((g.sample(g.clock(0.0, 1500.375)) - 0.6).abs() < 1e-3);
+        let b = ranged(1, &[(1000, 0.0), (1500, 1.0)], &[(0, 1)]);
+        let b = bake_at(&b, 0, (1000, 2000)).unwrap();
+        assert!(!b.gseq);
+        assert_eq!(
+            b.clock(0.25, 999.0),
+            0.25,
+            "a band loop keeps its own clock"
+        );
     }
 
     /// A sequence-timeline track keeps only the first sequence's band, rebased to seconds — keys
@@ -660,7 +690,7 @@ mod tests {
             .filter(|(_, s)| {
                 s.alpha_anim
                     .as_ref()
-                    .is_some_and(|a| a.sample(Some(DEATH), 2.999) <= 0.0)
+                    .is_some_and(|a| a.sample(Some(DEATH), 2.999, 0.0) <= 0.0)
             })
             .map(|(i, _)| i)
             .collect();
@@ -673,7 +703,7 @@ mod tests {
             let a = subs[i].alpha_anim.as_ref().unwrap();
             for t in [3.0f32, 3.008, 10.0, 600.0] {
                 assert_eq!(
-                    a.sample(Some(DEATH), t),
+                    a.sample(Some(DEATH), t, 0.0),
                     0.0,
                     "batch {i} came back at t={t} — the parked clock aliased to the band head"
                 );
@@ -695,6 +725,7 @@ mod tests {
             period: 0.0,
             step: false,
             wrap: true,
+            gseq: false,
             keys: vec![(0.0, v)],
         })
     }
@@ -708,7 +739,7 @@ mod tests {
             weight: dim(0.5),
         }])
         .expect("a dimming pair is worth carrying");
-        assert!((both.sample(None, 7.0) - 0.25).abs() < 1e-6);
+        assert!((both.sample(None, 7.0, 0.0) - 0.25).abs() < 1e-6);
         assert_eq!(AlphaAnim::new(vec![AlphaSeq::default()]), None);
     }
 
@@ -729,11 +760,11 @@ mod tests {
             },
         ])
         .unwrap();
-        assert_eq!(a.sample(Some(0), 0.0), 0.0);
-        assert_eq!(a.sample(Some(1), 0.0), 1.0);
-        assert_eq!(a.sample(Some(2), 0.0), 0.5);
-        assert_eq!(a.sample(Some(99), 0.0), 0.0, "out of range ⇒ slot 0");
-        assert_eq!(a.sample(None, 0.0), 0.0, "unknown sequence ⇒ slot 0");
+        assert_eq!(a.sample(Some(0), 0.0, 0.0), 0.0);
+        assert_eq!(a.sample(Some(1), 0.0, 0.0), 1.0);
+        assert_eq!(a.sample(Some(2), 0.0, 0.0), 0.5);
+        assert_eq!(a.sample(Some(99), 0.0, 0.0), 0.0, "out of range ⇒ slot 0");
+        assert_eq!(a.sample(None, 0.0, 0.0), 0.0, "unknown sequence ⇒ slot 0");
         assert!(a.ever_hides());
         let never = AlphaAnim::new(vec![AlphaSeq {
             color: None,

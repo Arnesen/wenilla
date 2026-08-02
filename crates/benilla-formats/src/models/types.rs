@@ -364,6 +364,45 @@ const GROUND_FLAT_EPS: f32 = 0.01;
 /// the gap.
 const GROUND_HOVER_MAX: f32 = 1.0;
 
+/// The empty batch — test scaffolding (a picker or dress test wants *a* `RenderSubmesh`, not a
+/// meaningful one). No geometry, `Opaque`, WMO-style repeat sampling; every flag at its
+/// nothing-authored value.
+impl Default for RenderSubmesh {
+    fn default() -> Self {
+        Self {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+            texture: None,
+            skin_slot: None,
+            geoset_id: 0,
+            char_slot: None,
+            blend: ModelBlend::Opaque,
+            wrap_x: true,
+            wrap_y: true,
+            two_sided: false,
+            joints: Vec::new(),
+            weights: Vec::new(),
+            vertex_colors: Vec::new(),
+            interior: false,
+            emissive: false,
+            sidn: None,
+            window: false,
+            additive: false,
+            no_depth_write: false,
+            no_depth_test: false,
+            fog_policy: FogPolicy::Scene,
+            billboard: None,
+            welded_billboard: false,
+            alpha_anim: None,
+            uv_anim: None,
+            rgb_anim: None,
+            wmo_batch: None,
+        }
+    }
+}
+
 impl RenderSubmesh {
     /// Is this a **billboard card authored back-to-front** — one flat plane whose normal sits in the
     /// −X half-space the billboard law points *away* from the camera?

@@ -131,21 +131,20 @@ pub(crate) fn spawn_model_entities(
         out.push(h.root);
     }
     let mut skinned_meshes: Vec<Entity> = Vec::new();
-    for (wmo_batch_idx, sub) in submeshes.iter().enumerate() {
+    for (batch_idx, sub) in submeshes.iter().enumerate() {
         // The batch's app-built render form (decision 0834). Callers gate spawning on the forms
         // being complete, so a miss here is a broken contract — skip the batch rather than panic.
-        let Some((stat_mesh, stat_aabb)) = forms.stat.get(wmo_batch_idx) else {
+        let Some((stat_mesh, stat_aabb)) = forms.stat.get(batch_idx) else {
             continue;
         };
-        // WMO batches carry their authored order (index + 1; 0 = non-WMO) into the material so the
-        // pipeline can bias coplanar layers to resolve in MOBA file order — the byte-verified client
-        // behaviour (wow-5875-re models/scratch/wmo-batch-blend-depth-state.md). Every WMO batch gets
-        // it (the filmed farmhouse layers are OPAQUE batches, not blends). Doodads/M2 pass 0.
-        let wmo_batch_order = if is_wmo {
-            u16::try_from(wmo_batch_idx + 1).unwrap_or(u16::MAX)
-        } else {
-            0
-        };
+        // Every batch (WMO and M2) carries its authored order (index + 1) into the material's
+        // transparent sort bias, so one model's coplanar layers draw in file order instead of
+        // re-flipping a sort tie every frame (`model_render::BATCH_ORDER_SORT_EPS`). WMO batches
+        // additionally ride it into the clip-z nudge that resolves coplanar layers in MOBA file
+        // order — the byte-verified client behaviour (wow-5875-re
+        // models/scratch/wmo-batch-blend-depth-state.md); `model_material` gates that half on
+        // `is_wmo`.
+        let batch_order = u16::try_from(batch_idx + 1).unwrap_or(u16::MAX);
         let interior = sub.interior || interior_slot.is_some();
         // A billboard card is culled by the SAME rule as any other batch — its material's `0x04`
         // flag, nothing else. This site used to force `|| sub.billboard.is_some()`, on the reasoning
@@ -187,7 +186,7 @@ pub(crate) fn spawn_model_entities(
             sub.no_depth_test,
             sub.fog_policy,
             shade,
-            wmo_batch_order,
+            batch_order,
             sub.uv_anim.as_ref(),
             sub.rgb_anim.as_ref(),
             sub.wmo_batch,
@@ -224,7 +223,7 @@ pub(crate) fn spawn_model_entities(
                 sub.no_depth_test,
                 sub.fog_policy,
                 shade,
-                wmo_batch_order,
+                batch_order,
                 sub.uv_anim.as_ref(),
                 sub.rgb_anim.as_ref(),
                 sub.wmo_batch,
@@ -286,6 +285,10 @@ pub(crate) fn spawn_model_entities(
                     kind,
                     blend: sub.blend,
                 },
+                // The picker's triangles (decision 0857): the render forms are `RENDER_WORLD`-only,
+                // so the inspector/probe rays read the model's resident geometry. The caster
+                // centres a card at its pivot, the same bake the render form draws with.
+                crate::interact::PickMesh(sub.geometry.clone()),
                 mesh_tag,
                 card,
             ));
@@ -305,7 +308,7 @@ pub(crate) fn spawn_model_entities(
             // (or a contract break) falls back to the static form, un-rigged, rather than warn
             // the picker with a joint-less "skinned" mesh.
             let skinned_mesh = (skin.is_some() && rig_slot != 0)
-                .then(|| forms.skin.and_then(|s| s.get(wmo_batch_idx)).cloned())
+                .then(|| forms.skin.and_then(|s| s.get(batch_idx)).cloned())
                 .flatten();
             let use_rig = skinned_mesh.is_some();
             let part_tag = if use_rig {
@@ -321,6 +324,8 @@ pub(crate) fn spawn_model_entities(
                     kind,
                     blend: sub.blend,
                 },
+                // The picker's triangles (decision 0857) — same rule as the card above.
+                crate::interact::PickMesh(sub.geometry.clone()),
                 part_tag,
             ));
             // Static parts carry the build-time Aabb (the RENDER_WORLD rule above); a rigged
@@ -386,7 +391,6 @@ pub(crate) fn spawn_model_entities(
             meshes: skinned_meshes,
             fade: (radius, transform.transform_point(local_center)),
             clip: h.clip,
-            spawned_at: now,
             armed_at: now,
             // Born already expired, so the first frame runs the holder setup's `variationIdx = -1`
             // arm over the loader's var-0 seed — the reference's own two-stage load (decision 0768).

@@ -258,14 +258,11 @@ pub(crate) struct DoodadAnimHost {
     pub fade: (f32, Vec3),
     /// The looping first-sequence graph node + its duration (secs); `None` on the gseq-only tier.
     pub clip: Option<(AnimationNodeIndex, f32)>,
-    /// `Time::elapsed_secs` at spawn — the [`GlobalSeqDrive`]'s clock origin. Global sequences run
-    /// on the free shared clock with no arm at all, so a resume re-seats them from this and phase
-    /// stays a pure function of the shared clock, never of pause history.
-    pub spawned_at: f32,
-    /// `Time::elapsed_secs` at the current **arm** — the player's clock origin, which is NOT
-    /// `spawned_at` any more: the variation re-arms every play-window, and a resume must seek to
-    /// `(now − armed_at) mod duration` or it lands at the phase of a clip this host stopped playing
-    /// several windows ago.
+    /// `Time::elapsed_secs` at the current **arm** — the player's clock origin: the variation
+    /// re-arms every play-window, and a resume must seek to `(now − armed_at) mod duration` or it
+    /// lands at the phase of a clip this host stopped playing several windows ago. (The
+    /// [`GlobalSeqDrive`] needs no origin at all — global sequences sample the shared world clock
+    /// directly, decision 0855.)
     pub armed_at: f32,
     /// When the armed play-window ends, on the shared clock — the reference's `windowHi`
     /// (`[model+0xac]`), rewritten by every arm. `now ≥ window_hi` ⇒ re-roll. A host is born with
@@ -421,7 +418,6 @@ fn gate_doodad_anim(
             continue;
         }
         host.active = drawn;
-        let t = now - host.spawned_at;
         if let Some(mut p) = player {
             if drawn {
                 if let Some((node, duration)) = host.clip {
@@ -442,10 +438,9 @@ fn gate_doodad_anim(
             }
         }
         if let Some(mut d) = drive {
+            // No re-seek on resume: the drive samples the shared world clock (decision 0855), so
+            // a re-appearing doodad lands on the phase the clock dictates by construction.
             d.set_paused(!drawn);
-            if drawn {
-                d.sync(t);
-            }
         }
     }
 }
@@ -493,6 +488,10 @@ pub(crate) struct MatAnim {
     /// the wearer's appear-fade and interior classifier rather than the world-model visibility
     /// authority's. See [`Self::resting`].
     unit_lane: bool,
+    /// The gseq factors' ATTACH anchor (secs on the shared clock): `None` until the first
+    /// [`sample_mat_anim`] pass stamps it — the reference snapshots the scene clock once per
+    /// model instance at attach (`CM2Model+0x68`, wow-re `gseq-anchor.md`; decisions 0856/0858).
+    gseq_attach: Option<f64>,
     /// The last sampled combined factor (colour-alpha × weight), read by the visibility authority.
     pub current: f32,
 }
@@ -503,7 +502,9 @@ impl MatAnim {
         now: f32,
         frozen: bool,
     ) -> Self {
-        let current = anim.sample(None, 0.0);
+        // The seed sample: both clocks at 0 — nothing armed, and the attach anchor (stamped on
+        // the first live pass) makes the gseq cursor open at 0 too.
+        let current = anim.sample(None, 0.0, 0.0);
         Self {
             anim,
             host: None,
@@ -512,6 +513,7 @@ impl MatAnim {
             frozen,
             drives_tag: false,
             unit_lane: false,
+            gseq_attach: None,
             current,
         }
     }
@@ -528,7 +530,7 @@ impl MatAnim {
         let mut m = Self::new(anim, now, false);
         m.drives_tag = true;
         m.seq = seq;
-        m.current = m.anim.sample(seq, 0.0);
+        m.current = m.anim.sample(seq, 0.0, 0.0);
         m
     }
 
@@ -606,6 +608,10 @@ pub(crate) fn sample_mat_anim(
     mut q: Query<&mut MatAnim>,
 ) {
     let now = time.elapsed_secs();
+    // The scene clock, full-precision (a long-uptime f32 elapsed drifts whole milliseconds,
+    // which a 433 ms twinkle shows): the base the per-instance gseq attach anchor subtracts
+    // from (0856).
+    let shared = time.elapsed_secs_f64();
     for mut m in &mut q {
         if m.frozen {
             continue;
@@ -625,7 +631,10 @@ pub(crate) fn sample_mat_anim(
             None if m.host.is_some() => (m.seq, 0.0),
             None => (m.seq, now - m.spawned_at),
         };
-        m.current = m.anim.sample(seq, elapsed);
+        // The instance's gseq cursor: sceneNow − attach, the anchor stamped on this first pass
+        // (decisions 0856/0858 — every lane, spell effects included: fresh instance per play).
+        let attach = *m.gseq_attach.get_or_insert(shared);
+        m.current = m.anim.sample(seq, elapsed, shared - attach);
     }
 }
 
@@ -633,9 +642,10 @@ pub(crate) fn sample_mat_anim(
 /// batch material carrying a texture-transform translation loop, keyed by material asset id.
 /// [`tick_anim_materials`] re-samples a *drawn* entry's offset into the material's `sun_scale.zw`
 /// each frame — one shared uniform per material, so every instance of a model batch scrolls in
-/// phase. Exactly faithful for gseq loops (the reference's free-running shared clock); a recorded,
-/// invisible divergence for seq-band loops (the reference phases those per instance at arm time —
-/// meaningless for a seamless scroll). Entries drop when the material asset does.
+/// phase. A recorded, invisible divergence for BOTH clock laws (0856): the reference phases a
+/// seq-band loop per play (arm cursor) and a gseq loop per instance (attach anchor,
+/// `gseq-anchor.md`), but one uniform per material cannot phase per instance — meaningless for a
+/// seamless scroll either way. Entries drop when the material asset does.
 #[derive(Resource, Default)]
 pub(crate) struct UvAnimMaterials(
     pub  std::collections::HashMap<
@@ -860,6 +870,7 @@ mod tests {
             period: 0.0,
             step: true,
             wrap: true, // period 0: a constant has no clock
+            gseq: false,
             keys: vec![(0.0, 0.0)],
         };
         std::sync::Arc::new(
@@ -1066,7 +1077,6 @@ mod tests {
                     meshes: Vec::new(),
                     fade: (1.0, Vec3::ZERO),
                     clip: None,
-                    spawned_at: 0.0,
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: Some(0),
@@ -1154,7 +1164,6 @@ mod tests {
                     meshes: Vec::new(),
                     fade: (1.0, Vec3::ZERO),
                     clip: None,
-                    spawned_at: 0.0,
                     armed_at: 0.0,
                     window_hi: f32::NEG_INFINITY,
                     anim_id: None,
@@ -1225,7 +1234,7 @@ mod tests {
     }
 
     /// The draw gate stops the player + pauses the gseq drive when every submesh is hidden, and on
-    /// re-appearing re-arms at the shared-clock position (`(now − spawned_at) mod duration`) — the
+    /// re-appearing re-arms at the shared-clock position (`(now − armed_at) mod duration`) — the
     /// ref's clock-indexed pose, so pause history never desyncs phase.
     #[test]
     fn gate_pauses_hidden_and_resumes_on_the_shared_clock() {
@@ -1258,7 +1267,6 @@ mod tests {
                     meshes: vec![mesh],
                     fade: (1.0, Vec3::ZERO),
                     clip: Some((node, 2.0)),
-                    spawned_at: 0.0,
                     armed_at: 0.0,
                     // Far future: this test exercises the DRAW gate, so no window may expire
                     // under it and change the armed clip mid-assertion.

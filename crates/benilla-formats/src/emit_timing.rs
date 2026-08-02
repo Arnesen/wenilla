@@ -68,21 +68,23 @@ impl EmitTiming {
     }
 
     /// Is the gate ON, `elapsed` seconds into sequence slot `seq`? A slot with no baked gate is
-    /// ON (the loader default).
-    pub fn emitting(&self, seq: Option<usize>, elapsed: f32) -> bool {
+    /// ON (the loader default). `shared_now` is the world's shared elapsed seconds — a
+    /// gseq-tagged gate routes to it ([`crate::models::KeyAnim::clock`]).
+    pub fn emitting(&self, seq: Option<usize>, elapsed: f32, shared_now: f64) -> bool {
         self.enabled
             .get(self.idx(seq))
             .and_then(|o| o.as_ref())
-            .is_none_or(|a| a.sample_or(elapsed, 1.0) > 0.5)
+            .is_none_or(|a| a.sample_or(a.clock(elapsed, shared_now), 1.0) > 0.5)
     }
 
     /// The spawn rate (particles/sec), `elapsed` seconds into sequence slot `seq`. A slot with no
     /// baked rate spawns nothing. Floored at 0 (a track tail may legitimately go negative).
-    pub fn rate(&self, seq: Option<usize>, elapsed: f32) -> f32 {
+    /// `shared_now` routes a gseq-tagged rate loop to the shared world clock.
+    pub fn rate(&self, seq: Option<usize>, elapsed: f32, shared_now: f64) -> f32 {
         self.rate
             .get(self.idx(seq))
             .and_then(|o| o.as_ref())
-            .map_or(0.0, |a| a.sample_or(elapsed, 0.0))
+            .map_or(0.0, |a| a.sample_or(a.clock(elapsed, shared_now), 0.0))
             .max(0.0)
     }
 
@@ -128,6 +130,7 @@ impl EmitTiming {
                 period: 0.0,
                 step: true,
                 wrap: true,
+                gseq: false,
                 keys: vec![(0.0, rate)],
             })],
             enabled: vec![None],
@@ -211,8 +214,9 @@ impl EmitParams {
     }
 
     /// Sample every channel `elapsed` seconds into sequence slot `seq` (same slot resolution as
-    /// [`EmitTiming`]: out-of-range degrades to slot 0).
-    pub fn sample(&self, seq: Option<usize>, elapsed: f32) -> ParamsNow {
+    /// [`EmitTiming`]: out-of-range degrades to slot 0). `shared_now` routes gseq-tagged
+    /// channels to the shared world clock.
+    pub fn sample(&self, seq: Option<usize>, elapsed: f32, shared_now: f64) -> ParamsNow {
         let d = ParamsNow::default();
         let at = |i: usize, default: f32| -> f32 {
             let ch = &self.channels[i];
@@ -220,9 +224,9 @@ impl EmitParams {
                 Some(s) if s < ch.len() => s,
                 _ => 0,
             };
-            ch.get(slot)
-                .and_then(|o| o.as_ref())
-                .map_or(default, |a| a.sample_or(elapsed, default))
+            ch.get(slot).and_then(|o| o.as_ref()).map_or(default, |a| {
+                a.sample_or(a.clock(elapsed, shared_now), default)
+            })
         };
         ParamsNow {
             emission_speed: at(0, d.emission_speed),
@@ -261,6 +265,7 @@ impl EmitParams {
                 period: 0.0,
                 step: true,
                 wrap: true,
+                gseq: false,
                 keys: vec![(0.0, v)],
             })]
         };
@@ -344,10 +349,14 @@ mod tests {
             &slots(&[((0, 1000), true)]),
             &[],
         );
-        assert_eq!(t.rate(None, 0.050), 0.0, "before the key: step holds 0");
-        assert_eq!(t.rate(None, 0.070), 30.0, "at/after the key: 30");
-        assert_eq!(t.rate(None, 0.500), 30.0, "held to the band end");
-        assert!(t.emitting(None, 0.5), "no gate track = always on");
+        assert_eq!(
+            t.rate(None, 0.050, 0.0),
+            0.0,
+            "before the key: step holds 0"
+        );
+        assert_eq!(t.rate(None, 0.070, 0.0), 30.0, "at/after the key: 30");
+        assert_eq!(t.rate(None, 0.500, 0.0), 30.0, "held to the band end");
+        assert!(t.emitting(None, 0.5, 0.0), "no gate track = always on");
     }
 
     /// The LINEAR ramp law (the BloodSpurt shape `0 → 100 → 0`, interp 1): mid-ramp pours the
@@ -360,12 +369,15 @@ mod tests {
             &slots(&[((0, 1000), true)]),
             &[],
         );
-        assert!((t.rate(None, 0.050) - 50.0).abs() < 1e-4, "rising mid-ramp");
         assert!(
-            (t.rate(None, 0.150) - 50.0).abs() < 1e-4,
+            (t.rate(None, 0.050, 0.0) - 50.0).abs() < 1e-4,
+            "rising mid-ramp"
+        );
+        assert!(
+            (t.rate(None, 0.150, 0.0) - 50.0).abs() < 1e-4,
             "falling mid-ramp"
         );
-        assert_eq!(t.rate(None, 0.500), 0.0, "the ramp self-closes");
+        assert_eq!(t.rate(None, 0.500, 0.0), 0.0, "the ramp self-closes");
     }
 
     /// The per-sequence window law — the B27 shape, synthesized: an enabled gate authored ON
@@ -393,23 +405,26 @@ mod tests {
         );
         // Idle (slot 1): the collapsed window (1,1) resolves to keys[1] = OFF — at every time,
         // wrap included.
-        assert!(!t.emitting(Some(1), 0.0));
-        assert!(!t.emitting(Some(1), 0.25));
-        assert!(!t.emitting(Some(1), 400.0));
+        assert!(!t.emitting(Some(1), 0.0, 0.0));
+        assert!(!t.emitting(Some(1), 0.25, 0.0));
+        assert!(!t.emitting(Some(1), 400.0, 0.0));
         // The one-shot clip (slot 0): ON at its start, OFF from 333 ms — and the clamped clock
         // HOLDS that tail at/after the band end instead of aliasing back to the ON start.
-        assert!(t.emitting(Some(0), 0.1));
-        assert!(!t.emitting(Some(0), 0.5));
-        assert!(!t.emitting(Some(0), 1.0), "t == period must not alias to 0");
+        assert!(t.emitting(Some(0), 0.1, 0.0));
+        assert!(!t.emitting(Some(0), 0.5, 0.0));
         assert!(
-            !t.emitting(Some(0), 5.0),
+            !t.emitting(Some(0), 1.0, 0.0),
+            "t == period must not alias to 0"
+        );
+        assert!(
+            !t.emitting(Some(0), 5.0, 0.0),
             "parked long past the end: still off"
         );
         // The later clip (slot 2): its degenerate window is the ON key.
-        assert!(t.emitting(Some(2), 0.05));
+        assert!(t.emitting(Some(2), 0.05, 0.0));
         // Unknown/out-of-range degrades to slot 0 (the doodad law).
-        assert!(t.emitting(None, 0.1));
-        assert!(!t.emitting(Some(9), 0.5));
+        assert!(t.emitting(None, 0.1, 0.0));
+        assert!(!t.emitting(Some(9), 0.5, 0.0));
         // The rate is a whole-track constant: same in every slot.
         assert_eq!(t.constant_rate(), Some(20.0));
         assert_eq!(t.peak_rate(), 20.0);
@@ -431,7 +446,7 @@ mod tests {
             &slots(&[((0, 867), false)]),
             &[],
         );
-        let at = |t: f32| p.sample(None, t);
+        let at = |t: f32| p.sample(None, t, 0.0);
         assert!((at(0.0).area_length - 0.1944).abs() < 1e-3, "opens tight");
         let mid = at(0.3335).area_length;
         assert!(
@@ -457,9 +472,12 @@ mod tests {
             &slots(&[((0, 1000), true)]),
             &[],
         );
-        assert!(t.emitting(None, 0.1), "first pass: inside the window");
-        assert!(!t.emitting(None, 0.8), "first pass: past it");
-        assert!(t.emitting(None, 1.1), "second pass: the window re-fires");
+        assert!(t.emitting(None, 0.1, 0.0), "first pass: inside the window");
+        assert!(!t.emitting(None, 0.8, 0.0), "first pass: past it");
+        assert!(
+            t.emitting(None, 1.1, 0.0),
+            "second pass: the window re-fires"
+        );
     }
 
     /// **The dead-slot-0 shape** — `BlastedLandsLightningbolt01.m2`'s emitter 2, synthesized
@@ -494,17 +512,25 @@ mod tests {
         );
         // Slot 0 — what the old pinned consumer sampled. Silent across its whole band.
         for s in [0.0, 0.3, 0.6, 0.9, 1.2] {
-            assert_eq!(t.rate(Some(0), s), 0.0, "slot 0 is a flat zero at {s}s");
+            assert_eq!(
+                t.rate(Some(0), s, 0.0),
+                0.0,
+                "slot 0 is a flat zero at {s}s"
+            );
         }
         assert_eq!(
-            t.rate(None, 0.5),
+            t.rate(None, 0.5, 0.0),
             0.0,
             "`None` degrades to slot 0 — also silent"
         );
         // Slot 1 — what the arm actually rolled. The strike is here, and only here.
-        assert_eq!(t.rate(Some(1), 0.0), 0.0, "slot 1 opens closed");
-        assert_eq!(t.rate(Some(1), 0.316), 30.0, "the burst fires mid-band");
-        assert_eq!(t.rate(Some(1), 0.5), 0.0, "and self-closes");
+        assert_eq!(t.rate(Some(1), 0.0, 0.0), 0.0, "slot 1 opens closed");
+        assert_eq!(
+            t.rate(Some(1), 0.316, 0.0),
+            30.0,
+            "the burst fires mid-band"
+        );
+        assert_eq!(t.rate(Some(1), 0.5, 0.0), 0.0, "and self-closes");
         // The trap that hid it: the build-time cull sees a live emitter either way.
         assert_eq!(
             t.peak_rate(),

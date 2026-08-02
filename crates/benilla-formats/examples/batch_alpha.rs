@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
             continue;
         };
         let samples: Vec<f32> = (0..24u16)
-            .map(|k| a.sample(Some(slot), 3.0 * f32::from(k) / 24.0))
+            .map(|k| a.sample(Some(slot), 3.0 * f32::from(k) / 24.0, 0.0))
             .collect();
         let lo = samples.iter().copied().fold(f32::MAX, f32::min);
         let hi = samples.iter().copied().fold(f32::MIN, f32::max);

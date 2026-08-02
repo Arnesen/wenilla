@@ -24,7 +24,8 @@
 //! Picking only runs while [`InspectMode`] is on (today's sole consumer, driven by the inspector
 //! chord); when real player-facing consumers arrive it simply runs whenever any of them is active.
 
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayCastVisibility};
+use benilla_assets::coords::wow_to_bevy;
+use bevy::camera::primitives::Aabb;
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -36,6 +37,40 @@ use crate::player::WorldCamera;
 use crate::ui_script::PointerOverUi;
 
 mod journal;
+
+/// The resident **pick geometry** of one drawn batch: the model's decoded `RenderSubmesh`, `Arc`-shared
+/// with the model asset itself (decision 0857). The render forms are `RENDER_WORLD`-only since 0834 —
+/// their main-world vertex data is gone after extract, which is why Bevy's `MeshRayCast` silently
+/// stopped hitting every static model (the GO hover, the inspector, `WOW_PICK`). So the pickers read
+/// triangles from THIS instead, through the same WoW→Bevy bake the render form was built with
+/// (`submesh_to_static_mesh`: `wow_to_bevy` per vertex, billboard cards centred at their pivot).
+/// Attached beside `Mesh3d` at every spawn site that also attaches a pick key ([`WorldObject`] /
+/// `ModelPart`); a keyed entity without one (the model-less cube fallback) is picked by its `Aabb`.
+#[derive(Component, Clone)]
+pub struct PickMesh(pub std::sync::Arc<benilla_formats::RenderSubmesh>);
+
+/// One triangle-accurate hit from [`cast_pick_ray`]: the world-space point, the hit triangle's
+/// geometric normal (two-sided — the orientation is the authored winding's), and the distance along
+/// the ray.
+pub struct RayHit {
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub distance: f32,
+}
+
+/// The one query every mesh picker casts against: a part's resident geometry, its world pose, the
+/// render world's own visibility verdict (the cast honours it, as `RayCastVisibility::VisibleInView`
+/// did), and its bound for the broad phase.
+pub type PickParts<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static PickMesh>,
+        &'static GlobalTransform,
+        &'static ViewVisibility,
+        Option<&'static Aabb>,
+    ),
+>;
 
 /// The identity of a pickable world thing, read by the inspector now and by tooltips/cursor/targeting
 /// later. Attached to a thing's renderable mesh entities at spawn.
@@ -100,7 +135,7 @@ fn update_mouseover(
     window: Query<&Window, With<PrimaryWindow>>,
     camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     objects: Query<Entity, With<WorldObject>>,
-    mut ray_cast: MeshRayCast,
+    parts: PickParts,
 ) {
     if !inspect.enabled {
         if target.entity.is_some() {
@@ -126,7 +161,7 @@ fn update_mouseover(
     };
     let identified: HashSet<Entity> = objects.iter().collect();
     if let Some((entity, point, distance)) =
-        pick_at_cursor(cursor, camera, cam_tf, &identified, &mut ray_cast)
+        pick_at_cursor(cursor, camera, cam_tf, &identified, &parts)
     {
         target.entity = Some(entity);
         target.point = point;
@@ -144,17 +179,179 @@ pub fn pick_at_cursor(
     camera: &Camera,
     cam_tf: &GlobalTransform,
     pickable: &HashSet<Entity>,
-    ray_cast: &mut MeshRayCast,
+    parts: &PickParts,
 ) -> Option<(Entity, Vec3, f32)> {
     let ray = camera.viewport_to_world(cam_tf, cursor).ok()?;
-    let filter = |e: Entity| pickable.contains(&e);
-    let settings = MeshRayCastSettings::default()
-        .with_visibility(RayCastVisibility::VisibleInView)
-        .with_filter(&filter);
-    ray_cast
-        .cast_ray(ray, &settings)
-        .first()
-        .map(|(e, hit)| (*e, hit.point, hit.distance))
+    cast_pick_ray(ray, pickable, parts, false)
+        .into_iter()
+        .next()
+        .map(|(e, hit)| (e, hit.point, hit.distance))
+}
+
+/// Cast `ray` against `pickable`'s **resident geometry** ([`PickMesh`] — decision 0857: the render
+/// meshes are `RENDER_WORLD`-only, so there is no main-world mesh data to cast against) and return
+/// the hits nearest-first: one per entity (its nearest triangle), the whole list with `all_hits`
+/// (the `WOW_PICK` probe's everything-along-the-ray reading) or just the front entity without.
+///
+/// Broad phase: a world-space slab test on each candidate's `Aabb` (entry distance), nearest entry
+/// first, so the narrow walk stops as soon as a confirmed hit is closer than every remaining box. A
+/// part with no bound (a `NoFrustumCulling` fx part) is narrow-tested unconditionally; a keyed
+/// entity with a bound but no [`PickMesh`] (the model-less cube fallback, whose cuboid *is* its
+/// box) takes its box entry as the hit. Triangles test **two-sided**, like the unit picker's narrow
+/// phase — a generous pick beats a strict one at silhouette edges.
+pub fn cast_pick_ray(
+    ray: Ray3d,
+    pickable: &HashSet<Entity>,
+    parts: &PickParts,
+    all_hits: bool,
+) -> Vec<(Entity, RayHit)> {
+    let (origin, dir) = (ray.origin, *ray.direction);
+    let mut candidates: Vec<(f32, Entity)> = Vec::new();
+    for &entity in pickable {
+        let Ok((mesh, gt, vis, aabb)) = parts.get(entity) else {
+            continue;
+        };
+        if !vis.get() {
+            continue; // not drawn in any view this frame — the old cast's VisibleInView rule
+        }
+        let entry = match (aabb, mesh) {
+            (Some(aabb), _) => {
+                let (min, max) = world_aabb(aabb, gt);
+                match ray_aabb(origin, dir, min, max) {
+                    Some(t) => t,
+                    None => continue,
+                }
+            }
+            (None, Some(_)) => 0.0,
+            (None, None) => continue,
+        };
+        candidates.push((entry, entity));
+    }
+    candidates.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut hits: Vec<(Entity, RayHit)> = Vec::new();
+    let mut best = f32::INFINITY;
+    for (entry, entity) in candidates {
+        if !all_hits && best < entry {
+            break; // every remaining box starts beyond the confirmed nearest hit
+        }
+        let Ok((mesh, gt, _, _)) = parts.get(entity) else {
+            continue;
+        };
+        let hit = match mesh {
+            Some(m) => ray_pick_mesh(m, gt, origin, dir),
+            // The cube fallback: its box entry is exactly its surface (the cuboid IS its Aabb).
+            None => Some(RayHit {
+                point: origin + dir * entry,
+                normal: -dir,
+                distance: entry,
+            }),
+        };
+        if let Some(h) = hit {
+            best = best.min(h.distance);
+            hits.push((entity, h));
+        }
+    }
+    hits.sort_unstable_by(|a, b| a.1.distance.total_cmp(&b.1.distance));
+    if !all_hits {
+        hits.truncate(1);
+    }
+    hits
+}
+
+/// The narrow phase for one part: ray-test every triangle of its resident geometry, in **model-local
+/// space** — the world ray mapped through the part's inverse affine, under which the ray parameter is
+/// unchanged, so a local `t` (against the world-normalized direction's image) *is* the world distance.
+/// Vertices go through the render form's own bake (`build_submesh_mesh`): `wow_to_bevy` per vertex,
+/// a billboard card centred at its pivot — so the pick tests exactly the surface the part draws
+/// (a card's live camera-facing rotation rides its `GlobalTransform`, shared here too).
+fn ray_pick_mesh(mesh: &PickMesh, gt: &GlobalTransform, origin: Vec3, dir: Vec3) -> Option<RayHit> {
+    let geo = &*mesh.0;
+    let inv = gt.affine().inverse();
+    let local_origin = inv.transform_point3(origin);
+    let local_dir = inv.transform_vector3(dir);
+    let center = geo
+        .billboard
+        .as_ref()
+        .map_or(Vec3::ZERO, |b| wow_to_bevy(b.pivot));
+    let pos = |i: u32| Some(wow_to_bevy(*geo.positions.get(i as usize)?) - center);
+    let mut nearest: Option<(f32, [Vec3; 3])> = None;
+    for t in geo.indices.chunks_exact(3) {
+        let (Some(a), Some(b), Some(c)) = (pos(t[0]), pos(t[1]), pos(t[2])) else {
+            continue; // an out-of-range index — corrupt authoring; skip the triangle, not the model
+        };
+        let tri = [a, b, c];
+        if let Some(d) = ray_triangle(local_origin, local_dir, &tri) {
+            if nearest.is_none_or(|(nd, _)| d < nd) {
+                nearest = Some((d, tri));
+            }
+        }
+    }
+    let (t, tri) = nearest?;
+    let world = tri.map(|v| gt.transform_point(v));
+    let normal = (world[1] - world[0])
+        .cross(world[2] - world[0])
+        .normalize_or_zero();
+    Some(RayHit {
+        point: origin + dir * t,
+        normal,
+        distance: t,
+    })
+}
+
+/// Ray–triangle intersection (Möller–Trumbore), **two-sided**, returning `t ≥ 0` along `dir`
+/// (unnormalized is fine — `t` is in `dir` lengths) or `None` on miss/parallel. Two-sided because a
+/// posed mesh can present back faces at silhouette edges and a generous pick beats a strict one.
+pub(crate) fn ray_triangle(origin: Vec3, dir: Vec3, tri: &[Vec3; 3]) -> Option<f32> {
+    let (e1, e2) = (tri[1] - tri[0], tri[2] - tri[0]);
+    let p = dir.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-8 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = origin - tri[0];
+    let u = s.dot(p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(e1);
+    let v = dir.dot(q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = e2.dot(q) * inv;
+    (t >= 0.0).then_some(t)
+}
+
+/// A mesh's model-local [`Aabb`] transformed into a world-space axis-aligned box `(min, max)` — its 8
+/// corners run through the entity's world transform, then min/max'd. (An AABB of the rotated box: a hair
+/// larger than the true oriented box, which only makes the hover more forgiving.)
+pub(crate) fn world_aabb(aabb: &Aabb, gt: &GlobalTransform) -> (Vec3, Vec3) {
+    let center = Vec3::from(aabb.center);
+    let he = Vec3::from(aabb.half_extents);
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                let world = gt.transform_point(center + he * Vec3::new(sx, sy, sz));
+                min = min.min(world);
+                max = max.max(world);
+            }
+        }
+    }
+    (min, max)
+}
+
+/// Ray vs axis-aligned box (the slab test): the entry distance along `dir` if the ray hits, else `None`.
+/// `dir` need not be normalized; a zero component is handled by the infinities `recip` produces.
+pub(crate) fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let inv = dir.recip();
+    let t1 = (min - origin) * inv;
+    let t2 = (max - origin) * inv;
+    let tmin = t1.min(t2).max_element();
+    let tmax = t1.max(t2).min_element();
+    (tmax >= tmin.max(0.0)).then_some(tmin.max(0.0))
 }
 
 /// **Ctrl+Cmd+I** (for *inspect*) arms/disarms the inspector — the dev-instrument chord, off the
@@ -539,5 +736,94 @@ impl Plugin for InteractPlugin {
             // Always recording (messages persist two frames — no ordering constraint needed).
             .add_systems(Update, journal::record_casts)
             .add_systems(EguiPrimaryContextPass, (inspect_ui, journal::journal_ui));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use benilla_formats::RenderSubmesh;
+
+    const TRI: [Vec3; 3] = [
+        Vec3::new(-1.0, 0.0, -1.0),
+        Vec3::new(1.0, 0.0, -1.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    ];
+
+    #[test]
+    fn ray_triangle_hits_at_the_right_distance() {
+        let t = ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, &TRI).expect("hit");
+        assert!((t - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ray_triangle_is_two_sided() {
+        // Same triangle hit from below (reversed winding relative to the ray) still connects.
+        assert!(ray_triangle(Vec3::new(0.0, -5.0, 0.0), Vec3::Y, &TRI).is_some());
+    }
+
+    #[test]
+    fn ray_triangle_misses_outside_and_behind() {
+        // Outside the triangle's extent.
+        assert!(ray_triangle(Vec3::new(3.0, 5.0, 0.0), Vec3::NEG_Y, &TRI).is_none());
+        // Triangle behind the ray origin (t < 0).
+        assert!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, &TRI).is_none());
+        // Parallel to the plane.
+        assert!(ray_triangle(Vec3::new(0.0, 5.0, 0.0), Vec3::X, &TRI).is_none());
+    }
+
+    /// [`TRI`]'s pre-image under `wow_to_bevy` (`bevy = (−y, z, −x)` ⇒ `wow = (−bz, −bx, by)`):
+    /// a submesh authored with THESE WoW-space positions must be picked exactly where the render
+    /// form draws it, i.e. at [`TRI`] in model-local Bevy space.
+    fn wow_tri() -> RenderSubmesh {
+        RenderSubmesh {
+            positions: vec![[1.0, 1.0, 0.0], [1.0, -1.0, 0.0], [-1.0, 0.0, 0.0]],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        }
+    }
+
+    /// The picker ↔ render-form bake contract (decision 0857): [`ray_pick_mesh`] must test the
+    /// resident WoW-axes geometry through the SAME `wow_to_bevy` bake `submesh_to_static_mesh`
+    /// builds the drawn mesh with, under the part's world transform — the render mesh itself is
+    /// `RENDER_WORLD`-only (0834), so this path is the only thing keeping static models pickable.
+    #[test]
+    fn resident_geometry_picks_where_the_render_form_draws() {
+        let mesh = PickMesh(std::sync::Arc::new(wow_tri()));
+        // A translated + uniformly scaled part: the triangle spans x∈[8,12], z∈[-2,2] at y=1.
+        let gt =
+            GlobalTransform::from(Transform::from_xyz(10.0, 1.0, 0.0).with_scale(Vec3::splat(2.0)));
+        let hit = ray_pick_mesh(&mesh, &gt, Vec3::new(10.0, 6.0, 0.0), Vec3::NEG_Y)
+            .expect("the baked triangle must be hit under its world transform");
+        assert!((hit.distance - 5.0).abs() < 1e-4);
+        assert!(hit.point.abs_diff_eq(Vec3::new(10.0, 1.0, 0.0), 1e-4));
+        assert!(hit.normal.abs_diff_eq(Vec3::Y, 1e-4) || hit.normal.abs_diff_eq(-Vec3::Y, 1e-4));
+        // …and a miss stays a miss.
+        assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(20.0, 6.0, 0.0), Vec3::NEG_Y).is_none());
+    }
+
+    /// A billboard card's render form is centred at its pivot (`build_submesh_mesh`); the pick must
+    /// subtract the same pivot or it tests the card a whole pivot-offset away from where it draws.
+    #[test]
+    fn billboard_card_picks_pivot_centred() {
+        let mut sub = wow_tri();
+        // Pivot at WoW (0, 0, 3) → Bevy (0, 3, 0): the baked card shifts down 3 in model-local y.
+        sub.billboard = Some(benilla_formats::Billboard {
+            pivot: [0.0, 0.0, 3.0],
+            bone: 0,
+            kind: benilla_formats::BillboardKind::Spherical,
+            scale_anim: None,
+            seq_translations: Vec::new(),
+        });
+        let mesh = PickMesh(std::sync::Arc::new(sub));
+        // The card entity sits AT the pivot's world spot (the spawn sites bake
+        // `transform_point(pivot)` into its translation), so the authored triangle — 3 below the
+        // pivot in model-local Bevy y — draws at world y = 0: a straight-down ray from y = 8 hits
+        // at distance 8. Without the pivot subtraction it would (wrongly) hit at y = 3.
+        let gt = GlobalTransform::from(Transform::from_xyz(0.0, 3.0, 0.0));
+        let hit = ray_pick_mesh(&mesh, &gt, Vec3::new(0.0, 8.0, 0.0), Vec3::NEG_Y)
+            .expect("the pivot-centred card must be hit where it draws");
+        assert!((hit.distance - 8.0).abs() < 1e-4);
+        assert!(hit.point.abs_diff_eq(Vec3::ZERO, 1e-4));
     }
 }

@@ -436,6 +436,9 @@ pub(super) fn attach_effect_visuals(
                     kind: ModelKind::Creature,
                     blend: part.blend,
                 },
+                // The picker's triangles (decision 0857): the probe names fx batches through
+                // `ModelPart`, and the render meshes are `RENDER_WORLD`-only.
+                crate::interact::PickMesh(part.geometry.clone()),
             ));
             if let (true, Some(_)) = (rigged, &part.skinned_mesh) {
                 child.insert((
@@ -479,6 +482,8 @@ pub(super) fn attach_effect_visuals(
                 kind: ModelKind::Creature,
                 blend: part.blend,
             },
+            // The picker's triangles (decision 0857), pivot-centred by the caster like the bake.
+            crate::interact::PickMesh(part.geometry.clone()),
             card,
         ));
         // The card's build-time bound (decision 0834): `calculate_bounds` can no longer derive
@@ -564,11 +569,9 @@ pub(super) fn attach_effect_visuals(
                 alpha: Some(root),
             },
             // The effect's rig arms ONE clip; the emitters' rate/enabled windows ride that slot
-            // (a missile's InFlight is not file-order-first), on the instance's own spawn clock.
-            played_seq.map_or(
-                particles::EmitClock::Pinned,
-                particles::EmitClock::PinnedSeq,
-            ),
+            // (a missile's InFlight is not file-order-first) on the spawn clock, and gseq loops
+            // ride the pooled scene clock (0856).
+            particles::EmitClock::Effect(played_seq),
         );
     }
     // The same pick, as an `AnimationData` id — the ribbons' per-sequence visibility keys off it,
@@ -643,6 +646,9 @@ pub(super) fn arm_effect_rig(
         }
         if let Some(drive) = crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
         {
+            // Fresh anchor per play — the byte-verified effect lifecycle (0858): CreateModel
+            // always allocates+attaches, so every cast's gseq loops open at phase 0, exactly
+            // like the ref (the director's 3-cast trace: the flash at +16 frames every time).
             commands.entity(root).insert(drive);
         }
     }

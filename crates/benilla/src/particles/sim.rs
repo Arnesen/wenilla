@@ -588,7 +588,10 @@ pub(super) fn simulate_particles(
         // wow-re `part-emission-rate-animated.md` §1). Frost Nova rides its emission radius
         // 0.19 → 13.2 yd out with the ring; Arcane Explosion 0 → 7.2 yd with the dome — births
         // MUST read the frame's values, not `value[0]` (decision 0844).
-        let now = def.params.sample(clock_seq, elapsed_s);
+        // The instance's gseq cursor (0856/0858): the spawn age IS `sceneNow − attach` — the
+        // emitter spawns with its instance, and every lane's instance is fresh per play.
+        let gseq_now = f64::from(*age);
+        let now = def.params.sample(clock_seq, elapsed_s, gseq_now);
 
         // 1. Age + integrate the live pool. The verified vanilla integrator (`particle_integrate`
         //    @ 0x7b2680): pos += dt·v with the gravity term on the UP axis (up += dt·v_up − ½·g·dt²;
@@ -643,8 +646,8 @@ pub(super) fn simulate_particles(
         //    one-shot effects' choreography (a 200 ms hand flash inside a 1.0 s clip; the impact
         //    model's six staggered windows). Live particles are untouched — they finish their
         //    lifespans exactly like the drain above.
-        let emitting = !*draining && def.timing.emitting(clock_seq, elapsed_s);
-        let rate = def.timing.rate(clock_seq, elapsed_s);
+        let emitting = !*draining && def.timing.emitting(clock_seq, elapsed_s, gseq_now);
+        let rate = def.timing.rate(clock_seq, elapsed_s, gseq_now);
         let dist_lod =
             (1.0 - (placement.translation.distance(e_cam_pos) - 50.0) * 0.02).clamp(0.25, 1.0);
         let burst = accumulate_emission(
@@ -759,9 +762,10 @@ pub(super) fn simulate_particles(
         //     A draining parent stops driving; child pools live out their spans (the despawn
         //     above waits for them).
         for child in children.iter_mut() {
-            let c_emitting = !*draining && child.def.timing.emitting(None, *age);
-            let c_rate = child.def.timing.rate(None, *age);
-            let c_now = child.def.params.sample(None, *age);
+            // A child cloud is its own fresh instance: its gseq cursor is its own age (0856).
+            let c_emitting = !*draining && child.def.timing.emitting(None, *age, f64::from(*age));
+            let c_rate = child.def.timing.rate(None, *age, f64::from(*age));
+            let c_now = child.def.params.sample(None, *age, f64::from(*age));
             drive_child(
                 child,
                 &c_now,

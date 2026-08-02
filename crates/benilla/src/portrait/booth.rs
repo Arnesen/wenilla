@@ -504,6 +504,7 @@ mod tests {
                     period: 0.0,
                     step: true,
                     wrap: true, // period 0: a constant has no clock
+                    gseq: false,
                     keys: vec![(0.0, v)],
                 }),
             }])

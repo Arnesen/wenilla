@@ -326,8 +326,10 @@ mod tests {
     fn part(geoset: u16) -> EntityPart {
         EntityPart {
             mesh: Handle::default(),
+            geometry: std::sync::Arc::new(benilla_formats::RenderSubmesh::default()),
             aabb: None,
             skinned_mesh: None,
+            welded_billboard: false,
             material: Handle::default(),
             material_interior: None,
             material_interior_bake: None,

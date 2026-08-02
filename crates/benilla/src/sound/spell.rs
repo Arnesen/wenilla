@@ -43,9 +43,19 @@ fn route_spell_kit_sounds(
         return;
     };
     let listener = listener.pos;
+    // Same-drain dedup: the client rings a kit's sound once per PlaySpellVisualKit call, and a
+    // state kit is legitimately played twice in one packet burst (the impact hand-off's flash +
+    // the aura watcher's ADD edge — both real reference callers, 0852). One frame, one ring;
+    // plays in different frames (a missile impact preceding the aura by a beat) both ring, as
+    // the reference's two calls would.
+    let mut played_now: Vec<(Entity, u32)> = Vec::new();
     for ev in events.read() {
         match *ev {
             SpellKitSound::Play { entity, kit_sound } => {
+                if played_now.contains(&(entity, kit_sound)) {
+                    continue;
+                }
+                played_now.push((entity, kit_sound));
                 let pos = transforms.get(entity).map(|t| t.translation).ok();
                 let looping = kit_looping(&kits, kit_sound);
                 // The kit player is otherwise invisible in logs — this line is what a headless
@@ -89,6 +99,14 @@ fn route_spell_kit_sounds(
                 if let Some(kit_sound) = hold_loops.remove(&entity) {
                     super::kit::stop_source_kit(&mut out, entity, kit_sound);
                 }
+            }
+            SpellKitSound::StopKit { entity, kit_sound } => {
+                // Kit-scoped (an aura-drop reap, 0852): stop exactly this kit's channels; the
+                // ledger entry goes only if it is this kit, so an unrelated hold loop survives.
+                if hold_loops.get(&entity) == Some(&kit_sound) {
+                    hold_loops.remove(&entity);
+                }
+                super::kit::stop_source_kit(&mut out, entity, kit_sound);
             }
         }
     }

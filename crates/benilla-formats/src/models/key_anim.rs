@@ -86,8 +86,35 @@ pub struct KeyAnim<V> {
     /// onto its **opening** value: an elemental's Death sequence fades every batch to alpha 0 and
     /// then — one frame later, for ever — snapped back to a fully opaque body frozen in mid-air.
     pub wrap: bool,
+    /// **Which clock feeds the loop** — the other half of the clock law, also decided at bake
+    /// time. `true` = a global-sequence loop: the reference's cursor is
+    /// `(sceneClock − instanceAttachTime) % duration` (wow-re `gseq-anchor.md`, byte-verified:
+    /// one free-running per-scene ms clock, snapshotted ONCE per model instance at attach —
+    /// `CM2Model+0x68`). Per-INSTANCE anchoring, stamped at attach; sequence tracks instead
+    /// re-arm their cursor at every play. `false` = a sequence-band loop: clocked by the host's
+    /// playing-clip time. Consumers route via [`Self::clock`], passing their instance's anchored
+    /// gseq cursor — the spell-fx lane passes the raw scene clock (its pooled-instance
+    /// emulation). Decisions 0855/0856: sampling a gseq loop on a per-play clock pinned every
+    /// Arcane Intellect cast's twinkles to phase 0 (clustered, low, identical cast to cast).
+    pub gseq: bool,
     /// `(secs from loop start, value)`, time-ascending.
     pub keys: Vec<(f32, V)>,
+}
+
+impl<V> KeyAnim<V> {
+    /// The sampling time for this loop, given the caller's two clocks: `band_t` — the host's
+    /// playing-clip / spawn-age seconds (the per-play arm cursor) — and `gseq_now`, the
+    /// instance's global-sequence cursor (`sceneClock − attachTime`; the spell-fx pool lane
+    /// passes the raw scene clock — see [`Self::gseq`]). A gseq loop reads `gseq_now`
+    /// (pre-wrapped in f64, so a long-uptime cursor keeps millisecond precision through the f32
+    /// narrowing); everything else keeps its band clock.
+    pub fn clock(&self, band_t: f32, gseq_now: f64) -> f32 {
+        if self.gseq && self.period > 0.0 {
+            (gseq_now % f64::from(self.period)) as f32
+        } else {
+            band_t
+        }
+    }
 }
 
 impl<V: Lerp> KeyAnim<V> {
@@ -205,12 +232,13 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
     }
     let keys: Vec<(u32, V)> = track.keys.iter().map(|&(t, v)| (t, proj(v))).collect();
     let step = track.interp == 0;
-    // A constant has no clock at all (`period == 0` short-circuits the sampler), so `wrap` is
-    // arbitrary — `true` keeps it the identity value it has always been.
+    // A constant has no clock at all (`period == 0` short-circuits the sampler), so `wrap` and
+    // `gseq` are arbitrary — `true`/`false` keep it the identity value it has always been.
     let constant = |v: V| KeyAnim {
         period: 0.0,
         step,
         wrap: true,
+        gseq: false,
         keys: vec![(0.0, v)],
     };
     // An all-equal track is a constant in every band: dropped when the static path owns it, else a
@@ -236,6 +264,7 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
             // A global sequence runs its own free clock, the same loop in every animation — it
             // always wraps, whatever the playing sequence's own loop flag says.
             wrap: true,
+            gseq: true,
             keys: keys.iter().map(|&(t, v)| (t as f32 / 1000.0, v)).collect(),
         });
     }
@@ -280,6 +309,7 @@ pub(crate) fn bake_track<T: Copy, V: Lerp + PartialEq>(
         step,
         // The band's own loop flag IS this loop's clock: a one-shot sequence holds its tail.
         wrap: looping,
+        gseq: false,
         keys: baked,
     })
 }
