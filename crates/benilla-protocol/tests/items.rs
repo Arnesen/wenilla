@@ -42,6 +42,15 @@ fn item_query_wire() {
     // CMSG_AUTOEQUIP_ITEM (vmangos AutoEquipItem::ReadFromWorldPacket): bagIndex, slot.
     assert_eq!(messages::auto_equip_item(255, 25), hx("ff19"));
 
+    // CMSG_OPEN_ITEM (vmangos OpenItem::ReadFromWorldPacket, Server/Packets/Spell.cpp:19-23):
+    // bagIndex, slot — and NOTHING else (no spell ordinal, no targets block; opening is not a
+    // cast). The same two bytes as auto-equip under a different opcode: this is the fork a
+    // clam/lockbox/gift takes instead of USE_ITEM, and the only one the server answers with
+    // SendLoot on the item's own guid. Backpack slot 3 = bag 255 + player-array slot 25; an item
+    // inside an equipped bag addresses that bag's own player-array slot (19..22) + inner slot.
+    assert_eq!(messages::open_item(255, 25), hx("ff19"));
+    assert_eq!(messages::open_item(19, 0), hx("1300"));
+
     // SMSG_INVENTORY_CHANGE_FAILURE (vmangos InventoryChangeFailure::AppendBodyTo): the level
     // refusal (reason 1) carries a u32 required level before the guids; others don't.
     let level_fail = messages::parse_server(

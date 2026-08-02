@@ -600,6 +600,12 @@ pub(crate) enum ClientCommand {
         spell_index: u8,
         go_target: Option<u64>,
     },
+    /// Open a bag item (`CMSG_OPEN_ITEM`, same bag addressing) — the drain's fork for an
+    /// *openable* click (`ItemInfo::openable`): a clam, an unlocked lockbox, a wrapped gift. The
+    /// server answers `SMSG_LOOT_RESPONSE` on the **item's own guid**, so the ordinary loot feed
+    /// opens a window over a thing in the bag; a wrapped gift instead swaps entry in place and
+    /// sends no window. Refusals arrive as `InventoryFailure` (still locked, dead, flying).
+    OpenItem { bag_index: u8, slot: u8 },
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`, same bag addressing) — the drain's fork for an
     /// *equippable* click, mirroring the real client's equip-vs-use decision. Refusals come back
     /// as `InventoryFailure` events onto the UI error line.

@@ -773,39 +773,41 @@ fn app_with_freeze() -> App {
 
 /// A rig mid-animation: two clips playing at the speeds the driver picked for them (a gait scaled to
 /// the mover's speed, and a cast one-shot at 1.0 — the pair Ice Block catches).
-fn rig_playing(speeds: [(u32, f32); 2]) -> AnimationPlayer {
+fn rig_playing(speeds: &[(u32, f32)]) -> AnimationPlayer {
     let mut player = AnimationPlayer::default();
     for (node, speed) in speeds {
         player
-            .play(AnimationNodeIndex::new(node as usize))
-            .set_speed(speed);
+            .play(AnimationNodeIndex::new(*node as usize))
+            .set_speed(*speed);
     }
     player
 }
 
-fn speed_of(app: &App, rig: Entity, node: u32) -> f32 {
-    app.world()
+/// `(paused, speed)` of one armed clip — the two things the freeze is judged on: the clock is held,
+/// and the *value* other code copies is untouched.
+fn clip(app: &App, rig: Entity, node: u32) -> (bool, f32) {
+    let a = app
+        .world()
         .entity(rig)
         .get::<AnimationPlayer>()
         .expect("the rig kept its player")
         .animation(AnimationNodeIndex::new(node as usize))
-        .expect("the clip is still armed")
-        .speed()
+        .expect("the clip is still armed");
+    (a.is_paused(), a.speed())
 }
 
 /// **The director's retest, at the mechanism.** Ice Block's state kit carries proc 11 at rate 0, so
 /// the unit's clocks stop dead: the run cycle it was mid-stride in and the cast one-shot that had
 /// just been armed both hold the frame they were on — which is why the caster never gets to raise
-/// their hand. Dropping the aura hands each clip back the speed the driver had given it, not a
-/// blanket 1.0.
+/// their hand. Dropping the aura lets both go again, at the speeds the driver gave them.
 #[test]
-fn ice_block_holds_the_clocks_and_the_drop_hands_them_back() {
+fn ice_block_holds_the_clocks_and_the_drop_lets_them_go() {
     let mut app = app_with_freeze();
     let unit = app
         .world_mut()
         .spawn((
             crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
-            rig_playing([(4, 1.35), (54, 1.0)]),
+            rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();
     app.update();
@@ -814,15 +816,16 @@ fn ice_block_holds_the_clocks_and_the_drop_hands_them_back() {
     assert_eq!(n.head_anim_rate(), Some(0.0), "kit 3709's proc 11 is 0");
     // 9074175 = 0x8A75FF — the ice-blue the same kit tints the body with, beside the freeze.
     assert_eq!(n.head_tint(), Some([0x8A, 0x75, 0xFF]), "kit 3709's proc 1");
-    assert_eq!(speed_of(&app, unit, 4), 0.0, "the gait stops mid-stride");
-    assert_eq!(speed_of(&app, unit, 54), 0.0, "so does the cast one-shot");
+    assert!(clip(&app, unit, 4).0, "the gait stops mid-stride");
+    assert!(clip(&app, unit, 54).0, "so does the cast one-shot");
+    // The SPEEDS are untouched, which is the whole point: nothing that copies a clip's rate
+    // (`transplant_up` does, to move a one-shot onto the torso overlay) can inherit the freeze.
+    assert_eq!(clip(&app, unit, 4).1, 1.35);
+    assert_eq!(clip(&app, unit, 54).1, 1.0);
 
-    // A second frame changes nothing — the hold is idempotent, and it must not re-save the zero it
-    // wrote itself (that is what would make the release hand back 0.0 forever).
-    app.update();
-    assert_eq!(speed_of(&app, unit, 4), 0.0);
+    app.update(); // idempotent
 
-    // The aura leaves the slots: the reference writes the saved rates back (`0x6203e0`).
+    // The aura leaves the slots.
     app.world_mut()
         .entity_mut(unit)
         .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
@@ -836,41 +839,53 @@ fn ice_block_holds_the_clocks_and_the_drop_hands_them_back() {
         .unwrap()
         .rate
         .is_empty());
-    assert_eq!(
-        speed_of(&app, unit, 4),
-        1.35,
-        "the gait's own rate, restored"
-    );
-    assert_eq!(speed_of(&app, unit, 54), 1.0);
+    assert!(!clip(&app, unit, 4).0, "running again");
+    assert!(!clip(&app, unit, 54).0);
+    assert_eq!(clip(&app, unit, 4).1, 1.35, "at its own rate");
     assert!(
         app.world().entity(unit).get::<AnimRateFreeze>().is_none(),
-        "the release drops the save with it"
+        "the release drops the marker with it"
     );
 }
 
-/// A clip armed *during* the freeze is saved on the frame we first touch it, so the release hands
-/// back what the driver meant for it rather than the frozen 0.
+/// **The bug the first shipped version had, pinned so it cannot come back.** A one-shot moved to the
+/// torso overlay under the freeze (`transplant_up` copies the source clip's speed and seek) used to
+/// be saved at the frozen `0`, restored to `0`, and left welded to the upper body for the rest of the
+/// session — surviving every later cast, because a clip that never advances never *finishes* and so
+/// never releases the overlay. Pausing carries no value to copy: the transplant inherits the driver's
+/// real speed, and the thaw sets it running.
 #[test]
-fn a_clip_armed_under_the_freeze_is_saved_before_it_is_held() {
+fn a_clip_armed_under_the_freeze_comes_back_at_its_own_speed() {
     let mut app = app_with_freeze();
     let unit = app
         .world_mut()
         .spawn((
             crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
-            rig_playing([(4, 1.35), (54, 1.0)]),
+            rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();
     app.update();
 
-    // The driver arms Stand at 1.0 a frame later (the root wiped the direction bits).
-    app.world_mut()
-        .entity_mut(unit)
-        .get_mut::<AnimationPlayer>()
+    // `transplant_up`'s own shape: read the frozen source clip, arm the torso twin from it.
+    let speed = clip(&app, unit, 54).1;
+    assert_eq!(speed, 1.0, "the source's speed is not the freeze");
+    let seek = app
+        .world()
+        .entity(unit)
+        .get::<AnimationPlayer>()
         .unwrap()
-        .play(AnimationNodeIndex::new(0))
-        .set_speed(1.0);
+        .animation(AnimationNodeIndex::new(54))
+        .unwrap()
+        .seek_time();
+    {
+        let mut ent = app.world_mut().entity_mut(unit);
+        let mut player = ent.get_mut::<AnimationPlayer>().unwrap();
+        let upper = player.play(AnimationNodeIndex::new(156));
+        upper.seek_to(seek);
+        upper.set_speed(speed);
+    }
     app.update();
-    assert_eq!(speed_of(&app, unit, 0), 0.0, "held the frame it arrived on");
+    assert!(clip(&app, unit, 156).0, "held on arrival");
 
     app.world_mut()
         .entity_mut(unit)
@@ -878,7 +893,12 @@ fn a_clip_armed_under_the_freeze_is_saved_before_it_is_held() {
             95, 0,
         )])));
     app.update();
-    assert_eq!(speed_of(&app, unit, 0), 1.0);
+    assert!(!clip(&app, unit, 156).0);
+    assert_eq!(
+        clip(&app, unit, 156).1,
+        1.0,
+        "the overlay runs out and releases instead of welding a cast pose on"
+    );
 }
 
 /// The mount comes with the rider: `0x6201d0` writes `[unit+0xdc]` before it writes `[unit+0xd8]`,
@@ -888,20 +908,20 @@ fn the_freeze_reaches_the_mount_body() {
     let mut app = app_with_freeze();
     let mount = app
         .world_mut()
-        .spawn(rig_playing([(5, 2.0), (91, 1.0)]))
+        .spawn(rig_playing(&[(5, 2.0), (91, 1.0)]))
         .id();
     let unit = app
         .world_mut()
         .spawn((
             crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
-            rig_playing([(91, 1.0), (54, 1.0)]),
+            rig_playing(&[(91, 1.0), (54, 1.0)]),
             crate::entities::mount::MountChild(mount),
         ))
         .id();
     app.update();
 
-    assert_eq!(speed_of(&app, unit, 91), 0.0, "the rider");
-    assert_eq!(speed_of(&app, mount, 5), 0.0, "and the mount under them");
+    assert!(clip(&app, unit, 91).0, "the rider");
+    assert!(clip(&app, mount, 5).0, "and the mount under them");
 
     app.world_mut()
         .entity_mut(unit)
@@ -909,7 +929,8 @@ fn the_freeze_reaches_the_mount_body() {
             95, 0,
         )])));
     app.update();
-    assert_eq!(speed_of(&app, mount, 5), 2.0);
+    assert!(!clip(&app, mount, 5).0);
+    assert_eq!(clip(&app, mount, 5).1, 2.0);
 }
 
 /// An aura with no proc 11 — Stealth — leaves the clocks entirely alone. The freeze is the kit's,
@@ -921,10 +942,27 @@ fn an_aura_without_the_proc_never_touches_a_clock() {
         .world_mut()
         .spawn((
             crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, STEALTH), (95, 0x0E)])),
-            rig_playing([(4, 1.35), (54, 1.0)]),
+            rig_playing(&[(4, 1.35), (54, 1.0)]),
         ))
         .id();
     app.update();
-    assert_eq!(speed_of(&app, unit, 4), 1.35);
+    assert!(!clip(&app, unit, 4).0);
     assert!(app.world().entity(unit).get::<AnimRateFreeze>().is_none());
+}
+
+/// Kit 1744's `8947848.0` is a rate our f32-seconds clock cannot express (the reference's is integer
+/// ms with a modulo, where it is noise rather than a freeze). It installs a node — the data is read,
+/// not dropped — and the apply leaves the clocks alone rather than inventing a look for it.
+#[test]
+fn a_non_zero_rate_installs_a_node_and_holds_nothing() {
+    let mut n = AuraNodes::new(1.0);
+    install(&mut n, 17624, &[AuraNode::AnimRate(8_947_848.0)], 0.0);
+    assert_eq!(n.head_anim_rate(), Some(8_947_848.0));
+
+    let mut app = app_with_freeze();
+    let unit = app.world_mut().spawn(rig_playing(&[(4, 1.35)])).id();
+    app.world_mut().entity_mut(unit).insert(n);
+    app.update();
+    assert!(!clip(&app, unit, 4).0);
+    assert_eq!(clip(&app, unit, 4).1, 1.35);
 }

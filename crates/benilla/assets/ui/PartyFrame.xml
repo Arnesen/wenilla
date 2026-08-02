@@ -67,6 +67,13 @@
             frame.portrait   = getglobal(name .. "Portrait")
             frame.healthBar  = getglobal(name .. "HealthBar")
             frame.manaBar    = getglobal(name .. "ManaBar")
+            -- The recessed-bar look, the reference's own mechanism (ref-TargetFrame.lua l.32-34):
+            -- push the bars one frame level BELOW the art's TextureFrame. Frame level is the only
+            -- key term above the draw layer (decision 0884), so this is the only thing that can hold
+            -- the BACKGROUND party art over the ARTWORK bar fills. See the LAYERING note below.
+            local textureFrameLevel = getglobal(tf):GetFrameLevel()
+            frame.healthBar:SetFrameLevel(textureFrameLevel - 1)
+            frame.manaBar:SetFrameLevel(textureFrameLevel - 1)
             frame.nameText   = getglobal(tf .. "Name")
             frame.leaderIcon = getglobal(tf .. "LeaderIcon")
             frame.masterIcon = getglobal(tf .. "MasterIcon")
@@ -257,12 +264,18 @@
     <!-- The shared member-frame template — ref PartyFrameTemplates.xml, 128x53 over the 128x64
          UI-PartyFrame art at (0,-2) (the art hangs 13 px below the frame rect, as authored).
 
-         LAYERING (the ref's law, in our z-model's idiom): the ref nests the frame art two anonymous
-         child frames deep so it draws OVER the status bars — the bars show through the art's
-         semi-transparent tube windows, inset, their ends clipped by the rails. Ours is the
-         UnitFrames.xml idiom: a $parentTextureFrame child declared AFTER the bars. The name and the
-         leader/master/disconnect icons ride in it too (the ref keeps them in that nested frame;
-         left below the art, the ring would swallow the leader crown). -->
+         LAYERING (the ref's law): the ref nests the frame art two anonymous child frames deep so it
+         draws OVER the status bars — the bars show through the art's semi-transparent tube windows,
+         inset, their ends clipped by the rails. Ours is the UnitFrames.xml idiom, which reaches the
+         same place by the ref's OTHER route (its TargetFrame's): a $parentTextureFrame child, with
+         OnLoad pushing the bars one frame level BELOW it. Both spend a frame LEVEL, which is the
+         point — level is the one key term above the draw layer (decision 0884). Until then this file
+         instead leaned on declaring the TextureFrame after the bars, and the old draw key's
+         insertion-order tie-break; 0884 pinned the layer as bucket-wide and above the frame, which
+         put the bars' ARTWORK fills straight over the BACKGROUND art. Do not go back to declaration
+         order. The name and the leader/master/disconnect icons ride in the TextureFrame too (the ref
+         keeps them in that nested frame; left below the art, the ring would swallow the leader
+         crown). -->
     <!-- frameStrata LOW is the ref's own (`PartyFrameTemplates.xml` l.194) and it is load-bearing,
          not decoration. The panel windows (loot, character, merchant, quest log, …) are MEDIUM, and
          the party frames share the top-left corner with the left-slot panel. Left in the default

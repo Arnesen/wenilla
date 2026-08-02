@@ -122,15 +122,23 @@ pub(super) struct ChatProbes<'w, 's> {
     guids: Res<'w, crate::net::GuidIndex>,
 }
 
-/// The two setters `DoEmote` drives besides the packet, bundled (the drain is at Bevy's 16-param
-/// ceiling): the **posture** (`EmoteSpecProc == 1` → `SetStandState`) and the **stow**
-/// (`SetSheatheState(0, SNAP)`, unconditional on every emote that passes the gates — wow-re
-/// `sheath-policy.md` §1, site `0x5ef630`). Both are queues into their subsystem's one setter,
-/// never applied here.
+/// Everything the drain **queues into another subsystem's one setter** rather than applying itself,
+/// bundled (the drain is at Bevy's 16-param ceiling).
+///
+/// - `stand`/`sheath` — the two setters `DoEmote` drives besides the packet: the **posture**
+///   (`EmoteSpecProc == 1` → `SetStandState`) and the **stow** (`SetSheatheState(0, SNAP)`,
+///   unconditional on every emote that passes the gates — wow-re `sheath-policy.md` §1, site
+///   `0x5ef630`).
+/// - `target`/`assist` — the by-name selection asks (decision 0886), answered by
+///   [`crate::target`]'s shared resolver so they commit through the same SetSelection path a click
+///   does. Chat never writes [`Selection`] itself.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(super) struct EmoteOut<'w> {
+pub(super) struct ChatOut<'w> {
     stand: MessageWriter<'w, crate::player::StandStateRequest>,
     sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
+    target: MessageWriter<'w, crate::target::TargetByNameRequest>,
+    assist: MessageWriter<'w, crate::target::AssistRequest>,
+    follow: MessageWriter<'w, crate::player::FollowRequest>,
 }
 
 // One parameter per concern — the chat drain fans out to every command's consumer.
@@ -156,7 +164,7 @@ pub(super) fn drain_chat_input(
     mut go_targets: MessageWriter<crate::creature_anim::SpellGoTargets>,
     // The command table (decision 0881) — the reference's own aliases, resolved at boot.
     table: Res<super::commands::SlashCommands>,
-    mut emote_out: EmoteOut,
+    mut chat_out: ChatOut,
     probes: ChatProbes,
 ) {
     let ChatProbes {
@@ -495,6 +503,36 @@ pub(super) fn drain_chat_input(
             ParsedChat::Forfeit => {
                 script.queue_duel_request(benilla_ui::script::DuelRequest::Cancel);
             }
+            // The by-name selection pair (decision 0886). Both hand the name to `crate::target`'s
+            // shared resolver — the reference's own `0x493aa0`, parameterised per caller — so the
+            // commit goes through the one SetSelection path a click, TAB and `TargetUnit` share.
+            //
+            // A bare `/target` reproduces `GetSlashCmdTarget`'s fallback (your current target's
+            // name, iff it is a player) and is therefore a no-op re-select; a bare `/target` with a
+            // creature selected resolves to nothing, exactly as the reference's `if
+            // GetSlashCmdTarget(msg)` guard does.
+            ParsedChat::Target { name } => {
+                if let Some(name) =
+                    name.or_else(|| target_player_name(&selection, &mut names, &commands))
+                {
+                    chat_out
+                        .target
+                        .write(crate::target::TargetByNameRequest { name });
+                }
+            }
+            // A bare `/assist` is the ref's `AssistUnit("target")` — assist whoever is selected,
+            // creature or player — so it passes `None` straight through rather than taking the
+            // player-name fallback. The ref reaches the same unit by resolving its NAME first
+            // (`AssistByName`), which can pick a different same-named player; going by the live
+            // selection is the same intent without that ambiguity (recorded in 0886).
+            ParsedChat::Assist { name } => {
+                chat_out.assist.write(crate::target::AssistRequest { name });
+            }
+            // `/follow` (decision 0890) — the subject is resolved by `crate::target` and the motion
+            // is `crate::player`'s; chat only carries the ask. Bare follows the current selection.
+            ParsedChat::Follow { name } => {
+                chat_out.follow.write(crate::player::FollowRequest { name });
+            }
             // The ref's handler is `SlashCmdList["PVP"] = function() TogglePVP() end` — one line
             // over the same binding the popup row calls, so it enters the same intent queue
             // (decision 0646 §3; the `/duel` reasoning above, verbatim).
@@ -565,7 +603,7 @@ pub(super) fn drain_chat_input(
                 // sheathes in the reference too. The anim layer's one setter owns the idempotency
                 // refusal, so an already-stowed body costs nothing.
                 if let Ok((entity, _, _)) = self_player.single() {
-                    emote_out.sheath.write(crate::creature_anim::SheathRequest {
+                    chat_out.sheath.write(crate::creature_anim::SheathRequest {
                         entity,
                         state: 0,
                         ceremony: false,
@@ -577,7 +615,7 @@ pub(super) fn drain_chat_input(
                 // the one setter in `crate::player`, which sends `CMSG_STANDSTATECHANGE`, holds the
                 // local commit until the echo lands, and runs the sit-stow rider.
                 if let Some(state) = posture {
-                    emote_out
+                    chat_out
                         .stand
                         .write(crate::player::StandStateRequest { state: state as u8 });
                 }

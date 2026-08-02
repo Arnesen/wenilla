@@ -22,7 +22,7 @@ use benilla_protocol::{decode, EntityKind, WorldSession, WORLD_PORT};
 use clap::Parser;
 
 use probes::{
-    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, Probe,
+    Attack, Aura, Charge, Ctx, Death, EquipPackSlot, GiverStatus, GroundFx, Loot, OpenItem, Probe,
     QueryNames, Quest, QuestItem, QuestLog, Speed, Spells, Spirit, SwapPackSlots, UsePackSlot,
     Vendor, WorldState,
 };
@@ -81,6 +81,14 @@ struct Cli {
     /// delta or a destroy on that item's guid (consumed), or an explicit cast-result refusal.
     #[arg(long)]
     use_pack_slot: Option<u8>,
+    /// Live-verify `CMSG_OPEN_ITEM`: `.additem` a Small Barnacled Clam (entry 7973 — LOOTABLE,
+    /// LockID 0, the director's own case), find it in the backpack, and run the fork a bag
+    /// right-click makes for an *openable* item — `CMSG_OPEN_ITEM(bagIndex, slot)`, never
+    /// `CMSG_USE_ITEM` (a clam has no on-use spell, so the use goes nowhere) — requiring
+    /// `SMSG_LOOT_RESPONSE` on the **item's own guid**. Releases the window and subtracts the copy
+    /// afterwards. Needs a GM account (the deploy's probes are gmlevel 6).
+    #[arg(long)]
+    open_item: bool,
     /// Send a `/say` line right after entering the world — the GM dot-command channel
     /// (`.additem 3732`, `.repairitems`, …) for setting up probe scenarios. Repeatable; the lines go
     /// out in order (e.g. `--say ".modify money 5000000" --say ".go creature 1"`).
@@ -343,6 +351,9 @@ fn main() -> Result<()> {
     }
     if let Some(n) = cli.use_pack_slot {
         probes.push(Box::new(UsePackSlot { n }));
+    }
+    if cli.open_item {
+        probes.push(Box::new(OpenItem));
     }
     if let Some(n) = cli.equip_pack_slot {
         probes.push(Box::new(EquipPackSlot { n }));

@@ -209,6 +209,40 @@ pub(super) fn drain_container_uses(
             }
             continue;
         }
+        // The openable fork: a clam, an unlocked lockbox, a wrapped gift. `CMSG_OPEN_ITEM`, not
+        // `CMSG_USE_ITEM` — the server's `HandleOpenItemOpcode` is the only handler that answers
+        // with `SendLoot(item guid, LOOT_CORPSE)`, i.e. a loot window over a thing in your bag;
+        // sending USE_ITEM instead casts the item's (absent) on-use spell and nothing happens,
+        // which is exactly the "no way to open clams" symptom. The predicate is
+        // `ItemInfo::openable` — literally the same call the tooltip's `<Right Click to Open>`
+        // line makes, so the promise and the packet cannot drift apart.
+        //
+        // It sits ABOVE the readable fork because the reference's own tooltip law makes the two
+        // mutually exclusive with **openable winning** (wow-re `tooltip-content-law.md`
+        // §1-OPENABLE, the `jmp` past the READABLE test): a wrapped gift that also carries letter
+        // text opens, it does not read. Below the merchant/bank intercepts, which outrank every
+        // ordinary click.
+        let openable = self_q
+            .iter()
+            .next()
+            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items))
+            .and_then(|guid| {
+                let obj = items.object(guid)?;
+                let inst_flags = obj.item_flags().unwrap_or(0);
+                let entry = obj.object_entry()?;
+                items
+                    .template(entry, guid, &commands)?
+                    .openable(inst_flags)
+                    .then_some(guid)
+            });
+        if let Some(guid) = openable {
+            debug!("ui_items: open item {guid:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})");
+            let _ = commands.0.send(ClientCommand::OpenItem {
+                bag_index,
+                slot: wire_slot,
+            });
+            continue;
+        }
         // The readable fork: an item INSTANCE carrying `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made
         // permanent letter) opens the reader instead of a use — client-side, no permission
         // packet (vmangos' `CMSG_READ_ITEM` handler gates on the *template*'s PageText, which is

@@ -425,8 +425,9 @@ fn required_level_one_is_hidden() {
 /// (white) when the instance carries letter text, the green-escaped "<Made by %s>" otherwise —
 /// then READABLE off the instance text id (its template's PageText is 0 — the
 /// director-reported gap). An unresolved creator (name query in flight) emits no line. LOCKED
-/// yields to the instance UNLOCKED bit — and ITEM_OPENABLE never emits from `SetBagItem` (a
-/// p6=1 source: the `0x52e2e8` bypass), so the unlocked chest shows its bare name.
+/// yields to the instance UNLOCKED bit — which is also what un-gates ITEM_OPENABLE: a bag hover
+/// on an openable instance DOES show the green `<Right Click to Open>` (director-observed on a
+/// clam; see `ItemInstance::openable_source` for why this overrides §1-OPENABLE's p6 reading).
 #[test]
 fn instance_tail_creator_and_readable() {
     let mut s = script();
@@ -458,16 +459,26 @@ fn instance_tail_creator_and_readable() {
         flags,
         ..Default::default()
     };
+    s.set_item_template(
+        7973,
+        ItemTemplateView {
+            name: "Small Barnacled Clam".into(),
+            quality: 1,
+            flags: 0x4,
+            ..Default::default()
+        },
+    );
     let mut slots = HashMap::new();
     slots.insert(1, slot(889, true, Some("One"), 0)); // the mail letter
     slots.insert(2, slot(889, true, None, 0)); // creator name still in flight
     slots.insert(3, slot(2589, false, Some("Geoffrey"), 0)); // crafted, still locked
-    slots.insert(4, slot(2589, false, None, 0x4)); // unlocked → LOCKED gone, and NO open line
+    slots.insert(4, slot(2589, false, None, 0x4)); // unlocked → LOCKED gone, open line on
+    slots.insert(5, slot(7973, false, None, 0)); // the clam: lockless, openable outright
     s.set_container(
         0,
         Some(ContainerState {
             name: Some("Backpack".into()),
-            num_slots: 4,
+            num_slots: 5,
             slots,
         }),
     );
@@ -502,11 +513,18 @@ fn instance_tail_creator_and_readable() {
         vec!["Heavy Chest", "Locked", "|cff00ff00<Made by Geoffrey>|r"],
         "CREATED_BY carries the string's own green escape; locked chest hides OPENABLE"
     );
-    // The instance UNLOCKED bit retires the LOCKED line — and OPENABLE still never emits
-    // (SetBagItem is p6=1; only send-mail/auction/buyback sources reach the emitter in 5875).
+    // The instance UNLOCKED bit retires the LOCKED line AND satisfies the openable lock sub-gate.
     s.run(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); TT:SetBagItem(0, 4)"#)
         .unwrap();
+    let lines = lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(texts, vec!["Heavy Chest", "<Right Click to Open>"]);
+    assert_eq!(lines[1].1, [0.0, 1.0, 0.0, 1.0], "OPENABLE is green");
+    // The director's case: a lockless LOOTABLE template (a clam) is openable outright — name +
+    // the green line, nothing between them.
+    s.run(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); TT:SetBagItem(0, 5)"#)
+        .unwrap();
     let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
-    assert_eq!(texts, vec!["Heavy Chest"]);
+    assert_eq!(texts, vec!["Small Barnacled Clam", "<Right Click to Open>"]);
     assert!(s.take_errors().is_empty());
 }

@@ -191,7 +191,44 @@ impl ItemInfo {
     pub fn placeable_on_action_bar(&self) -> bool {
         self.use_spell.is_some() || self.inventory_type != 0
     }
+
+    /// Does a right-click **open** this concrete instance rather than use it? `instance_flags` is
+    /// the item object's `ITEM_FIELD_FLAGS` (0 for a template-only view, which can never be
+    /// openable — you can't right-click a hyperlink).
+    ///
+    /// The one predicate behind both halves of the affordance: the tooltip's green
+    /// `<Right Click to Open>` line and the `CMSG_OPEN_ITEM` fork. It is the reference's own
+    /// tooltip condition (wow-re `tooltip-content-law.md` §1-OPENABLE, byte-read at
+    /// `0x52e2f8`–`0x52e321`): the template LOOTABLE bit [`ITEM_FLAG_LOOTABLE`] behind its lock
+    /// sub-gate — a [`ItemInfo::lock_id`] item only opens once the instance carries
+    /// [`ITEM_DYNFLAG_UNLOCKED`] — **or** a wrapped gift ([`ITEM_FLAG_WRAPPER`] on the template
+    /// plus [`ITEM_DYNFLAG_WRAPPED`] on the instance). vmangos's `HandleOpenItemOpcode` gates on
+    /// exactly the same pair, so the two ends agree: what the tooltip promises is what the server
+    /// will honour, and a still-locked junkbox neither advertises the line nor sends the packet.
+    pub fn openable(&self, instance_flags: u32) -> bool {
+        let lootable = self.flags & ITEM_FLAG_LOOTABLE != 0
+            && (self.lock_id == 0 || instance_flags & ITEM_DYNFLAG_UNLOCKED != 0);
+        let gift =
+            self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED != 0;
+        lootable || gift
+    }
 }
+
+/// `ITEM_FLAG_LOOTABLE` — the **template** bit that makes an item right-clickable into a loot
+/// window (a clam, a lockbox, a Gnomish Mind Control Cap's box). vmangos
+/// `ItemPrototype.h:66`, whose own comment names the client behaviour this drives: "It or lockid
+/// set enable for client show 'Right click to open'".
+pub const ITEM_FLAG_LOOTABLE: u32 = 0x0000_0004;
+/// `ITEM_FLAG_WRAPPER` — the template bit for gift wrapping (vmangos `ItemPrototype.h:73`); paired
+/// with [`ITEM_DYNFLAG_WRAPPED`] on the instance it makes the wrapped present openable.
+pub const ITEM_FLAG_WRAPPER: u32 = 0x0000_0200;
+/// `ITEM_DYNFLAG_UNLOCKED` — the **instance** (`ITEM_FIELD_FLAGS`) bit a lockbox gains once it has
+/// been picked/keyed open; until then a `LockID` item refuses to open (vmangos
+/// `HandleOpenItemOpcode`'s `EQUIP_ERR_ITEM_LOCKED`).
+pub const ITEM_DYNFLAG_UNLOCKED: u32 = 0x0000_0004;
+/// `ITEM_DYNFLAG_WRAPPED` — the instance bit on a gift-wrapped item; opening it unwraps to the
+/// present (vmangos swaps the entry from `character_gifts` rather than sending loot).
+pub const ITEM_DYNFLAG_WRAPPED: u32 = 0x0000_0008;
 
 /// One `Damage` block ([`ItemInfo::damages`] — block 0 is also mirrored into
 /// [`ItemInfo::dmg_min`]/[`ItemInfo::dmg_max`]/[`ItemInfo::dmg_type`]).
@@ -506,6 +543,18 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, go_target: Option<u64>)
         }
     }
     body
+}
+
+/// Body of `CMSG_OPEN_ITEM` (VERIFIED vmangos `OpenItem::ReadFromWorldPacket`,
+/// `Server/Packets/Spell.cpp` + `.h:36-45`; opcode 172 `Opcodes_1_12_1.h:175`): `bagIndex`, `slot`
+/// — the same two bytes and the same bag addressing as [`use_item`], and nothing else (no spell
+/// ordinal, no targets block: opening is not a cast).
+///
+/// The right-click fork for an [`ItemInfo::openable`] item. The server answers on the **item's own
+/// guid**: `SendLoot(item, LOOT_CORPSE)` for a lootable, or — for a wrapped gift — an entry swap
+/// and no window at all.
+pub fn open_item(bag_index: u8, slot: u8) -> Vec<u8> {
+    vec![bag_index, slot]
 }
 
 /// Body of `CMSG_AUTOEQUIP_ITEM` (VERIFIED vmangos `AutoEquipItem::ReadFromWorldPacket`,

@@ -845,11 +845,7 @@ pub(super) fn drive_animations(
                 if let Some((c, repeat)) = picked {
                     play_clip(&mut tr, &mut player, c, repeat, 1.0);
                 }
-                drv.mode = Mode::Swing {
-                    id,
-                    flags: mv.flags,
-                    under: special,
-                };
+                drv.mode = Mode::Swing { id, under: special };
                 drv.gait = None;
                 base_played = true;
                 played_oneshot = Some(id);
@@ -1044,7 +1040,7 @@ pub(super) fn drive_animations(
                     drv.gait = None; // recompute a fresh gait next frame
                 }
             }
-            Mode::Swing { id, flags, under } => {
+            Mode::Swing { id, under } => {
                 if special != under {
                     // The state this one-shot replaced CHANGED — the client's next event play
                     // supersedes it: a fresh jump/pose entry (`None → Some`), the FALLINGFAR
@@ -1125,25 +1121,47 @@ pub(super) fn drive_animations(
                         );
                         drv.mode = Mode::Looping(sp);
                     }
-                } else if oneshot_finished(&player, anims, id, catalog) || mv.flags != flags {
-                    // Finished — or a movement-flag change: the client's locomotion re-arm lands
-                    // on the change and blindly overwrites bone 0, one-shot or not (the same
-                    // re-arm decision 0280 named for the un-finishable looping kit clip, and
+                } else if oneshot_finished(&player, anims, id, catalog)
+                    || mv.flags != drv.gait_flags
+                {
+                    // Finished — or a movement-flag change: the client's base re-arm lands on the
+                    // change and blindly overwrites bone 0, one-shot or not (the same re-arm
+                    // decision 0280 named for the un-finishable looping kit clip, and
                     // Mode::Land's flag-change re-pick). Holding the clip out instead slides the
                     // post-shot runner over the ground on straight legs (director-observed vs
                     // ref). An EDGE, not a level — the split-boneless masked fallback enters
                     // here already moving, and steady flags must let that clip play out.
-                    if mv.flags != flags {
+                    //
+                    // Against `drv.gait_flags` — what the **base** was last armed for — not this
+                    // one-shot's own arm-time `flags` (decision 0894). The reference keeps no
+                    // per-one-shot latch: a movement-state change requests the base and bone 0
+                    // takes it, whenever the one-shot happened to start. Ice Block is the case that
+                    // separates them — its root wipes the direction bits in the SAME frame the cast
+                    // one-shot arrives, so the arm-time compare sees no edge ever and the cast held
+                    // bone 0 for the whole block; against the base's flags the edge is still there,
+                    // Stand overwrites the cast, and the character is neutral when the freeze lands.
+                    if mv.flags != drv.gait_flags {
                         // The locomotion re-arm is a normal PlayAnimation — the deferred-combat
                         // cache clears with it (decision 0406; a finished clip instead had its
                         // cache consumed by the injection above, before this machine ran).
                         drv.deferred = None;
-                        // …and it is a LOCOMOTION request, so a still-playing CAST/COMBAT clip
-                        // transplants up to the key-bone instead of being overwritten (decision
-                        // 0878). A *finished* clip has nothing to move: the client's descriptor
-                        // probe reports a completed slot as id −1 (`0x5fe1f0` reads the completion
-                        // latch, not the armed record), so the transplant predicates never see it.
-                        transplant_up(&mut drv, &mut player, &tr, anims, entity, id);
+                        // …and **if** the re-arm resolves to a LOCOMOTION id, a still-playing
+                        // CAST/COMBAT clip transplants up to the key-bone instead of being
+                        // overwritten (decision 0878; the client's gate is `0x5fee80` on the
+                        // *requested* id, `0x5fe912`). A *finished* clip has nothing to move: the
+                        // client's descriptor probe reports a completed slot as id −1 (`0x5fe1f0`
+                        // reads the completion latch, not the armed record), so the transplant
+                        // predicates never see it.
+                        //
+                        // The gate was missing here, and Ice Block is what it costs (decision
+                        // 0894): a stun's root wipes the direction bits, so the flag change re-arms
+                        // to **Stand(0)** — not locomotion — and the reference *overwrites* the
+                        // cast on bone 0, leaving the character fully neutral for the freeze to
+                        // catch. Transplanting unconditionally moved it to the torso instead and
+                        // froze an arm out.
+                        if select::gait_is_locomotion(&mv, walk) {
+                            transplant_up(&mut drv, &mut player, &tr, anims, entity, id);
+                        }
                     }
                     drv.mode = Mode::Gait;
                     drv.gait = None; // recompute a fresh gait next frame
@@ -1377,6 +1395,11 @@ pub(super) fn drive_animations(
                     } else {
                         drv.gait = Some(target); // no clip (bind pose) — record the target so we don't churn
                     }
+                    // The base is now arm-consistent with this movement state — every branch above
+                    // leaves `drv.gait == Some(target)`. A one-shot that displaces it later reads
+                    // this, not its own arm-time flags, to know whether the movement state has
+                    // moved on since (decision 0894).
+                    drv.gait_flags = mv.flags;
                     // Leaving the ranged idle (moving, sheath change, cancel) drops the hold —
                     // the next shooting session opens with a fresh nock.
                     if ranged_load.is_none() {

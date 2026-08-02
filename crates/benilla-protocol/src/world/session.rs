@@ -360,6 +360,15 @@ impl WorldSession {
         )
     }
 
+    /// Open an item by bag position (`CMSG_OPEN_ITEM`) — the unsplit twin of
+    /// [`WorldWriter::open_item`], for the probe's live open-item verification.
+    pub fn open_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {
+        self.send(
+            opcode::CMSG_OPEN_ITEM,
+            &messages::open_item(bag_index, slot),
+        )
+    }
+
     /// Equip a bag item (`CMSG_AUTOEQUIP_ITEM`) — the unsplit twin of
     /// [`WorldWriter::auto_equip_item`], for the probe's live equip verification.
     pub fn auto_equip_item(&mut self, bag_index: u8, slot: u8) -> Result<()> {

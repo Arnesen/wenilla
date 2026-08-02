@@ -663,6 +663,7 @@ fn writer_loop(
                         spell_index,
                         go_target,
                     } => w.use_item(bag_index, slot, spell_index, go_target),
+                    ClientCommand::OpenItem { bag_index, slot } => w.open_item(bag_index, slot),
                     ClientCommand::AutoEquipItem { bag_index, slot } => {
                         w.auto_equip_item(bag_index, slot)
                     }

@@ -29,11 +29,24 @@ pub(super) struct ItemInstance {
     /// Instance `ITEM_FIELD_FLAGS` — the openable lock sub-gate reads UNLOCKED `0x4`
     /// (`0x52e30c`) and the wrapped-gift arm WRAPPED `0x8` (`0x52e31d`).
     pub flags: u32,
-    /// The ref's `p6=0` source class (wow-re §1-OPENABLE, byte-census 2026-07-20): ITEM_OPENABLE
-    /// is reachable ONLY from object-present p6=0 sources (SetSendMailItem, SetAuctionSellItem,
-    /// SetBuybackItem) — `SetBagItem`/`SetInventoryItem` pass p6=1 and a `[this+0x440]` gate
-    /// (`0x52e2e8`) bypasses the openable tree entirely. Every current benilla source is p6=1
-    /// or template-only, so this stays `false` until those tooltips carry real instances.
+    /// May this source emit the ITEM_OPENABLE line at all?
+    ///
+    /// wow-re §1-OPENABLE (byte-census 2026-07-20) reads a `[this+0x440]` gate at `0x52e2e8` as
+    /// bypassing the whole openable tree for every `p6=1` binding, and concludes that
+    /// `SetBagItem` — the binding your own bags hover through — can NEVER emit it. **That
+    /// conclusion is contradicted by ground truth:** the director's screenshot shows a Small
+    /// Barnacled Clam hovered IN A BAG with the green `<Right Click to Open>` line, and vmangos's
+    /// own `ITEM_FLAG_LOOTABLE` comment names that exact client behaviour ("It or lockid set
+    /// enable for client show 'Right click to open'"). A line that could only ever appear on the
+    /// send-mail / auction-sell / buyback tooltips would also be behaviourally absurd. The note is
+    /// additionally self-inconsistent there (§1-CREATOR puts the GIFTCREATOR read at `0x52e32a`,
+    /// inside the region §1-OPENABLE calls the openable emit + jump), so the transcription — not
+    /// the observation — is the suspect. A wow-re §5 re-derivation of `[0x52e2e0, 0x52e376)` is in
+    /// flight; until it lands, the bag hover follows the director's eyes.
+    ///
+    /// The flag is kept rather than deleted because the *template-vs-instance* distinction it also
+    /// carries is settled (gate 1, `0x52e2e0`: no object ⇒ no line — you can't right-click a
+    /// hyperlink), and because the p6 split may still be real for the sources we cannot observe.
     pub openable_source: bool,
 }
 

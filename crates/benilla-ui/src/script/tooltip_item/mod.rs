@@ -309,7 +309,10 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 creator: s.creator.clone(),
                                 has_text: false,
                                 flags: s.flags,
-                                // p6=1 in the ref — SetInventoryItem can never emit OPENABLE.
+                                // Unobservable either way: nothing openable is equippable, so the
+                                // doll hover has no case to show. Left `false` (wow-re
+                                // §1-OPENABLE's p6 reading) rather than flipped on the bag's
+                                // evidence — see `ItemInstance::openable_source`.
                                 openable_source: false,
                             },
                         )
@@ -375,8 +378,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                             creator: s.creator.clone(),
                             has_text: s.readable,
                             flags: s.flags,
-                            // p6=1 in the ref — SetBagItem can never emit OPENABLE (§1-OPENABLE).
-                            openable_source: false,
+                            // The bag hover DOES emit `<Right Click to Open>` — director-observed
+                            // (a clam in a bag), against wow-re §1-OPENABLE's p6 reading. See
+                            // `ItemInstance::openable_source`: that gate is under re-derivation,
+                            // and the observation is the ground truth we build on.
+                            openable_source: true,
                         },
                     ),
                     None => return Ok(MultiValue::from_vec(vec![Value::Nil])),

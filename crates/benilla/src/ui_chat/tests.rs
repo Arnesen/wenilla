@@ -602,20 +602,60 @@ fn real_alias_table_resolves_the_shipped_commands() {
             "{line} resolves to an emote"
         );
     }
-    // …and the four names the reference has NO command for, which the DBC-name match used to
-    // accept. `/follow` is the sharp one: it fired a text emote where the real client's
-    // `SlashCmdList["FOLLOW"]` follows your target (benilla has no follow yet, so it is honestly
-    // unknown rather than wrongly an emote).
-    for line in ["/follow", "/joke", "/puzzle", "/attackmytarget"] {
+    // …and the three names the reference has NO command for, which the DBC-name match used to
+    // accept as emotes.
+    for line in ["/joke", "/puzzle", "/attackmytarget"] {
         assert_eq!(parse_line(line), ParsedChat::Unknown, "{line}");
     }
+    // `/follow` was the sharp one in that class: the DBC-name match fired a text emote where the
+    // real client's `SlashCmdList["FOLLOW"]` follows your target. 0881 made it honestly unknown;
+    // 0890 makes it the real command, over all three shipped aliases (SLASH_FOLLOW1-6 → `/f`,
+    // `/follow`, `/fol`).
+    for line in ["/follow", "/f", "/fol"] {
+        assert_eq!(
+            parse_line(line),
+            ParsedChat::Follow { name: None },
+            "{line}"
+        );
+    }
+    assert_eq!(
+        parse_line("/follow Probeone"),
+        ParsedChat::Follow {
+            name: Some("Probeone".into())
+        }
+    );
     // A command whose handler benilla does not register answers like any unknown command.
     assert_eq!(parse_line("/ginvite"), ParsedChat::Unknown);
+    // The by-name selection pair (decision 0886) — every shipped alias, and the whole-argument
+    // grammar that makes a multi-word creature name ONE name. `/tar` and `/a` are the short forms
+    // the shipped strings carry (SLASH_TARGET2/4, SLASH_ASSIST1/3).
+    assert_eq!(
+        parse_line("/target Kobold Vermin"),
+        ParsedChat::Target {
+            name: Some("Kobold Vermin".into())
+        },
+        "the argument is trimmed WHOLE — `GetSlashCmdTarget`'s gsub, not a first-word split"
+    );
+    assert_eq!(
+        parse_line("/tar   Hogger  "),
+        ParsedChat::Target {
+            name: Some("Hogger".into())
+        }
+    );
+    assert_eq!(parse_line("/target"), ParsedChat::Target { name: None });
+    assert_eq!(
+        parse_line("/a Bob"),
+        ParsedChat::Assist {
+            name: Some("Bob".into())
+        }
+    );
+    assert_eq!(parse_line("/assist"), ParsedChat::Assist { name: None });
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
-    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **55 distinct
-    // aliases** across the 28 registered `SlashCmdList` indices.
-    assert_eq!(table.counts(), (55, 225), "(slash, emote) aliases");
+    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **62 distinct
+    // aliases** across the 31 registered `SlashCmdList` indices (0886 added TARGET's `/target`
+    // `/tar` and ASSIST's `/assist` `/a` to 0881's 55; 0890 added FOLLOW's `/f` `/follow` `/fol`).
+    assert_eq!(table.counts(), (62, 225), "(slash, emote) aliases");
 }
 
 // ── The send-side posture-eligibility gate (`emote_send_eligible`) — the director-verified rows

@@ -306,6 +306,53 @@ impl ZKey {
     pub const fn raw(self) -> u64 {
         self.0
     }
+
+    /// Unpack this key back into its fields.
+    #[inline]
+    pub const fn parts(self) -> ZParts {
+        unpack(self.0)
+    }
+}
+
+/// The fields of a packed [`ZKey`], in significance order — the readable face of an opaque `u64`.
+///
+/// A draw-order key is a single number by design (one sort produces the whole render list), which
+/// makes every question *about* an order — "why is this over that?", "which pairs would a re-rank
+/// invert?" — unanswerable at a glance. [`unpack`] is that answer, and it is why
+/// [`crate::script::ExtractedQuad::z`] can stay a bare `u64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZParts {
+    /// The frame strata bucket id (0..=9, [`Strata::index`]).
+    pub strata: u8,
+    /// The frame level within the strata bucket.
+    pub level: u16,
+    /// The draw layer (0..=4, [`DrawLayer::index`]) — bucket-wide, above the frame (decision 0884).
+    pub layer: u8,
+    /// `true` for a font string: all textures of a `(strata, level, layer)` precede all its text.
+    pub is_fontstring: bool,
+    /// The owning frame's link-stamp — its position in the client's intrusive bucket list.
+    pub insertion: u32,
+    /// `false` for a frame's own slot, `true` for one of its regions.
+    pub is_region: bool,
+    /// The Era `textureSubLevel` knob; inert for 1.12 content (always 0 there).
+    pub sub_level: i8,
+    /// Declaration order within the owning frame's layer.
+    pub decl: u16,
+}
+
+/// Unpack a raw [`ZKey`] (e.g. [`crate::script::ExtractedQuad::z`]) into its fields.
+#[inline]
+pub const fn unpack(raw: u64) -> ZParts {
+    ZParts {
+        strata: ((raw >> STRATUM_SHIFT) & 0xf) as u8,
+        level: ((raw >> LEVEL_SHIFT) & 0xffff) as u16,
+        layer: ((raw >> LAYER_SHIFT) & 0x7) as u8,
+        is_fontstring: (raw >> FONTSTRING_SHIFT) & 1 == 1,
+        insertion: ((raw >> INSERTION_SHIFT) & ((1 << INSERTION_BITS) - 1)) as u32,
+        is_region: (raw >> IS_REGION_SHIFT) & 1 == 1,
+        sub_level: (((raw >> SUBLEVEL_SHIFT) & 0xff) as i16 - 128) as i8,
+        decl: ((raw >> DECL_SHIFT) & ((1 << DECL_BITS) - 1)) as u16,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -329,9 +376,9 @@ pub enum ZTarget {
 /// (`propagation.md`) — a child of a hidden frame already carries `effective_visible == false` and is
 /// skipped here. Each visible frame emits its own [`ZTarget::Frame`] entry followed by one
 /// [`ZTarget::Region`] per owned region; the returned vec is sorted ascending by [`ZKey`], which *is*
-/// the total draw order (strata → **layer** → frame link-stamp → is-region → sub-level →
-/// texture<fontstring → decl; the layer outranks the frame — see the `ZKey` bit-layout note and
-/// decision 0884). Ties are impossible: distinct frames differ in link-stamp, a frame and its
+/// the total draw order (strata → frame level → **draw layer** → texture<fontstring → frame
+/// link-stamp → is-region → sub-level → decl; the layer outranks the frame — see the `ZKey`
+/// bit-layout note and decision 0884). Ties are impossible: distinct frames differ in link-stamp, a frame and its
 /// regions differ in the is-region bit, and a frame's regions differ in the remaining fields.
 ///
 /// Ordering only: this emits an entry for *every* region of a visible frame. Region-level

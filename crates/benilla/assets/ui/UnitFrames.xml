@@ -12,12 +12,20 @@
         LAYERING (matches the ref's structure). The draw order must be trough < bars < ring art < text:
         the frame's metal well-edges overlap the bar edges so the bars read RECESSED, not pasted on top.
         The ref gets this with a child `TargetFrameTextureFrame` (ring art) and `SetFrameLevel(bar,
-        textureFrame-1)` to push the bars beneath it. Our z-model tie-breaks a `(strata, level)` bucket by
-        frame *insertion* order (crates/benilla-ui/src/order.rs), so we get the same result structurally
-        and without SetFrameLevel: the parent holds trough + portrait (+ target's name plate) in
-        BACKGROUND; the `$parentHealthBar`/`$parentPowerBar` StatusBars come next; then
+        textureFrame-1)` to push the bars beneath it, and we do the same, in BenillaUnitFrame_OnLoad:
+        the parent holds trough + portrait (+ target's name plate) in BACKGROUND; the
+        `$parentHealthBar`/`$parentPowerBar` StatusBars sit at the PARENT's frame level; and
         `$parentTextureFrame` (232×100, filling the parent) holds the ring art (BACKGROUND) + name/level/dead text
-        (OVERLAY), declared LAST so it draws over the bar edges and the portrait. The ring's art is a THIN
+        (OVERLAY) one level ABOVE them, so it draws over the bar edges and the portrait.
+
+        That SetFrameLevel is load-bearing, and this file used to do without it. Until decision 0884
+        the bars were held under the ring art by DECLARING `$parentTextureFrame` after them, leaning on
+        the old draw key's insertion-order tie-break between siblings at one `(strata, level)`. 0884
+        pinned the real law at the binary: the draw LAYER is bucket-wide and outranks the frame, so
+        siblings interleave by layer and the bars' ARTWORK fills painted straight over the TextureFrame's
+        BACKGROUND ring art (the frames read as pasted-on slabs — director report, 2026-08-02). Frame
+        level is the one term above the layer, which is exactly why the reference spends a level here.
+        Do not "simplify" this back into declaration order. The ring's art is a THIN
         band with transparent corners (not an opaque surround), so the square is hidden by the portrait
         itself — set via SetPortraitToTexture, masked to its inscribed circle (the client's portraits are
         always round: a model render or a circular-cropped icon), so no corner reaches the ring's gap. The
@@ -129,6 +137,13 @@
             -- The name/level/dead text live inside $parentTextureFrame (so they draw over the ring art
             -- that draws over the bars), so their global names carry the TextureFrame prefix.
             local tf = name .. "TextureFrame"
+            -- The recessed-bar look, the reference's own mechanism (ref-TargetFrame.lua l.32-34):
+            -- push the bars one frame level BELOW the ring art's TextureFrame. Frame level is the
+            -- only key term above the draw layer (decision 0884), so this is the only thing that can
+            -- hold a BACKGROUND ring texture over an ARTWORK bar fill. See the LAYERING note up top.
+            local textureFrameLevel = getglobal(tf):GetFrameLevel()
+            frame.healthBar:SetFrameLevel(textureFrameLevel - 1)
+            frame.powerBar:SetFrameLevel(textureFrameLevel - 1)
             frame.nameText  = getglobal(tf .. "NameText")
             frame.levelText = getglobal(tf .. "LevelText")
             frame.deadText  = getglobal(tf .. "DeadText")
@@ -752,8 +767,11 @@
                     </Anchors>
                     <Color r="0" g="0" b="0" a="0.5"/>
                 </Texture>
-                <!-- Portrait 64×64 TOPLEFT (42,-12) (ref l.35-46, moved ARTWORK→BACKGROUND so the ring
-                     art draws over it). Texture set in OnLoad via SetPortraitToTexture (circle-masked). -->
+                <!-- Portrait 64×64 TOPLEFT (42,-12) (ref l.35-46, which puts it in ARTWORK; ours sits
+                     in BACKGROUND, a leftover of the pre-0884 layering. The ring art now clears it by
+                     frame LEVEL, and nothing else in this layer overlaps the portrait's square, so the
+                     two are indistinguishable here — left alone rather than churned inside a bug fix).
+                     Texture set in OnLoad via SetPortraitToTexture (circle-masked). -->
                 <Texture name="$parentPortrait">
                     <Size><AbsDimension x="64" y="64"/></Size>
                     <Anchors>
@@ -761,8 +779,9 @@
                     </Anchors>
                 </Texture>
             </Layer>
-            <!-- The ring art + name/level text live in $parentTextureFrame below (declared AFTER the
-                 bars) so they draw OVER the bar edges — the recessed-bar look. See the LAYERING note. -->
+            <!-- The ring art + name/level text live in $parentTextureFrame below, one frame level
+                 ABOVE the bars, so they draw OVER the bar edges — the recessed-bar look. OnLoad puts
+                 them there (SetFrameLevel); see the LAYERING note at the top of this file. -->
         </Layers>
         <Frames>
             <!-- Health bar 119×12 TOPLEFT (106,-41), UI-StatusBar, green (ref l.288-315). -->
@@ -784,8 +803,9 @@
                 <BarColor r="0.0" g="0.0" b="1.0"/>
             </StatusBar>
             <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame). 232×100 fills the
-                 parent; declared after the StatusBars so it draws over their edges — our z-model's
-                 insertion-order equivalent of the ref's SetFrameLevel(bar, textureFrame-1). -->
+                 parent; it draws over the bar edges because OnLoad pushes the bars one frame level
+                 BELOW it (the ref's SetFrameLevel(bar, textureFrame-1)) — NOT because of where it
+                 is declared. See the LAYERING note at the top of this file. -->
             <Frame name="$parentTextureFrame">
                 <Size><AbsDimension x="232" y="100"/></Size>
                 <Anchors>
@@ -965,9 +985,10 @@
                 <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
                 <BarColor r="0.0" g="0.0" b="1.0"/>
             </StatusBar>
-            <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame); declared after the
-                 StatusBars so it draws over their edges (our z-model's insertion-order equivalent of
-                 the ref's SetFrameLevel(bar, textureFrame-1)). -->
+            <!-- The ring art + text, over the bars (ref TargetFrameTextureFrame); it draws over the
+                 bar edges because OnLoad pushes the bars one frame level BELOW it (the ref's
+                 SetFrameLevel(bar, textureFrame-1)) — NOT because of where it is declared. See the
+                 LAYERING note at the top of this file. -->
             <Frame name="$parentTextureFrame">
                 <Size><AbsDimension x="232" y="100"/></Size>
                 <Anchors>

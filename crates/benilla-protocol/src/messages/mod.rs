@@ -105,9 +105,10 @@ pub use group::{
     PartyMemberStatsInfo, RaidTargetUpdate, ReadyCheck, GROUP_MEMBER_ASSISTANT,
 };
 pub use items::{
-    auto_equip_item, auto_store_bag_item, destroy_item, item_query, set_ammo, split_item,
-    swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry, ItemUseSpell,
-    BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
+    auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
+    split_item, swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry,
+    ItemUseSpell, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED,
+    ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{
     autostore_loot_item, loot, loot_error, loot_money, loot_release, loot_roll, loot_type,

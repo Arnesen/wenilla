@@ -379,6 +379,12 @@ pub(crate) struct Player {
     /// places the other forward sources do — the direction vector, the wire flags, the swim
     /// amounts, and the turn-rate's "am I translating" test.
     pub(super) autorun: bool,
+    /// **`/follow` is holding the forward key this frame** (decision 0890). Not a mode of its own:
+    /// the reference's follow owns no translation and simply pushes the same move-forward bit the W
+    /// key does (`0x60e790`), so this folds into [`forward_axis`] beside `autorun` and the
+    /// both-button run rather than driving the mover itself. Rewritten every frame by
+    /// [`super::follow::steer_follow`], which runs just before the controller reads it.
+    pub(super) follow_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
     /// Feet position in **Bevy** coords (converted to raw WoW only when sending to the server).

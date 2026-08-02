@@ -249,6 +249,9 @@ mod tests {
     use super::*;
 
     use super::test_template as info;
+    use benilla_protocol::messages::{
+        ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED, ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER,
+    };
     use crossbeam_channel::TryRecvError;
 
     fn commands() -> (NetCommands, crossbeam_channel::Receiver<ClientCommand>) {
@@ -289,6 +292,35 @@ mod tests {
         items.insert_template(9999, None);
         assert_eq!(items.take_fresh(), vec![117]);
         assert!(items.take_fresh().is_empty(), "a drain empties the queue");
+    }
+
+    /// The one predicate both halves of the right-click-to-open affordance ask
+    /// (`ItemInfo::openable`): the tooltip's green line and the `CMSG_OPEN_ITEM` fork. Its whole
+    /// subtlety is the two sub-gates — a `LockID` template stays shut until the INSTANCE carries
+    /// UNLOCKED, and a wrapper template needs the instance's WRAPPED bit — so a template-only
+    /// view (instance flags 0) can never be openable.
+    #[test]
+    fn openable_is_the_lootable_bit_behind_its_lock_and_gift_sub_gates() {
+        let plain = |flags: u32, lock_id: u32| {
+            let mut t = info("Small Barnacled Clam");
+            t.flags = flags;
+            t.lock_id = lock_id;
+            t
+        };
+
+        // The clam: LOOTABLE, no lock — openable outright, instance flags irrelevant.
+        assert!(plain(ITEM_FLAG_LOOTABLE, 0).openable(0));
+        // An ordinary item is never openable, however its instance is flagged.
+        assert!(!plain(0, 0).openable(ITEM_DYNFLAG_UNLOCKED | ITEM_DYNFLAG_WRAPPED));
+        // A junkbox: LOOTABLE but locked — shut until the instance says UNLOCKED.
+        assert!(!plain(ITEM_FLAG_LOOTABLE, 7).openable(0));
+        assert!(plain(ITEM_FLAG_LOOTABLE, 7).openable(ITEM_DYNFLAG_UNLOCKED));
+        // Gift wrap: the WRAPPER template opens only while the instance is still WRAPPED.
+        assert!(!plain(ITEM_FLAG_WRAPPER, 0).openable(0));
+        assert!(plain(ITEM_FLAG_WRAPPER, 0).openable(ITEM_DYNFLAG_WRAPPED));
+        // The wrapped arm ignores the lock gate entirely — it is the sibling `||`, not a nested
+        // case: a wrapped gift of a locked box opens as the gift.
+        assert!(plain(ITEM_FLAG_WRAPPER | ITEM_FLAG_LOOTABLE, 7).openable(ITEM_DYNFLAG_WRAPPED));
     }
 
     #[test]

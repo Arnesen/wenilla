@@ -85,13 +85,14 @@
 //!   [`crate::model_fade::ParentModel`] link up to the unit — the recursion itself, and the same walk
 //!   `ModelAlphas` already does for alpha.
 //!
-//! **Proc 11 ships too** (decision 0889): the **freeze**. Its param is a playback *rate* written onto
-//! the unit's own animation clocks (`0x60db7e` → `SetBoneAnimSpeed 0x712910` on the mount's bone 0,
-//! the body's key-bone 4 — the upper-body split — and the body's bone 0), old rates saved in the node
-//! and written back when it expires (`0x6203e0`). Rate 0 is Ice Block: the pose holds exactly where
-//! it was, *including* a cast one-shot that had just been armed, which is why the caster never gets
-//! to raise their hand. [`apply_aura_anim_rate`] is that leg, and the reference's save/restore is
-//! [`AnimRateFreeze`].
+//! **Proc 11 ships too** (decisions 0889 + 0891): the **freeze**. Its param is a playback *rate*
+//! written onto the unit's own animation clocks (`0x60db7e` → `SetBoneAnimSpeed 0x712910` on the
+//! mount's bone 0, the body's key-bone 4 — the upper-body split — and the body's bone 0), old rates
+//! saved in the node and written back when it expires (`0x6203e0`). Rate 0 is Ice Block: the pose
+//! holds exactly where it was, *including* a cast one-shot that had just been armed, which is why the
+//! caster never gets to raise their hand. [`apply_aura_anim_rate`] is that leg — and it expresses
+//! rate 0 as a **pause**, not as a speed, because the reference's rate belongs to a bone while a speed
+//! here belongs to a clip that other code copies from ([`AnimRateFreeze`] carries the story).
 //!
 //! Types 2, 7 and 13 also appear on state kits (Berserk/Bloodlust's 2, the Sap/Feign-Death 7, the
 //! "Glowy (Red)" 13) and have **no verified mechanism** — they fall through [`node_for`]'s single `_`
@@ -319,33 +320,50 @@ fn tint_probe() -> Option<[u8; 3]> {
     })
 }
 
-/// On a rig whose clocks a proc-11 aura is holding: the playback speeds we took over, so the release
-/// can hand them back — the reference's own `+0x60`/`+0x64`/`+0x68` (`0x6201d0` saves the three bone
-/// rates before overwriting them; `0x6203e0` writes them back when the node expires with the aura).
+/// Marker: this rig's clocks are being held by a proc-11 aura, so the release knows to let them go.
 ///
-/// Keyed by animation node because that is what a speed belongs to here: the reference saves per
-/// *bone* because a rate is a bone-clock property there, and ours is per armed clip.
+/// It carries **nothing**, and that is the fix for the first shipped version's bug. That one stored
+/// the speed of every clip it took over and wrote the values back on release — the reference's own
+/// `+0x60`/`+0x64`/`+0x68` save/restore, transliterated one level too low. It cannot work here,
+/// because in the reference a rate belongs to a *bone* (one value, saved once, and clips armed later
+/// never carry one) while ours would have to belong to a *clip*, and clips get armed under the freeze
+/// carrying values copied from other, already-frozen clips. `transplant_up` is exactly that: moving a
+/// one-shot to the torso overlay copies the source clip's speed, which under the freeze was `0`, so
+/// the overlay was saved at `0`, restored to `0`, and never advanced again — a cast pose welded to the
+/// upper body for the rest of the session, surviving every later cast (it never *finished*, so the
+/// overlay never released). Pausing owns no value and so cannot poison one.
 #[derive(Component, Default, Debug)]
-pub(crate) struct AnimRateFreeze {
-    saved: Vec<(AnimationNodeIndex, f32)>,
-}
+pub(crate) struct AnimRateFreeze;
 
-/// Hold every unit whose head proc-11 node says so at that node's rate — its own rig and its mount's
-/// (`[unit+0xd8]` and `[unit+0xdc]`, the two models `0x6201d0` writes) — and hand the speeds back
-/// when the aura goes.
+/// Hold the clocks of every unit whose head proc-11 node says so — its own rig and its mount's
+/// (`[unit+0xd8]` and `[unit+0xdc]`, the two models `0x6201d0` writes) — and let them go when the aura
+/// does.
+///
+/// **A rate of 0 is expressed as a PAUSE, not as `set_speed(0.0)`.** They are the same picture on
+/// screen (Bevy evaluates a paused animation at its frozen seek, exactly as `0x712910`'s `bias` rebase
+/// holds the reference's current frame) but not the same object: a pause is a bit the clock reads,
+/// where a speed is a *value* other code copies. `transplant_up` copies a clip's speed when it moves a
+/// one-shot to the torso overlay, and that is how the first version welded a cast pose to the upper
+/// body permanently — see [`AnimRateFreeze`] and decision 0891. Nothing here reads or writes a speed, so nothing can
+/// inherit the freeze and outlive it.
 ///
 /// **Reasserted every frame, and that is the faithful shape, not a belt-and-braces clamp.** The
 /// reference's rate lives on the bone (`+0xb0`, the factor `timebase.md` §2's clock multiplies its
 /// window by) and **arming an animation does not touch it**: op4 `0x7121a0`'s success leg writes the
 /// track index and the cursors and leaves `+0xb0` alone (only its disarm leg and `SetBoneAnimSpeed
 /// 0x712910` write it). So "rate 0 until the aura is reaped" is literally the reference's state
-/// across every re-arm in between, and re-writing it each frame is how a per-clip speed says the
-/// same thing.
+/// across every re-arm in between, and re-pausing each frame is how a per-clip flag says the same
+/// thing — including for clips armed *under* the freeze, which the reference freezes by construction.
 ///
 /// It runs **after the driver**, so this frame's arms are already in — which is the whole Ice Block
 /// observable: the cast one-shot is armed and then frozen at the frame it was on, so the caster never
-/// gets to raise their hand (`0x712910` re-bases `bias` to preserve the current frame, so rate 0
-/// holds the pose exactly where it stood).
+/// gets to raise their hand.
+///
+/// **A non-zero rate does nothing** (and only kit 1744's `8947848.0` is one — a packed grey that
+/// landed in the rate column, on Stoned / Petrification / Thadius Spawn). Our clock is f32 seconds
+/// where the reference's is integer milliseconds with a modulo, so a rate that large is noise there
+/// and different noise here; there is no honest transliteration, and inventing one would be worse than
+/// saying so. Recorded, not special-cased.
 ///
 /// What it deliberately does **not** touch: attached effect models (the ice block's own
 /// `icebarrier_state.mdx` keeps shimmering — the reference writes the unit's two models only) and
@@ -356,65 +374,59 @@ pub(crate) fn apply_aura_anim_rate(
         &AuraNodes,
         Option<&crate::entities::mount::MountChild>,
     )>,
-    mut rigs: Query<(&mut AnimationPlayer, Option<&mut AnimRateFreeze>)>,
+    mut rigs: Query<(&mut AnimationPlayer, Has<AnimRateFreeze>)>,
     mut commands: Commands,
 ) {
     for (entity, nodes, mount) in &units {
-        let rate = nodes.head_anim_rate();
+        let frozen = nodes.head_anim_rate() == Some(0.0);
         for rig in [Some(entity), mount.map(|m| m.0)].into_iter().flatten() {
-            let Ok((mut player, freeze)) = rigs.get_mut(rig) else {
+            let Ok((mut player, held)) = rigs.get_mut(rig) else {
                 continue;
             };
-            match (rate, freeze) {
-                (Some(rate), Some(mut freeze)) => hold(&mut player, &mut freeze, rate),
-                (Some(rate), None) => {
-                    let mut fresh = AnimRateFreeze::default();
-                    hold(&mut player, &mut fresh, rate);
-                    trace_clock_edge("freeze", rig, rate, &fresh);
-                    commands.entity(rig).try_insert(fresh);
-                }
-                (None, Some(freeze)) => {
-                    for (node, speed) in &freeze.saved {
-                        if let Some(anim) = player.animation_mut(*node) {
-                            anim.set_speed(*speed);
-                        }
+            match (frozen, held) {
+                (true, _) => {
+                    for (_, anim) in player.playing_animations_mut() {
+                        anim.pause();
                     }
-                    trace_clock_edge("thaw", rig, 1.0, &freeze);
+                    if !held {
+                        trace_clock_edge("freeze", rig, &player);
+                        commands.entity(rig).try_insert(AnimRateFreeze);
+                    }
+                }
+                (false, true) => {
+                    // Resume everything: the set we paused is "whatever was playing", and it grew
+                    // every frame the freeze held. Nothing else on a unit rig pauses an animation
+                    // (the portrait booth does, on its own rigs), so there is no third party's pause
+                    // to trample.
+                    for (_, anim) in player.playing_animations_mut() {
+                        anim.resume();
+                    }
+                    trace_clock_edge("thaw", rig, &player);
                     commands.entity(rig).try_remove::<AnimRateFreeze>();
                 }
-                (None, None) => {}
+                (false, false) => {}
             }
         }
     }
 }
 
-/// Take every playing animation's clock to `rate`, remembering the speed each one was running at the
-/// first time we touch it — a clip armed *during* the freeze is saved on its own first frame, so the
-/// release hands back what the driver meant rather than a blanket 1.0.
-fn hold(player: &mut AnimationPlayer, freeze: &mut AnimRateFreeze, rate: f32) {
-    for (node, anim) in player.playing_animations_mut() {
-        if !freeze.saved.iter().any(|(n, _)| n == node) {
-            freeze.saved.push((*node, anim.speed()));
-        }
-        anim.set_speed(rate);
-    }
-}
-
 /// The freeze's own instrument (`WOW_MOVE_TRACE`, tag `aur`): one line per rig at each edge, naming
-/// the clips it took over and the speeds it is holding — the difference between "the clocks stopped"
-/// and "nothing was playing anyway", which no count of *absent* anim events can tell apart.
-fn trace_clock_edge(what: &str, rig: Entity, rate: f32, freeze: &AnimRateFreeze) {
+/// the clips it took over and the speed each is *left* running at — the difference between "the clocks
+/// stopped" and "nothing was playing anyway", which no count of *absent* anim events can tell apart.
+///
+/// It prints the speeds precisely because the first version's bug was invisible without them: a `@0`
+/// on the thaw line is a clip that will never advance again.
+fn trace_clock_edge(what: &str, rig: Entity, player: &AnimationPlayer) {
     if !crate::dbg_trace::enabled_for("aur") {
         return;
     }
-    let clips: Vec<String> = freeze
-        .saved
-        .iter()
-        .map(|(n, s)| format!("{}@{s}", n.index()))
+    let clips: Vec<String> = player
+        .playing_animations()
+        .map(|(n, a)| format!("{}@{}", n.index(), a.speed()))
         .collect();
     crate::dbg_trace::line(
         "aur",
-        &format!("{what} rig={rig} rate={rate} clips=[{}]", clips.join(" ")),
+        &format!("{what} rig={rig} clips=[{}]", clips.join(" ")),
     );
 }
 

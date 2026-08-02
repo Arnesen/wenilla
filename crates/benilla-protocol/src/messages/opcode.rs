@@ -218,6 +218,12 @@ pub const CMSG_GAMEOBJECT_QUERY: u16 = 0x005E; // 94
 pub const CMSG_QUEST_QUERY: u16 = 0x005C; // 92
 pub const CMSG_ITEM_QUERY_SINGLE: u16 = 0x0056; // 86
 pub const CMSG_USE_ITEM: u16 = 0x00AB; // 171
+/// VERIFIED vmangos `Opcodes_1_12_1.h:175`: 172. Body in [`super::items::open_item`] — the bag
+/// position of an *openable* item (a clam, an unlocked lockbox, a wrapped gift). The right-click
+/// fork `CMSG_USE_ITEM` never takes: the server answers `SMSG_LOOT_RESPONSE` on the **item's own
+/// guid** (`HandleOpenItemOpcode` → `SendLoot(item, LOOT_CORPSE)`), so the loot window opens over
+/// a thing in your bag rather than a corpse in the world.
+pub const CMSG_OPEN_ITEM: u16 = 0x00AC; // 172
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 177. Body in [`super::gameobj_use`] — a full guid, the
 /// GameObject to use (decision 0236). Not interchangeable with `CMSG_LOOT`: the server rejects a
 /// GameObject guid on `CMSG_LOOT`, so a chest opens its loot through this opcode.

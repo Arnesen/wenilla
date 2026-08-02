@@ -71,6 +71,9 @@ pub(super) enum SlashIndex {
     LootFfa,
     LootRoundRobin,
     LootMaster,
+    Target,
+    Assist,
+    Follow,
 }
 
 impl SlashIndex {
@@ -105,13 +108,16 @@ impl SlashIndex {
             Self::LootFfa => "LOOT_FFA",
             Self::LootRoundRobin => "LOOT_ROUNDROBIN",
             Self::LootMaster => "LOOT_MASTER",
+            Self::Target => "TARGET",
+            Self::Assist => "ASSIST",
+            Self::Follow => "FOLLOW",
         }
     }
 
     /// Every registered index — the registry proper. A reference command NOT in this list resolves
     /// nowhere and answers `HELP_TEXT_SIMPLE`, exactly as an unknown command does in the reference
     /// (better than a registered handler that silently does nothing).
-    const ALL: [Self; 28] = [
+    const ALL: [Self; 31] = [
         Self::Reply,
         Self::Join,
         Self::Leave,
@@ -140,6 +146,9 @@ impl SlashIndex {
         Self::LootFfa,
         Self::LootRoundRobin,
         Self::LootMaster,
+        Self::Target,
+        Self::Assist,
+        Self::Follow,
     ];
 }
 

@@ -405,18 +405,16 @@ pub(super) enum Mode {
     /// *edge* exits — the FALLINGFAR latch's Fall (played ONCE, at the latch edge
     /// `0x61a820` — 0864's per-tick re-assert was §5-refuted, decision 0868; a clip armed
     /// after the latch holds like any other) and the `0x602c60` land pick at touchdown. Grounded
-    /// (`under == None`) it returns to Gait when it finishes; a new one restarts it — and, like
-    /// [`Mode::Land`], any movement-flag change from `flags` (captured at play time) re-picks
-    /// immediately: the client's locomotion re-arm overwrites bone 0 blindly on the change (the
-    /// same re-arm decision 0280 named), so a shot fired standing yields to the run the instant
-    /// the player moves instead of sliding the clip out. The *masked* route never enters here —
-    /// it plays as an overlay beside `Mode`, leaving the base machine (this enum) running
-    /// underneath.
-    Swing {
-        id: u16,
-        flags: u32,
-        under: Option<Special>,
-    },
+    /// (`under == None`) it returns to Gait when it finishes; a new one restarts it — and any
+    /// movement-flag change since the **base** was last armed
+    /// ([`AnimDriver::gait_flags`](crate::creature_anim::AnimDriver)) re-picks immediately: the
+    /// client's base re-arm overwrites bone 0 blindly on the change (the same re-arm decision 0280
+    /// named), so a shot fired standing yields to the run the instant the player moves instead of
+    /// sliding the clip out. It carried its own arm-time flags until 0894, which made the edge
+    /// invisible whenever the one-shot and the movement change landed on the same frame. The
+    /// *masked* route never enters here — it plays as an overlay beside `Mode`, leaving the base
+    /// machine (this enum) running underneath.
+    Swing { id: u16, under: Option<Special> },
 }
 
 /// The gait an idle/moving unit should play in [`Mode::Gait`], most-specific id first with fallbacks so a
@@ -973,6 +971,25 @@ const RATE_SCALED: &[u16] = &[4, 5, 11, 12, 13, 37, 38, 39, 42, 43, 44, 45, 135,
 /// transplanting it, exactly as the bytes order it.
 pub(super) fn is_locomotion(id: u16) -> bool {
     RATE_SCALED.contains(&id)
+}
+
+/// Whether the gait this movement state resolves to is a **locomotion** id — i.e. whether a
+/// movement-flag re-arm is the transplant's `0x5fee80` request or an ordinary bone-0 overwrite.
+///
+/// The re-arm at a flag change has no id in hand yet (the gait is recomputed the following frame),
+/// so this asks [`gait_candidates`] what it *will* pick. `ready`/`ranged_load` are passed `None`
+/// deliberately and it changes no answer: both are **standing** idles that locomotion outranks in
+/// the cascade, so a moving unit picks its locomotion id whether or not they are set, and a still
+/// one picks something that is not locomotion either way.
+///
+/// This is the gate Ice Block turns on. A stun's root wipes the direction bits, the flag change
+/// re-arms, and the pick is **Stand(0)** — *not* locomotion — so the cast one-shot on bone 0 is
+/// **overwritten** rather than transplanted onto the torso: the character goes fully neutral before
+/// the freeze catches it (decision 0894, the director's reading of the reference client).
+pub(super) fn gait_is_locomotion(state: &MovementState, walk_speed: f32) -> bool {
+    gait_candidates(state, walk_speed, None, None)
+        .first()
+        .is_some_and(|id| is_locomotion(*id))
 }
 
 /// The playback rate for a clip given the unit's live speed (wow-5875-re `0x5fe2f0`): `speed / moveSpeed`

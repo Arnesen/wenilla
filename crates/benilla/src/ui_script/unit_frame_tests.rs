@@ -1055,3 +1055,145 @@ fn target_frame_border_follows_the_classification_law() {
 
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The recessed-bar look, asserted in the draw list: the ring art's metal well-edges must paint
+/// **over** the health/power fills, and the name/level text over both.
+///
+/// This is the shape decision 0884 broke. Our transcription used to get the ring over the bars by
+/// *declaring* `$parentTextureFrame` after the StatusBars, leaning on the old draw key's
+/// insertion-order tie-break between siblings at one `(strata, level)`. 0884 pinned the real law —
+/// the draw **layer** is bucket-wide and outranks the frame — so the bars' ARTWORK fills started
+/// painting over the TextureFrame's BACKGROUND ring art and the frames read as pasted-on slabs.
+/// The fix is the reference's own mechanism (`TargetFrame.lua` l.32-34): push the bars one frame
+/// level *below* the texture frame, where no layer can lift them back over it.
+#[test]
+fn the_ring_art_paints_over_the_bars() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_unit_frames(&s);
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Onemage".into()),
+            health: 60,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 60,
+            max_power: 100,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("UNIT_HEALTH", vec![ScriptValue::Str("player".into())]);
+    s.resolve();
+    let quads = s.extract();
+
+    // The ring art: `UI-TargetingFrame` exactly — not the `-LevelBackground` / `-Elite` siblings.
+    let ring = quads
+        .iter()
+        .find(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("UI-TargetingFrame"))
+        })
+        .expect("the player frame's ring art");
+    // The bar fills (both bars share the texture; take the highest z of the two).
+    let fill = quads
+        .iter()
+        .filter(|q| {
+            matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("UI-StatusBar"))
+        })
+        .map(|q| q.z)
+        .max()
+        .expect("a bar fill");
+    let name = quads
+        .iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "Onemage"))
+        .expect("the name text");
+
+    assert!(
+        ring.z > fill,
+        "the ring art must paint OVER the bar fills (ring z={:#x}, fill z={fill:#x})",
+        ring.z
+    );
+    assert!(
+        name.z > fill,
+        "the name text must paint OVER the bar fills (name z={:#x}, fill z={fill:#x})",
+        name.z
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The same recessed-bar law for the PARTY member frames, which carry an independent copy of the
+/// idiom (`PartyFrame.xml`'s `$parentTextureFrame` over `$parentHealthBar`/`$parentManaBar`).
+///
+/// Split from the player/target test on purpose: the two files reach the same look through separate
+/// OnLoads, so one green assertion says nothing about the other. This is the copy 0884 broke in
+/// silence — nobody was in a party when the director reported the player frame.
+#[test]
+fn the_party_art_paints_over_the_bars() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    // The loot test's prefix (`loot_tests.rs`): PartyFrame's inline <Script> reads
+    // StaticPopupDialogs, which UiPanels.xml defines, and its per-member dropdown OnLoad walks the
+    // whole popup kit.
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "GameTooltip.xml");
+    load_xml(&s, "UIDropDownMenu.xml");
+    load_xml(&s, "UnitPopup.xml");
+    // BENILLA_POWER_COLORS (the shared power-colour table) lives in UnitFrames.xml; the party
+    // frames' Update reads it. The player/target frames it also defines stay hidden here — no unit.
+    load_xml(&s, "UnitFrames.xml");
+    load_xml(&s, "PartyFrame.xml");
+
+    s.set_unit(
+        "party1",
+        Some(UnitState {
+            exists: true,
+            name: Some("Onepriest".into()),
+            health: 60,
+            max_health: 100,
+            level: 60,
+            power_type: 0,
+            power: 60,
+            max_power: 100,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PARTY_MEMBERS_CHANGED", vec![]);
+    s.resolve();
+    let quads = s.extract();
+
+    // Scoped to member frame 1 by owner name, so a stray UI-StatusBar from any other frame in the
+    // manifest can never stand in for the bar under test.
+    let mine = |q: &benilla_ui::script::ExtractedQuad| {
+        s.quad_owner_name(q.target)
+            .is_some_and(|n| n.starts_with("PartyMemberFrame1"))
+    };
+    let art = quads
+        .iter()
+        .find(|q| {
+            mine(q)
+                && matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("UI-PartyFrame"))
+        })
+        .expect("the party member frame art");
+    let fill = quads
+        .iter()
+        .filter(|q| {
+            mine(q)
+                && matches!(&q.content, QuadContent::Texture { path: Some(p), .. }
+                    if p.ends_with("UI-StatusBar"))
+        })
+        .map(|q| q.z)
+        .max()
+        .expect("a bar fill");
+    assert!(
+        art.z > fill,
+        "the party art must paint OVER the bar fills (art z={:#x}, fill z={fill:#x})",
+        art.z
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

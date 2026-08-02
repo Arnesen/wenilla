@@ -521,6 +521,14 @@ pub(crate) struct AnimDriver {
     /// The gait id currently targeted while in [`Mode::Gait`] (so we cross-fade only on a change). `None`
     /// forces a fresh selection (first eval, or after a Special state exits).
     gait: Option<u16>,
+    /// The movement flags the **base slot** was last armed for — the reference has no per-one-shot
+    /// latch, so "the movement state changed" means *since the base last took a request*, never
+    /// "since this one-shot started" (decision 0894). The distinction is invisible until a one-shot
+    /// and a movement change land on the SAME frame: Ice Block's root wipes the direction bits in
+    /// the very frame the cast one-shot arrives, so an arm-time comparison sees no edge at all and
+    /// the cast keeps bone 0 — where the reference's next base request overwrites it and leaves the
+    /// character neutral.
+    gait_flags: u32,
     /// The unit's **client-side sheath state** — the mirror of the client's committed CUR cache
     /// (`[unit+0xd40]`, decision 0080): what the weapon placement renders (absent a
     /// [`VisualSheath`] ceremony pin) and what the setter/reconcile test against. Seeded from
@@ -661,6 +669,7 @@ impl Default for AnimDriver {
         Self {
             mode: Mode::Gait,
             gait: None,
+            gait_flags: 0,
             sheath_cur: None,
             sheath_byte: None,
             sheath_swap: None,

@@ -649,7 +649,6 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
         drv(&app, spin_last).mode,
         super::super::select::Mode::Swing {
             id: 16,
-            flags: 0,
             under: None,
         },
         "the first arrival holds the body"
@@ -662,7 +661,6 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
         drv(&app, swing_last).mode,
         super::super::select::Mode::Swing {
             id: 57,
-            flags: 0,
             under: None,
         },
         "the spin holds the body through the later swing"
@@ -712,7 +710,6 @@ fn deferred_combat_clip_plays_once_the_body_frees() {
         drv.mode,
         super::super::select::Mode::Swing {
             id: 16,
-            flags: 0,
             under: None,
         },
         "the parked swing armed"
@@ -779,7 +776,6 @@ fn a_movement_flag_change_cuts_a_full_body_oneshot_immediately() {
         mode(&app),
         super::super::select::Mode::Swing {
             id: 16,
-            flags: 0,
             under: None,
         },
         "standing swing holds the base track"
@@ -1331,7 +1327,6 @@ fn a_jump_in_place_cast_replaces_the_hang_and_survives_the_arc() {
         drv(&app, unit).mode,
         super::super::select::Mode::Swing {
             id: 54,
-            flags: move_flags::FALLING,
             under: Some(super::super::select::Special::Jump),
         },
         "the cast replaces the hang full-body — never dropped, never masked"
@@ -2112,5 +2107,102 @@ fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
     assert!(
         settled,
         "the ceremony must end with the pin dropped, leaving the committed state (saw {seen:?})"
+    );
+}
+
+/// **Ice Block, at the mechanism (decision 0894).** The stun's root wipes the direction bits in the
+/// SAME frame the cast one-shot arrives, so the one-shot's own arm-time flags already read ROOT and
+/// an arm-time comparison sees no movement edge — ever. The base's flags still hold the run it was
+/// armed for, so the edge is there, the re-arm resolves to **Stand(0)** (not locomotion → no
+/// transplant), and Stand overwrites the cast on bone 0: the character is fully neutral, with
+/// nothing on the torso, by the time the freeze catches it. Before this the cast held bone 0 for the
+/// whole block, or rode up to the torso and froze an arm out.
+#[test]
+fn a_root_landing_with_the_cast_returns_the_body_to_neutral() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    let overlay = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .overlay
+            .map(|o| o.id)
+    };
+    assert_eq!(gait(&app), Some(5), "running");
+
+    // One frame: the root lands (direction bits wiped) AND the cast one-shot arrives.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::ROOT,
+        ..Default::default()
+    });
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    // The cast takes bone 0 and the base re-arm displaces it inside the same frame — the reference's
+    // one-slot last-writer-wins, which is exactly what the base's flags (still FORWARD) unlock.
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Gait,
+        "the base request wins bone 0 back"
+    );
+    assert!(
+        overlay(&app).is_none(),
+        "no torso transplant: Stand(0) is not a locomotion request"
+    );
+    app.update();
+    assert_eq!(gait(&app), Some(0), "fully neutral standing");
+    assert!(overlay(&app).is_none(), "and nothing left on the torso");
+}
+
+/// The control that keeps 0878 honest: the transplant still fires when the re-arm really *is*
+/// locomotion. A cast fired standing, then the player runs — the legs take Run and the cast keeps
+/// going on the torso, which is the whole of R-B.
+#[test]
+fn a_run_starting_under_a_cast_still_transplants_it_up() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update(); // settle: Stand
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    let overlay = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .overlay
+            .map(|o| o.id)
+    };
+    assert!(matches!(
+        mode(&app),
+        super::super::select::Mode::Swing { id: 54, .. }
+    ));
+
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    assert_eq!(
+        overlay(&app),
+        Some(54),
+        "a locomotion re-arm moves the cast to the torso instead of cutting it"
     );
 }

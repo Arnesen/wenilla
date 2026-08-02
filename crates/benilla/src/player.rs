@@ -31,6 +31,8 @@ use crate::ui_script::PointerOverUi;
 
 mod arc;
 mod camera;
+mod follow;
+
 mod gait;
 // The land-here affordance (free-fly's other half). `pub(crate)` for its `LandHere` message, which
 // the debug panel's button writes.
@@ -54,11 +56,14 @@ mod wire_in;
 // render-alpha field, so the unit-lane material-alpha compose (`entities::apply_unit_mat_alpha`)
 // orders itself before it and lets that documented override stand.
 pub(crate) use camera::apply_self_model_fade;
+// `/follow` (decision 0890): chat asks with the message, `crate::target` resolves the subject into
+// the state, and this module owns the motion.
 use camera::{
     apply_zoom_scroll, run_look_session, seat_camera, CameraProbe, FlyCam, LookButton,
     CAM_COLLISION_RADIUS, CAM_DIST_DEFAULT, CAM_PIVOT_FALLBACK,
 };
 pub(crate) use camera::{head_height, CameraControl, CameraPivot, WorldCamera, CAM_NEAR};
+pub(crate) use follow::{FollowRequest, FollowState};
 // The shared avatar state + movement constants live in [`state`]; the private re-imports below are
 // what lets this module and the concern modules beside it keep naming them `super::X` unchanged.
 use state::{
@@ -125,6 +130,7 @@ impl Plugin for PlayerPlugin {
         if let Some(cam) = probe_cam::from_env() {
             app.insert_resource(cam);
         }
+        follow::plugin(app);
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,
             // or under the opaque loading screen (whose covered render is what compiles the
@@ -203,6 +209,17 @@ impl Plugin for PlayerPlugin {
                 mirror_self_collision_height
                     .in_set(WorldStage::Input)
                     .before(control),
+            )
+            // `/follow` (decision 0890): steer the facing and decide this tick's synthesized forward
+            // input immediately BEFORE the controller, which folds the flag into its forward axis.
+            // The player's own turn input therefore runs after us and wins, which is exactly what
+            // makes the turn-away cancel reachable.
+            .add_systems(
+                Update,
+                follow::steer_follow
+                    .in_set(WorldStage::Input)
+                    .before(control)
+                    .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
             // The self-avatar zoom-in fade rides the same `MeshTag`/material channel as the interior
             // classifier + the appear/despawn fades, so it must run *after* both to win the frame while
@@ -625,8 +642,13 @@ fn control(
         // and the bit survives — and the client emits MSG_MOVE_STOP with S still held. The other order
         // (autorun, then S) destroys the bit at key-down and walks you backward. Same two keys, two
         // outcomes; that asymmetry is the whole shape of the feature.
+        // `/follow` enters as the FORWARD term, not a fifth source (decision 0890): the reference's
+        // follow pushes the very same move-forward bit `0x100000` the W key does, through the same
+        // setter, so it nets against a held S and diagonals with a strafe exactly like a held W. It
+        // rides the HELD state and not the key-DOWN edge, so it never trips the autorun cancel set
+        // above — which is right: synthesized input is not a keypress.
         let fwd_axis = state::forward_axis(
-            keys_pressed(KeyCode::KeyW),
+            keys_pressed(KeyCode::KeyW) || player.follow_forward,
             keys_pressed(KeyCode::KeyS),
             both_buttons,
             autorun,

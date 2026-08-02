@@ -44,6 +44,7 @@ use crate::interact::{InspectMode, WorldClick, WorldRightClick};
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::schedule::WorldStage;
 
+mod by_name;
 mod click;
 mod cursor_mode;
 mod flash;
@@ -63,6 +64,9 @@ pub(crate) use flash::CombatFlash;
 // The action layer's "attack pressed with no target" request — the nearest-enemy auto-acquire
 // (`scan`) answers it with the same core TAB uses.
 pub(crate) use scan::{can_attack, AttackNearestRequest};
+// The chat layer's by-name selection asks (`/target`, `/assist` — decision 0886), answered by the
+// shared resolver the reference parameterises per caller.
+pub(crate) use by_name::{AssistRequest, TargetByNameRequest};
 // The byte-verified reaction decode + its faction catalog, reused by the unit-frame feed to tint the
 // target's name plate (`TargetFrame_CheckFaction`) the same way the selection ring colours itself.
 // `duel_rung` is the diagnostic face of the same walk, for `/reaction` (decision 0637).
@@ -171,6 +175,8 @@ impl Plugin for TargetPlugin {
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
             .add_message::<AttackNearestRequest>()
+            .add_message::<TargetByNameRequest>()
+            .add_message::<AssistRequest>()
             .add_systems(
                 Startup,
                 (
@@ -211,6 +217,19 @@ impl Plugin for TargetPlugin {
                     click::act_on_right_click,
                     click::clear_target_requests,
                     click::target_unit_requests,
+                    // The chat layer's by-name asks (decision 0886), beside the UI's token asks:
+                    // both are non-mouse selection writers committing through `scan::commit`.
+                    // The chat layer's by-name asks, grouped as one chained element (the outer
+                    // chain is at Bevy's 20-tuple limit): `/target` and `/assist` commit through
+                    // `scan::commit` like every other non-mouse selection writer, and `/follow`
+                    // resolves its subject for `crate::player` to move (decision 0890) without
+                    // touching `Selection` at all.
+                    (
+                        by_name::target_by_name_requests,
+                        by_name::assist_requests,
+                        by_name::follow_requests,
+                    )
+                        .chain(),
                     scan::auto_acquire_attacker,
                     scan::tab_target,
                     scan::acquire_and_attack,

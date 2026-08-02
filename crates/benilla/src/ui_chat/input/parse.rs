@@ -159,16 +159,42 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// kick, leave, loot settings, raid marks — apply to the local mirror, so the whole menu
     /// surface is exercisable serverless.
     PartyTest { arg: String },
+    /// `/target [name]` — select by name (`TargetByName`, decision 0886). Resolves creatures AND
+    /// players, case-insensitively, by whole name or longest common prefix, with no range, cone,
+    /// liveness or hostility gate at all. `None` = bare, which the ref's `GetSlashCmdTarget` turns
+    /// into your current target's name when that target is a player (a no-op re-select), and into
+    /// nothing otherwise.
+    Target { name: Option<String> },
+    /// `/assist [name]` — select whatever the basis unit is targeting. A named basis resolves
+    /// **players only** (typemask 0x10); bare assists your current target, creature or player.
+    Assist { name: Option<String> },
+    /// `/follow [name]` — auto-follow (decision 0890). A named subject resolves players only, and
+    /// only living assistable ones (the ref's filter mode 2); bare follows the current selection,
+    /// creature or player. Client-side movement — nothing goes on the wire.
+    Follow { name: Option<String> },
     /// A slash line matching neither a chat command nor an `EmotesText` name — dropped.
     Unknown,
 }
 
-/// The name half of the ref's `GetSlashCmdTarget` (ChatFrame.lua:650-658): a non-empty argument
-/// is the name (first word — 1.12 names carry no spaces); empty defers to the dispatch's
-/// player-target fallback.
+/// The name half of the ref's `GetSlashCmdTarget` (ChatFrame.lua:650-658) — the argument grammar
+/// **thirteen** shipped commands share, `/target` and `/assist` among them.
+///
+/// Its first line is a trim, not a tokenizer: `gsub(msg, "(%s*)(.*[^%s]+)(%s*)", "%2", 1)` keeps
+/// **everything between the outer whitespace**, internal spaces included. This used to take the
+/// first word instead, on the reasoning that 1.12 player names carry no spaces — true, but
+/// `/target` resolves *creature* names too, and "Kobold Vermin" is the common case. `args` reaches
+/// us already trimmed ([`parse_line`]), which is exactly what that gsub computes.
+///
+/// Empty defers to the caller's fallback (a bare party command acts on the selected PLAYER —
+/// `target_player_name` in [`super`], the ref's `UnitIsPlayer("target")` branch).
+///
+/// **Not carried: the unit-token expansion.** The ref's tail expands `player`, `target`,
+/// `^party[1-4]` and `^raid[0-9]` through `UnitName` before returning, so `/assist party1` means
+/// "that member's name". benilla feeds only the `player` and `target` tokens to the VM's unit
+/// store, so the roster half has nothing to resolve against yet; the tokens would pass through as
+/// literal names. Named in decision 0886 as a gap rather than half-built here.
 fn slash_target_name(args: &str) -> Option<String> {
-    let name = args.split_whitespace().next().unwrap_or("");
-    (!name.is_empty()).then(|| name.to_string())
+    (!args.is_empty()).then(|| args.to_string())
 }
 
 /// Parse a trimmed slash line into an ACTION (`/join`, `/afk`, `/random`, `/wave`, the dev
@@ -269,6 +295,17 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
             name: slash_target_name(args),
         },
         S::Duel => ParsedChat::Duel {
+            name: slash_target_name(args),
+        },
+        // The by-name selection pair (decision 0886). Both take the whole trimmed argument —
+        // `/target Kobold Vermin` is one name, not a name plus junk.
+        S::Target => ParsedChat::Target {
+            name: slash_target_name(args),
+        },
+        S::Assist => ParsedChat::Assist {
+            name: slash_target_name(args),
+        },
+        S::Follow => ParsedChat::Follow {
             name: slash_target_name(args),
         },
         S::DuelCancel => ParsedChat::Forfeit,
