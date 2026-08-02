@@ -4,6 +4,7 @@
 //! the concern modules beside it (`mover`, `swim`, `arc`, `movement_net`, …) all borrow from here.
 
 use avian3d::prelude::*;
+use benilla_protocol::MoveMode;
 use bevy::prelude::*;
 
 /// Backpedal speed as a fraction of run: vanilla `MOVE_RUN_BACK` 4.5 / `MOVE_RUN` 7.0. Moving backward
@@ -74,6 +75,22 @@ pub(super) const JUMP_SPEED: f32 = 7.955_547;
 /// Terminal fall speed (yd/s) — binary-VERIFIED vanilla value (matches vmangos `terminalVelocity`).
 /// Shared with [`crate::net`]'s ballistic integration (caps a long fall's vertical speed).
 pub(crate) const TERMINAL_VELOCITY: f32 = 60.148_003;
+/// **Terminal fall speed under feather fall** (yd/s) — the *whole* of what Slow Fall does. The
+/// reference's gravity integrate `0x7c5d20` picks its clamp from one flag test
+/// (`0x7c5d23 test [ecx+0x40], 0x20000000`): the ordinary cap `[0x87d894]` = 60.148, or this one
+/// `[0x87d898]` when `MOVEFLAG_SAFE_FALL` is set. VERIFIED — wow-re `system/collision/ledger.tsv`
+/// (`0x7c5d20`, sweep2 §5) and `scratch/spec-ground.md`'s terminal-vel select.
+///
+/// The same 7.0 shows up on the server: vmangos raises its anticheat's expected jump speed to
+/// `max(current, 7.0f)` on receiving a feather-fall ack (`HandleMovementFlagChangeToggleAck:576`) —
+/// it is matching this clamp.
+pub(crate) const FEATHER_TERMINAL_VELOCITY: f32 = 7.0;
+/// **How far above the ground a hovering body rests** (yd) — the whole of what Hover does. The
+/// reference's WALK resolver `0x6367b0` adds `[0x7ff9d8]` = 1.0 to its surface offset iff
+/// `MOVEFLAG_HOVER` (`0x40000000`) is set, and the step-down reach widens by the same yard
+/// (`0x633e35`). VERIFIED — wow-re `system/collision/collision.md` ("0x40000000 is HOVER, not a wade
+/// bit") + `scratch/step-vs-fall-election.md`.
+pub(crate) const HOVER_HEIGHT: f32 = 1.0;
 /// Standability gate: a surface is walkable iff its normal is within ~50° of straight up (cos 50° —
 /// the vanilla threshold). Steeper than this you can't climb and you slide back down.
 pub(super) const GROUND_COS: f32 = 0.642_788;
@@ -170,6 +187,128 @@ pub(super) struct MoveSpeed {
     pub(super) env_override: bool,
 }
 
+/// **The granted mover modes — one system, five bits** (decision 0866).
+///
+/// A *mode* is a `MOVEMENTFLAGS` bit the **server grants** that changes how our mover behaves rather
+/// than where it is heading. They live here as typed fields, not as bits in
+/// [`Player::move_flags`], for the reason decision 0726 first hit: `move_flags` is last-streamed
+/// wire bookkeeping, rebuilt from state every frame, so a mode parked there alone would be gone
+/// before the mover ever read it. The flag word is *rebuilt from these fields* each frame instead —
+/// which is also what keeps the server's copy of our mode alive (drop the bit from our stream and
+/// the next server-authored move echoes a mode-less word back and clears it under us).
+///
+/// **Two arrival routes, and the difference matters.** Four of the five come through the *ack'd*
+/// family ([`benilla_protocol::MoveMode`]) — an addressed opcode we must answer with the echoed
+/// counter or the grant never lands. [`Self::levitating`] does not: it arrives merged out of a
+/// server-authored `MSG_MOVE_*` (the `SERVER_AUTHORED` mask), unhandshaked.
+///
+/// **Each one's effect is the reference's, byte-verified** — the addresses are in
+/// [`benilla_protocol::MoveMode`]'s table; here is where each is consumed:
+///
+/// - [`rooted`](Self::rooted) — translation and jumps die; **turning stays live** ([`super::control`]).
+/// - [`feather_fall`](Self::feather_fall) — terminal fall speed becomes [`FEATHER_TERMINAL_VELOCITY`]
+///   ([`super::mover::step`]).
+/// - [`hover`](Self::hover) — ground contact rises by [`HOVER_HEIGHT`] ([`super::mover::step`]).
+/// - [`water_walking`](Self::water_walking) — the liquid surface is walkable ground, and the swim
+///   latch cannot arm ([`super::swim`]).
+/// - [`levitating`](Self::levitating) — the swim/depth decision is suppressed entirely
+///   ([`super::swim::update_swimming`]).
+///
+/// **Levitate (spell 1706) grants three at once** — feather fall + hover + water walk — which is why
+/// they are one struct rather than four unrelated booleans.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MoveModes {
+    /// The server rooted our mover (`SMSG_FORCE_MOVE_ROOT` — death until release, and every root or
+    /// stun; decision 0308). Translation input and jumps are dead — the faithful "can't move between
+    /// death and release" — but **turning stays live**: the reference's `StartTurn 0x7c6c50` has no
+    /// root gate at all, and `SetRoot 0x7c7340` clears the direction bits exactly once, at apply. A
+    /// character who cannot even turn is *stunned*, which is a different mechanism.
+    pub(crate) rooted: bool,
+    /// Water-walking (`SMSG_MOVE_WATER_WALK`, `SPELL_AURA_WATER_WALK` — Water Walking, Levitate, and
+    /// the ghost form): the liquid surface counts as walkable ground, so we stand on it instead of
+    /// sinking, and the swim latch cannot arm underneath us.
+    pub(crate) water_walking: bool,
+    /// Feather fall (`SMSG_MOVE_FEATHER_FALL`, `SPELL_AURA_FEATHER_FALL` — Slow Fall, Levitate): the
+    /// fall integrator's terminal velocity drops to [`FEATHER_TERMINAL_VELOCITY`]. Nothing else
+    /// changes — the arc, the flags and the landing report are the ordinary ones.
+    pub(crate) feather_fall: bool,
+    /// Hover (`SMSG_MOVE_SET_HOVER`, `SPELL_AURA_HOVER` — Levitate): ground contact sits
+    /// [`HOVER_HEIGHT`] above the surface, so the body floats and walks along a yard up.
+    pub(crate) hover: bool,
+    /// **Free flight** (`MOVEFLAG_LEVITATING`, GM `.cheat fly` — decision 0726). The one mode that
+    /// arrives *unhandshaked*, merged out of a server-authored move ([`super::wire_in`]).
+    ///
+    /// It does exactly one thing, and it does it by suppression: while set, the water/depth swim
+    /// decision does not run at all ([`super::swim::update_swimming`] — the reference's
+    /// `0x6030d2 test ah,4` bail). So a [`Player::swimming`] the server switched on stays on with no
+    /// water under it — which *is* GM flight — and, symmetrically, real water can no longer put us
+    /// into swim while it is set.
+    pub(crate) levitating: bool,
+}
+
+impl MoveModes {
+    /// Grant or revoke one ack'd mode. [`Self::levitating`] is deliberately unreachable here — it
+    /// has no opcode of its own and arrives through the server-authored flag merge instead.
+    pub(crate) fn set(&mut self, mode: MoveMode, apply: bool) {
+        match mode {
+            MoveMode::Root => self.rooted = apply,
+            MoveMode::WaterWalk => self.water_walking = apply,
+            MoveMode::FeatherFall => self.feather_fall = apply,
+            MoveMode::Hover => self.hover = apply,
+        }
+    }
+
+    /// The granted modes as `MOVEMENTFLAGS` bits — **what every outbound packet must carry**.
+    ///
+    /// This is the half that is easy to skip and expensive to skip: the reference has one
+    /// `[cmov+0x40]` that is both the live state and the wire word, so a real client echoes back
+    /// whatever the server granted for free. Ours rebuilds the word from state each frame, so
+    /// dropping a mode here makes the server's copy forget it — and the next server-authored move
+    /// echoes a mode-less word back, our merge clears the mode, and the aura silently stops working
+    /// (decision 0726 hit exactly this with GM flight).
+    pub(crate) fn wire_flags(&self) -> u32 {
+        use crate::creature_anim::move_flags as f;
+        let mut flags = 0;
+        if self.rooted {
+            flags |= f::ROOT;
+        }
+        if self.water_walking {
+            flags |= f::WATER_WALKING;
+        }
+        if self.feather_fall {
+            flags |= f::SAFE_FALL;
+        }
+        if self.hover {
+            flags |= f::HOVER;
+        }
+        if self.levitating {
+            flags |= f::LEVITATING;
+        }
+        flags
+    }
+
+    /// Lift the granted modes **out of a server-authored flag word** into typed state (decision
+    /// 0726's step, now the whole family's). All five bits sit inside the reference's
+    /// `SERVER_AUTHORED` merge mask (`0x75a0_7dff`), so a bare `MSG_MOVE_*` the server writes for
+    /// our mover can grant or revoke them with no handshake — `.cheat fly` is the case that proved
+    /// it, and it is why LEVITATING has no opcode of its own.
+    ///
+    /// **Root is a deliberate divergence, and not because the mask excludes it** — bit 12 is inside
+    /// the mask, so the reference *does* merge root from a server-authored pose. We don't: in this
+    /// client the ack'd opcode is root's only grant path, and letting a bare pose clear it would put
+    /// a locally-unrooted body against a server that still has us rooted — which streams moving bits
+    /// and trips `CHEAT_TYPE_ROOT_MOVE`. The reference gets away with it because vmangos re-adds
+    /// `MOVEFLAG_ROOT` to anything it writes for a rooted mover (`MovementHandler.cpp:1064`), so its
+    /// merge is a no-op in practice. Revisit if a case ever needs the wire to unroot.
+    pub(crate) fn merge_from_wire(&mut self, wire: u32) {
+        use crate::creature_anim::move_flags as f;
+        self.water_walking = wire & f::WATER_WALKING != 0;
+        self.feather_fall = wire & f::SAFE_FALL != 0;
+        self.hover = wire & f::HOVER != 0;
+        self.levitating = wire & f::LEVITATING != 0;
+    }
+}
+
 /// Our controllable avatar. Until `active`, the camera free-flies; once the server reports our
 /// position we take control (third-person) and drive movement. Toggle free-fly with `F`.
 /// `active`/`pos`/`detached` are `pub(crate)` so terrain streaming can center the loaded block on the
@@ -177,23 +316,9 @@ pub(super) struct MoveSpeed {
 #[derive(Resource, Default)]
 pub(crate) struct Player {
     pub(crate) active: bool,
-    /// The server rooted our mover (`SMSG_FORCE_MOVE_ROOT` — at death, until release; decision
-    /// 0308). While set, translation input and jumps are dead (the faithful "can't move between
-    /// death and release"); turning stays live, like a real rooted client. Set/cleared by the
-    /// root-ack handler in [`super::wire_in`].
-    pub(super) rooted: bool,
-    /// **The server put us in free flight** (`MOVEFLAG_LEVITATING`, GM `.cheat fly` — decision
-    /// 0726). Set/cleared only from a server-authored move ([`super::wire_in`]), like
-    /// [`Player::rooted`] — a granted mover *mode*, which in this architecture is typed state rather
-    /// than a raw bit ([`Player::move_flags`] is last-streamed wire bookkeeping, rebuilt from state
-    /// every frame).
-    ///
-    /// It does exactly one thing, and it does it by suppression: while set, the water/depth swim
-    /// decision does not run at all ([`super::swim::update_swimming`] — the reference's
-    /// `0x6030d2 test ah,4` bail). So a [`Player::swimming`] the server switched on stays on with no
-    /// water under it — which *is* GM flight — and, symmetrically, real water can no longer put us
-    /// into swim while it is set.
-    pub(super) levitating: bool,
+    /// **The granted mover modes** — what the server has switched on for our mover, as typed state
+    /// rather than raw bits. See [`MoveModes`].
+    pub(super) modes: MoveModes,
     /// **Autorun** latched on — the reference's input bit `0x1000` in the local mover's input word
     /// `[MOVE+4]`, flipped by `ToggleAutoRun 0x513de0` (a read+invert: the command family's only
     /// *toggle*, where every directional command is a set/clear pair). VERIFIED, wow-re
@@ -535,4 +660,136 @@ mod autorun_tests {
         // Losing the mover (death / root / taxi) is, and it is a level rather than an edge.
         assert!(autorun_cancelled(false, false, false, true));
     }
+}
+
+#[cfg(test)]
+mod move_mode_tests {
+    use super::{MoveModes, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_HEIGHT, TERMINAL_VELOCITY};
+    use crate::creature_anim::move_flags as f;
+    use benilla_protocol::MoveMode;
+
+    /// Every ack'd mode round-trips: granted through [`MoveModes::set`], out as its own
+    /// `MOVEMENTFLAGS` bit, and revoked again. The bit values are the ones vmangos reads back out of
+    /// our acks, so a mismatch is silent on our side and wrong on the server's.
+    #[test]
+    fn each_granted_mode_rides_the_wire_word_as_its_own_bit() {
+        for (mode, bit) in [
+            (MoveMode::Root, f::ROOT),
+            (MoveMode::WaterWalk, f::WATER_WALKING),
+            (MoveMode::FeatherFall, f::SAFE_FALL),
+            (MoveMode::Hover, f::HOVER),
+        ] {
+            let mut modes = MoveModes::default();
+            assert_eq!(modes.wire_flags(), 0);
+            modes.set(mode, true);
+            assert_eq!(
+                modes.wire_flags(),
+                bit,
+                "{mode:?} must ride the wire as {bit:#x}"
+            );
+            assert_eq!(
+                mode.flag(),
+                bit,
+                "{mode:?}: our bit and the protocol's agree"
+            );
+            modes.set(mode, false);
+            assert_eq!(modes.wire_flags(), 0, "{mode:?} revokes cleanly");
+        }
+    }
+
+    /// **Levitate grants three modes at once** (spell 1706 = feather fall + hover + water walk), so
+    /// the word has to carry all three together — the case that proves this is one system and not
+    /// four independent booleans.
+    #[test]
+    fn levitate_carries_its_three_modes_at_once() {
+        let mut modes = MoveModes::default();
+        for mode in [MoveMode::FeatherFall, MoveMode::Hover, MoveMode::WaterWalk] {
+            modes.set(mode, true);
+        }
+        assert_eq!(
+            modes.wire_flags(),
+            f::SAFE_FALL | f::HOVER | f::WATER_WALKING
+        );
+        // …and dropping one leaves the other two standing.
+        modes.set(MoveMode::Hover, false);
+        assert_eq!(modes.wire_flags(), f::SAFE_FALL | f::WATER_WALKING);
+    }
+
+    /// The server-authored merge owns the four unhandshaked bits and **must not touch root**. Root
+    /// is inside the reference's `0x75a0_7dff` mask, so this is our deliberate divergence, not the
+    /// mask's doing — and the failure it prevents is concrete: a bare pose clearing root locally
+    /// while the server still holds us rooted streams moving bits into `CHEAT_TYPE_ROOT_MOVE`.
+    #[test]
+    fn the_wire_merge_never_unroots_us() {
+        let mut modes = MoveModes {
+            rooted: true,
+            ..Default::default()
+        };
+        modes.merge_from_wire(0); // a pose claiming no modes at all
+        assert!(modes.rooted, "only the ack'd opcode may unroot");
+        assert!(!modes.hover && !modes.feather_fall && !modes.water_walking && !modes.levitating);
+
+        // The other four do follow the wire, in both directions — this is how `.cheat fly` arrives.
+        modes.merge_from_wire(f::SAFE_FALL | f::HOVER | f::WATER_WALKING | f::LEVITATING);
+        assert!(modes.hover && modes.feather_fall && modes.water_walking && modes.levitating);
+        assert!(modes.rooted, "still ours alone");
+    }
+
+    /// **Feather fall is a terminal-velocity substitution and nothing more** (`0x7c5d20`): gravity
+    /// is untouched, so the drop *accelerates normally* and only then rides the lower cap. Pinning
+    /// the shape, not just the constant — an implementation that scaled gravity instead would give
+    /// a fall that starts wrong, and would pass a constants-only test.
+    #[test]
+    fn feather_fall_caps_the_descent_without_softening_gravity() {
+        let dt = 1.0 / 60.0;
+        let step = |v: f32, terminal: f32| (v - GRAVITY * dt).max(-terminal);
+
+        // One frame from rest is identical with and without the aura — gravity is the same.
+        assert_eq!(
+            step(0.0, FEATHER_TERMINAL_VELOCITY),
+            step(0.0, TERMINAL_VELOCITY),
+            "the first frame of a slow fall is an ordinary fall"
+        );
+
+        // Held long enough, the two settle at their own caps.
+        let settle = |terminal: f32| {
+            let mut v = 0.0;
+            for _ in 0..600 {
+                v = step(v, terminal);
+            }
+            v
+        };
+        assert_eq!(
+            settle(FEATHER_TERMINAL_VELOCITY),
+            -FEATHER_TERMINAL_VELOCITY
+        );
+        assert_eq!(settle(TERMINAL_VELOCITY), -TERMINAL_VELOCITY);
+
+        // And the cap is reached in well under half a second, which is why Slow Fall reads as a
+        // drift rather than a fall: v = g·t ⇒ t = 7.0/19.291105 ≈ 0.363 s.
+        let mut v = 0.0f32;
+        let mut frames = 0;
+        while v > -FEATHER_TERMINAL_VELOCITY {
+            v = step(v, FEATHER_TERMINAL_VELOCITY);
+            frames += 1;
+        }
+        assert!(
+            (frames as f32 * dt - 0.363).abs() < 0.02,
+            "capped after {frames} frames ({:.3} s), expected ≈0.363 s",
+            frames as f32 * dt
+        );
+    }
+
+    /// The two mover constants are the reference's, not round numbers we liked. A drift here is
+    /// invisible in play and wrong everywhere.
+    #[test]
+    fn the_mode_constants_are_the_verified_ones() {
+        assert_eq!(FEATHER_TERMINAL_VELOCITY, 7.0); // [0x87d898]
+        assert_eq!(HOVER_HEIGHT, 1.0); // [0x7ff9d8]
+        assert_eq!(TERMINAL_VELOCITY, 60.148_003); // [0x87d894]
+    }
+
+    /// Feather fall must be the SLOWER cap — the whole point of the aura. A *compile-time* assert,
+    /// because both sides are constants: swapped, they would otherwise only show up in play.
+    const _: () = assert!(FEATHER_TERMINAL_VELOCITY < TERMINAL_VELOCITY);
 }

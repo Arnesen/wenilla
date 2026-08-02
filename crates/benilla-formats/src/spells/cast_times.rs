@@ -37,6 +37,19 @@ pub struct SpellCastTime {
     pub minimum_ms: u32,
 }
 
+impl SpellCastTime {
+    /// The level-scaled cast time, ms — `Spell_C::GetCastTime 0x6e3340`'s walk over this row
+    /// (module docs): `base + perLevel·(casterLevel − spellLevel)`, floored to the row minimum
+    /// and to zero. `spell_level` is the `SpellRec+0x70` column the client scales against
+    /// ([`crate::spells::SpellDisplay::spell_level`]). Spellmod op `0xa` (SPELLMOD_CASTING_TIME)
+    /// is the caller's concern — no downstream consumer models spellmods yet.
+    pub fn resolved_ms(&self, caster_level: u32, spell_level: u32) -> u32 {
+        let delta = i64::from(caster_level.saturating_sub(spell_level));
+        let scaled = i64::from(self.base_ms) + i64::from(self.per_level_ms) * delta;
+        scaled.max(i64::from(self.minimum_ms)).max(0) as u32
+    }
+}
+
 /// `SpellCastTimes.dbc`, by row id ([`crate::spells::SpellDisplay::casting_time_index`]).
 #[derive(Default)]
 pub struct SpellCastTimeCatalog {
@@ -91,6 +104,45 @@ pub fn load_spell_cast_times(chain: &mut Chain) -> Result<SpellCastTimeCatalog> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GetCastTime 0x6e3340`'s scaling walk on the module doc's own probe rows: the instant
+    /// sentinel stays 0, a flat row ignores level, and the signed per-level row shrinks down to
+    /// its minimum floor (never below, never negative).
+    #[test]
+    fn resolved_ms_scales_and_floors() {
+        let instant = SpellCastTime {
+            base_ms: 0,
+            per_level_ms: 0,
+            minimum_ms: 0,
+        };
+        assert_eq!(instant.resolved_ms(60, 0), 0);
+
+        let fireball = SpellCastTime {
+            base_ms: 1500,
+            per_level_ms: 0,
+            minimum_ms: 1500,
+        };
+        assert_eq!(fireball.resolved_ms(60, 1), 1500);
+
+        // Row 10's real shape {1000, -100, 500}: at spell level it reads base, then shrinks
+        // 100 ms/level until the 500 floor catches it.
+        let scaling = SpellCastTime {
+            base_ms: 1000,
+            per_level_ms: -100,
+            minimum_ms: 500,
+        };
+        assert_eq!(scaling.resolved_ms(10, 10), 1000);
+        assert_eq!(scaling.resolved_ms(13, 10), 700);
+        assert_eq!(scaling.resolved_ms(60, 10), 500, "the minimum floor");
+
+        // A hypothetical floor-less shrink clamps at zero rather than going negative.
+        let floorless = SpellCastTime {
+            base_ms: 100,
+            per_level_ms: -100,
+            minimum_ms: 0,
+        };
+        assert_eq!(floorless.resolved_ms(60, 1), 0);
+    }
 
     /// `SpellCastTimes.dbc` on the real data — the module doc's own probe rows. Skips without
     /// client data.

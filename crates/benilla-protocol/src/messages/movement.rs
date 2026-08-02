@@ -109,6 +109,65 @@ impl SpeedKind {
     }
 }
 
+/// **A granted mover *mode*** — one of the four the server hands the controlling client, each a
+/// single `MOVEMENTFLAGS` bit that changes how the mover behaves rather than where it is going
+/// (decision 0866). Sibling of [`SpeedKind`]: same shape (a mode per opcode pair, an ack per mode),
+/// same reason for existing — the server treats the set as one family (`IsFlagAckOpcode`,
+/// `MovementChangeType`), so we do too, and a fifth mode is a variant rather than a new lane.
+///
+/// The bit values are 1.12's, VERIFIED vmangos `Objects/MovementInfo.h:25-62`. What each one *does*
+/// is the client's own business — the server only grants it — and all four are byte-verified in the
+/// reference's CMovement setter cluster (`0x7c7280`–`0x7c7370`, wow-re `system/collision`):
+///
+/// | mode | bit | reference effect | granted by |
+/// |---|---|---|---|
+/// | [`Root`](Self::Root) | `0x0000_1000` | translation dies; the fall stops. **Turning stays live** — `StartTurn 0x7c6c50` has no root gate. | root/stun/death |
+/// | [`WaterWalk`](Self::WaterWalk) | `0x1000_0000` | the liquid surface becomes walkable ground | `SPELL_AURA_WATER_WALK` (104) |
+/// | [`FeatherFall`](Self::FeatherFall) | `0x2000_0000` | terminal fall velocity drops to 7 yd/s from 60.148 (`0x7c5d20`) | `SPELL_AURA_FEATHER_FALL` (105) |
+/// | [`Hover`](Self::Hover) | `0x4000_0000` | ground contact rises by 1.0 yd (walk resolver `0x6367b0`) | `SPELL_AURA_HOVER` (106) |
+///
+/// **Levitate (1706) grants three of them at once** — feather fall + hover + water walk — which is
+/// what makes them one system rather than four coincidences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveMode {
+    Root,
+    WaterWalk,
+    FeatherFall,
+    Hover,
+}
+
+impl MoveMode {
+    /// This mode's `MOVEMENTFLAGS` bit.
+    pub fn flag(self) -> u32 {
+        match self {
+            MoveMode::Root => 0x0000_1000,
+            MoveMode::WaterWalk => 0x1000_0000,
+            MoveMode::FeatherFall => 0x2000_0000,
+            MoveMode::Hover => 0x4000_0000,
+        }
+    }
+
+    /// The `CMSG_*_ACK` opcode answering this mode's SMSG. Root is the only mode whose two
+    /// directions ack on *different* opcodes (vmangos routes both to `HandleMoveRootAck`).
+    pub fn ack_opcode(self, apply: bool) -> u16 {
+        use super::opcode;
+        match (self, apply) {
+            (MoveMode::Root, true) => opcode::CMSG_FORCE_MOVE_ROOT_ACK,
+            (MoveMode::Root, false) => opcode::CMSG_FORCE_MOVE_UNROOT_ACK,
+            (MoveMode::WaterWalk, _) => opcode::CMSG_MOVE_WATER_WALK_ACK,
+            (MoveMode::FeatherFall, _) => opcode::CMSG_MOVE_FEATHER_FALL_ACK,
+            (MoveMode::Hover, _) => opcode::CMSG_MOVE_HOVER_ACK,
+        }
+    }
+
+    /// Whether the ack body carries the trailing `u32 apply` dword. Root's does **not**: it lands on
+    /// vmangos's `HandleMoveRootAck` (which infers apply from the opcode), while the other three land
+    /// on `HandleMovementFlagChangeToggleAck`, which reads it (`Server/Packets/Movement.cpp:38-59`).
+    pub fn ack_carries_apply(self) -> bool {
+        !matches!(self, MoveMode::Root)
+    }
+}
+
 /// One jump's ballistic launch parameters — the conditional `MovementInfo` tail present iff the
 /// `MOVEFLAG_JUMPING` (0x2000) flag is set. VERIFIED byte-for-byte against vmangos `MovementInfo::Read`
 /// (build 1.12.1): wire order is `zspeed, cosAngle, sinAngle, xyspeed` (note cos *before* sin). The

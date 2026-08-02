@@ -103,6 +103,52 @@ pub(super) fn cast_mounted_refusal(mounted: bool, spell: Option<&SpellDisplay>) 
     mounted && spell.is_none_or(|d| d.attributes & 0x0100_0000 == 0)
 }
 
+/// The AuraInterruptFlags-space MOVING|TURNING pair (`0x18`) — the moving gate's
+/// "movement would matter anyway" arms test it on BOTH `AuraInterruptFlags` (+0x58) and
+/// `ChannelInterruptFlags` (+0x5c), byte-verified at `0x609e0e`/`0x609e1c`.
+const AURA_INTERRUPT_MOVING_TURNING: u32 = 0x18;
+
+/// The **pre-send** moving refusal (decision 0862) — the requirement validator `0x6094f0`'s
+/// moving block (`0x609de3–0x609e48`; the sole client-local emitter of reason `0x2e` "Can't do
+/// that while moving". wow-re `moving-cast-gate.md`, §5 byte-verified): a press while the
+/// caster's live CMovement flags carry any of {forward, backward, strafe L/R, JUMPING} refuses
+/// locally — no packet, no cast bar, no GCD. Without it, vmangos *accepts* the cast (its
+/// CheckCast moving-reject covers only autorepeat/sit-still spells, `Spell.cpp:5432`) and then
+/// `Spell::update`'s 0.5-yd movement interrupt kills it — the start-then-cancel grief this gate
+/// exists to prevent. The full reject condition, gate for gate:
+///
+/// - **entry**: `InterruptFlags & 0x1` (movement-interruptible — instants without it pass);
+/// - **the movement word**: the WIRE `MovementFlags` layout (`[unit+0x9a8]+0x40`), mask
+///   `0x200f` = forward|backward|strafe + JUMPING — turning and pitch are outside it, and so is
+///   FALLINGFAR (`0x4000`; the client has NO falling/Stuck exemption — that's vmangos-only);
+/// - **exemption**: an auto-repeat spell (`AttributesEx2 & 0x20` — Auto Shot, Shoot) never
+///   refuses, whatever else it carries;
+/// - **would movement matter**: a nonzero resolved cast time ([`super::Spells::cast_time_ms`]),
+///   OR the [`AURA_INTERRUPT_MOVING_TURNING`] bits on the aura/channel interrupt columns — the
+///   OR-arms are how a zero-cast-time *channel* is still refused at initiation.
+///
+/// An uncataloged spell passes (every record-read above needs the row; the ladder's other
+/// data-driven legs — cooldown, GCD, range — share the disposition, and the server's own
+/// interrupt stays the safety net). In the validator's order this sits after the mounted block
+/// and before the shapeshift-form leg (`0x609e50`), which is where [`super::send_spell_cast`]
+/// runs it.
+pub(super) fn cast_moving_refusal(
+    move_flags_word: u32,
+    cast_time_ms: u32,
+    spell: Option<&SpellDisplay>,
+) -> bool {
+    use crate::creature_anim::move_flags;
+    // The verified 0x200f: ANY_MOVE (0xf) | FALLING (0x2000), in our identical wire layout.
+    const MOVING_MASK: u32 = move_flags::ANY_MOVE | move_flags::FALLING;
+    let Some(d) = spell else { return false };
+    d.interrupt_flags & crate::ui_cast::SPELL_INTERRUPT_MOVEMENT != 0
+        && move_flags_word & MOVING_MASK != 0
+        && !d.auto_repeat()
+        && (cast_time_ms != 0
+            || d.aura_interrupt_flags & AURA_INTERRUPT_MOVING_TURNING != 0
+            || d.channel_interrupt_flags & AURA_INTERRUPT_MOVING_TURNING != 0)
+}
+
 /// The resolved {min, max} for one action against one target — the `GetMinMaxRange 0x6e3480`
 /// law over our descriptor reaches.
 ///
@@ -249,10 +295,10 @@ pub(super) fn feed_action_state(
                         || (form_byte != 0 && d.shapeshift_form == Some(u32::from(form_byte)))
                 };
                 st.auto_repeat = auto_repeat.0 == Some(button.action);
-                // The full usable walk (`0x6e3d60` §2a — [`super::usable`]): reagents, forms,
-                // stealth, aura states, the bit-25 cooldown fold, and the power gate (the sole
-                // notEnoughMana writer). Target-dependent for the Execute family only. `spells`
-                // is necessarily Some here — `d` came out of it.
+                // The full usable walk (`0x6e3d60` §2a — [`super::usable`]): reagents, combo
+                // points, forms, stealth, aura states, the bit-25 cooldown fold, and the power
+                // gate (the sole notEnoughMana writer). Target-dependent for the Execute family
+                // only. `spells` is necessarily Some here — `d` came out of it.
                 if let (Some((store, _, _, _)), Some(sp)) = (me, spells.as_deref()) {
                     let ctx = usable::UsableCtx {
                         store,
@@ -544,5 +590,61 @@ mod tests {
         assert!(!cast_mounted_refusal(false, Some(&plain)));
         assert!(!cast_mounted_refusal(false, None));
         assert!(cast_mounted_refusal(true, None), "no record, no exemption");
+    }
+
+    /// The moving refusal (`0x609de3`) — every leg of the byte-verified condition: the
+    /// `InterruptFlags & 0x1` entry, the `0x200f` wire mask (turn/FALLINGFAR outside it,
+    /// JUMPING inside), the auto-repeat exemption, and the "would movement matter" arms (cast
+    /// time / aura / channel `0x18` bits).
+    #[test]
+    fn cast_moving_refusal_follows_the_validator_condition() {
+        use crate::creature_anim::move_flags as mf;
+        // Fireball's shape: ordinary timed cast (interrupt 0xf, nonzero cast time).
+        let timed = SpellDisplay {
+            interrupt_flags: 0xf,
+            ..Default::default()
+        };
+        // Moving forward refuses; standing still doesn't.
+        assert!(cast_moving_refusal(mf::FORWARD, 1500, Some(&timed)));
+        assert!(!cast_moving_refusal(0, 1500, Some(&timed)));
+        // Strafe and JUMPING are in the mask; turn and FALLING_FAR are not (`0x200f`).
+        assert!(cast_moving_refusal(mf::STRAFE_LEFT, 1500, Some(&timed)));
+        assert!(cast_moving_refusal(mf::FALLING, 1500, Some(&timed)));
+        assert!(!cast_moving_refusal(mf::TURN_LEFT, 1500, Some(&timed)));
+        assert!(!cast_moving_refusal(mf::FALLING_FAR, 1500, Some(&timed)));
+        // An instant WITHOUT the movement interrupt bit passes (Fire Blast's shape)…
+        let instant = SpellDisplay {
+            interrupt_flags: 0xe,
+            ..Default::default()
+        };
+        assert!(!cast_moving_refusal(mf::FORWARD, 0, Some(&instant)));
+        // …and even WITH it, a zero cast time passes unless an 0x18 arm bites.
+        assert!(!cast_moving_refusal(mf::FORWARD, 0, Some(&timed)));
+        // Arcane Missiles' shape: zero cast time, but the channel column's moving bits refuse
+        // at initiation (the OR-arm; 0x7c0c & 0x18 != 0).
+        let channel = SpellDisplay {
+            interrupt_flags: 0xf,
+            channel_interrupt_flags: 0x7c0c,
+            ..Default::default()
+        };
+        assert!(cast_moving_refusal(mf::FORWARD, 0, Some(&channel)));
+        // The aura-column arm (food/drink sit-still bits).
+        let sit_still = SpellDisplay {
+            interrupt_flags: 0x1,
+            aura_interrupt_flags: 0x18,
+            ..Default::default()
+        };
+        assert!(cast_moving_refusal(mf::FORWARD, 0, Some(&sit_still)));
+        // Auto-repeat (AttributesEx2 & 0x20) is unconditionally exempt — Auto Shot fires on
+        // the run whatever its columns say.
+        let auto_shot = SpellDisplay {
+            interrupt_flags: 0x1,
+            attributes_ex2: 0x20,
+            aura_interrupt_flags: 0x18,
+            ..Default::default()
+        };
+        assert!(!cast_moving_refusal(mf::FORWARD, 0, Some(&auto_shot)));
+        // No record: nothing to read, the press passes (the server stays the net).
+        assert!(!cast_moving_refusal(mf::FORWARD, 1500, None));
     }
 }

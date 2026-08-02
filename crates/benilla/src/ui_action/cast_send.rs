@@ -5,7 +5,8 @@
 //! `TryCast 0x6e4b60` → commit `0x6e54f0` is *one* function with a long ladder of local gates and a
 //! post-send tail, and duplicating any part of it per caller is how the two paths drift. The ladder
 //! below is that function's order, gate for gate — profession intercept, auto-repeat toggle,
-//! cooldown, GCD, in-flight guard, mounted, reagents/totems, target binding, range — followed by
+//! cooldown, GCD, in-flight guard, mounted, moving, form, reagents/totems, target binding,
+//! range — followed by
 //! the commit's own tail (ranged stance, auto-repeat arm, the send, the auto-attack start, the GCD
 //! arm).
 //!
@@ -146,6 +147,26 @@ pub(crate) fn send_spell_cast(
         debug!("ui_action: cast {spell_id} refused locally — mounted (0x39)");
         cast_errors.0.push((spell_id, 0x39));
         return;
+    }
+    // The moving leg of the SAME requirement validator (`0x609de3`, after the mounted/posture/
+    // environment blocks, before the form leg — wow-re `moving-cast-gate.md`, decision 0862): a
+    // cast-time (or movement-sensitive) press while already moving refuses locally with the
+    // client's own reason 0x2e "Can't do that while moving" and NEVER sends. The gate must be
+    // local: vmangos accepts the sent cast (its CheckCast moving-reject covers only
+    // autorepeat/sit-still spells) and then its movement interrupt cancels it mid-bar — the
+    // start-then-die cast bar this gate removes. The full condition is [`state`]'s.
+    if let Some(d) = def {
+        let caster_level = ctx
+            .rel
+            .self_store
+            .and_then(|s| s.0.unit_level())
+            .unwrap_or(0);
+        let cast_time_ms = spells.map_or(0, |s| s.cast_time_ms(d, caster_level));
+        if state::cast_moving_refusal(ctx.self_move_flags, cast_time_ms, def) {
+            debug!("ui_action: cast {spell_id} refused locally — moving (0x2e)");
+            cast_errors.0.push((spell_id, 0x2e));
+            return;
+        }
     }
     // The shapeshift-form leg of the SAME requirement validator (`0x6094f0` at `0x609e49` →
     // the form gate `0x612480`; wow-re `shapeshift-plaincast-toggle.md` §Q3, which corrected

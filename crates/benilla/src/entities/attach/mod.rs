@@ -139,10 +139,24 @@ fn setup_skinned_instance(
         match crate::rig_palette::RigSkin::allocate_bones(palettes, nbones as u32, ibp.clone()) {
             Some(rig) => {
                 let slot = rig.slot;
-                commands.entity(entity).insert(rig);
+                // The marker's invariant is "currently slot-less": a heal-triggered (or any
+                // other) rebuild that lands a slot clears it, or the healer would loop.
+                commands
+                    .entity(entity)
+                    .insert(rig)
+                    .remove::<crate::rig_palette::RigStarved>();
                 slot
             }
-            None => 0, // table full (warned) — parts render the static bind-pose mesh
+            None => {
+                // Table full (warned): parts render the static bind-pose mesh — but no longer
+                // for ever. The marker hands the unit to `heal_rig_starved` (decision 0863),
+                // which rebuilds the visual once the table has headroom; without it a mob that
+                // streamed in during a full-table window stayed a statue for its whole life.
+                commands
+                    .entity(entity)
+                    .insert(crate::rig_palette::RigStarved);
+                0
+            }
         };
     if let Some(anims) = d.animations.as_ref() {
         // **Every** GameObject instance gets the loader-idle seed, state machine or not — the

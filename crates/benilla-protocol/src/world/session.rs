@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use benilla_srp::vanilla_header::{HeaderCrypto, ProofSeed};
 use benilla_srp::{NormalizedString, SESSION_KEY_LENGTH};
 
-use crate::messages::{self, opcode, Character, ServerPacket};
+use crate::messages::{self, opcode, Character, MoveMode, ServerPacket};
 
 use super::movement::{client_uptime_ms, movement_info, MOVEMENT_FLAG_FORWARD};
 use super::reader::WorldReader;
@@ -564,46 +564,24 @@ impl WorldSession {
         )
     }
 
-    /// Acknowledge a server root/unroot on our mover (`SMSG_FORCE_MOVE_[UN]ROOT` → the matching
-    /// `CMSG_FORCE_MOVE_[UN]ROOT_ACK`) — the unsplit twin of [`WorldWriter::move_root_ack`], for the
-    /// `--death` probe: the server roots us at death and unroots us at release, and observers never
-    /// see the change until we echo the counter (+ our current pose) back.
-    pub fn move_root_ack(
+    /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (the ack'd
+    /// family; decision 0866) — the unsplit twin of [`WorldWriter::move_mode_ack`], for the
+    /// `--death` probe: the server roots us at death, unroots and grants walk-on-water at release,
+    /// and applies nothing until we echo the counter (+ our current `pose`) back.
+    pub fn move_mode_ack(
         &mut self,
         guid: u64,
         counter: u32,
-        rooted: bool,
+        mode: MoveMode,
+        apply: bool,
         flags: u32,
-        pos: [f32; 3],
-        orientation: f32,
+        pose: ([f32; 3], f32),
     ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
+        let info = movement_info(pose.0, pose.1, flags);
+        let trailing = mode.ack_carries_apply().then_some(apply);
         self.send(
-            if rooted {
-                opcode::CMSG_FORCE_MOVE_ROOT_ACK
-            } else {
-                opcode::CMSG_FORCE_MOVE_UNROOT_ACK
-            },
-            &messages::move_flag_ack(guid, counter, &info, None),
-        )
-    }
-
-    /// Acknowledge a water-walk grant/removal on our mover (`SMSG_MOVE_WATER_WALK`/`LAND_WALK` →
-    /// `CMSG_MOVE_WATER_WALK_ACK`) — the unsplit twin of [`WorldWriter::water_walk_ack`], for the
-    /// `--death` probe: the ghost form grants walk-on-water at release and removes it at revive.
-    pub fn water_walk_ack(
-        &mut self,
-        guid: u64,
-        counter: u32,
-        on: bool,
-        flags: u32,
-        pos: [f32; 3],
-        orientation: f32,
-    ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
-        self.send(
-            opcode::CMSG_MOVE_WATER_WALK_ACK,
-            &messages::move_flag_ack(guid, counter, &info, Some(on)),
+            mode.ack_opcode(apply),
+            &messages::move_flag_ack(guid, counter, &info, trailing),
         )
     }
 

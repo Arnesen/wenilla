@@ -51,8 +51,6 @@ pub(crate) fn spawn_model_entities(
     commands: &mut Commands,
     mat_cache: &mut MaterialCache,
     materials: &mut Assets<WowModelMaterial>,
-    // The owned skin-palette table (decision 0720): an animated placement's rig claims a slot.
-    palettes: &mut crate::rig_palette::RigPalettes,
     light: &Buffer,
     submeshes: &[ModelSubmesh],
     // The model's app-built render forms (decision 0834), index-parallel with `submeshes`: the
@@ -120,17 +118,20 @@ pub(crate) fn spawn_model_entities(
                 || !m.emitters.is_empty()
                 || !m.ribbons.is_empty()
         })
-        .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, palettes, m, transform));
+        .and_then(|(m, _)| crate::doodad_anim::spawn_anim_host(commands, m, transform));
     // Captures freeze material-alpha clocks at 0 (deterministic frames) — read the env once.
     let mat_frozen = crate::capture::scenario_active();
     let skin = host
         .as_ref()
         .map(|h| (h.joints.clone(), h.inverse_bindposes.clone()));
-    let (rig_root, rig_slot) = host.as_ref().map_or((None, 0), |h| (Some(h.root), h.slot));
+    let rig_root = host.as_ref().map(|h| h.root);
     if let Some(h) = &host {
         out.push(h.root);
     }
     let mut skinned_meshes: Vec<Entity> = Vec::new();
+    // The parts the lazy-rig wake will promote static → skinned (decision 0863) — the ones that
+    // got a [`crate::doodad_anim::SkinnedTwin`] below.
+    let mut lazy_parts: Vec<Entity> = Vec::new();
     for (batch_idx, sub) in submeshes.iter().enumerate() {
         // The batch's app-built render form (decision 0834). Callers gate spawning on the forms
         // being complete, so a miss here is a broken contract — skip the batch rather than panic.
@@ -196,8 +197,11 @@ pub(crate) fn spawn_model_entities(
         );
         // The blend twin for the distance-fade feather pass (reuse the cutout when already blend, or when
         // this is a non-fading interior prop). A MULTIPLY batch (Mod/Mod2x — the weapon-rack
-        // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so it
-        // cannot feather — the reference's instanceAlpha fade leaves it at full strength (0528).
+        // ARMORREFLECT sheen) also reuses its steady self: its blend equation reads no alpha, so no
+        // material swap can feather it — the reference's instanceAlpha fade leaves it at full
+        // strength (0528). Since decision 0865 the tag alpha it already carries is no longer inert:
+        // `wow_model.wgsl` lerps a multiply batch's colour toward the blend identity by it, so the
+        // rack sheen now rides the distance fade too (the deliberate deviation).
         let blend = if steady_interior_prop
             || matches!(
                 sub.blend,
@@ -300,24 +304,18 @@ pub(crate) fn spawn_model_entities(
             }
             (card_entity.id(), Vec3::ZERO)
         } else {
-            // An animated doodad's ordinary submesh draws the skinned twin bound to the placement's
-            // palette rig (decision 0720 — the rig slot in the tag; the entity keeps the placement
-            // transform — culling/fade read it; the skinned draw itself is palette-driven).
-            // Everything else — and the palette-full fallback (slot 0) — draws the static mesh.
-            // The twin comes from the app-built forms (0834); a lane that didn't request it
-            // (or a contract break) falls back to the static form, un-rigged, rather than warn
-            // the picker with a joint-less "skinned" mesh.
-            let skinned_mesh = (skin.is_some() && rig_slot != 0)
+            // An animated doodad's ordinary submesh spawns on the STATIC form with its skinned
+            // twin waiting beside it (`SkinnedTwin`): the palette slot no longer exists at spawn
+            // — the draw gate allocates it at the placement's first wake and swaps the mesh in
+            // (decision 0863, `doodad_anim::lazy`). The twin comes from the app-built forms
+            // (0834); a lane that didn't request it (or a contract break) simply never promotes,
+            // rather than arm the picker with a joint-less "skinned" mesh.
+            let skinned_mesh = skin
+                .is_some()
                 .then(|| forms.skin.and_then(|s| s.get(batch_idx)).cloned())
                 .flatten();
-            let use_rig = skinned_mesh.is_some();
-            let part_tag = if use_rig {
-                MeshTag(crate::mesh_tag::rig_bits(rig_slot) | mesh_tag.0)
-            } else {
-                mesh_tag
-            };
             let mut part_entity = commands.spawn((
-                Mesh3d(skinned_mesh.unwrap_or_else(|| stat_mesh.clone())),
+                Mesh3d(stat_mesh.clone()),
                 MeshMaterial3d(cutout.clone()),
                 transform,
                 ModelPart {
@@ -326,15 +324,20 @@ pub(crate) fn spawn_model_entities(
                 },
                 // The picker's triangles (decision 0857) — same rule as the card above.
                 crate::interact::PickMesh(sub.geometry.clone()),
-                part_tag,
+                mesh_tag,
             ));
-            // Static parts carry the build-time Aabb (the RENDER_WORLD rule above); a rigged
-            // part's skinned mesh keeps main-world data, so `calculate_bounds` covers it as
-            // before.
-            if !use_rig {
-                if let Some(aabb) = stat_aabb {
-                    part_entity.insert(*aabb);
-                }
+            // Every part now spawns static, so every part carries the build-time Aabb (the
+            // RENDER_WORLD rule above). It stays through a promote: the skinned twin shares the
+            // bind-pose geometry, so the bound is the same one `calculate_bounds` used to derive.
+            if let Some(aabb) = stat_aabb {
+                part_entity.insert(*aabb);
+            }
+            if let Some(sm) = skinned_mesh {
+                part_entity.insert(crate::doodad_anim::SkinnedTwin {
+                    skinned: sm,
+                    stat: stat_mesh.clone(),
+                });
+                lazy_parts.push(part_entity.id());
             }
             let entity = part_entity.id();
             if skin.is_some() {
@@ -396,8 +399,24 @@ pub(crate) fn spawn_model_entities(
             // arm over the loader's var-0 seed — the reference's own two-stage load (decision 0768).
             window_hi: f32::NEG_INFINITY,
             anim_id: h.anim_id,
-            active: true,
+            // Born PARKED (decision 0863): the spawn frame's `Visibility` is the default-visible
+            // lie (the fade/cull authorities haven't classified the fresh parts yet), and the
+            // gate's promote requires a drawn frame ON TOP of `active` — so the first real
+            // verdict, not the spawn race, decides the slot. The gate flips this true the same
+            // first pass either way, so pose/resume semantics are unchanged.
+            active: false,
+            parked_at: now,
         });
+        // The lazy palette rig (decision 0863): what the draw gate's first wake allocates and
+        // promotes. Only when the placement has skinnable parts at all — an emitter-only host
+        // (chimney smoke) never takes a slot, which under the eager design it wasted one on.
+        if !lazy_parts.is_empty() {
+            commands.entity(h.root).insert(crate::doodad_anim::LazyRig {
+                joints: h.joints.clone(),
+                ibp: h.inverse_bindposes.clone(),
+                parts: lazy_parts,
+            });
+        }
     }
     (
         out,

@@ -481,9 +481,14 @@ pub(super) fn build_parts(
                     // The AlphaMode::Blend twin for the spawn appear-fade (decision 0032) — the exterior
                     // look feathered, the same variant DoodadFade uses. Reuse the exterior when it's
                     // already Blend (its cutout already feathers; no separate twin needed). A MULTIPLY
-                    // batch (Mod/Mod2x) gets NO twin: its blend equation reads no alpha, so it cannot
-                    // fade — the reference's instanceAlpha ramp leaves the sheen at full strength while
-                    // the base fades under it (decision 0528); `None` spawns the part Steady.
+                    // batch (Mod/Mod2x) also reuses its steady self: its blend equation reads no
+                    // alpha, so it cannot feather through the alpha channel — the reference's
+                    // instanceAlpha ramp leaves the sheen at full strength while the base fades under
+                    // it (0528; re-confirmed for items by wow-re `m2-item-texture-fill.md`). benilla
+                    // fades it anyway as a deliberate deviation: the part arms the ramp like any
+                    // other, and `wow_model.wgsl` lerps a multiply batch's colour toward its blend
+                    // IDENTITY by the tag alpha, so the sheen rides the same ramp instead of popping
+                    // over a body that hasn't faded in (the director's login report; decision 0865).
                     // The depth-prime twin (wow-re `m2-blend-promotion-zfill.md` §4): every batch
                     // that can fade AND writes depth gets one. `cutout` mirrors what the part's
                     // colour pass discards while translucent — the fade twin's hard 224/255 for
@@ -506,7 +511,9 @@ pub(super) fn build_parts(
                         }
                     };
                     let fade_blend = match sub.blend {
-                        ModelBlend::Mod | ModelBlend::Mod2x => None,
+                        // The steady material IS the "twin": no swap, the ramp only drives the tag
+                        // alpha the shader's identity-lerp reads (see the comment block above).
+                        ModelBlend::Mod | ModelBlend::Mod2x => Some(exterior.clone()),
                         ModelBlend::Blend => Some(exterior.clone()),
                         // The SOURCE blend rides into the twin (Opaque or AlphaKey here): with
                         // fade_variant it still builds AlphaMode::Blend, but the source decides
@@ -568,14 +575,14 @@ pub(super) fn build_parts(
                     // a despawn ramp): same probe mode, alpha-blend state. Without it a fade swaps
                     // an indoor entity to the EXTERIOR blend twin and its light jumps to the lit
                     // outdoor intensity mid-feather (director-caught, 2026-07-13). Reuse the bake
-                    // variant when the part is already Blend, like the exterior twin above; a
-                    // multiply batch fades never (no fade twin at all), so it builds none either.
-                    let interior_bake_blend = interior_bake.as_ref().and_then(|bake| {
+                    // variant when the part is already Blend, like the exterior twin above — and
+                    // for a multiply batch, whose steady bake IS the twin (the shader's
+                    // identity-lerp does the feather, decision 0865).
+                    let interior_bake_blend = interior_bake.as_ref().map(|bake| {
                         match sub.blend {
-                            ModelBlend::Mod | ModelBlend::Mod2x => None,
-                            ModelBlend::Blend => Some(bake.clone()),
+                            ModelBlend::Mod | ModelBlend::Mod2x | ModelBlend::Blend => bake.clone(),
                             // Source blend through to the twin, like the exterior twin above (0842).
-                            _ => Some(model_material(
+                            _ => model_material(
                                 cache,
                                 materials,
                                 texture.clone(),
@@ -597,7 +604,7 @@ pub(super) fn build_parts(
                                 None,
                                 false,
                                 light,
-                            )),
+                            ),
                         }
                     });
                     // The interior MATTE variant: the plain day/night pair at sun ×1.0 — the

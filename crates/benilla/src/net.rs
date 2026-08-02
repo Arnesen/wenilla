@@ -18,8 +18,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use benilla_protocol::{
-    messages::WhoRequest, EntityKind, JumpInfo, MoveSpeeds, ObjectFields, SessionEvent, SpeedKind,
-    TransportPose,
+    messages::WhoRequest, EntityKind, JumpInfo, MoveMode, MoveSpeeds, ObjectFields, SessionEvent,
+    SpeedKind, TransportPose,
 };
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, Sender};
@@ -88,6 +88,7 @@ impl Plugin for NetPlugin {
             .add_message::<TeleportMessage>()
             .add_message::<SelfMoveMessage>()
             .add_message::<SpeedChangeMessage>()
+            .add_message::<MoveModeMessage>()
             .add_message::<ServerSoundMessage>()
             .add_message::<WeatherMessage>()
             .add_message::<EmoteMessage>()
@@ -952,23 +953,20 @@ pub(crate) enum ClientCommand {
     /// the flying cinematic camera (a first login's race intro) and every NPC around the body
     /// despawns until relog. A future cinematic arc moves this send to the playback's end.
     CompleteCinematic,
-    /// Acknowledge a server root/unroot on our mover (`CMSG_FORCE_MOVE_[UN]ROOT_ACK`, decision
-    /// 0308): the echoed `counter` + our live pose. Sent by the controller the frame the
-    /// [`crate::death::MoveRootMessage`] lands; un-acked, observers never see the change.
-    MoveRootAck {
+    /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (decisions
+    /// 0308, 0866): the echoed `counter` + our live pose, on the opcode
+    /// [`MoveMode::ack_opcode`] picks. Sent by the controller the frame the
+    /// [`MoveModeMessage`] lands; un-acked, the server never applies the change and observers never
+    /// see it.
+    ///
+    /// `flags` must already carry the applied mode bit — the controller ORs it in before sending
+    /// (vmangos KICKS a root-apply ack whose `MovementInfo` lacks `MOVEFLAG_ROOT`, and reads the
+    /// word as the mover's new flags for the other three).
+    MoveModeAck {
         guid: u64,
         counter: u32,
-        rooted: bool,
-        flags: u32,
-        pos: [f32; 3],
-        orientation: f32,
-    },
-    /// Acknowledge a water-walk grant/removal (`CMSG_MOVE_WATER_WALK_ACK` — one opcode both ways,
-    /// the trailing apply flag distinguishes). The ghost form's walk-on-water (decision 0308).
-    WaterWalkAck {
-        guid: u64,
-        counter: u32,
-        on: bool,
+        mode: MoveMode,
+        apply: bool,
         flags: u32,
         pos: [f32; 3],
         orientation: f32,
@@ -1199,6 +1197,24 @@ pub(crate) struct SpeedChangeMessage {
     pub(crate) kind: SpeedKind,
     pub(crate) counter: u32,
     pub(crate) speed: f32,
+}
+
+/// **The server granted or revoked a mover mode** on our own mover — root, water-walk, feather-fall
+/// or hover (the ack'd movement-mode family; decision 0866). Sibling of [`SpeedChangeMessage`] in
+/// every respect: written by [`apply_net_updates`] for our guid only, read by the player controller,
+/// which is the one place that owns both the mode state and the honest pose the ack must carry.
+///
+/// This used to be two death-arc-shaped messages (`MoveRootMessage`/`WaterWalkMessage` in
+/// `crate::death`), which is why the other two modes were never noticed as missing: root arrived at
+/// death, water-walk arrived in ghost form, and nothing framed them as one family. They are one —
+/// the server's own `IsFlagAckOpcode` set.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct MoveModeMessage {
+    /// Our mover's guid (the bridge only emits ours) — echoed in the ack body.
+    pub(crate) guid: u64,
+    pub(crate) counter: u32,
+    pub(crate) mode: MoveMode,
+    pub(crate) apply: bool,
 }
 
 /// A cross-map worldport (`.tele Orgrimmar`, initial-login map, a boat crossing the sea): snap

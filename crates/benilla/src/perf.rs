@@ -4,7 +4,8 @@
 //! standard). Registers
 //! Bevy's diagnostics (frame time / FPS, entity count, render-pass timing), keeps a rolling window of
 //! recent real frame durations, and draws a **minimal, always-on FPS pill** (top-center) that you
-//! **click to expand** into the full readout; **Ctrl+Cmd+P** toggles the whole HUD. Expanded, it shows:
+//! **click to expand** into the full readout; the **dev chord + `P`** toggles the whole HUD
+//! (`Ctrl+Shift+P` — decisions 0585/0867/0870). Expanded, it shows:
 //! - FPS + last frame ms,
 //! - **p50 / p99 / worst** frame ms over the window (worst-frame is the metric that matters, not the
 //!   average — averages hide the hitch you feel),
@@ -90,7 +91,7 @@ impl Plugin for PerfPlugin {
         })
         .add_systems(
             Update,
-            // `toggle_hud` needs no ordering against the UI keyboard feed any more: its Ctrl+Cmd+P
+            // `toggle_hud` needs no ordering against the UI keyboard feed any more: its dev
             // chord can't be typed text, so there's no `UiKeyboardCapture` to read (decision 0585).
             (toggle_hud, sample_frame_time),
         )
@@ -371,8 +372,9 @@ impl FrameStats {
     }
 }
 
-/// HUD state. **Ctrl+Cmd+P** toggles `visible` (default on — it's a standing dev surface); `expanded` is the
-/// click-to-open full readout (default off — a minimal FPS pill until clicked). `visible` is
+/// HUD state. The **dev chord + `P`** toggles `visible` (default on — it's a standing dev surface);
+/// `expanded` is the click-to-open full readout (default off — a minimal FPS pill until
+/// clicked). `visible` is
 /// `pub(crate)` so the capture harness ([`crate::capture`]) can force the overlay off for pristine,
 /// UI-free screenshots.
 #[derive(Resource)]
@@ -392,7 +394,7 @@ impl Default for PerfHud {
 }
 
 fn toggle_hud(keys: Res<ButtonInput<KeyCode>>, mut hud: ResMut<PerfHud>) {
-    // Ctrl+Cmd+P, not a bare `p` — `P` is the reference's TOGGLESPELLBOOK, and a dev instrument
+    // The dev chord + `P`, not a bare `p` — `P` is the reference's TOGGLESPELLBOOK, and a dev
     // doesn't get to squat on a game binding (decision 0585). The chord can't be mistaken for typed
     // text, so unlike the old bare key it needs no chat-bar/EditBox gate.
     if crate::debug_panel::dev_chord(&keys, KeyCode::KeyP) {

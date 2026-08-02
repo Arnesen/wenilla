@@ -327,12 +327,18 @@ pub fn ping(sequence: u32, last_rtt_ms: u32) -> Vec<u8> {
     body
 }
 
-/// Body of a movement-flag-change ack (`CMSG_FORCE_MOVE_[UN]ROOT_ACK` / `CMSG_MOVE_WATER_WALK_ACK`
-/// — the death arc's root/water-walk family, decision 0308): a **full** `u64` guid, the echoed
-/// `u32` movement counter, our current `MovementInfo`, and — for the water-walk ack ONLY — a
-/// trailing `u32 apply` (VERIFIED vmangos `Server/Packets/Movement.cpp:38-59`:
-/// `MoveFlagChangeAck` reads the apply dword, `MoveRootAck` does not). The counter MUST be the one
-/// the server sent — a zero/greater counter trips its cheat log (`HandleMoveRootAck`).
+/// Body of a **movement-mode ack** — the whole ack'd family (root / water-walk / feather-fall /
+/// hover; decisions 0308, 0866): a **full** `u64` guid, the echoed `u32` movement counter, our
+/// current `MovementInfo`, and — for every mode *except root* — a trailing `u32 apply` (VERIFIED
+/// vmangos `Server/Packets/Movement.cpp:38-59`: `MoveFlagChangeAck` reads the apply dword,
+/// `MoveRootAck` does not; [`MoveMode::ack_carries_apply`](super::MoveMode::ack_carries_apply) is
+/// that rule). The counter MUST be the one the server sent — a zero/greater counter trips its cheat
+/// log (`HandleMoveRootAck`).
+///
+/// **`info.flags` must carry the applied mode bit.** vmangos hard-requires it for root
+/// (`HandleMoveRootAck:715` KICKS an apply-ack whose `MovementInfo` lacks `MOVEFLAG_ROOT`) and takes
+/// the word as the mover's new flags for the rest — so an ack that drops the bit un-grants the very
+/// mode it is accepting.
 pub fn move_flag_ack(guid: u64, counter: u32, info: &MovementInfo, apply: Option<bool>) -> Vec<u8> {
     let mut body = Vec::with_capacity(48);
     body.extend_from_slice(&guid.to_le_bytes());

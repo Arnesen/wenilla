@@ -193,9 +193,133 @@ pub(super) fn tick_scale_ease(
     }
 }
 
+/// Palette headroom below which the healer waits: rebuilding into a still-tight table would just
+/// re-starve, and the doodad reaper (`doodad_anim::lazy`) is what makes room. Deliberately under
+/// the reaper's low-water (256) so the reaper engages first and the heal follows into the space
+/// it opened.
+const HEAL_MIN_HEADROOM: usize = 128;
+
+/// Visual rebuilds per frame — a starved *population* (a whole stream-in burst denied at once)
+/// heals over a second or two instead of one spike of teardown+reattach commands.
+const HEAL_PER_FRAME: usize = 2;
+
+/// Rebuild the visuals of units whose attach was DENIED a palette rig (decision 0863 — the
+/// [`RigStarved`](crate::rig_palette::RigStarved) marker): the same teardown set as the
+/// display-id swap above (the reference's `0x60abe0` rebuild), fade-skipped via `Reattached` —
+/// a heal is not a spawn. `attach_entity_visuals` rebuilds next frame(s), allocating with the
+/// headroom this system waited for; if the table filled again in between, the attach re-marks
+/// and the healer comes back. Before this system, a full-table denial froze the unit at bind
+/// pose for its whole life — the "statue mobs at the stream-in boundary" bug.
+#[allow(clippy::type_complexity)] // one query's two-marker filter
+pub(super) fn heal_rig_starved(
+    mut commands: Commands,
+    palettes: Res<crate::rig_palette::RigPalettes>,
+    starved: Query<(Entity, &Guid), (With<crate::rig_palette::RigStarved>, With<VisualAttached>)>,
+) {
+    if starved.is_empty() || palettes.slot_headroom() < HEAL_MIN_HEADROOM {
+        return;
+    }
+    for (entity, guid) in starved.iter().take(HEAL_PER_FRAME) {
+        info!(
+            "rig heal: guid {:016x} was denied a palette rig at attach — rebuilding (0x60abe0 shape)",
+            guid.0
+        );
+        commands
+            .entity(entity)
+            .despawn_related::<Children>()
+            .remove::<(
+                VisualAttached,
+                AppliedDisplay,
+                super::equipment::AppliedEquipment,
+                super::mount::AppliedMount,
+                super::mount::MountChild,
+                AnimationPlayer,
+                bevy::animation::transition::AnimationTransitions,
+                AnimationGraphHandle,
+                benilla_assets::ModelAnimations,
+                crate::creature_anim::AnimDriver,
+                (
+                    crate::creature_anim::RigPose,
+                    crate::creature_anim::BodyTwist,
+                    crate::creature_anim::GlobalSeqDrive,
+                ),
+                crate::rig_palette::RigSkin,
+                super::BoneAttach,
+                super::equipment::HeldAttached,
+                crate::rig_palette::RigStarved,
+            )>()
+            .insert(super::equipment::Reattached);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The heal law (decision 0863): a rig-starved unit rebuilds — visual children despawned,
+    /// the attach trigger re-armed (`VisualAttached` off, `Reattached` on), the marker consumed
+    /// — but ONLY when the palette has real headroom; against a still-tight table the healer
+    /// waits (rebuilding into it would just re-starve).
+    #[test]
+    fn a_starved_unit_rebuilds_when_the_table_has_room_and_waits_when_it_has_not() {
+        let mut app = App::new();
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        app.add_systems(Update, heal_rig_starved);
+        let child = app.world_mut().spawn_empty().id();
+        let unit = app
+            .world_mut()
+            .spawn((
+                crate::rig_palette::RigStarved,
+                VisualAttached,
+                crate::net::Guid(0xB0B),
+                AppliedDisplay(Some(7)),
+            ))
+            .add_child(child)
+            .id();
+
+        // Choke the table under the heal's minimum headroom: the unit is left alone.
+        let hoard: Vec<crate::rig_palette::RigSkin> = {
+            let mut palettes = app
+                .world_mut()
+                .resource_mut::<crate::rig_palette::RigPalettes>();
+            (0..(crate::mesh_tag::MAX_RIG_SLOTS - 1 - HEAL_MIN_HEADROOM / 2))
+                .filter_map(|_| {
+                    crate::rig_palette::RigSkin::allocate_bones(&mut palettes, 1, Handle::default())
+                })
+                .collect()
+        };
+        app.update();
+        assert!(
+            app.world().entity(unit).contains::<VisualAttached>(),
+            "no headroom ⇒ the healer waits"
+        );
+
+        // Room opens (the reaper's doing, in the live app): the rebuild teardown lands.
+        {
+            let mut palettes = app
+                .world_mut()
+                .resource_mut::<crate::rig_palette::RigPalettes>();
+            for rig in hoard.iter().take(HEAL_MIN_HEADROOM) {
+                let slot = rig.slot;
+                palettes.free(slot);
+            }
+        }
+        app.update();
+        let e = app.world().entity(unit);
+        assert!(!e.contains::<VisualAttached>(), "attach re-armed");
+        assert!(
+            !e.contains::<crate::rig_palette::RigStarved>(),
+            "marker consumed"
+        );
+        assert!(
+            e.contains::<super::super::equipment::Reattached>(),
+            "fade-skipped rebuild — a heal is not a spawn"
+        );
+        assert!(
+            app.world().get_entity(child).is_err(),
+            "the old visual's children despawned"
+        );
+    }
 
     /// The ease's shape is the reference's (`0x614bbf`): starts at `from`, cosine-smooth (half-way
     /// in value at half-way in time), lands exactly on `to` at 2 s and holds.

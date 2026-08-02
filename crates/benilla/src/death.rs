@@ -77,27 +77,6 @@ pub(crate) struct DeathNet {
     pub(crate) water_walk: bool,
 }
 
-/// The server rooted/unrooted our mover (`SMSG_FORCE_MOVE_ROOT`/`UNROOT` — at death/release). The
-/// controller acks with its live pose (`CMSG_FORCE_MOVE_[UN]ROOT_ACK`) and gates its own movement
-/// input while rooted — the faithful "can't move between death and release" mechanism.
-#[derive(Message)]
-pub(crate) struct MoveRootMessage {
-    /// Our mover's guid (the bridge only emits ours) — echoed in the ack body.
-    pub(crate) guid: u64,
-    pub(crate) counter: u32,
-    pub(crate) rooted: bool,
-}
-
-/// Water-walking granted/removed on our mover (`SMSG_MOVE_WATER_WALK`/`LAND_WALK` — the ghost
-/// form). The controller acks (`CMSG_MOVE_WATER_WALK_ACK`); the mover regime is deferred (0308).
-#[derive(Message)]
-pub(crate) struct WaterWalkMessage {
-    /// Our mover's guid (the bridge only emits ours) — echoed in the ack body.
-    pub(crate) guid: u64,
-    pub(crate) counter: u32,
-    pub(crate) on: bool,
-}
-
 /// The feed's change-tracking memory (the [`crate::ui_unit::UnitFeedState`] pattern — guid-keyed,
 /// first-snapshot-counts-as-edge so logging in dead brings the popup up).
 #[derive(Resource, Default)]
@@ -399,8 +378,6 @@ impl Plugin for DeathPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DeathNet>()
             .init_resource::<DeathFeedState>()
-            .add_message::<MoveRootMessage>()
-            .add_message::<WaterWalkMessage>()
             .add_systems(
                 Update,
                 (

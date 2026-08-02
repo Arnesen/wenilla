@@ -56,6 +56,38 @@ pub(crate) struct SheathRequest {
     pub(crate) ceremony: bool,
 }
 
+/// The manual `ToggleSheath` **cycle** — the state a Z press asks for next, or `None` where the
+/// ref makes no `SetSheatheState` call at all. Byte-read off `0x5eb642`–`0x5eb6a8` (the four
+/// ToggleSheath call sites tabulated in wow-re `sheath-policy.md` §1; the dispatch is a
+/// `sub 0; je` / `dec; je` / `dec; jne` walk over the committed state `[unit+0xd40]`):
+///
+/// ```text
+/// CUR 0   mainhand or offhand worn -> 1 melee      (0x5eb6a0: push 1, 0, 1)
+///         else ranged worn         -> 2 ranged     (0x5eb699: push 1, ebx=0, 2)
+///         else                     -> no call      (0x5eb697: je 0x5eb6ad)
+/// CUR 1   ranged worn              -> 2 ranged     (0x5eb671)
+///         else                     -> 0 stowed     (0x5eb67f)
+/// CUR 2                            -> 0 stowed     (0x5eb653)
+/// ```
+///
+/// So the press walks **three** states — melee, then ranged, then stowed — never a two-state
+/// flip. `melee`/`ranged` are the ref's three `GetWeapon(0/1/2)` results (vtable `+0x98`, called
+/// at `0x5eb5f0`/`0x5eb600`/`0x5eb610`); ours are [`Wielded`]'s slots, carrying the same "an item
+/// is worn there" fact. **Named deviation:** the ref also zeroes its ranged candidate when the
+/// unit's class byte fails a `DAT_00c0def4` "can hold a ranged weapon" lookup
+/// (`0x5eb616`–`0x5eb640`, INFERRED semantics) — unobservable here, since a class that fails it
+/// cannot equip a ranged item to begin with.
+pub(crate) fn toggle_sheath_next(cur: u8, (melee, ranged): (bool, bool)) -> Option<u8> {
+    match cur {
+        0 if melee => Some(1),
+        0 if ranged => Some(2),
+        0 => None,
+        1 if ranged => Some(2),
+        1 | 2 => Some(0),
+        _ => None, // the ref's `dec ecx; jne` tail — no call for a state outside {0, 1, 2}
+    }
+}
+
 /// One executed draw/stow swap at its hand-touches-weapon moment — fired only by the *ceremony*
 /// (the [`VisualSheath`] release at the authored `$SHL`/`$SHR` event). Snap transitions never
 /// fire it: in the client the draw/stow sound rides the ceremony clip's own keyframes, and a
@@ -142,5 +174,41 @@ pub(super) fn start_sheath_ceremony(
             unpinned: false,
         });
         commands.entity(entity).insert(VisualSheath(old_state));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toggle_sheath_next;
+
+    /// The `ToggleSheath` cycle exactly as the bytes branch (`0x5eb642`–`0x5eb6a8`): three states,
+    /// each leg gated on what is actually worn. The director's report — "Z should take out swords
+    /// then range then nothing" — is the first row.
+    #[test]
+    fn the_z_press_walks_melee_then_ranged_then_stowed() {
+        const MELEE_AND_BOW: (bool, bool) = (true, true);
+        const MELEE_ONLY: (bool, bool) = (true, false);
+        const BOW_ONLY: (bool, bool) = (false, true);
+        const EMPTY: (bool, bool) = (false, false);
+
+        // Sword + bow: the full three-state walk, and round.
+        assert_eq!(toggle_sheath_next(0, MELEE_AND_BOW), Some(1));
+        assert_eq!(toggle_sheath_next(1, MELEE_AND_BOW), Some(2));
+        assert_eq!(toggle_sheath_next(2, MELEE_AND_BOW), Some(0));
+
+        // No ranged weapon: the CUR=1 leg falls through to the stow (`0x5eb67f`) — the two-state
+        // flip, which is correct only here.
+        assert_eq!(toggle_sheath_next(0, MELEE_ONLY), Some(1));
+        assert_eq!(toggle_sheath_next(1, MELEE_ONLY), Some(0));
+
+        // Nothing in either hand: the draw goes straight to ranged (`0x5eb699`).
+        assert_eq!(toggle_sheath_next(0, BOW_ONLY), Some(2));
+        assert_eq!(toggle_sheath_next(2, BOW_ONLY), Some(0));
+
+        // Nothing worn at all: the ref makes no call (`0x5eb697: je 0x5eb6ad`) — the press is a
+        // silent no-op, not a draw of empty hands.
+        assert_eq!(toggle_sheath_next(0, EMPTY), None);
+        assert_eq!(toggle_sheath_next(1, EMPTY), Some(0));
+        assert_eq!(toggle_sheath_next(2, EMPTY), Some(0));
     }
 }

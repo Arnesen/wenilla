@@ -470,8 +470,15 @@ impl Plugin for EntitiesPlugin {
                     refresh_mounts,
                     // A live display-id / scale change (decision 0695): the display swap is the
                     // same teardown-and-rebuild; the scale change arms the reference's 2 s ease.
-                    refresh_live_display,
-                    tick_scale_ease,
+                    // The rig heal (decision 0863) rides the same nest (Bevy's 20-tuple ceiling):
+                    // a unit denied a palette rig at attach rebuilds — the same teardown — once
+                    // the table has headroom again; never a permanent statue.
+                    (
+                        refresh_live_display,
+                        tick_scale_ease,
+                        live_display::heal_rig_starved,
+                    )
+                        .chain(),
                 )
                     .chain()
                     .in_set(EntityVisualsSet)

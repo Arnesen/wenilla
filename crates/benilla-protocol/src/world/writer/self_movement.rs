@@ -1,6 +1,6 @@
 //! Our own mover's `WorldWriter` sends — the self-movement stream (`MSG_MOVE_*`) and the acks the
-//! server demands of a player mover (speed change, near-teleport, worldport, root/unroot,
-//! water-walk, spline-done). Bodies in [`crate::messages`]'s `movement`/`move_*`/`teleport_ack`/
+//! server demands of a player mover (speed change, near-teleport, worldport, the granted
+//! movement-mode family, spline-done). Bodies in [`crate::messages`]'s `movement`/`move_*`/`teleport_ack`/
 //! `force_speed_ack` builders; the `MovementInfo` stamping is
 //! [`crate::world::movement`]'s. Split out of `writer/mod.rs` (decision 0636), the family the
 //! writer type itself was originally built for.
@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 
-use crate::messages::{self, opcode, JumpInfo, TransportPose};
+use crate::messages::{self, opcode, JumpInfo, MoveMode, TransportPose};
 use crate::world::movement::{client_uptime_ms, movement_info};
 
 use super::WorldWriter;
@@ -118,47 +118,33 @@ impl WorldWriter {
         )
     }
 
-    /// Acknowledge a server root/unroot on our mover (`SMSG_FORCE_MOVE_[UN]ROOT` → the matching
-    /// `CMSG_FORCE_MOVE_[UN]ROOT_ACK`): full guid + the echoed counter + our current
-    /// `MovementInfo`. Un-acked, the change never reaches observers; a wrong/zero counter trips
-    /// the server's cheat log (`HandleMoveRootAck`). While rooted, `flags` must not carry moving
-    /// bits (vmangos `MovementInfo.h`: moving flags with `MOVEFLAG_ROOT` freeze the real client).
-    pub fn move_root_ack(
+    /// **Acknowledge a granted mover mode** — root, water-walk, feather-fall or hover (the ack'd
+    /// family; decision 0866): full guid + the echoed counter + our current `MovementInfo`, plus the
+    /// trailing `u32 apply` for every mode but root ([`MoveMode::ack_carries_apply`]). Un-acked, the
+    /// server never applies the change and observers never see it; a wrong/zero counter trips its
+    /// cheat log (`HandleMoveRootAck`).
+    ///
+    /// `flags` is the caller's live wire word and must already carry the applied mode's bit. Two
+    /// server rules constrain it: an apply-ack without the bit is a KICK for root
+    /// (`HandleMoveRootAck:715`), and **moving bits must never accompany `MOVEFLAG_ROOT`** — they
+    /// freeze the real client (vmangos `MovementInfo.h`) and trip `CHEAT_TYPE_ROOT_MOVE`. Turn bits
+    /// are not moving bits (`MOVEFLAG_MASK_MOVING` excludes them) and are fine alongside root.
+    ///
+    /// `pose` is the mover's live `(position, orientation)` — the pair `World::self_pose` returns.
+    pub fn move_mode_ack(
         &mut self,
         guid: u64,
         counter: u32,
-        rooted: bool,
+        mode: MoveMode,
+        apply: bool,
         flags: u32,
-        pos: [f32; 3],
-        orientation: f32,
+        pose: ([f32; 3], f32),
     ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
+        let info = movement_info(pose.0, pose.1, flags);
+        let trailing = mode.ack_carries_apply().then_some(apply);
         self.send(
-            if rooted {
-                opcode::CMSG_FORCE_MOVE_ROOT_ACK
-            } else {
-                opcode::CMSG_FORCE_MOVE_UNROOT_ACK
-            },
-            &messages::move_flag_ack(guid, counter, &info, None),
-        )
-    }
-
-    /// Acknowledge a water-walk grant/removal on our mover (`SMSG_MOVE_WATER_WALK`/`LAND_WALK` →
-    /// `CMSG_MOVE_WATER_WALK_ACK`, one ack opcode for both directions): the root ack's shape plus
-    /// the trailing `u32 apply` the server's `MoveFlagChangeAck` reader expects.
-    pub fn water_walk_ack(
-        &mut self,
-        guid: u64,
-        counter: u32,
-        on: bool,
-        flags: u32,
-        pos: [f32; 3],
-        orientation: f32,
-    ) -> Result<()> {
-        let info = movement_info(pos, orientation, flags);
-        self.send(
-            opcode::CMSG_MOVE_WATER_WALK_ACK,
-            &messages::move_flag_ack(guid, counter, &info, Some(on)),
+            mode.ack_opcode(apply),
+            &messages::move_flag_ack(guid, counter, &info, trailing),
         )
     }
 }

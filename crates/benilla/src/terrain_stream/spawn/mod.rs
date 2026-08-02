@@ -47,11 +47,11 @@ const SPAWN_COUNT_CAP: usize = 150;
 /// gets the production [`WowModelMaterial`] (cutout + blend twin) and the same `ModelPart`/`DoodadFade`/
 /// `MeshTag` components the old spawn used — so the existing visibility/fade/lighting systems take over.
 /// The nested resource tuple of [`spawn_loaded_placements`] (the 16-SystemParam ceiling): the
-/// prop-probe table, the skin-palette table (0720), the stream-trace counters, the live/settling
-/// state the landing cap reads, and the model-forms cache (0834).
+/// prop-probe table, the stream-trace counters, the live/settling state the landing cap reads,
+/// and the model-forms cache (0834). The skin-palette table left with decision 0863 — a
+/// placement's rig slot is the draw gate's to claim at first wake now, not the spawner's.
 type SpawnTables<'w> = (
     ResMut<'w, PropProbes>,
-    ResMut<'w, crate::rig_palette::RigPalettes>,
     ResMut<'w, crate::perf::StreamActivity>,
     Option<Res<'w, crate::player::Player>>,
     ResMut<'w, ModelForms>,
@@ -78,11 +78,11 @@ pub(super) fn spawn_loaded_placements(
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
     // Nested to stay inside Bevy's 16-element system-param tuple limit: the prop-probe table +
-    // the skin-palette table (decision 0720) + the stream-trace counters + the live/settling
-    // state the landing cap reads + the model-forms cache (decision 0834).
+    // the stream-trace counters + the live/settling state the landing cap reads + the
+    // model-forms cache (decision 0834).
     tables: SpawnTables,
 ) {
-    let (mut probes, mut palettes, mut activity, player, mut forms) = tables;
+    let (mut probes, mut activity, player, mut forms) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -154,7 +154,6 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         mat_cache,
                         materials,
-                        &mut palettes,
                         light,
                         &m.submeshes,
                         FormSlices {
@@ -256,7 +255,6 @@ pub(super) fn spawn_loaded_placements(
                         &mut commands,
                         mat_cache,
                         materials,
-                        &mut palettes,
                         light,
                         &m.submeshes,
                         FormSlices {
@@ -520,7 +518,6 @@ pub(super) fn spawn_loaded_placements(
                 &mut commands,
                 mat_cache,
                 materials,
-                &mut palettes,
                 light,
                 &m.submeshes,
                 FormSlices {

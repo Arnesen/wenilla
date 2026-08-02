@@ -598,9 +598,12 @@ impl FadeMaterials {
 }
 
 /// The material handles one batch fades *through*, as a spawn site borrows them — the inputs
-/// [`FadeMaterials`] is built from. `blend: None` means the batch cannot feather at all (a MULTIPLY
-/// batch's blend equation reads no alpha — decision 0528 — and a WMO-display batch builds no twin),
-/// which is the one legitimate reason for a part to spawn opaque while its unit is still ramping.
+/// [`FadeMaterials`] is built from. `blend: None` means the batch cannot feather at all (a
+/// WMO-display batch builds no twin), which is the one legitimate reason for a part to spawn
+/// opaque while its unit is still ramping. A MULTIPLY batch (Mod/Mod2x) passes its **steady self**
+/// as the twin: its blend equation reads no alpha (decision 0528), so no material swap can feather
+/// it — instead it arms the ramp like any other part and `wow_model.wgsl` lerps its colour toward
+/// the blend identity by the tag alpha (the deliberate deviation of decision 0865).
 pub(crate) struct FadeSet<'a> {
     pub(crate) steady: &'a Handle<WowModelMaterial>,
     pub(crate) blend: Option<&'a Handle<WowModelMaterial>>,

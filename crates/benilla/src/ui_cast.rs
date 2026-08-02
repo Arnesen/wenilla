@@ -235,7 +235,9 @@ impl ActiveChannel {
 /// own movement interrupt (`Spell::update`'s 0.5-yd position delta) still kills anything we
 /// miss. The per-spell gates, byte-verified at the call sites (`f6 46 54 01` @`0x51511e`,
 /// `f6 42 5c 08` @`0x515175`; identities corroborated by vmangos `SpellDefines.h`):
-const SPELL_INTERRUPT_MOVEMENT: u32 = 0x1; // SpellRec+0x54 InterruptFlags (SPELL_INTERRUPT_FLAG_MOVEMENT)
+/// (Also the entry test of the cast-INITIATION moving gate — `ui_action::state`'s
+/// `cast_moving_refusal`, decision 0862 — which is a different mechanism from this self-cancel.)
+pub(crate) const SPELL_INTERRUPT_MOVEMENT: u32 = 0x1; // SpellRec+0x54 InterruptFlags (SPELL_INTERRUPT_FLAG_MOVEMENT)
 const CHANNEL_INTERRUPT_MOVING: u32 = 0x8; // SpellRec+0x5c ChannelInterruptFlags (AURA_INTERRUPT_MOVING_CANCELS)
 
 /// The controller's report that a cancel-worthy local move edge happened this frame — a

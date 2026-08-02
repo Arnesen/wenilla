@@ -510,6 +510,11 @@ pub(in crate::net) fn extrapolate_remote_units(
                     from,
                     vel,
                     time.delta(),
+                    // No hover offset: a remote's own granted modes are not modelled yet — decision
+                    // 0866 builds the family for our own mover. A hovering *observed* player draws
+                    // a yard low until the relayed `MSG_MOVE_HOVER` is read into per-unit mode
+                    // state; the same shape as every other unmodelled remote mode.
+                    0.0,
                 )
                 .center
             };

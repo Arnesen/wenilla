@@ -1128,6 +1128,86 @@ mod tests {
         );
     }
 
+    /// **The director's login report on the Naxx items** (decision 0865): a MULTIPLY sheen batch
+    /// (Mod2x — the ARMORREFLECT family) used to spawn Steady, popping as a full-strength ×2 layer
+    /// over a body still fading in. Its blend equation reads no alpha, so no material swap can
+    /// feather it (0528, byte-reconfirmed by wow-re `m2-item-texture-fill.md`) — instead the part
+    /// now arms the ramp on its STEADY material (the "twin" is itself) and the shader lerps its
+    /// colour toward the blend identity by the tag alpha. Headless, this asserts the arm half:
+    /// joined ramp, tag alpha ≈ 0, no material swap, and a FadeMaterials record so despawn/stealth
+    /// ramps re-arm it too.
+    #[test]
+    fn a_multiply_sheen_joins_the_wearers_ramp_on_its_steady_material() {
+        const KIND: ItemModelKind = ItemModelKind::Weapon;
+        const SINCE: f32 = 3.0;
+        let steady: Handle<crate::terrain::WowModelMaterial> = Handle::Uuid(
+            bevy::asset::uuid::Uuid::from_u128(0x5133),
+            std::marker::PhantomData,
+        );
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<crate::rig_palette::RigPalettes>();
+        let mut displays = ItemDisplays::icons_for_tests(
+            benilla_formats::ItemDisplayCatalog::from_displays(HashMap::new()),
+        );
+        let mut dm = empty_display();
+        let mut sheen = part(false);
+        sheen.blend = benilla_formats::ModelBlend::Mod2x;
+        sheen.material = steady.clone();
+        // What `entities::display` now builds for a multiply batch: the steady self as the twin.
+        sheen.fade_blend = Some(steady.clone());
+        dm.parts = Some(vec![sheen]);
+        displays.models.insert((7, KIND), dm);
+        app.insert_resource(displays);
+
+        let joint = app.world_mut().spawn(Transform::default()).id();
+        let bones = BoneAttach {
+            anchors: HashMap::from([(3u16, joint)]),
+            points: HashMap::from([(attach_id::HAND_RIGHT, (3u16, Vec3::ZERO))]),
+            markers: HashMap::new(),
+        };
+        let mut items = HeldItems::default();
+        items.slots[0] = Some(HeldSlot {
+            display: 7,
+            kind: KIND,
+            attach: attach_id::HAND_RIGHT,
+            visual: NO_GLOW,
+        });
+        app.world_mut().spawn((
+            items,
+            bones,
+            Transform::default(),
+            UnitAppearFade::Pending { since: SINCE },
+        ));
+        app.add_systems(Update, attach_held_items);
+        app.update();
+
+        let mut q = app.world_mut().query::<(
+            &MeshTag,
+            &MeshMaterial3d<crate::terrain::WowModelMaterial>,
+            Option<&crate::model_fade::FadeMaterials>,
+            Option<&crate::model_fade::PendingAppearFade>,
+        )>();
+        let found: Vec<_> = q.iter(app.world()).collect();
+        assert_eq!(found.len(), 1, "the one sheen batch spawned");
+        let (tag, mat, fm, pending) = found[0];
+        assert_eq!(
+            pending.map(|p| p.since),
+            Some(SINCE),
+            "the sheen joined the wearer's pending ramp (it used to spawn Steady and pop)",
+        );
+        assert_eq!(
+            mat.0, steady,
+            "no material swap — the steady multiply pipeline"
+        );
+        let fm = fm.expect("a FadeMaterials record, so despawn/stealth ramps re-arm it");
+        assert_eq!(fm.blend, steady, "…whose 'twin' is the steady self");
+        assert!(
+            crate::mesh_tag::alpha_of(tag.0) <= 1.0 / 63.0,
+            "…opening at tag alpha ≈ 0: the shader's identity-lerp makes it contribute nothing",
+        );
+    }
+
     /// A wearer holding a **weapon** (mainhand, drawn in the hand) and wearing a **shoulder** that
     /// carries emitters — the bench for the sheath-swap tests below. Returns the app and the wearer.
     fn dress_a_wearer() -> (App, Entity) {

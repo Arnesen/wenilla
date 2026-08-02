@@ -139,10 +139,23 @@ pub(crate) mod move_flags {
     /// `0x02000000`; NOT the TBC-era 0x200). Set while the mover rides a transport's platform
     /// frame; every packet carrying it also carries the local-pose tail (decision 0438 phase 2).
     pub const ON_TRANSPORT: u32 = 0x0200_0000;
-    /// MOVEFLAG_WATERWALKING — the ghost form's walk-on-water (decision 0308). Carried in the
-    /// water-walk apply ack like the real client (the server's toggle-ack doesn't demand it the
-    /// way the root ack does, but the faithful ack echoes the applied state).
+    /// MOVEFLAG_WATERWALKING — the liquid surface counts as walkable ground (Water Walking,
+    /// Levitate, and the ghost form; decisions 0308/0866). Reference consumers: the liquid-mask
+    /// selector `0x6315f0` (`0x63160d test eax,0x10000000`, taken *only* when not swimming) and the
+    /// opcode-0x22 apply `0x61a430`.
     pub const WATER_WALKING: u32 = 0x1000_0000;
+    /// MOVEFLAG_SAFE_FALL — **feather fall** (Slow Fall, Levitate; decision 0866). It has exactly
+    /// one effect: the gravity integrate `0x7c5d20` picks its terminal clamp on this bit
+    /// (`0x7c5d23 test [ecx+0x40],0x20000000`) — 7.0 yd/s `[0x87d898]` instead of the ordinary
+    /// 60.148 `[0x87d894]`. wow-re's ledger labels it "in-water; selects swim gravity", which is the
+    /// bit's *shape* read without the server-side name: vmangos sets it only from
+    /// `SPELL_AURA_FEATHER_FALL`, and swimming is the separate [`SWIMMING`] (0x200000).
+    pub const SAFE_FALL: u32 = 0x2000_0000;
+    /// MOVEFLAG_HOVER — the body rests 1.0 yd above the ground (Levitate; decision 0866). VERIFIED
+    /// as hover rather than a wade bit in wow-re `system/collision/collision.md`: the WALK resolver
+    /// `0x6367b0` gates a `[0x7ff9d8]` = +1.0-yd surface offset on it, and the step-down reach
+    /// widens by the same yard (`0x633e35`).
+    pub const HOVER: u32 = 0x4000_0000;
 
     /// The bits a **server-authored move packet owns**, and the only ones it may write — the
     /// reference's flag *merge* mask, VERIFIED at `0x618c30 @0x618deb`
@@ -374,16 +387,28 @@ pub(super) enum Mode {
     /// stale-direction flash. Plays through to Gait only if the input holds steady. Not a
     /// non-preemptible bracket.
     Land { id: u16, flags: u32 },
-    /// Playing an action one-shot **full-body on the base track** (the standing-idle route of decision
-    /// 0087): a standing melee swing (decision 0073) or a standing `/cheer`-class emote whose live
-    /// state routed it to bone 0. Returns to Gait when it finishes; a new one restarts it; a wanted
-    /// Special (jump/pose) preempts it — and, like [`Mode::Land`], any movement-flag change from
-    /// `flags` (captured at play time) re-picks immediately: the client's locomotion re-arm
-    /// overwrites bone 0 blindly on the change (the same re-arm decision 0280 named), so a shot
-    /// fired standing yields to the run the instant the player moves instead of sliding the clip
-    /// out. The *masked* route never enters here — it plays as an overlay beside `Mode`, leaving
-    /// the base machine (this enum) running underneath.
-    Swing { id: u16, flags: u32 },
+    /// Playing an action one-shot **full-body on the base track** (the bone-0 route of decision
+    /// 0087): a standing melee swing (decision 0073), a standing `/cheer`-class emote — or a
+    /// **mid-air cast/emote** (decision 0864: the airborne route test masks only COMBAT ids, so a
+    /// jump-in-place cast replaces the hang on bone 0, exactly the ref's full-body mid-air cast).
+    /// `under` is the Special whose base clip this play replaced (`None`: it replaced a gait).
+    /// While `under` is airborne the one-shot obeys the client's airborne-freeze: a finished clip
+    /// clamps and holds its last frame, flag changes are keep-current no-ops, and only a Special
+    /// *edge* exits — the FALLINGFAR latch's Fall (played ONCE, at the latch edge
+    /// `0x61a820` — 0864's per-tick re-assert was §5-refuted, decision 0868; a clip armed
+    /// after the latch holds like any other) and the `0x602c60` land pick at touchdown. Grounded
+    /// (`under == None`) it returns to Gait when it finishes; a new one restarts it — and, like
+    /// [`Mode::Land`], any movement-flag change from `flags` (captured at play time) re-picks
+    /// immediately: the client's locomotion re-arm overwrites bone 0 blindly on the change (the
+    /// same re-arm decision 0280 named), so a shot fired standing yields to the run the instant
+    /// the player moves instead of sliding the clip out. The *masked* route never enters here —
+    /// it plays as an overlay beside `Mode`, leaving the base machine (this enum) running
+    /// underneath.
+    Swing {
+        id: u16,
+        flags: u32,
+        under: Option<Special>,
+    },
 }
 
 /// The gait an idle/moving unit should play in [`Mode::Gait`], most-specific id first with fallbacks so a
@@ -861,7 +886,8 @@ pub(super) enum OneShotRoute {
 /// state-route block; a non-CLASS_A id is always full-body. The load-bearing memberships were
 /// byte-decoded (17/66/68/80 ∈; the 37–45 jump/swim/locomotion band excluded); the patchy interior of
 /// the wide ranges is INFERRED (wow-re note §3 Open) but never load-bearing here — the only ids that
-/// reach [`route_oneshot`] are swings and emotes, all squarely inside these ranges.
+/// reach [`route_oneshot`] are swings, emotes, and the spell-kit cast anims (32/33/51–54 — wow-re's
+/// own CLASS_A gloss: "swings, emotes, casts"), all squarely inside these ranges.
 fn is_class_a(id: u16) -> bool {
     matches!(id,
         2 | 8..=10 | 14..=36 | 46..=49 | 51..=90 | 105..=113 | 117..=118 | 122..=138 | 185..=186 | 195)
@@ -869,7 +895,9 @@ fn is_class_a(id: u16) -> bool {
 
 /// The **COMBAT** membership (wow-re `0x5fcc10`) — the set whose airborne test can route to the mask
 /// (a mid-jump swing). Byte-decoded memberships: **17 ∈**, and **66/68/80 ∉** (the emotes never mask
-/// on airborne alone). Every swing id (16–19/85/87/88/117) is in it; no emote id is.
+/// on airborne alone). Every swing id (16–19/85/87/88/117) is in it; no emote id is — and no CAST id
+/// (32/33/51–54) either, which is why a jump-in-place cast routes FULL-BODY and replaces the hang
+/// (decision 0864), while the same cast over a moving jump masks via the frozen-in move bits.
 fn is_combat(id: u16) -> bool {
     matches!(id, 10 | 16..=24 | 30 | 36 | 57..=59 | 85..=88 | 95 | 117 | 118)
 }

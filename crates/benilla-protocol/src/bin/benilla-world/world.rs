@@ -1,6 +1,6 @@
 //! The shared world state every probe reads: the entity tracker, the merged self descriptor, the
-//! item/vendor stores, the opcode tally — plus the session-keeping acks (teleport, force-speed,
-//! root, water-walk) that keep *any* session alive regardless of probe mix, and the shared
+//! item/vendor stores, the opcode tally — plus the session-keeping acks (teleport, force-speed, the
+//! granted movement-mode family) that keep *any* session alive regardless of probe mix, and the shared
 //! [`DeathArc`] scenario machinery (`--death`/`--spirit` both read it, so neither owns it).
 
 use std::collections::{BTreeMap, HashMap};
@@ -8,7 +8,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use benilla_protocol::{
-    Character, EntityKind, ObjectFields, ServerPacket, SessionEvent, SpeedKind, WorldSession,
+    Character, EntityKind, MoveMode, ObjectFields, ServerPacket, SessionEvent, SpeedKind,
+    WorldSession,
 };
 
 /// A Kobold Vermin spawn in Northshire (mangos `creature` guid 79992) — the `--attack` teleport
@@ -481,51 +482,38 @@ impl World {
                     }
                 }
             }
-            // Root/unroot must be acked (the echoed counter + our current pose) or the change never
-            // reaches observers, and the app stays gated on its own input while rooted (decision 0308
-            // §1/§4). Unconditional session-keeping (like teleport/force-speed): a force-root arriving
-            // outside the death arc would otherwise go un-acked, and the real client always acks.
-            SessionEvent::MoveRoot {
+            // **A granted mover mode** (root / water-walk / feather-fall / hover — decision 0866)
+            // must be acked with the echoed counter + our current pose, or the server never applies
+            // the change and observers never see it. Unconditional session-keeping (like
+            // teleport/force-speed): a mode granted outside the death arc would otherwise go
+            // un-acked, and the real client always acks.
+            SessionEvent::MoveMode {
                 guid,
                 counter,
-                rooted,
+                mode,
+                apply,
             } if *guid == self.self_guid => {
-                let (pos, orientation) = self.self_pose();
-                // A root-APPLY ack must carry MOVEFLAG_ROOT (0x1000) in its
-                // MovementInfo — the server KICKS one without it (vmangos
-                // `HandleMoveRootAck:715-723`; live-verified: the flags-0 ack drew
-                // "movement info does not have rooted movement flag" in Movement.log
-                // and the root never confirmed, so release sent no unroot).
-                let flags = if *rooted { 0x1000 } else { 0 };
-                session.move_root_ack(*guid, *counter, *rooted, flags, pos, orientation)?;
-                if *rooted {
-                    if let Some(arc) = &mut self.death_arc {
-                        arc.rooted_seen = true;
+                let pose = self.self_pose();
+                // The ack's MovementInfo must carry the applied mode's own bit: for root the server
+                // KICKS one without it (vmangos `HandleMoveRootAck:715-723`; live-verified — the
+                // flags-0 ack drew "movement info does not have rooted movement flag" in
+                // Movement.log and the root never confirmed, so release sent no unroot), and for the
+                // other three the word IS the mover's new flags. This probe holds no mover state of
+                // its own, so the applied bit alone is the honest word.
+                let flags = if *apply { mode.flag() } else { 0 };
+                session.move_mode_ack(*guid, *counter, *mode, *apply, flags, pose)?;
+                if let Some(arc) = &mut self.death_arc {
+                    match (mode, apply) {
+                        (MoveMode::Root, true) => arc.rooted_seen = true,
+                        (MoveMode::Root, false) => arc.unroot_seen = true,
+                        (MoveMode::WaterWalk, true) => arc.water_walk_seen = true,
+                        _ => {}
                     }
-                    println!("SMSG_FORCE_MOVE_ROOT — acked (rooted at death)");
-                } else {
-                    if let Some(arc) = &mut self.death_arc {
-                        arc.unroot_seen = true;
-                    }
-                    println!("SMSG_FORCE_MOVE_UNROOT — acked (released)");
                 }
-            }
-            // The ghost form's walk-on-water grant/removal — same ack shape as
-            // MoveRoot, plus the trailing apply flag; both directions ack here.
-            SessionEvent::WaterWalk { guid, counter, on } if *guid == self.self_guid => {
-                let (pos, orientation) = self.self_pose();
-                // The faithful echo carries MOVEFLAG_WATERWALKING (0x10000000) while
-                // applied (the toggle-ack path doesn't hard-require it like root).
-                let flags = if *on { 0x1000_0000 } else { 0 };
-                session.water_walk_ack(*guid, *counter, *on, flags, pos, orientation)?;
-                if *on {
-                    if let Some(arc) = &mut self.death_arc {
-                        arc.water_walk_seen = true;
-                    }
-                    println!("SMSG_MOVE_WATER_WALK — acked (ghost walk-on-water granted)");
-                } else {
-                    println!("SMSG_MOVE_LAND_WALK — acked (water-walk removed)");
-                }
+                println!(
+                    "mover mode {mode:?} {} — acked",
+                    if *apply { "granted" } else { "revoked" }
+                );
             }
             SessionEvent::CorpseReclaimDelay { delay_ms } => {
                 if let Some(arc) = &mut self.death_arc {

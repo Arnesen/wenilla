@@ -5,18 +5,17 @@
 //! `notEnoughMana` — the §5's B2, re-confirmed.
 //!
 //! Modeled legs: the TRADE_SKILL early-out · dead (leg 1) · reagents/totems (leg 3) · required
-//! equipped item (leg 4) · the shapeshift-form gate (leg 6, [`SpellDisplay::usable_in_form`]) ·
-//! only-stealthed (leg 7) · not-in-combat (leg 8) · CasterAuraState (leg 9) · TargetAuraState +
-//! its CanAttack/CanAssist fork (legs 10/10b — the ONE target-dependent pair; our per-frame
-//! diff-push recomputes it on target change for free, where the ref re-runs its cache on events)
-//! · the bit-25 cooldown fold (leg 11) · power (leg 12).
+//! equipped item (leg 4) · the combo-point gate (leg 5) · the shapeshift-form gate (leg 6,
+//! [`SpellDisplay::usable_in_form`]) · only-stealthed (leg 7) · not-in-combat (leg 8) ·
+//! CasterAuraState (leg 9) · TargetAuraState + its CanAttack/CanAssist fork (legs 10/10b — the
+//! ONE target-dependent pair; our per-frame diff-push recomputes it on target change for free,
+//! where the ref re-runs its cache on events) · the bit-25 cooldown fold (leg 11) · power (leg 12).
 //!
 //! Deferred, named (each answers usable=true until modeled): leg 2's caster aura-immunity
 //! helpers (`0x6e9f20/40/60` — silence/pacify vs the spell's school/mechanic; needs an aura-type
-//! model), leg 5's self-only identity (`AttributesEx` b20/b22 + `caster+0xe68+0x1029`), leg 4's
-//! `AttributesEx3` sub-conditions and the broken-durability exclusion (no durability model), and
-//! the ghost state beyond plain death. CanAssist inside 10b is the reaction-rank stand-in the
-//! ring/`can_attack` share, pending the true `0x6066f0` walk.
+//! model), leg 4's `AttributesEx3` sub-conditions and the broken-durability exclusion (no
+//! durability model), and the ghost state beyond plain death. CanAssist inside 10b is the
+//! reaction-rank stand-in the ring/`can_attack` share, pending the true `0x6066f0` walk.
 
 use std::time::Instant;
 
@@ -111,6 +110,16 @@ pub(crate) fn spell_usable(
     }
     // Leg 4 (`0x6e40e0`): some worn item must match the class + subclass mask.
     if !equipped_item_fits(d, ctx.store, items, commands) {
+        return (false, false);
+    }
+    // Leg 5 (`0x6e3e95`–`0x6e3eb2`): the combo-point gate. A finishing move (`AttributesEx`
+    // b20/b22) is unusable while the caster's combo-point byte is 0 — `[caster+0xe68]+0x1029`,
+    // i.e. `PLAYER_FIELD_BYTES` byte 1 off the player-block base, one byte below the honor rank
+    // the item-usable gate reads at `+0x102b`. CASTER-only: the client never checks that the
+    // points sit on the CURRENT target (the server does, and refuses a mismatch with
+    // `SPELL_FAILED_BAD_TARGETS`) — see decision 0869. This is Overpower's whole window: it has
+    // no aura state, so every other leg passes and the button stayed lit forever without it.
+    if d.needs_combo_points() && ctx.store.0.player_combo_points().unwrap_or(0) == 0 {
         return (false, false);
     }
     // Leg 6 (`0x612480`): the shapeshift-form gate — the form's stance flag from
@@ -263,6 +272,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(walk(&reagent, &alive), (false, false));
+
+        // Leg 5: a finishing move with no combo points banked (field 1222 byte 1). Overpower's
+        // own shape — no aura state anywhere, so this leg is the only thing that greys it.
+        let overpower = SpellDisplay {
+            attributes_ex: 0x4810_0200,
+            ..Default::default()
+        };
+        assert!(overpower.needs_combo_points());
+        assert_eq!(walk(&overpower, &alive), (false, false));
+        let dodged = player(&[(1222, 0x05_03_01_01)]);
+        assert_eq!(walk(&overpower, &dodged), (true, false));
+        // The neighbouring bytes of that dword must not read as combo points.
+        let ranked = player(&[(1222, 0x05_03_00_01)]);
+        assert_eq!(walk(&overpower, &ranked), (false, false));
 
         // Leg 6: a cat-form spell out of form.
         let claw = SpellDisplay {

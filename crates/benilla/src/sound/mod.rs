@@ -53,8 +53,9 @@ pub(crate) use zone::ExplorationSounds;
 pub(crate) struct SoundConfig {
     /// Master enable — mirrors the client's `-nosound` gate as a live toggle.
     pub enabled: bool,
-    /// Quick mute — toggled by `Ctrl`+`Cmd`+`M` (the dev-chord plane, decision 0585). Zeroes the
-    /// **main track only**: selection and channel life go on untouched, so unmute is instant
+    /// Quick mute — toggled by the dev chord + `M` (its plane is per-OS: decisions 0585, 0867).
+    /// Zeroes the **main track only**: selection and channel life go on untouched, so unmute is
+    /// instant
     /// (unlike `enabled`, which stops sounds from being picked at all). Starts `true`: the client
     /// boots silent until deliberately unmuted.
     pub muted: bool,
@@ -232,7 +233,7 @@ fn update_audio_listener(
     }
 }
 
-/// `Ctrl`+`Cmd`+`M` — flip [`SoundConfig::muted`]. Lives on the dev-chord plane
+/// The dev chord + `M` — flip [`SoundConfig::muted`]. Lives on the dev-chord plane
 /// ([`crate::debug_panel::dev_chord`], decision 0585) so it can never collide with a game binding
 /// and stays reachable with the chat bar open.
 fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<SoundConfig>) {

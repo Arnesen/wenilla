@@ -322,10 +322,24 @@ fn build_markers(
             .submeshes
             .iter()
             .any(|s| s.billboard.is_none())
-            .then(|| {
-                crate::doodad_anim::spawn_anim_host(&mut commands, &mut palettes, model, seat_tf)
-            })
+            .then(|| crate::doodad_anim::spawn_anim_host(&mut commands, model, seat_tf))
             .flatten();
+        // EAGER slot allocation — this lane has no draw gate to promote lazily (decision 0863
+        // made laziness the terrain-stream caller's policy, not the host's). A handful of
+        // markers exist at once, so eager is the right spend; slot 0 (table full, warned)
+        // falls back to the static mesh below exactly as before.
+        let marker_slot = host.as_ref().map_or(0, |h| {
+            crate::rig_palette::RigSkin::allocate(
+                &mut palettes,
+                h.joints.clone(),
+                h.inverse_bindposes.clone(),
+            )
+            .map_or(0, |rig| {
+                let slot = rig.slot;
+                commands.entity(h.root).insert(rig);
+                slot
+            })
+        });
         let seat = match &host {
             Some(h) => h.root,
             None => commands.spawn((seat_tf, Visibility::default())).id(),
@@ -397,7 +411,7 @@ fn build_markers(
                     // rig when the model animates (the `!` bob — decision 0720); the static mesh
                     // otherwise (capture mode keeps every marker static, like the doodad rail),
                     // including the palette-full fallback (slot 0).
-                    let use_rig = host.as_ref().is_some_and(|h| h.slot != 0);
+                    let use_rig = marker_slot != 0;
                     let mesh = if use_rig {
                         skin_forms.get(pi).cloned().unwrap_or_default()
                     } else {
@@ -406,10 +420,7 @@ fn build_markers(
                             .map(|(h, _)| h.clone())
                             .unwrap_or_default()
                     };
-                    let rig_tag = host
-                        .as_ref()
-                        .filter(|_| use_rig)
-                        .map_or(0, |h| crate::mesh_tag::rig_bits(h.slot));
+                    let rig_tag = crate::mesh_tag::rig_bits(marker_slot);
                     let child = commands
                         .spawn((
                             Mesh3d(mesh),

@@ -191,7 +191,6 @@ pub(super) fn spawn_wmo_gameobject_props(
     mut uv_reg: ResMut<crate::doodad_anim::UvAnimMaterials>,
     mut tint_reg: ResMut<crate::doodad_anim::TintAnimMaterials>,
     mut probes: ResMut<PropProbes>,
-    mut palettes: ResMut<crate::rig_palette::RigPalettes>,
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
 ) {
@@ -267,7 +266,6 @@ pub(super) fn spawn_wmo_gameobject_props(
                 &mut commands,
                 &mut entity_mats.0,
                 &mut materials,
-                &mut palettes,
                 light,
                 &m.submeshes,
                 crate::model_forms::FormSlices {

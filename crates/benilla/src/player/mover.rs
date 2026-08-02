@@ -32,9 +32,10 @@ use bevy::prelude::*;
 use crate::collision::player_query_filter;
 
 use super::{
-    move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, GRAVITY, GROUND_COS, GROUND_PROBE,
-    JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT,
-    TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
+    move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY,
+    GROUND_COS, GROUND_PROBE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO,
+    STEP_SNAP_SLACK, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
+    WEDGE_STILL_FRAMES,
 };
 
 /// What the step decided — read by the move-flags / wire logic that follows it in `control`.
@@ -67,6 +68,7 @@ pub(super) fn step(
     dir: Vec3,
     speed: f32,
     want_jump: bool,
+    water_floor: Option<f32>,
 ) -> Outcome {
     let dt = time.delta_secs();
     let input_horiz = if moving {
@@ -88,11 +90,20 @@ pub(super) fn step(
     // ([`LAND_PROBE`], ~skin scale). The wider walking probe would end the arc up to 0.2 yd
     // early and close the gap with a same-frame snap — the visible pop at every silent landing
     // (decision 0190); the fall's own collision already stops the capsule exactly at contact.
-    let ground_reach = if player.airborne_since.is_some() {
-        LAND_PROBE
+    // A hovering body rests [`HOVER_HEIGHT`] above the floor (decision 0866), so every downward
+    // reach that decides "am I standing on something" has to grow by the same amount — otherwise
+    // the float reads as airborne and it falls, which is the hover bit doing nothing at all.
+    let hover_offset = if player.modes.hover {
+        HOVER_HEIGHT
     } else {
-        GROUND_PROBE
+        0.0
     };
+    let ground_reach = hover_offset
+        + if player.airborne_since.is_some() {
+            LAND_PROBE
+        } else {
+            GROUND_PROBE
+        };
     let classify = probe_down(center, ground_reach);
     let on_walkable = classify.as_ref().is_some_and(|h| h.normal1.y >= GROUND_COS);
     // Who we stand on (frame start); the end-of-frame snap probe below refreshes it post-move.
@@ -115,7 +126,11 @@ pub(super) fn step(
 
     // The wedged rest (decision 0211) stands until real ground takes over or the support
     // vanishes — we walked off the funnel wall into open air, which resumes a normal fresh fall.
-    if player.wedged && (on_floor || held || probe_down(center, LAND_PROBE).is_none()) {
+    // Its own reach stays [`LAND_PROBE`] (not the classify reach above), plus the hover offset so a
+    // hovering wedge is not read as having lost its support the moment the mode lands.
+    if player.wedged
+        && (on_floor || held || probe_down(center, LAND_PROBE + hover_offset).is_none())
+    {
         player.wedged = false;
     }
     let grounded = on_floor || player.wedged;
@@ -133,7 +148,18 @@ pub(super) fn step(
             jumped = true;
         }
     } else {
-        player.vel_y = (player.vel_y - GRAVITY * dt).max(-TERMINAL_VELOCITY);
+        // **Feather fall is a terminal-velocity substitution, and nothing else** (decision 0866).
+        // The reference's gravity integrate `0x7c5d20` picks its clamp from one flag test
+        // (`0x7c5d23 test [ecx+0x40], 0x20000000`) — the ordinary 60.148 or 7.0 under
+        // `MOVEFLAG_SAFE_FALL`. Gravity itself is unchanged, so a Slow Fall still *accelerates*
+        // normally for the first ~0.36 s and only then rides the cap: the drop starts like any
+        // other and settles into a drift, which is what Slow Fall looks like.
+        let terminal = if player.modes.feather_fall {
+            FEATHER_TERMINAL_VELOCITY
+        } else {
+            TERMINAL_VELOCITY
+        };
+        player.vel_y = (player.vel_y - GRAVITY * dt).max(-terminal);
     }
     let mut air_nudged = false;
     if grounded {
@@ -152,7 +178,15 @@ pub(super) fn step(
     // frames keep their own slide here: no step-up, no snap, and gravity in the velocity.
     let (mut climb, mut snap_probe) = (None, None);
     if !held && grounded && !jumped {
-        let g = grounded_step(ms, capsule, &filter, center, player.horiz_vel, time.delta());
+        let g = grounded_step(
+            ms,
+            capsule,
+            &filter,
+            center,
+            player.horiz_vel,
+            time.delta(),
+            hover_offset,
+        );
         center = g.center;
         climb = g.climb;
         snap_probe = g.snap;
@@ -204,7 +238,24 @@ pub(super) fn step(
     }
     // The frame that detects the wedge reports grounded immediately, so the falling pose ends
     // and the wire sees a normal landing (`MSG_MOVE_FALL_LAND`) this frame, not next.
-    let grounded = grounded || player.wedged;
+    let mut grounded = grounded || player.wedged;
+
+    // **Water walking: the liquid surface IS the floor** (decision 0866). `water_floor` is the
+    // surface Y the caller resolved, and it is `Some` only while the mode is granted AND we are not
+    // already swimming — the reference's own gate, read at `0x631617` (`test eax,0x200000; jne`)
+    // right after the water-walk test: a caster who is already submerged keeps swimming, and only
+    // surfaces onto the water once out of it. Liquid is not a collider here (it is queried, not
+    // swept), so it cannot come out of the probes above; it lands as a floor clamp instead — the
+    // body may not sink past it, and resting on it is being grounded, which ends any arc.
+    if let Some(surface) = water_floor {
+        let feet = center.y - half_h.y;
+        if feet <= surface {
+            center.y = surface + half_h.y;
+            player.vel_y = 0.0;
+            player.wedged = false;
+            grounded = true;
+        }
+    }
 
     player.pos = center - half_h;
     move_trace::frame(move_trace::Frame {
@@ -270,6 +321,7 @@ pub(crate) fn grounded_step(
     center: Vec3,
     horiz_vel: Vec3,
     dt: std::time::Duration,
+    surface_offset: f32,
 ) -> GroundedStep {
     let cast = |from: Vec3, disp: Vec3| {
         ms.cast_move(capsule, from, Quat::IDENTITY, disp, SKIN_WIDTH, filter)
@@ -334,13 +386,19 @@ pub(crate) fn grounded_step(
     // *idle* body every frame: the small float a raw wire Z leaves a watched player standing on
     // our terrain is taken out here, the same way [`crate::net::motion::ground_clamp_creatures`]
     // takes it out of an idle NPC.
+    // `surface_offset` is HOVER (decision 0866): the reference's WALK resolver `0x6367b0` adds
+    // `[0x7ff9d8]` = 1.0 to this same surface offset while `MOVEFLAG_HOVER` is set, and widens the
+    // step-down reach by the same yard (`0x633e35`) so the float still follows the ground down.
+    // Both halves are here: the reach grows by the offset, and the snap stops that far short of the
+    // floor. Zero for everyone not hovering, which is the ordinary case and unchanged.
     let d = slid - center;
-    let reach = d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT;
+    let reach =
+        d.x.hypot(d.z) * STEP_SLOPE_RATIO + STEP_SNAP_SLACK + CAPSULE_HEIGHT + surface_offset;
     let hit = cast(slid, Vec3::NEG_Y * reach);
     let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
     let mut ground = None;
     if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
-        slid.y -= h.distance;
+        slid.y -= h.distance - surface_offset;
         ground = Some(h.entity);
     }
     GroundedStep {

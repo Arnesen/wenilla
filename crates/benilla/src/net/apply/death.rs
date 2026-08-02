@@ -1,14 +1,15 @@
 //! Death-arc arm bodies for [`super::apply_net_updates`]'s dispatch match (decision 0308) — the
 //! wire-fed [`DeathNet`] stores (the corpse marker and its guid latch, the reclaim clock, the
-//! resurrect offer, the spirit-healer confirm, the death durability notice) plus the two
-//! controller-facing acks the server addresses to our own mover. Each `pub(super)` fn here is
+//! resurrect offer, the spirit-healer confirm, the death durability notice) plus the granted
+//! movement-mode forward the server addresses to our own mover. Each `pub(super)` fn here is
 //! exactly one arm's body — except the two corpse-guid latches, which ride the object-lifecycle
 //! arms; the match at the call site stays the dispatcher, one call per arm.
 
-use benilla_protocol::{EntityKind, ObjectFields};
+use benilla_protocol::{EntityKind, MoveMode, ObjectFields};
 use bevy::prelude::*;
 
-use crate::death::{CorpsePoint, DeathNet, MoveRootMessage, ResurrectOffer, WaterWalkMessage};
+use crate::death::{CorpsePoint, DeathNet, ResurrectOffer};
+use crate::net::MoveModeMessage;
 use crate::ui_items::UiErrorLines;
 
 use super::super::SelfGuid;
@@ -90,36 +91,30 @@ pub(super) fn durability_damage_death(lines: &mut UiErrorLines) {
         .push("Your equipped items suffer a 10% durability loss.".to_string());
 }
 
-/// `SMSG_FORCE_MOVE_ROOT`/`SMSG_FORCE_MOVE_UNROOT` — the server only addresses our own mover; the
-/// guard keeps a stray relay harmless.
-pub(super) fn move_root(
+/// **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall, hover. The
+/// server only ever addresses the controlling client's own mover; the guard keeps a stray relay
+/// harmless. Water-walk is additionally mirrored into [`DeathNet`], which reads it as a ghost-form
+/// cue — but the *mover* effect of every mode, this one included, is the controller's
+/// ([`crate::player::wire_in`]).
+pub(super) fn move_mode(
     guid: u64,
     counter: u32,
-    rooted: bool,
-    self_guid: &SelfGuid,
-    out: &mut MessageWriter<MoveRootMessage>,
-) {
-    if self_guid.0 == Some(guid) {
-        out.write(MoveRootMessage {
-            guid,
-            counter,
-            rooted,
-        });
-    }
-}
-
-/// `SMSG_MOVE_WATER_WALK`/`SMSG_MOVE_LAND_WALK` — mirrored into [`DeathNet`] for the swim arc's
-/// future mover regime; the ack itself is the controller's.
-pub(super) fn water_walk(
-    guid: u64,
-    counter: u32,
-    on: bool,
+    mode: MoveMode,
+    apply: bool,
     self_guid: &SelfGuid,
     death_net: &mut DeathNet,
-    out: &mut MessageWriter<WaterWalkMessage>,
+    out: &mut MessageWriter<MoveModeMessage>,
 ) {
-    if self_guid.0 == Some(guid) {
-        death_net.water_walk = on;
-        out.write(WaterWalkMessage { guid, counter, on });
+    if self_guid.0 != Some(guid) {
+        return;
     }
+    if mode == MoveMode::WaterWalk {
+        death_net.water_walk = apply;
+    }
+    out.write(MoveModeMessage {
+        guid,
+        counter,
+        mode,
+        apply,
+    });
 }

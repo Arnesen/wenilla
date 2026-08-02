@@ -197,11 +197,11 @@ pub(super) fn feed_ui_input(
     // around `arg1` and compared to `GetBindingKey("TOGGLEWORLDMAP")`), and `ALT-`/`CTRL-`/`SHIFT-`
     // are three separate strings in `WoW.exe`. So `CTRL-P` is a *different* entry from `P` and a
     // modified press never falls through to the unmodified binding. Ours must not either — otherwise
-    // the dev-overlay chords (Ctrl+Cmd+P / Ctrl+Cmd+I, decision 0585) would ALSO fire the letter's
-    // game action. `sup` is our one addition to the reference's three: Cmd isn't a binding modifier in
-    // the Mac client's scheme, but we've claimed the Cmd plane for the dev instruments and nothing in
-    // game binds it. (A binding that *wants* a modifier declares it — see `vplates::toggle_vplates`,
-    // which spends SHIFT itself for the V / SHIFT-V pair.)
+    // the dev-overlay chords would ALSO fire the letter's game action (`Ctrl`+`Shift`+key —
+    // decisions 0585/0867/0870). `sup` is our one addition to the reference's three: Cmd is not a
+    // binding modifier in any client's scheme, so a bare binding has no business firing under it
+    // either. (A binding that *wants* a modifier declares it — see `vplates::toggle_vplates`, which
+    // spends SHIFT itself for the V / SHIFT-V pair.)
     let modified = shift || ctrl || alt || sup;
     for ev in keyboard.read() {
         // ACTIONBUTTON1..12 (the number row 1..9,0,-,= — the bar's own HotKey labels): the ref's

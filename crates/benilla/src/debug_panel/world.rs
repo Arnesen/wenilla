@@ -7,7 +7,7 @@
 //!   looks wrong *here*" becomes a pasteable coordinate for the headless probes
 //!   (`WOW_PROBE_CHAT`, live-shot runs) and the FPS-journal loop closes without hand-copying
 //!   numbers.
-//! - **land here** — the button half of [`crate::player::land`] (whose chord is `Ctrl`+`Cmd`+`G`),
+//! - **land here** — the button half of [`crate::player::land`] (whose chord is the dev chord + `G`),
 //!   shown only while free-flying.
 //!
 //! **While free-flying, the spot is the CAMERA's** — the section gains a `camera` line and the
@@ -202,7 +202,7 @@ pub(super) fn world_section(ui: &mut egui::Ui, world: &mut WorldReadout) {
         };
         ui.ctx().copy_text(line);
     }
-    // Land here — the button half of the `Ctrl`+`Cmd`+`G` chord. Only while detached, because
+    // Land here — the button half of the dev chord's `G`. Only while detached, because
     // attached the camera sits behind the avatar and "land at the camera" means a step backwards.
     if detached_at.is_some() && ui.button("land here").clicked() {
         world.land.write(LandHere);

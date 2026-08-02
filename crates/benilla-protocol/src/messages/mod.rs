@@ -118,7 +118,7 @@ pub use mail::{
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
 };
-pub use movement::{JumpInfo, MovementInfo, SpeedKind, TransportPose};
+pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, TransportPose};
 pub use opcode_names::opcode_name;
 pub use packet::{CreatureQueryInfo, MonsterMoveFacing, ServerPacket};
 pub use parse::parse_server;

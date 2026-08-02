@@ -9,7 +9,7 @@ use super::{
     CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
     InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
-    LootRoll, LootRollWon, LootStartRoll, MailListEntry, Object, PartyMemberStatsInfo,
+    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MoveMode, Object, PartyMemberStatsInfo,
     PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
     QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellCooldown,
     SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
@@ -736,19 +736,15 @@ pub enum ServerPacket {
     SpiritHealerConfirm {
         npc: u64,
     },
-    /// `SMSG_FORCE_MOVE_ROOT` / `SMSG_FORCE_MOVE_UNROOT` — the server (un)roots our mover; must be
-    /// acked with the echoed `counter` (`CMSG_FORCE_MOVE_[UN]ROOT_ACK`) or observers never see it.
-    MoveRoot {
+    /// **A granted mover mode changed** — the ack'd movement-mode family (decision 0866): root,
+    /// water-walk, feather-fall or hover, granted or revoked on our mover. `apply` is the direction.
+    /// Must be acked with the echoed `counter` ([`MoveMode::ack_opcode`]) or the server never applies
+    /// the change and observers never see it.
+    MoveMode {
         guid: u64,
         counter: u32,
-        rooted: bool,
-    },
-    /// `SMSG_MOVE_WATER_WALK` / `SMSG_MOVE_LAND_WALK` — water-walking granted/removed on our mover
-    /// (the ghost form's walk-on-water); ack with `CMSG_MOVE_WATER_WALK_ACK` + the echoed counter.
-    WaterWalk {
-        guid: u64,
-        counter: u32,
-        on: bool,
+        mode: MoveMode,
+        apply: bool,
     },
     /// `SMSG_LOGOUT_COMPLETE` — the world session is over; we are back at character select.
     LogoutComplete,
@@ -1141,10 +1137,16 @@ impl ServerPacket {
             ServerPacket::DurabilityDamageDeath => "SMSG_DURABILITY_DAMAGE_DEATH".into(),
             ServerPacket::ResurrectRequest(_) => "SMSG_RESURRECT_REQUEST".into(),
             ServerPacket::SpiritHealerConfirm { .. } => "SMSG_SPIRIT_HEALER_CONFIRM".into(),
-            ServerPacket::MoveRoot { rooted: true, .. } => "SMSG_FORCE_MOVE_ROOT".into(),
-            ServerPacket::MoveRoot { rooted: false, .. } => "SMSG_FORCE_MOVE_UNROOT".into(),
-            ServerPacket::WaterWalk { on: true, .. } => "SMSG_MOVE_WATER_WALK".into(),
-            ServerPacket::WaterWalk { on: false, .. } => "SMSG_MOVE_LAND_WALK".into(),
+            ServerPacket::MoveMode { mode, apply, .. } => match (mode, apply) {
+                (MoveMode::Root, true) => "SMSG_FORCE_MOVE_ROOT".into(),
+                (MoveMode::Root, false) => "SMSG_FORCE_MOVE_UNROOT".into(),
+                (MoveMode::WaterWalk, true) => "SMSG_MOVE_WATER_WALK".into(),
+                (MoveMode::WaterWalk, false) => "SMSG_MOVE_LAND_WALK".into(),
+                (MoveMode::FeatherFall, true) => "SMSG_MOVE_FEATHER_FALL".into(),
+                (MoveMode::FeatherFall, false) => "SMSG_MOVE_NORMAL_FALL".into(),
+                (MoveMode::Hover, true) => "SMSG_MOVE_SET_HOVER".into(),
+                (MoveMode::Hover, false) => "SMSG_MOVE_UNSET_HOVER".into(),
+            },
             ServerPacket::LogoutComplete => "SMSG_LOGOUT_COMPLETE".into(),
             ServerPacket::LogoutResponse { .. } => "SMSG_LOGOUT_RESPONSE".into(),
             ServerPacket::LogoutCancelAck => "SMSG_LOGOUT_CANCEL_ACK".into(),

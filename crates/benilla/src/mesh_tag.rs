@@ -181,6 +181,15 @@ pub(crate) fn rig_of(tag: u32) -> u16 {
     ((tag & RIG_MASK) >> RIG_SHIFT) as u16
 }
 
+/// Rewrite a tag's rig field in place, preserving every other field and both flag bits — the
+/// lazy-rig promote/demote writer (decision 0863): a doodad part's slot arrives at its first
+/// draw-wake and leaves under table pressure, and neither edge may touch the law payload, the
+/// fade alpha, or the shade/probe field. "Written once at spawn" (the module doc) remains the
+/// rule for every OTHER lane; this is the one sanctioned re-writer, and it owns only its field.
+pub(crate) fn with_rig(tag: u32, slot: u16) -> u32 {
+    (tag & !RIG_MASK) | rig_bits(slot)
+}
+
 /// A fade alpha as `MeshTag` bits: 6-bit fraction in the low field, everything else zero. Handles
 /// the shader's `0`-sentinel: `MeshTag == 0` means *untagged ⇒ opaque 1.0* in `wow_model.wgsl`,
 /// so a true zero (or negative) alpha returns `1` (≈1/63, near-invisible) instead of an

@@ -153,17 +153,19 @@ const COL_CAST_UI: usize = 3;
 /// [`COL_CATEGORY`] (Feign Death 30000 rec, Charge 15000 catRec, Lay on Hands 3600000 catRec).
 const COL_RECOVERY_TIME: usize = 19;
 const COL_CATEGORY_RECOVERY_TIME: usize = 20;
-/// `InterruptFlags` (21, `SpellRec+0x54`) / `ChannelInterruptFlags` (23, `SpellRec+0x5c`) — what
-/// breaks a cast / a running channel. Pinned empirically 2026-07-17 by the module's established
-/// cross-check (every vmangos `spell_template` row at its `MAX(build) ≤ 5875`): column 21 is the
-/// **unique** column matching `interruptFlags` on all 6389 nonzero rows, column 23 unique on all
-/// 343 nonzero `channelInterruptFlags` rows (`AuraInterruptFlags` = 22, 582/582, stays unread —
-/// no consumer yet), and the raw-row arithmetic agrees (offset = column×4, chain-locked between
-/// the verified neighbors `+0x50`/col 20 and col 25). Spot checks: Fireball 133 interrupt `0xf`,
-/// channel 0; Arcane Missiles 5143 channel `0x7c0c`; First Aid 746 interrupt 0, channel `0x3c0e`.
-/// Consumed by the cast bar's local self-cancel (`benilla::ui_cast`), where the bit semantics —
-/// the client-side movement gate — are documented.
+/// `InterruptFlags` (21, `SpellRec+0x54`) / `AuraInterruptFlags` (22, `SpellRec+0x58`) /
+/// `ChannelInterruptFlags` (23, `SpellRec+0x5c`) — what breaks a cast / a live aura / a running
+/// channel. Pinned empirically 2026-07-17 by the module's established cross-check (every vmangos
+/// `spell_template` row at its `MAX(build) ≤ 5875`): column 21 is the **unique** column matching
+/// `interruptFlags` on all 6389 nonzero rows, column 22 unique on all 582 nonzero
+/// `auraInterruptFlags` rows, column 23 unique on all 343 nonzero `channelInterruptFlags` rows,
+/// and the raw-row arithmetic agrees (offset = column×4, chain-locked between the verified
+/// neighbors `+0x50`/col 20 and col 25). Spot checks: Fireball 133 interrupt `0xf`, channel 0;
+/// Arcane Missiles 5143 channel `0x7c0c`; First Aid 746 interrupt 0, channel `0x3c0e`. Consumed
+/// by the cast bar's local self-cancel (`benilla::ui_cast`) and the cast-initiation moving gate
+/// (`benilla::ui_action`, decision 0862), where the bit semantics are documented.
 const COL_INTERRUPT_FLAGS: usize = 21;
+const COL_AURA_INTERRUPT_FLAGS: usize = 22;
 const COL_CHANNEL_INTERRUPT_FLAGS: usize = 23;
 /// `powerType` (31) / `manaCost` (32) / `ManaCostPercentage` (156) — the cast-cost triple
 /// `IsUsableAction`'s not-enough-power verdict reads. Same empirical pin (Taunt/Charge pwr 1 =
@@ -416,6 +418,15 @@ pub const ATTR_NOT_IN_COMBAT: u32 = 0x1000_0000;
 /// `AttributesEx2` bit 19 — the form requirement is waived while unshifted (vmangos
 /// `SPELL_ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED`; a form-gate input).
 const ATTR_EX2_ALLOW_WHILE_NOT_SHAPESHIFTED: u32 = 0x0008_0000;
+/// The **combo-point consumers** — `AttributesEx` bits 20 and 22 (vmangos
+/// `SPELL_ATTR_EX_FINISHING_MOVE_DAMAGE` / `_DURATION`, both commented "Uses combo points"; the
+/// pair `SpellEntry::NeedsComboPoints` tests). The usable walk's leg 5 reads exactly this pair
+/// (wow-re §2a: "AttributesEx b20/b22") before consulting the caster's combo-point byte —
+/// [`SpellDisplay::needs_combo_points`], decision 0869. In 5875 the set is the six rogue/druid
+/// finishers (Eviscerate, Expose Armor, Ferocious Bite, Kidney Shot, Rip, Rupture, Slice and
+/// Dice) **plus Overpower**, whose own `AttributesEx` bit 30 vmangos names `COMBO_ON_BLOCK` and
+/// annotates, in one word, "Overpower".
+const ATTR_EX_FINISHING_MOVE: u32 = 0x0050_0000;
 /// `SpellEffects` value `47` — `SPELL_EFFECT_TRADE_SKILL`: the usable walk's early-out
 /// (`0x6e3d99`, `Effect[0]==0x2f` ⇒ usable, skipping every gate). Also the crafting book's open
 /// key (0437): `Spell_C::TryCast 0x6e4b60` branches on `Effect[0]==0x2f` and opens the window
@@ -600,6 +611,7 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 category: u32_at(r, COL_CATEGORY).unwrap_or(0),
                 recovery_ms: u32_at(r, COL_RECOVERY_TIME).unwrap_or(0),
                 interrupt_flags: u32_at(r, COL_INTERRUPT_FLAGS).unwrap_or(0),
+                aura_interrupt_flags: u32_at(r, COL_AURA_INTERRUPT_FLAGS).unwrap_or(0),
                 channel_interrupt_flags: u32_at(r, COL_CHANNEL_INTERRUPT_FLAGS).unwrap_or(0),
                 category_recovery_ms: u32_at(r, COL_CATEGORY_RECOVERY_TIME).unwrap_or(0),
                 start_recovery_category: u32_at(r, COL_START_RECOVERY_CATEGORY).unwrap_or(0),

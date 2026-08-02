@@ -915,6 +915,23 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     if (is_additive) {
         out_rgb = out_rgb * faded_alpha;
     }
+    // MULTIPLY batches (Mod bit 7 / Mod2x bit 8 — the ARMORREFLECT sheen family, 0528): their
+    // blend equation reads no source alpha, so the instance fade cannot ride the alpha channel —
+    // the reference genuinely pops these at full strength through every instanceAlpha ramp
+    // (byte-confirmed for items: wow-re `m2-item-texture-fill.md` — the type-3 stage is never
+    // bound and draws the flat primary colour, ~white, so Mod2x is a full-strength ×2 layer
+    // mid-fade). benilla fades them anyway, a deliberate deviation (decision 0865): lerp the
+    // source colour toward the blend IDENTITY — Mod: white (src·dst = dst); Mod2x: 0.5 grey
+    // (2·0.5·dst = dst) — by the instance fade `obj_fade` (never the texture alpha). At
+    // obj_fade 1 this is exact parity with the steady look; at 0 the layer contributes nothing,
+    // so the sheen rides the appear/despawn/stealth/distance ramps like every other batch
+    // instead of popping over a body that hasn't faded in.
+    let is_mod = (u32(m.clutter_fade.z) & 128u) != 0u;
+    let is_mod2x = (u32(m.clutter_fade.z) & 256u) != 0u;
+    if (is_mod || is_mod2x) {
+        let identity = select(vec3<f32>(1.0), vec3<f32>(0.5), is_mod2x);
+        out_rgb = mix(identity, out_rgb, obj_fade);
+    }
     // GAMMA LANE (0161): raw gamma out — blending (alpha AND additive) happens in gamma like
     // the reference's byte framebuffer; the frame decodes once in the FFXGlow combine. (The old
     // `lin` A/B emitted linear for the sRGB encode — subsumed by the lane.)

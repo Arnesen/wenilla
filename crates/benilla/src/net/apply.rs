@@ -80,10 +80,9 @@ pub(super) fn apply_net_updates(
         MessageWriter<EnteredWorldMessage>,
         MessageWriter<LoggedOutMessage>,
         MessageWriter<super::SpeedChangeMessage>,
-        // The death arc's controller-facing acks (decision 0308): the server root/water-walk
-        // changes the player controller answers with its live pose.
-        MessageWriter<crate::death::MoveRootMessage>,
-        MessageWriter<crate::death::WaterWalkMessage>,
+        // The ack'd movement-mode family (decisions 0308, 0866): a mode the server granted our
+        // mover, which the player controller applies and answers with its live pose.
+        MessageWriter<super::MoveModeMessage>,
         // The login screen's dialog + reconnect-policy feed (decision 0539).
         MessageWriter<super::LoginStageMessage>,
         MessageWriter<super::LoginFailedMessage>,
@@ -210,11 +209,13 @@ pub(super) fn apply_net_updates(
         MessageWriter<crate::creature_anim::MountFlourish>,
         // The UNIT_COMBAT event feed (the portrait hit indicator, decision 0576) + the
         // COMBAT_TEXT_UPDATE feed (the center combat text, decision 0578) — the spell arms'
-        // self-facing twins of the floating-text spawn. Nested pair: the tuple is at the
+        // self-facing twins of the floating-text spawn — and the sheath setter's queue, which the
+        // ATTACKERSTATEUPDATE arm's melee auto-draw writes into. Nested: the tuple is at the
         // 16-param ceiling.
         (
             MessageWriter<crate::ui_unit::UnitCombatFeedback>,
             MessageWriter<crate::ui_unit::CombatTextEvent>,
+            MessageWriter<crate::creature_anim::SheathRequest>,
         ),
     ),
     // The aura feed's duration side-table + the clock to stamp arrivals (decisions 0255/0257): the
@@ -294,8 +295,7 @@ pub(super) fn apply_net_updates(
         mut entered_world,
         mut logged_out,
         mut speed_changes,
-        mut move_roots,
-        mut water_walks,
+        mut move_modes,
         mut login_stages,
         mut login_failures,
         mut disconnects,
@@ -818,18 +818,19 @@ pub(super) fn apply_net_updates(
             SessionEvent::DurabilityDamageDeath => {
                 death::durability_damage_death(&mut ui_actions.14)
             }
-            SessionEvent::MoveRoot {
+            SessionEvent::MoveMode {
                 guid,
                 counter,
-                rooted,
-            } => death::move_root(guid, counter, rooted, &self_guid, &mut move_roots),
-            SessionEvent::WaterWalk { guid, counter, on } => death::water_walk(
+                mode,
+                apply,
+            } => death::move_mode(
                 guid,
                 counter,
-                on,
+                mode,
+                apply,
                 &self_guid,
                 &mut death_net,
-                &mut water_walks,
+                &mut move_modes,
             ),
             SessionEvent::ItemTemplate { entry, info } => {
                 item_template(entry, info.map(|b| *b), &mut items)
@@ -850,6 +851,7 @@ pub(super) fn apply_net_updates(
                 &mut audio.3,
                 &mut audio.8,
                 &mut audio.15 .1,
+                &mut audio.15 .2,
                 play_seq.next(),
             ),
             SessionEvent::SpellDamageLog(s) => combat_log::spell_damage_log(

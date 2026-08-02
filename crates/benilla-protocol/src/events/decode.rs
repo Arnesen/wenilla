@@ -369,18 +369,17 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::SpiritHealerConfirm { npc } => {
             vec![SessionEvent::SpiritHealerConfirm { npc }]
         }
-        ServerPacket::MoveRoot {
+        ServerPacket::MoveMode {
             guid,
             counter,
-            rooted,
-        } => vec![SessionEvent::MoveRoot {
+            mode,
+            apply,
+        } => vec![SessionEvent::MoveMode {
             guid,
             counter,
-            rooted,
+            mode,
+            apply,
         }],
-        ServerPacket::WaterWalk { guid, counter, on } => {
-            vec![SessionEvent::WaterWalk { guid, counter, on }]
-        }
         ServerPacket::GroupInvite { inviter } => vec![SessionEvent::GroupInvite { inviter }],
         ServerPacket::GroupDecline { name } => vec![SessionEvent::GroupDecline { name }],
         ServerPacket::GroupUninvited => vec![SessionEvent::GroupUninvited],

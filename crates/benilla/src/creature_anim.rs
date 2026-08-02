@@ -46,8 +46,8 @@ use crate::schedule::WorldStage;
 /// picks, playback-rate math) — kept in its own file as it carries the bulk of the unit-tested selector
 /// logic, separate from the Bevy driver systems in [`driver`].
 mod select;
-use select::Mode;
 pub(crate) use select::{ease_strafe_yaw, move_flags, strafe_body_offset, MovementState};
+use select::{Mode, Special};
 
 /// The display-facing counter-twist (the strafe body pose): the [`BodyTwist`] component + the
 /// post-animation system that composes the SpineLow/Head counter-rotation onto the frame's pose.
@@ -448,7 +448,9 @@ pub(crate) struct SpellGoTargets {
 /// executes them, so every sheath transition has exactly one author.
 mod sheath;
 use sheath::{load_anim_data, SheathSwap};
-pub(crate) use sheath::{AnimData, SheathRequest, SheathSwapMessage, VisualSheath};
+pub(crate) use sheath::{
+    toggle_sheath_next, AnimData, SheathRequest, SheathSwapMessage, VisualSheath,
+};
 
 /// The `SMSG_EMOTE` → [`EmoteAnim`] consumer (Part 1 of the emote-animation wiring) — kept
 /// alongside `sheath` as its own small concern.
@@ -556,6 +558,12 @@ pub(crate) struct AnimDriver {
     /// walks a multi-part dance. `None` = the main arm is a one-shot (its budget is a `Count`
     /// repeat) or a deliberate freeze (ranged Load / Loot).
     loop_window: Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    /// The Special wanted LAST frame — the driver's Special **edge** detector (decision 0864).
+    /// An edge is a play in the client (the jump/pose entry, the FALLINGFAR latch's Fall, the
+    /// land pick), so it clears the deferred-combat cache like any normal arm (`0x5fe48e`);
+    /// the *level* must not (mid-air the airborne-freeze issues no plays, so a fast-path park
+    /// survives to its clip's end).
+    last_special: Option<Special>,
 }
 
 impl AnimDriver {
@@ -622,6 +630,7 @@ impl Default for AnimDriver {
             deferred: None,
             ranged_held: false,
             loop_window: None,
+            last_special: None,
         }
     }
 }

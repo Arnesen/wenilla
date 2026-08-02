@@ -7,7 +7,7 @@ mod common;
 
 use benilla_protocol::events::{decode, SessionEvent};
 use benilla_protocol::messages;
-use benilla_protocol::ServerPacket;
+use benilla_protocol::{MoveMode, ServerPacket};
 use common::hx;
 
 #[test]
@@ -283,43 +283,66 @@ fn death_arc_family_parses_and_decodes() {
         other => panic!("spirit healer confirm decode: {other:?}"),
     }
 
-    // SMSG_FORCE_MOVE_ROOT / SMSG_MOVE_WATER_WALK: PACKED guid + u32 counter. Guid 0x2A packs as
-    // mask 0x01 + one byte.
+    // **The whole ack'd movement-mode family, all eight opcodes** (decision 0866): one wire shape,
+    // PACKED guid + u32 counter. Guid 0x2A packs as mask 0x01 + one byte. Every pair is exercised,
+    // because the family's whole point is that adding a mode must not need a new lane — and because
+    // the four that were missing (feather-fall, hover) were missing *silently*.
     let body = hx("012a07000000"); // packed(0x2A) + counter 7
-    let pkt = messages::parse_server(opcode::SMSG_FORCE_MOVE_ROOT, &body).unwrap();
-    match decode(pkt).as_slice() {
-        [SessionEvent::MoveRoot {
-            guid: 0x2A,
-            counter: 7,
-            rooted: true,
-        }] => {}
-        other => panic!("move root decode: {other:?}"),
+    for (op, mode, apply) in [
+        (opcode::SMSG_FORCE_MOVE_ROOT, MoveMode::Root, true),
+        (opcode::SMSG_FORCE_MOVE_UNROOT, MoveMode::Root, false),
+        (opcode::SMSG_MOVE_WATER_WALK, MoveMode::WaterWalk, true),
+        (opcode::SMSG_MOVE_LAND_WALK, MoveMode::WaterWalk, false),
+        (opcode::SMSG_MOVE_FEATHER_FALL, MoveMode::FeatherFall, true),
+        (opcode::SMSG_MOVE_NORMAL_FALL, MoveMode::FeatherFall, false),
+        (opcode::SMSG_MOVE_SET_HOVER, MoveMode::Hover, true),
+        (opcode::SMSG_MOVE_UNSET_HOVER, MoveMode::Hover, false),
+    ] {
+        let pkt = messages::parse_server(op, &body).unwrap();
+        match decode(pkt).as_slice() {
+            [SessionEvent::MoveMode {
+                guid: 0x2A,
+                counter: 7,
+                mode: got_mode,
+                apply: got_apply,
+            }] if *got_mode == mode && *got_apply == apply => {}
+            other => panic!("move mode decode for opcode {op:#06x}: {other:?}"),
+        }
     }
-    let pkt = messages::parse_server(opcode::SMSG_FORCE_MOVE_UNROOT, &body).unwrap();
-    assert!(matches!(
-        decode(pkt).as_slice(),
-        [SessionEvent::MoveRoot { rooted: false, .. }]
-    ));
-    let pkt = messages::parse_server(opcode::SMSG_MOVE_WATER_WALK, &body).unwrap();
-    assert!(matches!(
-        decode(pkt).as_slice(),
-        [SessionEvent::WaterWalk {
-            on: true,
-            counter: 7,
-            ..
-        }]
-    ));
-    let pkt = messages::parse_server(opcode::SMSG_MOVE_LAND_WALK, &body).unwrap();
-    assert!(matches!(
-        decode(pkt).as_slice(),
-        [SessionEvent::WaterWalk { on: false, .. }]
-    ));
+
+    // The mode→bit map, VERIFIED vmangos `Objects/MovementInfo.h:25-62`. These are the bits the
+    // mover reads and the ack echoes, so a transcription slip here is silent everywhere else.
+    assert_eq!(MoveMode::Root.flag(), 0x0000_1000);
+    assert_eq!(MoveMode::WaterWalk.flag(), 0x1000_0000);
+    assert_eq!(MoveMode::FeatherFall.flag(), 0x2000_0000);
+    assert_eq!(MoveMode::Hover.flag(), 0x4000_0000);
+
+    // Root is the ONLY mode whose ack opcode differs by direction, and the only one whose ack body
+    // carries no trailing apply dword — vmangos routes it to `HandleMoveRootAck`, the other three to
+    // `HandleMovementFlagChangeToggleAck` (`Server/Protocol/Opcodes.cpp:314-816`).
+    assert_eq!(
+        MoveMode::Root.ack_opcode(true),
+        opcode::CMSG_FORCE_MOVE_ROOT_ACK
+    );
+    assert_eq!(
+        MoveMode::Root.ack_opcode(false),
+        opcode::CMSG_FORCE_MOVE_UNROOT_ACK
+    );
+    assert!(!MoveMode::Root.ack_carries_apply());
+    for mode in [MoveMode::WaterWalk, MoveMode::FeatherFall, MoveMode::Hover] {
+        assert_eq!(
+            mode.ack_opcode(true),
+            mode.ack_opcode(false),
+            "{mode:?}: one ack opcode both ways"
+        );
+        assert!(mode.ack_carries_apply(), "{mode:?}: ack carries apply");
+    }
 }
 
-/// The move-flag ack bodies (client side): full guid + echoed counter + MovementInfo, with the
-/// trailing `u32 apply` on the water-walk ack ONLY (vmangos `Movement.cpp:38-59` — `MoveRootAck`
-/// has no apply dword). The root ack must be exactly 4 bytes shorter than the water-walk ack for
-/// the same inputs.
+/// The movement-mode ack bodies (client side): full guid + echoed counter + MovementInfo, with the
+/// trailing `u32 apply` on every mode EXCEPT root (vmangos `Movement.cpp:38-59` — `MoveRootAck` has
+/// no apply dword). The root ack must be exactly 4 bytes shorter than the others for the same
+/// inputs.
 #[test]
 fn move_flag_ack_bodies_differ_by_the_apply_tail() {
     use benilla_protocol::messages::{move_flag_ack, MovementInfo};

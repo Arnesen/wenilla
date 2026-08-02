@@ -1,8 +1,9 @@
 //! Server-authored movement edges applied to our mover — the inbound mirror of
 //! [`super::movement_net`] (which streams our own movement out). One entry point,
 //! [`apply_server_moves`], called by [`super::control`] before input integrates: cross-map
-//! worldports (incl. the riding-through-the-seam branch, decision 0455), same-map teleports,
-//! root/unroot (death — decision 0308), water-walk grants, the one-shot take-control edge, the
+//! worldports (incl. the riding-through-the-seam branch, decision 0455), same-map teleports, the
+//! **granted movement-mode family** (root, water-walk, feather-fall, hover — decisions 0308/0866,
+//! applied to [`super::state::MoveModes`] and acked here), the one-shot take-control edge, the
 //! pre-control forced-speed acks (the controlled branch answers those through the movement
 //! stream's own per-frame payload instead — the returned list), and the **bare self-addressed
 //! move** ([`apply_self_move`], decision 0725).
@@ -13,15 +14,15 @@
 //! mover-guid gate at all — and sends nothing back; the next ordinary heartbeat carries the
 //! server's own pose home, which is what makes `.go forward` stick.
 
+use benilla_protocol::MoveMode;
 use bevy::prelude::*;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 
 use crate::creature_anim::{move_flags, wrap_pi};
-use crate::death::{MoveRootMessage, WaterWalkMessage};
 use crate::net::{
-    ClientCommand, Guid, MoveKind, NetCommands, SelfMoveMessage, SelfPlayer, SpeedChangeMessage,
-    TeleportMessage, WorldportMessage,
+    ClientCommand, Guid, MoveKind, MoveModeMessage, NetCommands, SelfMoveMessage, SelfPlayer,
+    SpeedChangeMessage, TeleportMessage, WorldportMessage,
 };
 use crate::transport::Transport;
 use crate::world_map::CurrentMap;
@@ -32,7 +33,8 @@ use super::{movement_net, Player, SETTLE_TIMEOUT};
 /// Drain this frame's server-authored movement messages, apply them to the mover, and send each
 /// ack. Returns the frame's forced-speed changes: pre-control/detached they were acked here with
 /// the parked pose; controlled, the caller's movement stream acks them with its live payload.
-/// `self_pos` is the streamed self entity's current translation (the take-control snap target).
+/// `self_pose` is the streamed self entity's current translation + facing yaw (the take-control
+/// snap target).
 // One system phase's full input set (the spawner precedent); the transports query type is
 // `control`'s own param shape passed through.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -45,14 +47,13 @@ pub(super) fn apply_server_moves(
     teleports: &mut MessageReader<TeleportMessage>,
     worldports: &mut MessageReader<WorldportMessage>,
     speed_msgs: &mut MessageReader<SpeedChangeMessage>,
-    root_msgs: &mut MessageReader<MoveRootMessage>,
-    waterwalk_msgs: &mut MessageReader<WaterWalkMessage>,
+    mode_msgs: &mut MessageReader<MoveModeMessage>,
     self_moves: &mut MessageReader<SelfMoveMessage>,
     transports: &Query<
         (&Transform, &Guid),
         (With<Transport>, Without<SelfPlayer>, Without<FlyCam>),
     >,
-    self_pos: Option<Vec3>,
+    self_pose: Option<(Vec3, f32)>,
 ) -> Vec<SpeedChangeMessage> {
     // Cross-map worldport (`.tele Orgrimmar`, initial-login map, a boat crossing the sea): the net
     // bridge surfaced it as a message earlier this frame (WorldStage::Net). Snap the avatar, bump
@@ -180,43 +181,42 @@ pub(super) fn apply_server_moves(
         }
     }
 
-    // Server root/unroot on our mover (death/release — decision 0308): apply the change locally,
-    // THEN ack with the resulting flags — the real client's shape, and the server's law: a
-    // root-apply ack whose MovementInfo lacks MOVEFLAG_ROOT is a KICK (vmangos
-    // `HandleMoveRootAck:715-723`, live-verified against the deploy's Movement.log). Moving bits
-    // never accompany ROOT (they freeze the real client), so the walk stream parks first.
-    for m in root_msgs.read() {
-        player.rooted = m.rooted;
-        if m.rooted {
+    // **The ack'd movement-mode family** (decisions 0308, 0866) — root, water-walk, feather-fall,
+    // hover. Apply the mode to our typed state FIRST, then ack with the flag word that state
+    // rebuilds to: that ordering is the real client's, and it is also the server's law — an
+    // apply-ack whose `MovementInfo` lacks the mode bit un-grants the very mode it is accepting,
+    // and for root it is an outright KICK (vmangos `HandleMoveRootAck:715-723`, live-verified
+    // against the deploy's `Movement.log`).
+    //
+    // Root additionally **parks the walk stream and ends the arc**: moving bits must never
+    // accompany `MOVEFLAG_ROOT` (they freeze the real client, and vmangos raises
+    // `CHEAT_TYPE_ROOT_MOVE`), and the reference's own `SetRoot 0x7c7340` clears the direction bits
+    // and calls stop-fall `0x7c6290` at apply. Turn bits are *not* moving bits —
+    // `MOVEFLAG_MASK_MOVING` excludes them — the same asymmetry that keeps turning live while
+    // rooted.
+    for m in mode_msgs.read() {
+        player.modes.set(m.mode, m.apply);
+        if m.mode == MoveMode::Root && m.apply {
             movement_net::park_mover(&net_cmds.0, player);
+            player.airborne_since = None;
+            player.vel_y = 0.0;
+            player.fall_far = false;
         }
         let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
-        let _ = net_cmds.0.send(ClientCommand::MoveRootAck {
+        let _ = net_cmds.0.send(ClientCommand::MoveModeAck {
             guid: m.guid,
             counter: m.counter,
-            rooted: m.rooted,
-            flags: if m.rooted { move_flags::ROOT } else { 0 },
+            mode: m.mode,
+            apply: m.apply,
+            flags: player.modes.wire_flags(),
             pos: bevy_to_wow(player.pos),
             orientation: facing,
         });
         info!(
-            "mover {} (acked)",
-            if m.rooted { "rooted" } else { "unrooted" }
+            "mover mode {:?} {} (acked)",
+            m.mode,
+            if m.apply { "granted" } else { "revoked" }
         );
-    }
-    // Water-walk grant/removal (the ghost form): ack with the applied flag (the faithful echo;
-    // the toggle-ack path doesn't hard-require it the way the root ack does). The walk-on-water
-    // mover regime itself is the swim arc's deferred seam (0308 §8).
-    for m in waterwalk_msgs.read() {
-        let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
-        let _ = net_cmds.0.send(ClientCommand::WaterWalkAck {
-            guid: m.guid,
-            counter: m.counter,
-            on: m.on,
-            flags: if m.on { move_flags::WATER_WALKING } else { 0 },
-            pos: bevy_to_wow(player.pos),
-            orientation: facing,
-        });
     }
 
     // Take control once the server first reports our position (the streamed `SelfPlayer` entity,
@@ -224,23 +224,31 @@ pub(super) fn apply_server_moves(
     // directly; the entity renderer attaches its body model (0041) the same way it does for any
     // other player.
     if !player.active {
-        if let Some(pos) = self_pos {
+        if let Some((pos, yaw)) = self_pose {
             player.pos = pos;
             player.active = true;
             player.settling = true; // settle onto the initial ground once it loads (don't fall through)
             player.settle_deadline = time.elapsed_secs() + SETTLE_TIMEOUT;
             player.world_stale = true; // nothing is streamed yet at all — see [`Player::world_stale`]
-            cam.yaw = 0.0;
+                                       // The streamed spawn pose carries the server's facing (the character's logout
+                                       // orientation on a fresh login) — adopt it whole, camera seated behind, like the
+                                       // reference. Zeroing here is what made every login face due north regardless.
+            cam.yaw = yaw;
             cam.pitch = -0.45;
-            player.face_yaw = 0.0;
-            player.model_yaw = 0.0;
+            player.face_yaw = yaw;
+            player.model_yaw = yaw;
+            // Seed the facing-change detector with the adopted facing — the server gave it to us,
+            // so the first controlled frame owes no `SET_FACING` (the real client sends nothing at
+            // login until the mouse actually turns).
+            player.last_facing = yaw.rem_euclid(std::f32::consts::TAU);
             // The avatar's `MovementState` (the animation selector's motion source) is NOT inserted
             // here: it rides the `SelfPlayer` tag (`net::apply::tag_self_player`), because a
             // cross-map worldport despawns and re-streams this entity while `player.active` stays
             // true — per-entity state attached only on this one-shot edge would be lost on transfer.
             info!(
-                "took control of player @ {:?} ('F' toggles free-fly)",
-                player.pos
+                "took control of player @ {:?} facing {:.3} ('F' toggles free-fly)",
+                player.pos,
+                yaw.rem_euclid(std::f32::consts::TAU)
             );
         }
     }
@@ -330,7 +338,7 @@ fn apply_self_move(
     // runs `0x61a1af → 0x61a230 → SetSwim` (wow-re `swim-transition.md`, "the local unit's server
     // echo"). This pair is GM flight: `.cheat fly` sends SWIMMING + LEVITATING together.
     player.swimming = player.move_flags & move_flags::SWIMMING != 0;
-    player.levitating = player.move_flags & move_flags::LEVITATING != 0;
+    player.modes.merge_from_wire(player.move_flags);
     // Neither mode touches `settling`: the settle release is the terrain streamer's, keyed on the
     // destination's residency in every mover mode alike (decision 0737). The pre-0737 special case
     // here (swim clears the hold) existed only because the old release was a walk-mover ground

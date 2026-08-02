@@ -12,7 +12,7 @@
 //! distance (clamped to the vanilla `cameraDistanceMax` range; the camera *glides* to the new
 //! distance). A left-drag orbit offset *persists* — the vanilla `cameraSmoothStyle` auto-follow that
 //! swung the camera back behind the character while moving is deliberately removed (director's call).
-//! `F` toggles free-fly; `Ctrl`+`Cmd`+`G` **lands the avatar where the camera is** ([`land`]).
+//! `F` toggles free-fly; the **dev chord + `G`** lands the avatar where the camera is ([`land`]).
 //!
 //! Movement is a thin kinematic capsule controller over avian's `MoveAndSlide` (decision 0009).
 
@@ -71,8 +71,8 @@ use state::{
 // 0737 — residency releases the hold, not ground contact), which owns the deadline push while the
 // resident world is still the departed map's (0710).
 pub(crate) use state::{
-    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, GRAVITY, SETTLE_TIMEOUT,
-    TERMINAL_VELOCITY,
+    Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY,
+    GRAVITY, HOVER_HEIGHT, SETTLE_TIMEOUT, TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
@@ -221,10 +221,9 @@ fn control(
         MessageReader<WorldportMessage>,
         MessageWriter<crate::creature_anim::SheathRequest>,
         MessageReader<crate::net::SpeedChangeMessage>,
-        // The death arc's server movement-flag changes (decision 0308): root at death / unroot +
-        // water-walk at release — acked here with the live pose.
-        MessageReader<crate::death::MoveRootMessage>,
-        MessageReader<crate::death::WaterWalkMessage>,
+        // The ack'd movement-mode family (decisions 0308, 0866): root / water-walk / feather-fall /
+        // hover, granted on our mover — applied to `player.modes` and acked here with the live pose.
+        MessageReader<crate::net::MoveModeMessage>,
         // The landing report for the client-side hard-landing predictor (`0x602d00` — wound
         // vocal + dust; the consumers gate on the threshold, `creature_anim::env_damage`).
         MessageWriter<crate::creature_anim::HardLanding>,
@@ -268,6 +267,9 @@ fn control(
             Has<crate::creature_anim::Engaged>,
             Option<&crate::net::UnitSpeeds>,
             Option<&mut BodyTwist>,
+            // What is worn in each hand and in the ranged slot — the Z toggle's cycle reads it
+            // (the ref's three `GetWeapon(0/1/2)` calls before the state walk, below).
+            Option<&crate::creature_anim::Wielded>,
         ),
         (With<SelfPlayer>, Without<FlyCam>),
     >,
@@ -418,10 +420,12 @@ fn control(
         &mut net.2,
         &mut net.4,
         &mut net.5,
-        &mut net.6,
-        &mut net.10,
+        &mut net.9,
         transports,
-        self_player.single().ok().map(|(_, t, ..)| t.translation),
+        self_player
+            .single()
+            .ok()
+            .map(|(_, t, ..)| (t.translation, server_ride::yaw_of(t.rotation))),
     );
 
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z).normalize_or_zero();
@@ -546,7 +550,7 @@ fn control(
             keys_just_pressed(KeyCode::KeyW),
             keys_just_pressed(KeyCode::KeyS),
             both_buttons_engaged,
-            player.rooted || player.server_riding,
+            player.modes.rooted || player.server_riding,
         ) {
             player.autorun = false;
         }
@@ -629,7 +633,7 @@ fn control(
         }
         // Rooted (dead-unreleased): translation intent dies here — turning above stays live, the
         // real rooted client's behavior (decision 0308 slice 1).
-        if player.rooted {
+        if player.modes.rooted {
             dir = Vec3::ZERO;
         }
         let moving = dir != Vec3::ZERO;
@@ -642,7 +646,7 @@ fn control(
         let stand_byte = self_player
             .single()
             .ok()
-            .and_then(|(.., store, _, _, _)| store.map(|s| s.0.unit_stand_state()))
+            .and_then(|(.., store, _, _, _, _)| store.map(|s| s.0.unit_stand_state()))
             .unwrap_or(0);
         if player.stand_pending == Some(stand_byte) {
             player.stand_pending = None; // the echo landed
@@ -677,7 +681,7 @@ fn control(
             // wow-re `sheath-policy.md` §4): entering any stand-state ∉ {0 STAND, 2 SIT_CHAIR}
             // force-stows drawn weapons, through the anim layer's one setter.
             if s != 0 && s != 2 {
-                if let Ok((e, _, _, _, drv, _, _, _, _)) = self_player.single() {
+                if let Ok((e, _, _, _, drv, _, _, _, _, _)) = self_player.single() {
                     if drv.and_then(|d| d.sheath_state()).unwrap_or(0) != 0 {
                         net.3.write(crate::creature_anim::SheathRequest {
                             entity: e,
@@ -690,7 +694,7 @@ fn control(
         }
         let stand_now = player.stand_pending.unwrap_or(stand_byte);
         // Sheath toggle (Z) — vanilla's draw/stow, through the anim layer's ONE setter
-        // ([`crate::creature_anim::SheathRequest`], decision 0080): flip the *committed*
+        // ([`crate::creature_anim::SheathRequest`], decision 0080): walk the *committed*
         // client-side state (the setter cache — attacking auto-draws and the anim reconcile
         // force-stows, which a local bool or the raw echo byte would drift from), commit + send
         // `CMSG_SETSHEATHED` there, and play the ceremony — the manual toggle is the ONLY path
@@ -698,7 +702,8 @@ fn control(
         // `sheath-policy.md`). No body model yet (no driver) drops the toggle, the client's own
         // refusal.
         if bare_binding(KeyCode::KeyZ) {
-            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _)) = self_player.single() {
+            if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded)) = self_player.single()
+            {
                 // The manual toggle's guard chain (decision 0080d) — the guards of the client's
                 // 12-deep silent-refusal chain (`ToggleSheath` `0x5eb480`) whose states exist
                 // today: dead · engaged in combat · not standing (`GetStandState() != 0` —
@@ -718,12 +723,22 @@ fn control(
                         drv.sheath_ceremony_active()
                     );
                 } else {
-                    let drawn = drv.sheath_state().unwrap_or(0) != 0;
-                    net.3.write(crate::creature_anim::SheathRequest {
-                        entity: e,
-                        state: u8::from(!drawn),
-                        ceremony: true,
-                    });
+                    // The cycle proper ([`crate::creature_anim::toggle_sheath_next`], byte-read):
+                    // melee → ranged → stowed, gated on what is actually worn — never a
+                    // two-state flip. `None` = the ref makes no call at all (nothing equipped).
+                    let w = wielded.copied().unwrap_or_default();
+                    let worn = (w.main.is_some() || w.off.is_some(), w.ranged.is_some());
+                    let next = crate::creature_anim::toggle_sheath_next(
+                        drv.sheath_state().unwrap_or(0),
+                        worn,
+                    );
+                    if let Some(state) = next {
+                        net.3.write(crate::creature_anim::SheathRequest {
+                            entity: e,
+                            state,
+                            ceremony: true,
+                        });
+                    }
                 }
             }
         }
@@ -756,7 +771,7 @@ fn control(
             } else {
                 run_speed
             };
-        let mut want_jump = keys_just_pressed(KeyCode::Space) && !player.rooted;
+        let mut want_jump = keys_just_pressed(KeyCode::Space) && !player.modes.rooted;
 
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
@@ -807,7 +822,7 @@ fn control(
             }
             // Rooted kills swim translation like the walk `dir` above (decision 0308's regime —
             // the water arm reads raw keys, so it needs its own cut).
-            if player.rooted {
+            if player.modes.rooted {
                 swim_fwd = 0.0;
                 swim_side = 0.0;
             }
@@ -826,12 +841,12 @@ fn control(
         // (TU-F: Space is the Jump command; it is NOT a pitch or ascend input) — and never
         // reaches this walk-side gate.
         if want_jump && !moving && !swimming && player.airborne_since.is_none() {
-            if let Ok((e, .., store, _, _, _)) = self_player.single() {
+            if let Ok((e, .., store, _, _, _, _)) = self_player.single() {
                 if store.is_some_and(|s| s.0.unit_mount_display_id() != 0) {
                     want_jump = false;
                     if !turning {
                         let _ = net.0 .0.send(ClientCommand::MountSpecial);
-                        net.9.write(crate::creature_anim::MountFlourish { unit: e });
+                        net.8.write(crate::creature_anim::MountFlourish { unit: e });
                     }
                 }
             }
@@ -899,7 +914,7 @@ fn control(
             // gain height. Otherwise fall back to the current feet Y if the surface query briefly
             // misses (a chunk seam): the cap is then at our own depth, so the avatar just holds for
             // that frame — a transient miss in real water is not the same thing as flight.
-            let rest_line = (!player.levitating).then(|| surface_y.unwrap_or(player.pos.y));
+            let rest_line = (!player.modes.levitating).then(|| surface_y.unwrap_or(player.pos.y));
             // Directional swim speed — **VERIFIED** (`0x7c4c90`'s swim arm, the §5's TU-H):
             // forward or strafe-only → swim; the backward bit `0x2` → `min(swimBack, swim)` —
             // byte-identical in template to the run arm's `min(runBack, run)`. Vanilla defaults
@@ -946,6 +961,16 @@ fn control(
         } else {
             // The kinematic mover step — walk/fall physics + the step-down snap (decisions
             // 0009/0182/0190); the mechanism lives in [`mover`].
+            // **Water walking** (decision 0866): hand the mover the liquid surface as a floor. The
+            // `!swimming` half is the reference's own gate — the water-walk arm at `0x63160d` is
+            // skipped when `MOVEFLAG_SWIMMING` is set (`0x631617`) — so granting the aura to a
+            // submerged caster does not eject them; they surface onto the water on the way out.
+            // (This branch is already the non-swimming one, so `swimming` is false here; the
+            // condition is written out because the gate is the mechanism, not an accident of
+            // control flow.)
+            let water_floor = (player.modes.water_walking && !swimming)
+                .then_some(surface_y)
+                .flatten();
             mover::step(
                 &mut player,
                 &time,
@@ -955,6 +980,7 @@ fn control(
                 dir,
                 speed,
                 want_jump,
+                water_floor,
             )
         };
 
@@ -1033,15 +1059,14 @@ fn control(
         // animation (below) *and* the movement stream we send the server (further down), so the two can
         // never disagree. Direction bits mirror the client's MOVEMENTFLAGS; FALLING marks the airborne
         // arc (animation-only — it is masked off before going on the wire, see the send block).
-        let mut move_flags_now = 0u32;
-        // The granted mover mode rides every packet, in or out of the water — the reference's
-        // builder reads the one `[cmov+0x40]` the server's merge wrote it into, so it echoes back
-        // whatever the server granted (decision 0726). Ours has to put it back explicitly, because
-        // this word is rebuilt from state each frame; dropping it would make the server forget we
-        // are flying and the next server-authored move would clear the mode under us.
-        if player.levitating {
-            move_flags_now |= move_flags::LEVITATING;
-        }
+        // **Every granted mover mode rides every packet**, in or out of the water — the reference's
+        // builder reads the one `[cmov+0x40]` the server's merge wrote them into, so it echoes back
+        // whatever was granted for free (decisions 0726, 0866). Ours has to put them back
+        // explicitly, because this word is rebuilt from state each frame; drop one and the server
+        // forgets the mode, then the next server-authored move echoes a mode-less word back and
+        // clears it under us. Root rides too — moving bits are what must not accompany it, and
+        // rooted input can't produce any (`dir` is zeroed above, jumps refused).
+        let mut move_flags_now = player.modes.wire_flags();
         // `landed`/`started_falling` gate the wire's jump/fall lifecycle; the swim branch never sets
         // them (leaving the water resumes the ground mover from rest, no airborne report).
         let landed;
@@ -1174,7 +1199,7 @@ fn control(
         // `CAM_PIVOT_FLOOR`). Read the avatar's model-local pivot + its live scale here (where we hold the
         // self entity); until the body attaches (no `CameraPivot` yet) fall back to a human neck height.
         let mut cam_pivot_height = CAM_PIVOT_FALLBACK;
-        if let Ok((entity, mut t, motion, pivot, .., twist)) = self_player.single_mut() {
+        if let Ok((entity, mut t, motion, pivot, .., twist, _)) = self_player.single_mut() {
             t.translation = player.pos;
             // The swim body pitch (TU-A, `0x60a110`→`0x710620`): while swimming AND moving fwd/back
             // the model root renders `Rz(yaw)·Ry(−pitch)` — in Bevy axes, the yaw then a nose-up
@@ -1196,7 +1221,7 @@ fn control(
             // same way). `fall_start_y` still holds this arc's launch height here (it is only
             // re-seeded at the next take-off).
             if landed {
-                net.7.write(crate::creature_anim::HardLanding {
+                net.6.write(crate::creature_anim::HardLanding {
                     entity,
                     descent: player.fall_start_y - player.pos.y,
                 });
@@ -1260,7 +1285,7 @@ fn control(
             || jumped
             || autorun_armed
         {
-            net.8 .0 = true;
+            net.7 .0 = true;
         }
 
         // Stream this frame's movement to the server — a `MSG_MOVE_*` per movement-axis transition, the

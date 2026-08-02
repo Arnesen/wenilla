@@ -31,7 +31,7 @@ use super::camera::WorldCamera;
 use super::state::Player;
 
 /// Ask to land the avatar at the free-flying camera. Written by the debug panel's **land here**
-/// button; the `Ctrl`+`Cmd`+`G` chord is read directly by [`land_here`].
+/// button; the dev chord's `G` is read directly by [`land_here`].
 #[derive(Message)]
 pub(crate) struct LandHere;
 

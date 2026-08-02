@@ -157,7 +157,7 @@ pub(super) fn update_swimming(player: &mut Player, surface_y: Option<f32>, now: 
     // it IS the mechanism of GM flight (decision 0726). The server sets SWIMMING and LEVITATING in
     // one packet, and the second is what stops the dry ground under us clearing the first on the
     // very next frame.
-    if player.levitating {
+    if player.modes.levitating {
         return player.swimming;
     }
     let Some(surface) = surface_y else {
@@ -461,7 +461,7 @@ mod tests {
         // The server just sent `.cheat fly on`: SWIMMING + LEVITATING, standing on dry ground.
         let mut flying = player_at(0.0);
         flying.swimming = true;
-        flying.levitating = true;
+        flying.modes.levitating = true;
         assert!(
             update_swimming(&mut flying, None, 0.0),
             "no liquid at all must NOT stop a levitating swimmer — this is the whole of GM flight"
@@ -473,14 +473,14 @@ mod tests {
 
         // The other arm, and it is the same instruction: water cannot latch swim while levitating.
         let mut dry = player_at(0.0);
-        dry.levitating = true;
+        dry.modes.levitating = true;
         assert!(
             !update_swimming(&mut dry, Some(swim_enter_depth(HUMAN_MALE) + 1.0), 0.0),
             "the ENTER arm is skipped too — the bail is before the branch, not inside it"
         );
 
         // And clearing the mode (`.cheat fly off` sends flags 0) hands the water its job back.
-        flying.levitating = false;
+        flying.modes.levitating = false;
         assert!(
             !update_swimming(&mut flying, None, 0.0),
             "with the mode gone, no liquid stops swimming again"

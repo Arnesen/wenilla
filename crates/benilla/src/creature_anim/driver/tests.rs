@@ -64,13 +64,21 @@ fn caster_model() -> ModelAnimations {
 }
 
 /// The real 5875 rows this chain rests on (decode-verified in `anim_data::tests`):
-/// ReadySpellDirected carries the force-stow WeaponFlags `&4`, Ready2HL the force-draw `&0x20`.
+/// ReadySpellDirected carries the force-stow WeaponFlags `&4`, Ready2HL and Attack1H the
+/// force-draw `&0x20`.
 fn catalog() -> AnimData {
     AnimData(AnimDataCatalog::from_rows([
         (
             0,
             AnimEntry {
                 weapon_flags: 0,
+                fallback: 0,
+            },
+        ),
+        (
+            17,
+            AnimEntry {
+                weapon_flags: 0x20,
                 fallback: 0,
             },
         ),
@@ -636,7 +644,11 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
     // spin parks (it plays when the swing ends; the ref's swing-first batch shows exactly this).
     assert_eq!(
         drv(&app, spin_last).mode,
-        super::super::select::Mode::Swing { id: 16, flags: 0 },
+        super::super::select::Mode::Swing {
+            id: 16,
+            flags: 0,
+            under: None,
+        },
         "the first arrival holds the body"
     );
     assert_eq!(drv(&app, spin_last).deferred, Some(57), "the spin parks");
@@ -645,7 +657,11 @@ fn same_frame_collision_fast_paths_the_second_combat_clip() {
     // doubled, with the swing parked behind it. The old last-call-wins model ate the spin here.
     assert_eq!(
         drv(&app, swing_last).mode,
-        super::super::select::Mode::Swing { id: 57, flags: 0 },
+        super::super::select::Mode::Swing {
+            id: 57,
+            flags: 0,
+            under: None,
+        },
         "the spin holds the body through the later swing"
     );
     assert_eq!(drv(&app, swing_last).deferred, Some(16), "the swing parks");
@@ -691,7 +707,11 @@ fn deferred_combat_clip_plays_once_the_body_frees() {
     let drv = app.world().entity(unit).get::<AnimDriver>().unwrap();
     assert_eq!(
         drv.mode,
-        super::super::select::Mode::Swing { id: 16, flags: 0 },
+        super::super::select::Mode::Swing {
+            id: 16,
+            flags: 0,
+            under: None,
+        },
         "the parked swing armed"
     );
     assert_eq!(drv.deferred, None, "the cache is consumed");
@@ -754,7 +774,11 @@ fn a_movement_flag_change_cuts_a_full_body_oneshot_immediately() {
     app.update();
     assert_eq!(
         mode(&app),
-        super::super::select::Mode::Swing { id: 16, flags: 0 },
+        super::super::select::Mode::Swing {
+            id: 16,
+            flags: 0,
+            under: None,
+        },
         "standing swing holds the base track"
     );
 
@@ -1224,4 +1248,489 @@ fn a_looping_arm_advances_through_its_variations_at_window_end() {
         "over ~15 one-pass windows the memoryless weighted walk must visit BOTH variations \
          (saw {seen:?}) — an arm-once-wrap-forever driver never leaves the first"
     );
+}
+
+/// A jumper's model for the decision 0864 suite: the airborne bracket (JumpStart/Jump hang/
+/// JumpEnd/Fall), the gaits, a spell-kit cast anim (SpellCastOmni 54, with a masked variant),
+/// and the combat pair (Special1H 57 / AttackUnarmed 16) for the mid-air fast-path tenant.
+fn jumper_model() -> ModelAnimations {
+    let mut cast = clip(54, 7, false); // SpellCastOmni — the kit release anim
+    cast.upper_node = Some(AnimationNodeIndex::new(8));
+    ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),   // Stand
+            clip(5, 2, true),   // Run
+            clip(37, 3, false), // JumpStart
+            clip(38, 4, true),  // Jump hang
+            clip(39, 5, false), // JumpEnd
+            clip(40, 6, true),  // Fall
+            cast,
+            clip(57, 9, false),  // Special1H — a spell kit's combat one-shot
+            clip(16, 10, false), // AttackUnarmed — the bare-hands swing
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    }
+}
+
+fn jumper(app: &mut App) -> Entity {
+    app.world_mut()
+        .spawn((
+            jumper_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState::default(),
+        ))
+        .id()
+}
+
+/// The ref's jump-in-place cast (decision 0864 — the report this pins): a cast id is CLASS_A
+/// but NOT COMBAT, so the airborne route test doesn't mask it — with no move bits it routes
+/// FULL-BODY and REPLACES the jump hang on bone 0 (the client's one-slot last-writer-wins; the
+/// old machine dropped it, which is why the cast only showed on *walking* jumps). The clip then
+/// rides the airborne-freeze: the continuing Jump level must NOT re-preempt it — the client
+/// issues no plays mid-arc, so the clip plays out (and a finished one clamps and holds) until
+/// an edge.
+#[test]
+fn a_jump_in_place_cast_replaces_the_hang_and_survives_the_arc() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update(); // settle: Stand
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9, // an upward launch: a jump arc, in place
+        ..Default::default()
+    });
+    app.update();
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Entering(super::super::select::Special::Jump),
+        "airborne: the jump bracket enters"
+    );
+    // The instant AoE releases mid-air: the kit anim arrives.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    fn drv(app: &App, unit: Entity) -> &AnimDriver {
+        app.world().entity(unit).get::<AnimDriver>().unwrap()
+    }
+    assert_eq!(
+        drv(&app, unit).mode,
+        super::super::select::Mode::Swing {
+            id: 54,
+            flags: move_flags::FALLING,
+            under: Some(super::super::select::Special::Jump),
+        },
+        "the cast replaces the hang full-body — never dropped, never masked"
+    );
+    assert!(
+        drv(&app, unit).overlay.is_none(),
+        "no move bits, non-combat id: not the overlay route"
+    );
+    // The arc continues: the Jump *level* must not preempt the clip back to the bracket.
+    app.update();
+    app.update();
+    assert!(
+        matches!(
+            drv(&app, unit).mode,
+            super::super::select::Mode::Swing { id: 54, .. }
+        ),
+        "the airborne-freeze holds the one-shot through the arc"
+    );
+}
+
+/// Touchdown while a mid-air one-shot holds bone 0: the Special edge (`Some → None`) routes
+/// through `leave_special` — the `0x602c60` land dispatcher's pick replaces the clip like any
+/// plain play (a stationary landing picks JumpEnd 39).
+#[test]
+fn landing_mid_cast_plays_the_land_pick() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update();
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(MovementState::default()); // touchdown, stationary
+    app.update();
+    let mode = app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    assert_eq!(
+        mode,
+        super::super::select::Mode::Land { id: 39, flags: 0 },
+        "the land pick cuts the held cast at touchdown"
+    );
+}
+
+/// The FALLINGFAR latch mid-one-shot is an edge (`Jump → Fall`): the client plays Fall(40)
+/// ONCE, on the substep it latches (`0x61a820` — the 0864-era per-tick re-assert was
+/// §5-refuted, decision 0868), replacing the clip. A fresh cast armed AFTER the latch then
+/// holds bone 0 like any other airborne one-shot, until the landing pick cuts it.
+#[test]
+fn a_cast_over_the_fall_loop_holds_until_landing() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update();
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update(); // Swing { 54, under: Jump }
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING | move_flags::FALLING_FAR,
+        vertical_speed: -5.0,
+        ..Default::default()
+    });
+    app.update();
+    let mode = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().mode;
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Looping(super::super::select::Special::Fall),
+        "the latch's Fall play replaces the held cast"
+    );
+    // A second cast while falling far arms (last-writer-wins) …
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 2,
+    });
+    app.update();
+    assert!(
+        matches!(
+            mode(&app),
+            super::super::select::Mode::Swing {
+                id: 54,
+                under: Some(super::super::select::Special::Fall),
+                ..
+            }
+        ),
+        "the cast arms over the Fall loop"
+    );
+    // … and HOLDS through the rest of the fall: no per-tick re-assert exists (0868), and the
+    // Fall level is not an edge.
+    app.update();
+    app.update();
+    assert!(
+        matches!(
+            mode(&app),
+            super::super::select::Mode::Swing {
+                id: 54,
+                under: Some(super::super::select::Special::Fall),
+                ..
+            }
+        ),
+        "the cast holds bone 0 through the fall — Fall plays only at its latch edge"
+    );
+    // Touchdown cuts it with the land pick, as every airborne one-shot.
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(MovementState::default());
+    app.update();
+    assert_eq!(
+        mode(&app),
+        super::super::select::Mode::Land { id: 39, flags: 0 },
+        "the landing pick replaces the held cast"
+    );
+}
+
+/// The walking jump keeps the masked route (the already-working half, now pinned): the
+/// takeoff-frozen FORWARD bit routes the cast to the SpineLow overlay — the torso casts, the
+/// legs keep the arc, and the base machine is untouched.
+#[test]
+fn a_moving_jump_cast_masks_onto_the_overlay() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD | move_flags::FALLING,
+        vertical_speed: 7.9,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    let drv = app.world().entity(unit).get::<AnimDriver>().unwrap();
+    assert!(
+        drv.overlay.is_some_and(|ov| ov.id == 54),
+        "frozen-in move bits: the cast masks onto the overlay"
+    );
+    assert_eq!(
+        drv.mode,
+        super::super::select::Mode::Entering(super::super::select::Special::Jump),
+        "the base machine keeps the bracket untouched"
+    );
+}
+
+/// The airborne-freeze in the GAIT slot (the step-off arc, decision 0864): live pins — here
+/// the stationary cast hold — cannot swap the clip mid-air; the takeoff gait keeps rolling and
+/// the pin applies at touchdown.
+#[test]
+fn the_step_off_arc_freezes_the_gait_against_live_pins() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            caster_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState::default(),
+        ))
+        .id();
+    app.update(); // settle: Stand
+    let gait = |app: &App| app.world().entity(unit).get::<AnimDriver>().unwrap().gait;
+    assert_eq!(gait(&app), Some(0));
+    // Step off a ledge (downward launch: no jump arc, no Special; vz ≠ 0 — the §5-verified
+    // freeze gate `FALLING && (FALLINGFAR || vz ≠ 0)`, decision 0868) …
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: -3.0,
+        ..Default::default()
+    });
+    // … and the precast lands mid-fall: the stationary pin must NOT re-pick mid-air.
+    app.world_mut().entity_mut(unit).insert(CastHold {
+        ranged: false,
+        anim_id: 51,
+        spell_id: 20793,
+    });
+    app.update();
+    app.update();
+    assert_eq!(
+        gait(&app),
+        Some(0),
+        "the selector never re-picks mid-air — the takeoff gait holds"
+    );
+    // Touchdown: the freeze lifts and the pin applies immediately.
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(MovementState::default());
+    app.update();
+    assert_eq!(gait(&app), Some(51), "the pin lands with the unit");
+}
+
+/// A mid-air fast-path park survives the arc's LEVEL (decision 0864's edge-clear): the old
+/// per-frame kill cleared the deferred cache on every airborne frame; the client clears only
+/// at plays (state EDGES) — and the landing's pick, a play, still kills it.
+#[test]
+fn a_midair_deferred_park_survives_the_level_and_dies_at_the_landing_play() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update(); // Entering(Jump)
+                  // A kit combat one-shot replaces the bracket (57 is forced-full-body), then a swing lands
+                  // the same wire batch: combat-over-combat fast-paths — the swing parks.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 57,
+        seq: 1,
+    });
+    app.world_mut().write_message(SwingMessage {
+        attacker: unit,
+        victim: None,
+        hit_info: 0x2,
+        victim_state: 1,
+        damage: 21,
+        seq: 2,
+    });
+    app.update();
+    fn drv(app: &App, unit: Entity) -> &AnimDriver {
+        app.world().entity(unit).get::<AnimDriver>().unwrap()
+    }
+    assert_eq!(
+        drv(&app, unit).deferred,
+        Some(16),
+        "the swing parks behind the kit clip"
+    );
+    // The arc's level must not kill the park (the old per-frame clear did).
+    app.update();
+    app.update();
+    assert_eq!(
+        drv(&app, unit).deferred,
+        Some(16),
+        "no play mid-arc — the park survives"
+    );
+    // Touchdown: the land pick is a play — the park dies with it (`0x5fe48e`).
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(MovementState::default());
+    app.update();
+    assert_eq!(
+        drv(&app, unit).deferred,
+        None,
+        "the landing play clears the cache"
+    );
+}
+
+/// The deferred cache's consuming read sits DOWNSTREAM of the airborne-freeze (`0x5fd392`
+/// inside the `0x5fd360` recompute arm; §5-verified, decision 0868): a park made mid-arc is
+/// never consumed mid-air, even with the body free — it waits, and the landing edge's play
+/// clears it.
+#[test]
+fn a_midair_park_is_not_consumed_before_landing() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update();
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update(); // Entering(Jump), body otherwise free
+    app.world_mut()
+        .entity_mut(unit)
+        .get_mut::<AnimDriver>()
+        .unwrap()
+        .deferred = Some(16);
+    app.update();
+    app.update();
+    fn drv(app: &App, unit: Entity) -> &AnimDriver {
+        app.world().entity(unit).get::<AnimDriver>().unwrap()
+    }
+    assert_eq!(
+        drv(&app, unit).deferred,
+        Some(16),
+        "the freeze blocks the consuming read — the park waits mid-air"
+    );
+    assert!(
+        drv(&app, unit).overlay.is_none(),
+        "the parked swing never played mid-air"
+    );
+    // Touchdown: the landing play clears the cache (`0x5fe48e`) — the park dies unplayed.
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(MovementState::default());
+    app.update();
+    assert_eq!(
+        drv(&app, unit).deferred,
+        None,
+        "the landing play clears the cache"
+    );
+}
+
+/// **The ranged→melee handoff at every landed swing** (`0x625829`, wow-re `sheath-policy.md` §1's
+/// `0x6255b0` row) — the director's report: a bow drawn by a shot that never fired, then a melee
+/// attack, and the swings keep coming out of the bow. The reconcile provably cannot fix it, and
+/// this pins both halves: the CONTROL (a sword swing while ranged-drawn leaves the stance at 2 —
+/// the client's melee force is gated `CUR != 2`, `0x5fe0f9`/`0x5fe13b`, so the ranged stance is
+/// stable under any number of swings), and the FIX (the packet arm's own snap moves it, and the
+/// reconcile then holds it there).
+#[test]
+fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
+    let mut app = app();
+    let model = ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![clip(0, 1, true), clip(17, 2, false)], // Stand + Attack1H
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    // A warrior wearing a 1H sword and a bow: the exact loadout of the report.
+    let unit = app
+        .world_mut()
+        .spawn((
+            model,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::SelfPlayer,
+            Wielded {
+                main: Some((2, 0x7)), // 1H sword -> Attack1H (17)
+                off: None,
+                ranged: Some((2, 0x2)), // bow
+                main_sheath: 3,
+                off_sheath: 0,
+            },
+        ))
+        .id();
+    let sheath = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .sheath_state()
+    };
+    let swing = |app: &mut App| {
+        app.world_mut().write_message(SwingMessage {
+            attacker: unit,
+            victim: None,
+            hit_info: 0,
+            victim_state: 1,
+            damage: 7,
+            seq: 0,
+        });
+        app.update();
+    };
+
+    // The shot's draw (`SetSheatheState(2, SNAP)` — the cast-send arm).
+    app.world_mut().write_message(SheathRequest {
+        entity: unit,
+        state: 2,
+        ceremony: false,
+    });
+    app.update();
+    assert_eq!(sheath(&app), Some(2), "the shot draws the bow");
+
+    // CONTROL: swings alone. Attack1H's WeaponFlags `&0x20` is a force-DRAW-MELEE the client only
+    // consults on the `CUR != 2` path, so nothing in the reconcile can leave the ranged stance.
+    swing(&mut app);
+    swing(&mut app);
+    assert_eq!(
+        sheath(&app),
+        Some(2),
+        "the reconcile alone never leaves the ranged stance — this is the bug's shape"
+    );
+
+    // The packet arm's snap (what `net::apply::combat::attacker_state` now writes beside the
+    // swing): the sword comes out on the first landed blow.
+    app.world_mut().write_message(SheathRequest {
+        entity: unit,
+        state: 1,
+        ceremony: false,
+    });
+    swing(&mut app);
+    assert_eq!(sheath(&app), Some(1), "the landed swing draws melee");
+
+    // …and holds: every later swing re-requests 1, which the setter refuses as idempotent, and
+    // Attack1H's `&0x20` re-asserts melee on the `CUR != 2` path.
+    swing(&mut app);
+    assert_eq!(sheath(&app), Some(1), "melee holds across the volley");
 }

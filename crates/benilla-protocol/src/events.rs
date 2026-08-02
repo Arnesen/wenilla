@@ -826,17 +826,17 @@ pub enum SessionEvent {
     /// gossip spirit-healer option): fires the CONFIRM_XP_LOSS popup; its Accept sends
     /// `CMSG_SPIRIT_HEALER_ACTIVATE` back with this guid.
     SpiritHealerConfirm { npc: u64 },
-    /// The server (un)rooted a mover (`SMSG_FORCE_MOVE_ROOT`/`UNROOT` — ours at death/release).
-    /// Must be acked with the echoed `counter` (+ our current `MovementInfo`) or observers never
-    /// see the change; the app also gates its own input while rooted.
-    MoveRoot {
+    /// **A granted mover mode changed** — root, water-walk, feather-fall or hover (the ack'd
+    /// movement-mode family, decision 0866). Must be acked with the echoed `counter` (+ our current
+    /// `MovementInfo`), or the server never applies it and observers never see the change. The app
+    /// also **applies the mode to its own mover**: each one changes how the mover behaves — see
+    /// [`crate::messages::MoveMode`] for what each does.
+    MoveMode {
         guid: u64,
         counter: u32,
-        rooted: bool,
+        mode: crate::messages::MoveMode,
+        apply: bool,
     },
-    /// Water-walking granted/removed on a mover (`SMSG_MOVE_WATER_WALK`/`LAND_WALK` — the ghost
-    /// form's walk-on-water). Ack like [`Self::MoveRoot`], with the trailing apply flag.
-    WaterWalk { guid: u64, counter: u32, on: bool },
     /// Someone invited us to their group (`SMSG_GROUP_INVITE`) — the invite popup.
     GroupInvite { inviter: String },
     /// An invite we sent was declined (`SMSG_GROUP_DECLINE`).

@@ -349,6 +349,21 @@ impl ObjectFields {
     pub fn player_release_timer_running(&self) -> bool {
         self.get_u32(FIELD_PLAYER_FIELD_BYTES).unwrap_or(0) & 0x08 != 0
     }
+    /// `PLAYER_FIELD_BYTES` byte 1 — the player's **combo points** (0..5; vmangos
+    /// `PLAYER_FIELD_BYTES_OFFSET_COMBO_POINTS`, written by `Player::SetComboPoints`). PRIVATE, so
+    /// it streams only for our own player — the only consumer. The client reads this byte at
+    /// `[player+0xe68]+0x1029` in the usable walk's leg 5 (the combo-point gate, decision 0869):
+    /// the same dword whose byte 3 is [`Self::player_honor_rank`]'s byte-verified `+0x102b`, off
+    /// the player-block base the duel-arbiter comment pins at `[player+0xe68]`.
+    ///
+    /// **Not rogue/druid-only.** vmangos awards one here when a *warrior's* victim **dodges**
+    /// (`Unit.cpp` `PROC_EX_DODGE` → `AddComboPoints(target, 1)` plus a 4 s `REACTIVE_OVERPOWER`
+    /// timer whose expiry `ClearComboPoints`es it) — the server's chosen marker for "Overpower is
+    /// up", and the only way that window reaches the client. `None` before the field streams.
+    pub fn player_combo_points(&self) -> Option<u8> {
+        self.get_u32(FIELD_PLAYER_FIELD_BYTES)
+            .map(|b| ((b >> 8) & 0xff) as u8)
+    }
     /// `PLAYER_FIELD_BYTES` byte 3 — the player's **highest lifetime honor rank** (vmangos
     /// `PLAYER_FIELD_BYTES_OFFSET_HIGHEST_HONOR_RANK`, written by `HonorMgr`): what the client's
     /// item-usable gate compares an item's `RequiredHonorRank` against (`0x5ea930` reads the

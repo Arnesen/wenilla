@@ -6,7 +6,9 @@
 use benilla_protocol::messages::AttackerState;
 use bevy::prelude::*;
 
-use crate::creature_anim::{Engaged, RangedHold, SwingFlush, SwingImpact, SwingMessage};
+use crate::creature_anim::{
+    Engaged, RangedHold, SheathRequest, SwingFlush, SwingImpact, SwingMessage,
+};
 use crate::ui_unit::CombatTextEvent;
 
 use super::super::{AiReactionMessage, GuidIndex, SelfGuid};
@@ -77,6 +79,7 @@ pub(super) fn attacker_state(
     swings: &mut MessageWriter<SwingMessage>,
     impacts: &mut MessageWriter<SwingImpact>,
     center: &mut MessageWriter<CombatTextEvent>,
+    sheaths: &mut MessageWriter<SheathRequest>,
     seq: u64,
 ) {
     let victim = index.0.get(&s.victim).copied();
@@ -124,6 +127,22 @@ pub(super) fn attacker_state(
         seq,
     };
     if let Some(&e) = index.0.get(&s.attacker) {
+        // The **observed attacker auto-draws melee** — the ref's SECOND melee draw, independent
+        // of the attack-start one, and the reason a swing is never delivered in the wrong stance:
+        // `0x625829 cmp [attacker+0xd40],1; jne` → `SetSheatheState(1, bInstant=1, bFireEvent=1)`
+        // at `0x62583a`, byte-read here, tabulated in wow-re `sheath-policy.md` §1. It sits
+        // immediately after the attacker resolve and **before** any hit-info handling, so even a
+        // swing whose animation is suppressed (`HitInfo & 0x10000`) still draws. Nothing else in
+        // the policy can do this job: the per-animation reconcile's melee force is gated to
+        // `CUR != 2` (`0x5fe0f9`/`0x5fe13b`), so a unit swinging with a bow drawn — a ranged
+        // stance a shot left behind — would otherwise keep swinging with the bow forever. The
+        // setter's own idempotency is the `cmp`: a request equal to the committed state is
+        // refused there, so this is free on every swing after the first.
+        sheaths.write(SheathRequest {
+            entity: e,
+            state: 1,
+            ceremony: false,
+        });
         swings.write(SwingMessage {
             attacker: e,
             ..swing

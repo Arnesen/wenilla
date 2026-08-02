@@ -99,6 +99,10 @@ pub(crate) struct CastContext<'a> {
     /// The local range gate's inputs (`IsTargetInRange 0x6e47b0` over `GetMinMaxRange
     /// 0x6e3480`) — the caster's and the selection's position + combat reach.
     pub(crate) range: RangeInputs,
+    /// The caster's live CMovement flags word (the client's `[unit+0x9e8]`,
+    /// [`crate::creature_anim::move_flags`] layout) — what the requirement validator's moving
+    /// gate reads at cast initiation.
+    pub(crate) self_move_flags: u32,
 }
 
 /// Positions + combat reaches for the pre-send range refusal ([`super::send_spell_cast`]'s
@@ -138,6 +142,7 @@ pub(crate) struct CastTargeting<'w, 's> {
     reputations: Res<'w, Reputations>,
     self_transform: Query<'w, 's, &'static Transform, With<SelfPlayer>>,
     transforms: Query<'w, 's, &'static Transform>,
+    player: Res<'w, crate::player::Player>,
 }
 
 impl CastTargeting<'_, '_> {
@@ -168,6 +173,7 @@ impl CastTargeting<'_, '_> {
                     .map_or(1.5, |s| s.0.unit_combat_reach()),
                 target_reach: target_store.map(|s| s.0.unit_combat_reach()),
             },
+            self_move_flags: self.player.move_flags(),
         }
     }
 }

@@ -81,6 +81,12 @@ pub struct SpellDisplay {
     /// `SPELL_INTERRUPT_FLAG_MOVEMENT`) gates the cast bar's local self-cancel
     /// (`benilla::ui_cast`, where the client-side semantics are documented).
     pub interrupt_flags: u32,
+    /// `AuraInterruptFlags` ([`COL_AURA_INTERRUPT_FLAGS`]) — what breaks this spell's applied
+    /// aura (the food/drink "sit still" bits live here). The cast-initiation moving gate
+    /// (`0x609de3`, wow-re `moving-cast-gate.md`; decision 0862) reads its `0x18`
+    /// (MOVING|TURNING) bits as one of the three "would movement matter" arms. `0` for most
+    /// direct casts.
+    pub aura_interrupt_flags: u32,
     /// `ChannelInterruptFlags` ([`COL_CHANNEL_INTERRUPT_FLAGS`]) — what breaks this spell's
     /// running channel; the bits live in the *aura*-interrupt space (vmangos tests it with
     /// `AURA_INTERRUPT_MOVING_CANCELS`), not `InterruptFlags`'. `0` for non-channels.
@@ -237,6 +243,7 @@ impl Default for SpellDisplay {
             category: 0,
             recovery_ms: 0,
             interrupt_flags: 0,
+            aura_interrupt_flags: 0,
             channel_interrupt_flags: 0,
             category_recovery_ms: 0,
             start_recovery_category: 0,
@@ -442,6 +449,13 @@ impl SpellDisplay {
     /// hold** (timers parked) until `SMSG_COOLDOWN_EVENT` starts it ([`ATTR_COOLDOWN_ON_EVENT`]).
     pub fn cooldown_on_event(&self) -> bool {
         self.attributes & ATTR_COOLDOWN_ON_EVENT != 0
+    }
+
+    /// A **combo-point consumer** (`AttributesEx` bits 20/22, [`ATTR_EX_FINISHING_MOVE`]) — the
+    /// usable walk's leg 5 greys it while the caster's combo-point byte is 0 (decision 0869). The
+    /// rogue/druid finishers, and Overpower.
+    pub fn needs_combo_points(&self) -> bool {
+        self.attributes_ex & ATTR_EX_FINISHING_MOVE != 0
     }
 
     /// The on-next-swing class (`Attributes & 0x404`, [`ATTR_ON_NEXT_SWING`]) — the spell queues

@@ -29,11 +29,12 @@ use crate::net::{ClientCommand, NetCommands, SelfPlayer, Spline};
 
 use super::Player;
 
-/// Extract the Bevy Y-yaw of a facing quaternion. `sample_splines` writes the self entity's rotation
-/// as `Quat::from_rotation_y(facing)` (a pure Y turn), and benilla's Bevy yaw equals the WoW
-/// orientation (decision 0002), so this recovers both the controller's `face_yaw` and the wire
-/// orientation for the ack.
-fn yaw_of(rotation: Quat) -> f32 {
+/// Extract the Bevy Y-yaw of a facing quaternion. The net bridge and `sample_splines` both write
+/// the self entity's rotation as `Quat::from_rotation_y(facing)` (a pure Y turn), and benilla's
+/// Bevy yaw equals the WoW orientation (decision 0002), so this recovers both the controller's
+/// `face_yaw` and the wire orientation. Shared with the take-control edge (`wire_in`), which adopts
+/// the streamed spawn pose's facing the same way.
+pub(super) fn yaw_of(rotation: Quat) -> f32 {
     rotation.to_euler(EulerRot::YXZ).0
 }
 

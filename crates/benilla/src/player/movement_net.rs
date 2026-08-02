@@ -59,6 +59,15 @@ const OUTBOUND_FLAG_MASK: u32 = move_flags::FORWARD
     // server-authored move (a `.go forward`, a forced speed change) echoes a LEVITATING-less word
     // back at us, our merge clears the mode, and we fall out of the sky mid-flight.
     | move_flags::LEVITATING
+    // …**and the rest of the granted movement-mode family** (decision 0866) — root, water-walk,
+    // safe-fall, hover: the same reasoning one step stronger. These four are the *ack'd* modes, so
+    // the server holds an explicit record of granting each one and notices our stream disagreeing.
+    // `MOVEFLAG_ROOT` especially: vmangos re-adds it to anything it writes for a rooted mover
+    // (`MovementHandler.cpp:1064`), and its absence from an apply-ack is a kick.
+    | move_flags::ROOT
+    | move_flags::WATER_WALKING
+    | move_flags::SAFE_FALL
+    | move_flags::HOVER
     | move_flags::ON_TRANSPORT;
 
 /// This frame's **arc edges** — the airborne lifecycle as the send law reads it. One struct rather

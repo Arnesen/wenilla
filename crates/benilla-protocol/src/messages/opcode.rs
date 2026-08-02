@@ -578,12 +578,21 @@ pub const SMSG_CORPSE_RECLAIM_DELAY: u16 = 0x0269; // 617
 /// "Your equipped items suffer a 10%% durability loss." error line).
 pub const SMSG_DURABILITY_DAMAGE_DEATH: u16 = 0x02BD; // 701
 
-// The ack'd movement-flag family the death arc exercises (root at death / unroot + water-walk at
-// release — VERIFIED vmangos `Opcodes_1_12_1.h`: 222-223, 232-235, 720 and
-// `MovementPacketSender.cpp:306-397`). The SMSGs to the mover carry `packed guid + u32 counter`;
-// the acks echo `full u64 guid + u32 counter + MovementInfo` (+ a trailing `u32 apply` on the
-// water-walk ack only — `Server/Packets/Movement.cpp:38-59`). Un-acked changes never reach
-// observers, and wrong/zero counters trip the server's cheat log — the counter must be echoed.
+// **The ack'd movement-mode family** — four granted mover modes, one wire shape (decision 0866).
+// This is not our grouping: the server names the set itself in `IsFlagAckOpcode`
+// (`Server/Protocol/Opcodes.h`) and routes all four through one sender
+// (`MovementPacketSender::AddMovementFlagChangeToController`, whose `MovementChangeType` is exactly
+// `{ROOT, WATER_WALK, SET_HOVER, FEATHER_FALL}`). Opcode numbers VERIFIED vmangos `Opcodes_1_1x.h`
+// (unchanged into 1.12.1) and cross-checked against the client's own name table
+// ([`super::opcode_names`]).
+//
+// **The wire shape is uniform.** The SMSG to the mover carries `packed guid + u32 counter`; the ack
+// echoes `full u64 guid + u32 counter + MovementInfo`, plus a trailing `u32 apply` for every mode
+// **except root** — the root ack lands on vmangos's `HandleMoveRootAck`, the other three on
+// `HandleMovementFlagChangeToggleAck`, which reads that extra dword
+// (`Server/Packets/Movement.cpp:38-59`). Un-acked changes never reach observers, and wrong/zero
+// counters trip the server's cheat log — the counter must be echoed. Modelled as
+// [`super::MoveMode`], whose docs carry what each flag does to the mover.
 pub const SMSG_MOVE_WATER_WALK: u16 = 0x00DE; // 222
 pub const SMSG_MOVE_LAND_WALK: u16 = 0x00DF; // 223
 pub const CMSG_MOVE_WATER_WALK_ACK: u16 = 0x02D0; // 720
@@ -591,6 +600,12 @@ pub const SMSG_FORCE_MOVE_ROOT: u16 = 0x00E8; // 232
 pub const CMSG_FORCE_MOVE_ROOT_ACK: u16 = 0x00E9; // 233
 pub const SMSG_FORCE_MOVE_UNROOT: u16 = 0x00EA; // 234
 pub const CMSG_FORCE_MOVE_UNROOT_ACK: u16 = 0x00EB; // 235
+pub const SMSG_MOVE_FEATHER_FALL: u16 = 0x00F2; // 242
+pub const SMSG_MOVE_NORMAL_FALL: u16 = 0x00F3; // 243
+pub const SMSG_MOVE_SET_HOVER: u16 = 0x00F4; // 244
+pub const SMSG_MOVE_UNSET_HOVER: u16 = 0x00F5; // 245
+pub const CMSG_MOVE_HOVER_ACK: u16 = 0x00F6; // 246
+pub const CMSG_MOVE_FEATHER_FALL_ACK: u16 = 0x02CF; // 719
 
 // The social family — the friend list, the ignore list, and `/who` (VERIFIED vmangos
 // `Opcodes_1_12_1.h` + `Server/Packets/Social.{h,cpp}`, `Handlers/MiscHandler.cpp`,

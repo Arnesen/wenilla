@@ -504,6 +504,38 @@ fn real_spell_catalog_reads_usable_walk_columns() {
     let execute = cat.get(5308).unwrap();
     assert_eq!((execute.stances, execute.target_aura_state), (0x50000, 2));
     assert_eq!(cat.get(6572).unwrap().caster_aura_state, 1, "Revenge");
+
+    // Leg 5, the combo-point gate (0869): Overpower carries NO aura state — its window rides
+    // `AttributesEx` b20 (`FINISHING_MOVE_DAMAGE`) exactly like the rogue/druid finishers, which
+    // is why the aura-state legs alone left it permanently lit. Every rank, the finishers with
+    // it, and the neighbouring warrior abilities as the control.
+    for rank in [7384, 7887, 11584, 11585] {
+        let op = cat.get(rank).unwrap();
+        assert!(op.needs_combo_points(), "Overpower {rank}");
+        assert_eq!(
+            (op.caster_aura_state, op.target_aura_state),
+            (0, 0),
+            "Overpower {rank} has no aura-state gate — leg 5 is all that holds it"
+        );
+    }
+    for finisher in [
+        2098, /* Eviscerate */
+        1943, /* Rupture */
+        5171, /* Slice and Dice */
+    ] {
+        assert!(
+            cat.get(finisher).unwrap().needs_combo_points(),
+            "{finisher}"
+        );
+    }
+    for plain in [
+        78,   /* Heroic Strike */
+        5308, /* Execute */
+        6572, /* Revenge */
+    ] {
+        assert!(!cat.get(plain).unwrap().needs_combo_points(), "{plain}");
+    }
+
     // Auto Shot: bows/guns/crossbows. Slow Fall: one Light Feather.
     let auto_shot = cat.get(75).unwrap();
     assert_eq!(

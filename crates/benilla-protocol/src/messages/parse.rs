@@ -14,7 +14,7 @@ use super::{
     action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
     gossip, group, items, loot, mail, monster_move, movement, opcode, progression, quest, social,
     spellbook, spells, taxi, trade, trainer, update_object, vendor, world_state, Character,
-    CreatureQueryInfo, ServerPacket, SpeedKind,
+    CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -662,26 +662,36 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_SPIRIT_HEALER_CONFIRM => ServerPacket::SpiritHealerConfirm {
             npc: death::read_spirit_healer_confirm(&mut r)?,
         },
-        // The ack'd movement-flag family (root at death / water-walk in ghost form): the mover-
-        // addressed shape is `packed guid + u32 counter` (VERIFIED vmangos
-        // `MovementPacketSender.cpp:342-366`, the `> CLIENT_BUILD_1_9_4` branch). The app must ack
-        // with the echoed counter or observers never see the change.
-        opcode::SMSG_FORCE_MOVE_ROOT | opcode::SMSG_FORCE_MOVE_UNROOT => {
+        // **The ack'd movement-mode family** (decision 0866) — root, water-walk, feather-fall and
+        // hover, granted to the controlling client. ONE wire shape for all eight opcodes:
+        // `packed guid + u32 counter` (VERIFIED vmangos `MovementPacketSender.cpp:342-366`, the
+        // `> CLIENT_BUILD_1_9_4` branch). The app must ack with the echoed counter, or the server
+        // never applies the change and observers never see it.
+        opcode::SMSG_FORCE_MOVE_ROOT
+        | opcode::SMSG_FORCE_MOVE_UNROOT
+        | opcode::SMSG_MOVE_WATER_WALK
+        | opcode::SMSG_MOVE_LAND_WALK
+        | opcode::SMSG_MOVE_FEATHER_FALL
+        | opcode::SMSG_MOVE_NORMAL_FALL
+        | opcode::SMSG_MOVE_SET_HOVER
+        | opcode::SMSG_MOVE_UNSET_HOVER => {
+            let (mode, apply) = match opcode {
+                opcode::SMSG_FORCE_MOVE_ROOT => (MoveMode::Root, true),
+                opcode::SMSG_FORCE_MOVE_UNROOT => (MoveMode::Root, false),
+                opcode::SMSG_MOVE_WATER_WALK => (MoveMode::WaterWalk, true),
+                opcode::SMSG_MOVE_LAND_WALK => (MoveMode::WaterWalk, false),
+                opcode::SMSG_MOVE_FEATHER_FALL => (MoveMode::FeatherFall, true),
+                opcode::SMSG_MOVE_NORMAL_FALL => (MoveMode::FeatherFall, false),
+                opcode::SMSG_MOVE_SET_HOVER => (MoveMode::Hover, true),
+                _ => (MoveMode::Hover, false),
+            };
             let guid = read_packed_guid(&mut r)?;
             let counter = read_u32_le(&mut r)?;
-            ServerPacket::MoveRoot {
+            ServerPacket::MoveMode {
                 guid,
                 counter,
-                rooted: opcode == opcode::SMSG_FORCE_MOVE_ROOT,
-            }
-        }
-        opcode::SMSG_MOVE_WATER_WALK | opcode::SMSG_MOVE_LAND_WALK => {
-            let guid = read_packed_guid(&mut r)?;
-            let counter = read_u32_le(&mut r)?;
-            ServerPacket::WaterWalk {
-                guid,
-                counter,
-                on: opcode == opcode::SMSG_MOVE_WATER_WALK,
+                mode,
+                apply,
             }
         }
         opcode::SMSG_INITIALIZE_FACTIONS => {

@@ -280,23 +280,57 @@ fn toggle_panel(
     }
 }
 
-/// Did the **dev-overlay chord** — `Ctrl`+`Cmd`+*key* — just fire? (decision 0585.)
+/// How the dev plane is written on screen. Every surface that names a chord reads this instead of
+/// spelling one out, so the panel footer, the inspector badge and the mute checkbox can't drift from
+/// what [`dev_chord`] actually listens for.
+pub(crate) const DEV_CHORD: &str = "Ctrl+Shift";
+
+/// Did the **dev-overlay chord** — [`DEV_CHORD`]+*key* — just fire? (decisions 0585, 0867, 0870.)
 ///
 /// The dev instruments used to sit on bare letters, which is a namespace we don't own: every letter is
-/// a *game* binding in the reference client, so `P` both opened the spellbook and toggled the perf HUD.
-/// `Ctrl`+`Cmd` is a plane no in-game binding can ever claim (1.12 builds its binding names from
-/// `ALT-`/`CTRL-`/`SHIFT-` only, and the Mac client's Cmd isn't among them), so an instrument parked
-/// there can never collide with a key the player wants. The other half of the rule lives at the
-/// gameplay key feed (`ui_script::input`): a bare-key binding doesn't fire while a command modifier is
-/// held, so this chord doesn't *also* trigger the letter's game action.
+/// a *game* binding in the reference client, so `P` both opened the spellbook and toggled the perf HUD
+/// (0585). They moved to `Ctrl`+`Cmd`, and then off it: on Windows that is `Ctrl`+`Win`, a plane the
+/// shell owns and keeps extending — `Win+Ctrl+M` is Magnifier settings, which had our mute (0867).
 ///
-/// Both sides of each modifier count, and extra modifiers don't block. Deliberately **not** gated on
-/// [`crate::ui_script::UiKeyboardCapture`] the way the bare-key toggles were: a chord can't be mistaken
-/// for typed text, so the dev overlays stay reachable with the chat bar open.
+/// **`Ctrl`+`Shift`, one plane on every OS** (0870, director's call). The alternative was keeping
+/// `Ctrl`+`Cmd` on macOS for its one real advantage — Cmd is outside the reference's binding namespace
+/// (1.12 builds binding names from `ALT-`/`CTRL-`/`SHIFT-` only), so nothing in game could *ever* claim
+/// it. That buys protection against a binding no default declares and no player has yet written, and
+/// it costs a per-OS split in the docs, the hints and the reader's head. One plane wins. It also drops
+/// our dependence on winit's `sendEvent:` swizzle, without which AppKit's swallowed `keyUp` under Cmd
+/// would latch a chord after one use (0585's macOS risk, now simply not run).
+///
+/// `Ctrl`+`Shift` is the emptiest plane the reference *can* name: of its 152 defaults, exactly two
+/// carry two modifiers — `CTRL-SHIFT-TAB` and `CTRL-SHIFT-PAGEDOWN` — and no letter at all.
+/// `Ctrl`+`Alt` was never available: that is AltGr, which European layouts type real characters with
+/// (decision 0702).
+///
+/// **Exactly those two modifiers and no others**, both sides of each. The block is what makes this
+/// plane safe to leave ungated below: AltGr+Shift+*key* is `Ctrl`+`Alt`+`Shift`+*key*, and a German
+/// layout typing one of those into chat must not fire an overlay. It is also the same exact-set rule
+/// every binding here obeys — the reference matches a binding by string equality, so `CTRL-SHIFT-P` is
+/// a different entry from `SHIFT-P` and neither answers for the other.
+///
+/// Deliberately **not** gated on [`crate::ui_script::UiKeyboardCapture`] the way the bare-key toggles
+/// were: a chord can't be mistaken for typed text, so the dev overlays stay reachable with the chat bar
+/// open. The other half of the rule lives at the gameplay key feed (`ui_script::input`): a bare-key
+/// binding doesn't fire while *any* modifier is held, so this chord doesn't also trigger the letter's
+/// game action.
 pub(crate) fn dev_chord(keys: &ButtonInput<KeyCode>, key: KeyCode) -> bool {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let cmd = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
-    ctrl && cmd && keys.just_pressed(key)
+    dev_plane(keys) && keys.just_pressed(key)
+}
+
+/// The modifier half of [`dev_chord`]. See there for why the plane is what it is.
+fn dev_plane(keys: &ButtonInput<KeyCode>) -> bool {
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let blocked = keys.any_pressed([
+        KeyCode::AltLeft,
+        KeyCode::AltRight,
+        KeyCode::SuperLeft,
+        KeyCode::SuperRight,
+    ]);
+    ctrl && shift && !blocked
 }
 
 /// Draw the panel as a translucent **overlay** on the right — the world renders full-screen
@@ -563,7 +597,7 @@ fn debug_panel_ui(
                             }
                         });
 
-                    // The object inspector is its own Ctrl+Cmd+I surface (see `interact.rs`), not a
+                    // The object inspector is its own dev-chord `I` surface (see `interact.rs`), not a
                     // section here — identifying a thing shouldn't need the whole panel open.
                     egui::CollapsingHeader::new("Particles")
                         .default_open(true)
@@ -584,7 +618,7 @@ fn debug_panel_ui(
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.checkbox(&mut sound_cfg.enabled, "enabled");
-                            ui.checkbox(&mut sound_cfg.muted, "muted (Ctrl+Cmd+M)");
+                            ui.checkbox(&mut sound_cfg.muted, format!("muted ({DEV_CHORD}+M)"));
                             ui.add(
                                 egui::Slider::new(&mut sound_cfg.master, 0.0..=1.0).text("master"),
                             );
@@ -655,7 +689,9 @@ fn debug_panel_ui(
             // discoverable from the one surface people find first.
             ui.separator();
             ui.label(
-                egui::RichText::new("`  panel   ·   Ctrl+Cmd:  P perf · I inspect · M mute")
+                egui::RichText::new(format!(
+                    "`  panel   ·   {DEV_CHORD}:  P perf · I inspect · M mute"
+                ))
                     .small()
                     .color(OVERLAY_TEXT_DIM),
             );
@@ -679,4 +715,57 @@ fn debug_panel_ui(
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(held: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut k = ButtonInput::default();
+        for &c in held {
+            k.press(c);
+        }
+        k
+    }
+
+    /// The plane fires on its two modifiers, either side of each.
+    #[test]
+    fn ctrl_shift_is_the_plane() {
+        for pair in [
+            [KeyCode::ControlLeft, KeyCode::ShiftRight],
+            [KeyCode::ControlRight, KeyCode::ShiftLeft],
+        ] {
+            assert!(dev_plane(&keys(&pair)), "{pair:?} fires");
+        }
+    }
+
+    /// One modifier is not the chord, and a third one names something else. The case that matters:
+    /// AltGr *is* `Ctrl`+`Alt`, so AltGr+Shift+key is a character a European layout types, never a
+    /// dev chord — the overlays are ungated while the chat bar is open. `Ctrl`+`Cmd` is likewise
+    /// nothing of ours now (0870): on Windows it is the shell's, `Win+Ctrl+M` being Magnifier
+    /// settings.
+    #[test]
+    fn a_lone_or_extra_modifier_is_not_the_chord() {
+        for held in [
+            vec![KeyCode::ControlLeft],
+            vec![KeyCode::ShiftLeft],
+            vec![KeyCode::ControlLeft, KeyCode::SuperLeft],
+            vec![KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::AltLeft],
+            vec![KeyCode::ControlLeft, KeyCode::ShiftLeft, KeyCode::SuperLeft],
+        ] {
+            assert!(!dev_plane(&keys(&held)), "{held:?} is not the chord");
+        }
+    }
+
+    /// The label a hint prints is the plane actually listened for — one const, one predicate, so a
+    /// player is never told to press a key we stopped reading.
+    #[test]
+    fn the_label_matches_the_plane() {
+        assert_eq!(DEV_CHORD, "Ctrl+Shift");
+        assert!(dev_plane(&keys(&[
+            KeyCode::ControlLeft,
+            KeyCode::ShiftLeft
+        ])));
+    }
 }

@@ -99,6 +99,9 @@ pub(crate) struct RigPalettes {
     peak_slots: usize,
     peak_bones: u32,
     live_bones: u32,
+    /// Allocations refused since the last census line (`WOW_RIG_CENSUS`) — the exhaustion
+    /// diagnosis's live denial rate (decision 0863). Read-and-reset by [`census_rig_palettes`].
+    denied: u32,
     /// `WOW_RIG_COST` meters (decision 0736 premise check): whole-vec deep copies this frame
     /// (`Arc::make_mut` clones when the extract still holds last publish's reference), the µs
     /// they took, and the rows (bones) written. Printed + reset by [`publish_rig_palettes`].
@@ -122,6 +125,7 @@ impl Default for RigPalettes {
             peak_slots: 0,
             peak_bones: 0,
             live_bones: 0,
+            denied: 0,
             cost_copies: 0,
             cost_copy_us: 0.0,
             cost_rows: 0,
@@ -355,7 +359,22 @@ impl RigPalettes {
             self.peak_bones,
         )
     }
+
+    /// Slots still allocatable right now — the pressure signal (decision 0863): the doodad
+    /// reaper starts reclaiming parked rigs under [`crate::doodad_anim::REAP_LOW_WATER`], and
+    /// the unit heal only rebuilds a starved visual when there is real room to succeed.
+    pub(crate) fn slot_headroom(&self) -> usize {
+        MAX_RIG_SLOTS - self.slot_high + self.free_slots.len()
+    }
 }
+
+/// The unit whose visual was built WITHOUT a palette rig because the table was full at attach
+/// time (decision 0863) — it renders the static bind pose. [`crate::entities`]' heal system
+/// rebuilds it (the 0x60abe0 display-swap teardown, `Reattached` so it doesn't re-fade) once the
+/// table has headroom again; without this marker the denial was PERMANENT, the "statue mobs at
+/// the stream-in boundary" bug.
+#[derive(Component)]
+pub(crate) struct RigStarved;
 
 /// A registered rig, on the entity that owns its pose (the unit / doodad-host / booth root):
 /// its palette slot + the joint entities + the shared inverse bindposes. The hook frees the slot
@@ -418,6 +437,7 @@ impl RigSkin {
                 ibp,
             }),
             None => {
+                palettes.denied += 1;
                 let (s, b, ps, pb) = palettes.occupancy();
                 warn!(
                     "rig palette exhausted ({bones} bones wanted; live {s} slots / {b} bones, \
@@ -614,12 +634,100 @@ fn coalesce_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     out
 }
 
+/// `WOW_RIG_CENSUS=<secs>` (any unparseable value = 5): a periodic one-line breakdown of WHO
+/// holds the palette's slots — per-lane slots(bones) with the doodad lane split live/parked by
+/// its draw gate, a bones-per-slot histogram, denials since the last line, and the prop-probe
+/// table's live/peak. The last matters because probes and rigs are the two `MeshTag`-slot-indexed
+/// tables competing for the same 30 payload bits — a re-split of either field must read both
+/// occupancies (decision 0863's exhaustion diagnosis). Zero-cost when off: one env read, once.
+fn rig_census_every() -> Option<f32> {
+    static EVERY: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| {
+        std::env::var("WOW_RIG_CENSUS")
+            .ok()
+            .map(|v| v.parse().unwrap_or(5.0))
+    })
+}
+
+/// The `[rig-census]` printer (`WOW_RIG_CENSUS=<secs>`) — see [`rig_census_every`].
+#[allow(clippy::type_complexity)] // one census's full lane classification
+fn census_rig_palettes(
+    time: Res<Time<bevy::time::Real>>,
+    rigs: Query<(
+        &RigSkin,
+        Option<&crate::doodad_anim::DoodadAnimHost>,
+        Has<crate::net::NetEntity>,
+    )>,
+    probes: Res<crate::lighting::PropProbes>,
+    mut palettes: ResMut<RigPalettes>,
+    mut next: Local<f32>,
+) {
+    let Some(every) = rig_census_every() else {
+        return;
+    };
+    let now = time.elapsed_secs();
+    if now < *next {
+        return;
+    }
+    *next = now + every;
+    // Lanes: doodad anim hosts (split by their draw gate), net units, everything else (held-item
+    // billboard rigs, spell-fx instances, booth rigs). `(slots, bones)` each.
+    let (mut doodad, mut doodad_parked, mut unit, mut other) =
+        ((0u32, 0u32), (0u32, 0u32), (0u32, 0u32), (0u32, 0u32));
+    let mut hist = [0u32; 6]; // bones/slot: ≤2, 3–4, 5–8, 9–16, 17–32, 33+
+    for (rig, host, is_unit) in &rigs {
+        let b = rig.bones();
+        let lane = match (host, is_unit) {
+            (Some(h), _) if h.active => &mut doodad,
+            (Some(_), _) => &mut doodad_parked,
+            (None, true) => &mut unit,
+            (None, false) => &mut other,
+        };
+        lane.0 += 1;
+        lane.1 += b;
+        hist[match b {
+            0..=2 => 0,
+            3..=4 => 1,
+            5..=8 => 2,
+            9..=16 => 3,
+            17..=32 => 4,
+            _ => 5,
+        }] += 1;
+    }
+    let denied = std::mem::take(&mut palettes.denied);
+    let (s, b, ps, pb) = palettes.occupancy();
+    let (p_live, p_peak) = probes.occupancy();
+    eprintln!(
+        "[rig-census] slots={s}/{} bones={b}/{MAX_PALETTE_BONES} peak={ps}/{pb} | \
+         doodad={}({}) parked={}({}) unit={}({}) other={}({}) | \
+         bones/slot ≤2:{} 3-4:{} 5-8:{} 9-16:{} 17-32:{} 33+:{} | \
+         denied +{denied} | probes {p_live}/{p_peak} of {}",
+        MAX_RIG_SLOTS - 1,
+        doodad.0,
+        doodad.1,
+        doodad_parked.0,
+        doodad_parked.1,
+        unit.0,
+        unit.1,
+        other.0,
+        other.1,
+        hist[0],
+        hist[1],
+        hist[2],
+        hist[3],
+        hist[4],
+        hist[5],
+        crate::lighting::MAX_PROP_PROBES,
+    );
+}
+
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<RigPalettes>()
         .init_resource::<RigPaletteExtract>()
         .init_resource::<RigPaletteMirrors>()
         .add_plugins(ExtractResourcePlugin::<RigPaletteExtract>::default())
         .add_plugins(ExtractResourcePlugin::<RigPaletteMirrors>::default())
+        .add_systems(Update, census_rig_palettes)
         .add_systems(
             PostUpdate,
             (compute_rig_palettes, publish_rig_palettes)

@@ -13,10 +13,10 @@
 //!   `WorldObject` under the cursor, found by ray-casting against the **actual mesh geometry** (so it
 //!   works on colliderless props — most doodads, including the campfire — which a physics raycast
 //!   misses).
-//! - the **inspector surface** ([`inspect_ui`]) — a standalone, key-toggleable overlay (**Ctrl+Cmd+I**): a
-//!   weak "armed" pill plus a small identity card that follows the cursor over any picked object. It's
-//!   its own surface, *not* a section of the backtick debug panel, so identifying a thing costs one
-//!   chord and no panel.
+//! - the **inspector surface** ([`inspect_ui`]) — a standalone, key-toggleable overlay (**the dev
+//!   chord + `I`**): a weak "armed" pill plus a small identity card that follows the cursor over any
+//!   picked object. It's its own surface, *not* a section of the backtick debug panel, so
+//!   identifying a thing costs one chord and no panel.
 //! - the **cast journal** ([`journal`]) — the *temporal* half of the same instrument: a spell is an
 //!   event, gone before a cursor could reach it, so every cast edge is recorded as it flows past and
 //!   the same inspector overlay lists the recent ones, click-to-copy.
@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-use crate::debug_panel::{overlay_text, ModelKind, OVERLAY_FILL, OVERLAY_TEXT_DIM};
+use crate::debug_panel::{overlay_text, ModelKind, DEV_CHORD, OVERLAY_FILL, OVERLAY_TEXT_DIM};
 use crate::net::ObjectStore;
 use crate::player::WorldCamera;
 use crate::ui_script::PointerOverUi;
@@ -109,7 +109,7 @@ pub struct WorldRightClick;
 #[derive(Message, Clone, Copy)]
 pub struct WorldRightPress;
 
-/// Whether mouseover picking runs. Today it's armed/disarmed by the **Ctrl+Cmd+I** inspector toggle
+/// Whether mouseover picking runs. Today it's armed/disarmed by the **dev chord + `I`** inspector toggle
 /// ([`toggle_inspect`]).
 #[derive(Resource, Default)]
 pub struct InspectMode {
@@ -354,9 +354,9 @@ pub(crate) fn ray_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<
     (tmax >= tmin.max(0.0)).then_some(tmin.max(0.0))
 }
 
-/// **Ctrl+Cmd+I** (for *inspect*) arms/disarms the inspector — the dev-instrument chord, off the
-/// bare-letter plane the game's own bindings own (decision 0585). Unmistakable as a chord, so unlike
-/// the old bare `i` it needs no chat-bar/EditBox gate.
+/// The **dev chord + `I`** (for *inspect*) arms/disarms the inspector — off the bare-letter plane the
+/// game's own bindings own (0585), on whichever plane this OS leaves free (0867). Unmistakable as a
+/// chord, so unlike the old bare `i` it needs no chat-bar/EditBox gate.
 fn toggle_inspect(keys: Res<ButtonInput<KeyCode>>, mut inspect: ResMut<InspectMode>) {
     if crate::debug_panel::dev_chord(&keys, KeyCode::KeyI) {
         inspect.enabled = !inspect.enabled;
@@ -454,7 +454,9 @@ fn inspect_ui(
                     overlay_text(ui);
                     // Spelled out, not ⌃⌘ — egui's default font stack has no glyph for U+2303 and
                     // would draw tofu.
-                    ui.label(egui::RichText::new("inspect · ctrl+cmd+I to exit").small());
+                    ui.label(
+                        egui::RichText::new(format!("inspect · {DEV_CHORD}+I to exit")).small(),
+                    );
                 });
         });
 
@@ -711,7 +713,7 @@ fn inspect_ui(
 }
 
 /// Registers the mouseover foundation (the [`MouseoverTarget`] + [`InspectMode`] resources and the
-/// per-frame pick), the standalone Ctrl+Cmd+I inspector surface, and the cast journal (recording
+/// per-frame pick), the standalone dev-chord `I` inspector surface, and the cast journal (recording
 /// always, drawing under the same toggle).
 pub struct InteractPlugin;
 
@@ -725,7 +727,7 @@ impl Plugin for InteractPlugin {
             .add_message::<WorldRightPress>()
             // After the UI keyboard feed because `update_mouseover` reads `PointerOverUi`, whose
             // player-UI half `UiInput` writes — the pick must see this frame's hover, not last
-            // frame's. (`toggle_inspect` itself no longer needs the ordering: its Ctrl+Cmd+I chord
+            // frame's. (`toggle_inspect` itself no longer needs the ordering: its dev chord
             // can't be typed text, so it reads no keyboard-capture flag — decision 0585.)
             .add_systems(
                 Update,

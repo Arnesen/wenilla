@@ -326,6 +326,14 @@ pub(super) fn drive_animations(
         if falling && !was_falling {
             drv.jump_arc = mv.vertical_speed > JUMP_ARC_MIN_UP;
         }
+        // The airborne-freeze's exact gate (`0x5fd8e8`, §5-arbitrated — decision 0868):
+        // keep-current iff `FALLING && (FALLINGFAR || vz ≠ 0)`. The vz clause pins every real
+        // arc (ballistics make vz ≠ 0 from the first integrated substep); the one uncovered
+        // case is a fresh walk-off's vz == 0 substep, where the client genuinely may re-pick.
+        // Gates the gait slot's mid-air keep-current AND the deferred-cache consumer below
+        // (the `+0xd60` read sits downstream of the freeze: a parked clip never plays mid-air).
+        let airborne_frozen =
+            falling && (mv.flags & move_flags::FALLING_FAR != 0 || mv.vertical_speed != 0.0);
         // The idle re-face turn-shuffle (decision 0123 — the client's facing-delta latch
         // `0x607ed0`, wow-re `loop-replay-fidget.md` §5b): a stationary creature easing its yaw
         // toward its target reads as *turning* to the anim layer, so the gait picks
@@ -451,6 +459,14 @@ pub(super) fn drive_animations(
             // under the seat pin, so the equivalent is refusing the draw at the setter — no
             // commit, no volunteered CMSG (named deviation: same observable, earlier site).
             if req.state != cur && !(mounted && req.state != 0) {
+                // The setter's own trace, the twin of the reconcile's below: between them every
+                // sheath transition names itself and its author, so "why is the weapon out"
+                // is one `RUST_LOG=benilla=debug` grep rather than a re-derivation of the
+                // 24-site policy from the symptom.
+                debug!(
+                    "sheath: unit {entity} {cur} -> {} (request, ceremony {})",
+                    req.state, req.ceremony
+                );
                 drv.sheath_cur = Some(req.state);
                 if is_self {
                     let _ = net.0.send(ClientCommand::SetSheathed {
@@ -562,8 +578,12 @@ pub(super) fn drive_animations(
         // swing the Eviscerate spin deferred fires once the spin ends. A frame with fresh
         // requests consumes it implicitly instead (a normal arm clears the cache; a fast-path
         // hit re-parks its own request — both what the client's `0x5fe48e`/`0x5fe480` do).
+        // NEVER mid-air: the read (`0x5fd392`, inside the `0x5fd360` recompute arm) sits
+        // downstream of the airborne-freeze, so a park made mid-arc waits — and dies at the
+        // landing play's clear (§5-verified, decision 0868).
         if requests.is_empty()
             && drv.deferred.is_some()
+            && !airborne_frozen
             && live_oneshot(&drv, &player, &tr, anims, catalog).is_none()
         {
             requests.extend(drv.deferred.take());
@@ -616,7 +636,6 @@ pub(super) fn drive_animations(
                 }
                 continue;
             }
-            let mut dropped = false;
             // A prior overlay is superseded by this play — stop its node so the new route owns the
             // subtree (a fresh masked node re-takes it below, or a full-body route reclaims the base).
             if let Some(ov) = drv.overlay.take() {
@@ -650,28 +669,40 @@ pub(super) fn drive_animations(
                 });
                 masked_played = true;
                 played_oneshot = Some(id);
-            } else if special.is_none() {
-                // Full-body route (standing idle), or the split-boneless masked fallback: the clip
-                // replaces the base on bone 0. A wanted Special keeps precedence when we *can't* mask
-                // (no split bone) — that one-shot is dropped, as benilla can't stack it over the base.
+            } else {
+                // Full-body route (standing idle / airborne non-combat), or the split-boneless
+                // masked fallback (the client's −1 key-bone sentinel arms bone 0 too): the clip
+                // replaces the base on bone 0 — **even over a Special**. The client never drops a
+                // play: one slot, last-writer-wins (decisions 0083/0087; the wow-re §3 route puts
+                // a jump-in-place cast/emote on bone 0, replacing the hang — decision 0864 is the
+                // ref's mid-air cast). Cutting an airborne clip freezes the outgoing node first —
+                // the pose-snapshot decay of the client's op4 blend, scoped exactly like
+                // [`leave_special`]'s (decision 0503).
+                if matches!(special, Some(select::Special::Jump | select::Special::Fall)) {
+                    if let Some(active) = tr
+                        .get_main_animation()
+                        .and_then(|n| player.animation_mut(n))
+                    {
+                        active.set_speed(0.0);
+                    }
+                }
                 if let Some((c, repeat)) = picked {
                     play_clip(&mut tr, &mut player, c, repeat, 1.0);
                 }
                 drv.mode = Mode::Swing {
                     id,
                     flags: mv.flags,
+                    under: special,
                 };
                 drv.gait = None;
                 base_played = true;
                 played_oneshot = Some(id);
-            } else {
-                dropped = true; // wanted a mask we can't build while a Special holds
             }
             if crate::dbg_trace::enabled() {
                 crate::dbg_trace::line(
                     "fct",
                     &format!(
-                        "anim play unit={entity} id={id} masked={masked_played} base={base_played} dropped={dropped}"
+                        "anim play unit={entity} id={id} masked={masked_played} base={base_played} under={special:?}"
                     ),
                 );
             }
@@ -697,10 +728,15 @@ pub(super) fn drive_animations(
             }
         }
 
-        // A Special (jump/pose/fall) claiming the body is a normal PlayAnimation — it clears
-        // the deferred-combat cache (the client's `0x5fe48e`): a swing parked behind the spin
-        // dies when a jump cuts the spin, exactly like the ref.
-        if special.is_some() {
+        // A Special EDGE is a play (the jump/pose entry, the FALLINGFAR latch's Fall, the land
+        // pick — each a normal PlayAnimation), and every normal arm clears the deferred-combat
+        // cache (the client's `0x5fe48e`): a swing parked behind the spin dies when a jump cuts
+        // the spin. The *level* must not clear (decision 0864 corrects the old per-frame kill):
+        // mid-air the airborne-freeze issues no plays, so a fast-path park made mid-arc
+        // survives to its clip's end, exactly like the ref.
+        let special_edge = special != drv.last_special;
+        drv.last_special = special;
+        if special_edge {
             drv.deferred = None;
         }
         // The looping-variation ADVANCE (decision 0516 — wow-re `loop-replay-fidget.md` §7/§7d,
@@ -852,19 +888,70 @@ pub(super) fn drive_animations(
                     drv.gait = None; // recompute a fresh gait next frame
                 }
             }
-            Mode::Swing { id, flags } => {
-                if let Some(sp) = special {
-                    // A jump/pose/fall preempts the swing one-shot.
-                    drv.mode = enter_special(
-                        sp,
-                        relaxed,
-                        &mut tr,
-                        &mut player,
-                        anims,
-                        catalog,
-                        &mut rng,
-                        &mut drv.loop_window,
-                    );
+            Mode::Swing { id, flags, under } => {
+                if special != under {
+                    // The state this one-shot replaced CHANGED — the client's next event play
+                    // supersedes it: a fresh jump/pose entry (`None → Some`), the FALLINGFAR
+                    // latch's Fall (`Jump → Fall`), the `0x602c60` land pick at touchdown
+                    // (`Some → None`) — each a plain PlayAnimation over bone 0, never a
+                    // "restore". Leaving an airborne/pose `under` routes through
+                    // [`leave_special`] exactly like the un-replaced machine: the latch
+                    // handoff, the landing pick, and the pose exits all apply unchanged.
+                    drv.mode = if let Some(sp) = under {
+                        leave_special(
+                            sp,
+                            special,
+                            moving,
+                            relaxed,
+                            mv.flags,
+                            &mut tr,
+                            &mut player,
+                            anims,
+                            catalog,
+                            &mut rng,
+                            &mut drv.loop_window,
+                        )
+                    } else if let Some(sp) = special {
+                        enter_special(
+                            sp,
+                            relaxed,
+                            &mut tr,
+                            &mut player,
+                            anims,
+                            catalog,
+                            &mut rng,
+                            &mut drv.loop_window,
+                        )
+                    } else {
+                        Mode::Gait // unreachable: special != under with under None ⇒ special Some
+                    };
+                } else if matches!(under, Some(select::Special::Jump | select::Special::Fall)) {
+                    // The airborne-freeze (`0x5fd8e8` keep-current): mid-arc nothing re-picks
+                    // bone 0 — a finished clip clamps and holds its last frame for the rest of
+                    // the arc (the §6 clamp path), and a mid-air flag change is a keep-current
+                    // no-op. The only exits are the edges above: the FALLINGFAR latch's Fall
+                    // and the land pick at touchdown. This holds over Fall too: 0864's per-tick
+                    // Fall(40) re-assert was §5-REFUTED (decision 0868 — Fall plays ONCE, at the
+                    // latch edge `0x61a820@0x61a9eb`; `0x5ff030` is a wire-apply path, not a
+                    // tick), so a clip that takes bone 0 after the latch holds until landing.
+                } else if let Some(sp) = under {
+                    // A pose held under the one-shot: on finish, back to the pose LOOP directly
+                    // (decision 0083 (c) — the enter never replays after an interruption).
+                    if oneshot_finished(&player, anims, id, catalog) {
+                        play(
+                            &mut tr,
+                            &mut player,
+                            anims,
+                            sp.loop_id(),
+                            true,
+                            relaxed,
+                            1.0,
+                            catalog,
+                            &mut rng,
+                            &mut drv.loop_window,
+                        );
+                        drv.mode = Mode::Looping(sp);
+                    }
                 } else if oneshot_finished(&player, anims, id, catalog) || mv.flags != flags {
                     // Finished — or a movement-flag change: the client's locomotion re-arm lands
                     // on the change and blindly overwrites bone 0, one-shot or not (the same
@@ -897,6 +984,23 @@ pub(super) fn drive_animations(
                         &mut drv.loop_window,
                     );
                     drv.gait = None;
+                } else if airborne_frozen && drv.gait.is_some_and(|g| g != DEATH) {
+                    // The airborne-freeze on the STEP-OFF arc — the exact §5-verified gate
+                    // (`0x5fd8e8`: `FALLING && (FALLINGFAR || vz ≠ 0)`, decisions 0864/0868;
+                    // the selector chain's leg right after death): mid-air the selector never
+                    // re-picks, so the takeoff-frozen gait keeps rolling mid-cycle AND the live
+                    // pins further down the chain (the stationary cast hold, the loot kneel, the
+                    // Ready/ranged idles, the state-emote idle) cannot swap the clip until
+                    // touchdown. Rate stays synced — the client's per-frame rate write is outside
+                    // the selector. (DEATH is excluded: the dead-override owns that gait, and a
+                    // mid-air revive must re-select, not hold the corpse pose.)
+                    if let Some(c) = drv.gait.and_then(|g| find_resolved(anims, g, catalog)) {
+                        for v in anims.clips.iter().filter(|v| v.anim_id == c.anim_id) {
+                            if let Some(active) = player.animation_mut(v.node) {
+                                active.set_speed(playback_rate(v, mv.speed));
+                            }
+                        }
+                    }
                 } else {
                     // A bracket-less step-off fall landing needs NO case of its own: the arc never
                     // latched FALLINGFAR, so the `0x602c60` land dispatcher is a verified no-op
