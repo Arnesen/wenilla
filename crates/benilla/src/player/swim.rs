@@ -261,6 +261,26 @@ fn settle_to_rest(feet_y: f32, surface_y: f32, h: f32) -> f32 {
     (feet_y - (surface_y - rest_cap(h))).max(0.0)
 }
 
+/// **Does the water own this mover's vertical this frame?** — the rest line [`swim_step`] enforces,
+/// or `None` for none at all.
+///
+/// `None` means exactly one thing: **GM flight** (decision 0726). `LEVITATING` is the reference's
+/// suppression of the water's authority over the mover (`0x6030d2`, the same bail
+/// [`update_swimming`] takes), and the swim regime with no liquid that owns it has nothing to
+/// constrain against — an ascent must be free, or you could dive but never climb.
+///
+/// A *momentary* sample miss in real water is deliberately **not** that case: it maps to
+/// `Some(own feet Y)`, a rest line at our own depth, so the avatar simply holds for the frame.
+/// Collapsing the two would make a chunk-seam glitch and GM flight indistinguishable.
+///
+/// This exists as one named function because the constraint has **two arms** — refuse the rise,
+/// satisfy the drop — and B128 was what happened when they read different sources: 0644 added the
+/// second arm after 0726 wrote the first, so flight was exempt from the cap and not from the settle
+/// (decision 0882).
+pub(super) fn rest_line(player: &Player, surface_y: Option<f32>) -> Option<f32> {
+    (!player.modes.levitating).then(|| surface_y.unwrap_or(player.pos.y))
+}
+
 /// Advance the avatar one swim frame: the pitched travel velocity through the client's *floating*
 /// physics (VERIFIED, TU-B — gravity bypassed: an idle swimmer's depth is **frozen**, the vertical
 /// comes only from `input_vel`), a collide-and-slide against the lakebed/banks, and the hard
@@ -346,7 +366,18 @@ pub(super) fn swim_step(
     // Gated on a stroke, matching the resolver's own outer gate (`0x634100 test [esi+0x40],0x200f`
     // — translation or falling, never idle): an idle floater is not resolved at all, so its depth
     // stays frozen (TU-B(c)).
-    if input_vel != Vec3::ZERO {
+    //
+    // …and gated on **`surface_y.is_some()` — the very same rest line the cap above reads**, which
+    // is the whole of B128 (decision 0882). The rest line has two arms — refuse the rise, satisfy
+    // the drop — and they must share one gate, because `None` here means exactly one thing: GM
+    // flight, the swim regime with no liquid that owns it (0726; a momentary sample miss is
+    // `Some(own feet Y)` at the caller, never `None`). 0644 added this second arm *after* 0726 and
+    // read the liquid straight from `surface_at` instead, so the exemption covered the cap and not
+    // the settle: flying over a lake, `excess` is the entire altitude, the down-cast through open
+    // air hits nothing, and one frame teleports the avatar onto the waterline. That is both
+    // reporters' wording exactly — "from any height", and "*when moving* from land to water", the
+    // `input_vel != ZERO` gate right here.
+    if surface_y.is_some() && input_vel != Vec3::ZERO {
         if let Some(surface_now) = surface_at(c - half_h) {
             let excess = settle_to_rest(c.y - half_h.y, surface_now, player.collision_height.0);
             if excess > 0.0 {
@@ -558,6 +589,48 @@ mod tests {
             let excess = 0.25;
             assert!((settle_to_rest(10.0 - cap + excess, 10.0, h) - excess).abs() < 1e-6);
         }
+    }
+
+    /// **B128, pinned.** `.gm fly` over water yanked the avatar down onto the waterline instantly,
+    /// from any height (two reporters). Cause: the rest line's two arms read different sources —
+    /// [`rest_line`] exempted flight from the *cap*, while the *settle* re-read the liquid itself.
+    /// This pins the exemption at its single source, in both directions, so the two can't diverge
+    /// again: while levitating there is no line at all, and the moment the mode clears the water
+    /// has its authority back.
+    #[test]
+    fn gm_flight_hands_the_water_no_authority_over_the_vertical() {
+        let lake_surface = 40.0;
+
+        // 300 yd above a lake, `.gm fly` on. This is the exact geometry of B128: liquid is over our
+        // XY (the query answers `Some`), and the drop the settle would compute is the whole
+        // altitude — through open air, so nothing stops the cast and one frame lands us in the lake.
+        let mut flying = player_at(lake_surface + 300.0);
+        flying.swimming = true;
+        flying.modes.levitating = true;
+        assert_eq!(
+            rest_line(&flying, Some(lake_surface)),
+            None,
+            "no rest line while levitating — this is the gate BOTH arms take, not just the cap"
+        );
+        // What the settle would have done had it reached its arithmetic: teleport us 300 yd down.
+        // Asserted so the fix is measured against the defect rather than merely asserted away.
+        assert!(
+            settle_to_rest(flying.pos.y, lake_surface, flying.collision_height.0) > 299.0,
+            "the ungated settle's drop is the whole altitude — that was the yank"
+        );
+
+        // Clear the mode (`.gm fly off` sends flags 0) and the water is back in charge immediately.
+        flying.modes.levitating = false;
+        assert_eq!(rest_line(&flying, Some(lake_surface)), Some(lake_surface));
+
+        // And the case flight must not be confused with: a *momentary* surface-query miss in real
+        // water is a rest line at our own feet — the avatar holds for the frame, it does not fly.
+        let swimmer = player_at(lake_surface - 2.0);
+        assert_eq!(
+            rest_line(&swimmer, None),
+            Some(swimmer.pos.y),
+            "a chunk-seam miss must stay a Some, or it is indistinguishable from GM flight"
+        );
     }
 
     /// **B76, pinned.** The bug the director reported: a gnome could not swim up to the surface,

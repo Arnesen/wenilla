@@ -744,6 +744,18 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
+    // The combo-point dots at the target frame's top-right (decisions 0869/0875). `demo_unit_feed`
+    // seeds a ROGUE with four points banked on the selected wolf for this scenario only — the demo
+    // player is a warrior everywhere else, and a warrior authentically lights no dot. Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-combopoints`.
+    Scenario {
+        name: "ui-combopoints",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: None,
+    },
     // The re-skinned main action bar (no window fixture — the bar loads by default under
     // WOW_CAPTURE_UI=1, and `demo_unit_feed` seeds the action slots + player XP). The bar is 1024
     // wide + 128px end caps, so this fixture takes a WIDER, shorter window (see main.rs's per-capture

@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use benilla_protocol::messages::{ActionButton, SpellCooldown, ACTION_KIND_SPELL};
+use benilla_protocol::messages::{ActionButton, SpellCooldown};
 use bevy::prelude::*;
 
 use crate::cooldowns::Cooldowns;
@@ -57,19 +57,17 @@ pub(super) fn learned_spell(spell_id: u32, actions: &mut PlayerActions) {
     }
 }
 
-/// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old in the book **and on the action
-/// bar** (decision 0237). The server sends no fresh `SMSG_ACTION_BUTTONS` for this (VERIFIED vmangos
-/// `Player::learnSpell` — the `supercededOld` path touches only the spell store), so the client owns
-/// the bar swap: every spell button pointing at the old rank re-points at the new one.
+/// A rank-up (`SMSG_SUPERCEDED_SPELL`): the new rank replaces the old **in the book** (decision
+/// 0237). The server sends no fresh `SMSG_ACTION_BUTTONS` for this (VERIFIED vmangos
+/// `Player::learnSpell` — the `supercededOld` path touches only the spell store), so the bar has to
+/// follow too; it does, from the book, in `ui_action::ranks` (decision 0883). Re-pointing buttons
+/// *here* as well would be a second, weaker copy of that law — weaker because this packet doesn't
+/// arrive at all when the rank was gained while the character was loading (vmangos suppresses it
+/// with `IsInWorld()`), which is exactly the case that shipped a dead rank-1 button.
 pub(super) fn superceded_spell(old_spell_id: u32, new_spell_id: u32, actions: &mut PlayerActions) {
     debug!("net: superceded spell {old_spell_id} -> {new_spell_id}");
     actions.spells.remove(&old_spell_id);
     actions.spells.insert(new_spell_id);
-    for button in actions.buttons.values_mut() {
-        if button.kind == ACTION_KIND_SPELL && button.action == old_spell_id {
-            button.action = new_spell_id;
-        }
-    }
     actions.dirty = true;
 }
 
@@ -677,7 +675,7 @@ pub(super) fn aura_duration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_protocol::messages::ACTION_KIND_MACRO;
+    use benilla_protocol::messages::ACTION_KIND_SPELL;
 
     #[test]
     fn learned_spell_adds_to_the_book_once() {
@@ -694,26 +692,18 @@ mod tests {
         );
     }
 
+    /// A rank-up moves the **book** and marks the store dirty; the bar is not touched here — the
+    /// one rank law lives in `ui_action::ranks`, which the dirty flag then runs (decision 0883).
     #[test]
-    fn superceded_spell_swaps_the_book_and_only_matching_spell_buttons() {
+    fn superceded_spell_swaps_the_book_and_leaves_the_bar_to_the_rank_pass() {
         let mut actions = PlayerActions::default();
-        actions.spells.insert(78); // rank 1, known
-                                   // Rank 1 sits on the bar in slot 0; slot 1 is a *macro* whose id
-                                   // collides with the old rank and must NOT be rewritten.
+        actions.spells.insert(78); // Heroic Strike rank 1, known
         actions.buttons.insert(
             0,
             ActionButton {
                 slot: 0,
                 action: 78,
                 kind: ACTION_KIND_SPELL,
-            },
-        );
-        actions.buttons.insert(
-            1,
-            ActionButton {
-                slot: 1,
-                action: 78,
-                kind: ACTION_KIND_MACRO,
             },
         );
 
@@ -727,12 +717,11 @@ mod tests {
             actions.spells.contains(&284),
             "the new rank enters the book"
         );
-        assert_eq!(actions.buttons[&0].action, 284, "the spell button rank-ups");
         assert_eq!(
-            actions.buttons[&1].action, 78,
-            "the id-colliding macro is untouched"
+            actions.buttons[&0].action, 78,
+            "the bar follows from the book, not from here"
         );
-        assert!(actions.dirty);
+        assert!(actions.dirty, "…and `dirty` is what makes it follow");
     }
 
     /// The regression the live `WOW_CAST_TRACE` caught: a triggered proc (Frost Armor's Chilled

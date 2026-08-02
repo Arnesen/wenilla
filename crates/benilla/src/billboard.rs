@@ -483,7 +483,11 @@ pub(crate) fn face_billboards(
                     // screenshot cannot tell them apart; this line does (it split Arcane
                     // Intellect's "missing" stars into scale ✓ / place ✓ / alpha ×0.3 — the
                     // faithful stealth-aura compose, not a defect).
-                    if crate::dbg_trace::enabled() && elapsed_ms % 512 < 20 {
+                    // `enabled_for`, not `enabled`: this is by far the busiest tag in the file
+                    // (thousands of lines a second in a populated scene, each an unbuffered write
+                    // under the shared mutex), so it is the one most worth dropping cheaply when the
+                    // run is asking a movement question — `WOW_MOVE_TRACE_TAGS`, decision 0880.
+                    if crate::dbg_trace::enabled_for("card") && elapsed_ms % 512 < 20 {
                         crate::dbg_trace::line(
                             "card",
                             &format!(

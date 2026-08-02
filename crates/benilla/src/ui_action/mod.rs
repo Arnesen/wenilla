@@ -43,6 +43,7 @@ mod errors;
 mod feed;
 #[cfg(test)]
 mod feed_tests;
+mod ranks;
 mod state;
 pub(crate) mod targeting;
 pub(crate) mod toggle;
@@ -250,6 +251,13 @@ impl Plugin for UiActionPlugin {
                     // routes entirely to `action_sets`, never also queuing a use), so the drains'
                     // relative order doesn't matter. The dynamic-state feed follows the identity
                     // feed so a fresh slot's first state push lands the same frame.
+                    // The rank pass runs on the same `dirty` flag the identity feed consumes,
+                    // and strictly before it: a slot corrected here is resolved and pushed with
+                    // its right rank the same frame, so a stale rank never reaches a pixel
+                    // (decision 0883).
+                    ranks::normalize_action_ranks
+                        .in_set(UnitFeed)
+                        .before(feed::feed_actions),
                     feed::feed_actions.in_set(UnitFeed).before(UiInput),
                     state::feed_action_state
                         .in_set(UnitFeed)

@@ -15,8 +15,9 @@
           the precedent note), so the 20 instances inherit the CombatTextFont Font object and
           carry the template's anchor directly.
         - UNIT_MANA → UNIT_POWER_UPDATE + the Era Unit* API (our event surface, decision 0068);
-          same low-mana law. PLAYER_COMBO_POINTS is not registered (no combo wire yet) — the
-          handler arm stays for when it lands.
+          same low-mana law. PLAYER_COMBO_POINTS rides the combo wire (0869); its arm reads
+          `GetComboPoints()`, so it is rogue/druid-only and per-target for free — the binding
+          gates, not this file (0875).
         - Lua 5.0 `for k,v in t` iteration becomes explicit index loops (5.1 VM), backwards
           where the body removes.
         The wire → messageType mapping feeding COMBAT_TEXT_UPDATE lives app-side
@@ -197,8 +198,7 @@
             elseif event == "PLAYER_REGEN_ENABLED" then
                 messageType = "LEAVING_COMBAT"
             elseif event == "PLAYER_COMBO_POINTS" then
-                -- Not registered yet (no combo wire) — the arm stays for when it lands.
-                local comboPoints = GetComboPoints and GetComboPoints() or 0
+                local comboPoints = GetComboPoints()
                 if comboPoints > 0 then
                     messageType = "COMBO_POINTS"
                     data = comboPoints
@@ -460,6 +460,7 @@
                 CombatText:UnregisterEvent("COMBAT_TEXT_UPDATE")
                 CombatText:UnregisterEvent("UNIT_HEALTH")
                 CombatText:UnregisterEvent("UNIT_POWER_UPDATE")
+                CombatText:UnregisterEvent("PLAYER_COMBO_POINTS")
                 CombatText:UnregisterEvent("PLAYER_REGEN_DISABLED")
                 CombatText:UnregisterEvent("PLAYER_REGEN_ENABLED")
                 return
@@ -467,6 +468,7 @@
                 CombatText:RegisterEvent("COMBAT_TEXT_UPDATE")
                 CombatText:RegisterEvent("UNIT_HEALTH")
                 CombatText:RegisterEvent("UNIT_POWER_UPDATE")
+                CombatText:RegisterEvent("PLAYER_COMBO_POINTS")
                 CombatText:RegisterEvent("PLAYER_REGEN_DISABLED")
                 CombatText:RegisterEvent("PLAYER_REGEN_ENABLED")
             end

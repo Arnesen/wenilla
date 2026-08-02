@@ -9,6 +9,15 @@ use super::{
     classification_word, grey_band, level_reads_unknown, pick_unit_token, power_token, with_unit,
 };
 
+/// The two class ids `GetComboPoints 0x51a190` accepts — the literals `4` and `0xb` it compares
+/// the class byte `[[player+0x110]+0x79]` against. That byte is `UNIT_FIELD_BYTES_0` byte 1, the
+/// same value [`PlayerReqState::class_id`](super::super::PlayerReqState) carries; `UnitClass`'s own
+/// binding (`0x518350`) reads it through the identical `[obj+0x110]+0x79` chain, which is what
+/// identifies it. The *names* are the conventional vanilla ids — the client's class table is
+/// heap-built, so nothing in the file maps 4→Rogue by itself (decision 0875).
+const CLASS_ROGUE: u32 = 4;
+const CLASS_DRUID: u32 = 11;
+
 /// Register the `Unit*` globals reading the per-token snapshot store (the same style/place the
 /// object model and stdlib register their globals — bare globals on `_G`, matching the live API
 /// surface).
@@ -489,6 +498,45 @@ pub(in crate::script) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, ()| {
             let model = lua.app_data_ref::<Model>().expect("model app_data");
             Ok(model.money as i64)
+        })?,
+    )?;
+
+    // GetComboPoints() → the player's banked combo points, 0..5 (a player-level global, not a unit
+    // token — the 1.12 binding takes no arguments). `ComboFrame` shows/hides on it, and the
+    // combat-text COMBO_POINTS arm reads it.
+    //
+    // TWO gates before the byte, transcribed from `0x51a190` (§5 byte-read, decision 0875) — the
+    // reference `ComboFrame.lua` carries no class check at all, so BOTH of them live here or
+    // nowhere:
+    //
+    //   51a1c3  mov eax,[esi+0x110]; mov al,[eax+0x79]   ; the class byte
+    //   51a1cc  cmp al,4 / cmp al,0xb → jne push 0.0     ; ROGUE or DRUID, nothing else
+    //   51a1f3  edx=[esi+0xe68]; eax=[edx+0x838] …0x83c  ; PLAYER_FIELD_COMBO_TARGET
+    //   51a205  cmp against [0xb4e2d8]/[0xb4e2dc]        ; == the CURRENT target, or push 0.0
+    //   51a234  mov al,[ecx+0x1029]                      ; only now, PLAYER_FIELD_BYTES byte 1
+    //
+    // The class gate is why a *warrior* never sees a dot even though the server really does bank a
+    // point for them on a victim's dodge: that byte reaches the usable walk's leg 5 (which has no
+    // class test, and is what greys Overpower — 0869) but stops here, before any UI can see it.
+    // The target gate is why combo points read as "per target": re-targeting empties the dots
+    // without the count moving, and selecting the banked unit again refills them.
+    //
+    // Both comparisons are the binary's own plain equality — no null special case. With nothing
+    // banked and no target both GUIDs are 0, which passes the target gate and reads a byte that is
+    // 0 anyway; the server writes and clears the pair together.
+    g.set(
+        "GetComboPoints",
+        lua.create_function(|lua, ()| {
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let class = model.player_req.class_id;
+            if class != CLASS_ROGUE && class != CLASS_DRUID {
+                return Ok(0_i64);
+            }
+            let target = model.units.get("target").map_or(0, |u| u.guid);
+            if model.combo_target != target {
+                return Ok(0_i64);
+            }
+            Ok(i64::from(model.combo_points))
         })?,
     )?;
 

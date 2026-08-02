@@ -121,7 +121,7 @@ impl SpeedKind {
 ///
 /// | mode | bit | reference effect | granted by |
 /// |---|---|---|---|
-/// | [`Root`](Self::Root) | `0x0000_1000` | translation dies; the fall stops. **Turning stays live** — `StartTurn 0x7c6c50` has no root gate. | root/stun/death |
+/// | [`Root`](Self::Root) | `0x0000_1000` | translation dies; the fall stops. **Turning stays live**, by the input tick's authored allow-list (`0x618054`). | root/stun/death |
 /// | [`WaterWalk`](Self::WaterWalk) | `0x1000_0000` | the liquid surface becomes walkable ground | `SPELL_AURA_WATER_WALK` (104) |
 /// | [`FeatherFall`](Self::FeatherFall) | `0x2000_0000` | terminal fall velocity drops to 7 yd/s from 60.148 (`0x7c5d20`) | `SPELL_AURA_FEATHER_FALL` (105) |
 /// | [`Hover`](Self::Hover) | `0x4000_0000` | ground contact rises by 1.0 yd (walk resolver `0x6367b0`) | `SPELL_AURA_HOVER` (106) |

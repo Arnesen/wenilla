@@ -31,6 +31,7 @@ mod group;
 mod items;
 mod loot;
 mod mail;
+mod mirror_timer;
 mod monster_move;
 mod movement;
 pub mod opcode;
@@ -117,6 +118,10 @@ pub use mail::{
     get_mail_list, item_text_query, mail_action, mail_create_text_item, mail_delete, mail_error,
     mail_mark_as_read, mail_message_type, mail_return_to_sender, mail_take_item, mail_take_money,
     send_mail, MailAttachment, MailListEntry,
+};
+pub use mirror_timer::{
+    read_pause_mirror_timer, read_start_mirror_timer, read_stop_mirror_timer, MirrorTimerKind,
+    MirrorTimerStart,
 };
 pub use movement::{JumpInfo, MoveMode, MovementInfo, SpeedKind, TransportPose};
 pub use opcode_names::opcode_name;

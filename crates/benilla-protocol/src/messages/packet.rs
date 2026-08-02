@@ -9,11 +9,12 @@ use super::{
     CorpseLocation, DamageShield, EnvironmentalDamageLog, ExplorationXp, FriendEntry,
     FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
     InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
-    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MoveMode, Object, PartyMemberStatsInfo,
-    PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestOption,
-    QuestRequestItems, QuestTemplate, ResurrectRequestBody, SpeedKind, SpellCooldown,
-    SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask,
-    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object,
+    PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
+    QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody,
+    SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
+    SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
+    TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -875,6 +876,18 @@ pub enum ServerPacket {
     DuelCountdown {
         seconds: u32,
     },
+    /// `SMSG_START_MIRROR_TIMER` — start or wholly re-state one mirror timer (the breath /
+    /// fatigue bars, decision 0874). The family has no update opcode: every change re-sends this.
+    MirrorTimerStart(MirrorTimerStart),
+    /// `SMSG_PAUSE_MIRROR_TIMER` — freeze/unfreeze a running timer. vmangos never sends it.
+    MirrorTimerPause {
+        kind: u32,
+        paused: bool,
+    },
+    /// `SMSG_STOP_MIRROR_TIMER` — that timer is over; hide its bar.
+    MirrorTimerStop {
+        kind: u32,
+    },
     /// `SMSG_FRIEND_LIST` — the whole friend list, guids + presence (decision 0668). Pushed
     /// unasked at login and on every `CMSG_FRIEND_LIST`; always complete, never a delta.
     FriendList {
@@ -1178,6 +1191,9 @@ impl ServerPacket {
             ServerPacket::DuelComplete { .. } => "SMSG_DUEL_COMPLETE".into(),
             ServerPacket::DuelWinner { .. } => "SMSG_DUEL_WINNER".into(),
             ServerPacket::DuelCountdown { .. } => "SMSG_DUEL_COUNTDOWN".into(),
+            ServerPacket::MirrorTimerStart(..) => "SMSG_START_MIRROR_TIMER".into(),
+            ServerPacket::MirrorTimerPause { .. } => "SMSG_PAUSE_MIRROR_TIMER".into(),
+            ServerPacket::MirrorTimerStop { .. } => "SMSG_STOP_MIRROR_TIMER".into(),
             ServerPacket::FriendList { .. } => "SMSG_FRIEND_LIST".into(),
             ServerPacket::IgnoreList { .. } => "SMSG_IGNORE_LIST".into(),
             ServerPacket::FriendStatus(..) => "SMSG_FRIEND_STATUS".into(),

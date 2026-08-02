@@ -97,6 +97,10 @@ struct UnitFeedState {
     /// The last `(PLAYER_XP, PLAYER_NEXT_LEVEL_XP)` pair pushed, for the `PLAYER_XP_UPDATE` trigger —
     /// the XP bar's feed is a player-global (like coinage), not a per-unit-token field.
     last_xp: Option<(u32, u32)>,
+    /// The last `(count, banked-target guid)` pair pushed, for the `PLAYER_COMBO_POINTS` trigger —
+    /// player-globals (`PLAYER_FIELD_BYTES` byte 1 + `PLAYER_FIELD_COMBO_TARGET`), not per-unit-
+    /// token fields. Diffed as a pair because the server writes them as one (decision 0875).
+    last_combo: Option<(u8, u64)>,
     /// The self unit's last in-combat flag, for the `PLAYER_REGEN_DISABLED`/`ENABLED` triggers
     /// (`None` until first seen — first sight fires only when already IN combat, so logging in
     /// at peace never announces "Leaving Combat").
@@ -725,11 +729,82 @@ fn feed_units(
             script.fire_event("PLAYER_XP_UPDATE", vec![]);
         }
     }
+
+    // The combo-point feed: `PLAYER_FIELD_BYTES` byte 1 and the `PLAYER_FIELD_COMBO_TARGET` GUID
+    // it is banked against, both PRIVATE, pushed as the pair the server writes (0869, 0875).
+    //
+    // Both halves are PUSHED whenever either moves — `GetComboPoints` reads both, so a stale
+    // target would make it lie on the next call. Only the COUNT fires the event: the client's
+    // `PLAYER_COMBO_POINTS` (event 202, `0x5ddff0`) is registered at `0x5dd9d9` as a **one-byte
+    // field-change watch on `+0x1029`** and nothing else — the combo-target field has no watch of
+    // its own (0879). The watch carries no value test, so it fires on the drop back to zero too,
+    // which is the edge `ComboFrame` needs to hide itself when the server's 4 s
+    // `REACTIVE_OVERPOWER` timer clears the point.
+    //
+    // The reader's other input — which unit is selected — reaches it through
+    // `PLAYER_TARGET_CHANGED` above, the event the reference registers `ComboFrame` for precisely
+    // because `GetComboPoints` consults the current target.
+    if let Some((store, _)) = self_q.iter().next() {
+        let banked = (
+            store.0.player_combo_points().unwrap_or(0),
+            store.0.player_combo_target(),
+        );
+        if let Some(fire) = combo_edge(feed.last_combo, banked) {
+            feed.last_combo = Some(banked);
+            script.set_combo_points(banked.0, banked.1);
+            if fire {
+                script.fire_event("PLAYER_COMBO_POINTS", vec![]);
+            }
+        }
+    }
+}
+
+/// The combo feed's edge, given the last `(count, banked-target)` pair pushed and the current one:
+/// `None` = nothing moved, `Some(fire)` = push the pair, and whether `PLAYER_COMBO_POINTS` fires.
+///
+/// The two halves diverge because the client's watches do. Event 202 is registered at `0x5dd9d9`
+/// as a **one-byte field-change watch on `+0x1029`** — the count — and `PLAYER_FIELD_COMBO_TARGET`
+/// carries no watch of its own (§5-VERIFIED, decision 0879). So a re-bank onto a different unit at
+/// an unchanged count moves the *value* `GetComboPoints` reads without announcing itself, and the
+/// UI hears about it through `PLAYER_TARGET_CHANGED` instead. The watch has no value test, so the
+/// drop back to zero fires like any other change — the edge that takes the dots down.
+fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
+    (last != Some(now)).then(|| last.map(|(count, _)| count) != Some(now.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The combo feed pushes on either half moving but speaks only for the count — the client's
+    /// watch is on that byte alone (decision 0879).
+    #[test]
+    fn only_the_count_fires_the_combo_event() {
+        const A: u64 = 0xF130_0000_0000_0001;
+        const B: u64 = 0xF130_0000_0000_0002;
+
+        assert_eq!(combo_edge(Some((1, A)), (1, A)), None, "nothing moved");
+        assert_eq!(
+            combo_edge(Some((1, A)), (2, A)),
+            Some(true),
+            "a builder lands: push and speak"
+        );
+        assert_eq!(
+            combo_edge(Some((5, A)), (0, 0)),
+            Some(true),
+            "the clear speaks too — the falling edge is what hides the dots"
+        );
+        assert_eq!(
+            combo_edge(Some((1, A)), (1, B)),
+            Some(false),
+            "re-banked onto another unit at the same count: pushed, but silent like the client"
+        );
+        assert_eq!(
+            combo_edge(None, (0, 0)),
+            Some(true),
+            "first sight announces once, as the descriptor block's first write does"
+        );
+    }
 
     /// The rank getter's two gates (`0x605620`, decision 0782) as they reach a snapshot. The pet
     /// gate is the interesting half: a charmed or enslaved elite reports rank 0, so it loses its

@@ -145,6 +145,9 @@ pub(super) fn apply_net_updates(
             // Either absent if its DBC failed to load.
             Option<Res<crate::area::AreaTableRes>>,
             Option<Res<crate::sound::ExplorationSounds>>,
+            // The mirror-timer queue (decision 0874): the breath/fatigue START/PAUSE/STOP edges,
+            // drained into the FrameXML bars by `crate::ui_mirror`.
+            ResMut<crate::ui_mirror::MirrorTimerFeed>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -285,6 +288,7 @@ pub(super) fn apply_net_updates(
             mut logout,
             area_table,
             exploration_sounds,
+            mut mirror_timers,
         ),
     ) = caches;
     let (
@@ -761,6 +765,19 @@ pub(super) fn apply_net_updates(
             SessionEvent::DuelCountdown { seconds } => {
                 crate::ui_duel::apply::countdown(&mut duel, seconds);
             }
+            // ── The mirror timers (decision 0874): breath / fatigue / feign-death. Pure queue
+            // arms — every meaning (which bar, what colour, what caption, how fast it drains)
+            // is resolved at the UI seam in `ui_mirror`, and the countdown itself is the
+            // FrameXML's own OnUpdate integration ──────────────────────────────────────────────
+            SessionEvent::MirrorTimerStart(start) => mirror_timers
+                .0
+                .push(crate::ui_mirror::MirrorTimerEdge::Start(start)),
+            SessionEvent::MirrorTimerPause { kind, paused } => mirror_timers
+                .0
+                .push(crate::ui_mirror::MirrorTimerEdge::Pause { kind, paused }),
+            SessionEvent::MirrorTimerStop { kind } => mirror_timers
+                .0
+                .push(crate::ui_mirror::MirrorTimerEdge::Stop { kind }),
             // ── The social family (decision 0668): the friend/ignore lists, the `/who`
             // answer, and the result codes that print their own chat lines. The lines and the
             // Era events fire off the mirror in `ui_social::feed_social` — every one of them

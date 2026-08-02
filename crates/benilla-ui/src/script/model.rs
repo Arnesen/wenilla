@@ -572,6 +572,19 @@ pub(crate) struct Model {
     pub(crate) player_xp: u32,
     pub(crate) player_next_level_xp: u32,
 
+    /// The player's banked combo points and the unit they sit on — the raw `PLAYER_FIELD_BYTES`
+    /// byte 1 and `PLAYER_FIELD_COMBO_TARGET` GUID, pushed together each frame either moves
+    /// ([`UiScript::set_combo_points`]). Player-global PRIVATE fields, like `money`.
+    ///
+    /// **Raw wire values, deliberately ungated.** The server banks a point here for a *warrior*
+    /// too (the Overpower window), and the usable walk's leg 5 consumes exactly that. The two
+    /// gates the real `GetComboPoints 0x51a190` applies — rogue-or-druid only, and the banked
+    /// target must be the CURRENT target — live in the binding, where the binary puts them
+    /// (decision 0875). Read [`Self::combo_points`] directly and you are reading the wire, not
+    /// what the reference UI can see.
+    pub(crate) combo_points: u8,
+    pub(crate) combo_target: u64,
+
     /// The paper doll's combat-stats snapshot (`None` until the app's feed lands), the
     /// equipment/ammo slot views, and the model pane's persistent bake yaw — the character-window
     /// seam ([`char_stats`], decision 0208 §3). All player-only data: the backing descriptor
@@ -824,6 +837,8 @@ impl Model {
             net_latency_ms: 0,
             player_xp: 0,
             player_next_level_xp: 0,
+            combo_points: 0,
+            combo_target: 0,
             player_combat_stats: None,
             inventory_slots: Default::default(),
             inventory_alerts: [0; 12],

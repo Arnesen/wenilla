@@ -3,13 +3,16 @@
 //! every source (wire lines, channel notices, rolls, client-composed loot/system lines) into
 //! events with names resolved ask-once; [`frames`] is the router + the `ChatFrame_OnEvent`
 //! composer fanning lines across the docked windows; [`input`] is the outbound side (the chat
-//! EditBox, the slash grammar, the send-side emote posture gate). This face wires them into
-//! [`UiChatPlugin`] and re-exports the crate-facing API (`ChatLog`, `ChatEvent`, `ChatEventKind`).
+//! EditBox, the slash grammar, the send-side emote posture gate) over [`commands`]'s table of every
+//! `/command` the client answers (decision 0881, built from the reference's own alias strings).
+//! This face wires them into [`UiChatPlugin`] and re-exports the crate-facing API (`ChatLog`,
+//! `ChatEvent`, `ChatEventKind`).
 
 use bevy::prelude::*;
 
 use crate::ui_script::UiInput;
 
+mod commands;
 mod edit;
 mod event;
 mod feed;
@@ -29,6 +32,10 @@ impl Plugin for UiChatPlugin {
             .init_resource::<frames::ChatWindows>()
             .init_resource::<edit::ChatEditState>()
             .init_resource::<edit::ChannelState>()
+            // The slash-command table (decision 0881), built from the reference's own alias strings
+            // once the VM's globals and the emote catalog exist — both are `Startup`, so this runs
+            // at the next schedule rather than chasing an ordering constraint into two modules.
+            .add_systems(PostStartup, commands::build_slash_commands)
             // Push before the input pass so a line is on screen the same frame it decodes (mirrors
             // the loot/merchant feeds).
             .add_systems(Update, feed::feed_chat.before(UiInput))

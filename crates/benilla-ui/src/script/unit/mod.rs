@@ -276,6 +276,20 @@ impl super::UiScript {
         model.player_next_level_xp = next_level_xp;
     }
 
+    /// Push the player's banked combo points (`PLAYER_FIELD_BYTES` byte 1) and the unit they sit
+    /// on (`PLAYER_FIELD_COMBO_TARGET`) — the pair `Player::SetComboPoints` writes together, taken
+    /// together so they can never be read half-updated. Player-level PRIVATE fields, same shape as
+    /// [`Self::set_money`]; the app calls this each frame either moves, including the drop back to
+    /// zero (decisions 0869, 0875).
+    ///
+    /// **Raw wire values** — `GetComboPoints`'s class and current-target gates live in the binding,
+    /// where the binary puts them.
+    pub fn set_combo_points(&mut self, points: u8, target: u64) {
+        let mut model = self.model_mut();
+        model.combo_points = points;
+        model.combo_target = target;
+    }
+
     /// Drain the unit tokens `TargetUnit` queued since the last call — the app resolves each to a
     /// streamed entity and commits the selection (the reference's `TargetUnit` → SetSelection path).
     pub fn take_target_requests(&mut self) -> Vec<String> {

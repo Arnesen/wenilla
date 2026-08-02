@@ -119,6 +119,7 @@ mod ui_loot;
 mod ui_loot_roll;
 mod ui_mail;
 mod ui_merchant;
+mod ui_mirror;
 mod ui_net;
 mod ui_party;
 mod ui_pass;
@@ -200,6 +201,7 @@ use ui_loot::UiLootPlugin;
 use ui_loot_roll::UiLootRollPlugin;
 use ui_mail::UiMailPlugin;
 use ui_merchant::UiMerchantPlugin;
+use ui_mirror::UiMirrorPlugin;
 use ui_net::UiNetPlugin;
 use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
@@ -647,6 +649,10 @@ fn main() -> AppExit {
     // bar's performance meter polls (decision 0658).
     .add_plugins(UiNetPlugin)
     .add_plugins(UiCastPlugin)
+    // The breath / fatigue bars (decision 0874): server-authoritative mirror timers off the
+    // wire into the transcribed MirrorTimer1/2/3 frames. Beside the cast bar it shares its
+    // feed→drain shape (and its art: the same UI-CastingBar-Border chrome).
+    .add_plugins(UiMirrorPlugin)
     // Floating combat text (decision 0137 phase 2): the WORLDTEXTSTRING law — world-anchored
     // damage numbers/outcome words projected into the UI quad pass each frame.
     .add_plugins(combat_text::CombatTextPlugin)

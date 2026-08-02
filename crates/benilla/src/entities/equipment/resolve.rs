@@ -185,16 +185,21 @@ pub(in crate::entities) fn resolve_equipment(
                 commands.entity(entity).insert(eq);
             }
         }
-        // The *visual* sheath state: held at the pre-transition value while the draw/stow overlay
-        // plays (the weapon swaps hands at the animation's authored $SHL/$SHR moment, not at the
-        // byte change — [`VisualSheath`]); else the anim layer's **client-side committed state**
-        // (the setter/reconcile cache, decision 0080 — the descriptor byte plus the policy's
-        // forces); else, before the driver first runs, the raw descriptor byte.
-        let unit_sheath = visual_sheath
-            .map(|v| v.0)
-            .or_else(|| driver.and_then(|d| d.sheath_state()))
+        // The settled sheath state: the anim layer's **client-side committed state** (the
+        // setter/reconcile cache, decision 0080 — the descriptor byte plus the policy's forces);
+        // else, before the driver first runs, the raw descriptor byte.
+        let committed = driver
+            .and_then(|d| d.sheath_state())
             .or_else(|| s.unit_sheath_state())
             .unwrap_or(0);
+        // …and the *visual* one governing a given slot's placement, which during a draw/stow
+        // ceremony is **per arm** ([`VisualSheath`]): each hand's weapon moves at its own clip's
+        // authored $SHL/$SHR moment, not at the byte change. A melee → ranged toggle therefore
+        // has the sword already on the back while the bow is still on its way to the other hand —
+        // the ceremony's two movements (`creature_anim::sheath`).
+        let sheath_of = |slot: usize, inv_type: u32| {
+            visual_sheath.map_or(committed, |v| v.for_slot(slot, inv_type))
+        };
         // A player wearing a NON-character display (druid form, GM morph — decision 0695)
         // attaches no equipment sub-models at all: the reference's held/helm/shoulder attach
         // lives on the CCharacterComponent (`0x47a0c0`, wow-re charactermodel node), which only
@@ -214,15 +219,15 @@ pub(in crate::entities) fn resolve_equipment(
         let mut wielded = Wielded::default();
         let mut ranged_inv_type = None;
         for slot in 0..HELD_SLOTS {
-            // (display id, inventory type, item sheath type, item class, item subclass) per slot.
-            let resolved: Option<(u32, u32, u8, u8, u8)> = match net_entity.kind {
+            // (display id, inventory type, item sheath type, class, subclass, material) per slot.
+            let resolved: Option<(u32, u32, u8, u8, u8, u8)> = match net_entity.kind {
                 EntityKind::Unit => {
                     let display = s.unit_virtual_item_display(slot as u8).filter(|d| *d != 0);
                     display.map(|d| {
-                        let (class, subclass, _, inv) =
+                        let (class, subclass, material, inv) =
                             s.unit_virtual_item_info(slot as u8).unwrap_or((0, 0, 0, 0));
                         let sheath = s.unit_virtual_item_sheath(slot as u8).unwrap_or(0);
-                        (d, inv as u32, sheath, class, subclass)
+                        (d, inv as u32, sheath, class, subclass, material)
                     })
                 }
                 EntityKind::Player => s
@@ -237,13 +242,17 @@ pub(in crate::entities) fn resolve_equipment(
                             t.sheath as u8,
                             t.class as u8,
                             t.subclass as u8,
+                            t.material as u8,
                         )
                     }),
                 _ => None,
             };
-            let Some((display, inv_type, item_sheath, class, subclass)) = resolved else {
+            let Some((display, inv_type, item_sheath, class, subclass, material)) = resolved else {
                 continue;
             };
+            // The item's Material — the draw/stow sound's only key (decision 0882). Both wire
+            // sources carry it; neither is a guess.
+            wielded.materials[slot] = material;
             // The wielded weapon-class pair (decision 0073's swing/ready selectors) — what's *in*
             // the hand, independent of whether its model is displayed (a sheath-less item still
             // swings with its own class). The mainhand's sheath type picks the draw/stow one-shot
@@ -262,6 +271,8 @@ pub(in crate::entities) fn resolve_equipment(
                 // nocked ammo's attach point below.
                 2 => {
                     wielded.ranged = Some((class, subclass));
+                    wielded.ranged_sheath = item_sheath;
+                    wielded.ranged_inv = inv_type;
                     ranged_inv_type = Some(inv_type);
                 }
                 _ => {}
@@ -269,7 +280,8 @@ pub(in crate::entities) fn resolve_equipment(
             if !char_component {
                 continue; // wielded resolved; the model never attaches on a non-character body
             }
-            let Some(attach) = placement(slot, inv_type, item_sheath, unit_sheath) else {
+            let Some(attach) = placement(slot, inv_type, item_sheath, sheath_of(slot, inv_type))
+            else {
                 continue;
             };
             let kind = if inv_type == 14 {
@@ -343,7 +355,14 @@ pub(in crate::entities) fn resolve_equipment(
         // transform override; no cloak conflict). Self-only by construction, exactly like the
         // client: bag slots are never replicated in 1.12, so a remote player's scan finds
         // nothing (§H1 — a two-client capture would be the clean confirmation).
-        if net_entity.kind == EntityKind::Player && char_component && unit_sheath == 2 {
+        // Timed off the RANGED slot's own visual state, so the quiver arrives with the bow it
+        // feeds. (Named deviation: the ref attaches it at the *start* of the ranged draw — the
+        // `0x611e10(1)` call inside each drawer — where ours waits for that clip's $SHL. Same
+        // clip, a few hundred ms apart, and the two are never seen separately.)
+        if net_entity.kind == EntityKind::Player
+            && char_component
+            && sheath_of(2, ranged_inv_type.unwrap_or(0)) == 2
+        {
             let mut quiver_display = None;
             for bag in 19u8..23 {
                 let entry = s

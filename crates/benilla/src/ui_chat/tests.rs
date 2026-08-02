@@ -2,7 +2,7 @@ use crate::net::ChatKind;
 
 use super::event::{default_color, ChatEvent, ChatEventKind as K};
 use super::frames::compose;
-use super::input::{emote_send_eligible, parse_line, ParsedChat};
+use super::input::{emote_send_eligible, ParsedChat};
 
 /// A player-line event (the wire bridge's output shape) — sender resolved, optional flag.
 fn ev(kind: K, text: &str, sender: &str) -> ChatEvent {
@@ -251,9 +251,41 @@ fn colors_match_the_shipped_table() {
 
 // ── the submitted-line grammar (0288 P5): type switches + action commands ──────────────────
 
-/// A stub `EmotesText` resolver: only "wave" resolves, to id 101 (mirrors `/wave`'s real id).
-fn stub_emotes(name: &str) -> Option<u32> {
-    (name == "wave").then_some(101)
+/// The grammar fixture: a command table built from a *stub* of the reference's alias strings, in
+/// the same `SLASH_<INDEX><n>` / `EMOTE<i>_CMD<j>` shape the shipped `GlobalStrings.lua` has. The
+/// aliases here are fixture data for the ARGUMENT grammar; that the real ones all resolve is
+/// [`real_alias_table_resolves_the_shipped_commands`]'s job, on the real files.
+fn stub_table() -> super::commands::SlashCommands {
+    const STRINGS: &[(&str, &str)] = &[
+        ("SLASH_JOIN1", "/join"),
+        ("SLASH_LEAVE1", "/leave"),
+        ("SLASH_LIST_CHANNEL1", "/chatlist"),
+        ("SLASH_CHAT_AFK1", "/afk"),
+        ("SLASH_RANDOM1", "/random"),
+        ("SLASH_RANDOM2", "/roll"),
+        ("SLASH_PLAYED1", "/played"),
+        ("SLASH_HELP1", "/help"),
+        ("SLASH_PVP1", "/pvp"),
+        ("SLASH_REPLY1", "/r"),
+        ("SLASH_LOGOUT1", "/logout"),
+        ("SLASH_LOGOUT2", "/camp"),
+        ("SLASH_QUIT1", "/quit"),
+        ("SLASH_TRADE1", "/trade"),
+        ("SLASH_SCRIPT1", "/script"),
+        // One emote index, in the two-table shape: the alias, and the token it resolves through.
+        ("EMOTE1_CMD1", "/wave"),
+        ("EMOTE1_CMD2", "/hello"), // an alias that is NOT the token — the 0881 class of bug
+        ("EMOTE1_TOKEN", "WAVE"),
+    ];
+    super::commands::SlashCommands::build(
+        |key| {
+            STRINGS
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_string())
+        },
+        |token| (token == "WAVE").then_some(101),
+    )
 }
 
 /// The Enter-path type switch (send path — no trailing-space requirement).
@@ -348,111 +380,237 @@ fn tell_ring_dedups_and_cycles() {
 
 #[test]
 fn action_commands_parse() {
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
     assert_eq!(
-        parse_line("/join world secret", stub_emotes),
+        parse_line("/join world secret"),
         ParsedChat::Join {
             name: "world".into(),
             password: "secret".into(),
         }
     );
     assert_eq!(
-        parse_line("/leave world", stub_emotes),
+        parse_line("/leave world"),
         ParsedChat::Leave {
             name: "world".into()
         }
     );
     assert_eq!(
-        parse_line("/chatlist world", stub_emotes),
+        parse_line("/chatlist world"),
         ParsedChat::ChatList {
             name: "world".into()
         }
     );
     assert_eq!(
-        parse_line("/afk farming", stub_emotes),
+        parse_line("/afk farming"),
         ParsedChat::AfkDnd {
             kind: ChatKind::Afk,
             msg: "farming".into(),
         }
     );
+    assert_eq!(parse_line("/roll"), ParsedChat::Random { min: 1, max: 100 });
     assert_eq!(
-        parse_line("/roll", stub_emotes),
-        ParsedChat::Random { min: 1, max: 100 }
-    );
-    assert_eq!(
-        parse_line("/random 50", stub_emotes),
+        parse_line("/random 50"),
         ParsedChat::Random { min: 1, max: 50 }
     );
     assert_eq!(
-        parse_line("/random 2 8", stub_emotes),
+        parse_line("/random 2 8"),
         ParsedChat::Random { min: 2, max: 8 }
     );
-    assert_eq!(parse_line("/played", stub_emotes), ParsedChat::Played);
-    assert_eq!(parse_line("/help", stub_emotes), ParsedChat::Help);
+    assert_eq!(parse_line("/played"), ParsedChat::Played);
+    assert_eq!(parse_line("/help"), ParsedChat::Help);
     // /pvp takes no argument (decision 0646 §3): the binding has no state form, so a trailing
     // word is ignored rather than read as a target.
-    assert_eq!(parse_line("/pvp", stub_emotes), ParsedChat::Pvp);
-    assert_eq!(parse_line("/pvp on", stub_emotes), ParsedChat::Pvp);
+    assert_eq!(parse_line("/pvp"), ParsedChat::Pvp);
+    assert_eq!(parse_line("/pvp on"), ParsedChat::Pvp);
     // /r rides its own arm (the reply state lives on ChatEditState).
     assert_eq!(
-        parse_line("/r hey", stub_emotes),
+        parse_line("/r hey"),
         ParsedChat::Reply { text: "hey".into() }
     );
 }
 
 #[test]
-fn emote_names_fall_through_to_the_dbc_lookup() {
-    assert_eq!(parse_line("/wave", stub_emotes), ParsedChat::TextEmote(101));
-    assert_eq!(parse_line("/nosuch", stub_emotes), ParsedChat::Unknown);
+fn emote_aliases_resolve_through_the_table() {
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
+    assert_eq!(parse_line("/wave"), ParsedChat::TextEmote(101));
+    // The 0881 fix in one line: an alias that is NOT its token's `EmotesText` name resolves too.
+    // `/hello` (token WAVE) is the shape `/lol` (token LAUGH) has in the shipped table — before
+    // the table, matching on the DBC name alone left 61 such commands unresolvable.
+    assert_eq!(parse_line("/hello"), ParsedChat::TextEmote(101));
+    // An emote takes an argument (`DoEmote(token, msg)`): the command is the first word only.
+    assert_eq!(parse_line("/wave Bob"), ParsedChat::TextEmote(101));
+    assert_eq!(parse_line("/nosuch"), ParsedChat::Unknown);
 }
 
 #[test]
 fn logout_and_camp_parse() {
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
     for line in ["/logout", "/camp", "/LOGOUT", "/logout now"] {
-        assert_eq!(parse_line(line, stub_emotes), ParsedChat::Logout);
+        assert_eq!(parse_line(line), ParsedChat::Logout);
     }
+    assert_eq!(parse_line("/quit"), ParsedChat::Quit);
+}
+
+#[test]
+fn one_line_reference_bodies_run_in_the_vm() {
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
+    // `/trade` is the ref's `InitiateTrade("target")`, verbatim.
+    assert_eq!(
+        parse_line("/trade"),
+        ParsedChat::Lua {
+            body: "InitiateTrade(\"target\")".into()
+        }
+    );
+    // `/script` runs the typed text AS the chunk (the ref's `RunScript(msg)`); bare is a no-op.
+    assert_eq!(
+        parse_line("/script Print(\"hi\")"),
+        ParsedChat::Lua {
+            body: "Print(\"hi\")".into()
+        }
+    );
+    assert_eq!(parse_line("/script"), ParsedChat::Unknown);
 }
 
 #[test]
 fn castvis_parses_id_and_phase() {
     use crate::creature_anim::CastEventKind;
-    let none = |_: &str| None;
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
     assert_eq!(
-        parse_line("/castvis 133", none),
+        parse_line("/castvis 133"),
         ParsedChat::CastVis {
             spell_id: 133,
             kind: CastEventKind::Start
         }
     );
     assert_eq!(
-        parse_line("/castvis 133 go", none),
+        parse_line("/castvis 133 go"),
         ParsedChat::CastVis {
             spell_id: 133,
             kind: CastEventKind::Go
         }
     );
     assert_eq!(
-        parse_line("/castvis 689 FAIL", none),
+        parse_line("/castvis 689 FAIL"),
         ParsedChat::CastVis {
             spell_id: 689,
             kind: CastEventKind::Fail
         }
     );
-    assert_eq!(parse_line("/castvis", none), ParsedChat::Unknown);
-    assert_eq!(parse_line("/castvis abc", none), ParsedChat::Unknown);
-    assert_eq!(parse_line("/castvis 133 nope", none), ParsedChat::Unknown);
-}
-
-#[test]
-fn unresolved_slash_line_falls_back_to_emote_lookup() {
-    assert_eq!(parse_line("/wave", stub_emotes), ParsedChat::TextEmote(101));
+    assert_eq!(parse_line("/castvis"), ParsedChat::Unknown);
+    assert_eq!(parse_line("/castvis abc"), ParsedChat::Unknown);
+    assert_eq!(parse_line("/castvis 133 nope"), ParsedChat::Unknown);
 }
 
 #[test]
 fn unknown_slash_command_is_dropped_not_said_aloud() {
+    let t = stub_table();
+    let parse_line = |line: &str| super::input::parse_line(&t, line);
     // The regression this grammar exists to fix: `/yell` used to literally SAY "/yell hello" —
     // any unresolved slash-line must never fall through to plain chat.
-    assert_eq!(parse_line("/dancemove", stub_emotes), ParsedChat::Unknown);
-    assert_eq!(parse_line("/frobnicate", stub_emotes), ParsedChat::Unknown);
+    assert_eq!(parse_line("/dancemove"), ParsedChat::Unknown);
+    assert_eq!(parse_line("/frobnicate"), ParsedChat::Unknown);
+}
+
+/// The RUNTIME leg on the real data (the `every_mount_key_resolves…` pattern): build the table the
+/// way boot does — the shipped `GlobalStrings.lua` and `ChatFrame.lua`'s token table executed into
+/// a real VM, joined to the real `EmotesText.dbc` — and assert the commands 0881 was opened for.
+/// Skips without client data.
+#[test]
+fn real_alias_table_resolves_the_shipped_commands() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+    let s = benilla_ui::script::UiScript::new().expect("VM");
+    for file in ["GlobalStrings.lua", "ChatFrame.lua"] {
+        let src = chain
+            .read_file(&format!("Interface\\FrameXML\\{file}"))
+            .expect("FrameXML file in the chain");
+        let src = String::from_utf8_lossy(&src).into_owned();
+        // GlobalStrings runs whole (it is only assignments); ChatFrame contributes its token
+        // table alone, through the production filter.
+        let src = if file == "ChatFrame.lua" {
+            src.lines()
+                .map(str::trim)
+                .filter(|l| crate::ui_script::is_emote_token_line(l))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            src
+        };
+        s.run(&src).expect("runs clean");
+    }
+    let cat = benilla_formats::load_emote_sound_catalog(&mut chain).expect("emote catalog");
+    let globals = s.lua().globals();
+    let table = super::commands::SlashCommands::build(
+        |name| globals.get::<String>(name).ok().filter(|v| !v.is_empty()),
+        |token| cat.text_id(token),
+    );
+    let parse_line = |line: &str| super::input::parse_line(&table, line);
+
+    // The reported symptom: `/sit` resolves to the SIT text emote (EmotesText id 86), whose
+    // `Emotes.dbc` row (13, STATE_SIT) is the posture emote that sets stand state 1.
+    assert_eq!(parse_line("/sit"), ParsedChat::TextEmote(86));
+    assert_eq!(
+        cat.text_emote(86).and_then(|e| cat.posture_state(e)),
+        Some(1)
+    );
+    // Every posture command the shipped tables expose, with the state it sets.
+    for (line, state) in [
+        ("/stand", 0),
+        ("/sit", 1),
+        ("/sleep", 3),
+        ("/liedown", 3),
+        ("/kneel", 8),
+    ] {
+        let ParsedChat::TextEmote(text_id) = parse_line(line) else {
+            panic!("{line} is an emote");
+        };
+        let posture = cat.text_emote(text_id).and_then(|e| cat.posture_state(e));
+        assert_eq!(posture, Some(state), "{line} sets stand state {state}");
+    }
+    // The dead-alias class 0881 found: an alias that differs from its token's DBC name. These all
+    // returned "Type '/help'…" before the table.
+    for line in [
+        "/lol",
+        "/hi",
+        "/ty",
+        "/thanks",
+        "/congrats",
+        "/sorry",
+        "/yes",
+        "/bravo",
+        "/weep",
+        "/goodbye",
+        "/pizza",
+        "/strong",
+    ] {
+        assert!(
+            matches!(parse_line(line), ParsedChat::TextEmote(_)),
+            "{line} resolves to an emote"
+        );
+    }
+    // …and the four names the reference has NO command for, which the DBC-name match used to
+    // accept. `/follow` is the sharp one: it fired a text emote where the real client's
+    // `SlashCmdList["FOLLOW"]` follows your target (benilla has no follow yet, so it is honestly
+    // unknown rather than wrongly an emote).
+    for line in ["/follow", "/joke", "/puzzle", "/attackmytarget"] {
+        assert_eq!(parse_line(line), ParsedChat::Unknown, "{line}");
+    }
+    // A command whose handler benilla does not register answers like any unknown command.
+    assert_eq!(parse_line("/ginvite"), ParsedChat::Unknown);
+    // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
+    // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
+    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **55 distinct
+    // aliases** across the 28 registered `SlashCmdList` indices.
+    assert_eq!(table.counts(), (55, 225), "(slash, emote) aliases");
 }
 
 // ── The send-side posture-eligibility gate (`emote_send_eligible`) — the director-verified rows

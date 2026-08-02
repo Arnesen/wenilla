@@ -147,6 +147,7 @@ fn stationary_cast_hold_stows_an_engaged_casters_weapon() {
                 ranged: None,
                 main_sheath: 2,
                 off_sheath: 0,
+                ..Default::default()
             },
         ))
         .id();
@@ -200,6 +201,7 @@ fn moving_cast_hold_keeps_its_stow_between_plays() {
                 ranged: None,
                 main_sheath: 2,
                 off_sheath: 0,
+                ..Default::default()
             },
             MovementState {
                 speed: 7.0,
@@ -390,6 +392,7 @@ fn cast_hold_stows_even_when_the_model_lacks_the_spell_anims() {
                 ranged: None,
                 main_sheath: 2,
                 off_sheath: 0,
+                ..Default::default()
             },
         ))
         .id();
@@ -1492,6 +1495,250 @@ fn a_moving_jump_cast_masks_onto_the_overlay() {
     );
 }
 
+/// **The transplant** (decision 0878 — the director's "jump right after a cast should only play
+/// the lower body animation and finish the upper body one"). A standing cast routes full-body to
+/// bone 0; the jump that follows is a LOCOMOTION request, so the client does **not** overwrite it
+/// — `0x5fe919` copies the bone-0 descriptor (id, rate, and its **live play position**) onto the
+/// key-bone and hands bone 0 the jump. The legs jump; the arms finish the cast.
+#[test]
+fn a_jump_over_a_live_cast_transplants_it_to_the_torso() {
+    let mut app = app();
+    let unit = jumper(&mut app);
+    app.update(); // settle: Stand
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    {
+        let drv = app.world().entity(unit).get::<AnimDriver>().unwrap();
+        assert!(
+            matches!(drv.mode, super::super::select::Mode::Swing { id: 54, .. }),
+            "standing: the cast takes the FULL BODY on bone 0"
+        );
+        assert!(drv.overlay.is_none(), "nothing on the key-bone yet");
+    }
+    // Jump in place, mid-cast.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FALLING,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update();
+    let drv = app.world().entity(unit).get::<AnimDriver>().unwrap();
+    assert_eq!(
+        drv.overlay.map(|ov| (ov.id, ov.node)),
+        Some((54, AnimationNodeIndex::new(8))),
+        "the cast transplants onto the SpineLow overlay instead of being replaced"
+    );
+    assert_eq!(
+        drv.mode,
+        super::super::select::Mode::Entering(super::super::select::Special::Jump),
+        "…and the legs get the jump"
+    );
+    assert!(
+        drv.overlay_fade.is_none(),
+        "a transplant carries blendFlag = 0: it resumes mid-clip, it does not cross-fade"
+    );
+}
+
+/// A **Special is a bone-0 play, so it cannot cut the torso** (decision 0878 — the jump-running
+/// half of the director's report). A moving caster's hold rides the key-bone; taking off routes
+/// JumpStart to bone 0 (`0x5fe912`: with the key-bone armed the locomotion request goes straight
+/// there) and leaves the hold running. The old `special.is_none()` filter dropped it on takeoff.
+#[test]
+fn a_jump_does_not_cut_the_moving_cast_hold() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            caster_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            MovementState {
+                flags: move_flags::FORWARD,
+                speed: 7.0,
+                ..Default::default()
+            },
+            CastHold {
+                anim_id: 51,
+                spell_id: 1,
+                ranged: false,
+            },
+        ))
+        .id();
+    app.update();
+    assert!(
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .overlay
+            .is_some_and(|ov| ov.id == 51 && ov.looping),
+        "a moving caster holds on the torso"
+    );
+    // Take off, still running, still casting.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD | move_flags::FALLING,
+        vertical_speed: 7.9,
+        speed: 7.0,
+        ..Default::default()
+    });
+    app.update();
+    assert!(
+        app.world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .overlay
+            .is_some_and(|ov| ov.id == 51 && ov.looping),
+        "the jump takes bone 0 — the hold keeps the torso"
+    );
+}
+
+/// **The fade-to-rest** (decision 0878 — "the end of the cast animation is cut off and it
+/// instantly snaps back"). A finished key-bone one-shot is never stopped: the client's completion
+/// event disarms the bone through op4 `param_3 = -1`, which holds the clip's final frame in the
+/// secondary slot and cross-fades it back onto the base over a fixed 150 ms. Real clip assets, so
+/// Bevy actually completes the overlay.
+#[test]
+fn a_finished_masked_cast_fades_out_instead_of_snapping() {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    let mut app = app();
+    const CAST: f32 = 0.3;
+    let run_handle = {
+        let mut c = AnimationClip::default();
+        c.set_duration(1.0);
+        app.world_mut()
+            .resource_mut::<Assets<AnimationClip>>()
+            .add(c)
+    };
+    let cast_handle = {
+        let mut c = AnimationClip::default();
+        c.set_duration(CAST);
+        app.world_mut()
+            .resource_mut::<Assets<AnimationClip>>()
+            .add(c)
+    };
+    // Three nodes: the run base, the cast's full-body node, and the cast's masked twin.
+    let (graph, nodes) = AnimationGraph::from_clips([run_handle, cast_handle.clone(), cast_handle]);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+    let mut run = clip(5, 0, true);
+    run.node = nodes[0];
+    let mut cast = clip(54, 0, false);
+    cast.node = nodes[1];
+    cast.duration = CAST;
+    cast.blend_time = 0.05;
+    cast.upper_node = Some(nodes[2]);
+    let unit = app
+        .world_mut()
+        .spawn((
+            ModelAnimations {
+                graph: graph_handle.clone(),
+                clips: vec![run, cast],
+                hand_close: [None, None],
+                playable_animation_lookup: Vec::new(),
+                animation_lookup: Vec::new(),
+                global_bones: Vec::new(),
+                first_seq: None,
+                pose: Default::default(),
+            },
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
+            AnimDriver::default(),
+            MovementState {
+                flags: move_flags::FORWARD,
+                speed: 7.0,
+                ..Default::default()
+            },
+        ))
+        .id();
+    app.update(); // settle: Run
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: 54,
+        seq: 1,
+    });
+    app.update();
+    {
+        let e = app.world().entity(unit);
+        let drv = e.get::<AnimDriver>().unwrap();
+        assert!(
+            drv.overlay.is_some_and(|ov| ov.node == nodes[2]),
+            "moving: the cast masks onto the torso"
+        );
+        assert!(
+            drv.overlay_fade.is_some_and(|f| f.out.is_none()),
+            "the arm is blended: it rises over its own blendTime, from the base pose"
+        );
+        let w = e.get::<AnimationPlayer>().unwrap().animation(nodes[2]);
+        assert!(
+            w.is_some_and(|a| a.weight() < super::ONESHOT_OVERLAY_WEIGHT),
+            "…so it starts below full weight, not snapped on"
+        );
+    }
+    // Step in small frames until the clip completes (a big frame would run the whole 150 ms fade
+    // out in one go — right behaviour, useless assertion).
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+        if app
+            .world()
+            .entity(unit)
+            .get::<AnimDriver>()
+            .unwrap()
+            .overlay
+            .is_none()
+        {
+            break;
+        }
+    }
+    {
+        let e = app.world().entity(unit);
+        let drv = e.get::<AnimDriver>().unwrap();
+        assert!(drv.overlay.is_none(), "the cast finished");
+        assert_eq!(
+            drv.overlay_fade.and_then(|f| f.out),
+            Some(nodes[2]),
+            "…and retired into the fade slot rather than being dropped"
+        );
+        let active = e
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(nodes[2])
+            .expect("the finished clip is still driving the torso, holding its last frame");
+        assert_eq!(
+            active.speed(),
+            0.0,
+            "held on the final frame, not replaying"
+        );
+        assert!(active.weight() > 0.0, "still blended in as λ decays");
+    }
+    // Past the 150 ms window: the slot self-releases, exactly like the kernel's `+0xd0 = -1`.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    app.update();
+    let e = app.world().entity(unit);
+    assert!(
+        e.get::<AnimDriver>().unwrap().overlay_fade.is_none(),
+        "the fade window expired"
+    );
+    assert!(
+        e.get::<AnimationPlayer>()
+            .unwrap()
+            .animation(nodes[2])
+            .is_none(),
+        "…and the node is released"
+    );
+}
+
 /// The airborne-freeze in the GAIT slot (the step-off arc, decision 0864): live pins — here
 /// the stationary cast hold — cannot swap the clip mid-air; the takeoff gait keeps rolling and
 /// the pin applies at touchdown.
@@ -1678,6 +1925,7 @@ fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
                 ranged: Some((2, 0x2)), // bow
                 main_sheath: 3,
                 off_sheath: 0,
+                ..Default::default()
             },
         ))
         .id();
@@ -1733,4 +1981,136 @@ fn a_landed_swing_snaps_its_attacker_out_of_the_ranged_stance() {
     // Attack1H's `&0x20` re-asserts melee on the `CUR != 2` path.
     swing(&mut app);
     assert_eq!(sheath(&app), Some(1), "melee holds across the volley");
+}
+
+/// **The ceremony's two movements, end to end** (decision 0872) — the director's report: pressing
+/// Z with both hands full puts the weapons away, lets the arms come back to neutral, and only
+/// *then* reaches over the shoulder for the bow. Phase 1 is the setter's own play (`0x611b60`);
+/// phase 2 is the on-anim-finish drawer (`0x5fc920` @ `0x5fca8c`/`0x5fcaa1`), which is the half
+/// benilla never had — before it, the ceremony ended when the stow clips did and the bow simply
+/// appeared. Real clip assets, so Bevy's `advance_animations` actually completes them.
+#[test]
+fn a_melee_to_ranged_toggle_stows_both_hands_before_it_reaches_for_the_bow() {
+    use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle};
+    use bevy::animation::AnimationClip;
+
+    let mut app = app();
+    const DUR: f32 = 0.1;
+    let handles: Vec<_> = (0..5)
+        .map(|_| {
+            let mut c = AnimationClip::default();
+            c.set_duration(DUR);
+            app.world_mut()
+                .resource_mut::<Assets<AnimationClip>>()
+                .add(c)
+        })
+        .collect();
+    let (graph, nodes) = AnimationGraph::from_clips(handles);
+    let graph_handle = app
+        .world_mut()
+        .resource_mut::<Assets<AnimationGraph>>()
+        .add(graph);
+    // The two stow/draw families, each with its per-arm masked pair. No `$SHL`/`$SHR` events, so
+    // each arm's weapon moves at the authored-event fallback: halfway.
+    let family = |id: u16, right: usize, left: usize| {
+        let mut c = clip(id, 0, false);
+        c.node = nodes[right];
+        c.duration = DUR;
+        c.blend_time = 0.0;
+        c.arm_nodes = Some((nodes[right], nodes[left]));
+        c
+    };
+    let mut stand = clip(0, 0, true);
+    stand.node = nodes[0];
+    stand.duration = DUR;
+    let anims = ModelAnimations {
+        graph: graph_handle.clone(),
+        clips: vec![stand, family(90, 1, 2), family(89, 3, 4)],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    // Sword-and-board plus a bow — the director's warrior. Hip sword (3 ⇒ HipSheath 90), back
+    // shield (4 ⇒ Sheath 89), back bow (1 ⇒ 89, and INVTYPE_RANGED ⇒ the LEFT arm).
+    let unit = app
+        .world_mut()
+        .spawn((
+            anims,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimationGraphHandle(graph_handle),
+            AnimDriver::default(),
+            // The Z toggle is the local player's alone; a remote unit's committed state is pulled
+            // back to the server byte by the reconcile's rule 5 before any ceremony could run.
+            crate::net::SelfPlayer,
+            Wielded {
+                main: Some((2, 0x7)),
+                off: Some((4, 6)),
+                ranged: Some((2, 0x2)),
+                main_sheath: 3,
+                off_sheath: 4,
+                ranged_sheath: 1,
+                ranged_inv: 0x0f,
+                materials: [1, 6, 2],
+            },
+        ))
+        .id();
+    let visual = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<crate::creature_anim::VisualSheath>()
+            .map(|v| v.0)
+    };
+
+    // Get to melee-drawn without a ceremony (a snap, as every reactive trigger does), then press Z.
+    for (state, ceremony) in [(1u8, false), (2, true)] {
+        app.world_mut().write_message(SheathRequest {
+            entity: unit,
+            state,
+            ceremony,
+        });
+        app.update();
+    }
+    assert_eq!(
+        visual(&app),
+        Some([1, 1]),
+        "phase 1: both hands still hold their weapons while the stow clips play"
+    );
+
+    let mut seen = vec![[1u8, 1]];
+    let mut settled = false;
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+        match visual(&app) {
+            Some(v) if seen.last() != Some(&v) => seen.push(v),
+            None => {
+                settled = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // The smoking gun: a state where the RIGHT arm has settled into the ranged stance (sword on
+    // the back, nothing left to do) while the LEFT is still empty-handed — the bow on its way but
+    // not yet arrived. That can only exist if a second clip started after the stows finished.
+    assert!(
+        seen.contains(&[2, 0]),
+        "phase 2 never ran: the bow must be drawn by a SECOND clip, after both stows finished \
+         (saw {seen:?})"
+    );
+    let stow = seen.iter().position(|v| *v == [1, 1]).unwrap();
+    let reach = seen.iter().position(|v| *v == [2, 0]).unwrap();
+    assert!(
+        reach > stow,
+        "the reach must follow the stow, not blend with it (saw {seen:?})"
+    );
+    assert!(
+        settled,
+        "the ceremony must end with the pin dropped, leaving the committed state (saw {seen:?})"
+    );
 }

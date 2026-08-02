@@ -34,3 +34,22 @@ fn every_shipped_ui_xml_parses() {
         "only {checked} xml files swept — sweep broke"
     );
 }
+
+/// The WHOLE manifest LOADS, in its real order, with zero loader errors — the check the parse
+/// sweep above structurally cannot give, and the one the app itself never made.
+///
+/// [`super::load_default_ui`] only ever *logged* its errors, so a broken manifest entry reached a
+/// real run behind a log line nobody greps: a mistyped file name, a frame name colliding with a
+/// later window's, a template used before its definer, an `<Include>` that resolves to nothing.
+/// Nor could a capture run have caught it — captures skip the manifest entirely unless
+/// `WOW_CAPTURE_UI=1`. This is that assertion, over the array the app really walks, so a new
+/// window's entry is covered the moment it is added rather than when someone remembers to test it.
+#[test]
+fn the_whole_shipped_manifest_loads_without_errors() {
+    let mut s = benilla_ui::script::UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    let failures = super::load_default_ui(&s);
+    assert!(failures.is_empty(), "manifest load errors: {failures:#?}");
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

@@ -25,11 +25,11 @@ use super::select::{
     playback_rate, ready_anim, route_oneshot, state_emote_gait, swing_anim_main, swing_anim_off,
     unify, Mode, OneShotRoute, DEATH, DEFAULT_WALK_SPEED, STAND,
 };
-use super::sheath::start_sheath_ceremony;
+use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
 use super::{
     find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, CastHold, DefenseAnim,
-    EmoteAnim, Engaged, MovementState, Overlay, RangedHold, SheathRequest, SheathSwapMessage,
-    SwingImpact, SwingMessage, SwingSlowdown, VisualSheath, Wielded, WoundAnim,
+    EmoteAnim, Engaged, MovementState, Overlay, OverlayFade, RangedHold, SheathRequest,
+    SheathSwapMessage, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
 };
 
 mod grip;
@@ -51,6 +51,16 @@ use wound::{wound_evict, wound_trigger, wound_upkeep, WoundEdge};
 /// the cost of Bevy's weighted blend. The legs are excluded by the mask entirely. Same rationale and
 /// value as the per-arm sheath ceremony's overlay weight.
 const ONESHOT_OVERLAY_WEIGHT: f32 = 8.0;
+
+/// The key-bone **fade-to-rest** window (decision 0878 — wow-re `oneshot-lifecycle.md` §5.4): a
+/// finished upper-body one-shot is never stopped. The client's per-frame advance latches the
+/// completion (`0x719370`), the deferred event reaches `CGUnit::OnAnimationFinished 0x5fc920` the
+/// same frame, and that calls op4 with `param_3 = -1` (`0x5fcacb`) — which snapshots the clip's
+/// **held final frame** into the bone's secondary slot, seeds `+0x100 = clock + 150`,
+/// `+0x104 = 1/150`, `+0x108 = 1.0`, and disarms the primary so the bone inherits bone 0 again.
+/// **Fixed 150 ms** — deliberately NOT the sequence's own blendTime, which is used only on the arm
+/// path.
+const ONESHOT_RELEASE_FADE: f32 = 0.150;
 
 /// The launch vertical speed (yd/s, +up) above which a new airborne arc is a **jump** (the 37/38
 /// bracket) rather than a step-off fall. A jump launches at ≈7.96 up (our own controller's
@@ -102,6 +112,144 @@ pub(crate) fn oneshot_is_live(
     catalog: Option<&AnimDataCatalog>,
 ) -> bool {
     live_oneshot(drv, player, tr, anims, catalog).is_some()
+}
+
+/// Retire whatever holds the key-bone slot into its cross-fade ([`AnimDriver::overlay_fade`]) —
+/// the client's op4 snapshot of the outgoing pose into the bone's SECONDARY (`rep movsd
+/// +0x98 → +0xc4`) plus the window seed (decision 0878). `total` is the window: the incoming
+/// clip's own blendTime on a blended re-arm, [`ONESHOT_RELEASE_FADE`] on a fade-to-rest. Honors
+/// the client's **re-snapshot guard** (`0x7125d4` on the arm path, `0x7123a2` on the release
+/// path, both against `0x7ffa24 = 0.5f`): a fade still running above λ = 0.5 is not re-seeded —
+/// the older pose keeps decaying and the superseded node is simply dropped. Leaves
+/// [`AnimDriver::overlay`] empty; the caller arms the incoming clip (if any) after it.
+fn retire_overlay(drv: &mut AnimDriver, player: &mut AnimationPlayer, total: f32) {
+    let out = drv.overlay.take().map(|ov| ov.node);
+    if drv.overlay_fade.is_some_and(|f| fade_lambda(&f) > 0.5) {
+        if let Some(n) = out {
+            player.stop(n);
+        }
+        return;
+    }
+    if let Some(prev) = drv.overlay_fade.take().and_then(|f| f.out) {
+        player.stop(prev);
+    }
+    drv.overlay_fade = Some(OverlayFade {
+        out,
+        left: total,
+        total,
+    });
+}
+
+/// The blend weight λ of a key-bone cross-fade this frame — `smoothstep` over the fraction of the
+/// window still to run, so it decays 1 → 0 ([`select::blend_lambda`]).
+fn fade_lambda(f: &OverlayFade) -> f32 {
+    select::blend_lambda(if f.total > 0.0 { f.left / f.total } else { 0.0 })
+}
+
+/// The key-bone cross-fade's per-frame advance (decision 0878) — the kernel's λ decay
+/// (`0x714880`–`0x714923`) and its self-release (`0x7147b9`: `+0xd0 = -1` and λ = 0 the same
+/// frame). Two shapes, decided by whether an incoming clip holds the slot:
+///
+/// - **A release** (no incoming): the retiring node alone fades against the base, so its weight
+///   must land the blended share on `λ · W/(1+W)` — the client's full-override λ, capped by the
+///   standing [`ONESHOT_OVERLAY_WEIGHT`] approximation. `w = W·λ / (1 + W·(1−λ))`.
+/// - **A re-arm** (incoming present): the two clips split the slot's share by λ exactly as the
+///   client's `primary + (secondary − primary)·λ` does, at constant total — `W·λ` out, `W·(1−λ)`
+///   in. (An incoming that arrived by *transplant* seeds no fade at all: `blendFlag = 0`.)
+fn overlay_fade_upkeep(drv: &mut AnimDriver, player: &mut AnimationPlayer, dt: f32) {
+    let Some(mut f) = drv.overlay_fade else {
+        return;
+    };
+    f.left = (f.left - dt).max(0.0);
+    let lambda = fade_lambda(&f);
+    let live = drv.overlay.map(|ov| ov.node);
+    let w = ONESHOT_OVERLAY_WEIGHT;
+    if let Some(a) = f.out.and_then(|n| player.animation_mut(n)) {
+        a.set_weight(if live.is_some() {
+            w * lambda
+        } else {
+            w * lambda / (1.0 + w * (1.0 - lambda))
+        });
+    }
+    if let Some(a) = live.and_then(|n| player.animation_mut(n)) {
+        a.set_weight(w * (1.0 - lambda));
+    }
+    if f.left <= 0.0 {
+        if let Some(n) = f.out {
+            player.stop(n);
+        }
+        if let Some(a) = live.and_then(|n| player.animation_mut(n)) {
+            a.set_weight(w);
+        }
+        drv.overlay_fade = None;
+    } else {
+        drv.overlay_fade = Some(f);
+    }
+}
+
+/// The **TRANSPLANT** (`0x5fe919` — wow-re `oneshot-lifecycle.md` §3a, the half
+/// `anim-composition-model.md` §2 was missing; decision 0878). A base **locomotion** clip
+/// requested while bone 0 still plays a live **CAST** or **COMBAT** one-shot does not replace it:
+/// the client copies the bone-0 descriptor — its id, its rate, and `+0x08` the clip's **live
+/// elapsed position** — onto the key-bone with `blendFlag = 0`, then hands bone 0 the request. The
+/// cast therefore keeps running on the torso *at exactly the frame it was on*, with no cross-fade
+/// and no restart, while the legs take the jump or the run. This is the director's "jump right
+/// after a cast: the legs jump, the arms finish the cast".
+///
+/// A no-op when the key-bone is already armed — `0x5fe912` then jumps straight to `0x5fe930`
+/// (request → bone 0, key-bone untouched), which is exactly what leaving [`AnimDriver::overlay`]
+/// alone already gives us. Named simplification: the moved clip re-arms as a plain `Never` repeat,
+/// dropping any unspent replay budget (`R > 1`); every cast and swing this fires for is authored
+/// `(0, 0)` ⇒ `R = 1`.
+fn transplant_up(
+    drv: &mut AnimDriver,
+    player: &mut AnimationPlayer,
+    tr: &AnimationTransitions,
+    anims: &ModelAnimations,
+    entity: Entity,
+    id: u16,
+) -> bool {
+    if drv.overlay.is_some() || !(select::is_cast_anim(id) || select::is_combat_anim(id)) {
+        return false;
+    }
+    let Some(node) = tr.get_main_animation() else {
+        return false;
+    };
+    // The live position + rate, read off the armed VARIATION node (the play rolled one of them),
+    // which is also how we find the masked twin to resume on.
+    let Some((seek, speed)) = player
+        .animation(node)
+        .filter(|a| !a.is_finished())
+        .map(|a| (a.seek_time(), a.speed()))
+    else {
+        return false;
+    };
+    let Some(upper) = anims
+        .clips
+        .iter()
+        .find(|c| c.node == node)
+        .and_then(|c| c.upper_node)
+    else {
+        return false;
+    };
+    let active = player.play(upper);
+    active.replay();
+    active.set_repeat(bevy::animation::RepeatAnimation::Never);
+    active.seek_to(seek);
+    active.set_speed(speed);
+    active.set_weight(ONESHOT_OVERLAY_WEIGHT); // `blendFlag = 0` — no ramp, no cross-fade
+    drv.overlay = Some(Overlay {
+        node: upper,
+        id,
+        looping: false,
+    });
+    if crate::dbg_trace::enabled() {
+        crate::dbg_trace::line(
+            "fct",
+            &format!("anim transplant unit={entity} id={id} -> key-bone at {seek:.3}s (bone 0 takes the request)"),
+        );
+    }
+    true
 }
 
 /// The animation state machine, per unit (decision 0049 + 0073). Death overrides; otherwise:
@@ -159,14 +307,18 @@ pub(super) fn drive_animations(
     // The shared emote-audio catalog, promoted here for its `Emotes.dbc` → `AnimID` column: the
     // looping state-emote idle (`UNIT_NPC_EMOTESTATE`) below resolves through it, same as the
     // `SMSG_EMOTE` one-shot consumer ([`emote_anim::emote_to_anim`]).
-    // One tuple param (the 16-SystemParam ceiling): the shared emote-audio catalog and the
-    // client-local loot-target latch.
+    // One tuple param (the 16-SystemParam ceiling): the shared emote-audio catalog, the
+    // client-local loot-target latch, and the frame clock.
     aux: (
         Option<Res<EmoteSounds>>,
         // The loot-target latch (decision 0515): the SELF unit's kneel trigger — armed at the
         // `CMSG_LOOT` send, dropped at release/refusal — read by the loot leg below. `Option`
         // for the headless test worlds that don't build the loot seam.
         Option<Res<crate::ui_loot::LootLatch>>,
+        // The frame clock — the key-bone cross-fade's only time source (decision 0878): its
+        // retiring node is *frozen* on the clip's final frame, so unlike the wound's decay there
+        // is no playback clock to read the λ window off.
+        Res<Time>,
     ),
     // The variation roll's LCG state (decision 0114 — the client's single CRT `_rand` stream,
     // shared by every play; [`select::msvc_rand`]).
@@ -175,7 +327,8 @@ pub(super) fn drive_animations(
     // diff-only filter; see the trace block after the mode machine).
     mut anim_trace_last: Local<Option<String>>,
 ) {
-    let (emote_sounds, loot_latch) = aux;
+    let (emote_sounds, loot_latch, time) = aux;
+    let dt = time.delta_secs();
     // This frame's one-shot PLAY CALLS (swings + anim-emotes), gathered per unit and replayed
     // in the client's call order below ([`PlaySeq`] stamps — the net drain stamps packet order,
     // scene-time emitters stamp after it). Order matters twice over: the later call overwrites
@@ -315,6 +468,11 @@ pub(super) fn drive_animations(
         // right by construction, since the rider's body holds Mount(91) regardless and stealth and
         // mounts are mutually exclusive anyway.
         mv.stealthed = store.is_some_and(|s| s.0.unit_is_stealthed());
+        // Stunned — read the same way and for the same reason (decision 0880): the fidget bail is a
+        // descriptor test in the reference too (`0x5eb4f2`/`0x5ec219`), on every unit it animates,
+        // so a watched player under Ice Block goes as still as ours does.
+        mv.stunned =
+            store.is_some_and(|s| s.0.unit_flags() & crate::player::UNIT_FLAG_STUNNED != 0);
         let moving = mv.flags & move_flags::ANY_MOVE != 0;
         // The airborne arc's bookkeeping (wow-re land-anim-height-gate + rf57b §2): on the arc's
         // FIRST airborne frame, its launch vertical speed splits a **jump** (upward — the client's
@@ -351,7 +509,13 @@ pub(super) fn drive_animations(
         // `variationIdx = −1`, decision 0123) or is forced to the head: decided from the state
         // *before* this frame's transitions (the client tests the outgoing armed id).
         let outgoing = drv.active_anim().unwrap_or(STAND);
-        let relaxed = !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
+        // …and never while stunned (decision 0880): the reference's idle/fidget selectors bail on
+        // `UNIT_FLAG_STUNNED` before they get to choose anything, so the re-arm holds the head and
+        // even the idle twitch stops. Its own gate, not `arm_forces_head`'s combat/cast re-zero —
+        // Ice Block is neither engaged nor casting, and the two suppressions sit at different sites
+        // in the binary (`0x5eb4f2`/`0x5ec219` vs `0x5fdba0`).
+        let relaxed =
+            !mv.stunned && !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
 
         wound_upkeep(&mut drv, &mut player);
 
@@ -482,40 +646,31 @@ pub(super) fn drive_animations(
                         anims,
                         wielded,
                         cur,
+                        req.state,
                         catalog,
                     );
                 }
             }
         }
-        // Ceremony upkeep: unpin the weapon swap when a clip crosses the authored event (or every
-        // overlay vanished — never stick the placement stale), and stop each finished overlay.
-        // The unpin IS the hand-touches-weapon moment: the draw/stow ring fires here
-        // (`sound::sheathe` — the sound can't ride the `$SHL`/`$SHR` tags, hip clips carry none).
+        // Ceremony upkeep, per arm: move that arm's weapon when its clip crosses the authored
+        // `$SHL`/`$SHR` event (the hand-touches-weapon moment — the draw/stow ring fires there,
+        // `sound::sheathe`, since the sound can't ride the tags themselves: hip clips carry none),
+        // and when a *stow* clip finishes, run the client's **phase 2** — the on-anim-finish
+        // drawer `0x5fc920` @ `0x5fca8c`/`0x5fcaa1`. That deferred second movement is what makes a
+        // melee → ranged toggle read as "put the swords away, come back to neutral, *then* reach
+        // over the shoulder for the bow" instead of one blended swap.
         let sheath_now = drv.sheath_cur.unwrap_or(0);
-        if let Some(sw) = &mut drv.sheath_swap {
-            let mut any_alive = false;
-            let mut crossed = false;
-            for node in sw.nodes.into_iter().flatten() {
-                if let Some(a) = player.animation(node) {
-                    any_alive = true;
-                    crossed |= a.seek_time() >= sw.swap_at;
-                    if a.is_finished() {
-                        player.stop(node);
-                    }
-                }
-            }
-            if (crossed || !any_alive) && !sw.unpinned {
-                sw.unpinned = true;
-                commands.entity(entity).remove::<VisualSheath>();
-                sheath_swaps.write(SheathSwapMessage {
-                    entity,
-                    drawing: sheath_now != 0,
-                });
-            }
-            if !any_alive {
-                drv.sheath_swap = None;
-            }
-        }
+        advance_sheath_ceremony(
+            &mut commands,
+            entity,
+            &mut drv,
+            &mut player,
+            anims,
+            wielded,
+            sheath_now,
+            catalog,
+            &mut sheath_swaps,
+        );
 
         // ── This frame's one-shot: a melee swing (decision 0073 — one per SMSG_ATTACKERSTATEUPDATE)
         // or an anim-emote (decision 0081). A swing outranks an emote when both land (combat wins).
@@ -636,11 +791,6 @@ pub(super) fn drive_animations(
                 }
                 continue;
             }
-            // A prior overlay is superseded by this play — stop its node so the new route owns the
-            // subtree (a fresh masked node re-takes it below, or a full-body route reclaims the base).
-            if let Some(ov) = drv.overlay.take() {
-                player.stop(ov.node);
-            }
             // Mounted forces the masked route (byte-verified, wow-re mount-composition B1:
             // upper-body one-shots route to the key-bone while mounted, and the 91-force would
             // reclaim bone 0 on the next play anyway): a full-body /wave would replace the seat
@@ -657,11 +807,23 @@ pub(super) fn drive_animations(
                 .flatten();
             if let Some((node, repeat)) = upper {
                 // Masked route: the SpineLow overlay, beside `mode`. The base machine runs untouched.
+                // The re-arm is **blended** (op4 `blendFlag = 1`, decision 0878): whatever held the
+                // key-bone retires into the fade slot and this clip rises over its own blendTime
+                // (`0x7125f2` — the INCOMING sequence's `M2Sequence+0x20`), so a masked swing never
+                // swaps the torso in one frame. Note the full-body branch below deliberately does
+                // NOT touch the overlay: on that route the client's key-bone slot keeps its current
+                // descriptor (a dedup no-op), so a standing emote over a still-running masked swing
+                // plays legs-only underneath it (`0x5fe930`; wow-re claim 6 CONFIRMED).
+                retire_overlay(
+                    &mut drv,
+                    &mut player,
+                    picked.map_or(0.0, |(c, _)| c.blend_time.max(0.0)),
+                );
                 let active = player.play(node);
                 active.replay();
                 active.set_repeat(repeat); // always set — a reused node never keeps a stale count
                 active.set_speed(1.0); // nor a stale rate (a prior whiff slow-down, decision 0279)
-                active.set_weight(ONESHOT_OVERLAY_WEIGHT);
+                active.set_weight(0.0); // the fade upkeep raises it from λ = 1 this same frame
                 drv.overlay = Some(Overlay {
                     node,
                     id,
@@ -897,6 +1059,23 @@ pub(super) fn drive_animations(
                     // "restore". Leaving an airborne/pose `under` routes through
                     // [`leave_special`] exactly like the un-replaced machine: the latch
                     // handoff, the landing pick, and the pose exits all apply unchanged.
+                    //
+                    // …but FIRST the **transplant** (decision 0878): when what the base is about
+                    // to play is a LOCOMOTION clip — a jump entry (37), a land pick (39/187) — and
+                    // this one-shot is a live CAST/COMBAT clip, the client moves it up onto the
+                    // key-bone rather than letting the request overwrite it. Fall(40) and the pose
+                    // enters/exits are NOT locomotion ids, so a FALLINGFAR latch or a sit-down
+                    // still replaces the clip on bone 0, exactly as the bytes order it.
+                    let incoming_locomotion = match (under, special) {
+                        (_, Some(next)) => select::is_locomotion(next.enter()),
+                        (Some(select::Special::Jump | select::Special::Fall), None) => {
+                            select::jump_land_pick(mv.flags).is_some_and(select::is_locomotion)
+                        }
+                        _ => false,
+                    };
+                    if incoming_locomotion {
+                        transplant_up(&mut drv, &mut player, &tr, anims, entity, id);
+                    }
                     drv.mode = if let Some(sp) = under {
                         leave_special(
                             sp,
@@ -965,6 +1144,12 @@ pub(super) fn drive_animations(
                         // cache clears with it (decision 0406; a finished clip instead had its
                         // cache consumed by the injection above, before this machine ran).
                         drv.deferred = None;
+                        // …and it is a LOCOMOTION request, so a still-playing CAST/COMBAT clip
+                        // transplants up to the key-bone instead of being overwritten (decision
+                        // 0878). A *finished* clip has nothing to move: the client's descriptor
+                        // probe reports a completed slot as id −1 (`0x5fe1f0` reads the completion
+                        // latch, not the armed record), so the transplant predicates never see it.
+                        transplant_up(&mut drv, &mut player, &tr, anims, entity, id);
                     }
                     drv.mode = Mode::Gait;
                     drv.gait = None; // recompute a fresh gait next frame
@@ -1207,42 +1392,38 @@ pub(super) fn drive_animations(
             }
         }
 
-        // The anim half of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]): one line per
-        // frame the SELF unit's settled anim state *changes* — mode, gait, Special, flags, or the
-        // rate-driving speed — interleaved with the mover's `move` lines on the same clock, so a
-        // feel report ("the char's frames snap on landing") pins which layer moved and when.
-        if is_self && crate::dbg_trace::enabled() {
-            let state = format!(
-                "mode={:?} gait={:?} special={:?} flags={:08x} speed={:.2}",
-                drv.mode, drv.gait, special, mv.flags, mv.speed
-            );
-            if anim_trace_last.as_deref() != Some(&state) {
-                crate::dbg_trace::line("anim", &state);
-                *anim_trace_last = Some(state);
-            }
-        }
-
-        // ── Masked one-shot completion (decision 0087 (c)): a finished overlay releases the SpineLow
-        // subtree back to the base — the legs' base clip reclaims the torso, no auto-expiry timer. A
-        // looping base underneath is never disturbed by the overlay's start or end (it drives the legs
-        // throughout). Started *this* frame it is not finished, so it survives to play. A looping
-        // cast-hold overlay never finishes — it is released by the hold block below instead.
+        // ── Masked one-shot completion — the **fade-to-rest** (decision 0878, correcting 0087 (c)):
+        // a finished overlay is NOT stopped. The client latches the completion in its per-frame
+        // model advance (`0x719370`) and delivers a deferred event the same frame to
+        // `CGUnit::OnAnimationFinished 0x5fc920`, which disarms the key-bone through op4
+        // `param_3 = -1` — snapshotting the clip's **held final frame** into the bone's secondary
+        // slot and cross-fading it back onto the inherited base over a fixed 150 ms. So the torso's
+        // return is a blend out of the follow-through, never the one-frame cut this used to do
+        // (the director's "the end of the cast is cut off and it instantly snaps back"). A looping
+        // cast-hold overlay never completes — the hold block below owns its release.
         if let Some(ov) = drv.overlay {
             let done = if ov.looping {
                 false // a cast-hold loop: the hold block below owns its release
             } else if find_resolved(anims, ov.id, catalog).is_some_and(|c| c.looping) {
                 // A hold-less overlay whose CLIP is authored looping (a pushed kit's seated
-                // eat/drink gesture) has no natural end — release it when the body is claimed:
-                // movement or a Special transition. INTERIM (decision 0280): the client's exact
-                // release chain for this case is unpinned; supersede-by-a-later-play already
-                // evicts above.
-                moving || special.is_some()
+                // eat/drink gesture) has no natural end — release it when the body is claimed by
+                // MOVEMENT. INTERIM (decision 0280): the client's exact release chain for this case
+                // is unpinned; supersede-by-a-later-play already evicts above. A **Special** no
+                // longer counts (decision 0878): a jump is a bone-0 play, and bone-0 plays never
+                // touch the key-bone slot — cutting the torso on takeoff was the same defect the
+                // fade above fixes at the other end.
+                moving
             } else {
                 player.animation(ov.node).is_none_or(|a| a.is_finished())
             };
             if done {
-                player.stop(ov.node);
-                drv.overlay = None;
+                // Freeze the held frame, then retire it: the client's snapshot copies an already
+                // *expired* window, so the secondary clamps to `seq.end` and the fade runs from
+                // the clip's final pose (`oneshot-lifecycle.md` §5.4).
+                if let Some(a) = player.animation_mut(ov.node) {
+                    a.set_speed(0.0);
+                }
+                retire_overlay(&mut drv, &mut player, ONESHOT_RELEASE_FADE);
             }
         }
 
@@ -1254,24 +1435,31 @@ pub(super) fn drive_animations(
         // masked one-shot in the slot (a swing over the run) wins while it plays; the hold
         // re-takes the subtree the frame after it finishes (the client's last-writer-wins slot).
         // Its start is a play like any other, so the sheath reconcile below sees it (`hold_played`).
+        // A **Special no longer cancels it** (decision 0878): jumping mid-cast is a bone-0 play
+        // (JumpStart takes the legs) and the client's key-bone slot is untouched by it —
+        // `0x5fe912` routes a locomotion request straight to bone 0 when the key-bone is armed.
+        // Dropping the hold on takeoff was exactly the director's "jump-running cuts the cast".
         let mut hold_played: Option<u16> = None;
         let masked_hold = cast_hold
-            .filter(|_| mv.flags & move_flags::CAST_PIN_MOVE != 0 && special.is_none())
+            .filter(|_| mv.flags & move_flags::CAST_PIN_MOVE != 0)
             .and_then(|h| {
-                find_resolved(anims, h.anim_id, catalog)
-                    .and_then(|c| c.upper_node)
-                    .map(|node| (h.anim_id, node))
+                find_resolved(anims, h.anim_id, catalog).and_then(|c| {
+                    c.upper_node
+                        .map(|node| (h.anim_id, node, c.blend_time.max(0.0)))
+                })
             });
         match (masked_hold, drv.overlay) {
-            (Some((id, node)), prior) if prior.is_none_or(|ov| ov.looping && ov.id != id) => {
-                // Free slot, or a stale hold loop (the channel switched spells): (re)take it.
-                if let Some(ov) = prior {
-                    player.stop(ov.node);
-                }
+            (Some((id, node, blend)), prior)
+                if prior.is_none_or(|ov| ov.looping && ov.id != id) =>
+            {
+                // Free slot, or a stale hold loop (the channel switched spells): (re)take it — a
+                // blended key-bone re-arm like any other (decision 0878), so the outgoing pose
+                // retires under the hold's own blendTime instead of vanishing.
+                retire_overlay(&mut drv, &mut player, blend);
                 let active = player.play(node);
                 active.replay();
                 active.repeat();
-                active.set_weight(ONESHOT_OVERLAY_WEIGHT);
+                active.set_weight(0.0); // the fade upkeep raises it from λ = 1 this same frame
                 drv.overlay = Some(Overlay {
                     node,
                     id,
@@ -1280,13 +1468,49 @@ pub(super) fn drive_animations(
                 hold_played = Some(id);
             }
             (None, Some(ov)) if ov.looping => {
-                // The hold ended, or the unit stopped/entered a Special — release the subtree
-                // (the standing pin or the gait takes over from here).
-                player.stop(ov.node);
-                drv.overlay = None;
+                // The hold ended, or the unit stopped — release the subtree (the standing pin or
+                // the gait takes over). A looping clip never completes, so the client's
+                // completion-driven release never fires for it and its true release chain is
+                // still unpinned (0107/0280 INTERIM); it borrows the verified fade-to-rest shape
+                // rather than snapping, which is right either way.
+                retire_overlay(&mut drv, &mut player, ONESHOT_RELEASE_FADE);
             }
             _ => {}
         }
+        // The key-bone cross-fade's advance, last — after every arm/release this frame, so the
+        // weights land on the slot's settled state (the client's kernel likewise runs λ after the
+        // frame's PlayAnimation calls).
+        overlay_fade_upkeep(&mut drv, &mut player, dt);
+
+        // The anim half of the `WOW_MOVE_TRACE` debug trace ([`crate::dbg_trace`]): one line per
+        // frame the SELF unit's settled anim state *changes* — mode, gait, Special, flags, the
+        // rate-driving speed, and **both slots** — interleaved with the mover's `move` lines on the
+        // same clock, so a feel report ("the char's frames snap on landing") pins which layer moved
+        // and when. It runs HERE, after every arm/release/fade this frame, so `upper` is the
+        // settled key-bone state: without it a torso report ("the cast got cut") could not be told
+        // from a base one at all (decision 0878). `+fade` marks the 150 ms fade-to-rest running —
+        // a boolean, not a countdown, so a fade doesn't spam a line per frame.
+        if is_self && crate::dbg_trace::enabled() {
+            let state = format!(
+                "mode={:?} gait={:?} special={:?} flags={:08x} speed={:.2} upper={:?}{}",
+                drv.mode,
+                drv.gait,
+                special,
+                mv.flags,
+                mv.speed,
+                drv.overlay.map(|ov| ov.id),
+                if drv.overlay_fade.is_some() {
+                    "+fade"
+                } else {
+                    ""
+                },
+            );
+            if anim_trace_last.as_deref() != Some(&state) {
+                crate::dbg_trace::line("anim", &state);
+                *anim_trace_last = Some(state);
+            }
+        }
+
         let masked_played = masked_played || hold_played.is_some();
 
         let base_played = base_played || (drv.mode, drv.gait) != pre_state;

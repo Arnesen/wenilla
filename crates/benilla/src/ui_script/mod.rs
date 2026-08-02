@@ -216,11 +216,14 @@ fn setup_script(world: &mut World) {
         }
     };
     load_global_strings(world, &script);
+    load_emote_tokens(world, &script);
     // The unit frames are the default player UI — always loaded in a normal run. Captures stay
     // pristine (world-render baselines) unless WOW_CAPTURE_UI=1 opts the UI in.
     let capturing = world.contains_resource::<crate::capture::CaptureMode>();
     if !capturing || std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1") {
-        load_default_ui(&script);
+        // Errors are already logged per file as they happen; the returned list is the test-side
+        // assertion (`shipped_xml_tests`), not a second reporting channel.
+        let _ = load_default_ui(&script);
     }
     world.insert_non_send_resource(script);
 }
@@ -263,12 +266,86 @@ fn load_global_strings(world: &mut World, script: &UiScript) {
     }
 }
 
+/// Execute the reference's own **emote token table** into the VM (`EMOTE87_TOKEN = "SIT"`, …) —
+/// the second half of the emote slash grammar (decision 0881). The *aliases* are in
+/// `GlobalStrings.lua` above (`EMOTE87_CMD1 = "/sit"`), but the alias → `EmotesText.Name` mapping
+/// lives in `ChatFrame.lua`: the reference's chat **code**, which benilla replaces in Rust. So we
+/// take that file's **data** and none of its code — only whole lines matching
+/// `EMOTE<digits>_TOKEN = "<UPPER>";` ([`is_emote_token_line`]) are executed, and the file's ~2400
+/// lines of frame logic never run. Reading the shipped table beats transcribing 170 tokens into
+/// Rust: a transcription can be wrong, and a hand-kept alias list is exactly what left 61 real
+/// commands (`/lol`, `/hi`, `/ty`, …) unresolvable before 0881.
+fn load_emote_tokens(world: &mut World, script: &UiScript) {
+    let Some(assets) = world.get_resource::<crate::assets::WorldAssets>() else {
+        return; // already WARNed by load_global_strings
+    };
+    let bytes = {
+        let mut chain = assets.chain.lock_recover();
+        chain.read_file("Interface\\FrameXML\\ChatFrame.lua")
+    };
+    let src = match bytes {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => {
+            error!("ui_script: ChatFrame.lua read failed — emote commands will be dead: {e:#}");
+            return;
+        }
+    };
+    let table: Vec<&str> = src
+        .lines()
+        .map(str::trim)
+        .filter(|l| is_emote_token_line(l))
+        .collect();
+    let count = table.len();
+    if let Err(e) = script.run(&table.join("\n")) {
+        error!("ui_script: emote token table failed to run: {e}");
+        return;
+    }
+    // The sentinel is the command this whole seam exists for: EMOTE87 is `/sit`.
+    let sentinel: Option<String> = script.lua().globals().get("EMOTE87_TOKEN").ok();
+    match sentinel.as_deref() {
+        Some("SIT") => info!("ui_script: {count} emote tokens loaded"),
+        other => error!(
+            "ui_script: emote token sentinel is {other:?}, not \"SIT\" ({count} lines) — \
+             emote slash commands are broken"
+        ),
+    }
+}
+
+/// Is this line one of `ChatFrame.lua`'s emote-token assignments — `EMOTE<digits>_TOKEN = "<NAME>";`
+/// with `NAME` in `[A-Z0-9_]`? The whole-line shape is the filter that makes running the matched
+/// lines equivalent to reading data (no calls, no expressions, no side effects).
+pub(crate) fn is_emote_token_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("EMOTE") else {
+        return false;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let Some(rest) = rest[digits..].strip_prefix("_TOKEN = \"") else {
+        return false;
+    };
+    let Some(name) = rest.strip_suffix("\";") else {
+        return false;
+    };
+    digits > 0
+        && !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// Load benilla's own default UI (`assets/ui/*.xml` — the unit frames and the action bar) through
 /// the engine-free loader, resolving any `<Include>`/`<Script file=>` references against the
 /// crate's `assets/ui` dir. This is our content (MIT/Apache), committed and read from source —
 /// `CARGO_MANIFEST_DIR` points at the `benilla` crate. Textures (`Interface\…`) still resolve at
 /// render through the MPQ `sprite_texture` path; the loader only needs the XML/Lua text.
-fn load_default_ui(script: &UiScript) {
+///
+/// Returns every loader error, tagged `"<file>: <error>"` — the app ignores the value (each is
+/// already logged as it happens) and [`shipped_xml_tests`] asserts it empty. The manifest is an
+/// inline array no other test walks, so before that assertion a broken entry — a bad file name, a
+/// frame that collides with a later window's, a template referenced before its definer — reached a
+/// real run with nothing but a log line. Capture runs cannot cover it either: they skip this
+/// function entirely unless `WOW_CAPTURE_UI=1`.
+fn load_default_ui(script: &UiScript) -> Vec<String> {
+    let mut failures = Vec::new();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ui");
     // Provider for FrameXML/Lua references: try the path as given and by basename (Blizzard-style
     // backslash paths, dir-relative), resolved against our own assets/ui dir.
@@ -311,6 +388,9 @@ fn load_default_ui(script: &UiScript) {
         // UIDropDownMenuTemplate and opens a UnitPopup FRIEND menu.
         "ItemRef.xml",
         "UnitFrames.xml",
+        // The combo-point dots (decision 0869) — anchored to BenillaTargetFrame, so after
+        // UnitFrames.xml; its fade chain needs UiPanels.xml's UIFrameFade above.
+        "ComboFrame.xml",
         // The center-screen scrolling combat text (decision 0578) — the Blizzard_CombatText
         // transcription; consumes COMBAT_TEXT_UPDATE + the regen/health/power events, needs
         // only Fonts.xml (CombatTextFont) + UIParent before it.
@@ -364,6 +444,10 @@ fn load_default_ui(script: &UiScript) {
         // The cast bar (decision 0137 phase 1) — the extracted 1.12 CastingBarFrame, driven by
         // the SPELLCAST_* events `crate::ui_cast` fires. Only needs Fonts before it.
         "CastingBar.xml",
+        // The mirror timers (decision 0874): the breath/fatigue bars at top-center, driven by the
+        // MIRROR_TIMER_* events `crate::ui_mirror` fires. Needs only Fonts (GameFontHighlight)
+        // before it; kept beside the cast bar, whose border art it shares.
+        "MirrorTimer.xml",
         // The player buff/debuff bar (decisions 0255/0257 — the player aura arc): the HUD row of
         // aura icons under the minimap, driven by the UnitAura feed (`crate::ui_aura`). Needs Fonts
         // (its FontStrings) and ActionBar's `BENILLA_FALLBACK_ICON` global (both already loaded).
@@ -509,6 +593,7 @@ fn load_default_ui(script: &UiScript) {
         }
         for e in &report.errors {
             error!("ui_script({file}): {e}");
+            failures.push(format!("{file}: {e}"));
         }
         info!(
             "ui_script: {file} loaded ({} frames materialized)",
@@ -522,7 +607,9 @@ fn load_default_ui(script: &UiScript) {
     // application; the stance bar's show/hide handles the rest at runtime.
     if let Err(e) = script.run("UIParent_ManageFramePositions()") {
         error!("ui_script: managed-positions bootstrap: {e}");
+        failures.push(format!("managed-positions bootstrap: {e}"));
     }
+    failures
 }
 
 /// Feed synthetic `"player"`/`"target"` snapshots each frame (overriding the real feed, which finds
@@ -530,6 +617,10 @@ fn load_default_ui(script: &UiScript) {
 /// end-to-end on a screenshot: snapshot → `Unit*` bindings → Lua `OnEvent` → bars + text, for both
 /// unit frames (the target one included, so captures regression-test its show-on-target path).
 fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) {
+    /// The synthetic target's guid — a creature-family high part, so nothing mistakes it for a
+    /// player. Only its *distinctness* matters.
+    const DEMO_TARGET_GUID: u64 = 0xF130_0000_0000_0001;
+
     let Some(mut script) = script else {
         return;
     };
@@ -584,9 +675,28 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) 
             // A beast type word so the mouseover/target tooltip's level line reads
             // "Level 3 Beast" in captures.
             creature_type_name: Some("Beast".into()),
+            // A real guid: the combo seed below banks its points against exactly this unit, and
+            // `GetComboPoints` refuses to report points banked on anything but the CURRENT target
+            // (decision 0875). Also stops the demo player and target reading as the same unit,
+            // which two default zeros would.
+            guid: DEMO_TARGET_GUID,
             ..Default::default()
         }),
     );
+    // The combo dots (`ComboFrame`) need a class that can SEE them and points banked on the
+    // selected unit — seeded only for their own scenario, because the demo player is a warrior
+    // everywhere else (ui-char's level line reads "Level 12 Night Elf Warrior" off that) and a
+    // warrior authentically lights no dot. Run it with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-combopoints`.
+    if std::env::var("WOW_CAPTURE").as_deref() == Ok("ui-combopoints") {
+        script.set_player_req_state(benilla_ui::script::PlayerReqState {
+            level: 12,
+            class_id: 4, // rogue
+            ..Default::default()
+        });
+        script.set_combo_points(4, DEMO_TARGET_GUID);
+        script.fire_event("PLAYER_COMBO_POINTS", vec![]);
+    }
     if !*fired {
         // A few synthetic bar slots so captures show the action bar populated (battle-stance
         // page: actions 73.. — the page a real warrior login lands on). Spread across the 12 wells
@@ -692,7 +802,13 @@ fn demo_unit_feed(script: Option<NonSendMut<UiScript>>, mut fired: Local<bool>) 
 mod cast_tests;
 
 #[cfg(test)]
+mod mirror_timer_tests;
+
+#[cfg(test)]
 mod combat_text_tests;
+
+#[cfg(test)]
+mod combo_frame_tests;
 
 #[cfg(test)]
 mod unit_frame_tests;

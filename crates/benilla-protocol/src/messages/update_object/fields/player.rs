@@ -356,13 +356,29 @@ impl ObjectFields {
     /// the same dword whose byte 3 is [`Self::player_honor_rank`]'s byte-verified `+0x102b`, off
     /// the player-block base the duel-arbiter comment pins at `[player+0xe68]`.
     ///
-    /// **Not rogue/druid-only.** vmangos awards one here when a *warrior's* victim **dodges**
-    /// (`Unit.cpp` `PROC_EX_DODGE` → `AddComboPoints(target, 1)` plus a 4 s `REACTIVE_OVERPOWER`
-    /// timer whose expiry `ClearComboPoints`es it) — the server's chosen marker for "Overpower is
-    /// up", and the only way that window reaches the client. `None` before the field streams.
+    /// **The byte is not rogue/druid-only — the *display* is** (decision 0875). vmangos writes one
+    /// here when a *warrior's* victim **dodges** (`Unit.cpp` `PROC_EX_DODGE` →
+    /// `AddComboPoints(target, 1)` plus a 4 s `REACTIVE_OVERPOWER` timer whose expiry
+    /// `ClearComboPoints`es it) — the server's chosen marker for "Overpower is up", and the only
+    /// way that window reaches the client. Leg 5 reads this byte with no class test, which is what
+    /// greys Overpower; the Lua `GetComboPoints 0x51a190` reads the *same* byte behind a
+    /// rogue-or-druid class gate, which is why a warrior never sees a combo dot light up for it.
+    /// `None` before the field streams.
     pub fn player_combo_points(&self) -> Option<u8> {
         self.get_u32(FIELD_PLAYER_FIELD_BYTES)
             .map(|b| ((b >> 8) & 0xff) as u8)
+    }
+    /// `PLAYER_FIELD_COMBO_TARGET` (field 714, GUID) — the unit the banked
+    /// [`Self::player_combo_points`] sit on, written by `Player::SetComboPoints` in the same breath
+    /// as the byte and zeroed with it. PRIVATE, so it only ever streams for our own player.
+    ///
+    /// Combo points are **per target**, and the client enforces that in the *display*, not on the
+    /// wire: `GetComboPoints 0x51a190` reads this pair at `[player+0xe68]+0x838/+0x83c`, compares
+    /// it against the current-target GUID global (`0xb4e2d8/dc`) and pushes `0` on a mismatch
+    /// (decision 0875) — so re-targeting empties the dots without the count moving, and selecting
+    /// the original unit again refills them. `0` when nothing is banked.
+    pub fn player_combo_target(&self) -> u64 {
+        self.get_guid(FIELD_PLAYER_FIELD_COMBO_TARGET).unwrap_or(0)
     }
     /// `PLAYER_FIELD_BYTES` byte 3 — the player's **highest lifetime honor rank** (vmangos
     /// `PLAYER_FIELD_BYTES_OFFSET_HIGHEST_HONOR_RANK`, written by `HonorMgr`): what the client's

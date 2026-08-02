@@ -45,6 +45,11 @@ fn combat_stat_indices_chain_to_the_tested_anchors() {
     assert_eq!(FIELD_PLAYER_AMMO_ID + 3, FIELD_PLAYER_BUYBACK_PRICE_1);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES, UNIT_END + 0x40A);
     assert_eq!(FIELD_PLAYER_FIELD_BYTES + 1, FIELD_PLAYER_AMMO_ID);
+    // The combo-target GUID is the two dwords immediately BEFORE the live-tested XP pair, so it
+    // needs no anchor of its own. The binary agrees from the other side: `GetComboPoints 0x51a190`
+    // reads it at `[player+0xe68]+0x838`, and 0x838/4 = 0x20E (decision 0875).
+    assert_eq!(FIELD_PLAYER_FIELD_COMBO_TARGET, UNIT_END + 0x20E);
+    assert_eq!(FIELD_PLAYER_FIELD_COMBO_TARGET + 2, FIELD_PLAYER_XP);
     // The skill array: one past the tested XP pair, 384 dwords ending at CHARACTER_POINTS1.
     assert_eq!(FIELD_PLAYER_SKILL_INFO_1_1, FIELD_PLAYER_NEXT_LEVEL_XP + 1);
     assert_eq!(FIELD_PLAYER_SKILL_INFO_1_1, UNIT_END + 0x212);
@@ -218,6 +223,17 @@ fn player_field_bytes_splits_into_combo_points_and_honor_rank() {
     assert_eq!(capped.player_honor_rank(), Some(0));
     assert_eq!(ObjectFields::default().player_honor_rank(), None);
     assert_eq!(ObjectFields::default().player_combo_points(), None);
+}
+
+/// `PLAYER_FIELD_COMBO_TARGET` reads as one GUID out of its two dwords — the unit the points are
+/// banked on, which the display gate compares against the current target (decision 0875).
+#[test]
+fn player_combo_target_reads_the_guid_pair() {
+    let f = ObjectFields::from_pairs(&[(714, 0x1234_5678), (715, 0xF000_0001)]);
+    assert_eq!(f.player_combo_target(), 0xF000_0001_1234_5678);
+    // Nothing banked reads as 0 — the same value the current-target global holds with no target,
+    // which is exactly why the binary's plain equality compare needs no null special case.
+    assert_eq!(ObjectFields::default().player_combo_target(), 0);
 }
 
 /// The four aura arrays tile exactly, and the block lands on `BASEATTACKTIME` — an index this

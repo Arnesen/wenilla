@@ -1,0 +1,232 @@
+<Ui>
+    <!--
+        The mirror timers - the 1.12 MirrorTimer1/2/3, transcribed from the extracted reference
+        (Interface\FrameXML\MirrorTimer.xml/.lua, mpqx; decision 0874). Geometry, textures, colors
+        and the countdown integration are the reference's own.
+
+        "Mirror" is the client's word for a timer whose authority is the SERVER: the client never
+        computes breath or fatigue. The server ships a value + a signed rate and the frame
+        integrates `value + scale * elapsed` between packets - that OnUpdate line IS the whole of
+        the client-side motion. crate::ui_mirror fires the three events off the wire:
+        MIRROR_TIMER_START (name, remaining_ms, duration_ms, scale, paused, label) /
+        MIRROR_TIMER_PAUSE (name, paused) / MIRROR_TIMER_STOP (name).
+
+        arg1 is always the timer's NAME - "EXHAUSTION" / "BREATH" / "FEIGNDEATH" - the same key
+        MirrorTimerColors is indexed by, and the same key the client builds `<NAME>_LABEL` from to
+        look up the bar's caption ("Fatigue" / "Breath"; there is no FEIGNDEATH_LABEL in the 1.12
+        GlobalStrings, so that one shows an empty caption, exactly as the reference does).
+
+        Departures from the reference, all three deliberate:
+
+        1. THE START DRIVER. The reference registers MIRROR_TIMER_START on UIParent itself and
+           calls MirrorTimer_Show from UIParent_OnEvent (ref UIParent.lua l.97 + l.374-375). Our
+           UIParent.xml is script-only - it has no frame of its own to register events on - so the
+           hidden MirrorTimerDriver below hosts that one registration and makes the identical call.
+
+        2. THE FREE-DIALOG LOOP BOUND. The reference's second loop in MirrorTimer_Show iterates to
+           STATICPOPUP_NUMDIALOGS, a copy-paste from StaticPopup.lua (its first loop, over the same
+           frames, correctly uses MIRRORTIMER_NUMTIMERS). With 3 frames and 3 client timer types
+           the bug is latent - but it would index a nil MirrorTimer4. Corrected to the constant
+           that names these frames.
+
+        3. THE PAUSE ARG. The reference's MIRROR_TIMER_PAUSE branch reads the same arg1 as both a
+           timer name (`arg1 ~= this.timer`, above) and a number (`arg1 > 0`), so a real pause
+           packet errors out in the reference UI - which is why vmangos refuses to send one and
+           substitutes a full START instead (Player::SendMirrorTimers says so in the source). We
+           read the flag from arg2, which is what both branches plainly intend.
+
+        MirrorTimerColors carries a "DEATH" entry the reference never uses (no timer type maps to
+        it); kept verbatim.
+
+        POSITION: TOP, y=-96 - the reference's own anchor, under the top-center of the screen, with
+        timers 2 and 3 stacking downward from it.
+    -->
+    <Script><![CDATA[
+        MIRRORTIMER_NUMTIMERS = 3
+
+        MirrorTimerColors = {}
+        MirrorTimerColors["EXHAUSTION"] = { r = 1.00, g = 0.90, b = 0.00 }
+        MirrorTimerColors["BREATH"] = { r = 0.00, g = 0.50, b = 1.00 }
+        MirrorTimerColors["DEATH"] = { r = 1.00, g = 0.70, b = 0.00 }
+        MirrorTimerColors["FEIGNDEATH"] = { r = 1.00, g = 0.70, b = 0.00 }
+
+        function MirrorTimer_Show(timer, value, maxvalue, scale, paused, label)
+            -- Pick a free dialog to use
+            local dialog = nil
+            if not dialog then
+                -- Find an open dialog of the requested type
+                for index = 1, MIRRORTIMER_NUMTIMERS, 1 do
+                    local frame = getglobal("MirrorTimer"..index)
+                    if frame:IsVisible() and (frame.timer == timer) then
+                        dialog = frame
+                        break
+                    end
+                end
+            end
+            if not dialog then
+                -- Find a free dialog (ref: STATICPOPUP_NUMDIALOGS - see departure 2)
+                for index = 1, MIRRORTIMER_NUMTIMERS, 1 do
+                    local frame = getglobal("MirrorTimer"..index)
+                    if not frame:IsVisible() then
+                        dialog = frame
+                        break
+                    end
+                end
+            end
+            if not dialog then
+                return nil
+            end
+
+            dialog.timer = timer
+            dialog.value = (value / 1000)
+            dialog.scale = scale
+            if paused > 0 then
+                dialog.paused = 1
+            else
+                dialog.paused = nil
+            end
+
+            -- Set the text of the dialog
+            local text = getglobal(dialog:GetName().."Text")
+            text:SetText(label)
+
+            -- Set the status bar of the dialog
+            local statusbar = getglobal(dialog:GetName().."StatusBar")
+            local color = MirrorTimerColors[timer]
+            statusbar:SetMinMaxValues(0, (maxvalue / 1000))
+            statusbar:SetValue(dialog.value)
+            statusbar:SetStatusBarColor(color.r, color.g, color.b)
+
+            dialog:Show()
+
+            return dialog
+        end
+
+        function MirrorTimerFrame_OnLoad()
+            this:RegisterEvent("MIRROR_TIMER_PAUSE")
+            this:RegisterEvent("MIRROR_TIMER_STOP")
+            this:RegisterEvent("PLAYER_ENTERING_WORLD")
+            this.timer = nil
+        end
+
+        function MirrorTimerFrame_OnEvent()
+            if event == "PLAYER_ENTERING_WORLD" then
+                this:Hide()
+                this.timer = nil
+            end
+            if not this:IsShown() or (arg1 ~= this.timer) then
+                return
+            end
+            if event == "MIRROR_TIMER_PAUSE" then
+                -- ref: `if arg1 > 0` on the name it just string-compared (see departure 3)
+                if arg2 and arg2 > 0 then
+                    this.paused = 1
+                else
+                    this.paused = nil
+                end
+                return
+            end
+            if event == "MIRROR_TIMER_STOP" then
+                this:Hide()
+                this.timer = nil
+            end
+        end
+
+        function MirrorTimerFrame_OnUpdate(frame, elapsed)
+            if frame.paused then
+                return
+            end
+            local statusbar = getglobal(frame:GetName().."StatusBar")
+            frame.value = (frame.value + frame.scale * elapsed)
+            statusbar:SetValue(frame.value)
+        end
+
+        -- The ref's UIParent_OnEvent MIRROR_TIMER_START arm, rehosted (see departure 1).
+        function MirrorTimerDriver_OnLoad()
+            this:RegisterEvent("MIRROR_TIMER_START")
+        end
+
+        function MirrorTimerDriver_OnEvent()
+            MirrorTimer_Show(arg1, arg2, arg3, arg4, arg5, arg6)
+        end
+    ]]></Script>
+
+    <Frame name="MirrorTimerTemplate" toplevel="true" parent="UIParent" hidden="true" virtual="true">
+        <Size><AbsDimension x="206" y="26"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture>
+                    <Size><AbsDimension x="195" y="13"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="-2"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                    <Color r="0" g="0" b="0" a="0.5"/>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentText" inherits="GameFontHighlight">
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="0"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </FontString>
+                <Texture name="$parentBorder" file="Interface\CastingBar\UI-CastingBar-Border">
+                    <Size><AbsDimension x="256" y="64"/></Size>
+                    <Anchors>
+                        <Anchor point="TOP">
+                            <Offset><AbsDimension x="0" y="25"/></Offset>
+                        </Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <StatusBar name="$parentStatusBar">
+                <Size><AbsDimension x="195" y="13"/></Size>
+                <Anchors>
+                    <Anchor point="TOP">
+                        <Offset><AbsDimension x="0" y="-2"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>this:SetFrameLevel(this:GetFrameLevel() - 1)</OnLoad>
+                </Scripts>
+                <BarTexture file="Interface\TargetingFrame\UI-StatusBar"/>
+            </StatusBar>
+        </Frames>
+        <Scripts>
+            <OnLoad>MirrorTimerFrame_OnLoad()</OnLoad>
+            <OnEvent>MirrorTimerFrame_OnEvent()</OnEvent>
+            <OnUpdate>MirrorTimerFrame_OnUpdate(this, arg1)</OnUpdate>
+        </Scripts>
+    </Frame>
+
+    <Frame name="MirrorTimer1" inherits="MirrorTimerTemplate">
+        <Anchors>
+            <Anchor point="TOP">
+                <Offset><AbsDimension x="0" y="-96"/></Offset>
+            </Anchor>
+        </Anchors>
+    </Frame>
+    <Frame name="MirrorTimer2" inherits="MirrorTimerTemplate">
+        <Anchors>
+            <Anchor point="TOP" relativeTo="MirrorTimer1" relativePoint="BOTTOM"/>
+        </Anchors>
+    </Frame>
+    <Frame name="MirrorTimer3" inherits="MirrorTimerTemplate">
+        <Anchors>
+            <Anchor point="TOP" relativeTo="MirrorTimer2" relativePoint="BOTTOM"/>
+        </Anchors>
+    </Frame>
+
+    <!-- The START driver (departure 1): no art, no size - one event registration. -->
+    <Frame name="MirrorTimerDriver" parent="UIParent">
+        <Scripts>
+            <OnLoad>MirrorTimerDriver_OnLoad()</OnLoad>
+            <OnEvent>MirrorTimerDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

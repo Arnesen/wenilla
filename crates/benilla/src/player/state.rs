@@ -86,11 +86,17 @@ pub(crate) const TERMINAL_VELOCITY: f32 = 60.148_003;
 /// it is matching this clamp.
 pub(crate) const FEATHER_TERMINAL_VELOCITY: f32 = 7.0;
 /// **How far above the ground a hovering body rests** (yd) — the whole of what Hover does. The
-/// reference's WALK resolver `0x6367b0` adds `[0x7ff9d8]` = 1.0 to its surface offset iff
-/// `MOVEFLAG_HOVER` (`0x40000000`) is set, and the step-down reach widens by the same yard
-/// (`0x633e35`). VERIFIED — wow-re `system/collision/collision.md` ("0x40000000 is HOVER, not a wade
-/// bit") + `scratch/step-vs-fall-election.md`.
+/// reference extends the walk resolver's down-probe by `[0x7ff9d8]` = 1.0 (`0x636dd2`) and then
+/// subtracts it back out of the snap, landing the body exactly a yard clear. VERIFIED — wow-re
+/// `scratch/moveflag-family.md` §4, which settled it as a **direct write to `CMovement.pos.z`**
+/// rather than a probe widening, closing `step-vs-fall-election.md`'s open bit-identity handoff.
 pub(crate) const HOVER_HEIGHT: f32 = 1.0;
+/// **How fast a hovering body rises to that clearance** (yd/s). The snap itself can only *lower* the
+/// body — `pos.z −= max(L − 1.0, 0)` (`0x636e52`–`0x636ea9`) skips its write entirely when the floor
+/// is already within a yard — so the rise is a second, rate-limited pass at `0x636fa1`–`0x6370f1`
+/// whose rate comes from `0x7c61b0` returning `[0x87d898]`: the very same 7.0 the feather-fall clamp
+/// reads. Without it a granted hover reads as an instant pop instead of a float.
+pub(crate) const HOVER_CLIMB_RATE: f32 = 7.0;
 /// Standability gate: a surface is walkable iff its normal is within ~50° of straight up (cos 50° —
 /// the vanilla threshold). Steeper than this you can't climb and you slide back down.
 pub(super) const GROUND_COS: f32 = 0.642_788;
@@ -220,9 +226,12 @@ pub(super) struct MoveSpeed {
 pub(crate) struct MoveModes {
     /// The server rooted our mover (`SMSG_FORCE_MOVE_ROOT` — death until release, and every root or
     /// stun; decision 0308). Translation input and jumps are dead — the faithful "can't move between
-    /// death and release" — but **turning stays live**: the reference's `StartTurn 0x7c6c50` has no
-    /// root gate at all, and `SetRoot 0x7c7340` clears the direction bits exactly once, at apply. A
-    /// character who cannot even turn is *stunned*, which is a different mechanism.
+    /// death and release" — but **turning stays live, and by design rather than by omission**
+    /// (corrected by decision 0872): the reference's input tick consults an allow-list
+    /// (`0x615c71` → the byte table at `0x618054`) that blocks the translation command ids and
+    /// **explicitly permits** turn, pitch, run/walk and SetFacing. `SetRoot 0x7c7340` additionally
+    /// clears the direction bits once, at apply. A character who cannot even pivot is *stunned* —
+    /// a separate `UNIT_FIELD_FLAGS` gate ([`crate::player::UNIT_FLAG_STUNNED`]).
     pub(crate) rooted: bool,
     /// Water-walking (`SMSG_MOVE_WATER_WALK`, `SPELL_AURA_WATER_WALK` — Water Walking, Levitate, and
     /// the ghost form): the liquid surface counts as walkable ground, so we stand on it instead of
@@ -307,6 +316,46 @@ impl MoveModes {
         self.hover = wire & f::HOVER != 0;
         self.levitating = wire & f::LEVITATING != 0;
     }
+}
+
+/// **The two incapacitate suppressions, applied to a freshly built move-flag word** (decision 0880)
+/// — the last step of [`super::control`]'s per-frame rebuild, before the word drives the animation
+/// and goes on the wire.
+///
+/// The reference never needs this: its `[cmov+0x40]` is written *only* by emitters that already
+/// refuse, so the bits are absent by construction. Ours rebuilds the word from raw input every
+/// frame, so a suppression not re-applied here streams motion the body is not performing (decision
+/// 0056's law) and feeds the same lie to the anim layer.
+///
+/// - **Rooted → no direction bits.** The input tick's allow-list (`0x615c71` → the byte table at
+///   `0x618054`) DROPS command ids 0–5 — StartMove/StopMove/StartStrafe — while `0x1000` is set, so
+///   a key pressed under a root never reaches `0x7c6ae0`/`0x7c6c50` and never sets a bit; `SetRoot
+///   0x7c7340`'s own `and 0xffe07f00` wipes whatever was set, at apply. With the low nibble clear
+///   the movement-anim resolver `0x5fd100` takes its not-moving exit at `5fd10c test al,0xf` before
+///   it can reach any locomotion id — **that** is why a rooted character shows no walk/run
+///   animation, and why ours was still showing one: it kept building FORWARD out of the raw axis
+///   while the mover ignored it.
+/// - **Stunned → no turn bits.** `0x514755` skips the turn emitter `0x514f50` outright and
+///   force-stops one already in flight, so `0x7c6d90 StartTurn` never runs. Decision 0872 stopped
+///   the *rotation* (`control` restores the aim) but left the bits streaming, which still told every
+///   observer to play the turn-in-place shuffle.
+///
+/// They are keyed on different state on purpose, exactly as the reference has them: a pure root
+/// (Frost Nova, Entangling Roots) still pivots — turn is on the allow-list *deliberately* — and only
+/// `UNIT_FLAG_STUNNED` takes the pivot away (wow-re `unit-flags-movement-gates.md` §5). Nothing else
+/// is touched: the granted modes ride on (drop one and the server forgets it), SWIMMING survives a
+/// root exactly as `0xffe07f00` preserves `0x200000`, and FALLING is already gone by the time we get
+/// here — the root ended the arc ([`super::mover`]'s anchor).
+pub(crate) fn incapacitated_flags(flags: u32, rooted: bool, stunned: bool) -> u32 {
+    use crate::creature_anim::move_flags as f;
+    let mut out = flags;
+    if rooted {
+        out &= !f::ANY_MOVE;
+    }
+    if stunned {
+        out &= !(f::TURN_LEFT | f::TURN_RIGHT);
+    }
+    out
 }
 
 /// Our controllable avatar. Until `active`, the camera free-flies; once the server reports our
@@ -664,7 +713,10 @@ mod autorun_tests {
 
 #[cfg(test)]
 mod move_mode_tests {
-    use super::{MoveModes, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_HEIGHT, TERMINAL_VELOCITY};
+    use super::{
+        incapacitated_flags, MoveModes, FEATHER_TERMINAL_VELOCITY, GRAVITY, HOVER_CLIMB_RATE,
+        HOVER_HEIGHT, TERMINAL_VELOCITY,
+    };
     use crate::creature_anim::move_flags as f;
     use benilla_protocol::MoveMode;
 
@@ -792,4 +844,104 @@ mod move_mode_tests {
     /// Feather fall must be the SLOWER cap — the whole point of the aura. A *compile-time* assert,
     /// because both sides are constants: swapped, they would otherwise only show up in play.
     const _: () = assert!(FEATHER_TERMINAL_VELOCITY < TERMINAL_VELOCITY);
+
+    /// **A root and a stun are different states, and the difference is the pivot** (decision 0872).
+    /// This is the distinction the first pass got wrong — B179 was filed under the movement-mode
+    /// family, and it is not a member of it: root is a `MOVEMENTFLAGS` bit that leaves turning live
+    /// by the input tick's *authored* allow-list, while the freeze is `UNIT_FIELD_FLAGS` bit
+    /// `0x40000` gating the turn emitter. vmangos's `HandleModStun` grants both at once, which is
+    /// the only reason they look like one thing.
+    ///
+    /// The bit values are what the gate reads, so a transcription slip here silently un-freezes
+    /// every stun; `UNIT_FLAG_STUNNED` is checked against vmangos `UnitDefines.h` and against the
+    /// reference's own `shr eax, 0x12` (bit 18 → `1 << 18` = `0x40000`).
+    #[test]
+    fn a_stun_is_not_a_root() {
+        assert_eq!(crate::player::UNIT_FLAG_STUNNED, 1 << 18);
+        assert_eq!(crate::player::UNIT_FLAG_STUNNED, 0x0004_0000);
+        // It is a UNIT_FIELD_FLAGS bit, not a MOVEMENTFLAGS one — they are different words, and the
+        // whole confusion was reading the freeze as a movement flag. Nothing in the mode family may
+        // collide with it.
+        for mode in [
+            MoveMode::Root,
+            MoveMode::WaterWalk,
+            MoveMode::FeatherFall,
+            MoveMode::Hover,
+        ] {
+            assert_ne!(
+                mode.flag(),
+                crate::player::UNIT_FLAG_STUNNED,
+                "{mode:?} is a MOVEMENTFLAGS bit; the stun gate is a descriptor bit"
+            );
+        }
+        // …and a root, alone, is not a stun: granting it touches no unit flag at all.
+        let mut modes = MoveModes::default();
+        modes.set(MoveMode::Root, true);
+        assert_eq!(modes.wire_flags(), crate::creature_anim::move_flags::ROOT);
+    }
+
+    /// The hover clearance is reached by a **rate-limited climb**, not a snap — the reference's
+    /// second writer. Pins the rate and, more importantly, that the rise takes real time: a body a
+    /// full yard low needs ~0.143 s, which is the difference between a float and a pop.
+    #[test]
+    fn hover_climbs_to_its_clearance_rather_than_popping() {
+        assert_eq!(HOVER_CLIMB_RATE, 7.0); // [0x87d898], via 0x7c61b0
+        let dt = 1.0 / 60.0;
+        let mut clearance = 0.0_f32;
+        let mut frames = 0;
+        while clearance < HOVER_HEIGHT {
+            clearance = (clearance + HOVER_CLIMB_RATE * dt).min(HOVER_HEIGHT);
+            frames += 1;
+        }
+        assert!(
+            frames > 1,
+            "a snap would arrive in one frame; this must not"
+        );
+        assert!(
+            (frames as f32 * dt - HOVER_HEIGHT / HOVER_CLIMB_RATE).abs() < 0.02,
+            "climbed in {frames} frames, expected ≈0.143 s"
+        );
+    }
+
+    /// **The two incapacitate suppressions take exactly their own bits** (decision 0880) — the
+    /// difference between a pure root and a stun, which is the whole distinction B179 was drawing,
+    /// expressed on the one word that drives both the animation and the wire.
+    #[test]
+    fn the_incapacitate_suppressions_take_exactly_their_own_bits() {
+        // Every reported motion a body can hold at once, plus every mode a grant can have riding.
+        let keys = f::FORWARD | f::STRAFE_LEFT | f::TURN_LEFT;
+        let modes = f::ROOT | f::SWIMMING | f::SAFE_FALL | f::HOVER | f::WATER_WALKING;
+
+        assert_eq!(
+            incapacitated_flags(keys | modes, false, false),
+            keys | modes,
+            "neither gate: the word passes through untouched"
+        );
+        assert_eq!(
+            incapacitated_flags(keys | modes, true, false),
+            f::TURN_LEFT | modes,
+            "a PURE root (Frost Nova) takes the direction bits and leaves the pivot — turn is on \
+             the reference's allow-list on purpose"
+        );
+        assert_eq!(
+            incapacitated_flags(keys, false, true),
+            f::FORWARD | f::STRAFE_LEFT,
+            "the two are keyed on different state: the stun bit alone takes only the pivot"
+        );
+        // A stun is both at once (vmangos `HandleModStun` = SetFlag(STUNNED) + SetRooted(true)).
+        let blocked = incapacitated_flags(keys | modes, true, true);
+        assert_eq!(
+            blocked, modes,
+            "Ice Block leaves NO reported motion — which is what starves the anim resolver"
+        );
+        // …and the modes must survive it, or the next server-authored echo clears them under us
+        // (decision 0726's failure mode). ROOT above all: dropping it unroots us locally against a
+        // server that still has us rooted.
+        assert_eq!(blocked & f::ROOT, f::ROOT, "the root bit itself rides on");
+        assert_eq!(
+            blocked & f::SWIMMING,
+            f::SWIMMING,
+            "a rooted swimmer is still swimming — `0xffe07f00` preserves 0x200000"
+        );
+    }
 }

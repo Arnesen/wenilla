@@ -84,7 +84,16 @@ impl Player {
             new_arc,
             // A landing closes the arc (→ MSG_MOVE_FALL_LAND). A same-frame relaunch keeps
             // `airborne` true, so no FALL_LAND fires — the bounce streams a fresh JUMP instead.
-            landed: !airborne && was_airborne,
+            //
+            // **A root ends the arc without landing it** (decision 0880). `SetRoot`'s `StopFalling`
+            // clears FALLING wherever the body happens to be, and the reference *separately*
+            // suppresses the land packet while rooted (`0x602df3 test ah,0x10` gating opcode
+            // `0xc9`). Both halves matter here: without the suppression a stun caught mid-fall would
+            // report a touchdown in mid-air — a `MSG_MOVE_FALL_LAND` carrying the whole accumulated
+            // fall clock, which vmangos `Player::HandleFall` reads as a killing drop, plus the local
+            // wound grunt and dust puff of a landing that never happened. On release the fall
+            // restarts as a fresh arc from a zero clock, which is `ClearRoot`'s `StartFalling(0)`.
+            landed: !airborne && was_airborne && !self.modes.rooted,
             // A step-off with no jump opcode needs its first airborne report pushed promptly so
             // observers start the arc (→ an immediate heartbeat); a jump has its own JUMP opcode.
             started_falling: airborne && !was_airborne && !jumped,
@@ -266,6 +275,62 @@ mod tests {
             p.fall_far,
             "past FALL_FAR_TIME the step-off latches by time"
         );
+    }
+
+    /// A root or a stun caught mid-fall **ends the arc without landing it** (decision 0880). The
+    /// mover holds the body where it was (its anchor), so `airborne` goes false in mid-air — and the
+    /// reference suppresses the land packet on exactly that state (`0x602df3`). Were it not
+    /// suppressed, the frame the stun lands would report a touchdown 30 yd up carrying the whole
+    /// accumulated fall clock, which vmangos `Player::HandleFall` reads as a killing drop, and would
+    /// fire the local wound grunt + dust puff for a landing that never happened.
+    #[test]
+    fn a_root_taken_mid_fall_ends_the_arc_without_landing_it() {
+        let mut p = take_off(100.0);
+        p.pos.y = 70.0;
+        p.advance_airborne_arc(true, false, 1.0, 100.0);
+        assert!(p.fall_far, "precondition: a real, far fall is in progress");
+
+        p.modes.rooted = true;
+        let edges = p.advance_airborne_arc(false, false, 1.2, 100.0);
+        assert!(!edges.landed, "a root ENDS the arc; it does not land it");
+        assert_eq!(p.airborne_since, None, "and the fall clock is cleared");
+        // The control that gives the assertion its teeth: the identical frame with no root is a
+        // landing. The gate is the root, not "any arc that ends".
+        let mut q = take_off(100.0);
+        q.pos.y = 70.0;
+        q.advance_airborne_arc(true, false, 1.0, 100.0);
+        assert!(
+            q.advance_airborne_arc(false, false, 1.2, 100.0).landed,
+            "an unrooted body reaching the ground still reports its landing"
+        );
+    }
+
+    /// Releasing the root in mid-air is `ClearRoot 0x7c7370`'s `StartFalling` — a **fresh** arc from
+    /// a zero clock, not a resumption of the one the root ate. That is what keeps the drop honest:
+    /// the fall damage the server assesses is measured from the release, not from before the stun.
+    #[test]
+    fn releasing_the_root_mid_air_starts_a_fresh_fall_not_a_resumption() {
+        let mut p = take_off(100.0);
+        p.pos.y = 70.0;
+        p.advance_airborne_arc(true, false, 1.0, 100.0);
+        p.modes.rooted = true;
+        p.advance_airborne_arc(false, false, 1.2, 100.0);
+
+        p.modes.rooted = false; // the aura expired; still nothing under us
+        let edges = p.advance_airborne_arc(true, false, 11.2, 70.0);
+        assert!(edges.new_arc, "the release begins a new arc");
+        assert!(
+            edges.started_falling,
+            "a bracket-less step-off — StartFalling(0), no JUMP opcode"
+        );
+        assert_eq!(p.jump_zspeed, 0.0, "launched at exactly 0, like a walk-off");
+        assert_eq!(
+            p.airborne_since,
+            Some(11.2),
+            "a fresh fall clock — the pre-root one does not carry over"
+        );
+        assert_eq!(p.fall_start_y, 70.0, "and a fresh launch height");
+        assert!(!p.fall_far, "the new arc starts unlatched");
     }
 
     #[test]

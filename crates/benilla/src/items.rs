@@ -35,6 +35,11 @@ pub(crate) struct HeldTemplate {
     pub(crate) sheath: u32,
     pub(crate) class: u32,
     pub(crate) subclass: u32,
+    /// `Material` — the item's `Material.dbc` id (1 metal · 2 wood · 5 chain · 6 plate · 7 cloth ·
+    /// 8 leather · 0 undefined). On the wire in `SMSG_ITEM_QUERY_SINGLE_RESPONSE`, and the **only**
+    /// input to the draw/stow sound pick: `SheatheSoundLookups` carries one row per weapon subclass
+    /// per material, and every row of a material agrees — the subclass is inert (decision 0882).
+    pub(crate) material: u32,
 }
 
 /// The item stores: instances by guid, templates by entry (+ the in-flight ask-once set).
@@ -133,6 +138,7 @@ impl Items {
             sheath: i.sheath,
             class: i.class,
             subclass: i.subclass,
+            material: i.material,
         })
     }
 

@@ -72,12 +72,46 @@ use state::{
 // resident world is still the departed map's (0710).
 pub(crate) use state::{
     Player, PlayerCapsule, CAPSULE_HEIGHT, DEFAULT_COLLISION_HEIGHT, FEATHER_TERMINAL_VELOCITY,
-    GRAVITY, HOVER_HEIGHT, SETTLE_TIMEOUT, TERMINAL_VELOCITY,
+    GRAVITY, HOVER_CLIMB_RATE, HOVER_HEIGHT, SETTLE_TIMEOUT, TERMINAL_VELOCITY,
 };
 /// The swim boundary `0.75·h` — and therefore the **wade ceiling**, since wading is the implicit
 /// in-liquid-but-not-swimming state and the two cannot be different numbers. Read by the creature
 /// swim marker and the footstep splash slot, which have no `Player` of their own.
 pub(crate) use swim::swim_enter_depth;
+
+/// **`UNIT_FLAG_STUNNED`** — the `UNIT_FIELD_FLAGS` bit that freezes a character's *turning*
+/// (decision 0872). Not a movement flag and not an aura: the reference reads it straight off the
+/// descriptor block at `[[unit+0x110]+0xa0]` (predicate `0x5145b0` — note the inverted
+/// `not/shr/and` form, which a census grepping only `test …,0x40000` misses — consumed at
+/// `0x514755`, which skips both the turn and pitch emitters and force-stops either in flight).
+///
+/// It is the **other half** of a stun. vmangos's `HandleModStun` sets this flag *and* calls
+/// `SetRooted(true)`, so `SPELL_AURA_MOD_STUN` grants both: root kills translation, this kills the
+/// pivot. A pure root (Frost Nova, Entangling Roots) sets only the first — which is why a rooted
+/// player can still turn and a stunned one cannot, the distinction B179 was reporting.
+///
+/// It has a second consumer beyond the turn: the idle/fidget selectors bail on it
+/// (`0x5eb4f2`/`0x5ec219`), which is what stops even the idle twitch — see
+/// [`crate::creature_anim::MovementState::stunned`] (decision 0880).
+pub(crate) const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
+
+/// Ask for a **stand state** — the client's `SetStandState(newState)` (`0x5ed430`: send
+/// `CMSG_STANDSTATECHANGE` + apply locally through `0x6127b0`), as a message so every path that
+/// wants a posture funnels through the ONE setter in [`control`] (the [`crate::creature_anim::
+/// SheathRequest`] posture, decision 0080).
+///
+/// Two senders today: the `X` key reads the toggle inline in [`control`], and the **posture emotes**
+/// (`/sit`, `/sleep`, `/kneel`, `/stand`, `/lay`) send this — `DoEmote`'s `EmoteSpecProc == 1`
+/// branch calls the same `0x5ed430` the key does (wow-re `object-layer/scratch/emote-posture-
+/// gate.md` §1, decision 0881). Routing them here is what makes `/sit` sit at all: the *server*
+/// does nothing for a STATE text emote (vmangos `HandleTextEmoteOpcode` breaks out of the switch
+/// for SIT/SLEEP/KNEEL), so the posture is the client's own to set.
+///
+/// The state values are `UnitStandStateType`: 0 STAND · 1 SIT · 3 SLEEP · 8 KNEEL.
+#[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
+pub(crate) struct StandStateRequest {
+    pub(crate) state: u8,
+}
 
 /// The player/camera subsystem: spawns the camera + move/avatar resources at startup, drives the
 /// third-person/free-fly controller each frame. (The cursor is the [`crate::cursor`] subsystem.)
@@ -108,6 +142,9 @@ impl Plugin for PlayerPlugin {
                     .run_if(not(resource_exists::<crate::capture::CaptureMode>))
                     .run_if(in_state(crate::char_select::ClientState::InWorld)),
             )
+            // The posture setter's queue (the `/sit` family — decision 0881; `control` is the sole
+            // executor, like the sheath queue).
+            .add_message::<StandStateRequest>()
             // Land-here ([`land`]): the ask, and the re-attach when the server's teleport lands.
             // Before `control` so the frame that applies the teleport is the frame that takes
             // third-person control back — `control` reads `detached` after this has cleared it.
@@ -236,6 +273,9 @@ fn control(
         // A `MSG_MOVE_*` the server addressed to our OWN mover (decision 0725) — a pose it wrote,
         // with no handshake and no ack owed. `wire_in` snaps to it.
         MessageReader<crate::net::SelfMoveMessage>,
+        // The posture queue (decision 0881): `/sit` and its family ask here; the X key is read
+        // inline below. One setter, either way.
+        MessageReader<StandStateRequest>,
     ),
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit (see `mouse`).
     speed_capsule: (
@@ -366,6 +406,18 @@ fn control(
     // writes `face_yaw` directly — any change is a real mouse TURN of the character (a left-drag
     // orbits the camera only and never touches it).
     let yaw_before_look = player.face_yaw;
+    // **Stunned** (`UNIT_FIELD_FLAGS & 0x40000` — decision 0872): read once here, because the very
+    // first thing a stun suppresses is the mouse turn below. This is a descriptor bit, NOT a
+    // movement flag and NOT an aura: the reference's `0x5145b0` computes `!STUNNED` straight off
+    // `[[unit+0x110]+0xa0]` (`not eax; shr eax,0x12; and eax,1`) and `0x514755` consumes it to skip
+    // the turn and pitch emitters outright.
+    let stunned = self_player
+        .single()
+        .ok()
+        .and_then(|(.., store, _, _, _, _)| {
+            store.map(|s| s.0.unit_flags() & UNIT_FLAG_STUNNED != 0)
+        })
+        .unwrap_or(false);
     run_look_session(
         &buttons,
         mouse_motion,
@@ -385,6 +437,15 @@ fn control(
         left_click,
         right_click,
     );
+    // A stun freezes the BODY, not the view. The look session has already moved `cam.yaw` (and, on
+    // a right-drag, coupled `face_yaw = cam.yaw`); putting the aim back leaves the camera orbiting
+    // a body that does not turn — which is what a stunned character looks like, and what the
+    // reference produces by never running the turn emitter at all. Restoring rather than gating
+    // inside the session keeps the approved camera path (0050/0366's right-drag coupling) untouched.
+    // `mouse_turned` then reads false by construction, so the seated-turn stand-up cannot fire either.
+    if stunned {
+        player.face_yaw = yaw_before_look;
+    }
     let mouse_turned = player.face_yaw != yaw_before_look;
     {
         let cur = cursor_opts.bypass_change_detection();
@@ -592,7 +653,12 @@ fn control(
                 0
             };
         // A/D turn the facing when not mouse-looking (yaw increases turning left, matching mouse-left).
-        let turning = !mouselook && (keys_pressed(KeyCode::KeyA) || keys_pressed(KeyCode::KeyD));
+        // …and never while stunned: the reference skips the keyboard turn emitter `0x514f50`
+        // entirely (and force-stops an in-flight turn) behind the same `0x514755` gate. Killing the
+        // turn here is also what ends B179's *second* half — the walk animation a stunned character
+        // was still playing was the turn-in-place shuffle, which `gait` derives from real yaw change.
+        let turning =
+            !mouselook && !stunned && (keys_pressed(KeyCode::KeyA) || keys_pressed(KeyCode::KeyD));
         // This frame's keyboard-turn rotation — `seat_camera` carries the camera by it rigidly
         // (char and camera turn as one on the reference; director's call, closing 0050's open
         // "camera follow on turn" feel item).
@@ -631,8 +697,13 @@ fn control(
             -1 => dir -= move_right,
             _ => {}
         }
-        // Rooted (dead-unreleased): translation intent dies here — turning above stays live, the
-        // real rooted client's behavior (decision 0308 slice 1).
+        // **Rooted: translation intent dies here — turning above stays live.** Confirmed at the
+        // bytes (decisions 0866/0872) and it is *authored*, not accidental: the reference's input
+        // tick consults an allow-list (`0x615c71` → the byte table at `0x618054`) which blocks the
+        // translation command ids and **explicitly permits** the turn ids 8/9/0xa, pitch, run/walk
+        // and SetFacing. A character who cannot even pivot is STUNNED, a separate `UNIT_FIELD_FLAGS`
+        // gate handled above — and vmangos's `HandleModStun` grants both at once, which is why Ice
+        // Block freezes completely while Frost Nova lets you turn.
         if player.modes.rooted {
             dir = Vec3::ZERO;
         }
@@ -652,7 +723,11 @@ fn control(
             player.stand_pending = None; // the echo landed
         }
         let stand_state = player.stand_pending.unwrap_or(stand_byte);
-        let mut request_stand = None;
+        // The queued asks first (the `/sit` family — decision 0881), then the X key, which is the
+        // reference's own precedence: a queued `SetStandState` ran during the frame's message pass,
+        // the key is read now. The last writer wins, and every one of them lands on the single
+        // commit-and-send below.
+        let mut request_stand = net.10.read().last().map(|r| r.state);
         if bare_binding(KeyCode::KeyX) {
             request_stand = Some(u8::from(stand_state == 0));
         }
@@ -908,13 +983,9 @@ fn control(
             let fwd_axis = move_fwd * cp + Vec3::Y * sp;
             let v = fwd_axis * swim_fwd + move_right * swim_side;
             let dir3 = v.normalize_or_zero();
-            // The rest line this stroke may not rise above. **`None` while levitating** — GM flight
-            // is the swim regime with no liquid under it (decision 0726), so there is no waterline
-            // to cap against and the climb must be free; capping there would let you dive but never
-            // gain height. Otherwise fall back to the current feet Y if the surface query briefly
-            // misses (a chunk seam): the cap is then at our own depth, so the avatar just holds for
-            // that frame — a transient miss in real water is not the same thing as flight.
-            let rest_line = (!player.modes.levitating).then(|| surface_y.unwrap_or(player.pos.y));
+            // Whether the water owns our vertical at all this frame, and where its line sits — the
+            // one source both arms of the constraint read (`swim::rest_line`; `None` is GM flight).
+            let rest_line = swim::rest_line(&player, surface_y);
             // Directional swim speed — **VERIFIED** (`0x7c4c90`'s swim arm, the §5's TU-H):
             // forward or strafe-only → swim; the backward bit `0x2` → `min(swimBack, swim)` —
             // byte-identical in template to the run arm's `min(runBack, run)`. Vanilla defaults
@@ -987,7 +1058,14 @@ fn control(
         let now = time.elapsed_secs();
         // Airborne is a walk-only concept — swimming never falls, so the body-heading / anim-flags
         // logic below reads this hoisted value (false while swimming) instead of the walk branch's.
-        let airborne = !swimming && !held && (!grounded || jumped);
+        //
+        // **A root ends the arc outright** (decision 0880): `airborne` is our `MOVEFLAG_FALLING`,
+        // and `SetRoot 0x7c7340`'s second act is `StopFalling 0x7c6290`, which clears FALLING and
+        // FALLINGFAR together. So a root or a stun taken mid-air is not a body that lands — it is a
+        // body that is no longer falling, hanging where it was ([`mover::step`]'s anchor holds the
+        // position). Ground contact is left honest in `grounded` (the transport attach and the trace
+        // both want the truth); it is the *arc* that the root ends.
+        let airborne = !swimming && !held && !player.modes.rooted && (!grounded || jumped);
         // Transport attach/detach (decision 0438 phase 2). Attach when the walkable support is a
         // transport's collider — the boat's own hull, OR a deck prop's collider child (solid
         // cargo, 0470): the walk resolves the support upward through the parent chain to the
@@ -1160,6 +1238,10 @@ fn control(
                 move_flags_now = 0;
             }
         }
+        // The two incapacitate suppressions — rooted drops the direction bits, stunned drops the
+        // turn bits — applied to the whole word in one place, whichever branch built it, and with
+        // the reference's byte trail in [`state::incapacitated_flags`] (decision 0880).
+        move_flags_now = state::incapacitated_flags(move_flags_now, player.modes.rooted, stunned);
         // Riding a transport: the ON_TRANSPORT bit rides every packet with its local-pose tail
         // (built at the send below). Set from the POST-attach state so flag and tail agree the
         // very frame we board or step off (decision 0438 phase 2).

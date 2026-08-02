@@ -1,15 +1,22 @@
-//! The **submitted-line** side of the chat (decision 0288 P5): [`drain_chat_input`] routes each
-//! Entered line — a plain line sends as the box's CURRENT type (the edit machine's law,
-//! [`super::edit`]), a `/`-line runs the Enter-path type switch, the reply arm, the action
-//! grammar ([`parse_line`] → [`ParsedChat`]: `/join`-family, `/afk`, `/random`, `/played`,
-//! `/help`, `/wave`-style emotes with the send-side posture gate [`emote_send_eligible`], and
-//! the dev commands). Opening keys + live parsing live in [`super::edit`]; the inbound half is
-//! [`super::feed`]. Own sends are never echoed locally — the wire echoes back (vanilla behavior).
+//! The **submitted-line** side of the chat (decision 0288 P5) — what we DO about a line.
+//! [`drain_chat_input`] routes each Entered line: a plain line sends as the box's CURRENT type (the
+//! edit machine's law, [`super::edit`]); a `/`-line runs the Enter-path type switch, the reply arm,
+//! then the action table. What a line *means* is [`parse`]'s ([`parse_line`] → [`ParsedChat`]);
+//! which strings reach which arm is [`super::commands`]'s table.
+//!
+//! The emote arm is the client's `DoEmote` (`0x5ef560`) in full: the eligibility gate
+//! ([`emote_send_eligible`]), the asleep gate, the stow, the **posture** branch that makes `/sit`
+//! sit, then `CMSG_TEXT_EMOTE`. Opening keys + live parsing live in [`super::edit`]; the inbound
+//! half is [`super::feed`]. Own sends are never echoed locally — the wire echoes back (vanilla
+//! behavior).
 
 use bevy::prelude::*;
 
+mod parse;
+pub(super) use parse::{parse_enter_type_switch, parse_line, ParsedChat};
+
 use crate::creature_anim::{move_flags, MovementState};
-use crate::net::{ChatKind, ClientCommand, NetCommands, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 use crate::target::Selection;
 
 /// Send `text` as the box's CURRENT type (`ChatEdit_SendText`): whisper/channel targets ride
@@ -115,6 +122,17 @@ pub(super) struct ChatProbes<'w, 's> {
     guids: Res<'w, crate::net::GuidIndex>,
 }
 
+/// The two setters `DoEmote` drives besides the packet, bundled (the drain is at Bevy's 16-param
+/// ceiling): the **posture** (`EmoteSpecProc == 1` → `SetStandState`) and the **stow**
+/// (`SetSheatheState(0, SNAP)`, unconditional on every emote that passes the gates — wow-re
+/// `sheath-policy.md` §1, site `0x5ef630`). Both are queues into their subsystem's one setter,
+/// never applied here.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct EmoteOut<'w> {
+    stand: MessageWriter<'w, crate::player::StandStateRequest>,
+    sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
+}
+
 // One parameter per concern — the chat drain fans out to every command's consumer.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_chat_input(
@@ -136,6 +154,9 @@ pub(super) fn drain_chat_input(
     mut cast_events: MessageWriter<crate::creature_anim::CastEvent>,
     mut play_seq: ResMut<crate::creature_anim::PlaySeq>,
     mut go_targets: MessageWriter<crate::creature_anim::SpellGoTargets>,
+    // The command table (decision 0881) — the reference's own aliases, resolved at boot.
+    table: Res<super::commands::SlashCommands>,
+    mut emote_out: EmoteOut,
     probes: ChatProbes,
 ) {
     let ChatProbes {
@@ -189,8 +210,7 @@ pub(super) fn drain_chat_input(
             send_current(&mut state, &commands, remainder);
             continue;
         }
-        let resolve_emote = |name: &str| emotes.as_deref().and_then(|e| e.text_id(name));
-        match parse_line(msg, resolve_emote) {
+        match parse_line(&table, msg) {
             ParsedChat::Reply { text } => match state.last_tell.front().cloned() {
                 Some(target) => {
                     state.chat_type = super::edit::SendType::Whisper;
@@ -483,7 +503,7 @@ pub(super) fn drain_chat_input(
             // string literal, so it is escaped: a `/who` filter legitimately contains quotes
             // (`z-"Elwynn Forest"`), and a newline would end the statement.
             ParsedChat::Social { verb, arg } => {
-                let lua = format!("{}(\"{}\")", verb.lua_fn(), escape_lua_string(&arg));
+                let lua = format!("{}(\"{}\")", verb.lua_fn(), parse::escape_lua_string(&arg));
                 if let Err(e) = script.run(&lua) {
                     warn!("ui_chat(social): {e}");
                 }
@@ -495,8 +515,12 @@ pub(super) fn drain_chat_input(
                     "Chat: /s /y /p /g /o /raid /rw /bg, /w <name>, /r, /e",
                     "Channels: /join <name> [pw], /leave <name>, /chatlist <name>",
                     "Party: /invite /uninvite /promote [name — bare uses your target]",
+                    "Loot: /ffa /roundrobin /master <name>",
                     "Duel: /duel [name — bare uses your target], /forfeit (/concede /yield)",
-                    "Misc: /afk, /dnd, /random [min] [max], /played, /shot, /liquid, /logout",
+                    "Social: /who [filter], /friends, /ignore, /trade, /inspect",
+                    "Emotes: /sit /stand /sleep /kneel and every /wave-style emote",
+                    "Misc: /afk, /dnd, /random [min] [max], /played, /logout, /quit",
+                    "Instruments: /shot, /liquid, /reaction, /castvis, /chattest, /partytest",
                 ] {
                     chat_log.push_event(super::event::ChatEvent::text_only(
                         super::event::ChatEventKind::System,
@@ -504,35 +528,66 @@ pub(super) fn drain_chat_input(
                     ));
                 }
             }
+            // `DoEmote` (`0x5ef560`) end to end — wow-re `object-layer/scratch/emote-posture-
+            // gate.md` §1. The gates in the client's own order, then the two things it DOES: set a
+            // posture (the `/sit` family) and send the packet.
             ParsedChat::TextEmote(text_id) => {
-                // The posture-eligibility gate (`emote_send_eligible`): a chat-only text emote (no
-                // Emotes.dbc row) has no EmoteFlags to test and always sends.
                 let (stand_state, flags) = self_player
                     .single()
                     .map_or((0, 0), |(_, m, _)| (m.stand_state, m.flags));
                 let swimming = flags & move_flags::SWIMMING != 0;
+                let emote_id = emotes.as_deref().and_then(|e| e.text_emote(text_id));
+                // A chat-only text emote (no Emotes.dbc row) has no EmoteFlags to test and no
+                // posture to set — it always sends.
+                let posture = emote_id.and_then(|id| emotes.as_deref()?.posture_state(id));
+                // GATE A (`CheckEmoteEligible` `0x47db40`): suppresses the anim AND the packet.
                 let eligible = match emotes.as_deref() {
-                    Some(e) => e
-                        .text_emote(text_id)
-                        .and_then(|emote_id| e.emote_flags(emote_id))
+                    Some(e) => emote_id
+                        .and_then(|id| e.emote_flags(id))
                         .is_none_or(|f| emote_send_eligible(f, stand_state, swimming)),
                     None => true,
                 };
-                if eligible {
-                    let target = selection.guid.unwrap_or(0);
-                    match commands
-                        .0
-                        .send(ClientCommand::TextEmote { text_id, target })
-                    {
-                        Ok(()) => info!("chat: sent {msg:?}"),
-                        Err(_) => warn!("chat: not connected; dropped {msg:?}"),
-                    }
-                } else {
+                // GATE B (`0x5ef5f3`): asleep, only a POSTURE emote gets through — which is how
+                // `/stand` (and `/sit`) is the way out of `/sleep`, while a `/wave` in bed does
+                // nothing at all.
+                let awake_or_posture = stand_state != 3 || posture.is_some();
+                if !eligible || !awake_or_posture {
                     // Byte-verified whole-send suppression: a seated /bow sends nothing (no packet,
                     // no anim) — the client's DoEmote returns before building the packet.
                     debug!(
-                        "chat: emote {text_id} suppressed by posture gate (seated/asleep/swimming)"
+                        "chat: emote {text_id} suppressed (eligible {eligible}, \
+                         awake-or-posture {awake_or_posture}, stand {stand_state})"
                     );
+                    continue;
+                }
+                // The stow (`0x5ef630`, VERIFIED unconditional at this point in the flow): every
+                // emote that reaches here puts the weapons away, instantly — a `/wave` mid-fight
+                // sheathes in the reference too. The anim layer's one setter owns the idempotency
+                // refusal, so an already-stowed body costs nothing.
+                if let Ok((entity, _, _)) = self_player.single() {
+                    emote_out.sheath.write(crate::creature_anim::SheathRequest {
+                        entity,
+                        state: 0,
+                        ceremony: false,
+                    });
+                }
+                // The posture branch (`EmoteSpecProc == 1` → `SetStandState(param)`): the emote's
+                // whole visible effect, since the SERVER deliberately does nothing for a STATE text
+                // emote (vmangos `HandleTextEmoteOpcode` breaks out for SIT/SLEEP/KNEEL). Through
+                // the one setter in `crate::player`, which sends `CMSG_STANDSTATECHANGE`, holds the
+                // local commit until the echo lands, and runs the sit-stow rider.
+                if let Some(state) = posture {
+                    emote_out
+                        .stand
+                        .write(crate::player::StandStateRequest { state: state as u8 });
+                }
+                let target = selection.guid.unwrap_or(0);
+                match commands
+                    .0
+                    .send(ClientCommand::TextEmote { text_id, target })
+                {
+                    Ok(()) => info!("chat: sent {msg:?}"),
+                    Err(_) => warn!("chat: not connected; dropped {msg:?}"),
                 }
             }
             ParsedChat::CastVis { spell_id, kind } => {
@@ -584,6 +639,24 @@ pub(super) fn drain_chat_input(
             ParsedChat::Logout => {
                 script.queue_session_request(benilla_ui::script::SessionRequest::Logout)
             }
+            // `/quit` `/exit` — the ref's `Quit()`, same queue as the game menu's Exit button, so
+            // the field countdown and the confirmation are the ones already built (decision 0674).
+            ParsedChat::Quit => {
+                script.queue_session_request(benilla_ui::script::SessionRequest::Quit)
+            }
+            // The reference's own handler body, run in the VM (the 0668 posture) — `/trade`,
+            // `/inspect`, the loot-method trio, and `/script`'s raw chunk.
+            ParsedChat::Lua { body } => {
+                if let Err(e) = script.run(&body) {
+                    // `/script` hands the player's own typo back to them; a built-in body failing
+                    // is ours to see in the log.
+                    warn!("ui_chat: {body:?}: {e}");
+                    chat_log.push_event(super::event::ChatEvent::text_only(
+                        super::event::ChatEventKind::System,
+                        format!("{e}"),
+                    ));
+                }
+            }
             ParsedChat::Unknown => {
                 // HELP_TEXT_SIMPLE (the ref's unknown-command reply, ChatEdit_ParseText l.2203).
                 chat_log.push_event(super::event::ChatEvent::text_only(
@@ -593,349 +666,6 @@ pub(super) fn drain_chat_input(
             }
         }
     }
-}
-
-/// Escape a player-typed string for embedding in a Lua double-quoted literal: backslashes and
-/// quotes are escaped, and the two line terminators are dropped rather than escaped (nothing a
-/// slash command means can contain them, and a stray one would end the statement).
-fn escape_lua_string(s: &str) -> String {
-    s.chars()
-        .filter(|c| *c != '\n' && *c != '\r')
-        .flat_map(|c| {
-            let escaped = matches!(c, '\\' | '"');
-            escaped
-                .then_some('\\')
-                .into_iter()
-                .chain(std::iter::once(c))
-        })
-        .collect()
-}
-
-/// Which social slash command was typed — the selector for the Lua body it runs
-/// ([`ParsedChat::Social`], decision 0668).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SocialVerb {
-    /// `/who [filter]` — SLASH_WHO 1-2.
-    Who,
-    /// `/friends [name]` (aliases `/friend`) — SLASH_FRIENDS 1-4.
-    Friends,
-    /// `/removefriend <name>` (alias `/remfriend`) — SLASH_REMOVEFRIEND 1-4.
-    RemoveFriend,
-    /// `/ignore [name]` — SLASH_IGNORE 1-2. Toggles: an ignored name is un-ignored.
-    Ignore,
-    /// `/unignore [name]` — SLASH_UNIGNORE 1-2.
-    Unignore,
-}
-
-impl SocialVerb {
-    /// The Lua function in `FriendsFrame.xml` holding this verb's reference body.
-    fn lua_fn(self) -> &'static str {
-        match self {
-            Self::Who => "BenillaSlashWho",
-            Self::Friends => "BenillaSlashFriends",
-            Self::RemoveFriend => "BenillaSlashRemoveFriend",
-            Self::Ignore => "BenillaSlashIgnore",
-            Self::Unignore => "BenillaSlashUnignore",
-        }
-    }
-}
-
-/// What a submitted, already-trimmed chat line resolves to (see [`parse_line`]). Kept separate from
-/// [`ClientCommand`] so the parser is unit-testable without a live [`crate::sound::EmoteSounds`]
-/// resource or a network channel.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum ParsedChat {
-    /// `/r [text]` — reply to the last received tell ([`super::edit::ChatEditState::last_tell`]).
-    Reply { text: String },
-    /// `/join <name> [password]` (aliases /channel /chan — SLASH_JOIN).
-    Join { name: String, password: String },
-    /// `/leave <name>` (aliases /chatleave /chatexit).
-    Leave { name: String },
-    /// `/chatlist <name>` (aliases /chatwho /chatinfo) — the member roster ask.
-    ChatList { name: String },
-    /// `/afk [msg]` / `/dnd [msg]` — the away toggles (CHAT_MSG_AFK/DND sends).
-    AfkDnd { kind: ChatKind, msg: String },
-    /// `/random [min] [max]` (aliases /rand /rnd /roll): bare = 1-100, one number = 1-N.
-    Random { min: u32, max: u32 },
-    /// `/played` — CMSG_PLAYED_TIME.
-    Played,
-    /// `/shot` — the director's framing instrument (decision 0600): dump the CURRENT world-camera
-    /// pose as a ready-to-paste capture `Scenario` (raw WoW eye/look + the rendered game minute)
-    /// into chat and `config_base()`/shots.txt. Client-local, no wire traffic — how a chosen spot
-    /// travels from the director's eye to the golden set as exact numbers.
-    Shot,
-    /// `/liquid` — the swim diagnostic (decision 0634 follow-up): dump the interior claim, the
-    /// resolved liquid verdict, and every candidate footprint over the player's feet. Client-local,
-    /// no wire traffic. Built when the canal-tunnel "swim in air" survived the first fix — the
-    /// question "which surface is claiming this spot, and from which file" had no instrument.
-    Liquid,
-    /// `/reaction [name]` — the attackability diagnostic: every input the reaction ladder judges
-    /// the subject on, the rung that decided, and the resulting `can_attack` verdict. Bare uses
-    /// the current target; a name resolves a streamed player (what a scripted probe can reach).
-    Reaction { name: Option<String> },
-    /// `/help` (aliases /h /?) — the command summary.
-    Help,
-    /// A `/name` line that resolved in `EmotesText` (`/wave` → text id 101) — sent as
-    /// `CMSG_TEXT_EMOTE` targeted at the current selection.
-    TextEmote(u32),
-    /// The `/castvis` **dev instrument** (decision 0099 phase 2): synthesize a cast edge locally
-    /// — the exact [`crate::creature_anim::CastEvent`] the wire would produce — on the selection
-    /// (else self), no server round-trip. Runtime-available like every current instrument
-    /// (`ui_pass::demo_enabled`'s note: decision 0026's compile-time `dev` feature is the recorded
-    /// target seam, not yet built); it moves behind that feature when 0026 phase 1 lands.
-    CastVis {
-        spell_id: u32,
-        kind: crate::creature_anim::CastEventKind,
-    },
-    /// `/logout` — leave the world back to character select (`CMSG_LOGOUT_REQUEST`, decision 0193);
-    /// the vanilla client's own command. The confirmed round-trip (`SMSG_LOGOUT_COMPLETE`) flips
-    /// [`crate::char_select::ClientState`] back to the roster screen.
-    Logout,
-    /// `/chattest` — the 0288 instrument: pump one synthetic line of every kind/notice/link form
-    /// through the REAL router+composer, so the whole surface is eyeballable in one screen with
-    /// no server choreography. Dev-runtime like `/castvis` (decision 0026's compile-time gate is
-    /// the recorded target seam).
-    ChatTest,
-    /// `/invite` `/inv` `/i` — party invite by name (`CMSG_GROUP_INVITE`). `None` = bare, which
-    /// falls back to the selected PLAYER's name (the ref's `GetSlashCmdTarget` law,
-    /// ChatFrame.lua:650-658 — no name and no player target is a silent no-op).
-    Invite { name: Option<String> },
-    /// `/uninvite` `/un` `/u` `/kick` — kick by name (`CMSG_GROUP_UNINVITE`), same
-    /// name-or-target law.
-    Uninvite { name: Option<String> },
-    /// `/promote` `/pr` — hand leadership over (`CMSG_GROUP_SET_LEADER`), same name-or-target
-    /// law; the 1.12 wire takes a guid, resolved against the roster at dispatch.
-    Promote { name: Option<String> },
-    /// `/duel [name]` — challenge a player (the duel spell cast at them). `None` = bare, which
-    /// falls back to the selected PLAYER exactly like the party commands do — the ref's
-    /// `SlashCmdList["DUEL"]` is `if GetSlashCmdTarget(msg) then StartDuel(...)`, so no name and
-    /// no player target is a silent no-op.
-    Duel { name: Option<String> },
-    /// `/forfeit` `/concede` `/yield` — `CancelDuel()`. Takes no argument and needs no state
-    /// check: one opcode covers decline/cancel/forfeit and the server reads the intent.
-    Forfeit,
-    /// `/pvp` — `TogglePVP()` (decision 0646 §3). Takes no argument: the binding has no state
-    /// form, and the server reads the toggle from our current preference.
-    Pvp,
-    /// The social verbs (decision 0668) — `/who`, `/friends`, `/removefriend`, `/ignore`,
-    /// `/unignore`. Each carries the raw argument (`/who`'s is a whole filter string, not a
-    /// name), and each runs the reference's OWN `SlashCmdList` body, transcribed into
-    /// `FriendsFrame.xml` as `BenillaSlash*`: those bodies do more than send (a bare `/who`
-    /// opens the panel and fills its edit box, a bare `/ignore` opens the ignore list), and
-    /// keeping them in the FrameXML is what stops that behaviour being re-derived here.
-    Social { verb: SocialVerb, arg: String },
-    /// `/partytest [lead|invite|mark|off]` — the party-frame dev instrument (decision 0434, the
-    /// `/chattest` pattern): a synthetic roster through the real apply path (`lead` = the same
-    /// roster with US leading, for the leader-only popup rows), a fake pending invite for the
-    /// popup, a local skull on the current target (the mark renders without a server echo), or
-    /// clear. While the roster is synthetic the drain runs in SANDBOX mode
-    /// ([`crate::ui_party::GroupState::test`]): the popup's group-mutating rows — promote,
-    /// kick, leave, loot settings, raid marks — apply to the local mirror, so the whole menu
-    /// surface is exercisable serverless.
-    PartyTest { arg: String },
-    /// A slash line matching neither a chat command nor an `EmotesText` name — dropped.
-    Unknown,
-}
-
-/// The name half of the ref's `GetSlashCmdTarget` (ChatFrame.lua:650-658): a non-empty argument
-/// is the name (first word — 1.12 names carry no spaces); empty defers to the dispatch's
-/// player-target fallback.
-fn slash_target_name(args: &str) -> Option<String> {
-    let name = args.split_whitespace().next().unwrap_or("");
-    (!name.is_empty()).then(|| name.to_string())
-}
-
-/// Parse a trimmed slash line into an ACTION (`/join`, `/afk`, `/random`, `/wave`, the dev
-/// commands…). The chat-TYPE commands (`/say`-family, `/w`, `/r`) never reach here on the send
-/// path — [`parse_enter_type_switch`] and the reply arm consume them first; a plain no-slash
-/// line sends as the box's current type ([`drain_chat_input`]). A non-slash line reaching this
-/// fn (unit tests only) is [`ParsedChat::Unknown`].
-pub(super) fn parse_line(line: &str, resolve_emote: impl Fn(&str) -> Option<u32>) -> ParsedChat {
-    let Some(rest) = line.strip_prefix('/') else {
-        return ParsedChat::Unknown;
-    };
-    let rest = rest.trim();
-    let (cmd, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    let args = args.trim();
-    // The dev instrument's grammar: `/castvis <spell_id> [go|fail]` — bare = Start (the precast
-    // hold begins), `go` = the release, `fail` = the reap. Malformed → Unknown (dropped loudly).
-    if cmd.eq_ignore_ascii_case("castvis") {
-        use crate::creature_anim::CastEventKind;
-        let mut words = args.split_whitespace();
-        let Some(spell_id) = words.next().and_then(|w| w.parse::<u32>().ok()) else {
-            return ParsedChat::Unknown;
-        };
-        let kind = match words.next() {
-            None => CastEventKind::Start,
-            Some(w) if w.eq_ignore_ascii_case("go") => CastEventKind::Go,
-            Some(w) if w.eq_ignore_ascii_case("fail") => CastEventKind::Fail,
-            Some(_) => return ParsedChat::Unknown,
-        };
-        return ParsedChat::CastVis { spell_id, kind };
-    }
-    // `/logout` (also its vanilla alias `/camp`): args are ignored, like the real client.
-    if cmd.eq_ignore_ascii_case("logout") || cmd.eq_ignore_ascii_case("camp") {
-        return ParsedChat::Logout;
-    }
-    if cmd.eq_ignore_ascii_case("chattest") {
-        return ParsedChat::ChatTest;
-    }
-    if cmd.eq_ignore_ascii_case("partytest") {
-        return ParsedChat::PartyTest {
-            arg: args.to_ascii_lowercase(),
-        };
-    }
-    match cmd.to_ascii_lowercase().as_str() {
-        "r" | "reply" => ParsedChat::Reply {
-            text: args.to_string(),
-        },
-        "join" | "channel" | "chan" => {
-            let (name, password) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
-            if name.is_empty() {
-                // CHAT_JOIN_HELP (the ref's bare-/join reply) rides the Unknown help line.
-                ParsedChat::Unknown
-            } else {
-                ParsedChat::Join {
-                    name: name.to_string(),
-                    password: password.trim().to_string(),
-                }
-            }
-        }
-        "leave" | "chatleave" | "chatexit" => {
-            let name = args.split_whitespace().next().unwrap_or("");
-            if name.is_empty() {
-                ParsedChat::Unknown
-            } else {
-                ParsedChat::Leave {
-                    name: name.to_string(),
-                }
-            }
-        }
-        "chatlist" | "chatwho" | "chatinfo" => {
-            let name = args.split_whitespace().next().unwrap_or("");
-            if name.is_empty() {
-                ParsedChat::Unknown // the bare joined-channel listing is P6's (needs the list)
-            } else {
-                ParsedChat::ChatList {
-                    name: name.to_string(),
-                }
-            }
-        }
-        "afk" => ParsedChat::AfkDnd {
-            kind: ChatKind::Afk,
-            msg: args.to_string(),
-        },
-        "dnd" => ParsedChat::AfkDnd {
-            kind: ChatKind::Dnd,
-            msg: args.to_string(),
-        },
-        "random" | "rand" | "rnd" | "roll" => {
-            let mut nums = args
-                .split_whitespace()
-                .filter_map(|w| w.parse::<u32>().ok());
-            let (a, b) = (nums.next(), nums.next());
-            let (min, max) = match (a, b) {
-                (Some(a), Some(b)) => (a, b),
-                (Some(a), None) => (1, a),
-                _ => (1, 100),
-            };
-            ParsedChat::Random { min, max }
-        }
-        "played" => ParsedChat::Played,
-        "shot" => ParsedChat::Shot,
-        "liquid" => ParsedChat::Liquid,
-        "reaction" | "react" => ParsedChat::Reaction {
-            name: slash_target_name(args),
-        },
-        // The party membership commands (decision 0434; aliases quoted from GlobalStrings'
-        // SLASH_INVITE/UNINVITE/PROMOTE 1-8, lines 3660-3780).
-        "i" | "inv" | "invite" => ParsedChat::Invite {
-            name: slash_target_name(args),
-        },
-        "u" | "un" | "kick" | "uninvite" => ParsedChat::Uninvite {
-            name: slash_target_name(args),
-        },
-        "pr" | "promote" => ParsedChat::Promote {
-            name: slash_target_name(args),
-        },
-        // The duel verbs (decision 0633; aliases quoted from GlobalStrings' SLASH_DUEL 1-2 and
-        // SLASH_DUEL_CANCEL 1-6, lines 3563-3569).
-        "duel" => ParsedChat::Duel {
-            name: slash_target_name(args),
-        },
-        "forfeit" | "concede" | "yield" => ParsedChat::Forfeit,
-        // The PvP flag (decision 0646; GlobalStrings' SLASH_PVP 1-2, lines 3718-3719 — both
-        // aliases are literally "/pvp").
-        "pvp" => ParsedChat::Pvp,
-        // The social verbs (decision 0668; aliases quoted from GlobalStrings' SLASH_WHO 1-2,
-        // SLASH_FRIENDS 1-4, SLASH_REMOVEFRIEND 1-4, SLASH_IGNORE 1-2, SLASH_UNIGNORE 1-2 —
-        // lines 3585-3794). The argument is passed WHOLE: `/who`'s is a filter expression
-        // (`z-"Elwynn Forest" 1-10`), not a name, so `slash_target_name` must not touch it.
-        "who" => ParsedChat::Social {
-            verb: SocialVerb::Who,
-            arg: args.trim().to_string(),
-        },
-        "friend" | "friends" => ParsedChat::Social {
-            verb: SocialVerb::Friends,
-            arg: args.trim().to_string(),
-        },
-        "removefriend" | "remfriend" => ParsedChat::Social {
-            verb: SocialVerb::RemoveFriend,
-            arg: args.trim().to_string(),
-        },
-        "ignore" => ParsedChat::Social {
-            verb: SocialVerb::Ignore,
-            arg: args.trim().to_string(),
-        },
-        "unignore" => ParsedChat::Social {
-            verb: SocialVerb::Unignore,
-            arg: args.trim().to_string(),
-        },
-        "h" | "help" | "?" => ParsedChat::Help,
-        // Not a recognized command — the EmotesText lookup against the whole slash-line
-        // (`/wave`, `/lol`, …), exactly as before.
-        _ => resolve_emote(rest).map_or(ParsedChat::Unknown, ParsedChat::TextEmote),
-    }
-}
-
-/// The Enter-path type switch (`ChatEdit_ParseText(send=1)` runs the same conversion the live
-/// parse does, but without the live parse's trailing-space requirement — "/g hi" + Enter
-/// converts and sends in one stroke; "/g" alone converts and commits the sticky).
-pub(super) fn parse_enter_type_switch(
-    channels: &super::edit::ChannelState,
-    text: &str,
-) -> Option<(super::edit::TypeSwitch, String)> {
-    use super::edit::{SendType, TypeSwitch};
-    let rest = text.strip_prefix('/')?;
-    let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
-    let lower = cmd.to_ascii_lowercase();
-    // `/2 hi` and `/c world hi` convert-and-send on the enter path too.
-    if let Some(switch) = super::edit::channel_switch(channels, &lower, args) {
-        return Some(switch);
-    }
-    if ["w", "whisper", "t", "tell", "send"].contains(&lower.as_str()) {
-        let (target, remainder) = args.split_once(' ').unwrap_or((args, ""));
-        if target.is_empty() || target.starts_with('|') || remainder.trim().is_empty() {
-            return None; // needs a name AND a message on the enter path
-        }
-        return Some((
-            TypeSwitch::Whisper(target.to_string()),
-            remainder.to_string(),
-        ));
-    }
-    let t = match lower.as_str() {
-        "s" | "say" => SendType::Say,
-        "y" | "yell" | "sh" | "shout" => SendType::Yell,
-        "e" | "em" | "emote" | "me" => SendType::Emote,
-        "p" | "party" => SendType::Party,
-        "raid" | "ra" | "rsay" => SendType::Raid,
-        "rw" => SendType::RaidWarning,
-        "g" | "gc" | "gu" | "guild" => SendType::Guild,
-        "o" | "osay" => SendType::Officer,
-        "bg" | "battleground" => SendType::Battleground,
-        _ => return None,
-    };
-    Some((TypeSwitch::Plain(t), args.to_string()))
 }
 
 /// `/chattest` (the 0288 instrument): one synthetic line of every renderable form through the

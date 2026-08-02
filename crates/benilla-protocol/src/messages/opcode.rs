@@ -679,6 +679,18 @@ pub const CMSG_DUEL_CANCELLED: u16 = 0x016D; // 365
 /// opcode's high number: `0x4d474a` registers a handler for it alongside the 0x167 block.
 pub const SMSG_DUEL_COUNTDOWN: u16 = 0x02B7; // 695
 
+// The mirror timers — breath / fatigue / feign-death (decision 0874; VERIFIED vmangos
+// `Opcodes_1_12_1.h:474-476` + `Server/Packets/Misc.{h,cpp}`). Server-authoritative countdowns the
+// client only mirrors and integrates; the family has no CMSG and no separate "update" opcode — a
+// running timer that changes anything is re-sent as a whole START. Bodies in
+// [`super::mirror_timer`].
+pub const SMSG_START_MIRROR_TIMER: u16 = 0x01D9; // 473
+/// Never sent by vmangos, on purpose (`Player::SendMirrorTimers` substitutes a full START and says
+/// why in the source): the shipped 1.12 `MirrorTimer.lua` handler reads the same `arg1` as both a
+/// timer name and a number, so a real pause packet errors out in the reference UI. Decoded anyway.
+pub const SMSG_PAUSE_MIRROR_TIMER: u16 = 0x01DA; // 474
+pub const SMSG_STOP_MIRROR_TIMER: u16 = 0x01DB; // 475
+
 // The mail arc (decision 0544; VERIFIED vmangos `Opcodes_1_12_1.h` + `Handlers/MailHandler.cpp`).
 // There is no `SMSG_SHOW_MAILBOX` on 5875 — the mailbox window opens entirely client-side; every
 // CMSG below carries the mailbox guid at its head, and the server independently re-validates the

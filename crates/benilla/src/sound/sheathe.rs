@@ -1,19 +1,23 @@
 //! Draw/stow sounds — the sheath swap moment routed through `SheatheSoundLookups`.
 //!
-//! The trigger is [`SheathSwapMessage`] — the *ceremony's* hand-touches-weapon moment (the
-//! `VisualSheath` release at the one-shot's authored swap point). Ceremony-only: snap
+//! The trigger is [`SheathSwapMessage`] — the *ceremony's* hand-touches-weapon moment, fired once
+//! **per arm** as that arm's one-shot crosses its authored swap point. Ceremony-only: snap
 //! transitions (attack auto-draw, every reactive stow, remote units) are **silent**, like the
 //! client's — the sound lives in the ceremony playback, and `bInstant` paths play no clip
 //! (director-verified on the ref). NOT the `$SHL`/`$SHR` anim tags: those exist only on Sheath
 //! (89, the back-stow ceremony) — **HipSheath (90, every 1H draw) carries no sound events at
 //! all** (probe-verified on HumanMale; director-caught silence on a sword-and-board draw), so
-//! the event track cannot be the client's trigger. Each wielded hand resolves its item through
+//! the event track cannot be the client's trigger. The moving slot resolves its item through
 //! `SheatheSoundLookups` (`(class, subclass, material)` → stow/draw kit pair — metal/wood
-//! weapons, shields); empty hands are silent.
+//! weapons, shields); an empty slot is silent.
 //!
-//! INTERIM: item material isn't on the wire for players — wood for staves/polearms/fishing
-//! poles, metal otherwise (the same heuristic as `combat`); creatures could carry the virtual
-//! item's material byte through `Wielded` later.
+//! The pick's only real input is the item's **`Material`** (decision 0882): the 5875 table is one
+//! row per weapon subclass per material, and every row of a material carries the same kit pair —
+//! metal 698/700, wood 697/699 — so the subclass is inert and the material decides everything. It
+//! rides the wire both ways (`SMSG_ITEM_QUERY_SINGLE_RESPONSE` for players, the
+//! `UNIT_VIRTUAL_ITEM_INFO` byte triple for creatures) and reaches here through `Wielded`, so
+//! nothing is guessed. Shields land on their own class-4 rows, whose material is a don't-care the
+//! lookup's fallback resolves.
 
 use bevy::prelude::*;
 
@@ -26,9 +30,6 @@ use crate::schedule::WorldStage;
 
 use super::kit::{play_kit, KitRef, SoundCategory, SoundKits};
 use super::{AudioListener, SoundConfig, SoundOutput};
-
-/// Wood-bodied weapon subclasses (staff/polearm/fishing pole) — the material heuristic.
-const WOODEN: [u32; 3] = [6, 10, 20];
 
 #[derive(Resource)]
 struct SheatheSounds(SheatheSoundCatalog);
@@ -70,39 +71,40 @@ fn sheathe_sounds(
         let Ok((transform, wielded)) = units.get(swap.entity) else {
             continue;
         };
-        // Each wielded hand rings its own item (a sword-and-board draw = ring + shield thunk).
-        for hand in [wielded.main, wielded.off] {
-            let Some((class, subclass)) = hand else {
-                continue; // empty hand — nothing to ring
-            };
-            let (class, subclass) = (u32::from(class), u32::from(subclass));
-            let material = if class == 2 && WOODEN.contains(&subclass) {
-                2
-            } else if class == 2 {
-                1
-            } else {
-                0
-            };
-            let Some(pair) = sounds.0.get(class, subclass, material) else {
-                continue;
-            };
-            let kit = if swap.drawing {
-                pair.unsheathe
-            } else {
-                pair.sheathe
-            };
-            if let Err(e) = play_kit(
-                &mut kits,
-                &assets,
-                &mut out,
-                &config,
-                listener,
-                KitRef::Id(kit),
-                Some(transform.translation),
-                SoundCategory::Sfx,
-            ) {
-                warn!("sheathe (kit {kit}): {e:#}");
-            }
+        // One message per arm, naming the slot whose model just moved — so a sword-and-board draw
+        // is a ring plus a shield thunk (two messages, one clip each), and the second movement of
+        // a melee → ranged toggle rings the bow rather than the swords it just put away.
+        let item = match swap.slot {
+            0 => wielded.main,
+            1 => wielded.off,
+            _ => wielded.ranged,
+        };
+        let Some((class, subclass)) = item else {
+            continue; // empty slot — nothing to ring
+        };
+        let material = u32::from(wielded.materials[usize::from(swap.slot).min(2)]);
+        let Some(pair) = sounds
+            .0
+            .get(u32::from(class), u32::from(subclass), material)
+        else {
+            continue;
+        };
+        let kit = if swap.drawing {
+            pair.unsheathe
+        } else {
+            pair.sheathe
+        };
+        if let Err(e) = play_kit(
+            &mut kits,
+            &assets,
+            &mut out,
+            &config,
+            listener,
+            KitRef::Id(kit),
+            Some(transform.translation),
+            SoundCategory::Sfx,
+        ) {
+            warn!("sheathe (kit {kit}): {e:#}");
         }
     }
 }

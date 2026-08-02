@@ -33,12 +33,16 @@ pub struct SheatheSoundCatalog {
 }
 
 impl SheatheSoundCatalog {
-    /// The kit pair for an item, preferring the exact material row and falling back to any
-    /// material carried for that `(class, subclass)` (players' item material isn't on the wire —
-    /// the caller passes its best guess), then to the class's subclass-0 row: the 5875 table
-    /// only covers weapon subclasses 0–14, so daggers (15) and other stragglers ring like a
-    /// generic weapon of their material (INTERIM — the client's hash-miss behavior is
-    /// unrecorded).
+    /// The kit pair for an item. **`material` is the load-bearing argument** — the weapon rows
+    /// agree within a material and differ across one, so the class/subclass only choose the
+    /// *family* (weapon vs shield). Callers pass the item's real `Material` off the wire; it is
+    /// never inferred from the subclass, which carries no material information (decision 0882).
+    ///
+    /// Falls back to any material carried for that `(class, subclass)` — this is what lands a
+    /// shield, whose own rows hold material 0 as a don't-care, on the shield pair — and then to
+    /// the class's subclass-0 row: the 5875 table only covers weapon subclasses 0–14, so daggers
+    /// (15) and other stragglers ring like a generic weapon of their material (INTERIM — the
+    /// client's hash-miss behavior is unrecorded).
     pub fn get(&self, class: u32, subclass: u32, material: u32) -> Option<SheatheSounds> {
         [subclass, 0]
             .iter()
@@ -119,5 +123,55 @@ mod tests {
         let dagger = cat.get(2, 15, 1).expect("dagger falls back to subclass 0");
         assert_eq!((dagger.sheathe, dagger.unsheathe), (698, 700));
         assert!(cat.get(2, 15, 7).is_some(), "weird material still resolves");
+    }
+
+    /// **The material is the whole key; the subclass is inert** (decision 0882). Every weapon row
+    /// of a material carries the same kit pair, so a bow (subclass 2, sitting in the middle of the
+    /// weapon range) rings by what it is *made of* — and the reference client's own `itemcache.wdb`
+    /// puts every bow, crossbow and wand at material 2 (wood) while guns and thrown are metal.
+    /// Ringing a bow on the metal pair — which a "staves and polearms are the wooden ones" guess
+    /// does — is the director-reported wrong sound. Skips without client data.
+    #[test]
+    fn the_kit_pair_is_decided_by_material_alone() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_sheathe_sound_catalog(&mut chain).expect("load sheathe sounds");
+
+        // A bow is wood, and wood rings 697/699 — never the metal 698/700 pair.
+        let bow = cat.get(2, 2, 2).expect("wood bow");
+        assert_eq!((bow.sheathe, bow.unsheathe), (697, 699));
+
+        // The same subclass at the other material is the metal pair: subclass carries no
+        // information here, which is exactly why it must not be used to infer the material.
+        let metal = cat.get(2, 2, 1).expect("metal row for the same subclass");
+        assert_eq!((metal.sheathe, metal.unsheathe), (698, 700));
+
+        // …and that holds across every weapon subclass the table covers.
+        for subclass in 0..=14 {
+            assert_eq!(
+                cat.get(2, subclass, 2).map(|p| (p.sheathe, p.unsheathe)),
+                Some((697, 699)),
+                "subclass {subclass} at material 2 must ring wood"
+            );
+            assert_eq!(
+                cat.get(2, subclass, 1).map(|p| (p.sheathe, p.unsheathe)),
+                Some((698, 700)),
+                "subclass {subclass} at material 1 must ring metal"
+            );
+        }
+
+        // A shield's real material is whatever its armor row says (1 metal and 6 plate both occur
+        // in the reference cache); its DBC rows carry material 0 as a don't-care, and the
+        // fallback chain lands them on the shield pair regardless.
+        for material in [0, 1, 6] {
+            let shield = cat
+                .get(4, 6, material)
+                .expect("shield resolves at any material");
+            assert_eq!((shield.sheathe, shield.unsheathe), (696, 701));
+        }
     }
 }

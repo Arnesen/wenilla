@@ -368,6 +368,12 @@ const FIELD_PLAYER_FLAGS: u16 = 190;
 // three reads `UnitReaction 0x6061e0`'s duel leg makes (decision 0633).
 const FIELD_PLAYER_DUEL_ARBITER: u16 = 188;
 const FIELD_PLAYER_DUEL_TEAM: u16 = 196;
+// PLAYER_FIELD_COMBO_TARGET = UNIT_END(188) + 0x20E (GUID, PRIVATE) — VERIFIED vmangos
+// `UpdateFields_1_12_1.h:251`, and independently by the binary: `GetComboPoints 0x51a190` reads the
+// pair at `[player+0xe68]+0x838/+0x83c`, and 0x838/4 + 188 = 714 (decision 0875). The same player-
+// block base that puts the combo-point byte at `+0x1029` (0x1029/4 + 188 = 1222) — two offsets off
+// one pointer landing on two independently-known field indices is what pins the base itself.
+const FIELD_PLAYER_FIELD_COMBO_TARGET: u16 = 714;
 const FIELD_PLAYER_FIELD_BYTES: u16 = 1222; // UNIT_END+0x40A, BYTES — vmangos `PLAYER_FIELD_BYTES`
                                             // (distinct from the appearance `PLAYER_BYTES`(193)):
                                             // flags / comboPoints / actionBars / HIGHEST_HONOR_RANK

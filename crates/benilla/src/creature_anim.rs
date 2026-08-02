@@ -91,6 +91,23 @@ pub(crate) struct Wielded {
     /// Sheath 89 otherwise; the slot's own byte is the *only* input).
     pub(crate) main_sheath: u8,
     pub(crate) off_sheath: u8,
+    /// The ranged item's sheath type, same pick — the ranged **draw** clip reads it
+    /// (`0x6118a0`/`0x611960`/`0x611a20` all run `(1 << (rng[+4] & 0x1f)) & 0x88` on the ranged
+    /// record). Its **stow** clip does not: `0x611b60`'s PREV==2 legs push a literal `0x59`
+    /// (`0x611c8c`/`0x611cd3`), so a bow is always put away with Sheath 89.
+    pub(crate) ranged_sheath: u8,
+    /// The ranged item's `InventoryType` — the byte-verified **arm** pick: `0x1a`
+    /// (RANGEDRIGHT: gun/crossbow/wand) and `0x19` (THROWN) go to the right arm, everything else
+    /// (`0x0f`, a bow) to the left (`0x611b60` @ `0x611c74`, and the same compare in both
+    /// drawers). `0` when nothing is in the ranged slot.
+    pub(crate) ranged_inv: u32,
+    /// Each slot's `Material` id — the **only** key the draw/stow sound pick uses
+    /// (`SheatheSoundLookups`, decision 0882). Not derivable from the weapon class: real 5875 data
+    /// has maces (subclass 4) in both metal and wood, and puts every bow, crossbow and wand in
+    /// wood while guns and thrown are metal. It rides the wire — `SMSG_ITEM_QUERY_SINGLE_RESPONSE`
+    /// for players, the `UNIT_VIRTUAL_ITEM_INFO` byte triple for creatures — so nothing here is a
+    /// guess. Indexed by held slot: 0 mainhand · 1 offhand · 2 ranged.
+    pub(crate) materials: [u8; 3],
 }
 
 /// The unit is engaged in melee auto-attack (`SMSG_ATTACKSTART` .. `ATTACKSTOP`, decision 0073):
@@ -518,9 +535,18 @@ pub(crate) struct AnimDriver {
     /// A **masked upper-body one-shot** in flight (decision 0087): a swing/emote the live-state route
     /// sent to the SpineLow overlay (moving / seated / airborne-in-combat), playing *beside* [`Mode`]
     /// while the base track keeps driving the legs (run / sit / jump-arc). `None` = no overlay; a
-    /// finished overlay releases the subtree back to the base. The full-body route never uses this —
-    /// it replaces the base via [`Mode::Swing`].
+    /// finished overlay **fades** the subtree back to the base ([`Self::overlay_fade`]) rather than
+    /// dropping it. The full-body route never uses this — it replaces the base via [`Mode::Swing`]
+    /// — until a locomotion request **transplants** that clip up here (decision 0878).
     overlay: Option<Overlay>,
+    /// The key-bone slot's **cross-fade in flight** (decision 0878) — the client's per-bone
+    /// SECONDARY as an upper-body arm or release seeds it. Two producers, one curve
+    /// ([`select::blend_lambda`], λ decaying 1 → 0): the **fade-to-rest** that releases a finished
+    /// one-shot over a fixed 150 ms (`0x5fc920` → op4 `param_3 = −1`, `0x7123af`), and a **blended
+    /// re-arm** cross-fading a new masked clip in over the incoming clip's own blendTime
+    /// (`0x7125f2`). A **transplant** arm carries `blendFlag = 0` and seeds nothing — it resumes
+    /// the clip at its live frame with no fade at all.
+    overlay_fade: Option<OverlayFade>,
     /// The victim **wound-flinch** in flight (decision 0111) — the client's per-bone **SECONDARY
     /// blend slot**: a decaying cross-fade overlay (`λ` smoothstep `0.75 → 0` over the wound
     /// clip's own span) layered over whatever else plays, then self-releasing. Deliberately a
@@ -599,6 +625,20 @@ struct Overlay {
     looping: bool,
 }
 
+/// A key-bone cross-fade in flight ([`AnimDriver::overlay_fade`], decision 0878 — wow-re
+/// `oneshot-lifecycle.md` §5.4). `out` is the **retiring** node, holding the outgoing pose the
+/// client snapshots into the bone's secondary slot (`rep movsd +0x98 → +0xc4`); it is `None` when
+/// a fresh clip fades in over the *inherited base* pose, which needs no node of its own — the base
+/// is already there. `left`/`total` are the window: the fixed 150 ms of a fade-to-rest, or the
+/// incoming clip's own blendTime on a blended re-arm.
+#[derive(Clone, Copy)]
+struct OverlayFade {
+    out: Option<bevy::animation::graph::AnimationNodeIndex>,
+    /// Seconds still to run — λ = [`select::blend_lambda`]`(left / total)`, decaying 1 → 0.
+    left: f32,
+    total: f32,
+}
+
 /// A wound-flinch decay in flight ([`AnimDriver::wound`], decision 0111): the graph node the
 /// blend drives (the clip's masked [`AnimClip::upper_node`], or its full-body node when the
 /// bone-selection forces bone 0 — [`select::wound_full_body`]) and the decay window's inputs.
@@ -624,6 +664,7 @@ impl Default for AnimDriver {
             sheath_byte: None,
             sheath_swap: None,
             overlay: None,
+            overlay_fade: None,
             wound: None,
             jump_arc: false,
             was_falling: false,

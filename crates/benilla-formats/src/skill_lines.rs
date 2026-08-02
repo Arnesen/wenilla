@@ -24,7 +24,10 @@
 //! build) · `forward_spellid`(8) · `learnOnGetSkill`(9) · `max_value`(10) · `min_value`(11) ·
 //! `reqtrainpoints`(14; 12-13 unused). Read into one [`SlaInfo`] per spell (a spell can carry
 //! more than one row across race/class variants; the FIRST row wins, deterministic by file
-//! order — [`SkillLineCatalog::spell_to_line`]'s long-standing convention). `max_value`/
+//! order — [`SkillLineCatalog::spell_to_line`]'s long-standing convention), except
+//! `forward_spellid`, which takes the first **non-zero** across the spell's rows to match
+//! vmangos's own `SpellMgr::GetSpellBookSuccessorSpellId` exactly (identical on this build:
+//! probed, 44 spells carry more than one row and not one disagrees on the column). `max_value`/
 //! `min_value` are the recipe-difficulty trivial ranks (TrivialSkillLineRankHigh/Low): pinned on
 //! the raw 5875 file this session — Bolt of Linen Cloth 2963 → (line 197, req 1, low 25,
 //! high 50), Minor Healing Potion 2330 → (171, 1, 55, 95), which reproduces its known classic
@@ -78,8 +81,15 @@ const SKILL_LINE_ABILITY_FIELDS: usize = 15;
 const COL_SLA_SKILL_ID: usize = 1;
 const COL_SLA_SPELL_ID: usize = 2;
 const COL_SLA_REQ_SKILL_VALUE: usize = 7;
+const COL_SLA_FORWARD_SPELL: usize = 8;
 const COL_SLA_TRIVIAL_HIGH: usize = 10;
 const COL_SLA_TRIVIAL_LOW: usize = 11;
+
+/// Hard stop on a rank-chain walk ([`SkillLineCatalog::highest_known_rank`]). The real build-5875
+/// data is acyclic and its longest chain is **9** hops (Heroic Strike 78 → … → 25286, probed over
+/// every one of the 406 chained spells), so this only ever fires on edited/corrupt DBCs — where a
+/// wrong answer beats a hung frame.
+const MAX_RANK_CHAIN: usize = 16;
 
 const SKILL_LINE_CATEGORY: &str = "DBFilesClient\\SkillLineCategory.dbc";
 const SKILL_LINE_CATEGORY_FIELDS: usize = 11;
@@ -145,6 +155,13 @@ pub struct SlaInfo {
     pub skill_id: u32,
     /// `req_skill_value` (column 7) — the line rank required to learn/use the ability.
     pub req_skill_value: u32,
+    /// `forward_spellid` (column 8) — the **next rank** of this ability, or 0 when it has none.
+    /// This column is the whole rank-chain graph: 406 of the 4753 spells carry it, and they are
+    /// exactly the abilities the server supersedes (vmangos gates every `SMSG_SUPERCEDED_SPELL`
+    /// it sends on `GetSpellBookSuccessorSpellId`, `Player::AddSpell`) — the warrior/rogue
+    /// physical lines, the profession tier openers, weapon skills. Caster nukes/heals carry 0:
+    /// their ranks all stay known and castable, which is what makes vanilla down-ranking work.
+    pub forward_spell_id: u32,
     /// `min_value` (column 11) — TrivialSkillLineRankLow: yellow at-or-above, orange below.
     pub trivial_low: u32,
     /// `max_value` (column 10) — TrivialSkillLineRankHigh: gray at-or-above; green at-or-above
@@ -162,6 +179,11 @@ pub struct SkillLineCatalog {
     /// skill line id → its `SkillRaceClassInfo` rows (empty when the DBC failed to load — then
     /// [`Self::spell_tab`] skips the General collapse and keeps each line its own tab).
     race_class: HashMap<u32, Vec<SrciRow>>,
+    /// The `forward_spellid` graph inverted: next rank → the rank before it. Injective on the
+    /// real build-5875 data (probed: not one of the 406 chained spells is the successor of two
+    /// different predecessors), so a spell has at most one previous rank and
+    /// [`Self::chain_head`]'s walk is unambiguous.
+    rank_prev: HashMap<u32, u32>,
 }
 
 impl SkillLineCatalog {
@@ -174,6 +196,59 @@ impl SkillLineCatalog {
     /// requirement source (0437).
     pub fn ability(&self, spell_id: u32) -> Option<&SlaInfo> {
         self.abilities.get(&spell_id)
+    }
+
+    /// The **next rank** of `spell_id` ([`SlaInfo::forward_spell_id`]), or `None` when the ability
+    /// doesn't rank up this way — vmangos's `SpellMgr::GetSpellBookSuccessorSpellId`.
+    pub fn rank_successor(&self, spell_id: u32) -> Option<u32> {
+        self.abilities
+            .get(&spell_id)
+            .map(|a| a.forward_spell_id)
+            .filter(|&id| id != 0)
+    }
+
+    /// The **first** rank of `spell_id`'s chain — walk [`Self::rank_prev`] back to the spell that
+    /// nothing forwards to. `spell_id` itself when it heads its own chain (including the common
+    /// case of no chain at all).
+    fn chain_head(&self, spell_id: u32) -> u32 {
+        let mut head = spell_id;
+        for _ in 0..MAX_RANK_CHAIN {
+            match self.rank_prev.get(&head) {
+                Some(&prev) if prev != head => head = prev,
+                _ => break,
+            }
+        }
+        head
+    }
+
+    /// The **highest rank of `spell_id`'s ability that `known` contains** — the rank an action-bar
+    /// slot pointing at `spell_id` must actually hold. `None` when no rank of the chain is known
+    /// (an empty book, or an ability the character never learned): the caller leaves the slot
+    /// alone rather than pointing it somewhere arbitrary.
+    ///
+    /// Walks the whole chain from its head, not just forward from `spell_id`, so it answers for a
+    /// *downgrade* (the bar holds rank 5, the book was pushed back to rank 4) as well as the
+    /// ordinary rank-up. The server only ever keeps one rank of a chained ability active
+    /// (vmangos `Player::AddSpell` marks the old one `active = false` and it drops out of
+    /// `SMSG_INITIAL_SPELLS`), so in practice at most one rank is ever known and "highest" is
+    /// simply "the one".
+    pub fn highest_known_rank(
+        &self,
+        spell_id: u32,
+        known: &std::collections::HashSet<u32>,
+    ) -> Option<u32> {
+        let mut cur = self.chain_head(spell_id);
+        let mut best = known.contains(&cur).then_some(cur);
+        for _ in 0..MAX_RANK_CHAIN {
+            let Some(next) = self.rank_successor(cur) else {
+                break;
+            };
+            cur = next;
+            if known.contains(&cur) {
+                best = Some(cur);
+            }
+        }
+        best
     }
 
     /// The spellbook **tab** a spell lands in for a character of `race`/`class` (1-based unit
@@ -383,16 +458,29 @@ pub fn load_skill_line_catalog(chain: &mut Chain) -> Result<SkillLineCatalog> {
         if let (Some(skill_id), Some(spell_id)) =
             (u32_at(r, COL_SLA_SKILL_ID), u32_at(r, COL_SLA_SPELL_ID))
         {
-            // First row wins (module doc): deterministic, and every probed spell in the tests
-            // below has exactly one row anyway.
-            abilities.entry(spell_id).or_insert(SlaInfo {
+            let forward_spell_id = u32_at(r, COL_SLA_FORWARD_SPELL).unwrap_or(0);
+            // First row wins (module doc): deterministic by file order. 44 of the 4753 spells
+            // carry more than one row (race/class variants) — every spell probed by the tests
+            // below has exactly one.
+            let slot = abilities.entry(spell_id).or_insert(SlaInfo {
                 skill_id,
                 req_skill_value: u32_at(r, COL_SLA_REQ_SKILL_VALUE).unwrap_or(0),
+                forward_spell_id,
                 trivial_low: u32_at(r, COL_SLA_TRIVIAL_LOW).unwrap_or(0),
                 trivial_high: u32_at(r, COL_SLA_TRIVIAL_HIGH).unwrap_or(0),
             });
+            // …except the rank link, which takes the first NON-ZERO across the spell's rows —
+            // vmangos's `GetSpellBookSuccessorSpellId` scans all of them (module doc).
+            if slot.forward_spell_id == 0 {
+                slot.forward_spell_id = forward_spell_id;
+            }
         }
     }
+    let rank_prev = abilities
+        .iter()
+        .filter(|(_, a)| a.forward_spell_id != 0)
+        .map(|(&spell, a)| (a.forward_spell_id, spell))
+        .collect();
 
     let race_class = load_race_class_info(chain);
     let categories = load_categories(chain);
@@ -402,6 +490,7 @@ pub fn load_skill_line_catalog(chain: &mut Chain) -> Result<SkillLineCatalog> {
         abilities,
         categories,
         race_class,
+        rank_prev,
     })
 }
 
@@ -626,5 +715,63 @@ mod tests {
         }
         // Unknown race/class → no button (the conservative arm).
         assert!(!cat.abandonable(164, 0, 0));
+    }
+
+    /// The `forward_spellid` rank graph on the real build-5875 file — the action bar's
+    /// rank-normalization source (decision 0883). Skips without client data.
+    #[test]
+    fn real_rank_chains_resolve_the_highest_known_rank() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let cat = load_skill_line_catalog(&mut chain).expect("load skill lines");
+
+        // Sinister Strike ranks 1..8 — the chain the bug report walked (a level-60 rogue whose
+        // saved bar still held rank 1 while the book held only rank 8).
+        const SS: [u32; 8] = [1752, 1757, 1758, 1759, 1760, 8621, 11293, 11294];
+        for pair in SS.windows(2) {
+            assert_eq!(
+                cat.rank_successor(pair[0]),
+                Some(pair[1]),
+                "Sinister Strike {} → {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(cat.rank_successor(11294), None, "rank 8 tops the chain");
+        // Warrior Charge (100 → 6178 → 11578) and Heroic Strike's 9 ranks — the two physical
+        // families the director named.
+        assert_eq!(cat.rank_successor(100), Some(6178));
+        assert_eq!(cat.rank_successor(6178), Some(11578));
+        assert_eq!(cat.rank_successor(11567), Some(25286));
+
+        // From ANY rank, knowing only rank 8, the answer is rank 8 — the walk starts at the
+        // chain head, so it works downward as well as upward.
+        let top: std::collections::HashSet<u32> = [11294].into_iter().collect();
+        for id in SS {
+            assert_eq!(cat.highest_known_rank(id, &top), Some(11294), "from {id}");
+        }
+        // Knowing an intermediate rank resolves to it, not to the top of the chain.
+        let mid: std::collections::HashSet<u32> = [1759].into_iter().collect();
+        assert_eq!(cat.highest_known_rank(1752, &mid), Some(1759));
+        assert_eq!(cat.highest_known_rank(11294, &mid), Some(1759));
+        // No rank of the chain known → no answer (the caller leaves the slot alone).
+        assert_eq!(cat.highest_known_rank(1752, &Default::default()), None);
+
+        // Caster nukes carry NO forward link — every rank stays known and castable, which is what
+        // makes vanilla down-ranking work, and what keeps normalization off them. Fireball r1/r2,
+        // Frostbolt r1, Healing Touch r1, Renew r1, Immolate r1, Lightning Bolt r1.
+        for id in [133u32, 143, 116, 5185, 139, 348, 403] {
+            assert_eq!(cat.rank_successor(id), None, "spell {id} is not chained");
+            let known: std::collections::HashSet<u32> = [id].into_iter().collect();
+            assert_eq!(cat.highest_known_rank(id, &known), Some(id));
+        }
+        // A spell with no `SkillLineAbility` row at all (the auto-attack) is its own chain.
+        let attack: std::collections::HashSet<u32> = [6603].into_iter().collect();
+        assert_eq!(cat.rank_successor(6603), None);
+        assert_eq!(cat.highest_known_rank(6603, &attack), Some(6603));
     }
 }

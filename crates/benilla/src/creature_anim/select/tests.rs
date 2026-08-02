@@ -204,6 +204,12 @@ fn jump_land_pick_is_the_0x602c60_rule() {
     assert_eq!(jump_land_pick(FORWARD | WALK_MODE), None);
     assert_eq!(jump_land_pick(SWIMMING), None);
     assert_eq!(jump_land_pick(FORWARD | SWIMMING), None);
+    // …and ROOTED → no clip either (decision 0880): a root or a stun caught mid-air ends the fall
+    // in mid-air, and the reference suppresses the FALL_LAND this dispatcher runs on
+    // (`0x602df3`). Without it the body plays JumpEnd 39 while hanging 400 yd up — measured, and
+    // exactly what "the animation doesn't freeze" looked like.
+    assert_eq!(jump_land_pick(ROOT), None);
+    assert_eq!(jump_land_pick(ROOT | FORWARD), None);
 }
 
 #[test]

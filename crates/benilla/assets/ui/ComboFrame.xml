@@ -1,0 +1,181 @@
+<Ui>
+    <!--
+        The combo-point dots (decision 0869) — the reference `FrameXML/ComboFrame.xml` +
+        `ComboFrame.lua` transcribed, geometry QUOTED verbatim (offsets, sizes, TexCoords and the
+        five fade constants are the reference's own), renamed onto our frames and driven by our
+        `PLAYER_COMBO_POINTS` feed.
+
+        ONE `Interface\ComboFrame\ComboPoint` sheet holds all three layers, split by TexCoords: the
+        dim socket (0 .. 0.375), the lit highlight (0.375 .. 0.5625) and the additive shine
+        (0.5625 .. 1). A point that comes up fades its highlight in, and the highlight's completion
+        hands off to the shine's fade-in → fade-out — the reference's two-hop `finishedFunc` chain,
+        which our `UIFrameFade` (UiPanels.xml) supports verbatim.
+
+        NO CLASS TEST HERE, and none is missing: this file gates on `GetComboPoints() > 0` and
+        nothing else because the reference does, and `0x51a190` carries both real gates itself —
+        rogue-or-druid (`cmp al,4 / cmp al,0xb`), and the points must be banked on the CURRENT
+        target. So a *warrior* never lights a dot even though the server really does bank them a
+        point on a victim's dodge — that byte greys Overpower through the usable walk's leg 5 and
+        goes no further (§5 byte-read, decision 0875). Re-targeting empties these dots with the
+        count untouched, which is exactly why the reference registers PLAYER_TARGET_CHANGED.
+
+        The five dots march down-left, each anchored TOP-to-BOTTOM of the one before with a small
+        rightward drift — the reference's diagonal, hugging the target frame's ring.
+    -->
+    <Frame name="BenillaComboPointTemplate" virtual="true">
+        <Size><AbsDimension x="12" y="12"/></Size>
+        <Layers>
+            <!-- The empty socket (ref l.8-19). -->
+            <Layer level="BACKGROUND">
+                <Texture file="Interface\ComboFrame\ComboPoint">
+                    <Size><AbsDimension x="12" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"/>
+                    </Anchors>
+                    <TexCoords left="0" right="0.375" top="0" bottom="1"/>
+                </Texture>
+            </Layer>
+            <!-- The lit point, faded in as the point is earned (ref l.20-34). -->
+            <Layer level="ARTWORK">
+                <Texture name="$parentHighlight" file="Interface\ComboFrame\ComboPoint">
+                    <Size><AbsDimension x="8" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <TexCoords left="0.375" right="0.5625" top="0" bottom="1"/>
+                </Texture>
+            </Layer>
+            <!-- The additive flare, chained off the highlight's fade (ref l.35-48). -->
+            <Layer level="OVERLAY">
+                <Texture name="$parentShine" file="Interface\ComboFrame\ComboPoint" alphaMode="ADD">
+                    <Size><AbsDimension x="14" y="16"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor>
+                    </Anchors>
+                    <TexCoords left="0.5625" right="1" top="0" bottom="1"/>
+                </Texture>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <Frame name="BenillaComboFrame" frameStrata="MEDIUM" toplevel="true" parent="UIParent" hidden="true" alpha="0">
+        <Size><AbsDimension x="256" y="32"/></Size>
+        <!-- ref l.56-62: TOPRIGHT of the target frame, (-44,-9). -->
+        <Anchors>
+            <Anchor point="TOPRIGHT" relativeTo="BenillaTargetFrame">
+                <Offset><AbsDimension x="-44" y="-9"/></Offset>
+            </Anchor>
+        </Anchors>
+        <Frames>
+            <Frame name="BenillaComboPoint1" inherits="BenillaComboPointTemplate">
+                <Anchors>
+                    <Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="BenillaComboPoint2" inherits="BenillaComboPointTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="BenillaComboPoint1" relativePoint="BOTTOM">
+                        <Offset><AbsDimension x="7" y="4"/></Offset>
+                    </Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="BenillaComboPoint3" inherits="BenillaComboPointTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="BenillaComboPoint2" relativePoint="BOTTOM">
+                        <Offset><AbsDimension x="5" y="2"/></Offset>
+                    </Anchor>
+                </Anchors>
+            </Frame>
+            <Frame name="BenillaComboPoint4" inherits="BenillaComboPointTemplate">
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="BenillaComboPoint3" relativePoint="BOTTOM">
+                        <Offset><AbsDimension x="2" y="1"/></Offset>
+                    </Anchor>
+                </Anchors>
+            </Frame>
+            <!-- The fifth is the odd one out: the reference sizes it 15×18 (ref l.101-104). -->
+            <Frame name="BenillaComboPoint5" inherits="BenillaComboPointTemplate">
+                <Size><AbsDimension x="15" y="18"/></Size>
+                <Anchors>
+                    <Anchor point="TOP" relativeTo="BenillaComboPoint4" relativePoint="BOTTOM">
+                        <Offset><AbsDimension x="0" y="1"/></Offset>
+                    </Anchor>
+                </Anchors>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnLoad>
+                this:RegisterEvent("PLAYER_TARGET_CHANGED");
+                this:RegisterEvent("PLAYER_COMBO_POINTS");
+                BenillaComboPoint1Highlight:SetAlpha(0);
+                BenillaComboPoint1Shine:SetAlpha(0);
+            </OnLoad>
+            <OnEvent>
+                BenillaComboPointsFrame_OnEvent();
+            </OnEvent>
+        </Scripts>
+    </Frame>
+
+    <Script>
+        <![CDATA[
+        -- ref ComboFrame.lua l.1-6, verbatim.
+        MAX_COMBO_POINTS = 5;
+        COMBOFRAME_FADE_IN = 0.3;
+        COMBOFRAME_FADE_OUT = 0.5;
+        COMBOFRAME_HIGHLIGHT_FADE_IN = 0.4;
+        COMBOFRAME_SHINE_FADE_IN = 0.3;
+        COMBOFRAME_SHINE_FADE_OUT = 0.4;
+        COMBO_FRAME_LAST_NUM_POINTS = 0;
+
+        -- ref ComboFrame.lua `ComboPointsFrame_OnEvent`. Only points ABOVE the last count animate
+        -- (`i > COMBO_FRAME_LAST_NUM_POINTS`) — a repaint at the same count must not re-flare every
+        -- dot, which is why the last count is remembered across events rather than recomputed.
+        function BenillaComboPointsFrame_OnEvent()
+            local comboPoints = GetComboPoints();
+            if comboPoints > 0 then
+                if not BenillaComboFrame:IsVisible() then
+                    BenillaComboFrame:Show();
+                    UIFrameFadeIn(BenillaComboFrame, COMBOFRAME_FADE_IN);
+                end
+                for i = 1, MAX_COMBO_POINTS do
+                    local comboPointHighlight = getglobal("BenillaComboPoint"..i.."Highlight");
+                    local comboPointShine = getglobal("BenillaComboPoint"..i.."Shine");
+                    if i <= comboPoints then
+                        if i > COMBO_FRAME_LAST_NUM_POINTS then
+                            local fadeInfo = {};
+                            fadeInfo.mode = "IN";
+                            fadeInfo.timeToFade = COMBOFRAME_HIGHLIGHT_FADE_IN;
+                            fadeInfo.finishedFunc = BenillaComboPointShineFadeIn;
+                            fadeInfo.finishedArg1 = comboPointShine;
+                            UIFrameFade(comboPointHighlight, fadeInfo);
+                        end
+                    else
+                        comboPointHighlight:SetAlpha(0);
+                        comboPointShine:SetAlpha(0);
+                    end
+                end
+            else
+                BenillaComboPoint1Highlight:SetAlpha(0);
+                BenillaComboPoint1Shine:SetAlpha(0);
+                BenillaComboFrame:Hide();
+            end
+            COMBO_FRAME_LAST_NUM_POINTS = comboPoints;
+        end
+
+        function BenillaComboPointShineFadeIn(frame)
+            local fadeInfo = {};
+            fadeInfo.mode = "IN";
+            fadeInfo.timeToFade = COMBOFRAME_SHINE_FADE_IN;
+            fadeInfo.finishedFunc = BenillaComboPointShineFadeOut;
+            fadeInfo.finishedArg1 = frame:GetName();
+            UIFrameFade(frame, fadeInfo);
+        end
+
+        -- The name round-trip is the reference's own workaround ("hack since a frame can't have a
+        -- reference to itself in it") — kept, so the chain reads as its source does.
+        function BenillaComboPointShineFadeOut(frameName)
+            UIFrameFadeOut(getglobal(frameName), COMBOFRAME_SHINE_FADE_OUT);
+        end
+        ]]>
+    </Script>
+</Ui>

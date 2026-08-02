@@ -14,6 +14,11 @@
 //! `AnimID` (column 2) feeds both the one-shot anim-emote path (`SMSG_EMOTE`'s `Emotes.dbc` id) and
 //! the looping state-emote idle (`UNIT_NPC_EMOTESTATE`, the same id space) — [`EmoteSoundCatalog::anim`].
 //!
+//! `EmoteSpecProc`/`EmoteSpecProcParam` (columns 4/5) carry the **posture** half of the client's
+//! `DoEmote`: proc `1` means "this emote sets a stand state", and the param IS that state
+//! ([`EmoteSoundCatalog::posture_state`]) — the mechanism behind `/sit` (proc `2` is the looping
+//! state emote whose `EventSoundID` the `$ESD` event rings).
+//!
 //! `EmoteFlags` (column 3) feeds the **send-side posture-eligibility gate** — the only `EmoteFlags`
 //! consumer, byte-verified at the real client's `CheckEmoteEligible` (`0x47db40`, called from
 //! `DoEmote` `0x5ef560`): before `CMSG_TEXT_EMOTE` goes out, bit `0x0001` combined with a non-zero
@@ -47,6 +52,9 @@ pub struct EmoteSoundCatalog {
     /// `EventSoundID` the `$ESD` anim event rings (the client's `row[+0x10] == 2` gate at the
     /// `$ESD` handler `0x6239f0` — wow-re `sound/scratch/gather-sound-anim-events.md`).
     spec_proc: HashMap<u32, u32>,
+    /// `Emotes.dbc` id → its `EmoteSpecProcParam` (column 5). For `EmoteSpecProc == 1` this is the
+    /// **stand state** the emote sets — see [`EmoteSoundCatalog::posture_state`].
+    spec_proc_param: HashMap<u32, u32>,
 }
 
 impl EmoteSoundCatalog {
@@ -90,6 +98,20 @@ impl EmoteSoundCatalog {
     /// field doc).
     pub fn spec_proc(&self, emote_id: u32) -> Option<u32> {
         self.spec_proc.get(&emote_id).copied()
+    }
+
+    /// The **stand state** a POSTURE emote sets: `EmoteSpecProcParam` gated on `EmoteSpecProc == 1`
+    /// (`None` for every other emote). This is the client's `DoEmote` state branch — wow-re
+    /// `object-layer/scratch/emote-posture-gate.md` §1: `if (rec.EmoteSpecProc == 1 && …)
+    /// SetStandState(rec.SpecProcParam)`, the same `0x5ed430` setter the sit key drives. The five
+    /// reachable rows: STATE_SIT(13)→1, STATE_SLEEP(12)→3, STATE_KNEEL(68)→8, STATE_STAND(26)→0,
+    /// STATE_AT_EASE(313)→2 — which is why `/sit` sits at all, since the *server* deliberately does
+    /// nothing for a STATE text emote (vmangos `ChatHandler.cpp` `HandleTextEmoteOpcode`: SIT /
+    /// SLEEP / KNEEL / NONE break out before `HandleEmote`).
+    pub fn posture_state(&self, emote_id: u32) -> Option<u32> {
+        (self.spec_proc.get(&emote_id).copied() == Some(1))
+            .then(|| self.spec_proc_param.get(&emote_id).copied())
+            .flatten()
     }
 
     pub fn len(&self) -> usize {
@@ -152,6 +174,7 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
     let mut anim = HashMap::with_capacity(rs.records().len());
     let mut emote_flags = HashMap::with_capacity(rs.records().len());
     let mut spec_proc = HashMap::with_capacity(rs.records().len());
+    let mut spec_proc_param = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
         if let Some(kit) = u32_at(r, 6) {
@@ -166,6 +189,9 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
         if let Some(proc) = u32_at(r, 4) {
             spec_proc.insert(id, proc);
         }
+        if let Some(param) = u32_at(r, 5) {
+            spec_proc_param.insert(id, param);
+        }
     }
 
     Ok(EmoteSoundCatalog {
@@ -176,6 +202,7 @@ pub fn load_emote_sound_catalog(chain: &mut Chain) -> Result<EmoteSoundCatalog> 
         anim,
         emote_flags,
         spec_proc,
+        spec_proc_param,
     })
 }
 
@@ -233,6 +260,17 @@ mod tests {
         );
         assert_eq!(cat.anim(233), Some(136), "mining state plays anim 136");
         assert_eq!(cat.spec_proc(2), Some(0), "ONESHOT_BOW EmoteSpecProc");
+        // The posture branch (`DoEmote`'s `EmoteSpecProc == 1` → `SetStandState(param)`): the four
+        // stand states a slash emote can reach, byte-decoded off the shipped table. The values are
+        // vmangos `UnitStandStateType` (STAND 0 · SIT 1 · SLEEP 3 · KNEEL 8).
+        assert_eq!(cat.posture_state(13), Some(1), "STATE_SIT sets SIT");
+        assert_eq!(cat.posture_state(12), Some(3), "STATE_SLEEP sets SLEEP");
+        assert_eq!(cat.posture_state(68), Some(8), "STATE_KNEEL sets KNEEL");
+        assert_eq!(cat.posture_state(26), Some(0), "STATE_STAND sets STAND");
+        // A proc-2 state emote and a one-shot are NOT posture emotes, however tempting their param
+        // looks: the gate is the proc column, not the param's presence.
+        assert_eq!(cat.posture_state(233), None, "mining state is proc 2");
+        assert_eq!(cat.posture_state(2), None, "ONESHOT_BOW is proc 0");
         assert!(
             cat.voice
                 .keys()

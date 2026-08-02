@@ -100,6 +100,33 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
 
+    // GetName() → this region's global name, or nil when it was declared anonymously — the pair
+    // the frame side already answers. Real FrameXML round-trips a region through its name wherever
+    // it can't hold a reference to itself: `ComboFrame.lua`'s shine chain hands `frame:GetName()`
+    // to a fade `finishedFunc` and `getglobal`s it back ("hack since a frame can't have a
+    // reference to itself in it" — its own comment).
+    //
+    // Resolved by scanning the region-name registry rather than storing the name a second time on
+    // the region: that registry is the single authority for region names (the widget arena
+    // deliberately holds none), and a mirrored copy is one more thing to drift. The scan is linear
+    // in NAMED regions, and this is a human-rate call.
+    m.set(
+        "GetName",
+        lua.create_function(|lua, this: Table| {
+            let id = decode_id(&this)?;
+            let model = lua.app_data_ref::<Model>().expect("model app_data");
+            let name = model
+                .region_names
+                .iter()
+                .find(|&(_, &v)| v == id)
+                .map(|(k, _)| k.clone());
+            match name {
+                Some(n) => Ok(Value::String(lua.create_string(&n)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     // Region-level visibility — the real VisibleRegion Show/Hide on Textures/FontStrings (the
     // ref kit hides tab slices, cooldown swipes, money coins…). A hidden region draws nothing;
     // IsVisible additionally requires the owner frame's effective visibility, mirroring the

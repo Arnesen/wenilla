@@ -267,6 +267,18 @@ pub(crate) struct MovementState {
     /// legs never touch it: unlike the stand state there is nothing to predict controller-side —
     /// the crouch waits on the server's aura, exactly as the reference does.
     pub(crate) stealthed: bool,
+    /// **Stunned** — `UNIT_FIELD_FLAGS & 0x40000`, stamped from the unit's OWN descriptor every
+    /// frame like [`Self::stealthed`] (self and remote alike). It gates the **idle fidget**: the
+    /// reference's idle/fidget selectors bail on the bit outright (`0x5eb4f2`, `0x5ec219` —
+    /// `test dword ptr [eax+0xa0], 0x40000` → `jne` out), so a stunned unit holds one deterministic
+    /// idle instead of looking around.
+    ///
+    /// That is the *whole* of the stun's animation effect — there is no stun clip anywhere in the
+    /// `0x40000` census (wow-re `unit-flags-movement-gates.md` §3). The rest of the frozen look is
+    /// the ROOT half doing its job: a stun always arrives with one, and a rooted unit carries no
+    /// direction bit, so the movement-anim resolver takes its not-moving exit and the body stands
+    /// (decision 0880).
+    pub(crate) stunned: bool,
     /// Riding a **flying** server spline (the taxi flight): the client's selector reads the active
     /// CMovement's spline flags (`[[unit+0x118]+0xa4]+0x18`) and plays Fly 135 when the wire Flying
     /// bit (0x200) is set — RF-0057 `0x5fd19c`. Stamped by [`unify`] from the entity's live
@@ -354,9 +366,17 @@ impl Special {
 /// one-shot at all**, dropping straight into the gait (the reference backpedals the instant it
 /// touches down; 187 is a forward-run footplant and never plays backward — the "forward run flash
 /// after a jump-then-hold-S" bug). `None` = no landing clip, go straight to `Mode::Gait`.
+///
+/// **A ROOTED arc end is not a landing** (decision 0880). A root or a stun caught mid-air ends the
+/// fall where the body hangs — `SetRoot 0x7c7340`'s `StopFalling` clears FALLING with no ground
+/// involved — and the reference suppresses the land packet on exactly that state
+/// (`0x602df3 test ah,0x10` gating opcode `0xc9`). This dispatcher *is* that packet's consumer
+/// (`0x602c60` runs on the FALL_LAND apply, local and observed alike), so no packet means no pick:
+/// the pose starves to Stand instead of playing JumpEnd in mid-air. Same suppression, same byte
+/// site, as the wire half in [`crate::player`]'s arc bookkeeping.
 pub(super) fn jump_land_pick(flags: u32) -> Option<u16> {
     use move_flags::*;
-    if flags & SWIMMING != 0 {
+    if flags & (SWIMMING | ROOT) != 0 {
         None
     } else if flags & ANY_MOVE == 0 {
         Some(39)
@@ -614,6 +634,17 @@ pub(super) fn is_combat_anim(id: u16) -> bool {
     matches!(id, 10 | 16..=24 | 30 | 36 | 57..=59 | 85..=88 | 95 | 117 | 118)
 }
 
+/// The client's **CAST** classifier (`0x5fcbb0` — byte-decoded in wow-re `oneshot-lifecycle.md`
+/// §7, previously unlabelled): the spell-cast release anims `{2, 32, 33, 53, 54}`. Together with
+/// [`is_combat_anim`] it is what the **transplant** predicate (`0x5feae0`) tests on the *currently
+/// armed bone-0 clip*: a locomotion request over one of these does not replace it — the clip moves
+/// up onto the key-bone at its live play position ([`OneShotRoute`]'s two slots, decision 0878).
+/// NOT the ReadySpell holds (51/52) — those are their own set (`0x5fde40`), and a jump over a
+/// standing hold really does take the whole body.
+pub(super) fn is_cast_anim(id: u16) -> bool {
+    matches!(id, 2 | 32 | 33 | 53 | 54)
+}
+
 /// Whether `cands` (this frame's [`gait_candidates`] pick) is bare `[STAND]` — the one precedence
 /// slot the looping **state-emote idle** (`UNIT_NPC_EMOTESTATE`: `/dance`, NPC cooking/sweeping
 /// flavor loops) is allowed to fill instead, exactly where Stand itself would otherwise sit.
@@ -807,6 +838,18 @@ pub(super) fn wound_weight(remaining_frac: f32, others: f32) -> f32 {
     others * lambda / (1.0 - lambda)
 }
 
+/// The client's per-bone blend weight λ at amplitude 1.0 (`0x714880`–`0x714921`): `smoothstep(t)`
+/// with `smoothstep(t) = (3 − 2t)·t²` and `t` the fraction of the blend window **still to run**,
+/// so λ **decays 1 → 0** across it. Shared by the key-bone slot's two cross-fades (decision 0878):
+/// the fade-to-rest that releases a finished one-shot over a fixed 150 ms (op4 `param_3 = −1`,
+/// `0x7123af`: `+0x104 = 1/150`, amplitude `+0x108 = 1.0`) and the blended re-arm that cross-fades
+/// a new masked clip in over the *incoming* sequence's own blendTime (`0x7125f2`). The wound's
+/// twin ([`wound_weight`]) is the same curve at amplitude 0.75.
+pub(super) fn blend_lambda(remaining_frac: f32) -> f32 {
+    let t = remaining_frac.clamp(0.0, 1.0);
+    (3.0 - 2.0 * t) * t * t
+}
+
 /// The client's `_rand` — the MSVCRT LCG (`state × 214013 + 2531011`, output `(state >> 16) &
 /// 0x7fff`; byte-verified wow-re `rf36-rand-stub.md` at `0x7400e5`) — the roll feeding op4's
 /// per-play **variation pick** (`ModelAnimations::pick_variation`) and its **replay-count roll**
@@ -931,8 +974,18 @@ pub(super) fn route_oneshot(id: u16, flags: u32, stand_state: u8) -> OneShotRout
 }
 
 /// `AnimationData` ids whose playback rate the client scales by movement speed (wow-5875-re `0x5fee80`):
-/// the locomotion gaits. An id outside this set plays at rate 1×.
+/// the locomotion gaits. An id outside this set plays at rate 1×. The **same** table is the
+/// LOCOMOTION membership the transplant predicates key on ([`is_locomotion`]).
 const RATE_SCALED: &[u16] = &[4, 5, 11, 12, 13, 37, 38, 39, 42, 43, 44, 45, 135, 143, 187];
+
+/// The client's **LOCOMOTION** membership (`0x5fee80` — the very table the rate scaler uses):
+/// what the transplant predicates test as "the clip being *requested* is a base locomotion clip"
+/// (`0x5feae0`/`0x5fe912`, wow-re `oneshot-lifecycle.md` §3a). Note Fall(40) and SwimIdle(41) are
+/// **not** members — a FALLINGFAR latch mid-cast replaces the cast on bone 0 rather than
+/// transplanting it, exactly as the bytes order it.
+pub(super) fn is_locomotion(id: u16) -> bool {
+    RATE_SCALED.contains(&id)
+}
 
 /// The playback rate for a clip given the unit's live speed (wow-5875-re `0x5fe2f0`): `speed / moveSpeed`
 /// for a rate-scaled locomotion clip, else 1×. (The client also divides by the model's scale magnitude,

@@ -5,6 +5,14 @@
 //! report ("it snaps when I land") can be read across all of them. Each file opens with a
 //! `# t0=<unix epoch>` header so **two clients' traces align with each other**, which is what a
 //! sender-vs-observer question needs. Costs one `OnceLock` read per call when the env var is unset.
+//!
+//! **`WOW_MOVE_TRACE_TAGS="move,snd,in"` narrows it to those tags** (unset = everything). This is
+//! not tidiness: every line is an unbuffered `write` under one global mutex on the main thread, so a
+//! busy tag distorts the run it is meant to measure. A 600-yd fall probe (decision 0880) wrote
+//! ~4,200 lines/s, nearly all of them `card`, and the `move` line's own `t=` then carried whatever
+//! the queue ahead of it cost — frames read back as 0.011 s with 2.86 yd of travel, or 0.040 s with
+//! 0.96 yd, against a physics integration that was exact. A trace whose clock cannot be trusted for
+//! per-frame timing is half an instrument; filtering to the tags the question needs gives it back.
 
 use std::fs::File;
 use std::io::Write;
@@ -40,14 +48,42 @@ fn sink() -> Option<&'static Mutex<Sink>> {
     .as_ref()
 }
 
+/// The optional tag allow-list from `WOW_MOVE_TRACE_TAGS`; `None` (unset or empty) = keep everything.
+static TAGS: OnceLock<Option<Vec<String>>> = OnceLock::new();
+
+/// Whether `tag` survives the allow-list. Checked **before** the mutex, so a filtered-out tag costs
+/// a slice compare rather than a lock and a syscall — which is the whole point (see the module note).
+fn tag_allowed(tag: &str) -> bool {
+    TAGS.get_or_init(|| {
+        let raw = std::env::var("WOW_MOVE_TRACE_TAGS").ok()?;
+        let allow: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        (!allow.is_empty()).then_some(allow)
+    })
+    .as_ref()
+    .is_none_or(|allow| allow.iter().any(|t| t == tag))
+}
+
 /// Whether the trace is enabled — lets callers skip building their line when it's off.
 pub(crate) fn enabled() -> bool {
     sink().is_some()
 }
 
+/// Whether this *tag* is being written — [`enabled`] plus the allow-list, for a caller whose line is
+/// expensive to build (a per-frame `format!` over a hot loop) and which is filtered out anyway.
+pub(crate) fn enabled_for(tag: &str) -> bool {
+    enabled() && tag_allowed(tag)
+}
+
 /// Append one tagged line, stamped with the sink's shared clock.
 pub(crate) fn line(tag: &str, msg: &str) {
     let Some(sink) = sink() else { return };
+    if !tag_allowed(tag) {
+        return;
+    }
     let Ok(mut s) = sink.lock() else { return };
     let t = s.t0.elapsed().as_secs_f32();
     let _ = writeln!(s.out, "t={t:9.3} {tag:4} {msg}");

@@ -52,6 +52,13 @@ impl EmoteSounds {
         self.0.emote_flags(emote_id)
     }
 
+    /// The **stand state** this emote sets, if it is a posture emote (`EmoteSpecProc == 1`) —
+    /// `DoEmote`'s state branch (wow-re `object-layer/scratch/emote-posture-gate.md` §1). Promoted
+    /// for `crate::ui_chat`: it is what makes `/sit` actually sit.
+    pub(crate) fn posture_state(&self, emote_id: u32) -> Option<u32> {
+        self.0.posture_state(emote_id)
+    }
+
     /// The `$ESD` anim event's kit for a unit in this looping state emote: the row's
     /// `EventSoundID`, gated on `EmoteSpecProc == 2` — the client's `row[+0x10] == 2` test in the
     /// `$ESD` handler `0x6239f0` before it reads `row[+0x18]` (wow-re

@@ -36,6 +36,9 @@ pub(super) struct Frame {
     /// The atomic step-up's committed height gain this frame (yd), when the maneuver ran
     /// (decision 0209).
     pub climb: Option<f32>,
+    /// The root's anchor ran this frame (decision 0880) — no gravity, no slide, no snap. Without it
+    /// on the line, a rooted hang and a genuinely stuck mover are the same column of `dy=+0.000`.
+    pub anchored: bool,
 }
 
 /// One `snd` line per outbound movement packet: the opcode we chose, the live move-flags it carries,
@@ -156,11 +159,20 @@ pub(super) fn frame(f: Frame) {
         ),
     };
     let climb = f.climb.map_or(String::new(), |t| format!(" climb={t:+.3}"));
+    let anchored = if f.anchored { " ROOTED" } else { "" };
     dbg_trace::line(
         "move",
         &format!(
-            "y {:9.3} -> {:9.3} dy={:+.3} grounded={} walk={} vy={:+7.2} {}{}",
-            f.y_in, f.y_out, dy, f.grounded as u8, f.on_walkable as u8, f.vel_y, snap, climb
+            "y {:9.3} -> {:9.3} dy={:+.3} grounded={} walk={} vy={:+7.2} {}{}{}",
+            f.y_in,
+            f.y_out,
+            dy,
+            f.grounded as u8,
+            f.on_walkable as u8,
+            f.vel_y,
+            snap,
+            climb,
+            anchored
         ),
     );
 }

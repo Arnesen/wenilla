@@ -12,9 +12,9 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
-    gossip, group, items, loot, mail, monster_move, movement, opcode, progression, quest, social,
-    spellbook, spells, taxi, trade, trainer, update_object, vendor, world_state, Character,
-    CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
+    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, progression,
+    quest, social, spellbook, spells, taxi, trade, trainer, update_object, vendor, world_state,
+    Character, CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -882,6 +882,18 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_DUEL_COUNTDOWN => ServerPacket::DuelCountdown {
             seconds: duel::read_duel_countdown(&mut r)?,
+        },
+        // The mirror timers (decision 0874; bodies in `mirror_timer`). START carries the timer's
+        // whole state and is re-sent on every change — there is no update opcode in the family.
+        opcode::SMSG_START_MIRROR_TIMER => {
+            ServerPacket::MirrorTimerStart(mirror_timer::read_start_mirror_timer(&mut r)?)
+        }
+        opcode::SMSG_PAUSE_MIRROR_TIMER => {
+            let (kind, paused) = mirror_timer::read_pause_mirror_timer(&mut r)?;
+            ServerPacket::MirrorTimerPause { kind, paused }
+        }
+        opcode::SMSG_STOP_MIRROR_TIMER => ServerPacket::MirrorTimerStop {
+            kind: mirror_timer::read_stop_mirror_timer(&mut r)?,
         },
         // The social family (decision 0668; bodies in `social`). Both list packets are
         // replace-everything snapshots; the status packet is one result about one player.

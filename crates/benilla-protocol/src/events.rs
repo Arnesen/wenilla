@@ -13,7 +13,7 @@ use crate::messages::{
     ActionButton, AttackerState, ChannelNoticeTail, Character, CreateSpline, DamageShield,
     EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
     GroupLootInfo, GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
-    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry,
+    LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
     MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete,
     QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate,
     SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, TaxiMask, TradeStatus,
@@ -904,6 +904,18 @@ pub enum SessionEvent {
     },
     /// Start the duel countdown (`SMSG_DUEL_COUNTDOWN`) — already in whole seconds.
     DuelCountdown { seconds: u32 },
+    /// One mirror timer started, or was wholly re-stated (`SMSG_START_MIRROR_TIMER`, decision
+    /// 0874) — the breath / fatigue bars. There is no separate update opcode: the server re-sends
+    /// this whole packet whenever direction, remaining time or frozen state changes, so a
+    /// consumer must treat it as idempotent re-statement, not only as a first appearance.
+    MirrorTimerStart(MirrorTimerStart),
+    /// Freeze/unfreeze one running mirror timer (`SMSG_PAUSE_MIRROR_TIMER`). vmangos never sends
+    /// it on purpose — see [`crate::messages::opcode::SMSG_PAUSE_MIRROR_TIMER`].
+    MirrorTimerPause { kind: u32, paused: bool },
+    /// One mirror timer is over (`SMSG_STOP_MIRROR_TIMER`) — hide its bar. Sent both when the
+    /// condition ends *well* (surfacing refills the bar to full, and the server stops it there)
+    /// and when it stops applying at all (death, leaving the water).
+    MirrorTimerStop { kind: u32 },
     /// The whole friend list (`SMSG_FRIEND_LIST`, decision 0668) — pushed unasked at login and
     /// again for every `CMSG_FRIEND_LIST`. Always the complete list, never a delta, so it
     /// replaces whatever is held. Names are NOT on the wire (see [`crate::messages::social`]);

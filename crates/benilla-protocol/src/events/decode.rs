@@ -445,6 +445,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             loser,
         }],
         ServerPacket::DuelCountdown { seconds } => vec![SessionEvent::DuelCountdown { seconds }],
+        ServerPacket::MirrorTimerStart(start) => vec![SessionEvent::MirrorTimerStart(start)],
+        ServerPacket::MirrorTimerPause { kind, paused } => {
+            vec![SessionEvent::MirrorTimerPause { kind, paused }]
+        }
+        ServerPacket::MirrorTimerStop { kind } => vec![SessionEvent::MirrorTimerStop { kind }],
         ServerPacket::FriendList { friends } => vec![SessionEvent::FriendList { friends }],
         ServerPacket::IgnoreList { guids } => vec![SessionEvent::IgnoreList { guids }],
         ServerPacket::FriendStatus(status) => vec![SessionEvent::FriendStatus(status)],

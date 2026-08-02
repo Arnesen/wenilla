@@ -33,9 +33,9 @@ use crate::collision::player_query_filter;
 
 use super::{
     move_trace, Player, AIR_NUDGE_SPEED, CAPSULE_HEIGHT, FEATHER_TERMINAL_VELOCITY, GRAVITY,
-    GROUND_COS, GROUND_PROBE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH, STEP_SLOPE_RATIO,
-    STEP_SNAP_SLACK, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL, WEDGE_STALL_RATIO,
-    WEDGE_STILL_FRAMES,
+    GROUND_COS, GROUND_PROBE, HOVER_CLIMB_RATE, HOVER_HEIGHT, JUMP_SPEED, LAND_PROBE, SKIN_WIDTH,
+    STEP_SLOPE_RATIO, STEP_SNAP_SLACK, STEP_UP_HEIGHT, TERMINAL_VELOCITY, WEDGE_MIN_FALL,
+    WEDGE_STALL_RATIO, WEDGE_STILL_FRAMES,
 };
 
 /// What the step decided — read by the move-flags / wire logic that follows it in `control`.
@@ -122,6 +122,23 @@ pub(super) fn step(
     // swimmer, or a genuinely airborne teleport never produces (the loading-screen-until-landing
     // hang). The streamer runs every frame in every mover mode, so every mode releases the same way.
     let held = player.settling;
+    // **Rooted: the mover is ANCHORED — nothing advances the body, in any axis** (decision 0880).
+    // `SetRoot 0x7c7340` is three acts, not one: set `0x1000`, `call 0x7c6290` **StopFalling**
+    // (`and eax,0xffff9fff` — FALLING *and* FALLINGFAR together), then wipe the direction bits
+    // (`and 0xffe07f00`) and re-run the basis recompute `0x7c5c20`, which with no direction bit left
+    // to read builds a zero horizontal velocity. With FALLING clear the mode dispatcher `0x634040`
+    // routes the next substep to the WALK resolver `0x6367b0` rather than the fall integrator
+    // `0x635b00` — **the only place gravity lives** — and the walk resolver's own head gate returns
+    // immediately when the substep's horizontal distance is under `2^-20`, so no down-probe, no
+    // step-down snap and no fall election run either. Nothing is left that could move the body.
+    //
+    // That is why a root or a stun taken **mid-air leaves you hanging exactly where it caught you**,
+    // and why the drop resumes only on release: `ClearRoot 0x7c7370` calls `0x7c61c0` StartFalling,
+    // and `0x7c61c0` is precisely the entry that refuses while rooted
+    // (`0x7c61d6 test dword ptr [ecx+0x40], 0x203800` — SWIMMING|FALLING|ROOT|FIXED_Z), so no fall
+    // can begin under a root by any path. (wow-re `moveflag-family.md` §1/§5.3,
+    // `step-vs-fall-election.md`.)
+    let anchored = !held && player.modes.rooted;
     let on_floor = !held && on_walkable && player.vel_y <= 0.0;
 
     // The wedged rest (decision 0211) stands until real ground takes over or the support
@@ -136,8 +153,9 @@ pub(super) fn step(
     let grounded = on_floor || player.wedged;
 
     let mut jumped = false;
-    if held {
-        // Frozen at the snap position with no velocity until the ground loads under us.
+    if held || anchored {
+        // Frozen: the settle's hold (no velocity until the ground loads under us) or the root's
+        // anchor. The mover cannot tell them apart — both mean no gravity and no carried momentum.
         player.vel_y = 0.0;
         player.horiz_vel = Vec3::ZERO;
     } else if grounded {
@@ -162,9 +180,14 @@ pub(super) fn step(
         player.vel_y = (player.vel_y - GRAVITY * dt).max(-terminal);
     }
     let mut air_nudged = false;
-    if grounded {
+    // The anchor owns the horizontal too — the wipe leaves the basis recompute nothing to build a
+    // velocity from, so a body rooted mid-jump stops dead in the air instead of coasting on its
+    // frozen takeoff momentum. (Both arms below are already inert under a root — the caller zeroes
+    // `dir`, so `moving` is false and `input_horiz` is zero — but the anchor says it itself rather
+    // than inheriting it from a gate three functions away.)
+    if grounded && !anchored {
         player.horiz_vel = input_horiz;
-    } else if !held && moving && player.horiz_vel.length_squared() < 0.01 {
+    } else if !held && !anchored && moving && player.horiz_vel.length_squared() < 0.01 {
         // Air control: one nudge to steer a jump that took off from a standstill (a moving jump
         // keeps its momentum locked, since horiz_vel is already non-zero). The pressed direction
         // *really* moves us, so it re-seeds the frozen airborne direction flags.
@@ -177,7 +200,7 @@ pub(super) fn step(
     // snap — the same code every remote mover's dead-reckon runs. Held and airborne/jumping
     // frames keep their own slide here: no step-up, no snap, and gravity in the velocity.
     let (mut climb, mut snap_probe) = (None, None);
-    if !held && grounded && !jumped {
+    if !held && !anchored && grounded && !jumped {
         let g = grounded_step(
             ms,
             capsule,
@@ -194,9 +217,9 @@ pub(super) fn step(
             ground_entity = Some(e);
         }
     } else {
-        // Held: zero velocity (no move) — `held` already zeroed both terms, but say it outright.
-        // Jumping/airborne: gravity carries the arc.
-        let velocity = if held {
+        // Held or anchored: zero velocity (no move) — both already zeroed the two terms, but say it
+        // outright. Jumping/airborne: gravity carries the arc.
+        let velocity = if held || anchored {
             Vec3::ZERO
         } else {
             player.horiz_vel + Vec3::Y * player.vel_y
@@ -214,6 +237,7 @@ pub(super) fn step(
     // growing) catches the funnel's pinch-in as it happens — 0211's absolute-stillness test
     // waited out the decelerating millimeter creep, a visible hang in the falling pose.
     if !held
+        && !anchored
         && !grounded
         && !jumped
         && player.vel_y < -WEDGE_MIN_FALL
@@ -239,6 +263,22 @@ pub(super) fn step(
     // The frame that detects the wedge reports grounded immediately, so the falling pose ends
     // and the wire sees a normal landing (`MSG_MOVE_FALL_LAND`) this frame, not next.
     let mut grounded = grounded || player.wedged;
+
+    // **The hover climb** (decision 0872): the snap above can only lower the body, so the *rise* to
+    // the 1.0-yd clearance is this separate rate-limited pass — the reference's second writer at
+    // `0x636fa1`–`0x6370f1`, which climbs toward the same clearance at [`HOVER_CLIMB_RATE`]. Without
+    // it the grant reads as an instant pop; with it the body floats up over ~0.14 s.
+    // (…and never while anchored: the climb is the walk resolver's own second pass, so the rooted
+    // mover's stationary early-return skips it exactly like the snap above.)
+    if hover_offset > 0.0 && !held && !anchored {
+        if let Some(h) = probe_down(center, HOVER_HEIGHT + CAPSULE_HEIGHT) {
+            let clearance = h.distance;
+            if clearance < HOVER_HEIGHT {
+                center.y += (HOVER_HEIGHT - clearance).min(HOVER_CLIMB_RATE * dt);
+                player.vel_y = player.vel_y.max(0.0); // climbing, not falling
+            }
+        }
+    }
 
     // **Water walking: the liquid surface IS the floor** (decision 0866). `water_floor` is the
     // surface Y the caller resolved, and it is `Some` only while the mode is granted AND we are not
@@ -266,6 +306,7 @@ pub(super) fn step(
         vel_y: player.vel_y,
         snap: snap_probe,
         climb,
+        anchored,
     });
 
     Outcome {
@@ -398,7 +439,11 @@ pub(crate) fn grounded_step(
     let snap = Some((reach, hit.as_ref().map(|h| (h.distance, h.normal1.y))));
     let mut ground = None;
     if let Some(h) = hit.filter(|h| h.normal1.y >= GROUND_COS) {
-        slid.y -= h.distance - surface_offset;
+        // `max(…, 0)` is the reference's, and it is the difference between a float and a pop: the
+        // snap **only ever descends** (`0x636e8d`–`0x636e9e` skips the write when `L − 1.0 < 0`), so
+        // a hovering body that is already within its clearance is left where it is rather than
+        // yanked up to it. The rise to clearance is a separate rate-limited climb — see [`step`].
+        slid.y -= (h.distance - surface_offset).max(0.0);
         ground = Some(h.entity);
     }
     GroundedStep {

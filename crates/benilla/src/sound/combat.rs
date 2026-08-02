@@ -32,8 +32,8 @@
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
 //!
-//! INTERIM readings (flagged for a wow-re pass): players' weapon material is assumed metal and
-//! victims' armor lands on the flesh slot (the chain/plate slots need the armor-material chain);
+//! INTERIM readings (flagged for a wow-re pass): victims' armor lands on the flesh slot (the
+//! chain/plate slots need the armor-material chain);
 //! blocks assume a metal shield; the injury vocal plays on every damaging hit (the client may
 //! throttle); the deflect (`0x457f20`) and immune/absorb (`0x458610`) positioned stubs' kit ids
 //! are unpinned, so those branches stay silent here; the natural-weapon column is gated on
@@ -74,9 +74,9 @@ const COMBAT_MISS_2H: u32 = 7081;
 
 /// Weapon subclasses swung two-handed (item weapon subclass ids) — picks the 2H whoosh.
 const TWO_HANDED: [u32; 6] = [1, 5, 6, 8, 10, 17];
-/// Weapon subclasses whose body is wood (staff/polearm/fishing pole) — the non-metal row
-/// variant, and the wood parry slot when they parry (INTERIM heuristic, module docs).
-const WOODEN: [u32; 3] = [6, 10, 20];
+/// `Material.dbc` id 2 — a wood-bodied item, which picks the non-metal impact row and the wood
+/// parry slot. Read off the item itself (decision 0882), never inferred from its subclass.
+const MATERIAL_WOOD: u8 = 2;
 /// Fist/unarmed subclass — the row a weaponless swing uses (`Unarmed_Generic`).
 const UNARMED_SUBCLASS: u32 = 13;
 
@@ -104,12 +104,18 @@ fn load_weapon_impacts(mut commands: Commands, assets: Option<Res<WorldAssets>>)
 #[derive(Default)]
 struct LastSwing(EntityHashMap<SwingMessage>);
 
-/// The attacker's swinging weapon: `(subclass, wooden)`, unarmed when the hand is empty.
+/// The attacker's swinging weapon: `(subclass, wooden)`, unarmed when the hand is empty. The
+/// wood-vs-metal half is the item's own **`Material`** off the wire (decision 0882) — not a
+/// subclass guess, which the real 5875 data contradicts outright: maces (subclass 4) ship in both
+/// materials, so a Cudgel is wood where a Mace is metal.
 fn swing_weapon(wielded: Option<&Wielded>, offhand: bool) -> (u32, bool) {
     let hand = wielded.and_then(|w| if offhand { w.off } else { w.main });
     match hand {
         // class 2 = weapon; anything else in hand (held misc) swings as unarmed.
-        Some((2, subclass)) => (u32::from(subclass), WOODEN.contains(&u32::from(subclass))),
+        Some((2, subclass)) => (
+            u32::from(subclass),
+            wielded.is_some_and(|w| w.materials[usize::from(offhand)] == MATERIAL_WOOD),
+        ),
         _ => (UNARMED_SUBCLASS, false),
     }
 }
