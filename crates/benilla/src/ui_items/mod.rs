@@ -494,7 +494,11 @@ pub(crate) fn item_use_command(
 }
 
 /// The client's quality→color escape for an item link (`GetItemQualityColor`'s table) — shared by
-/// [`feed`]'s bag links and [`crate::ui_char`]'s doll-slot links (one table, no drifting twins).
+/// [`item_link`] and everything downstream of it (one table, no drifting twins).
+///
+/// VERIFIED against the 1.12.1 binary (`WoW.exe` 5875): `0x52ad90` indexes the seven-pointer table
+/// at `0x854124` into the `|cffRRGGBB` literals at `0x8546dc`, and **clamps anything `>= 7` to
+/// index 1** (white) — which is what the catch-all arm below is, not a defensive default.
 pub(super) fn quality_color(quality: u32) -> &'static str {
     match quality {
         0 => "ff9d9d9d",
@@ -505,6 +509,40 @@ pub(super) fn quality_color(quality: u32) -> &'static str {
         6 => "ffe6cc80",
         _ => "ffffffff",
     }
+}
+
+/// Build one item hyperlink — **the** item-link builder, the single owner of the escape shape.
+///
+/// VERIFIED against the 1.12.1 binary: `0x52adb0` is `SStrPrintf(dst, 0x400, fmt, …)` over
+/// `fmt @0x8549c8 = "%s|Hitem:%d:%d:%d:%d|h[%s]|h%s"`, with the leading `%s` the [`quality_color`]
+/// escape, the four `%d` = (item id, enchant id, random-property id, suffix factor), and the
+/// trailing `%s` the `"|r"` reset (`0x844538`). Every link the client shows — bag, paperdoll,
+/// inspect, loot-roll announcement, "You receive loot" — comes out of this one function, so ours
+/// does too: five hand-rolled `format!` twins of this string is how one site (the receive line)
+/// silently shipped a bare, uncoloured name.
+pub(super) fn item_link_full(
+    item_id: u32,
+    enchant_id: u32,
+    random_property_id: u32,
+    suffix_factor: u32,
+    name: &str,
+    quality: u32,
+) -> String {
+    format!(
+        "|c{}|Hitem:{item_id}:{enchant_id}:{random_property_id}:{suffix_factor}|h[{name}]|h|r",
+        quality_color(quality)
+    )
+}
+
+/// [`item_link_full`] for a caller that has no enchant/random-property ids in hand.
+///
+/// **Stated approximation (documented gap).** Bag, paperdoll and inspect items *do* carry an
+/// enchant and a random property on the wire; we do not thread either into the link yet, and the
+/// real client additionally appends the `ItemRandomProperties.dbc` suffix to the **name**
+/// (`0x5d8b00`) so a random-suffix green reads "Chipped Claw of the Bear". Both are one
+/// random-suffix arc, not per-call-site drift — which is why the zeros live here, once.
+pub(super) fn item_link(item_id: u32, name: &str, quality: u32) -> String {
+    item_link_full(item_id, 0, 0, 0, name, quality)
 }
 
 /// `INVTYPE_AMMO` — the projectile/ammo inventory type (arrows, bullets). Loaded via

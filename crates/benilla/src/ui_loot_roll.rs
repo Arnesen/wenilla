@@ -64,6 +64,7 @@ use crate::items::Items;
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands, SelfGuid};
 use crate::ui_chat::{ChatEvent, ChatEventKind, ChatLog};
+use crate::ui_items::item_link;
 use crate::ui_script::UiInput;
 
 /// Give up re-checking a pending announcement's names after this many frames — the same budget and
@@ -235,17 +236,6 @@ impl Plugin for UiLootRollPlugin {
             ),
         );
     }
-}
-
-/// The item link a roll line embeds — the `%s|Hitem:%d:%d:%d:%d|h[%s]|h%s` the `LOOT_ROLL_*`
-/// GlobalStrings all share, with the leading `%s` the quality color escape and the trailing `%s`
-/// the `|r` reset (the same link shape [`crate::ui_items`]'s bag links and [`crate::ui_char`]'s
-/// doll-slot links build — one helper each, one table behind them).
-fn item_link(item_id: u32, name: &str, quality: u32) -> String {
-    format!(
-        "|c{}|Hitem:{item_id}:0:0:0|h[{name}]|h|r",
-        crate::ui_items::quality_color(quality)
-    )
 }
 
 /// Pick and fill the announcement's chat string, given the pieces already resolved: the roller's

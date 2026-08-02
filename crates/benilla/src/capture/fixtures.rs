@@ -1152,11 +1152,25 @@ fn seed_bag_window(
     // Seed a few chat lines into ChatFrame1 (the bottom-left docked window) — the look-pass
     // instrument for the chat-line drop shadow + the ChatFontNormal wiring (Slice C). This rides the
     // Bag/Tooltip fixtures, NOT the merchant/gossip A/B pair, so the DPI before/after captures stay
-    // identical. The pinned per-type colors: SYSTEM yellow, SAY white, LOOT green.
+    // identical. The pinned per-type colors: SYSTEM yellow, SAY white, LOOT green. The LOOT pair is
+    // also the regression baseline for the item link inside a coloured line (`ui_loot::receive_line`
+    // — the quality escape wins over the line colour for the bracketed name, and the `x2` after the
+    // `|r` falls back to LOOT green): a common/white Tough Jerky and an uncommon/green stack.
     for (text, r, g, b) in [
         ("Welcome to Northshire Valley.", 1.0, 1.0, 0.0),
         ("[Marshal McBride] says: Well met, citizen.", 1.0, 1.0, 1.0),
-        ("You receive loot: [Tough Jerky].", 0.0, 170.0 / 255.0, 0.0),
+        (
+            "You receive loot: |cffffffff|Hitem:117:0:0:0|h[Tough Jerky]|h|r.",
+            0.0,
+            170.0 / 255.0,
+            0.0,
+        ),
+        (
+            "You receive loot: |cff1eff00|Hitem:4306:0:0:0|h[Silk Cloth]|h|rx2.",
+            0.0,
+            170.0 / 255.0,
+            0.0,
+        ),
     ] {
         script.add_chat_message("ChatFrame1", text, r, g, b);
     }

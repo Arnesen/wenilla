@@ -287,13 +287,19 @@ pub struct Region {
 /// The **screen root** (`CSimpleTop` / `UIParent`) is *not* a node here — a frame with
 /// `parent == None` is a top-level frame anchored to the always-visible, unit-scale screen root.
 ///
-/// **Insertion / draw order.** Each frame gets a monotonic `insertion_seq` at creation, used as the
-/// draw-order tiebreak within a `(strata, level)` bucket — and, like the client, a frame is
-/// re-sequenced to its bucket's **tail** whenever it *becomes visible* (`effective_visible_show
-/// 0x76ae10` re-ADDS to the intrusive level list) or a visible frame changes strata/level (both
-/// setters remove-then-add; `propagation.md`). Show order IS draw order within a bucket — how the
-/// reference's late-shown `MiniMapTrackingFrame` draws over the earlier-declared `MinimapBackdrop`
-/// ring despite the XML declaring it first (decision 0557; the mutators live in [`propagation`]).
+/// **Link-stamp / draw order.** Each frame gets a monotonic `insertion_seq` at creation, used as the
+/// draw-order tiebreak **below the draw layer** within a `(strata, level)` bucket (decision 0884 —
+/// the layer outranks the frame; see [`crate::order`]). Like the client, a frame is re-stamped to
+/// its bucket's **tail** whenever it *becomes visible* (`effective_visible_show 0x76ae10` re-ADDS to
+/// the intrusive level list) or a visible frame changes strata/level (both setters remove-then-add;
+/// `propagation.md`). Show order IS draw order within a bucket — how the reference's late-shown
+/// `MiniMapTrackingFrame` draws over the earlier-declared `MinimapBackdrop` ring despite the XML
+/// declaring it first (decision 0557; the mutators live in [`propagation`]).
+///
+/// The client's own list is a *head* insert walked tail→head, i.e. FIFO by link time with the
+/// newest-linked frame emitted last — order-equivalent to this ascending counter, which is why the
+/// counter stays (0884's §5 refuted the intuition that a head insert draws *first*). A same-value
+/// `SetFrameLevel` early-outs before re-stamping, matching `0x76a4f0`'s `je` at `0x76a509`.
 pub struct WidgetArena {
     frames: Arena<Frame>,
     regions: Arena<Region>,

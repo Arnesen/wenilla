@@ -44,7 +44,7 @@ use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, SelfPlayer};
 use crate::pending_item_ops::PendingItemOps;
 use crate::portrait::PaperDollBooth;
-use crate::ui_items::{find_equip_slot, quality_color};
+use crate::ui_items::{find_equip_slot, item_link};
 use crate::ui_script::UiInput;
 
 /// Equipment slots, 0-based (`EQUIPMENT_SLOT_*`): the inv-slot array index of the main hand,
@@ -431,12 +431,7 @@ fn slot_view(
             Some(t.name.clone()),
             t.quality as i32,
             t.display_info_id,
-            Some(format!(
-                "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
-                quality_color(t.quality),
-                entry,
-                t.name
-            )),
+            Some(item_link(entry, &t.name, t.quality)),
             find_equip_slot(t.inventory_type),
             t.class,
             t.placeable_on_action_bar(),
@@ -528,12 +523,7 @@ fn inventory_slots(
                 Some(t.name.clone()),
                 t.quality as i32,
                 t.display_info_id,
-                Some(format!(
-                    "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
-                    quality_color(t.quality),
-                    ammo_id,
-                    t.name
-                )),
+                Some(item_link(ammo_id, &t.name, t.quality)),
             ),
             None => (None, 0, 0, None),
         };

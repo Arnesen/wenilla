@@ -203,6 +203,34 @@ mod markup_tests {
         assert_eq!(lines[0][2].color, WHITE);
     }
 
+    /// The director-reported symptom, at the run level: a LOOT-green chat line whose item name
+    /// draws in the item's **quality** colour, not the line's. The whole "You receive loot" fix
+    /// hangs on the escape surviving intact from `ui_loot::receive_line` to here — this is the same
+    /// string that function emits, with LOOT green (0,170,0) as the line's base colour.
+    #[test]
+    fn a_loot_line_draws_its_item_name_in_the_quality_color_and_the_count_in_the_line_color() {
+        const LOOT_GREEN: [f32; 4] = [0.0, 170.0 / 255.0, 0.0, 1.0];
+        let lines = parse_markup(
+            "You receive loot: |cff9d9d9d|Hitem:7092:0:0:0|h[Chipped Claw]|h|rx2.",
+            LOOT_GREEN,
+        );
+        assert_eq!(lines[0].len(), 3);
+        assert_eq!(lines[0][0].text, "You receive loot: ");
+        assert_eq!(lines[0][0].color, LOOT_GREEN);
+        // The bracketed name: poor/grey, and clickable.
+        assert_eq!(lines[0][1].text, "[Chipped Claw]");
+        let grey = 0x9d as f32 / 255.0;
+        assert_eq!(lines[0][1].color, [grey, grey, grey, 1.0]);
+        assert_eq!(
+            lines[0][1].link.as_ref().expect("linked run").link,
+            "item:7092:0:0:0"
+        );
+        // The `|r` lands before the count, so `x2.` falls back to the line's own green.
+        assert_eq!(lines[0][2].text, "x2.");
+        assert_eq!(lines[0][2].color, LOOT_GREEN);
+        assert!(lines[0][2].link.is_none());
+    }
+
     #[test]
     fn newline_splits_lines() {
         let lines = parse_markup("one\ntwo", WHITE);

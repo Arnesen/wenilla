@@ -807,7 +807,7 @@ pub(super) fn apply_net_updates(
             SessionEvent::LootReleaseResponse { guid } => {
                 loot_release_response(guid, &mut loot, &mut loot_latch)
             }
-            SessionEvent::ItemPushResult(p) => item_push_result(p, &mut loot),
+            SessionEvent::ItemPushResult(p) => item_push_result(p, &self_guid, &mut loot),
             // ── The group-loot roll family (decision 0591) — the GroupLootFrame feed ───────────
             SessionEvent::LootStartRoll(p) => loot_start_roll(p, &mut loot_rolls),
             SessionEvent::LootRoll(p) => loot_roll(p, &mut loot_rolls),

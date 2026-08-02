@@ -25,6 +25,12 @@ const STEALTH_KIT: u32 = 312;
 const GHOST: u32 = 8326;
 const GHOST_VISUAL: u32 = 886;
 const GHOST_KIT: u32 = 989;
+/// **Ice Block** → `SpellVisual` 4325 → state kit 3709: proc 1 tint `9074175.0` + **proc 11 @ 0.0**
+/// (plus `icebarrier_state.mdx` at attach 0x13, which this layer doesn't own). The freeze, from the
+/// shipped table — `benilla-extract spellvis 11958`.
+const ICE_BLOCK: u32 = 11958;
+const ICE_BLOCK_VISUAL: u32 = 4325;
+const ICE_BLOCK_KIT: u32 = 3709;
 
 fn proc(ty: i32, param0: f32) -> CharProc {
     CharProc {
@@ -72,9 +78,21 @@ fn the_dispatch_names_only_the_verified_procs() {
         node_for(proc(char_proc_type::TINT, 65_280.0)),
         Some(AuraNode::Tint([0x00, 0xFF, 0x00])),
     );
-    // The five other types that ride real state kits have no verified mechanism yet: no node, so
+    // Proc 11 is a playback RATE, straight through (`0x60db7e` → `SetBoneAnimSpeed 0x712910`).
+    // Ice Block's 0.0 is the freeze; kit 1744's 8947848.0 goes through unexamined too, exactly as
+    // the reference hands the column on.
+    assert_eq!(
+        node_for(proc(char_proc_type::ANIM_RATE, 0.0)),
+        Some(AuraNode::AnimRate(0.0)),
+        "the freeze family's rate rides params[0]"
+    );
+    assert_eq!(
+        node_for(proc(char_proc_type::ANIM_RATE, 8_947_848.0)),
+        Some(AuraNode::AnimRate(8_947_848.0)),
+    );
+    // The four other types that ride real state kits have no verified mechanism yet: no node, so
     // nothing is invented and the kit doesn't arm on them alone.
-    for ty in [2, 7, 8, 11, 13] {
+    for ty in [2, 7, 8, 13] {
         assert_eq!(node_for(proc(ty, 1.0)), None, "type {ty} is unmodelled");
     }
 }
@@ -245,6 +263,13 @@ fn app_with_chains() -> App {
                     ..Default::default()
                 },
             ),
+            (
+                ICE_BLOCK_VISUAL,
+                VisualStages {
+                    state: ICE_BLOCK_KIT,
+                    ..Default::default()
+                },
+            ),
         ]),
         HashMap::from([
             // Kit 312's real slots: the unmodelled proc 7 FIRST, then proc 14 — so this also pins
@@ -258,6 +283,13 @@ fn app_with_chains() -> App {
                 proc_kit(&[
                     proc(char_proc_type::TINT, 9_222_653.0),
                     proc(char_proc_type::ALPHA, 0.5),
+                ]),
+            ),
+            (
+                ICE_BLOCK_KIT,
+                proc_kit(&[
+                    proc(char_proc_type::TINT, 9_074_175.0),
+                    proc(char_proc_type::ANIM_RATE, 0.0),
                 ]),
             ),
         ]),
@@ -275,6 +307,13 @@ fn app_with_chains() -> App {
                 GHOST,
                 benilla_formats::SpellDisplay {
                     visual: GHOST_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                ICE_BLOCK,
+                benilla_formats::SpellDisplay {
+                    visual: ICE_BLOCK_VISUAL,
                     ..Default::default()
                 },
             ),
@@ -720,4 +759,172 @@ fn the_rig_free_hook_clears_a_dead_units_tint() {
         crate::instance_tint::IDENTITY,
         "the slot is clean before anyone can reallocate it",
     );
+}
+
+// ── The freeze (proc 11) ─────────────────────────────────────────────────────────────────────────
+
+/// The arming world plus the clock-hold leg — the third proc's apply, ordered after the drain the
+/// way the real schedule orders it after the drain *and* the driver.
+fn app_with_freeze() -> App {
+    let mut app = app_with_chains();
+    app.add_systems(Update, apply_aura_anim_rate.after(drain_aura_procs));
+    app
+}
+
+/// A rig mid-animation: two clips playing at the speeds the driver picked for them (a gait scaled to
+/// the mover's speed, and a cast one-shot at 1.0 — the pair Ice Block catches).
+fn rig_playing(speeds: [(u32, f32); 2]) -> AnimationPlayer {
+    let mut player = AnimationPlayer::default();
+    for (node, speed) in speeds {
+        player
+            .play(AnimationNodeIndex::new(node as usize))
+            .set_speed(speed);
+    }
+    player
+}
+
+fn speed_of(app: &App, rig: Entity, node: u32) -> f32 {
+    app.world()
+        .entity(rig)
+        .get::<AnimationPlayer>()
+        .expect("the rig kept its player")
+        .animation(AnimationNodeIndex::new(node as usize))
+        .expect("the clip is still armed")
+        .speed()
+}
+
+/// **The director's retest, at the mechanism.** Ice Block's state kit carries proc 11 at rate 0, so
+/// the unit's clocks stop dead: the run cycle it was mid-stride in and the cast one-shot that had
+/// just been armed both hold the frame they were on — which is why the caster never gets to raise
+/// their hand. Dropping the aura hands each clip back the speed the driver had given it, not a
+/// blanket 1.0.
+#[test]
+fn ice_block_holds_the_clocks_and_the_drop_hands_them_back() {
+    let mut app = app_with_freeze();
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            rig_playing([(4, 1.35), (54, 1.0)]),
+        ))
+        .id();
+    app.update();
+
+    let n = app.world().entity(unit).get::<AuraNodes>().unwrap();
+    assert_eq!(n.head_anim_rate(), Some(0.0), "kit 3709's proc 11 is 0");
+    // 9074175 = 0x8A75FF — the ice-blue the same kit tints the body with, beside the freeze.
+    assert_eq!(n.head_tint(), Some([0x8A, 0x75, 0xFF]), "kit 3709's proc 1");
+    assert_eq!(speed_of(&app, unit, 4), 0.0, "the gait stops mid-stride");
+    assert_eq!(speed_of(&app, unit, 54), 0.0, "so does the cast one-shot");
+
+    // A second frame changes nothing — the hold is idempotent, and it must not re-save the zero it
+    // wrote itself (that is what would make the release hand back 0.0 forever).
+    app.update();
+    assert_eq!(speed_of(&app, unit, 4), 0.0);
+
+    // The aura leaves the slots: the reference writes the saved rates back (`0x6203e0`).
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+            95, 0,
+        )])));
+    app.update();
+    assert!(app
+        .world()
+        .entity(unit)
+        .get::<AuraNodes>()
+        .unwrap()
+        .rate
+        .is_empty());
+    assert_eq!(
+        speed_of(&app, unit, 4),
+        1.35,
+        "the gait's own rate, restored"
+    );
+    assert_eq!(speed_of(&app, unit, 54), 1.0);
+    assert!(
+        app.world().entity(unit).get::<AnimRateFreeze>().is_none(),
+        "the release drops the save with it"
+    );
+}
+
+/// A clip armed *during* the freeze is saved on the frame we first touch it, so the release hands
+/// back what the driver meant for it rather than the frozen 0.
+#[test]
+fn a_clip_armed_under_the_freeze_is_saved_before_it_is_held() {
+    let mut app = app_with_freeze();
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            rig_playing([(4, 1.35), (54, 1.0)]),
+        ))
+        .id();
+    app.update();
+
+    // The driver arms Stand at 1.0 a frame later (the root wiped the direction bits).
+    app.world_mut()
+        .entity_mut(unit)
+        .get_mut::<AnimationPlayer>()
+        .unwrap()
+        .play(AnimationNodeIndex::new(0))
+        .set_speed(1.0);
+    app.update();
+    assert_eq!(speed_of(&app, unit, 0), 0.0, "held the frame it arrived on");
+
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+            95, 0,
+        )])));
+    app.update();
+    assert_eq!(speed_of(&app, unit, 0), 1.0);
+}
+
+/// The mount comes with the rider: `0x6201d0` writes `[unit+0xdc]` before it writes `[unit+0xd8]`,
+/// so a frozen rider's mount stops under them rather than running on the spot.
+#[test]
+fn the_freeze_reaches_the_mount_body() {
+    let mut app = app_with_freeze();
+    let mount = app
+        .world_mut()
+        .spawn(rig_playing([(5, 2.0), (91, 1.0)]))
+        .id();
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, ICE_BLOCK), (95, 0x0E)])),
+            rig_playing([(91, 1.0), (54, 1.0)]),
+            crate::entities::mount::MountChild(mount),
+        ))
+        .id();
+    app.update();
+
+    assert_eq!(speed_of(&app, unit, 91), 0.0, "the rider");
+    assert_eq!(speed_of(&app, mount, 5), 0.0, "and the mount under them");
+
+    app.world_mut()
+        .entity_mut(unit)
+        .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+            95, 0,
+        )])));
+    app.update();
+    assert_eq!(speed_of(&app, mount, 5), 2.0);
+}
+
+/// An aura with no proc 11 — Stealth — leaves the clocks entirely alone. The freeze is the kit's,
+/// never "any aura", and never the stun flag: nothing in the `0x40000` census touches animation.
+#[test]
+fn an_aura_without_the_proc_never_touches_a_clock() {
+    let mut app = app_with_freeze();
+    let unit = app
+        .world_mut()
+        .spawn((
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(47, STEALTH), (95, 0x0E)])),
+            rig_playing([(4, 1.35), (54, 1.0)]),
+        ))
+        .id();
+    app.update();
+    assert_eq!(speed_of(&app, unit, 4), 1.35);
+    assert!(app.world().entity(unit).get::<AnimRateFreeze>().is_none());
 }

@@ -3121,3 +3121,134 @@ pub fn skyboxscan(chain: &mut Chain) -> Result<()> {
     }
     Ok(())
 }
+
+/// `AnimationData.dbc` ids of the effect-model lifecycle triple (names read from the real DBC).
+const ANIM_STAND: u16 = 0;
+const ANIM_HOLD: u16 = 158;
+const ANIM_DECAY: u16 = 159;
+
+/// Sweep every `.m2` (optionally under a path prefix) and census the **effect-model animation
+/// lifecycle**: which models author the `Stand`(0) → `Hold`(158) → `Decay`(159) triple, and what a
+/// consumer that arms ONE sequence and never advances would render for each.
+///
+/// The reference arms an effect instance's default track — `animationLookup[0]`, i.e. `Stand` — and
+/// a model that also owns `Hold` authors `Stand` as a **birth** (grow-in, clamp flag set) with the
+/// sustained pulse living in the separate looping `Hold` sequence, and the fade-out in `Decay`.
+/// A one-sequence consumer therefore FREEZES on the last frame of the birth for the effect's whole
+/// life — no pulse, no fade — which is exactly what "the Ice Barrier shield is frozen" looks like.
+///
+/// The classification is that failure, made countable:
+/// - **FREEZE** — owns `Hold`, and the armed `Stand` clamps: the reference pulses, we hold a pose.
+/// - **hold-loops** — owns `Hold` but `Stand` itself loops: still wrong (the wrong clip), but moving.
+/// - **decay-only** — owns `Decay` and no `Hold`: only the reap leg is unrendered.
+///
+/// It also counts the **file-order divergence**: the reference arms `animationLookup[0]`, so a
+/// consumer that arms the file's *first slot* instead is additionally wrong on any model whose slot
+/// 0 is not its `Stand` (the `DuelingFlag.m2` Spawn/Stand/Despawn shape, decision 0637). The two
+/// bugs are independent and the closing line separates them.
+///
+/// The population instrument for the mechanism, so it is closed corpus-wide rather than spell by
+/// spell; `m2seq` then explains one model in full.
+pub fn fxlifescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut freeze, mut hold_loops, mut decay_only) = (0u32, 0u32, 0u32, 0u32);
+    let (mut no_stand, mut slot0_not_stand) = (0u32, 0u32);
+    let mut by_dir: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rows: Vec<(String, String, String, f32, f32, f32)> = Vec::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            continue;
+        }
+        // What the reference arms: `animationLookup[0]` — Stand — never the file-order-first slot
+        // (they diverge on any model whose sequence 0 is not its Stand).
+        let armed = seqs.iter().find(|s| s.anim_id == ANIM_STAND);
+        let hold = seqs.iter().find(|s| s.anim_id == ANIM_HOLD);
+        let decay = seqs.iter().find(|s| s.anim_id == ANIM_DECAY);
+        if hold.is_none() && decay.is_none() {
+            continue; // neither leg authored — no lifecycle to miss
+        }
+        let class = match (hold.is_some(), armed) {
+            (true, Some(a)) if !a.looping => {
+                freeze += 1;
+                "FREEZE"
+            }
+            (true, _) => {
+                hold_loops += 1;
+                "hold-loops"
+            }
+            (false, _) => {
+                decay_only += 1;
+                "decay-only"
+            }
+        };
+        // The file-order divergence, independent of the lifecycle bug: what a slot-0 consumer arms
+        // versus the reference's `animationLookup[0]`.
+        let arm = match (armed, seqs[0].anim_id) {
+            (None, first) => {
+                no_stand += 1;
+                format!("no-Stand(slot0={first})")
+            }
+            (Some(_), ANIM_STAND) => "slot0".to_string(),
+            (Some(_), first) => {
+                slot0_not_stand += 1;
+                format!("slot0={first}!")
+            }
+        };
+        let top = name.split_once('\\').map(|(d, _)| d).unwrap_or("<root>");
+        *by_dir.entry(top.to_ascii_lowercase()).or_default() += 1;
+        rows.push((
+            name,
+            class.to_string(),
+            arm,
+            armed.map_or(0.0, |a| a.duration),
+            hold.map_or(0.0, |s| s.duration),
+            decay.map_or(0.0, |s| s.duration),
+        ));
+    }
+    rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    println!(
+        "model                                                        class       arm         stand   hold  decay"
+    );
+    for (name, class, arm, stand, hold, decay) in rows.iter().take(80) {
+        println!("{name:<60}  {class:<10}  {arm:<10}  {stand:>5.2}  {hold:>5.2}  {decay:>5.2}");
+    }
+    if rows.len() > 80 {
+        println!("… and {} more", rows.len() - 80);
+    }
+    println!(
+        "\n{} of {scanned} models author a Hold(158)/Decay(159) lifecycle leg",
+        rows.len()
+    );
+    println!("  FREEZE      {freeze:>5}  (owns Hold; the armed Stand clamps — a pose, where the reference pulses)");
+    println!("  hold-loops  {hold_loops:>5}  (owns Hold; the armed Stand loops — moving, but the wrong clip)");
+    println!("  decay-only  {decay_only:>5}  (owns Decay only — just the reap leg unrendered)");
+    println!(
+        "of those, the file-order divergence (a slot-0 consumer arms the wrong sequence outright): \
+         {slot0_not_stand} with slot 0 != Stand, {no_stand} with no Stand at all"
+    );
+    // Named in full, never left to the row cap: this set is small and each member is a distinct
+    // "arms the wrong sequence from frame one" case.
+    for (name, _, arm, ..) in rows.iter().filter(|r| r.2 != "slot0") {
+        println!("  {name:<58}  {arm}");
+    }
+    println!("by top-level directory:");
+    for (dir, n) in &by_dir {
+        println!("  {dir:<16} {n:>5}");
+    }
+    Ok(())
+}

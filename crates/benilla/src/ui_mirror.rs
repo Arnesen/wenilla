@@ -21,6 +21,7 @@ use bevy::prelude::*;
 
 use benilla_protocol::messages::{MirrorTimerKind, MirrorTimerStart};
 
+use crate::ui_action::Spells;
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -57,37 +58,74 @@ fn script_name(kind: MirrorTimerKind) -> &'static str {
     }
 }
 
-/// The bar's caption — **arg6** of `MIRROR_TIMER_START`.
+/// The static caption for a timer with **no owning spell** — the `GlobalStrings.lua` value the
+/// reference's `<NAME>_LABEL` lookup resolves to.
 ///
-/// The reference builds the global-string name by formatting `"%s_LABEL"` (`WoW.exe` @`0x460540`,
-/// sitting immediately after the name table above) with the timer name and looking the result up
-/// in the FrameScript globals. The 1.12 `GlobalStrings.lua` defines exactly two of the three —
-/// `BREATH_LABEL = "Breath"` and `EXHAUSTION_LABEL = "Fatigue"`, each with the comment "Used as
-/// the label for the … status bar" — and **no** `FEIGNDEATH_LABEL`, so that timer's caption comes
-/// back empty in the reference too.
+/// The 1.12 `GlobalStrings.lua` defines exactly two of the three: `BREATH_LABEL = "Breath"` and
+/// `EXHAUSTION_LABEL = "Fatigue"` (each commented "Used as the label for the … status bar"), and
+/// **no** `FEIGNDEATH_LABEL`. The reference's `GetGlobalString 0x703bf0` never returns NULL — it
+/// pre-seeds a static empty string (`0x882748`) — so the missing one is the **empty caption**, not
+/// a nil the Lua would trip over.
 ///
-/// The strings are inlined here rather than looked up through the VM for the same reason
-/// `CastingBar.xml` inlines `FAILED`/`INTERRUPTED`: benilla loads no `GlobalStrings.lua` yet. When
-/// it does, this becomes the lookup the reference does.
-fn caption(kind: MirrorTimerKind) -> &'static str {
+/// Inlined here rather than looked up through the VM for the same reason `CastingBar.xml` inlines
+/// `FAILED`/`INTERRUPTED`: benilla loads no `GlobalStrings.lua` yet.
+fn global_string_label(kind: MirrorTimerKind) -> &'static str {
     match kind {
         MirrorTimerKind::Fatigue => "Fatigue",
         MirrorTimerKind::Breath => "Breath",
-        // No FEIGNDEATH_LABEL exists in the 1.12 GlobalStrings — the reference shows no caption.
         MirrorTimerKind::FeignDeath => "",
     }
 }
 
+/// The bar's caption — **arg6** of `MIRROR_TIMER_START`, and it is **not** a fixed word.
+///
+/// §5-VERIFIED (wow-re `object-layer/scratch/mirror-timer.md`, the 2026-08-02 cross-check of
+/// handler `0x5e7990` and its label helper `0x5e7b10`): the client tries the **owning spell's
+/// localized name first** — `Spell.dbc` `SpellRec + 0x1e0 + 4*locale`, indexed by the START
+/// packet's `spellId` — and only falls back to the `"<NAME>_LABEL"` global string when there is
+/// no spell (`spellId == 0`).
+///
+/// That correction matters in play, and 0874 had it wrong: a water-breathing effect owns the
+/// breath timer for its duration (vmangos `UpdateMirrorTimers` starts the timer from
+/// `GetMirrorTimerBuff(type)` and passes `buff->GetId()`), so while it is up the bar is captioned
+/// with **the spell's own name**, not "Breath". The bar's colour still keys off the timer name,
+/// so only the word changes.
+///
+/// `spell_name` is the already-resolved catalog lookup (the `ui_cast` idiom: the script VM has no
+/// spell-catalog binding, so the drain resolves it — one lookup face, decision 0107). `None`
+/// covers both "no owning spell" and "spell not in the catalog"; the reference's fallback chain
+/// ends at the global string either way.
+fn caption(kind: MirrorTimerKind, spell_name: Option<&str>) -> String {
+    spell_name
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| global_string_label(kind))
+        .to_string()
+}
+
 /// Drain the queue into the script VM, one FrameScript event per edge.
 ///
-/// A `kind` the client has no bar for is dropped: the server's own `NUM_CLIENT_TIMERS` gate means
-/// vanilla never sends one (its fourth, `ENVIRONMENTAL`, drives lava damage with no bar), and the
-/// reference would index past the end of a 3-entry table if one arrived.
-fn feed_mirror_timers(script: Option<NonSendMut<UiScript>>, mut feed: ResMut<MirrorTimerFeed>) {
+/// A `kind` the client has no bar for is **dropped**. The reference does fire the event for one —
+/// its type→name switch (`0x5e7ae0`) answers `"UNKNOWN"` for anything outside 0..2 — but
+/// `MirrorTimerColors["UNKNOWN"]` is nil, so `MirrorTimer_Show` errors at the colour read
+/// *before* `dialog:Show()` and no bar ever appears. Dropping it is the same observable without
+/// the Lua error, and vanilla never sends one anyway (the server's `NUM_CLIENT_TIMERS` gate keeps
+/// its fourth timer, `ENVIRONMENTAL`, off the wire entirely).
+fn feed_mirror_timers(
+    script: Option<NonSendMut<UiScript>>,
+    mut feed: ResMut<MirrorTimerFeed>,
+    spells: Option<Res<Spells>>,
+) {
     let Some(mut script) = script else {
         // No VM (a capture/headless run): drop the edges rather than let them pile up unbounded.
         feed.0.clear();
         return;
+    };
+    // The owning spell's name, resolved here because the script VM has no spell-catalog binding
+    // (the `ui_cast` idiom, decision 0107). `0` = no spell, which is the common case.
+    let spell_name = |id: u32| -> Option<String> {
+        (id != 0)
+            .then(|| spells.as_ref()?.catalog.get(id).map(|d| d.name.clone()))
+            .flatten()
     };
     for edge in feed.0.drain(..) {
         let raw = match edge {
@@ -107,7 +145,7 @@ fn feed_mirror_timers(script: Option<NonSendMut<UiScript>>, mut feed: ResMut<Mir
                     ScriptValue::Int(i64::from(start.duration_ms)),
                     ScriptValue::Int(i64::from(start.scale)),
                     ScriptValue::Int(i64::from(start.paused)),
-                    ScriptValue::Str(caption(kind).into()),
+                    ScriptValue::Str(caption(kind, spell_name(start.spell_id).as_deref())),
                 ],
             ),
             MirrorTimerEdge::Pause { paused, .. } => (
@@ -145,12 +183,27 @@ mod tests {
         assert_eq!(script_name(MirrorTimerKind::FeignDeath), "FEIGNDEATH");
     }
 
-    /// The captions are the 1.12 `GlobalStrings.lua` values the `%s_LABEL` lookup resolves to —
-    /// and the feign-death one is empty because that global does not exist.
+    /// With no owning spell the caption is the 1.12 `GlobalStrings.lua` value the `<NAME>_LABEL`
+    /// lookup resolves to — and the feign-death one is empty because that global does not exist
+    /// (the reference's `GetGlobalString` hands back a static empty string, never nil).
     #[test]
-    fn captions_are_the_globalstrings_values() {
-        assert_eq!(caption(MirrorTimerKind::Fatigue), "Fatigue");
-        assert_eq!(caption(MirrorTimerKind::Breath), "Breath");
-        assert_eq!(caption(MirrorTimerKind::FeignDeath), "");
+    fn a_spell_less_timer_captions_from_the_global_string() {
+        assert_eq!(caption(MirrorTimerKind::Fatigue, None), "Fatigue");
+        assert_eq!(caption(MirrorTimerKind::Breath, None), "Breath");
+        assert_eq!(caption(MirrorTimerKind::FeignDeath, None), "");
+    }
+
+    /// The correction 0874 got wrong (§5, wow-re `mirror-timer.md`): the client tries the OWNING
+    /// SPELL's localized name first and only falls back to the global string. A water-breathing
+    /// effect owns the breath timer while it is up, so the bar reads with the spell's name.
+    #[test]
+    fn an_owning_spell_captions_the_bar_with_its_own_name() {
+        assert_eq!(
+            caption(MirrorTimerKind::Breath, Some("Water Breathing")),
+            "Water Breathing"
+        );
+        // An id the catalog can't resolve falls back exactly as a spell-less timer does.
+        assert_eq!(caption(MirrorTimerKind::Breath, None), "Breath");
+        assert_eq!(caption(MirrorTimerKind::Breath, Some("")), "Breath");
     }
 }

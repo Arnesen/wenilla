@@ -5,30 +5,51 @@
 //! ## Ground truth (wow-5875-re, binary-verified)
 //!
 //! The 1.12.1 client draws in a **flat painter's order**, *not* a hierarchical walk: every visible
-//! frame — children included — is an independent entry in a per-`(strata, level)` bucket, and
-//! `render_traverse_order 0x765650` walks **strata 0→8, level 0→N, then the level's insertion-ordered
-//! frame list**, calling each frame's Draw (`propagation.md`, `propagation-anchors.md`). Within a
-//! frame, its regions draw by **draw layer** (BACKGROUND→HIGHLIGHT), then the `textureSubLevel`, then
-//! textures-before-fontstrings, then declaration order. A child frame with a *lower* strata/level than
-//! its parent therefore draws *before* the parent — the order is global, keyed on the tuple below, not
+//! frame — children included — is an independent entry in a per-`(strata, level)` bucket
+//! (`propagation.md`, `propagation-anchors.md`). A child frame with a *lower* strata/level than its
+//! parent therefore draws *before* the parent — the order is global, keyed on the tuple below, not
 //! on the tree shape.
+//!
+//! **Inside one `(strata, level)` bucket, the DRAW LAYER outranks the frame.** The five render
+//! batches belong to the level node (`levelNode+0x1c`), not to any frame, and the emitter
+//! `0x765920` loops `layer = 0..4` outside and frames inside. So a bucket emits every frame's
+//! BACKGROUND, then every frame's BORDER, and so on — regions are *not* grouped behind their owning
+//! frame. Within one layer the same is true of kind: the batch holds a quad sub-array and a text
+//! sub-array, and `0x76fb00` drains all quads before any text, so **all** textures of a
+//! `(strata, level, layer)` precede **all** its font strings. (Decision 0884, wow-re
+//! `ui/scratch/draw-order-law.md`. This supersedes the earlier recorded key, which had no layer
+//! term at all and read the last term backwards.)
 //!
 //! ## The total order (most- to least-significant)
 //!
-//! `(stratum, frame level, frame insertion order, is-region, draw layer, sub-level, texture<fontstring,
+//! `(stratum, frame level, draw layer, texture<fontstring, frame link-stamp, is-region, sub-level,
 //! declaration order)` — packed big-endian-by-priority into one sortable [`ZKey`] (`u64`), so the
-//! whole render list is produced by one sort on the key. The `is-region` bit sits just below the frame
-//! identity so a frame's own entry always precedes all of its regions (useful for backdrop/scissor
-//! setup), independent of any region's sub-level.
+//! whole render list is produced by one sort on the key. The `is-region` bit is benilla's own: the
+//! binary has no frame-level drawable (only regions draw), so it sits *below* the layer key purely
+//! to keep a frame's backdrop/scissor slot ahead of that frame's own regions.
+//!
+//! The **link-stamp** is the client's live intrusive-list position, not a creation index: a frame is
+//! (re)linked at its bucket on becoming visible, on a strata change, and on a *changing* level set
+//! — later link = drawn on top. A monotonic global counter bumped at those same moments is
+//! order-equivalent within any one bucket, which is what [`crate::widget::WidgetArena`] keeps.
+//!
+//! **Below the layer, the frame term is exact for font strings and a deterministic stand-in for
+//! textures.** The client re-sorts each layer's quad array by *texture handle* (`0x7731a0`) and
+//! never sorts the text sub-array. A texture handle is an internal allocation our texture manager
+//! assigns differently, so we reproduce the client's pre-sort array instead — identical wherever a
+//! layer's quads share a texture or don't overlap. **No content may depend on the relative order of
+//! two overlapping textures within one layer.**
 //!
 //! ## Era deltas (designed-for, not invented)
 //!
 //! - **`BLIZZARD` stratum** — the modern engine adds exactly one stratum *above* `TOOLTIP`
 //!   (decision 0068 §"strict superset"; the 1.12 `UI.xsd`↔Era diff). It is the last [`Strata`]
 //!   variant; 1.12 content never selects it.
-//! - **`textureSubLevel`** — an i8 ordering knob *within* a draw layer. Present in the 1.12 struct's
-//!   region lists (the `~0x1c0` layer lists, `frame-model.md`) and first-class in Era; modeled as the
-//!   `sub_level` field of every region.
+//! - **`textureSubLevel`** — an i8 ordering knob *within* a draw layer, first-class in Era. 0884's
+//!   §5 found **no sub-level in 5875 at all** (`0x76a860` takes only `(region, layer)` and
+//!   head-inserts with no comparator; the per-layer header is a plain 0xc-byte triple with nowhere
+//!   to keep a sort key), correcting the earlier note that placed one in the 1.12 region lists. The
+//!   `sub_level` field stays as the Era delta and is inert for 1.12 content.
 
 use crate::widget::{FrameHandle, RegionHandle, RegionKind, WidgetArena};
 
@@ -138,25 +159,65 @@ impl Default for DrawLayer {
 //
 //   bits 60..=63 (4)   stratum          Strata::index() 0..=9   (< 16)
 //   bits 44..=59 (16)  frame level      u16                     (< 65536)
-//   bits 25..=43 (19)  frame insertion  monotonic create seq    (< 524288)
-//   bit  24      (1)   is-region        0 = the frame itself, 1 = one of its regions
-//   bits 21..=23 (3)   draw layer       DrawLayer::index() 0..=4 (< 8)
-//   bits 13..=20 (8)   sub-level        i8 biased by +128        (0..=255)
-//   bit  12      (1)   fontstring       0 = texture, 1 = fontstring (textures draw first)
+//   bits 41..=43 (3)   draw layer       DrawLayer::index() 0..=4 (< 8)
+//   bit  40      (1)   fontstring       0 = texture, 1 = fontstring — BUCKET-WIDE, above the frame
+//   bits 21..=39 (19)  frame link-stamp monotonic (re)link seq   (< 524288)
+//   bit  20      (1)   is-region        0 = the frame itself, 1 = one of its regions
+//   bits 12..=19 (8)   sub-level        i8 biased by +128        (0..=255) — INERT on 1.12
 //   bits  0..=11 (12)  declaration seq  region index within its owner frame (< 4096)
 //
-// A frame's own entry zeroes every field below `is-region`, so it precedes all of its regions.
-// Regions of one frame share the frame's (stratum, level, insertion) prefix, so they stay grouped
-// immediately behind their frame and order among themselves by (layer, sub-level, texture<fontstring,
-// decl) — exactly the client's within-frame region order.
+// ## Why the draw layer outranks the frame (decision 0884 — §5-VERIFIED)
+//
+// **The five render batches belong to the LEVEL NODE, not to the frame** (`levelNode+0x1c`, five
+// 0x30-byte batches), and the emitter `0x765920` loops `layer = 0..4` on the OUTSIDE and frames on
+// the inside. So the draw layer is a **bucket-wide** key: every frame sharing a `(strata, level)`
+// emits its BACKGROUND regions, then every frame its BORDER, then ARTWORK, then OVERLAY, then
+// HIGHLIGHT. It is not a within-frame ordering — which is what benilla modeled until 0884, with
+// the frame term ranked above the layer so a frame's regions stayed glued behind it.
+//
+// That inversion is what put the mirror timer's blue fill over its own border art and caption
+// (director report, 2026-08-02). The reference builds those bars as a Frame whose OVERLAY layer
+// carries the border + caption, with a child StatusBar whose `<BarTexture>` takes the default
+// **ARTWORK** layer and whose only OnLoad is `SetFrameLevel(GetFrameLevel() - 1)`. That line does
+// **not** put the child below the parent: a child is born at `parent.level + 1` (`SetParent
+// 0x76ab10` @`0x76ab65`), so the `-1` lands it at *exactly* the parent's level. Its whole job is to
+// **create the tie**, so the layer key can decide — ARTWORK(2) before OVERLAY(3), fill under
+// chrome. Ranked below the frame, there was no tie to resolve and the child always trailed.
+//
+// **`texture < fontstring` is bucket-wide too, and outranks the frame.** A layer's batch holds two
+// independent sub-arrays — the quad array `[batch+0x10]` (every `CSimpleTexture` appends via
+// `0x7706e0` → `0x772fd0`) and the text sub-batch `[batch+0x18]` (`0x772e50` → `0x773080`) — and
+// `0x76fb00` drains the WHOLE quad array before it touches the text one. So for two frames A, B at
+// one `(strata, level, layer)`, each with a texture and a font string, the client emits
+// `A.tex, B.tex, A.text, B.text` — never `A.tex, A.text, B.tex, B.text`.
+//
+// **The frame link-stamp below that is exact for font strings and a deterministic stand-in for
+// textures.** The client re-sorts a layer's quad array by *texture handle* (`0x7731a0`'s qsort,
+// comparator `0x7731c0`) and never sorts the text sub-batch. The handle is an internal allocation
+// our texture manager assigns differently, so reproducing that sort is neither achievable nor
+// desirable; we reproduce the client's PRE-sort array, which agrees wherever a layer's quads share
+// a texture or don't overlap (the common case). **No content may depend on the relative order of
+// two overlapping textures within one layer** — that is not a fidelity invariant.
+//
+// wow-re's own previously-recorded key — `(strata, level, insertion order)` — is superseded by the
+// same §5: it carried no layer term at all.
+//
+// A frame's own entry zeroes the layer and everything below `is-region`, so it precedes its own
+// BACKGROUND regions. That slot is benilla's backdrop/scissor hook, not the client's — in the
+// binary a frame has no drawable of its own — so it sits *below* the layer key, never above it.
+//
+// **`sub-level` is inert on 1.12**: §5 found no sub-level in 5875 at all (`0x76a860` takes only
+// `(region, layer)`, head-inserts with no comparator, and the per-layer header is a plain 0xc-byte
+// triple with nowhere to keep a sort key). The field stays as the modeled Era delta; no 1.12
+// content sets it, so it is always the `0` bias.
 
 const STRATUM_SHIFT: u32 = 60;
 const LEVEL_SHIFT: u32 = 44;
-const INSERTION_SHIFT: u32 = 25;
-const IS_REGION_SHIFT: u32 = 24;
-const LAYER_SHIFT: u32 = 21;
-const SUBLEVEL_SHIFT: u32 = 13;
-const FONTSTRING_SHIFT: u32 = 12;
+const LAYER_SHIFT: u32 = 41;
+const FONTSTRING_SHIFT: u32 = 40;
+const INSERTION_SHIFT: u32 = 21;
+const IS_REGION_SHIFT: u32 = 20;
+const SUBLEVEL_SHIFT: u32 = 12;
 const DECL_SHIFT: u32 = 0;
 
 pub(crate) const INSERTION_BITS: u32 = 19;
@@ -268,9 +329,10 @@ pub enum ZTarget {
 /// (`propagation.md`) — a child of a hidden frame already carries `effective_visible == false` and is
 /// skipped here. Each visible frame emits its own [`ZTarget::Frame`] entry followed by one
 /// [`ZTarget::Region`] per owned region; the returned vec is sorted ascending by [`ZKey`], which *is*
-/// the total draw order (strata → level → frame insertion → layer → sub-level → texture<fontstring →
-/// decl). Ties are impossible: distinct frames differ in insertion, a frame and its regions differ in
-/// the is-region bit, and a frame's regions differ in the remaining fields.
+/// the total draw order (strata → **layer** → frame link-stamp → is-region → sub-level →
+/// texture<fontstring → decl; the layer outranks the frame — see the `ZKey` bit-layout note and
+/// decision 0884). Ties are impossible: distinct frames differ in link-stamp, a frame and its
+/// regions differ in the is-region bit, and a frame's regions differ in the remaining fields.
 ///
 /// Ordering only: this emits an entry for *every* region of a visible frame. Region-level
 /// `Show`/`Hide` (the VisibleRegion bit, `region+0xc4`) is applied one layer up, where paint lives —
@@ -386,31 +448,57 @@ mod tests {
     }
 
     #[test]
-    fn within_frame_layer_sublevel_kind_decl_order() {
+    fn layer_then_kind_then_frame_then_decl() {
         let mk = |layer, sub, fs, decl| ZKey::region(Strata::Medium, 3, 42, layer, sub, fs, decl);
-        // layer dominates sub-level
+        // The layer is the top term below (strata, level) — it dominates everything under it.
         assert!(
             mk(DrawLayer::Border, i8::MIN, false, 0) > mk(DrawLayer::Background, 127, true, 4095)
         );
-        // within a layer, sub-level dominates kind
-        assert!(mk(DrawLayer::Artwork, 1, false, 0) > mk(DrawLayer::Artwork, 0, true, 4095));
-        // at equal layer+sub-level, textures precede fontstrings
-        assert!(mk(DrawLayer::Artwork, 0, true, 0) > mk(DrawLayer::Artwork, 0, false, 4095));
-        // at equal layer+sub-level+kind, declaration order decides
+        // Within a layer, KIND is next: all textures precede all fontstrings — and it now outranks
+        // sub-level (0884: the layer batch's two sub-arrays, quads drained before text).
+        assert!(
+            mk(DrawLayer::Artwork, i8::MIN, true, 0) > mk(DrawLayer::Artwork, 127, false, 4095)
+        );
+        // Below kind, declaration order decides within one frame's layer.
         assert!(mk(DrawLayer::Artwork, 0, false, 2) > mk(DrawLayer::Artwork, 0, false, 1));
-        // negative sub-level draws before positive
+        // Sub-level still orders below kind — inert on 1.12 (nothing sets it), kept for Era.
         assert!(mk(DrawLayer::Artwork, -1, false, 0) < mk(DrawLayer::Artwork, 0, false, 0));
     }
 
+    /// The law 0884 **replaced**, kept as a test so it cannot come back: a frame's regions are not
+    /// glued behind it. The draw layer is bucket-wide, so at one `(strata, level)` every frame's
+    /// BACKGROUND draws before any frame's OVERLAY — frame A's OVERLAY sorts *after* frame B's
+    /// BACKGROUND even though A linked first. That interleave is what puts the mirror timer's
+    /// ARTWORK fill under its own parent frame's OVERLAY border and caption.
     #[test]
-    fn regions_of_a_frame_stay_grouped_behind_it() {
-        // Two adjacent frames; frame B's frame-entry must sort after ALL of frame A's regions.
+    fn the_layer_interleaves_frames_it_does_not_group_them() {
+        let a_overlay = ZKey::region(Strata::Medium, 0, 10, DrawLayer::Overlay, 0, false, 0);
+        let b_background = ZKey::region(Strata::Medium, 0, 11, DrawLayer::Background, 0, false, 0);
+        assert!(
+            b_background < a_overlay,
+            "a later frame's BACKGROUND still draws before an earlier frame's OVERLAY"
+        );
+
+        // Same layer + same kind: the frame link-stamp decides, later on top.
+        let a_art = ZKey::region(Strata::Medium, 0, 10, DrawLayer::Artwork, 0, false, 0);
+        let b_art = ZKey::region(Strata::Medium, 0, 11, DrawLayer::Artwork, 0, false, 0);
+        assert!(
+            a_art < b_art,
+            "at equal layer+kind, later link draws on top"
+        );
+
+        // Kind spans frames: ALL textures of a (strata, level, layer) precede ALL its fontstrings.
+        let a_text = ZKey::region(Strata::Medium, 0, 10, DrawLayer::Artwork, 0, true, 0);
+        assert!(
+            b_art < a_text,
+            "a later frame's texture still precedes an earlier frame's fontstring"
+        );
+
+        // A frame's own slot is benilla's backdrop/scissor hook: it sits BELOW the layer key, so
+        // it precedes only its own regions, starting with its BACKGROUND.
         let a_frame = ZKey::frame(Strata::Medium, 0, 10);
-        let a_region_top =
-            ZKey::region(Strata::Medium, 0, 10, DrawLayer::Highlight, 127, true, 4095);
-        let b_frame = ZKey::frame(Strata::Medium, 0, 11);
-        assert!(a_frame < a_region_top);
-        assert!(a_region_top < b_frame);
+        let a_bg = ZKey::region(Strata::Medium, 0, 10, DrawLayer::Background, 0, false, 0);
+        assert!(a_frame < a_bg);
     }
 
     // ── Traversal over a synthetic tree ────────────────────────────────────────────────────────

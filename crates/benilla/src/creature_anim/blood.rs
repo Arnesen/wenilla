@@ -129,6 +129,9 @@ pub(super) fn blood_spurts(
             spell_id: 0, // no spell — a self-terminating effect is never reaped by id
             persistent: false,
             class: super::FxClass::Hold,
+            // The blood spurt is `CEffect::AddEffect` off the melee path, not a kit stage — but it
+            // is the same self-terminating shape (one pass, then gone).
+            stage: super::FxStage::OneShot,
             effects: vec![(
                 if front { ATTACH_FRONT } else { ATTACH_BACK },
                 path.to_string(),

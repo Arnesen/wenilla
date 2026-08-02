@@ -1,5 +1,6 @@
-//! **The aura-state CharProc layer** — what an aura does to the *body itself*: its translucency and
-//! its tint, for exactly as long as the aura lives. This is the half of a stage-2 "state kit" that
+//! **The aura-state CharProc layer** — what an aura does to the *body itself*: its translucency, its
+//! tint and its animation clock, for exactly as long as the aura lives. This is the half of a stage-2
+//! "state kit" that
 //! isn't an attach-point emitter (those are `creature_anim::spell_visual`'s
 //! [`arm_aura_state_fx`](crate::creature_anim::arm_aura_state_fx), decision 0393): where that
 //! watcher hangs *models* on the unit, this one changes how the unit's own model **renders**.
@@ -84,10 +85,17 @@
 //!   [`crate::model_fade::ParentModel`] link up to the unit — the recursion itself, and the same walk
 //!   `ModelAlphas` already does for alpha.
 //!
-//! Types 2, 7, 8, 11 and 13 also appear on state kits (Berserk/Bloodlust's 2, the Sap/Feign-Death 7,
-//! the Freeze/Ice-Block 11, the "Glowy (Red)" 13) and have **no verified mechanism** — the wow-re
-//! dispatcher note names only the cases above. They fall through [`node_for`]'s single `_` arm, which
-//! is where each lands as one match arm the day its RE returns.
+//! **Proc 11 ships too** (decision 0889): the **freeze**. Its param is a playback *rate* written onto
+//! the unit's own animation clocks (`0x60db7e` → `SetBoneAnimSpeed 0x712910` on the mount's bone 0,
+//! the body's key-bone 4 — the upper-body split — and the body's bone 0), old rates saved in the node
+//! and written back when it expires (`0x6203e0`). Rate 0 is Ice Block: the pose holds exactly where
+//! it was, *including* a cast one-shot that had just been armed, which is why the caster never gets
+//! to raise their hand. [`apply_aura_anim_rate`] is that leg, and the reference's save/restore is
+//! [`AnimRateFreeze`].
+//!
+//! Types 2, 7 and 13 also appear on state kits (Berserk/Bloodlust's 2, the Sap/Feign-Death 7, the
+//! "Glowy (Red)" 13) and have **no verified mechanism** — they fall through [`node_for`]'s single `_`
+//! arm, which is where each lands as one match arm the day its RE returns.
 
 use benilla_protocol::EntityKind;
 use bevy::mesh::MeshTag;
@@ -120,6 +128,9 @@ pub(crate) enum AuraNode {
     /// Proc 1: this aura's body tint, unpacked from the param's `0x00RRGGBB`. Modelled, not yet
     /// rendered (module docs).
     Tint([u8; 3]),
+    /// Proc 11: this aura's animation playback **rate** for the unit's own model — `0.0` for every
+    /// member of the freeze family (Ice Block, Freeze, Petrify, Entangle, Stilled).
+    AnimRate(f32),
 }
 
 /// The CharProc node lists of one unit — the ECS twin of the reference's per-unit `unit+0xb50`
@@ -137,6 +148,10 @@ pub(crate) struct AuraNodes {
     /// `(spell id, rgb)` — proc-1 nodes, newest at the front like the alpha list; the head is what
     /// the per-frame apply reads.
     tint: Vec<(u32, [u8; 3])>,
+    /// `(spell id, rate)` — proc-11 nodes, head-first like the other two. The head is the rate the
+    /// unit's animation clocks run at ([`apply_aura_anim_rate`]); empty = the clocks are the
+    /// driver's own again.
+    rate: Vec<(u32, f32)>,
     /// `baseAlpha`: the display row's `CreatureModelAlpha / 255` — for EVERY unit, players
     /// included; the getter `0x60d2d0` has no type fork, a normal character's row just says 255
     /// (`base-render-alpha.md` §6, correcting the "players 1.0" gloss). Owned by
@@ -210,6 +225,12 @@ impl AuraNodes {
     /// [`apply_aura_tint`].
     pub(crate) fn head_tint(&self) -> Option<[u8; 3]> {
         self.tint.first().map(|(_, rgb)| *rgb)
+    }
+
+    /// The head proc-11 node's rate — what this unit's animation clocks are being held at, or `None`
+    /// when no freeze aura is on it. Head-node-wins like the other two lists.
+    pub(crate) fn head_anim_rate(&self) -> Option<f32> {
+        self.rate.first().map(|(_, r)| *r)
     }
 }
 
@@ -298,6 +319,105 @@ fn tint_probe() -> Option<[u8; 3]> {
     })
 }
 
+/// On a rig whose clocks a proc-11 aura is holding: the playback speeds we took over, so the release
+/// can hand them back — the reference's own `+0x60`/`+0x64`/`+0x68` (`0x6201d0` saves the three bone
+/// rates before overwriting them; `0x6203e0` writes them back when the node expires with the aura).
+///
+/// Keyed by animation node because that is what a speed belongs to here: the reference saves per
+/// *bone* because a rate is a bone-clock property there, and ours is per armed clip.
+#[derive(Component, Default, Debug)]
+pub(crate) struct AnimRateFreeze {
+    saved: Vec<(AnimationNodeIndex, f32)>,
+}
+
+/// Hold every unit whose head proc-11 node says so at that node's rate — its own rig and its mount's
+/// (`[unit+0xd8]` and `[unit+0xdc]`, the two models `0x6201d0` writes) — and hand the speeds back
+/// when the aura goes.
+///
+/// **Reasserted every frame, and that is the faithful shape, not a belt-and-braces clamp.** The
+/// reference's rate lives on the bone (`+0xb0`, the factor `timebase.md` §2's clock multiplies its
+/// window by) and **arming an animation does not touch it**: op4 `0x7121a0`'s success leg writes the
+/// track index and the cursors and leaves `+0xb0` alone (only its disarm leg and `SetBoneAnimSpeed
+/// 0x712910` write it). So "rate 0 until the aura is reaped" is literally the reference's state
+/// across every re-arm in between, and re-writing it each frame is how a per-clip speed says the
+/// same thing.
+///
+/// It runs **after the driver**, so this frame's arms are already in — which is the whole Ice Block
+/// observable: the cast one-shot is armed and then frozen at the frame it was on, so the caster never
+/// gets to raise their hand (`0x712910` re-bases `bias` to preserve the current frame, so rate 0
+/// holds the pose exactly where it stood).
+///
+/// What it deliberately does **not** touch: attached effect models (the ice block's own
+/// `icebarrier_state.mdx` keeps shimmering — the reference writes the unit's two models only) and
+/// global sequences (a different clock there, and a different writer here).
+pub(crate) fn apply_aura_anim_rate(
+    units: Query<(
+        Entity,
+        &AuraNodes,
+        Option<&crate::entities::mount::MountChild>,
+    )>,
+    mut rigs: Query<(&mut AnimationPlayer, Option<&mut AnimRateFreeze>)>,
+    mut commands: Commands,
+) {
+    for (entity, nodes, mount) in &units {
+        let rate = nodes.head_anim_rate();
+        for rig in [Some(entity), mount.map(|m| m.0)].into_iter().flatten() {
+            let Ok((mut player, freeze)) = rigs.get_mut(rig) else {
+                continue;
+            };
+            match (rate, freeze) {
+                (Some(rate), Some(mut freeze)) => hold(&mut player, &mut freeze, rate),
+                (Some(rate), None) => {
+                    let mut fresh = AnimRateFreeze::default();
+                    hold(&mut player, &mut fresh, rate);
+                    trace_clock_edge("freeze", rig, rate, &fresh);
+                    commands.entity(rig).try_insert(fresh);
+                }
+                (None, Some(freeze)) => {
+                    for (node, speed) in &freeze.saved {
+                        if let Some(anim) = player.animation_mut(*node) {
+                            anim.set_speed(*speed);
+                        }
+                    }
+                    trace_clock_edge("thaw", rig, 1.0, &freeze);
+                    commands.entity(rig).try_remove::<AnimRateFreeze>();
+                }
+                (None, None) => {}
+            }
+        }
+    }
+}
+
+/// Take every playing animation's clock to `rate`, remembering the speed each one was running at the
+/// first time we touch it — a clip armed *during* the freeze is saved on its own first frame, so the
+/// release hands back what the driver meant rather than a blanket 1.0.
+fn hold(player: &mut AnimationPlayer, freeze: &mut AnimRateFreeze, rate: f32) {
+    for (node, anim) in player.playing_animations_mut() {
+        if !freeze.saved.iter().any(|(n, _)| n == node) {
+            freeze.saved.push((*node, anim.speed()));
+        }
+        anim.set_speed(rate);
+    }
+}
+
+/// The freeze's own instrument (`WOW_MOVE_TRACE`, tag `aur`): one line per rig at each edge, naming
+/// the clips it took over and the speeds it is holding — the difference between "the clocks stopped"
+/// and "nothing was playing anyway", which no count of *absent* anim events can tell apart.
+fn trace_clock_edge(what: &str, rig: Entity, rate: f32, freeze: &AnimRateFreeze) {
+    if !crate::dbg_trace::enabled_for("aur") {
+        return;
+    }
+    let clips: Vec<String> = freeze
+        .saved
+        .iter()
+        .map(|(n, s)| format!("{}@{s}", n.index()))
+        .collect();
+    crate::dbg_trace::line(
+        "aur",
+        &format!("{what} rig={rig} rate={rate} clips=[{}]", clips.join(" ")),
+    );
+}
+
 /// One aura's CharProc edge, written by the aura-slot watcher
 /// ([`crate::creature_anim::arm_aura_state_fx`], which owns the slot diff and the state-kit resolve
 /// for both halves of a kit) and drained by [`drain_aura_procs`].
@@ -332,6 +452,10 @@ pub(crate) fn node_for(proc: benilla_formats::CharProc) -> Option<AuraNode> {
                 packed as u8,
             ]))
         }
+        // `params[0]` is a playback rate, straight through — `0x60db7e` hands it to
+        // `SetBoneAnimSpeed` unexamined, so the one outlier (kit 1744's `8947848.0`, a packed grey
+        // that landed in the rate column) is passed through rather than special-cased.
+        ty::ANIM_RATE => Some(AuraNode::AnimRate(proc.params[0])),
         _ => None,
     }
 }
@@ -407,6 +531,7 @@ pub(crate) fn drain_aura_procs(
 fn reap(n: &mut AuraNodes, spell_id: u32, now: f32) {
     n.alpha.retain(|(s, _)| *s != spell_id);
     n.tint.retain(|(s, _)| *s != spell_id);
+    n.rate.retain(|(s, _)| *s != spell_id);
     n.retarget(now);
 }
 
@@ -418,10 +543,12 @@ fn reap(n: &mut AuraNodes, spell_id: u32, now: f32) {
 fn install(n: &mut AuraNodes, spell_id: u32, procs: &[AuraNode], now: f32) {
     n.alpha.retain(|(s, _)| *s != spell_id);
     n.tint.retain(|(s, _)| *s != spell_id);
+    n.rate.retain(|(s, _)| *s != spell_id);
     for node in procs {
         match *node {
             AuraNode::Alpha(f) => n.alpha.insert(0, (spell_id, f)),
             AuraNode::Tint(rgb) => n.tint.insert(0, (spell_id, rgb)),
+            AuraNode::AnimRate(r) => n.rate.insert(0, (spell_id, r)),
         }
     }
     n.retarget(now);
@@ -444,10 +571,13 @@ fn trace_edge(what: &str, entity: Entity, spell_id: u32, n: &AuraNodes) {
     let tint = n.head_tint().map_or_else(String::new, |[r, g, b]| {
         format!(" tint=#{r:02x}{g:02x}{b:02x}")
     });
+    let rate = n
+        .head_anim_rate()
+        .map_or_else(String::new, |r| format!(" animrate={r}"));
     crate::dbg_trace::line(
         "aur",
         &format!(
-            "{what} e={entity} spell={spell_id} alpha={alphas:?}{tint}              base {:.2} cur {:.2} target {:.2}",
+            "{what} e={entity} spell={spell_id} alpha={alphas:?}{tint}{rate}              base {:.2} cur {:.2} target {:.2}",
             n.base,
             n.current,
             n.target()

@@ -98,6 +98,20 @@ impl MatAnim {
         m
     }
 
+    /// Read the sequence (and its clock) from `host`'s live `AnimationPlayer` each frame instead of
+    /// staying pinned to the slot this instance opened on — for a spell-effect instance that
+    /// **advances** through its authored lifecycle (`Stand` → `Hold` → `Decay`, wow-re
+    /// `ceffect-anim-lifecycle.md`), because each leg has its own authored alpha loops: Ice
+    /// Barrier's pulse is as much the `Hold` band's oscillating transparency weights as its bone
+    /// scale. `None` leaves the instance pinned (a lane with no rig has no player to ask).
+    ///
+    /// It keeps [`Self::drives_tag`], so this stays an effect part writing its own tag — it borrows
+    /// the unit lane's *sequence source*, not its tag-compose ownership.
+    pub(crate) fn following_host(mut self, host: Option<Entity>) -> Self {
+        self.host = host;
+        self
+    }
+
     /// The **unit-lane** constructor: the sequence (and its clock) come from `host`'s live
     /// `AnimationPlayer`, so a creature's batches appear and disappear with the animation exactly
     /// as authored. The tag is composed by [`crate::entities::apply_unit_mat_alpha`], not driven

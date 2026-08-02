@@ -10,6 +10,7 @@ use benilla_protocol::messages::{
 use benilla_protocol::ItemInfo;
 use bevy::prelude::*;
 
+use super::super::SelfGuid;
 use crate::items::Items;
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 use crate::ui_items::EquipErrors;
@@ -116,14 +117,41 @@ pub(super) fn loot_all_passed(p: LootAllPassed, rolls: &mut LootRolls) {
     rolls.all_passed(p);
 }
 
+/// Is this push **ours**? The outermost gate in `CGGameUI::OnItemPush` (1.12.1 `WoW.exe` 5875,
+/// `0x491a60`): `0x491b56`/`0x491b61` compare the packet guid against the active player's and fork,
+/// and the self arm is the only one that prints "You receive …" *or* animates a bag button. A group
+/// member's push takes the `0x491d9f` arm and prints `LOOT_ITEM` ("%s receives loot: %s.") with
+/// *their* name — a line we do not build yet, so a foreign push is dropped rather than mislabelled
+/// ours.
+///
+/// The wire's **`showInChat`** used to be folded in here, which read correctly while the chat line
+/// was this packet's only output. It is a *later*, narrower gate — `0x491bf3` (self) / `0x491db1`
+/// (other) skip the chat formatter alone, after the `ITEM_PUSH` fire at `0x491be8` — so it now
+/// rides into [`LootState::push_receive`] as `PendingReceive::in_chat` and silences the line
+/// without touching the animation (decision 0887). vmangos always sends 1, so it is inert against
+/// our server either way; it is the client's own gate, kept where the client keeps it.
+fn is_our_push(p: &ItemPushResult, self_guid: &SelfGuid) -> bool {
+    self_guid.0 == Some(p.player_guid)
+}
+
 /// An item landed in our bags — looted or received from an NPC (`SMSG_ITEM_PUSH_RESULT`); drives
-/// the "You receive loot: …" chat line.
-pub(super) fn item_push_result(p: ItemPushResult, loot: &mut LootState) {
+/// the "You receive loot: …" chat line (gated by [`prints_receive_line`]) **and** the bag-bar drop
+/// animation (decision 0887), which is NOT so gated — hence the whole packet going through, and the
+/// self check being the only thing that can stop a push here. The reference's
+/// `CGGameUI::OnItemPush 0x491a60` emits both from this one packet: it returns early only on a guid
+/// mismatch, and tests `showInChat` further down, after the `ITEM_PUSH` fire.
+pub(super) fn item_push_result(p: ItemPushResult, self_guid: &SelfGuid, loot: &mut LootState) {
     // Solo loot never gets a MONEY_NOTIFY from this server (vmangos comments it out;
     // the purse rides the ordinary COINAGE field flush) — so this push line is the
     // one reliable "it landed" signal, surfaced as the "You receive loot/item" line.
-    debug!("net: item push {} x{}", p.item_entry, p.count);
-    loot.push_receive(p.item_entry, p.count, p.from_npc, p.created);
+    debug!(
+        "net: item push {} x{} → bag {} slot {:#x}",
+        p.item_entry, p.count, p.bag_slot, p.item_slot
+    );
+    if !is_our_push(&p, self_guid) {
+        return;
+    }
+    loot.push_receive(&p);
 }
 
 /// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
@@ -155,4 +183,45 @@ pub(super) fn inventory_failure(
     debug!("net: inventory failure {reason:#04x} (item {item_guid:#x})");
     equip_errors.0.push((reason, required_level));
     lock_cleared.0.extend(pending.clear_by_failure(item_guid));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: u64 = 0x0000_0000_0000_002A;
+    const THEM: u64 = 0x0000_0000_0000_00FF;
+
+    fn push(player_guid: u64, show_in_chat: bool) -> ItemPushResult {
+        ItemPushResult {
+            player_guid,
+            from_npc: false,
+            created: false,
+            show_in_chat,
+            bag_slot: 0xFF,
+            item_slot: 0,
+            item_entry: 2589,
+            suffix_factor: 0,
+            random_property_id: 0,
+            count: 1,
+        }
+    }
+
+    /// `OnItemPush`'s outermost gate: the push must be **ours** to produce anything at all. A party
+    /// member's drop must NOT print as "You receive loot" — the real client takes its other-player
+    /// arm and names them instead.
+    #[test]
+    fn only_our_own_pushes_reach_the_receive_queue() {
+        let me = SelfGuid(Some(ME));
+        assert!(is_our_push(&push(ME, true), &me));
+        assert!(!is_our_push(&push(THEM, true), &me));
+        // Before login lands a guid there is no active player to match against.
+        assert!(!is_our_push(&push(ME, true), &SelfGuid(None)));
+        // `showInChat` is NOT this gate (decision 0887): a silent push still queues, and still
+        // animates — it only loses its chat line, downstream in `drain_receives`.
+        assert!(is_our_push(&push(ME, false), &me));
+        let mut loot = LootState::default();
+        item_push_result(push(ME, false), &me, &mut loot);
+        assert_eq!(loot.pending_receive_count(), 1);
+    }
 }

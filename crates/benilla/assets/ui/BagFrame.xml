@@ -850,6 +850,126 @@
             end
         end
 
+        -- ── The item-push drop animation (decision 0887) ─────────────────────────────────────────
+        -- An item lands in a bag: its icon pops in above the bag bar, hangs there, then falls into
+        -- the button that took it and shrinks away. ref ItemAnim (MainMenuBarBagButtons.xml l.4-16 +
+        -- .lua l.68-80, .lua l.92-94): each bag button owns a hidden child that, on ITEM_PUSH
+        -- naming its own container, swaps in the pushed item's icon, rewinds to sequence time 0 and
+        -- shows itself; OnAnimFinished hides it again. A second push on the same button RESTARTS it
+        -- (SetSequenceTime(0,0)); pushes into different bags run independently. That is exactly the
+        -- machine below, with the reference's ITEM_PUSH `arg1` translated from its inventory-slot
+        -- vocabulary (20..23) into ours (bagId 1..4) app-side — ui_loot.rs `push_container` carries
+        -- the byte-verified selector.
+        --
+        -- The reference's is a <Model> playing Interface\ItemAnimations\ForcedBackpackItem.mdx — a
+        -- single 4-vertex quad on one animated bone, i.e. a 2D icon card with keyframed scale, alpha
+        -- and offset. benilla has no Model widget (decision 0137's Cooldown took the same posture:
+        -- model the mechanism, let our own renderer draw it), so it is a Texture driven by the
+        -- model's OWN tracks, read out of the shipped .m2 with `benilla-extract m2anim`/`m2bones`:
+        --
+        --   sequence 0, CLAMP (plays once), duration 1.000 s
+        --   texture-weight (alpha)  0.000→0.0  0.133→1.0  0.267→1.0  1.000→0.0     linear
+        --   bone 0 scale            0.000→1.0  0.133→1.2  0.267→1.0  1.000→0.014   linear
+        --   bone 0 translation      0.000→(0,0)  0.500→(0,0)  1.000→(+0.010,-0.040)
+        --   the quad itself: 0.03 x 0.03 model units, blend Alpha, unlit, no depth write
+        --
+        -- So: fade in over the first 133 ms while swelling to 1.2x; settle back to full size by
+        -- 267 ms; from there dwindle and fade continuously for the remaining 733 ms — while the
+        -- POSITION holds until the half-second and only then falls. The three tracks deliberately
+        -- do not share a schedule: the card is already down to ~0.69 size and ~0.68 alpha when it
+        -- starts moving, so the drop reads as the icon being drawn into the bag rather than as a
+        -- solid tile sliding. Those numbers are the file's, not ours.
+        --
+        -- THE ONE AUTHORED NUMBER is the model-unit → pixel scale, because a <Model> frame's 3D
+        -- projection is not RE-recorded (the ref's ItemAnim frame has no <Size> at all, so the rect
+        -- cannot be it) — see decision 0887's named gap. 1200 px/unit is the sibling calibration:
+        -- CooldownFrameTemplate is the same kind of degenerate UI model, its four quads span 0.04
+        -- units, and at its scale="0.75" that sweep covers a 36px action button ⇒ 0.04·K·0.75 = 36.
+        -- At K = 1200 this model's own numbers land on 36 px of icon (exactly a bag-bar button),
+        -- a 48 px fall and a 12 px sideways drift — which is why the sizes below are stated as the
+        -- model's ratios times the icon, not as free pixels: correct the scale in one place and the
+        -- whole animation stays in proportion.
+        BENILLA_ITEM_PUSH_PX_PER_UNIT = 1200
+        BENILLA_ITEM_PUSH_DURATION = 1.0
+        BENILLA_ITEM_PUSH_SIZE  = 0.03 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 36
+        BENILLA_ITEM_PUSH_FALL  = 0.04 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 48
+        BENILLA_ITEM_PUSH_DRIFT = 0.01 * BENILLA_ITEM_PUSH_PX_PER_UNIT   -- 12
+        -- {time, value} keyframes, linear between (M2 track interpolation 1) — the file's own keys.
+        BENILLA_ITEM_PUSH_ALPHA = { {0.000, 0.0}, {0.133, 1.0}, {0.267, 1.0}, {1.000, 0.0} }
+        BENILLA_ITEM_PUSH_SCALE = { {0.000, 1.0}, {0.133, 1.2}, {0.267, 1.0}, {1.000, 0.014} }
+        -- The translation track as a 0..1 fraction of the fall (both components move together, so
+        -- one curve drives both axes — the file keys (0,0) at 0.000 and 0.500, the full offset at
+        -- 1.000, i.e. it hangs for the first half second and then drops).
+        BENILLA_ITEM_PUSH_DROP  = { {0.000, 0.0}, {0.500, 0.0}, {1.000, 1.0} }
+
+        -- Sample a {time, value} keyframe list at `t`, linear between keys, clamped at both ends
+        -- (the M2 sampler's own shape for a CLAMP sequence).
+        function BenillaItemPushAnim_Sample(track, t)
+            local last = table.getn(track)
+            if t <= track[1][1] then return track[1][2] end
+            for i = 2, last do
+                local key = track[i]
+                if t <= key[1] then
+                    local prev = track[i - 1]
+                    local span = key[1] - prev[1]
+                    if span <= 0 then return key[2] end
+                    return prev[2] + (key[2] - prev[2]) * (t - prev[1]) / span
+                end
+            end
+            return track[last][2]
+        end
+
+        -- Place/size/fade the card for the current clock. The card LANDS centred on its button and
+        -- STARTS a fall's height above it (and a drift's width to the left), so the icon reads as
+        -- floating clear above the bar and then dropping into the bag — the model's own relative
+        -- motion, anchored to the button rather than to the ref's unresolvable model origin.
+        function BenillaItemPushAnim_Paint(anim)
+            local t = anim.elapsed
+            local drop = BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_DROP, t)
+            local size = BENILLA_ITEM_PUSH_SIZE * BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_SCALE, t)
+            anim:SetWidth(size)
+            anim:SetHeight(size)
+            anim:SetPoint("CENTER", anim:GetParent(), "CENTER",
+                BENILLA_ITEM_PUSH_DRIFT * (drop - 1),
+                BENILLA_ITEM_PUSH_FALL * (1 - drop))
+            anim:SetAlpha(BenillaItemPushAnim_Sample(BENILLA_ITEM_PUSH_ALPHA, t))
+        end
+
+        -- ref ItemAnim_OnLoad (l.68-70): the card listens for ITEM_PUSH and nothing else. It is
+        -- authored hidden, so it costs no OnUpdate until a push shows it (events reach hidden
+        -- frames; OnUpdate does not — the reference's own split).
+        function BenillaItemPushAnim_OnLoad(anim, containerId)
+            anim.containerId = containerId
+            anim.icon = getglobal(anim:GetName() .. "Icon")
+            anim.elapsed = 0
+            anim:RegisterEvent("ITEM_PUSH")
+        end
+
+        -- ref ItemAnim_OnEvent (l.72-80): `if this:GetParent():GetID() == arg1`, then
+        -- ReplaceIconTexture(arg2) / SetSequence(0) / SetSequenceTime(0,0) / Show. A push into a bag
+        -- with no button (a bank bag) matches nothing and animates nowhere, there and here.
+        function BenillaItemPushAnim_OnEvent(anim)
+            if arg1 ~= anim.containerId then return end
+            anim.icon:SetTexture(arg2)
+            anim.elapsed = 0
+            -- Seat the card above its button rather than at load: the bag bar's own level is set in
+            -- the BUTTON's OnLoad (BenillaActionBarArt_SeatAbove), which the loader may run after
+            -- this child exists. Re-deriving it per push is one call and can never read it stale.
+            anim:SetFrameLevel(anim:GetParent():GetFrameLevel() + 1)
+            BenillaItemPushAnim_Paint(anim)
+            anim:Show()
+        end
+
+        -- The CLAMP sequence's end is the ref's OnAnimFinished → this:Hide() (l.92-94).
+        function BenillaItemPushAnim_OnUpdate(anim, elapsed)
+            anim.elapsed = anim.elapsed + (elapsed or 0)
+            if anim.elapsed >= BENILLA_ITEM_PUSH_DURATION then
+                anim:Hide()
+                return
+            end
+            BenillaItemPushAnim_Paint(anim)
+        end
+
         -- The bag BAR's five buttons (the backpack toggle + the four equipped-bag slots) — the row
         -- Disable_/Enable_BagButtons greys as a unit. Distinct from UiPanels.xml's BAG_WINDOWS,
         -- which is the five bag *windows* those buttons open.
@@ -1432,6 +1552,24 @@
                 <Texture name="$parentIcon" file="Interface\Buttons\Button-Backpack-Up"/>
             </Layer>
         </Layers>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button, container id 0 = the backpack. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, 0)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
         <!-- The lit ring while the backpack window is open (ref MainMenuBarBackpackButton
              l.104) — a CheckButton like the ref's; OnShow/OnHide of the window drive it. -->
@@ -1464,6 +1602,24 @@
             <Anchor point="RIGHT" relativeTo="BenillaBagToggle" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
         <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button; container id 1. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, 1)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <NormalTexture file="Interface\Buttons\UI-Quickslot2">
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
@@ -1501,6 +1657,24 @@
             <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot1" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
         <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button; container id 2. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, 2)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <NormalTexture file="Interface\Buttons\UI-Quickslot2">
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
@@ -1537,6 +1711,24 @@
             <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot2" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
         <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button; container id 3. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, 3)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <NormalTexture file="Interface\Buttons\UI-Quickslot2">
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
@@ -1573,6 +1765,24 @@
             <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot3" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
         <Layers><Layer level="BACKGROUND"><Texture name="$parentIcon"/></Layer></Layers>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button; container id 4. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, 4)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <NormalTexture file="Interface\Buttons\UI-Quickslot2">
             <Size><AbsDimension x="66" y="66"/></Size>
             <Anchors><Anchor point="CENTER" relativePoint="CENTER"/></Anchors>
@@ -1625,6 +1835,26 @@
         <Anchors>
             <Anchor point="RIGHT" relativeTo="BenillaBagBarSlot4" relativePoint="LEFT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor>
         </Anchors>
+        <!-- The item-push drop card (decision 0887, BenillaItemPushAnim_* above) — the ref's
+             $parentItemAnim, one per bag button; container id -2 (KEYRING_CONTAINER). The ref gives
+             the keyring one too (MainMenuBarBagButtons.xml l.152-160), and the byte selector really
+             does reach it: a push landing in player-array slots 81..112 resolves to -2, not 0. -->
+        <Frames>
+            <Frame name="$parentItemAnim" hidden="true">
+                <Size><AbsDimension x="36" y="36"/></Size>
+                <Anchors><Anchor point="CENTER"/></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentIcon" setAllPoints="true"/>
+                    </Layer>
+                </Layers>
+                <Scripts>
+                    <OnLoad>BenillaItemPushAnim_OnLoad(self, -2)</OnLoad>
+                    <OnEvent>BenillaItemPushAnim_OnEvent(self)</OnEvent>
+                    <OnUpdate>BenillaItemPushAnim_OnUpdate(self, arg1)</OnUpdate>
+                </Scripts>
+            </Frame>
+        </Frames>
         <NormalTexture file="Interface\Buttons\UI-Button-KeyRing">
             <TexCoords left="0" right="0.5625" top="0" bottom="0.609375"/>
         </NormalTexture>

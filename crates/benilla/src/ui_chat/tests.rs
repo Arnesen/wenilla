@@ -90,13 +90,18 @@ fn system_and_loot_lines_are_verbatim() {
         .unwrap(),
         "Additem: Wool Cloth added."
     );
+    // A LOOT line arrives already composed by `ui_loot::receive_line`, item link and all; compose
+    // must pass the escapes through untouched (the quality colour is the link's, not the line's).
     assert_eq!(
         compose(
-            &ChatEvent::text_only(K::Loot, "You receive loot: [Tough Jerky].".into()),
+            &ChatEvent::text_only(
+                K::Loot,
+                "You receive loot: |cffffffff|Hitem:117:0:0:0|h[Tough Jerky]|h|r.".into()
+            ),
             K::Loot
         )
         .unwrap(),
-        "You receive loot: [Tough Jerky]."
+        "You receive loot: |cffffffff|Hitem:117:0:0:0|h[Tough Jerky]|h|r."
     );
 }
 

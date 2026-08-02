@@ -49,7 +49,7 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore};
 use crate::portrait::InspectBooth;
-use crate::ui_items::quality_color;
+use crate::ui_items::item_link;
 use crate::ui_script::UiInput;
 
 /// The unit tokens a UnitPopup row can name for another player — the popup menus' own set
@@ -119,14 +119,7 @@ fn inspect_slot_view(
         Some(t) => (Some(t.name.clone()), t.quality, t.display_info_id),
         None => (None, 0, 0),
     };
-    let link = name.as_ref().map(|n| {
-        format!(
-            "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
-            quality_color(quality),
-            entry,
-            n
-        )
-    });
+    let link = name.as_ref().map(|n| item_link(entry, n, quality));
     Some(InvSlotView {
         item_id: entry,
         icon: icons

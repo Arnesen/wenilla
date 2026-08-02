@@ -554,7 +554,7 @@ pub(super) fn attach_missile_models(
         // (Thrown_1H_*.m2) tumbles end-over-end through its InFlight bone rotation AND keys its
         // trail ribbon's per-sequence visibility ON — the worn item sits in Stand with neither.
         // A projectile with no InFlight sequence (an arrow, a fireball whose tumble is a global
-        // sequence) falls to the file-order-first clip inside the rig, unchanged.
+        // sequence) falls to the model's own `Stand` inside the rig, unchanged.
         if !attach_effect_visuals(
             &mut commands,
             entity,
@@ -564,6 +564,9 @@ pub(super) fn attach_missile_models(
             // A missile is a FREE world model: its trail stays world-frozen, and its pool
             // finishes in place when it impacts (0202's drain).
             EffectHost::default(),
+            // A projectile is the separate `CMissile` TU, not a `CEffect`: it has no kit stage and
+            // no Birth/Hold/Decay lifecycle — it flies its one sequence and dies on arrival.
+            None,
             &mut wow_materials,
             &mut tint_reg,
             &ibps,

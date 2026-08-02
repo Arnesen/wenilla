@@ -16,7 +16,7 @@ use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 
 use super::equip_error::equip_error_key;
 use super::{
-    find_equip_slot, has_key, keyring_size, quality_color, slot_guid_count, EquipErrors, BAGS,
+    find_equip_slot, has_key, item_link, keyring_size, slot_guid_count, EquipErrors, BAGS,
     BAG_SLOT_FIRST, BANK_BAGS, BANK_BAG_ID_FIRST, BANK_CONTAINER, BANK_SLOTS, KEYRING_CONTAINER,
     KEYRING_SLOTS, PACK_SLOTS,
 };
@@ -475,12 +475,7 @@ fn resolve_slot(
         durability,
         quality: Some(t.quality),
         item_id: entry,
-        link: Some(format!(
-            "|c{}|Hitem:{}:0:0:0|h[{}]|h|r",
-            quality_color(t.quality),
-            entry,
-            t.name
-        )),
+        link: Some(item_link(entry, &t.name, t.quality)),
         locked: false,
         readable,
         creator,

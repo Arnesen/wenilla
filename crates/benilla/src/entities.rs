@@ -460,7 +460,12 @@ impl Plugin for EntitiesPlugin {
                     spell_fx::tick_fx_tint,
                     // Fire each live instance's crossed event keyframes (decision 0304) — after
                     // attach so a just-spawned instance's head window [0, cur] fires this frame.
-                    spell_fx::fire_fx_anim_events,
+                    // Beside it (one nested, unordered element — the outer tuple is at `chain()`'s
+                    // 20-element ceiling): the effect-model completion callbacks, which advance an
+                    // instance birth → Hold and arm the reap's Decay. Independent of the event
+                    // scan; both only read a player Bevy already advanced in `PreUpdate`, and both
+                    // want to run after the attach passes so a fresh instance is covered at once.
+                    (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),
                     // A gear change re-dresses the standing visual in place — a re-composited atlas
                     // on the same parts, the equipment geosets re-selected, every attachment left
                     // alone (decision 0835, the reference's own shape).

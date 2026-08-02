@@ -510,7 +510,8 @@ use spell_visual::{
 #[cfg(test)]
 pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
-    held_strike_sound, FxClass, KitPush, MissileSpawn, SpellKitFx, SpellKitSound, SpellVisuals,
+    held_strike_sound, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx, SpellKitSound,
+    SpellVisuals,
 };
 
 /// The per-unit animation state machine.
@@ -805,6 +806,16 @@ impl Plugin for CreatureAnimPlugin {
                     // before `resolve_equipment` reads them, or a sheath transition double-swaps
                     // the weapon placement for a frame (the flash).
                     .before(crate::entities::EntityVisualsSet),
+            )
+            // The freeze (CharProc 11, decision 0889): **after the driver**, so this frame's arms
+            // are already in when the clocks are held — the Ice Block observable is precisely that
+            // the cast one-shot gets armed and then never advances a frame. After the drain too, so
+            // the node it reads is this frame's.
+            .add_systems(
+                Update,
+                crate::aura_visual::apply_aura_anim_rate
+                    .after(drive_animations)
+                    .after(crate::aura_visual::drain_aura_procs),
             );
     }
 }

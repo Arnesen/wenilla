@@ -468,11 +468,6 @@ pub(super) fn drive_animations(
         // right by construction, since the rider's body holds Mount(91) regardless and stealth and
         // mounts are mutually exclusive anyway.
         mv.stealthed = store.is_some_and(|s| s.0.unit_is_stealthed());
-        // Stunned — read the same way and for the same reason (decision 0880): the fidget bail is a
-        // descriptor test in the reference too (`0x5eb4f2`/`0x5ec219`), on every unit it animates,
-        // so a watched player under Ice Block goes as still as ours does.
-        mv.stunned =
-            store.is_some_and(|s| s.0.unit_flags() & crate::player::UNIT_FLAG_STUNNED != 0);
         let moving = mv.flags & move_flags::ANY_MOVE != 0;
         // The airborne arc's bookkeeping (wow-re land-anim-height-gate + rf57b §2): on the arc's
         // FIRST airborne frame, its launch vertical speed splits a **jump** (upward — the client's
@@ -508,14 +503,13 @@ pub(super) fn drive_animations(
         // Whether a looping base arm this frame may ROLL its variation (the client's base-arm
         // `variationIdx = −1`, decision 0123) or is forced to the head: decided from the state
         // *before* this frame's transitions (the client tests the outgoing armed id).
+        // (0880 also gated this on a stun. That gate cited `0x5eb4f2`/`0x5ec219` as "the idle/fidget
+        // selectors bail on UNIT_FLAG_STUNNED" — re-read at the bytes, those two sites are
+        // `ToggleSheath 0x5eb480` and `CanLootNow 0x5ec110`, and NO site in the whole `0x40000`
+        // census touches animation selection. The stun does not quiet the fidget; the freeze does,
+        // by stopping the clock (decision 0889), so the invented gate is gone.)
         let outgoing = drv.active_anim().unwrap_or(STAND);
-        // …and never while stunned (decision 0880): the reference's idle/fidget selectors bail on
-        // `UNIT_FLAG_STUNNED` before they get to choose anything, so the re-arm holds the head and
-        // even the idle twitch stops. Its own gate, not `arm_forces_head`'s combat/cast re-zero —
-        // Ice Block is neither engaged nor casting, and the two suppressions sit at different sites
-        // in the binary (`0x5eb4f2`/`0x5ec219` vs `0x5fdba0`).
-        let relaxed =
-            !mv.stunned && !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
+        let relaxed = !select::arm_forces_head(engaged, cast_hold.is_some(), outgoing);
 
         wound_upkeep(&mut drv, &mut player);
 

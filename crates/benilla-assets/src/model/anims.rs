@@ -168,12 +168,25 @@ impl ModelAnimations {
     }
 
     /// The clip a free/effect model instance runs: the caller's `preferred` id when the model has
-    /// it (the thrown-weapon missile asks for InFlight), else the file-order-first clip — the
-    /// existing default. One selector so the rig ([`crate::…`]'s `arm_effect_rig`) and its ribbon
-    /// gate agree on which sequence is playing.
+    /// it (the thrown-weapon missile asks for InFlight), else the reference's **model-load
+    /// bootstrap** — animation id **0 (`Stand`)**, variation 0 (wow-re `ceffect-anim-lifecycle.md`
+    /// §D1a, byte-verified `0x710153`–`0x71019b`: `0x711bf0(reqId = 0)` → `0x711960` → op4 with an
+    /// explicit `push 0x0` variation), falling back to the first sequence record's own id only when
+    /// the model authors no `Stand` (the guarded `*(dword*)&sequences[0]` at `0x710181`).
+    ///
+    /// **Not the file-order-first slot**, which is what this used to be: the two differ on 583
+    /// models corpus-wide (`benilla-extract fxlifescan`), and arming slot 0 hands
+    /// `Spells\LightningShield_State_Base` its `Decay` sequence from frame one. It is the same
+    /// correction `first_seq` already carries for the placed-doodad lane (0637, the duel flag) —
+    /// but taken *without* that field's bind-pose content gate, because an effect's emitters read
+    /// the posed joints even when the mesh would render identically.
+    ///
+    /// One selector so the rig (`entities::spell_fx::arm_effect_rig`) and its per-sequence riders
+    /// agree on which sequence is playing.
     pub fn preferred_clip(&self, preferred: Option<u16>) -> Option<&AnimClip> {
         preferred
             .and_then(|id| self.find(id))
+            .or_else(|| self.find(0))
             .or_else(|| self.clips.first())
     }
 
@@ -452,6 +465,37 @@ mod tests {
                 dir_flags: 0
             }
         );
+    }
+
+    // ── preferred_clip: the model-load bootstrap (wow-re `ceffect-anim-lifecycle.md` §D1a) ──────
+
+    /// The bootstrap arms **id 0 `Stand`**, not the file's first slot. `LightningShield_State`'s
+    /// real shape: sequence 0 is its `Decay`(159), and arming file-order-first handed a freshly
+    /// cast shield its fade-out from frame one.
+    #[test]
+    fn preferred_clip_arms_stand_over_the_file_order_first_slot() {
+        let anims = test_anims(&[159, 0, 158], Vec::new());
+        assert_eq!(anims.preferred_clip(None).map(|c| c.anim_id), Some(0));
+    }
+
+    /// The guarded fallback (`0x710181`): a model authoring no `Stand` at all — Cripple, Curse of
+    /// Tongues, both Holy Word: Shields, whose slot 0 is `Hold` — plays that first record's own id.
+    #[test]
+    fn preferred_clip_falls_back_to_the_first_record_without_a_stand() {
+        let anims = test_anims(&[158, 159], Vec::new());
+        assert_eq!(anims.preferred_clip(None).map(|c| c.anim_id), Some(158));
+    }
+
+    /// A caller-named id still wins (the thrown-weapon missile's InFlight) — and when the model
+    /// lacks it, the resolve falls through to the bootstrap rather than to slot 0.
+    #[test]
+    fn preferred_clip_honours_a_named_id_then_falls_to_stand() {
+        let anims = test_anims(&[159, 0, 158], Vec::new());
+        assert_eq!(
+            anims.preferred_clip(Some(158)).map(|c| c.anim_id),
+            Some(158)
+        );
+        assert_eq!(anims.preferred_clip(Some(42)).map(|c| c.anim_id), Some(0));
     }
 
     /// The variation pick is the client's weighted walk (wow-re `anim-id-resolution.md`, op4 with

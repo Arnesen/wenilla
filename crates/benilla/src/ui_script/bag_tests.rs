@@ -1519,3 +1519,194 @@ fn a_key_dropped_on_the_button_files_itself() {
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
+
+/// The item-push drop animation (decision 0887): `ITEM_PUSH(container, icon)` runs the pushed item's
+/// icon down into **that** container's bag-bar button and nobody else's, along the curves read out of
+/// `ForcedBackpackItem.m2` — pop in, hang, fall, shrink away — and hides itself at the end.
+///
+/// This is the whole observable contract of `BenillaItemPushAnim_*`: the routing (which button), the
+/// motion (starts a fall above the button, lands centred on it), the fade/scale shape (the file's
+/// keys), and the CLAMP end (one play, then gone). It is also the regression net for the OnUpdate
+/// gate — an anim frame left shown would keep ticking forever.
+#[test]
+fn an_item_push_drops_its_icon_into_the_bag_that_took_it() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1600.0, 900.0);
+    for file in [
+        "Fonts.xml",
+        "UiPanels.xml",
+        "MerchantFrame.xml",
+        "Cooldown.xml",
+        "ActionBar.xml",
+        "BagFrame.xml",
+    ] {
+        load_xml(&s, file);
+    }
+    s.resolve();
+
+    let shown = |s: &UiScript, name: &str| {
+        s.eval::<bool>(&format!("return {name}ItemAnim:IsShown()"))
+            .unwrap()
+    };
+    // The card's centre relative to its button's centre, in screen px (y-up): (dx, dy).
+    let offset = |s: &UiScript, name: &str| -> (f32, f32) {
+        s.eval::<(f32, f32)>(&format!(
+            "local a, b = {name}ItemAnim, {name} \
+             local ax, ay = a:GetLeft() + a:GetWidth() / 2, a:GetBottom() + a:GetHeight() / 2 \
+             local bx, by = b:GetLeft() + b:GetWidth() / 2, b:GetBottom() + b:GetHeight() / 2 \
+             return ax - bx, ay - by"
+        ))
+        .unwrap()
+    };
+    let size = |s: &UiScript, name: &str| {
+        s.eval::<f32>(&format!("return {name}ItemAnim:GetWidth()"))
+            .unwrap()
+    };
+    let alpha = |s: &UiScript, name: &str| {
+        s.eval::<f32>(&format!("return {name}ItemAnim:GetAlpha()"))
+            .unwrap()
+    };
+
+    // Nothing is animating until a push arrives.
+    for b in [
+        "BenillaBagToggle",
+        "BenillaBagBarSlot2",
+        "BenillaKeyRingButton",
+    ] {
+        assert!(!shown(&s, b), "{b}'s card starts hidden");
+    }
+
+    // A push into equipped bag 2.
+    s.fire_event(
+        "ITEM_PUSH",
+        vec![
+            benilla_ui::script::ScriptValue::Int(2),
+            benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Bag_08".into()),
+        ],
+    );
+    s.resolve();
+    assert!(shown(&s, "BenillaBagBarSlot2"), "bag 2's card plays");
+    for b in [
+        "BenillaBagToggle",
+        "BenillaBagBarSlot1",
+        "BenillaKeyRingButton",
+    ] {
+        assert!(!shown(&s, b), "{b} took nothing, so {b} animates nothing");
+    }
+    // The pushed icon reaches the RENDERER, not just the Lua state — exactly one quad carries it.
+    let drawn = |s: &UiScript, icon: &str| {
+        s.extract()
+            .iter()
+            .filter(
+                |q| matches!(&q.content, QuadContent::Texture { path: Some(p), .. } if p == icon),
+            )
+            .count()
+    };
+    assert_eq!(
+        drawn(&s, "Interface\\Icons\\INV_Misc_Bag_08"),
+        1,
+        "the card wears the pushed item's icon (ITEM_PUSH's arg2)"
+    );
+
+    // t=0: invisible, full size, held a whole fall above the button (and a drift to its left) —
+    // the .m2's alpha key (0.000, 0.0), scale key (0.000, 1.0), translation (0.000, (0,0)).
+    let (dx, dy) = offset(&s, "BenillaBagBarSlot2");
+    assert!(
+        (dy - 48.0).abs() < 0.5 && (dx + 12.0).abs() < 0.5,
+        "starts one fall (48px) above and one drift (12px) left of the button: got ({dx}, {dy})"
+    );
+    assert!(
+        alpha(&s, "BenillaBagBarSlot2") < 0.01,
+        "fades in from nothing"
+    );
+
+    // t=0.133: fully faded in, at the 1.2x swell — the pop the director sees above the bar.
+    s.tick(0.133);
+    s.resolve();
+    assert!(
+        (alpha(&s, "BenillaBagBarSlot2") - 1.0).abs() < 0.02,
+        "opaque by the alpha track's second key"
+    );
+    assert!(
+        (size(&s, "BenillaBagBarSlot2") - 36.0 * 1.2).abs() < 0.5,
+        "swollen to 1.2x the 36px icon at the scale track's peak"
+    );
+
+    // t=0.267: back to the icon's own size, still opaque, still parked.
+    s.tick(0.134);
+    s.resolve();
+    assert!(
+        (size(&s, "BenillaBagBarSlot2") - 36.0).abs() < 0.5,
+        "settled back to the 36px icon at the scale track's third key"
+    );
+    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    assert!((dy - 48.0).abs() < 0.5, "has not started falling: got {dy}");
+
+    // t=0.5: STILL PARKED — the translation track's second key is (0,0), so the whole first half
+    // second is a hang above the bar. The other two tracks are already running down, though: the
+    // three curves keep different schedules, which is the thing a "hold everything then drop"
+    // reading would get wrong (scale/alpha ≈ 0.686/0.682 here, the 0.267→1.000 ramps at t=0.5).
+    s.tick(0.233);
+    s.resolve();
+    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    assert!(
+        (dy - 48.0).abs() < 0.5,
+        "has not moved yet at the half second: got {dy}"
+    );
+    assert!(
+        (size(&s, "BenillaBagBarSlot2") - 36.0 * 0.686).abs() < 0.5,
+        "but is already dwindling: got {}",
+        size(&s, "BenillaBagBarSlot2")
+    );
+    assert!(
+        (alpha(&s, "BenillaBagBarSlot2") - 0.682).abs() < 0.02,
+        "and already fading: got {}",
+        alpha(&s, "BenillaBagBarSlot2")
+    );
+
+    // t=0.75: halfway down.
+    s.tick(0.25);
+    s.resolve();
+    let (_, dy) = offset(&s, "BenillaBagBarSlot2");
+    assert!(
+        (dy - 24.0).abs() < 0.5,
+        "half the fall travelled by t=0.75: got {dy}"
+    );
+
+    // Just short of the end: landed on the button, shrunk to nothing, faded out.
+    s.tick(0.24);
+    s.resolve();
+    let (dx, dy) = offset(&s, "BenillaBagBarSlot2");
+    assert!(
+        dx.abs() < 1.0 && dy.abs() < 1.5,
+        "lands centred on the button it went into: got ({dx}, {dy})"
+    );
+    assert!(
+        size(&s, "BenillaBagBarSlot2") < 2.0,
+        "collapsed to the scale track's 0.014"
+    );
+    assert!(alpha(&s, "BenillaBagBarSlot2") < 0.05, "faded out");
+
+    // Past 1.000s the CLAMP sequence is over — the ref's OnAnimFinished → Hide.
+    s.tick(0.05);
+    assert!(
+        !shown(&s, "BenillaBagBarSlot2"),
+        "one play, then gone (and no OnUpdate left running)"
+    );
+
+    // The keyring is a real destination, not a rounding of the backpack.
+    s.fire_event(
+        "ITEM_PUSH",
+        vec![
+            benilla_ui::script::ScriptValue::Int(-2),
+            benilla_ui::script::ScriptValue::Str("Interface\\Icons\\INV_Misc_Key_03".into()),
+        ],
+    );
+    assert!(shown(&s, "BenillaKeyRingButton"), "the keyring card plays");
+    assert!(
+        !shown(&s, "BenillaBagToggle"),
+        "and the backpack's does not"
+    );
+
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}

@@ -267,18 +267,6 @@ pub(crate) struct MovementState {
     /// legs never touch it: unlike the stand state there is nothing to predict controller-side —
     /// the crouch waits on the server's aura, exactly as the reference does.
     pub(crate) stealthed: bool,
-    /// **Stunned** — `UNIT_FIELD_FLAGS & 0x40000`, stamped from the unit's OWN descriptor every
-    /// frame like [`Self::stealthed`] (self and remote alike). It gates the **idle fidget**: the
-    /// reference's idle/fidget selectors bail on the bit outright (`0x5eb4f2`, `0x5ec219` —
-    /// `test dword ptr [eax+0xa0], 0x40000` → `jne` out), so a stunned unit holds one deterministic
-    /// idle instead of looking around.
-    ///
-    /// That is the *whole* of the stun's animation effect — there is no stun clip anywhere in the
-    /// `0x40000` census (wow-re `unit-flags-movement-gates.md` §3). The rest of the frozen look is
-    /// the ROOT half doing its job: a stun always arrives with one, and a rooted unit carries no
-    /// direction bit, so the movement-anim resolver takes its not-moving exit and the body stands
-    /// (decision 0880).
-    pub(crate) stunned: bool,
     /// Riding a **flying** server spline (the taxi flight): the client's selector reads the active
     /// CMovement's spline flags (`[[unit+0x118]+0xa4]+0x18`) and plays Fly 135 when the wire Flying
     /// bit (0x200) is set — RF-0057 `0x5fd19c`. Stamped by [`unify`] from the entity's live

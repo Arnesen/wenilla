@@ -335,3 +335,38 @@ fn a_stopped_timer_paints_nothing() {
     assert!(tex_quad(&quads, "UI-CastingBar-Border").is_none());
     assert!(tex_quad(&quads, "UI-StatusBar").is_none());
 }
+
+/// The director's report (2026-08-02): *"the z of the bar is wrong, its overlaying the border"* —
+/// the blue fill was painting over the border art AND over the caption, leaving "Breath"
+/// unreadable.
+///
+/// The reference's own construction says the fill belongs underneath: the border texture and the
+/// caption are OVERLAY regions of the timer **frame**, and the fill belongs to a **child**
+/// StatusBar whose only OnLoad is `SetFrameLevel(GetFrameLevel() - 1)`. Both must draw after the
+/// fill in the painter's order — i.e. strictly greater `z`.
+#[test]
+fn the_border_and_caption_draw_over_the_fill() {
+    let mut s = harness();
+    start(&mut s, "BREATH", 45_000, 60_000, -1, "Breath");
+    let quads = frame(&mut s, 0.016);
+
+    let fill = tex_quad(&quads, "UI-StatusBar").expect("the status-bar fill");
+    let border = tex_quad(&quads, "UI-CastingBar-Border").expect("the border chrome");
+    let caption = quads
+        .iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "Breath"))
+        .expect("the caption");
+
+    assert!(
+        border.z > fill.z,
+        "the border must paint OVER the fill (border z={:#x}, fill z={:#x})",
+        border.z,
+        fill.z
+    );
+    assert!(
+        caption.z > fill.z,
+        "the caption must paint OVER the fill (caption z={:#x}, fill z={:#x})",
+        caption.z,
+        fill.z
+    );
+}

@@ -218,6 +218,17 @@ enum Command {
         /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the **effect-model animation
+    /// lifecycle**: which models author the `Stand`(0) -> `Hold`(158) -> `Decay`(159) triple, and
+    /// what a consumer that arms ONE sequence and never advances renders for each. A spell-effect
+    /// model puts its grow-in in the clamping `Stand`, its sustained pulse in the looping `Hold`
+    /// and its fade-out in `Decay` — so arming only the first freezes on the birth's last frame for
+    /// the effect's whole life (the frozen Ice Barrier shield). The population instrument for that
+    /// class: FREEZE / hold-loops / decay-only counts, corpus-wide; `m2seq` explains one model.
+    Fxlifescan {
+        /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and measure how far our SKELETAL parse
     /// sits from the reference's sampler, per bone track per sequence band: empty bands (our
     /// nearest-key clamp vs the file's own `interpolation_ranges` window), held band edges (our
@@ -565,6 +576,7 @@ fn main() -> Result<()> {
         Command::Groundscan { prefix } => scan::groundscan(&mut chain, prefix.as_deref())?,
         Command::Geosetscan { prefix } => scan::geosetscan(&mut chain, prefix.as_deref())?,
         Command::Alphascan { prefix } => scan::alphascan(&mut chain, prefix.as_deref())?,
+        Command::Fxlifescan { prefix } => scan::fxlifescan(&mut chain, prefix.as_deref())?,
         Command::Goanimscan => scan::goanimscan(&mut chain)?,
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,

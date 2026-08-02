@@ -21,8 +21,10 @@
 //! attach cascade for a model lacking the requested point is the client's: tag → `0xf` → `0x13`
 //! → the unit's base (wow-re §5, `0x61ceb0`).
 //!
-//! Effect models run their **bone rigs** ([`arm_effect_rig`] — the first clip + global sequences
-//! pose the joints that meshes skin to and emitters/ribbons/cards ride) and their **material
+//! Effect models run their **bone rigs** ([`arm_effect_rig`] — the birth clip + global sequences
+//! pose the joints that meshes skin to and emitters/ribbons/cards ride), advance them through the
+//! authored `Stand` → `Hold` → `Decay` lifecycle ([`lifecycle`], which is where the Ice Barrier
+//! shield's pulse comes from), and run their **material
 //! animation**: each part's colour-alpha × transparency-weight loops sample per instance on the
 //! attach clock (a [`MatAnim`](crate::doodad_anim::MatAnim) that owns the part's render-alpha
 //! tag — Battle Shout's staggered crescent pulses), and an animated M2Color RGB ticks a
@@ -42,6 +44,8 @@
 //! callback; and the kit sound keeps playing unconditionally where the client gates it on
 //! no-visual-attached.
 
+mod lifecycle;
+
 use std::collections::HashMap;
 
 use benilla_assets::bone_target_id;
@@ -49,13 +53,15 @@ use bevy::animation::AnimatedBy;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 
-use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, SpellKitFx};
+use crate::creature_anim::{scan_events, AnimSoundEvent, FxClass, FxStage, SpellKitFx};
 use crate::debug_panel::{ModelKind, ModelPart};
 use crate::model_render::m2_url;
 use crate::particles;
 use crate::terrain::WowModelMaterial;
 
 use super::{BoneAttach, DisplayModel, EntityPart, ModelHandle};
+pub(super) use lifecycle::advance_fx_anim;
+use lifecycle::{decay_span, FxAnimLife, FxDecay};
 
 /// The client's attach fallback cascade when a model lacks the requested point (wow-re
 /// `spell-visual-apply.md` §5, `0x61ceb0`/`0x61fae0`): retry `0xf`, then `0x13`, then the unit's
@@ -296,11 +302,20 @@ pub(crate) fn drive_fx_view(
                 attached: true,
                 parent: None,
             },
+            // `WOW_FX_HOLD=1` previews a PERSISTENT instance, so it must show the persistent
+            // lifecycle — birth then `Hold` — or the instrument would report a freeze the game
+            // does not have. Without it the fixture previews a one-shot, which runs its birth once
+            // and is reaped by the fixture's own span clock below.
+            Some(if req.hold {
+                FxStage::State
+            } else {
+                FxStage::OneShot
+            }),
             &mut wow_materials,
             &mut tint_reg,
             &ibps,
             &mut palettes,
-            None, // the fixture previews a kit effect at its default (first) clip
+            None, // the fixture previews a kit effect on its model's own `Stand`
         ) {
             state.attached_at = Some(time.elapsed_secs());
         }
@@ -340,6 +355,13 @@ pub(super) struct EffectHost {
 /// emitters' attach frame, whose render alpha they inherit, and what becomes of them when the
 /// instance goes. Returns `false` while the model's parts are still building — call again next
 /// frame.
+///
+/// `stage` is the instance's **animation lifecycle** ([`lifecycle`]): `Some` for a spell-visual
+/// `CEffect`, which advances `Stand` → `Hold` → `Decay` and therefore reads its per-sequence riders
+/// (each part's alpha loops, each emitter's rate/enable windows) off its own live `AnimationPlayer`
+/// rather than off a slot pinned at spawn. `None` for the lanes that are not `CEffect`s and never
+/// advance — a missile (the separate `CMissile` TU), an item glow, the `fxview` preview — which
+/// keep the pinned single-clip arm they have always had.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attach_effect_visuals(
     commands: &mut Commands,
@@ -348,6 +370,7 @@ pub(super) fn attach_effect_visuals(
     now: f32,
     ground_anchor: bool,
     host: EffectHost,
+    stage: Option<FxStage>,
     wow_materials: &mut Assets<WowModelMaterial>,
     tint_reg: &mut FxTintAnims,
     ibps: &Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>,
@@ -389,7 +412,7 @@ pub(super) fn attach_effect_visuals(
             }
         })
         .collect();
-    let joints = arm_effect_rig(commands, root, dm, preferred_anim);
+    let (joints, armed) = arm_effect_rig(commands, root, dm, preferred_anim, stage);
     // The owned palette rig (decision 0720): allocated when the effect draws skinned parts; the
     // hook frees the slot when the instance despawns (impact reap, missile arrival).
     let rig_slot = match (&dm.inverse_bindposes, joints.is_empty()) {
@@ -406,7 +429,7 @@ pub(super) fn attach_effect_visuals(
         _ => 0,
     };
     let rigged = rig_slot != 0;
-    // The clip this instance runs (the missile's InFlight, else the file-order-first) — the same
+    // The clip this instance OPENS on (the missile's InFlight, else the model's `Stand`) — the same
     // pick `arm_effect_rig` armed. Its **file sequence slot** is the key into each batch's
     // per-sequence material-alpha loops: an effect that plays a non-first sequence must read that
     // sequence's authored batch visibility, not sequence 0's.
@@ -415,6 +438,13 @@ pub(super) fn attach_effect_visuals(
         .as_ref()
         .and_then(|a| a.preferred_clip(preferred_anim));
     let played_seq = played.map(|c| c.seq_index);
+    // …and for a `CEffect`, that is only the OPENING slot: the instance advances to `Hold` and then
+    // to `Decay`, each with its own authored alpha loops and emitter windows (for IceShield the
+    // pulse is as much the transparency-weight tracks as the bone scale). So its per-sequence
+    // riders read the live sequence off this instance's own player each frame — the same
+    // `playing_seq` lane a creature's batches already use — instead of the slot they opened on.
+    // A lane with no rig has no player to ask and stays pinned, as before.
+    let seq_host = (armed && stage.is_some()).then_some(root);
     commands.entity(root).with_children(|children| {
         for (part, material) in parts.iter().zip(&part_materials) {
             if part.billboard.is_some() {
@@ -453,7 +483,8 @@ pub(super) fn attach_effect_visuals(
             // The rig field rides the whole-tag seed (decision 0720).
             if let Some(anim) = &part.alpha_anim {
                 let mat_anim =
-                    crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
+                    crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                        .following_host(seq_host);
                 let rig_tag = if rigged && part.skinned_mesh.is_some() {
                     crate::mesh_tag::rig_bits(rig_slot)
                 } else {
@@ -493,7 +524,8 @@ pub(super) fn attach_effect_visuals(
         }
         // A card shares its batch's material-alpha loops (the billboard split copies them).
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
+            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                .following_host(seq_host);
             spawned.insert((
                 bevy::mesh::MeshTag(crate::mesh_tag::alpha_bits(mat_anim.current)),
                 mat_anim,
@@ -543,7 +575,8 @@ pub(super) fn attach_effect_visuals(
             ibp,
         );
         if let Some(anim) = &part.alpha_anim {
-            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq);
+            let mat_anim = crate::doodad_anim::MatAnim::driving_tag(anim.clone(), now, played_seq)
+                .following_host(seq_host);
             commands.entity(decal).insert(mat_anim);
         }
     }
@@ -568,10 +601,16 @@ pub(super) fn attach_effect_visuals(
                 // carries the host's fade down to them — decision 0833.
                 alpha: Some(root),
             },
-            // The effect's rig arms ONE clip; the emitters' rate/enabled windows ride that slot
-            // (a missile's InFlight is not file-order-first) on the spawn clock, and gseq loops
-            // ride the pooled scene clock (0856).
-            particles::EmitClock::Effect(played_seq),
+            // The emitters' rate/enabled windows ride the played sequence: a `CEffect` ADVANCES
+            // (`Stand` → `Hold` → `Decay`), so it reads the live one off its own player like a
+            // unit's do — the reference's `m2_animate` phase samples the CURRENT sequence record
+            // either way. A lane that never advances (a missile, whose InFlight is not the model's
+            // Stand) keeps its slot pinned on the spawn clock. gseq loops ride the instance's own
+            // spawn age in both (0856/0858 — an effect instance is fresh per play).
+            match seq_host {
+                Some(h) => particles::EmitClock::Host(h),
+                None => particles::EmitClock::Effect(played_seq),
+            },
         );
     }
     // The same pick, as an `AnimationData` id — the ribbons' per-sequence visibility keys off it,
@@ -600,23 +639,32 @@ pub(super) fn attach_effect_visuals(
 }
 
 /// Arm an effect-model instance's **authored rig** under `root` (a missile entity / fx instance
-/// root): the joint hierarchy, an `AnimationPlayer` on the file-order-first clip, and the
+/// root): the joint hierarchy, an `AnimationPlayer` on the model's birth clip, and the
 /// free-running global-sequence channels. Effect models pose their emitter/ribbon/mesh bones with
 /// this rig — the fireball missile's constant bone keys turn its authored long-axis-up frame into
 /// flight-forward and set its two trail ribbons 90° apart, and its global-sequence bone tumbles
-/// the molten core. The first clip plays regardless of the doodad content gate
+/// the molten core. The clip plays regardless of the doodad content gate
 /// (`ModelAnimations::first_seq`, which skips constant-pose sequences as render-identical — true
 /// for skinned MESHES at bind pose, but an effect's emitters read the posed joints, so the
-/// constant keys are load-bearing here). Returns the joint entities; empty for a boneless model
-/// (everything then rides `root` directly, as before).
+/// constant keys are load-bearing here).
+///
+/// The clip is the reference's model-load bootstrap — **animation id 0 `Stand`**, not the
+/// file-order-first slot ([`benilla_assets::ModelAnimations::preferred_clip`]) — and for a
+/// `CEffect` (`stage` is `Some`) it is only the OPENING leg: [`FxAnimLife`] carries the completion
+/// callback that advances it to `Hold` and, at the reap, to `Decay` ([`lifecycle`]).
+///
+/// Returns the joint entities (empty for a boneless model — everything then rides `root` directly,
+/// as before) and whether an `AnimationPlayer` was actually armed, which is what decides whether
+/// the per-sequence riders have a live sequence to follow.
 pub(super) fn arm_effect_rig(
     commands: &mut Commands,
     root: Entity,
     dm: &DisplayModel,
     preferred_anim: Option<u16>,
-) -> Vec<Entity> {
+    stage: Option<FxStage>,
+) -> (Vec<Entity>, bool) {
     if dm.skeleton.joints.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let joints = super::spawn_joints(commands, root, root, &dm.skeleton);
     // Billboard bones face the camera at the PALETTE level, children inheriting (the frost-armor
@@ -624,25 +672,32 @@ pub(super) fn arm_effect_rig(
     if let Some(bb) = crate::billboard::BillboardJointRig::new(&dm.skeleton, &joints, root) {
         commands.entity(root).insert(bb);
     }
+    let mut armed = false;
     if let Some(anims) = dm.animations.as_ref() {
         // A caller can name the sequence this instance should run (the thrown-weapon missile asks
         // for InFlight, so its authored spin plays and its ribbon's per-sequence visibility keys
         // ON); absent that — or when the model has no such sequence (an arrow, a fireball whose
-        // tumble is a global sequence) — fall to the file-order-first clip, as before.
+        // tumble is a global sequence) — the bootstrap's `Stand`.
         if let Some(clip) = anims.preferred_clip(preferred_anim) {
             let mut player = AnimationPlayer::default();
-            let play = player.play(clip.node);
-            if clip.looping {
-                play.repeat();
-            }
+            // The stage owns the repeat policy, not the sequence flag alone: stages 3/4 re-arm
+            // unconditionally (`0x60ed00`), so a clamping precast still repeats.
+            let life = FxAnimLife::arm(&mut player, clip, stage.unwrap_or(FxStage::OneShot));
             commands
                 .entity(root)
                 .insert((player, AnimationGraphHandle(anims.graph.clone())));
+            // The lifecycle watcher, and the `ModelAnimations` it (and the per-sequence riders)
+            // resolve the live sequence through — only on the `CEffect` lanes; a missile or an
+            // item glow neither advances nor is ever decay-reaped.
+            if stage.is_some() {
+                commands.entity(root).insert((life, anims.clone()));
+            }
             for (i, &j) in joints.iter().enumerate() {
                 commands
                     .entity(j)
                     .insert((bone_target_id(i as u16), AnimatedBy(root)));
             }
+            armed = true;
         }
         if let Some(drive) = crate::creature_anim::GlobalSeqDrive::new(&anims.global_bones, &joints)
         {
@@ -652,7 +707,7 @@ pub(super) fn arm_effect_rig(
             commands.entity(root).insert(drive);
         }
     }
-    joints
+    (joints, armed)
 }
 
 /// One live (or pending) effect-model instance on a unit.
@@ -665,6 +720,10 @@ struct FxInstance {
     /// Which owner's reap can kill a persistent instance (cast router vs aura watcher) — the
     /// client's reap-walk discriminator next to the spell id ([`FxClass`]).
     class: FxClass,
+    /// Which animation lifecycle its model runs ([`FxStage`]) — a separate axis from `class`, and
+    /// carried per instance because the same `class` covers a stage-4 precast and a stage-2
+    /// channel.
+    stage: FxStage,
     /// The M2 attachment id to hang from ([`benilla_formats::KIT_SLOT_TAGS`]), or
     /// [`benilla_formats::WORLD_EFFECT_TAG`] for the field-12 world-plant slot (0848/0850).
     tag: u16,
@@ -673,8 +732,13 @@ struct FxInstance {
     /// The spawned instance root (a child of the attach joint), `None` while the model loads.
     root: Option<Entity>,
     /// The self-termination deadline (`time.elapsed_secs()` clock), set at spawn for a
-    /// non-persistent instance.
+    /// non-persistent instance — and, for a reaped persistent one, the end of its `Decay` span.
     expires: Option<f32>,
+    /// Reaped, and playing its `Decay` out (wow-re `ceffect-anim-lifecycle.md` §8: the node is not
+    /// torn down synchronously — it keeps rendering for that sequence's authored duration). Such an
+    /// instance is already dying, so it no longer answers a reap or a replacing `Begin`: the
+    /// reference's walk can't reach it either, having moved it to the pending-destroy list.
+    decaying: bool,
 }
 
 /// A unit's effect instances (the client's per-unit `+0xb4` effect list).
@@ -755,9 +819,11 @@ pub(super) fn resolve_spell_fx(
     mut events: MessageReader<SpellKitFx>,
     mut units: Query<&mut FxAttached>,
     fx: Option<ResMut<SpellFx>>,
+    time: Res<Time>,
     asset_server: Res<AssetServer>,
 ) {
     let Some(mut fx) = fx else { return };
+    let now = time.elapsed_secs();
     // Group the edges per unit, preserving order, so each unit's instance list is written once.
     let mut ops: EntityHashMap<Vec<&SpellKitFx>> = EntityHashMap::default();
     for ev in events.read() {
@@ -782,23 +848,17 @@ pub(super) fn resolve_spell_fx(
                     spell_id,
                     persistent,
                     class,
+                    stage,
                     effects,
                     ..
                 } => {
                     // A persistent Begin REPLACES the unit's live persistent instances of the
-                    // same (spell, class) — despawn + re-begin at one sync point, no visible
-                    // gap — so an aura whose remove/add edges land across frames (a re-apply)
-                    // re-arms cleanly instead of stacking.
+                    // same (spell, class) — so an aura whose remove/add edges land across frames
+                    // (a re-apply) re-arms cleanly instead of stacking. The replaced instance
+                    // decays out exactly as a reaped one does: in the reference these are two
+                    // nodes, the old one dying on its own clock while the new one is born.
                     if *persistent {
-                        instances.retain(|i| {
-                            let dies = i.persistent && i.spell_id == *spell_id && i.class == *class;
-                            if dies {
-                                if let Some(root) = i.root {
-                                    commands.entity(root).despawn();
-                                }
-                            }
-                            !dies
-                        });
+                        reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
                     }
                     for (tag, path) in effects {
                         fx.models
@@ -811,25 +871,19 @@ pub(super) fn resolve_spell_fx(
                             spell_id: *spell_id,
                             persistent: *persistent,
                             class: *class,
+                            stage: *stage,
                             tag: *tag,
                             path: path.clone(),
                             root: None,
                             expires: None,
+                            decaying: false,
                         });
                     }
                 }
                 SpellKitFx::Reap {
                     spell_id, class, ..
                 } => {
-                    instances.retain(|i| {
-                        let dies = i.persistent && i.spell_id == *spell_id && i.class == *class;
-                        if dies {
-                            if let Some(root) = i.root {
-                                commands.entity(root).despawn();
-                            }
-                        }
-                        !dies
-                    });
+                    reap_matching(&mut instances, *spell_id, *class, &fx, now, &mut commands);
                 }
             }
         }
@@ -840,6 +894,44 @@ pub(super) fn resolve_spell_fx(
             }
         }
     }
+}
+
+/// The spell-id-keyed reap walk (`0x614150`): every live persistent instance of `(spell_id, class)`
+/// **plays its `Decay` out** and is torn down when that span ends — the reference's three gates in
+/// order (`0x614187`–`0x6141a1`: a model handle, a ready model, and a `Decay` the model actually
+/// authors), with an immediate destroy whenever any of them fails.
+///
+/// An instance already decaying is skipped: it is dying, and in the reference it has been moved off
+/// the unit's `+0xb4` list to the pending-destroy list, so a second reap cannot reach it either.
+/// One that never spawned a root has nothing to play and goes at once.
+fn reap_matching(
+    instances: &mut Vec<FxInstance>,
+    spell_id: u32,
+    class: FxClass,
+    fx: &SpellFx,
+    now: f32,
+    commands: &mut Commands,
+) {
+    instances.retain_mut(|i| {
+        if i.decaying || !i.persistent || i.spell_id != spell_id || i.class != class {
+            return true;
+        }
+        let span = i
+            .root
+            .and_then(|_| fx.models.get(&i.path))
+            .and_then(|dm| decay_span(dm.animations.as_ref()));
+        let (Some(root), Some(span)) = (i.root, span) else {
+            if let Some(root) = i.root {
+                commands.entity(root).despawn();
+            }
+            return false;
+        };
+        commands.entity(root).try_insert(FxDecay);
+        i.decaying = true;
+        i.expires = Some(now + span);
+        lifecycle::trace_leg("decay", root, lifecycle::ANIM_DECAY);
+        true
+    });
 }
 
 /// Spawn pending instances whose model finished building, and run the self-termination clock.
@@ -962,11 +1054,13 @@ pub(super) fn attach_spell_fx(
                     attached: true,
                     parent: Some(unit),
                 },
+                // A kit effect IS a `CEffect`: it runs the stage's animation lifecycle.
+                Some(inst.stage),
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,
                 &mut palettes,
-                None, // an attach-point kit effect runs its default (first) clip
+                None, // an attach-point kit effect opens on its model's own `Stand`
             );
             inst.root = Some(root);
             if !inst.persistent {

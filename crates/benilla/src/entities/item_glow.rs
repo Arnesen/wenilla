@@ -295,6 +295,9 @@ pub(super) fn attach_item_glows(
                     attached: true,
                     parent: Some(root),
                 },
+                // An `ItemVisuals` glow is armed by a different leg than `PlaySpellVisualKit`
+                // (0805) and carries no kit stage — the plain single-clip arm, as before.
+                None,
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,

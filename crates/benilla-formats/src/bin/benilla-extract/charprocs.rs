@@ -30,6 +30,7 @@ fn type_name(ty: i32) -> &'static str {
     match ty {
         char_proc_type::TINT => "TINT (body RGB)",
         char_proc_type::ALPHA => "ALPHA (body translucency)",
+        char_proc_type::ANIM_RATE => "ANIM_RATE (body anim playback rate — 0 freezes the pose)",
         _ => "(unmodelled)",
     }
 }

@@ -151,6 +151,25 @@ pub mod char_proc_type {
     /// is `baseAlpha × Π(node alphas)` (`0x60d180`), ramped to over 1000 ms by
     /// `StartAlphaFade 0x614f80`. Stealth's 0.3 and the ghost aura's 0.5 are both this proc.
     pub const ALPHA: i32 = 14;
+    /// **Body ANIMATION RATE** (`0x60db7e`) — the freeze. `params[0]` is a playback *rate*, written
+    /// straight onto the unit's model clocks by `SetBoneAnimSpeed 0x712910`: the mount's bone 0
+    /// (`[unit+0xdc]`, `-1`), the body's **key-bone 4** (SpineLow — the upper-body split track that
+    /// carries cast/emote one-shots) when the model has one (`0x711d20(4)` gates it), and the body's
+    /// bone 0 (`-1`). The previous rates are saved in the node (`+0x60`/`+0x64`/`+0x68`) and written
+    /// back when it expires with the aura (`0x6203e0`, gated on the node's own `+0x2c & 0x4`).
+    ///
+    /// The rate is the per-bone `+0xb0` the animation clock multiplies its window by
+    /// (`timebase.md` §2: `t = trunc(f32(window) × rate) + bias`), and **arming an animation never
+    /// touches it** — op4 `0x7121a0`'s success leg writes `+0xa4`/cursors and leaves `+0xb0` alone
+    /// (only its disarm leg and `0x712910` write it). So the value persists across every re-arm for
+    /// the aura's whole life, and `0x712910` re-bases `bias` so the *current frame* is preserved
+    /// across the rate change: **rate 0 holds the pose exactly where it was.**
+    ///
+    /// 15 kits carry it; 14 ship `params[0] = 0` — Ice Block (kit 3709), Freeze, Freeze Solid,
+    /// Flash Freeze, Petrify, Encage, Stilled. Kit 1744 (Stoned / Petrification / Thadius Spawn)
+    /// ships `8947848.0` = `0x888888`, which reads like a packed grey that landed in the rate
+    /// column; it is passed through, not special-cased.
+    pub const ANIM_RATE: i32 = 11;
 }
 
 /// One `SpellVisual.dbc` row: the five lifecycle-stage `SpellVisualKit` ids a cast may fire

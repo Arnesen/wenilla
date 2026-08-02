@@ -21,14 +21,15 @@
 //! → coin ? [`ClientCommand::LootMoney`] : [`ClientCommand::AutostoreLootItem`] (the clicked 1-based
 //! row mapped to the item's **wire** loot slot); `CloseLoot` → [`ClientCommand::LootRelease`].
 
-use benilla_protocol::messages::LootItem;
+use benilla_protocol::messages::{ItemPushResult, LootItem, BAG_PLAYER_INVENTORY, SLOT_BAG_FIRST};
 use bevy::prelude::*;
 
-use benilla_ui::script::{LootRow, LootState as LootSnapshot, UiScript};
+use benilla_ui::script::{LootRow, LootState as LootSnapshot, ScriptValue, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands};
+use crate::ui_items::KEYRING_CONTAINER;
 use crate::ui_script::UiInput;
 
 /// The coin-pile row icons (direct `Interface\Icons` paths — `SetTexture` takes them as-is, no DBC),
@@ -53,16 +54,75 @@ const COPPER_WORD: &str = "Copper";
 /// Give up re-checking a pending receive line's item name after this many frames (a negative-cached
 /// or genuinely-unknown entry never resolves; ~2s at 60fps is well past a normal template round-trip).
 const RECEIVE_MAX_TRIES: u16 = 120;
+/// The player-array slots the reference calls "the keyring" when deciding which bag button a push
+/// animates — the literal `0x51`/`0x70` bounds compiled into `OnItemPush` (`0x491bc3`/`0x491bc8`).
+/// It is the **descriptor array's** full 32-guid width (vmangos `KEYRING_SLOT_START 81` + 32), not
+/// the 16 addressable positions `ui_items`'s `KEYRING_SLOTS` names (81..96) — the client tests the
+/// wider range, so this transcribes the client rather than deriving from the server's stricter one.
+const PUSH_KEYRING_SLOTS: std::ops::RangeInclusive<u32> = 81..=112;
 
-/// One deferred "You receive loot/item" line: the pushed item entry + count, plus the source flag
-/// (looted vs from an NPC — the wording differs) and a retry budget for the item name resolving.
+/// One deferred push (`SMSG_ITEM_PUSH_RESULT`) awaiting its item template — the whole
+/// `CGGameUI::OnItemPush 0x491a60` tail, not just the chat line. Carries the pushed entry + count,
+/// the source flags (looted / from an NPC / created — the wording differs), the two random-property
+/// wire fields the item link carries, whether the line is spoken at all, the destination container
+/// ([`push_container`], for the bag-bar drop animation) and a retry budget.
+///
+/// Deferring **both** outputs on the template is the reference's own shape: `OnItemPush` opens with
+/// an item-cache lookup (`0x491a93`) and, on a miss, copies its nine arguments into a heap record and
+/// re-enters itself from the cache callback (`0x491aa7`-`0x491b05`, callback `0x491ee0`) — nothing is
+/// emitted until the item is known.
 struct PendingReceive {
     /// `SMSG_ITEM_PUSH_RESULT`'s created flag — a crafted/conjured item ("You create: …").
     created: bool,
     entry: u32,
     count: u32,
     from_npc: bool,
+    /// `SMSG_ITEM_PUSH_RESULT`'s `randomPropertyId` — link field 3 (see [`receive_line`]).
+    random_property_id: u32,
+    /// `SMSG_ITEM_PUSH_RESULT`'s `suffixFactor` — link field 4 (see [`receive_line`]).
+    suffix_factor: u32,
+    /// The wire's `showInChat` — whether the chat LINE is spoken. It gates the line ONLY: the
+    /// reference fires `ITEM_PUSH` at `0x491be8`, before the `[ebx+0x24]` test at `0x491bf3` that
+    /// guards the whole chat block, so a silent push still animates. Which is why this rides in the
+    /// record instead of short-circuiting at the net bridge (decision 0887).
+    in_chat: bool,
+    /// Which bag-bar button the drop animation plays on — see [`push_container`].
+    container: i64,
     tries: u16,
+}
+
+/// The wire push's `(bag, slot)` → the live-API **container id** the bag bar speaks (`0` backpack,
+/// `1..=4` an equipped bag, [`KEYRING_CONTAINER`] the keyring) — `ITEM_PUSH`'s `arg1`.
+///
+/// **Byte-VERIFIED** at `CGGameUI::OnItemPush` `0x491bb5`-`0x491bd6`, which is the whole selector:
+///
+/// ```text
+///   491bb5  cmp edi,0xff        ; edi = the wire `bag` byte
+///   491bbb  lea eax,[edi+1]     ; bag != 255  ⇒  bag + 1
+///   491bbe  jne 491bd6
+///   491bc0  mov eax,[ebp-0x4]   ; else look at the wire `slot`
+///   491bc3  cmp eax,0x51        ; 81  = vmangos KEYRING_SLOT_START
+///   491bc6  jl  491bd4
+///   491bc8  cmp eax,0x70        ; 112 = the last keyring position
+///   491bcb  jg  491bd4
+///   491bcd  mov eax,-2          ;  ⇒ KEYRING_CONTAINER
+///   491bd4  xor eax,eax         ;  ⇒ 0 (the backpack)
+/// ```
+///
+/// The one translation: the reference emits `bag + 1`, which is the **inventory-slot** id its bag
+/// buttons carry (`CharacterBag0Slot` = 20 … `Bag3Slot` = 23, `GetInventorySlotInfo`); benilla's bag
+/// bar is keyed by container id like every other bag surface here (`BAG_UPDATE(bagID)`,
+/// `BenillaBagBarSlot_InvSlot` = `19 + bagId`), so the same wire slots 19..22 become `1..=4`. Both
+/// vocabularies agree on `0` and `-2`, and both leave a non-equipped-bag container (a bank bag,
+/// wire 63..68) landing on an id no bag-bar button carries — no animation, exactly as there.
+fn push_container(bag: u8, slot: u32) -> i64 {
+    if bag != BAG_PLAYER_INVENTORY {
+        return i64::from(bag) - i64::from(SLOT_BAG_FIRST) + 1;
+    }
+    if PUSH_KEYRING_SLOTS.contains(&slot) {
+        return KEYRING_CONTAINER;
+    }
+    0
 }
 
 /// The open loot, filled by the net bridge and read by [`feed_loot`]. Holds the looted guid, the coin
@@ -138,13 +198,20 @@ impl LootState {
         std::mem::take(&mut self.auto_release)
     }
 
-    /// Queue a deferred "You receive …" line for a pushed item (`SMSG_ITEM_PUSH_RESULT`).
-    pub(crate) fn push_receive(&mut self, entry: u32, count: u32, from_npc: bool, created: bool) {
+    /// Queue a deferred push (`SMSG_ITEM_PUSH_RESULT`) — the "You receive …" line *and* the bag-bar
+    /// drop animation, emitted together once the item template lands (see [`PendingReceive`]). The
+    /// **self** gate lives at the net bridge ([`crate::net::apply`]); the `showInChat` gate does
+    /// not — it rides in as `in_chat` and silences the line alone, leaving the animation to play.
+    pub(crate) fn push_receive(&mut self, p: &ItemPushResult) {
         self.receives.push(PendingReceive {
-            created,
-            entry,
-            count,
-            from_npc,
+            created: p.created,
+            entry: p.item_entry,
+            count: p.count,
+            from_npc: p.from_npc,
+            random_property_id: p.random_property_id,
+            suffix_factor: p.suffix_factor,
+            in_chat: p.show_in_chat,
+            container: push_container(p.bag_slot, p.item_slot),
             tries: 0,
         });
     }
@@ -163,6 +230,14 @@ impl LootState {
     pub(crate) fn clear_session(&mut self) {
         self.clear();
         self.receives.clear();
+    }
+
+    /// How many pushes are queued awaiting their item template — the net bridge's test hook for
+    /// "did this packet get through the self gate", since neither output is emitted until the
+    /// template lands.
+    #[cfg(test)]
+    pub(crate) fn pending_receive_count(&self) -> usize {
+        self.receives.len()
     }
 
     /// Whether a coin row is shown (position 1 when present).
@@ -350,40 +425,97 @@ fn snapshot(
     Some(LootSnapshot { rows })
 }
 
-/// Surface any pending receive lines (`SMSG_ITEM_PUSH_RESULT`) in the chat window (decision 0084's
-/// chat arc — these migrated off the ErrorsFrame stopgap) once their item name resolves, colored
-/// `LOOT` green; unresolved lines retry up to [`RECEIVE_MAX_TRIES`] frames, then drop.
+/// Compose one `CHAT_MSG_LOOT` receive line — the whole of `CGGameUI::OnItemPush`'s self branch,
+/// VERIFIED against the 1.12.1 client binary (`WoW.exe` 5875, `0x491a60`, self arm `0x491bfb`).
+///
+/// The mechanic the line hangs on, and the reason the item name is **not** LOOT-green: the `%s` the
+/// GlobalString takes is a full **item link**, not a bare name. `0x491c43`/`0x491ca3` call the link
+/// builder `0x52adb0` ([`crate::ui_items::item_link_full`] is our transcription of it) with the item
+/// id, enchant `0`, the wire `randomPropertyId`, the wire `suffixFactor`, and the resolved name. The
+/// link's `|r` closes right after the `]`, so the count that follows is drawn in the line's own
+/// colour — exactly the reference client's `[Chipped Claw]x2.`
+///
+/// The format strings are QUOTED from the extracted `Interface\FrameXML\GlobalStrings.lua`
+/// (patch-2.MPQ, l.2599-2605): `LOOT_ITEM_SELF = "You receive loot: %s."` /
+/// `LOOT_ITEM_SELF_MULTIPLE = "You receive loot: %sx%d."` and the PUSHED_SELF / CREATED_SELF twins —
+/// note there is **no space** before the `x%d`. The key is selected by the wire's (created,
+/// received) pair with created winning (`0x491c04`-`0x491c1b` / `0x491c60`-`0x491c77`), exactly as
+/// the server sets them (vmangos `SendNewItem`: crafting → created, vendor/quest → received,
+/// loot → neither).
+fn receive_line(r: &PendingReceive, name: &str, quality: u32) -> String {
+    let verb = if r.created {
+        "You create"
+    } else if r.from_npc {
+        "You receive item"
+    } else {
+        "You receive loot"
+    };
+    let link = crate::ui_items::item_link_full(
+        r.entry,
+        0,
+        r.random_property_id,
+        r.suffix_factor,
+        name,
+        quality,
+    );
+    if r.count > 1 {
+        format!("{verb}: {link}x{}.", r.count)
+    } else {
+        format!("{verb}: {link}.")
+    }
+}
+
+/// Emit any pending pushes (`SMSG_ITEM_PUSH_RESULT`) once their item template resolves — the whole
+/// `CGGameUI::OnItemPush` tail, in the reference's own order: the bag-bar drop animation first
+/// (`ITEM_PUSH(container, icon)`, fired at `0x491be8` *before* the chat block, decision 0887), then —
+/// if the wire asked for it — the "You receive …" line in the chat window (decision 0084's chat arc),
+/// a `LOOT`-green line carrying a quality-coloured item link ([`receive_line`], decision 0888).
+/// Unresolved pushes retry up to [`RECEIVE_MAX_TRIES`] frames, then drop (the reference instead
+/// sleeps on the item-cache callback, so it never gives up — a stated divergence that only shows on
+/// an entry the server never answers for).
 fn drain_receives(
     loot: &mut LootState,
     items: &mut Items,
+    icons: Option<&ItemDisplays>,
     commands: &NetCommands,
     chat: &mut crate::ui_chat::ChatLog,
+    script: &mut UiScript,
 ) {
     let pending = std::mem::take(&mut loot.receives);
     let mut still = Vec::new();
     for mut r in pending {
-        match items.template(r.entry, 0, commands).map(|t| t.name.clone()) {
-            Some(name) => {
-                // The three 1.12 verbs (GlobalStrings LOOT_ITEM_CREATED_SELF /
-                // LOOT_ITEM_PUSHED_SELF / LOOT_ITEM_SELF), selected by the wire's
-                // (created, received) pair exactly as the server sets them (vmangos
-                // SendNewItem: crafting → created, vendor/quest → received, loot → neither).
-                let verb = if r.created {
-                    "You create"
-                } else if r.from_npc {
-                    "You receive item"
-                } else {
-                    "You receive loot"
-                };
-                let line = if r.count > 1 {
-                    format!("{verb}: [{name}] x{}.", r.count)
-                } else {
-                    format!("{verb}: [{name}].")
-                };
-                chat.push_event(crate::ui_chat::ChatEvent::text_only(
-                    crate::ui_chat::ChatEventKind::Loot,
-                    line,
-                ));
+        // One template read serves all three outputs: the name and quality for the line, the
+        // display id for the animation's icon.
+        let resolved = items
+            .template(r.entry, 0, commands)
+            .map(|t| (t.name.clone(), t.quality, t.display_info_id));
+        match resolved {
+            Some((name, quality, display_id)) => {
+                // `ITEM_PUSH` is UNGATED by `show_in_chat` and by the created/received pair: the
+                // fire at `0x491be8` precedes the `[ebx+0x24]` chat test at `0x491bf3`, so every
+                // push that reaches us animates, including a silent one. `arg2` is the item's icon
+                // path — the reference composes it from the icon directory + the display record's
+                // own name (`0x491baa`, "%s%s%s"); ours is the same path out of the
+                // `ItemDisplayInfo.dbc` catalog the bags and the loot window already read.
+                let icon = icons
+                    .and_then(|i| i.catalog.get(display_id))
+                    .and_then(|d| d.icon.clone());
+                if let Some(icon) = icon {
+                    debug!(
+                        "ui_loot: ITEM_PUSH container {} icon {icon} (item {})",
+                        r.container, r.entry
+                    );
+                    script.fire_event(
+                        "ITEM_PUSH",
+                        vec![ScriptValue::Int(r.container), ScriptValue::Str(icon)],
+                    );
+                }
+                if r.in_chat {
+                    chat.push_event(crate::ui_chat::ChatEvent::text_only(
+                        crate::ui_chat::ChatEventKind::Loot,
+                        receive_line(&r, &name, quality),
+                    ));
+                }
             }
             None => {
                 r.tries += 1;
@@ -422,7 +554,14 @@ fn feed_loot(
             loot_error_text(reason),
         ));
     }
-    drain_receives(&mut loot, &mut items, &commands, &mut chat);
+    drain_receives(
+        &mut loot,
+        &mut items,
+        icons.as_deref(),
+        &commands,
+        &mut chat,
+        &mut script,
+    );
 
     let fresh = snapshot(&loot, &mut items, icons.as_deref(), &commands);
     if fresh == *last {
@@ -517,6 +656,29 @@ mod tests {
             random_property_id: 0,
             slot_type: 0,
         }
+    }
+
+    /// One `SMSG_ITEM_PUSH_RESULT` as the loot path sees it (self, shown in chat, no random
+    /// property) — the net bridge's guid/`showInChat` gates are tested at their own seam.
+    fn push(entry: u32, count: u32, from_npc: bool, created: bool) -> ItemPushResult {
+        ItemPushResult {
+            player_guid: 0x1,
+            from_npc,
+            created,
+            show_in_chat: true,
+            bag_slot: 0xFF,
+            item_slot: 0,
+            item_entry: entry,
+            suffix_factor: 0,
+            random_property_id: 0,
+            count,
+        }
+    }
+
+    fn pending(entry: u32, count: u32, from_npc: bool, created: bool) -> PendingReceive {
+        let mut loot = LootState::default();
+        loot.push_receive(&push(entry, count, from_npc, created));
+        loot.receives.pop().expect("queued")
     }
 
     #[test]
@@ -655,12 +817,91 @@ mod tests {
     fn clear_closes_but_keeps_receives() {
         let mut loot = LootState::default();
         loot.open(0x42, 0, vec![item(0, 117, 1)]);
-        loot.push_receive(117, 1, false, false);
+        loot.push_receive(&push(117, 1, false, false));
         loot.clear();
         assert!(loot.source.is_none());
         assert_eq!(loot.receives.len(), 1, "a receive line outlives the window");
         loot.clear_session();
         assert!(loot.receives.is_empty(), "disconnect drops receive lines");
+    }
+
+    /// The receive line is an item **link**, not a bare name: the quality escape opens before the
+    /// `[` and `|r` closes after the `]`, so the count that follows falls back to the line's own
+    /// LOOT green. This is the shape the reference client prints (`[Chipped Claw]x2.` — white name,
+    /// green `x2`), and the reason the name must not inherit the chat colour.
+    #[test]
+    fn receive_line_carries_a_quality_colored_item_link() {
+        // Common/white, single — LOOT_ITEM_SELF = "You receive loot: %s.".
+        assert_eq!(
+            receive_line(&pending(2589, 1, false, false), "Linen Cloth", 1),
+            "You receive loot: |cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r."
+        );
+        // Poor/grey, stacked — LOOT_ITEM_SELF_MULTIPLE = "You receive loot: %sx%d." and the `x2`
+        // sits OUTSIDE the escape, with no space before it (GlobalStrings.lua l.2605, verbatim).
+        assert_eq!(
+            receive_line(&pending(7092, 2, false, false), "Chipped Claw", 0),
+            "You receive loot: |cff9d9d9d|Hitem:7092:0:0:0|h[Chipped Claw]|h|rx2."
+        );
+        // The (created, received) pair picks the verb, created winning over received.
+        assert_eq!(
+            receive_line(&pending(4306, 1, true, false), "Silk Cloth", 2),
+            "You receive item: |cff1eff00|Hitem:4306:0:0:0|h[Silk Cloth]|h|r."
+        );
+        assert_eq!(
+            receive_line(&pending(2320, 4, true, true), "Coarse Thread", 1),
+            "You create: |cffffffff|Hitem:2320:0:0:0|h[Coarse Thread]|h|rx4."
+        );
+    }
+
+    /// The link's two random-property fields ride the wire straight through
+    /// (`|Hitem:id:0:randomPropertyId:suffixFactor|h` — `0x52adb0`'s arg order).
+    #[test]
+    fn receive_line_carries_the_wire_random_property_fields() {
+        let mut loot = LootState::default();
+        loot.push_receive(&ItemPushResult {
+            random_property_id: 862,
+            suffix_factor: 1234,
+            ..push(15268, 1, false, false)
+        });
+        let r = loot.receives.pop().expect("queued");
+        assert_eq!(
+            receive_line(&r, "Bloodrazor", 3),
+            "You receive loot: |cff0070dd|Hitem:15268:0:862:1234|h[Bloodrazor]|h|r."
+        );
+    }
+
+    /// The client clamps a quality outside the table to index 1 (white) — `0x52ad90`'s
+    /// `cmpl $0x7 / jb` arm.
+    #[test]
+    fn receive_line_clamps_an_out_of_range_quality_to_white() {
+        assert_eq!(
+            receive_line(&pending(1, 1, false, false), "Odd Thing", 9),
+            "You receive loot: |cffffffff|Hitem:1:0:0:0|h[Odd Thing]|h|r."
+        );
+    }
+
+    /// [`push_container`] against the reference selector at `0x491bb5`-`0x491bd6`, arm by arm — the
+    /// value that decides which bag button the drop animation plays on.
+    #[test]
+    fn push_container_maps_the_wire_destination_onto_a_bag_bar_button() {
+        // `bag != 255` — an equipped bag. Wire 19..22 are the four bag inventory slots; the
+        // reference emits 20..23 (its buttons' inventory-slot ids), ours the container ids 1..=4.
+        assert_eq!(push_container(19, 0), 1);
+        assert_eq!(push_container(22, 5), 4);
+        // `bag == 255` with a keyring slot (the client's own 0x51..=0x70 window) — the keyring.
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 81), KEYRING_CONTAINER);
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 96), KEYRING_CONTAINER);
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 112), KEYRING_CONTAINER);
+        // `bag == 255` anywhere else — the backpack. 23..38 are its own slots; 80 and 113 are the
+        // positions just outside the keyring window, which the client resolves to 0, not -2.
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 23), 0);
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 80), 0);
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, 113), 0);
+        // A stack-merge reports no slot at all (`0xFFFF_FFFF`) — still the backpack, still animates.
+        assert_eq!(push_container(BAG_PLAYER_INVENTORY, u32::MAX), 0);
+        // A bank bag (wire 63..68) lands on an id no bag-bar button carries: no animation, which is
+        // exactly what the reference's `bag + 1` does with the same push.
+        assert!(!(0..=4).contains(&push_container(63, 0)));
     }
 
     #[test]

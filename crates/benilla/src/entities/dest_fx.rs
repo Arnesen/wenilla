@@ -294,6 +294,9 @@ pub(super) fn attach_ground_fx_models(
                 // A free world model standing at the point, chained to nothing: its trail stays
                 // world-frozen and its pool finishes in place when the effect ends.
                 super::spell_fx::EffectHost::default(),
+                // The dest one-shot is not a `CEffect` on a unit: it plants at the packet's point and
+                // runs its own span clock, so it keeps the plain single-clip arm.
+                None,
                 &mut wow_materials,
                 &mut tint_reg,
                 &ibps,

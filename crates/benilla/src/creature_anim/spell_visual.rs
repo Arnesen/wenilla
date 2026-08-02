@@ -87,6 +87,31 @@ pub(crate) enum FxClass {
     AuraState,
 }
 
+/// Which of the reference's five kit **stages** an instance's model runs its *animation lifecycle*
+/// as — the discriminator behind `PlaySpellVisualKit`'s per-stage completion-callback table
+/// (`0x60edf0`'s jump table `0x60f4f8`; wow-re `ceffect-anim-lifecycle.md` §2, §5 trio 2026-08-02).
+///
+/// Distinct from [`FxClass`], which answers a different question — *whose reap can kill this* (the
+/// `0x614150` force census). The two are not derivable from each other: a channel kit and an
+/// aura-state kit are both stage 2 but reaped by different owners, while a precast and a channel
+/// are both [`FxClass::Hold`] and run *different* animation lifecycles. So the stage rides its own
+/// field, set at each writer from the caller table (`spell-visual-apply.md` §1.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FxStage {
+    /// Stages 0/1 (kit push, cast release, impact) — callback `0x5fbf50`: destroy at the first
+    /// completion. Already modelled by the instance's own span clock, so it arms no watcher.
+    OneShot,
+    /// Stage 2 (aura state, channel) — callback `0x5ff170`: when the birth sequence completes, arm
+    /// **`Hold` (158)** if the model authors one and re-arm it for the effect's life; the reap arms
+    /// **`Decay` (159)** and the instance lives out that span. A model with no `Hold` is left
+    /// parked on its birth — `0x5ff170` does nothing at all in that case.
+    State,
+    /// Stages 3/4 (precast) — callback `0x60ed00`: **re-arm the id that just completed, forever**,
+    /// with no `Hold` lookup, no deadline and no destroy. So a precast model whose birth sequence
+    /// clamps still repeats it, where a loop-flag-only arm would freeze.
+    Relive,
+}
+
 /// A spell-visual kit's attach-point **effect model** edge (kit fields 3–11 →
 /// `SpellVisualEffectName` `.mdx` — decision 0099 phase 3; slot loop byte-pinned in wow-re
 /// `spell-visual-apply.md` §1.3). Written here, consumed by `crate::entities::spell_fx` (the
@@ -105,6 +130,10 @@ pub(crate) enum SpellKitFx {
         spell_id: u32,
         persistent: bool,
         class: FxClass,
+        /// The kit stage this play is, which decides the instances' **animation lifecycle**
+        /// ([`FxStage`]) — a separate axis from `class`/`persistent`, both of which are about
+        /// lifetime ownership rather than what the model plays.
+        stage: FxStage,
         effects: Vec<(u16, String)>,
     },
     /// The owner's lifetime ended (GO / fail / channel-clear / a replacing cast for
@@ -333,15 +362,18 @@ struct KitPlay {
     persistent: bool,
     effects: bool,
     sound: bool,
+    /// The stage this play is, for the instances' animation lifecycle ([`FxStage`]).
+    stage: FxStage,
 }
 
 impl KitPlay {
     /// The ordinary discrete play (kit push, cast release, impact stage): self-terminating
-    /// models, every leg on.
+    /// models, every leg on. Stages 0/1 both land here — they share `0x5fbf50`.
     const DISCRETE: Self = Self {
         persistent: false,
         effects: true,
         sound: true,
+        stage: FxStage::OneShot,
     };
 }
 
@@ -378,6 +410,7 @@ fn play_kit(
             spell_id,
             persistent: play.persistent,
             class: FxClass::Hold,
+            stage: play.stage,
             effects,
         });
     }
@@ -595,7 +628,8 @@ pub(super) fn route_cast_visuals(
                         });
                     }
                     // The precast's attach-point effect models (the glowing hands) — persistent,
-                    // the client's stage-4 lifetime: they live until the cast resolves.
+                    // the client's stage-4 lifetime: they live until the cast resolves, and their
+                    // animation re-arms forever ([`FxStage::Relive`], `0x60ed00`).
                     let effects = resolve_kit_effects(&visuals.0, &kit);
                     if !effects.is_empty() {
                         out.fx.write(SpellKitFx::Begin {
@@ -603,6 +637,7 @@ pub(super) fn route_cast_visuals(
                             spell_id: ev.spell_id,
                             persistent: true,
                             class: FxClass::Hold,
+                            stage: FxStage::Relive,
                             effects,
                         });
                     }
@@ -839,7 +874,8 @@ pub(super) fn route_cast_visuals(
                     out.sounds.write(SpellKitSound::Play { entity, kit_sound });
                 }
                 // The channel kit's effect models — persistent while the field holds (the
-                // client's stage-2 lifetime).
+                // client's stage-2 lifetime, and so the stage-2 Birth → Hold → Decay lifecycle:
+                // the channel poll `0x612a30` is one of the caller table's stage-2 sites).
                 let effects = resolve_kit_effects(&visuals.0, &kit);
                 if !effects.is_empty() {
                     out.fx.write(SpellKitFx::Begin {
@@ -847,6 +883,7 @@ pub(super) fn route_cast_visuals(
                         spell_id: cur,
                         persistent: true,
                         class: FxClass::Hold,
+                        stage: FxStage::State,
                         effects,
                     });
                 }
@@ -967,6 +1004,7 @@ pub(crate) fn arm_aura_state_fx(
                     spell_id,
                     persistent: true,
                     class: FxClass::AuraState,
+                    stage: FxStage::State,
                     effects,
                 });
             }
@@ -1021,6 +1059,12 @@ pub(super) fn arm_loot_fx(
                 spell_id: LOOT_FX_KEY,
                 persistent: true,
                 class: FxClass::Hold,
+                // Not a kit stage at all (this is `SpawnHardcodedEffect`, not
+                // `PlaySpellVisualKit`), but wow-re `loot-corpse-effect.md`'s recorded law for the
+                // loot art is "its own first sequence, LOOPING" — which is precisely what
+                // [`FxStage::Relive`] renders, and unlike a bare loop-flag arm it holds even if the
+                // art model's sequence were clamp-flagged.
+                stage: FxStage::Relive,
                 effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
             });
         } else if !lootable && armed.remove(&entity) {
@@ -1070,6 +1114,8 @@ pub(super) fn arm_level_up_fx(
                     spell_id: 0,
                     persistent: false,
                     class: FxClass::Hold,
+                    // The ding self-terminates on its own 1.867 s clip — the stage-0 shape.
+                    stage: FxStage::OneShot,
                     effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
                 });
             }
