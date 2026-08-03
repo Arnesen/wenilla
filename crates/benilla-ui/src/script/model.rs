@@ -304,10 +304,13 @@ pub(crate) struct Model {
     pub(crate) container_moves: Vec<container::ContainerMove>,
     /// Repair-mode clicks the pickup intercept queued (`(bag, slot)`; [`container`]).
     pub(crate) container_repairs: Vec<(i64, u32)>,
-    /// The armed item-targeted cast (the CraftFrame enchant pick, 0437 phase 3): while set, a
-    /// bag click queues into [`Self::item_picks`] instead of the cursor gesture.
+    /// The targeting cursor's **item** half is up (`TargetingWantsItem 0x6e6330`, decision 0923;
+    /// first built for the CraftFrame enchant pick, 0437 phase 3): while set, a bag OR paper-doll
+    /// click queues into [`Self::item_picks`] instead of running the cursor gesture.
     pub(crate) item_pick_armed: bool,
-    /// `(bag, slot)` clicks consumed by the armed item pick, drained by the app.
+    /// `(bag, slot)` clicks consumed by the armed item pick, drained by the app. A doll click
+    /// reports as [`super::EQUIPMENT_BAG`] + its 1-based inventory slot, so both seams speak the
+    /// one bag space the drain already resolves.
     pub(crate) item_picks: Vec<(i64, u32)>,
     /// `(bag, slot, count)` triples queued by `DeleteCursorItem` (`count == 0` = the whole
     /// stack) — the popup-confirmed destroy (decision 0216 §3), drained by the app into

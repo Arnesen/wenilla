@@ -285,6 +285,11 @@ impl Plugin for UiActionPlugin {
                         .in_set(UnitFeed)
                         .before(UiInput),
                     targeting::drain_stop_targeting.after(UiInput),
+                    // The item half's commit (decision 0923) — the bag / paper-doll click seam's
+                    // `0x495d60`. A UI drain like the others: after the input pass, so a click
+                    // this frame binds this frame. It is deliberately NOT in the target chain —
+                    // the clicks it consumes never reach the world.
+                    targeting::commit_item_cast_on_pick.after(UiInput),
                 ),
             );
     }

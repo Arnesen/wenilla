@@ -599,6 +599,12 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
             // needs the spin axis as ground truth, which a bare key COUNT never shows. Small
             // tracks print every key; a long track (a swirl/rotor loop) prints first/last plus
             // the axis of the first key-to-key increment — the spin axis itself.
+            //
+            // A long track also prints `swing` — the largest angle any key makes with the first,
+            // i.e. the track's actual AMPLITUDE. `step` is only the first increment, so a summary
+            // without this cannot answer "how far does this bone swing", which is the question a
+            // "does the rider inherit the mount's gallop pitch" investigation puts to it. Reading
+            // `step` as the amplitude under-reports a 20° swing as 1.5°.
             if !bk.rotation.is_empty() {
                 let aa = |q: &[f32; 4]| {
                     let w = q[3].clamp(-1.0, 1.0);
@@ -630,8 +636,19 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
                         q1[3] * inv0[2] + q1[0] * inv0[1] - q1[1] * inv0[0] + q1[2] * inv0[3],
                         q1[3] * inv0[3] - q1[0] * inv0[0] - q1[1] * inv0[1] - q1[2] * inv0[2],
                     ];
+                    // The amplitude: the largest angle any key makes with the first. `2·acos|⟨qi,q0⟩|`
+                    // is the geodesic angle between two unit quats, sign-folded so a double-cover
+                    // flip doesn't read as a 360° swing.
+                    let swing = bk
+                        .rotation
+                        .iter()
+                        .map(|(_, q)| {
+                            let dot: f32 = (0..4).map(|k| q[k] * q0[k]).sum();
+                            2.0 * dot.abs().clamp(0.0, 1.0).acos().to_degrees()
+                        })
+                        .fold(0.0f32, f32::max);
                     println!(
-                        "       seq{si} (anim {}) R: {} keys  first {t0:.3}s {}  step {}  last {tn:.3}s {}",
+                        "       seq{si} (anim {}) R: {} keys  first {t0:.3}s {}  step {}  swing {swing:.2}°  last {tn:.3}s {}",
                         s.anim_id,
                         bk.rotation.len(),
                         aa(q0),

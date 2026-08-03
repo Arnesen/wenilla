@@ -2448,3 +2448,182 @@ fn a_mounted_landing_runs_at_the_gaits_rate_not_at_one_times() {
 fn drv_of(app: &App, unit: Entity) -> &AnimDriver {
     app.world().entity(unit).get::<AnimDriver>().unwrap()
 }
+
+/// **B203 — the mount transition's own bone-0 arm.** The mount summon's cast-stage kit plays
+/// `SpellCastOmni` (54) at SPELL_GO, while the caster is still *unmounted*, so it takes the
+/// full-body route and `Mode::Swing` owns bone 0 for the clip's whole span. The mount field then
+/// lands a beat later — and the gait slot's mounted pin cannot help, because it only picks when
+/// the mode is already `Mode::Gait`. The reference has no such wait: `0x607a00`'s tail
+/// (`0x607b44`) is an ordinary op4 PRIMARY play of **91 `Mount`** on bone 0 of the body, so the
+/// cast clip is displaced the moment the mount arrives — which is why the director sees no cast
+/// animation at mount-up, only the poof.
+#[test]
+fn the_mount_transition_takes_bone_0_back_from_a_full_body_one_shot() {
+    use benilla_protocol::ObjectFields;
+
+    /// `UNIT_FIELD_MOUNTDISPLAYID` (index 133, decision 0441).
+    const FIELD_MOUNTDISPLAYID: u16 = 133;
+    const SPELL_CAST_OMNI: u16 = 54;
+    const MOUNT: u16 = 91;
+
+    let mut app = app();
+    let model = ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),                // Stand
+            clip(MOUNT, 2, true),            // Mount — the seat pose
+            clip(SPELL_CAST_OMNI, 3, false), // the cast release, FULL BODY (no upper_node)
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    let unit = app
+        .world_mut()
+        .spawn((
+            model,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(FIELD_MOUNTDISPLAYID, 0)])),
+            MovementState::default(),
+        ))
+        .id();
+    let mount_field = |app: &mut App, v: u32| {
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+                FIELD_MOUNTDISPLAYID,
+                v,
+            )])));
+    };
+    let playing = |app: &App| drv_of(app, unit).active_anim();
+
+    app.update();
+    assert_eq!(playing(&app), Some(0), "standing, unmounted");
+
+    // SPELL_GO: the cast-stage kit's release clip, full-body over bone 0.
+    app.world_mut().write_message(EmoteAnim {
+        entity: unit,
+        anim_id: SPELL_CAST_OMNI,
+        seq: 1,
+    });
+    app.update();
+    assert_eq!(
+        playing(&app),
+        Some(SPELL_CAST_OMNI),
+        "the release clip takes bone 0 while the caster is still on foot"
+    );
+
+    // …and the mount field lands, mid-clip. The transition's own arm reclaims bone 0.
+    mount_field(&mut app, 2404);
+    app.update();
+    assert_eq!(
+        playing(&app),
+        Some(MOUNT),
+        "B203: the mount arm displaces the cast clip — it does not wait for it to finish"
+    );
+
+    // The edge is a CHANGE, not a level: a steady mounted frame re-picks nothing new, and the
+    // seat pose simply holds (the reference's per-play re-force, rendered by the gait pin).
+    app.update();
+    assert_eq!(playing(&app), Some(MOUNT));
+
+    // Dismount is the same watcher's other leg (`0x607ce0` arms seq 0 Stand on the same bone).
+    mount_field(&mut app, 0);
+    app.update();
+    assert_eq!(playing(&app), Some(0), "back on its own feet, standing");
+}
+
+/// **B204 — the dismount CUTS the saddle pose; the mount-up blends into it** (decision 0931).
+/// The two legs of the `UNIT_FIELD_MOUNTDISPLAYID` watcher issue the same seven-argument op4
+/// `0x7121a0` call and differ in exactly one literal: `0x607b35 push 0x1` (build, cross-fade) vs
+/// `0x607d1c push 0x0` (teardown, no cross-fade). Fading Mount(91) out instead of cutting it is
+/// what read as a landing — 91 splays and bends the legs, and easing that into Stand over the
+/// clip's blend is a body absorbing an impact.
+///
+/// The assertion is on the OUTGOING clip's weight, because that is the whole difference: after
+/// the build frame the old pose is still weighted in (a blend in progress), after the teardown
+/// frame the saddle pose contributes nothing at all.
+#[test]
+fn the_dismount_cuts_the_saddle_pose_where_the_mount_up_blends_into_it() {
+    use benilla_protocol::ObjectFields;
+
+    const FIELD_MOUNTDISPLAYID: u16 = 133;
+    const MOUNT: u16 = 91;
+    let stand_node = AnimationNodeIndex::new(1);
+    let mount_node = AnimationNodeIndex::new(2);
+
+    let mut app = app();
+    // A deliberately LONG blend on both clips, so "did it fade or did it cut" cannot come down to
+    // how long a headless frame happened to take: at the harness's real-time `dt` the shipped
+    // 0.15 s blend is all but finished after a single update, and the difference the test is
+    // about would sit inside the noise.
+    let mut stand = clip(0, 1, true);
+    let mut mount = clip(MOUNT, 2, true);
+    stand.blend_time = 2.0;
+    mount.blend_time = 2.0;
+    let model = ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![stand, mount],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    };
+    let unit = app
+        .world_mut()
+        .spawn((
+            model,
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::ObjectStore(ObjectFields::from_pairs(&[(FIELD_MOUNTDISPLAYID, 0)])),
+            MovementState::default(),
+        ))
+        .id();
+    let mount_field = |app: &mut App, v: u32| {
+        app.world_mut()
+            .entity_mut(unit)
+            .insert(crate::net::ObjectStore(ObjectFields::from_pairs(&[(
+                FIELD_MOUNTDISPLAYID,
+                v,
+            )])));
+    };
+    let weight = |app: &App, node| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(node)
+            .map_or(0.0, |a| a.weight())
+    };
+
+    app.update();
+    assert_eq!(drv_of(&app, unit).active_anim(), Some(0));
+
+    // Build leg — `0x607b35 push 0x1`: Stand is still fading out under the seat pose.
+    mount_field(&mut app, 2404);
+    app.update();
+    assert_eq!(drv_of(&app, unit).active_anim(), Some(MOUNT));
+    assert!(
+        weight(&app, stand_node) > 0.5,
+        "the mount-up cross-fades: the outgoing pose is still weighted in"
+    );
+
+    // Teardown leg — `0x607d1c push 0x0`: the saddle pose is gone on the arm's own frame, not
+    // eased away over the clip's blend time.
+    mount_field(&mut app, 0);
+    app.update();
+    assert_eq!(drv_of(&app, unit).active_anim(), Some(0));
+    assert_eq!(
+        weight(&app, mount_node),
+        0.0,
+        "the dismount CUTS: Mount(91) contributes nothing the frame the field clears"
+    );
+}

@@ -360,11 +360,13 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             }
         }
         opcode::SMSG_INVENTORY_CHANGE_FAILURE => {
-            let (reason, required_level, item_guid) = items::read_inventory_change_failure(&mut r)?;
+            let (reason, required_level, item_guid, bag_slot) =
+                items::read_inventory_change_failure(&mut r)?;
             ServerPacket::InventoryChangeFailure {
                 reason,
                 required_level,
                 item_guid,
+                bag_slot,
             }
         }
         opcode::SMSG_INITIAL_SPELLS => {

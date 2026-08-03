@@ -136,6 +136,12 @@ pub struct SpellDisplay {
     /// `EquippedItemSubClassMask` (column 59) — `1 << subclass` mask refining
     /// [`Self::equipped_item_class`] (`0x4000c` = bows|guns|crossbows).
     pub equipped_item_subclass_mask: u32,
+    /// `EquippedItemInventoryTypeMask` (column 60, `SpellRec+0xf0`) — a `1 << InventoryType` mask,
+    /// the third and last leg of the reference's item-target gate (`0x495d60` @ `495e4d`; the two
+    /// before it are [`Self::equipped_item_class`]/[`Self::equipped_item_subclass_mask`] at
+    /// `495e10`). `0` = no requirement. This is the leg that decides a Crude Scope goes on a gun
+    /// and not a chestpiece; a mismatch is the client's own local "Invalid target" (`0x0a`).
+    pub equipped_item_inventory_type_mask: u32,
     /// `RequiresSpellFocus` ([`COL_REQUIRES_SPELL_FOCUS`]) — the `SpellFocusObject.dbc` object
     /// that must be nearby (1 Anvil, 3 Forge, 4 Cooking Fire — [`crate::spell_focus`]); 0 = none.
     /// The crafting book's "Requires: …" line (0437).
@@ -262,6 +268,7 @@ impl Default for SpellDisplay {
             reagents: [(0, 0); 8],
             equipped_item_class: -1,
             equipped_item_subclass_mask: 0,
+            equipped_item_inventory_type_mask: 0,
             requires_spell_focus: 0,
             shapeshift_form: None,
             stance_bar_order: 0,

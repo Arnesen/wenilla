@@ -652,10 +652,12 @@ pub(super) fn apply_net_updates(
                 reason,
                 required_level,
                 item_guid,
+                bag_slot,
             } => inventory_failure(
                 reason,
                 required_level,
                 item_guid,
+                bag_slot,
                 &mut ui_actions.2,
                 &mut ui_actions.6,
                 &mut ui_actions.7,

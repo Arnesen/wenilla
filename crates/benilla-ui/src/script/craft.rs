@@ -185,20 +185,6 @@ impl super::UiScript {
     pub fn take_craft_close(&mut self) -> bool {
         std::mem::take(&mut self.model_mut().craft_close)
     }
-
-    /// Arm (or disarm) the item-targeted-cast pick: while armed, a bag click queues its
-    /// `(bag, slot)` into the pick list instead of running the cursor gesture — the engine half
-    /// of the CraftFrame enchant flow (byte-VERIFIED seam: the `PickupContainerItem 0x4f9b30`
-    /// reroute, wow-re `tradeskill` TU-F). The app owns WHEN it's armed (an item-targeted
-    /// `DoCraft`) and cleared (completion, close).
-    pub fn set_item_pick_armed(&mut self, armed: bool) {
-        self.model_mut().item_pick_armed = armed;
-    }
-
-    /// Drain the `(bag, slot)` clicks the armed pick consumed since the last call.
-    pub fn take_item_picks(&mut self) -> Vec<(i64, u32)> {
-        std::mem::take(&mut self.model_mut().item_picks)
-    }
 }
 
 /// The recipe at a 1-based index, or `None` when out of range / no window is open.

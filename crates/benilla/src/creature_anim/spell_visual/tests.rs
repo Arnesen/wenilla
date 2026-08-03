@@ -746,3 +746,79 @@ fn ranged_visual_play_arms_the_any_caster_hold_and_a_non_ranged_play_clears_it()
         "the next ranged play re-arms"
     );
 }
+
+/// **The mount poof** ([`super::arm_mount_poof_fx`], decision 0927) — the three properties the
+/// reference's `UNIT_FIELD_MOUNTDISPLAYID` watcher gives it, each a real fork in `0x5ffa50`:
+/// **the build leg only** (the whole allocation sits behind `5ffa87 je 0x5ffade` on the NEW
+/// value, so a dismount spawns nothing), **any changed value** (0→N and N→N′ alike), and
+/// **first sight silent** (a unit that streams in already mounted did not just mount — the
+/// level-up ding's own treatment, decision 0305).
+#[test]
+fn the_mount_poof_puffs_on_the_build_leg_only() {
+    use benilla_protocol::ObjectFields;
+
+    /// `UNIT_FIELD_MOUNTDISPLAYID` (index 133, decision 0441).
+    const FIELD_MOUNTDISPLAYID: u16 = 133;
+    /// `SpellVisualEffectName` row 1185's shipped path — the druid-morph cloud.
+    const POOF: &str = "Spells\\DruidMorph_Impact_Base.mdx";
+    /// The M2 attach the hardcoded-effect spawn stamps (`DAT_0080c968[6]`).
+    const BASE_ATTACH: u16 = 0x13;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<SpellKitFx>();
+    app.insert_resource(SpellVisuals(
+        SpellVisualCatalog::from_tables(HashMap::new(), HashMap::new())
+            .with_hardcoded("HARDCODED Mount Poof", POOF),
+    ));
+    app.add_systems(Update, super::arm_mount_poof_fx);
+
+    let store =
+        |v: u32| crate::net::ObjectStore(ObjectFields::from_pairs(&[(FIELD_MOUNTDISPLAYID, v)]));
+    // Streams in ALREADY mounted: first sight arms the memory, silently.
+    let unit = app.world_mut().spawn(store(2404)).id();
+    app.update();
+    let puffs = |app: &mut App| -> Vec<(u16, String)> {
+        let mut out = Vec::new();
+        let world = app.world_mut();
+        let mut msgs = world.resource_mut::<Messages<SpellKitFx>>();
+        for m in msgs.drain() {
+            if let SpellKitFx::Begin {
+                entity, effects, ..
+            } = m
+            {
+                assert_eq!(entity, unit);
+                out.extend(effects);
+            }
+        }
+        out
+    };
+    assert!(
+        puffs(&mut app).is_empty(),
+        "a rider that streams into view did not just mount"
+    );
+
+    // Dismount — the NEW value is 0, so the build leg (and the whole allocation) is skipped.
+    app.world_mut().entity_mut(unit).insert(store(0));
+    app.update();
+    assert!(puffs(&mut app).is_empty(), "no poof on the way down");
+
+    // Mount: 0 → N.
+    app.world_mut().entity_mut(unit).insert(store(2404));
+    app.update();
+    assert_eq!(
+        puffs(&mut app),
+        vec![(BASE_ATTACH, POOF.to_string())],
+        "the build leg puffs the druid-morph cloud at the base attach"
+    );
+
+    // A steady mounted frame is not an edge — the watcher fires on the field CHANGING.
+    app.world_mut().entity_mut(unit).insert(store(2404));
+    app.update();
+    assert!(puffs(&mut app).is_empty(), "no re-puff while just riding");
+
+    // A swap (N → N′) is a change, and the reference rebuilds and puffs again.
+    app.world_mut().entity_mut(unit).insert(store(2405));
+    app.update();
+    assert_eq!(puffs(&mut app), vec![(BASE_ATTACH, POOF.to_string())]);
+}

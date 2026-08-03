@@ -152,7 +152,6 @@ pub(crate) struct DisplayedCursor(pub(crate) crate::target::WorldCursor);
 fn overlay_ui_cursor(
     base: Res<crate::target::WorldCursor>,
     script: Option<bevy::ecs::system::NonSend<benilla_ui::script::UiScript>>,
-    pending_pick: Option<Res<crate::ui_craft::PendingItemCast>>,
     mut displayed: ResMut<DisplayedCursor>,
 ) {
     use crate::target::{CursorKind, WorldCursor};
@@ -160,17 +159,10 @@ fn overlay_ui_cursor(
     let mut out = *base;
     // Spell-targeting pre-empts the WHOLE classifier — the real dispatcher's step 2 runs before
     // any object resolve (wow-re cursor-system.md §5, VERIFIED; the 0446/0452 named deferral).
-    // benilla's one targeting state is the armed enchant pick. INTERIM: plain Cast everywhere
-    // while armed — the ref's valid/invalid split (Cast in range / UnableCast out, computed by
-    // `0x6e6810`/`0x6e6350`) needs the item-target validity law derived before it's honest to
-    // gray anything.
-    if pending_pick.is_some_and(|p| p.spell_id != 0) {
-        displayed.0 = WorldCursor {
-            kind: CursorKind::Cast,
-            unable: false,
-        };
-        return;
-    }
+    // There is no branch for it HERE any more (decision 0923): the one targeting state writes the
+    // BASE cursor itself (`ui_action::targeting::drive_targeting_cursor`, which runs late in the
+    // target chain), so a live targeting word already reads as Cast — and, being non-Point, it
+    // falls past every overlay below by construction. That is the pre-emption, structurally.
     if out == WorldCursor::default() {
         if let Some(script) = script.as_ref() {
             // Repair is the locked base-mode override (`ShowRepairCursor`) and wins over the

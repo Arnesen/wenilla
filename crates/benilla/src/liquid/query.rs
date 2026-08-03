@@ -428,6 +428,13 @@ impl WaterChunkInfo {
         x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
     }
 
+    /// The wet footprint's XY box as `[[min_x, min_y], [max_x, max_y]]`, or `None` for an empty
+    /// grid (which claims no area at all) — what [`super::spatial::WaterIndex`] buckets by.
+    pub(super) fn xy_bounds(&self) -> Option<[[f32; 2]; 2]> {
+        (self.min_x <= self.max_x && self.min_y <= self.max_y)
+            .then_some([[self.min_x, self.min_y], [self.max_x, self.max_y]])
+    }
+
     /// Does this surface answer for a subject holding `claim`? — the delegation, in one place.
     ///
     /// An [`Inside`](LiquidClaim::Inside) subject reads its **own placement's** MLIQ and nothing
@@ -665,10 +672,10 @@ pub(crate) fn describe_at<'a>(
 
 /// Every **admitted** liquid surface height over `wow`'s XY under the given claim — the same
 /// delegation [`submersion_at`] applies (the 0634/0696 scoping: a pool in another building or
-/// storey never answers), with no over/under verdict attached: the consumer that needs surfaces
-/// the subject is merely *near* — above or below — is the camera's waterline snap
-/// (`player::camera::waterline_snap`), which keeps the eye out of the near-plane band around
-/// every admitted plane. Kept here so the delegation rule has one owner; `answers` stays private.
+/// storey never answers), with no over/under verdict attached: the consumer that needs the
+/// surfaces a subject is merely *near* — above or below — is the effect lane's water-side
+/// classification (`particles::sim::far_side_of_water_at`, decisions 0911/0921). Kept here so
+/// the delegation rule has one owner; `answers` stays private.
 pub(crate) fn surfaces_at<'a>(
     liquids: impl Iterator<Item = &'a WaterChunkInfo> + 'a,
     wow: [f32; 3],
@@ -777,20 +784,56 @@ pub(super) fn submersion_at<'a>(
         .unwrap_or_default()
 }
 
+/// How far the near rectangle's **lowest corner** sits below the eye (≤ 0, WoW-Z = Bevy-Y yards) —
+/// `min(0, corner heights − eye)`, so `eye_z + drop` is the reference's probe height
+/// `min(eye.z, corner[0..3].z)`. Zero when the camera pitches up enough that every corner clears
+/// the eye — the min with the eye itself is what keeps a skyward camera from probing above its
+/// own head. Pure (rotation + the projection's shape in, one height out) so the geometry is
+/// testable without ECS scaffolding, like [`submersion_at`].
+///
+/// The corners sit `near` ahead of the eye, `±tan(fov/2)·near` up/down and that times the aspect
+/// ratio sideways, in CAMERA space (Bevy: forward = −Z) — the same four points the reference
+/// builds from NDC z = −1 (`0x5c43b0`; wow-re `water-frame-straddle.md` §4c).
+pub(super) fn lowest_near_corner_drop(rotation: Quat, fov: f32, aspect: f32, near: f32) -> f32 {
+    let half_h = (fov * 0.5).tan() * near;
+    let half_w = half_h * aspect;
+    let mut drop: f32 = 0.0;
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            drop = drop.min((rotation * Vec3::new(sx * half_w, sy * half_h, -near)).y);
+        }
+    }
+    drop
+}
+
 pub(super) fn detect_submersion(
     mut underwater: ResMut<Underwater>,
-    camera: Query<&Transform, With<WorldCamera>>,
+    camera: Query<(&Transform, &Projection), With<WorldCamera>>,
     water: Query<&WaterChunkInfo>,
     eye_claim: Res<crate::wmo_portal::CameraInteriorClaim>,
     time: Res<Time>,
     mut last_dump: Local<Option<u32>>,
 ) {
-    let Ok(cam) = camera.single() else {
+    let Ok((cam, proj)) = camera.single() else {
         return;
     };
     let claim = camera_claim(&eye_claim);
     let eye = bevy_to_wow(cam.translation); // [x, y, z] WoW yards
-    underwater.0 = submersion_at(water.iter(), eye, claim);
+                                            // The probe HEIGHT is not the eye's — it is the lowest point of the NEAR RECTANGLE (or the
+                                            // eye itself if every corner sits above it): the reference's `0x6809c0` tests X,Y = the
+                                            // eye's, Z = `min(eye.z, corner[0..3].z)` over the frustum corners built at NDC z = −1 —
+                                            // VERIFIED, wow-re `water-frame-straddle.md` §4c. This is the whole no-straddle mechanism
+                                            // (§4d): the frame flips submerged the moment the visible rectangle's leading corner reaches
+                                            // the surface, before any under-surface viewpoint can render dry — so the crossing needs no
+                                            // camera constraint at all (the 0905 eye snap this replaces), and with the reference's 1/9
+                                            // near plane the band it owns is a few inches tall.
+    let probe_z = match proj {
+        Projection::Perspective(p) => {
+            eye[2] + lowest_near_corner_drop(cam.rotation, p.fov, p.aspect_ratio, p.near)
+        }
+        _ => eye[2],
+    };
+    underwater.0 = submersion_at(water.iter(), [eye[0], eye[1], probe_z], claim);
     // `WOW_FOG_DUMP` also explains *this* decision (`frame` drops the 1 Hz throttle, as there). The
     // committed fog is whichever submerged atmosphere the verdict names, so a fog line alone cannot
     // say whether an atmosphere that reads wrong is the wrong record or the right record never
@@ -816,7 +859,7 @@ pub(super) fn detect_submersion(
                                 Some(o) => format!("g{}", o.group),
                                 None => "adt".into(),
                             },
-                            if w.answers(claim, eye[2]) {
+                            if w.answers(claim, probe_z) {
                                 ""
                             } else {
                                 " (not yours)"
@@ -827,7 +870,7 @@ pub(super) fn detect_submersion(
                 .collect();
             cands.sort();
             eprintln!(
-                "[submerged] {:?} claim {claim:?} eye [{:.1} {:.1} {:.2}] over-xy {}",
+                "[submerged] {:?} claim {claim:?} eye [{:.1} {:.1} {:.2}] probe-z {probe_z:.2} over-xy {}",
                 underwater.0,
                 eye[0],
                 eye[1],
@@ -845,6 +888,28 @@ pub(super) fn detect_submersion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The corner-min probe geometry (`min(eye.z, corner z's)` as an offset from the eye): level
+    /// pitch reaches half the near rectangle's height down, straight down reaches the full near
+    /// distance, straight up reaches nothing (the min with the eye itself), and yaw never enters
+    /// (no roll ⇒ the rectangle's width is world-horizontal at every heading).
+    #[test]
+    fn near_corner_drop_is_the_rectangles_lowest_point() {
+        let (fov, aspect, near) = (std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 1.0 / 9.0);
+        let half_h = (fov * 0.5).tan() * near;
+        let at = |yaw: f32, pitch: f32| {
+            lowest_near_corner_drop(
+                Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0),
+                fov,
+                aspect,
+                near,
+            )
+        };
+        assert!((at(0.0, 0.0) + half_h).abs() < 1e-6);
+        assert!((at(0.0, -std::f32::consts::FRAC_PI_2) + near).abs() < 1e-6);
+        assert_eq!(at(0.0, std::f32::consts::FRAC_PI_2), 0.0);
+        assert!((at(1.23, -0.4) - at(0.0, -0.4)).abs() < 1e-6);
+    }
 
     /// A flat 10×10 yd wet quad at WoW z = `z` — one cell, four corners.
     fn flat_quad(z: f32) -> LiquidMesh {

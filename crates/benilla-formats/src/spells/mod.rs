@@ -212,6 +212,10 @@ const COL_REAGENT_1: usize = 42;
 const COL_REAGENT_COUNT_1: usize = 50;
 const COL_EQUIPPED_ITEM_CLASS: usize = 58;
 const COL_EQUIPPED_ITEM_SUBCLASS_MASK: usize = 59;
+/// `EquippedItemInventoryTypeMask` — chain-locked between `COL_EQUIPPED_ITEM_SUBCLASS_MASK`
+/// (`SpellRec+0xec`) and `COL_EFFECT_1` (`+0xf4`), i.e. exactly the `+0xf0` the reference's
+/// item-target gate reads at `0x495d60` @ `495e4d`. Decision 0923.
+const COL_EQUIPPED_ITEM_INVENTORY_TYPE_MASK: usize = 60;
 /// `RequiresSpellFocus` (`SpellRec+0x3c`, `0x3c/4 == 15` — the run the pinned neighbors chain-lock:
 /// `Stances` 11-12, `Targets` 13, `CasterAuraState` 16). A `SpellFocusObject.dbc` id that must be
 /// nearby to cast (1 Anvil, 3 Forge, 4 Cooking Fire — [`crate::spell_focus`]); 0 = none. Verified
@@ -635,6 +639,8 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 }),
                 equipped_item_class: u32_at(r, COL_EQUIPPED_ITEM_CLASS).unwrap_or(0) as i32,
                 equipped_item_subclass_mask: u32_at(r, COL_EQUIPPED_ITEM_SUBCLASS_MASK)
+                    .unwrap_or(0),
+                equipped_item_inventory_type_mask: u32_at(r, COL_EQUIPPED_ITEM_INVENTORY_TYPE_MASK)
                     .unwrap_or(0),
                 requires_spell_focus: u32_at(r, COL_REQUIRES_SPELL_FOCUS).unwrap_or(0),
                 // The stance-bar keys (wow-re shapeshift-bar-api.md): the first MOD_SHAPESHIFT

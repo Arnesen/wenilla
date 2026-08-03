@@ -25,11 +25,57 @@ pub(super) fn play_clip(
     repeat: RepeatAnimation,
     rate: f32,
 ) {
-    let active = tr.play(
+    arm(
+        tr,
         player,
-        c.node,
+        c,
+        repeat,
+        rate,
         Duration::from_secs_f32(c.blend_time.max(0.0)),
     );
+}
+
+/// Arm an already-resolved **looping** clip with the cross-fade SUPPRESSED — op4 `0x7121a0` called
+/// with `crossFadeFlag = 0`, which is a genuinely different arm, not a fast blend:
+///
+/// - the outgoing pose is **not** carried. `0x71253e`–`0x712543` tests arg6 and, when it is zero,
+///   jumps clean past the whole blend block — including the `rep movsd` at `0x7125d9`–`0x7125ea`
+///   that copies the primary block `[bone+0x98..]` into the secondary `[bone+0xc4..]`. So the new
+///   clip's first frame IS the pose, immediately, and a **full-body secondary overlay survives**
+///   (only the blended arm evicts it — decision 0114's shared-slot eviction is a *blend* law).
+/// - the primary's own bookkeeping still runs: `[bone+0xf8] = animId` at `0x71252f` is gated on
+///   arg7 (the slot selector) alone, so bone 0 changes hands either way.
+///
+/// The dismount teardown `0x607ce0` is the call site this exists for (decision 0931); the mount-up
+/// build `0x607b44` passes `1` and takes [`play_clip`]'s ordinary cross-fade.
+pub(super) fn cut_loop(
+    tr: &mut AnimationTransitions,
+    player: &mut AnimationPlayer,
+    anims: &ModelAnimations,
+    id: u16,
+    catalog: Option<&AnimDataCatalog>,
+    rng: &mut u32,
+    window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+) {
+    let Some(head) = find_resolved(anims, id, catalog) else {
+        return;
+    };
+    // op4's arg3 here is a literal `-1` (`0x607d25`), so the variation rolls unconditionally — the
+    // teardown is not one of the arms [`select::arm_forces_head`] pins to the head.
+    let (c, r) = roll_loop(anims, head, true, rng);
+    *window = Some((c.node, r));
+    arm(tr, player, c, RepeatAnimation::Forever, 1.0, Duration::ZERO);
+}
+
+fn arm(
+    tr: &mut AnimationTransitions,
+    player: &mut AnimationPlayer,
+    c: &AnimClip,
+    repeat: RepeatAnimation,
+    rate: f32,
+    blend: Duration,
+) {
+    let active = tr.play(player, c.node, blend);
     active.set_repeat(repeat);
     active.set_speed(rate);
 }

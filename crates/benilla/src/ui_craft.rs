@@ -6,15 +6,16 @@
 //! through the tooltip arc's substitution engine.
 //!
 //! **The item pick** (the one thing the TradeSkill window doesn't have): an enchant is an
-//! item-targeted cast (`SPELL_EFFECT_ENCHANT_ITEM`/`_TEMPORARY`). `DoCraft` on one arms
-//! [`PendingItemCast`]; the engine's `PickupContainerItem` reroute (byte-VERIFIED — the wow-re
-//! `tradeskill` TU-F seam at `0x4f9b30`) turns the next bag CLICK into the target pick, and the
-//! drain completes the cast (`CMSG_CAST_SPELL` with `TARGET_FLAG_ITEM` + the item's packed guid —
-//! the byte-pinned SPELLCAST item field). A non-item craft (a Runed rod's CREATE_ITEM) casts
-//! immediately through the one cast-send path, like a tradeskill recipe. **Named INTERIMs:** no
-//! targeting-cursor art while armed; no replace-enchant confirm popup yet (event 0x193 is pure
-//! client gating and 5875 has no replace opcode — needs the item's enchantment fields, a later
-//! slice); the paper-doll and trade-window targets are out of scope (bags only).
+//! item-targeted cast (`SPELL_EFFECT_ENCHANT_ITEM`/`_TEMPORARY`, `Targets = 0x10`). Since
+//! decision 0923 this window owns none of that machinery — `DoCraft` goes down the ONE cast
+//! ladder like every other caster surface, and the resolver's item arm raises the ONE targeting
+//! cursor, which the bag and paper-doll click seams complete ([`crate::ui_action::targeting`]).
+//! The private `PendingItemCast` this file used to carry — a second targeting state with its own
+//! arm, its own bag-click completion and its own cursor overlay, bypassing every ladder rung
+//! including the reagent check an enchant most needs — is gone.
+//!
+//! **Named INTERIM:** no replace-enchant confirm popup yet (event 0x193 is pure client gating and
+//! 5875 has no replace opcode — it needs the item's enchantment fields, a later slice).
 
 use bevy::prelude::*;
 
@@ -51,27 +52,17 @@ pub(crate) struct CraftOpen {
     pub(crate) line: Option<u32>,
 }
 
-/// An armed item-targeted craft cast, waiting for the player to right-click the target item in a
-/// bag (`0` = none armed). Completed by `ui_items::drain`'s use hook; cleared on completion,
-/// window close, or a fresh `DoCraft`.
-#[derive(Resource, Default)]
-pub(crate) struct PendingItemCast {
-    pub(crate) spell_id: u32,
-}
-
 pub(crate) struct UiCraftPlugin;
 
 impl Plugin for UiCraftPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CraftOpen>()
-            .init_resource::<PendingItemCast>()
-            .add_systems(
-                Update,
-                (
-                    feed_craft.in_set(UnitFeed).before(UiInput),
-                    drain_craft.after(UiInput),
-                ),
-            );
+        app.init_resource::<CraftOpen>().add_systems(
+            Update,
+            (
+                feed_craft.in_set(UnitFeed).before(UiInput),
+                drain_craft.after(UiInput),
+            ),
+        );
     }
 }
 
@@ -260,86 +251,37 @@ fn feed_craft(
     *last = fresh;
 }
 
-/// Drain the Lua intents: `DoCraft` on an item-targeted enchant ARMS the pick ([`PendingItemCast`]
-/// — the container drain completes it); on a self-craft (rod making) casts through the one
-/// cast-send path immediately. `CloseCraft` closes the window and disarms any pick.
+/// Drain the Lua intents: every `DoCraft` goes down the ONE cast ladder, and the resolver decides
+/// what happens next — an enchant's `Targets = 0x10` word arms the targeting cursor's item half
+/// (decision 0923; the bag / paper-doll click completes it, in `ui_action::targeting`), a rod
+/// craft's zero word commits immediately. `CloseCraft` closes the window; a pick armed by it is
+/// the one targeting word, cancelled the ordinary ways (ESC, right-click, a new cast).
+///
+/// Before 0923 this drain owned a private `PendingItemCast` with its own arm, its own bag-click
+/// completion and its own cursor overlay — a second targeting machine that skipped every rung the
+/// ladder runs (reagents included, which is what an enchant most needs). It is gone: the window
+/// is now just another caster surface.
 fn drain_craft(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<CraftOpen>,
-    mut pending_pick: ResMut<PendingItemCast>,
     skill_lines: Option<Res<SkillLines>>,
-    self_store: Query<&ObjectStore, With<SelfPlayer>>,
     targeting: cast_target::CastTargeting,
     mut ladder: CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let _ = skill_lines; // the feed resolves lines; the drain keys only on the spell's effects
+    let _ = skill_lines; // the feed resolves lines; the drain just casts what it is handed
     for spell_id in script.take_craft_dos() {
         if open.line.is_none() {
             debug!("ui_craft: DoCraft({spell_id}) with no open window — ignored");
             continue;
         }
-        let needs_item = ladder
-            .spells
-            .as_deref()
-            .and_then(|s| s.catalog.get(spell_id))
-            .map(|d| {
-                matches!(
-                    d.effect_1,
-                    SPELL_EFFECT_ENCHANT_ITEM | SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
-                )
-            });
-        match needs_item {
-            Some(true) => {
-                debug!("ui_craft: DoCraft({spell_id}) — item pick armed (right-click the target)");
-                pending_pick.spell_id = spell_id;
-            }
-            Some(false) => {
-                debug!("ui_craft: DoCraft({spell_id}) — self craft");
-                pending_pick.spell_id = 0;
-                ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
-            }
-            None => debug!("ui_craft: DoCraft({spell_id}) — unknown spell, ignored"),
-        }
+        debug!("ui_craft: DoCraft({spell_id})");
+        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
     }
     if script.take_craft_close() {
         debug!("ui_craft: client-side close (no packet)");
         open.line = None;
-        pending_pick.spell_id = 0;
     }
-
-    // Complete the armed pick: a bag click the engine rerouted (the PickupContainerItem seam)
-    // names the target item — resolve its guid and send the item-targeted cast. One-shot.
-    for (bag, slot) in script.take_item_picks() {
-        let armed = pending_pick.spell_id;
-        if armed == 0 {
-            continue; // a stale click raced the disarm — nothing to cast
-        }
-        let slot0 = u8::try_from(slot.saturating_sub(1)).unwrap_or(0);
-        let guid = self_store
-            .single()
-            .ok()
-            .and_then(|store| crate::ui_items::slot_guid(&store.0, bag, slot0, &ladder.items));
-        match guid {
-            Some(item_guid) => {
-                debug!("ui_craft: enchant pick — cast {armed} at item {item_guid:#x}");
-                let _ = ladder
-                    .commands
-                    .0
-                    .send(crate::net::ClientCommand::CastSpellItem {
-                        spell_id: armed,
-                        item_guid,
-                    });
-            }
-            None => debug!("ui_craft: enchant pick on an empty slot — kept armed"),
-        }
-        if guid.is_some() {
-            pending_pick.spell_id = 0;
-        }
-    }
-    // Mirror the armed state into the engine each frame (cheap; the engine reroutes bag clicks
-    // only while set).
-    script.set_item_pick_armed(pending_pick.spell_id != 0);
 }

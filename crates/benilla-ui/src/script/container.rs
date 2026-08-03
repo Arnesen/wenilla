@@ -469,22 +469,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "PickupContainerItem",
         lua.create_function(|lua, (bag, slot): (i64, u32)| {
             let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            // The repair-mode intercept lives IN the pickup path, exactly the real client
-            // (`0x4f9c7b`, wow-re repair-machinery.md): while the repair cursor is armed, the
-            // click means "repair this item" — queued for the app to send — and nothing is
-            // picked up. The mode STICKS across clicks (only HideRepairCursor/merchant-close
-            // clears it).
-            if model.repair_mode {
-                model.container_repairs.push((bag, slot));
+            // Two intercepts live IN the pickup path, in the reference's own order (decision
+            // 0923 re-read `PickupContainerItem 0x4f9b30` whole; the targeting rung is at
+            // `4f9c54` and the repair test at `4f9c7b`, so targeting wins — a poisoning click at
+            // a repair vendor binds the poison, it does not repair):
+            //
+            //   4f9c54  call 0x6e48a0        ; IsTargeting
+            //   4f9c5d  call 0x6e6330        ; TargetingWantsItem (word & 0x4010)
+            //   4f9c6d  call 0x495d60        ; bind THIS item — then return, nothing picked up
+            //
+            // The held-payload check precedes BOTH (`4f9c38`: a non-empty cursor jumps to the
+            // place/swap arm long before either), so a click while carrying an item is a place —
+            // transcribed by the `cursor.is_none()` gate. The word is one-shot: the app clears it
+            // on completion, cancel, or close.
+            if model.item_pick_armed && model.cursor.is_none() {
+                model.item_picks.push((bag, slot));
                 return Ok(false);
             }
-            // The item-targeted-cast intercept, same seam (byte-VERIFIED — wow-re `tradeskill`
-            // TU-F: the enchant pick reroutes the generic bag click inside `PickupContainerItem
-            // 0x4f9b30` while the spell-targeting cursor is up): the click means "cast the armed
-            // spell AT this item" — queued for the app to complete — and nothing is picked up.
-            // One-shot: the app clears the arm on completion/close.
-            if model.item_pick_armed {
-                model.item_picks.push((bag, slot));
+            // Repair mode (`0x4f9c7b`, wow-re repair-machinery.md): while the repair cursor is
+            // armed, the click means "repair this item" — queued for the app to send — and
+            // nothing is picked up. The mode STICKS across clicks (only HideRepairCursor /
+            // merchant-close clears it).
+            if model.repair_mode {
+                model.container_repairs.push((bag, slot));
                 return Ok(false);
             }
             Ok(pickup_container_item(&mut model, bag, slot))

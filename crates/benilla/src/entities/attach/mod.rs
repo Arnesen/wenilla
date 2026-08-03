@@ -845,6 +845,10 @@ pub(super) fn attach_entity_visuals(
                         MeshMaterial3d(material),
                         Transform::from_translation(Vec3::Y * lift),
                         object,
+                        // The cube has no resident `RenderSubmesh` to cast against — its `Aabb` IS
+                        // its shape, which it must SAY (decision 0929): the picker requires pick
+                        // geometry rather than inferring a box from its absence.
+                        crate::interact::PickBox,
                     ));
                 });
             }

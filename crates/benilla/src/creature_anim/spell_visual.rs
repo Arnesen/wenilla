@@ -32,15 +32,27 @@ const ERROR_CUBE: &str = "Spells\\ErrorCube.mdx";
 /// one loot effect (the client's flag8 dedup), which [`arm_loot_fx`]'s edge cache guarantees.
 const LOOT_FX_KEY: u32 = u32::MAX;
 
-/// The M2 attachment the client hangs its engine-spawned effects from (`0x13` — the loot
-/// sparkle and the level-up ding both). It is also the `spell_fx` attach cascade's own last
+/// The M2 attachment the three engine-spawned effects we ship hang from — the loot sparkle, the
+/// level-up ding and the mount poof. It is also the `spell_fx` attach cascade's own last
 /// fallback, so a model lacking the point lands on the unit base — exactly the reference's
-/// root fallback.
+/// root fallback (`0x61fb4f`–`0x61fb5f`: `HasAttachment(tag)` on `[unit+0xd8]`, else `0x13`).
+///
+/// **It is a table value, not an engine-wide constant** (wow-re `mount-composition.md` Q4b.1, §5
+/// 2026-08-03 — the 14-entry `DAT_0080c968`, dumped and joined to the `0x8617b8` name table). It
+/// happens to be `0x13` for indices **4** Loot Art, **5** Unit Level Up and **6** Mount Poof —
+/// our three — and for the PetLoyalty/Meeting-Stone/Reputation rows; it is `0x11` for the two
+/// breath effects and Inebriated Bubbles, and the sentinel `0x25` (spawn refused outright) for
+/// the two footstep sprays. A fourth consumer must read the table row, not reuse this.
 const HARDCODED_FX_ATTACH: u16 = 0x13;
 
 /// The engine-spawned level-up effect's baked lookup name (the client's string `0x8618e0`,
 /// matched by the boot name-resolve `0x61f5b0`; wow-re `levelup-ding.md` — decision 0305).
 const LEVEL_UP_EFFECT: &str = "HARDCODED Unit Level Up";
+
+/// The mount transition's cloud — hardcoded index **6**, shipped as `SpellVisualEffectName` row
+/// 1185 → `Spells\DruidMorph_Impact_Base.mdx`, i.e. literally the druid-morph puff (wow-re
+/// `mount-composition.md` Q4b, decision 0927).
+const MOUNT_POOF_EFFECT: &str = "HARDCODED Mount Poof";
 
 /// `SpellVisual.dbc` × `SpellVisualKit.dbc` — the stage-kit chain + each kit's anim/sound
 /// (`crate::creature_anim::spell_visual` module docs). Optional like every other DBC-backed
@@ -1124,4 +1136,72 @@ pub(super) fn arm_level_up_fx(
     }
     // Streamed units despawn on range-out — drop their level memory with them.
     levels.retain(|e, _| units.contains(*e));
+}
+
+/// The **mount poof** — the cloud the director reports seeing at mount-up and we never drew.
+///
+/// The reference's `UNIT_FIELD_MOUNTDISPLAYID` change-watcher (`0x604329` → `0x604570` →
+/// `0x5ffa50`) does three things on its **build** leg, and only there: tear down any old mount
+/// (`0x607ce0`, gated on the OLD value), build the new one (`0x607a00`), and then spawn a
+/// `HARDCODED` effect — `SMemAlloc(0x90)` → `Effect_C` ctor `0x61f490` → `0x61fae0(index=6,
+/// &ownerGUID, cb=0x5fbf50)` → `0x6210e0` (`5ffa90`–`5ffad9`). Index **6** resolves through the
+/// boot name-match table to `"HARDCODED Mount Poof"` → row 1185 → `Spells\DruidMorph_Impact_Base`
+/// — the druid-morph cloud, which is exactly the "cloud shapeshift animation" of the report.
+/// Byte-for-byte the same spawn shape as [`arm_level_up_fx`]'s index 5, so it is the same edge
+/// here (wow-re `mount-composition.md` Q4b, §5 2026-08-03; decision 0927).
+///
+/// The three properties that decide the shape of this arm, all VERIFIED there:
+/// - **Mount side only.** The build *and the entire allocation* sit behind `5ffa87 je 0x5ffade`
+///   on the **NEW** field value. `N→0` jumps clean past it: **no poof on dismount.** `0→N` and
+///   `N→N′` both spawn one.
+/// - **Any unit.** No active-player, local-player or distance gate exists anywhere in `0x5ffa50`
+///   — the same shape as the level-up ding. Range is the server's replication, not a filter.
+/// - **One-shot, on the rider's own body.** `[node+0x2c] = 0` (no world-plant, no dedup marker,
+///   not cancel-immune), tag `0x13` re-resolved against `[owner+0xd8]` every tick, and the
+///   registered callback is `0x5fbf50` — the CEffect *end-of-clip terminator* (its looping twin
+///   `0x600640` is what makes the loot sparkle repeat). So: `FxStage::OneShot`, non-persistent,
+///   2.8 s of its own clock. Because the rider's body is the mount's child at slot 0 (0917), the
+///   cloud rides the saddle for its whole span with no extra plumbing.
+///
+/// **Stated divergence.** The reference's tail `0x6208e0` is a same-record+same-tag dedup that
+/// destroys a still-running poof when a new one spawns on that unit; our one-shot instances carry
+/// no reap key, so a mount *swap* inside 2.8 s would show two overlapping clouds. Unreachable
+/// today (the mounted gate refuses a second mount spell) and bounded at "one extra puff", so it
+/// is named rather than modelled.
+pub(super) fn arm_mount_poof_fx(
+    changed: Query<(Entity, &ObjectStore), Changed<ObjectStore>>,
+    units: Query<(), With<ObjectStore>>,
+    visuals: Option<Res<SpellVisuals>>,
+    mut displays: Local<EntityHashMap<u32>>,
+    mut fx: MessageWriter<SpellKitFx>,
+) {
+    for (entity, store) in &changed {
+        let mount_display = store.0.unit_mount_display_id();
+        match displays.insert(entity, mount_display) {
+            // The build leg's gate is on the NEW value, so a dismount (`mount_display == 0`)
+            // spawns nothing — and first sight arms silently, exactly like the ding: a unit that
+            // streams in already mounted did not just mount.
+            Some(prev) if prev != mount_display && mount_display != 0 => {
+                let Some(path) = visuals
+                    .as_ref()
+                    .and_then(|v| v.0.hardcoded_effect(MOUNT_POOF_EFFECT))
+                else {
+                    continue; // no client data / no such row (the DBC-resource degrade shape)
+                };
+                debug!("anim: mount display {prev} → {mount_display}, the poof puffs ({entity})");
+                fx.write(SpellKitFx::Begin {
+                    entity,
+                    spell_id: 0,
+                    persistent: false,
+                    class: FxClass::Hold,
+                    // `0x5fbf50` — destroy at the first completion; the shipped model runs 2.8 s.
+                    stage: FxStage::OneShot,
+                    effects: vec![(HARDCODED_FX_ATTACH, path.to_string())],
+                });
+            }
+            _ => {}
+        }
+    }
+    // Streamed units despawn on range-out — drop their mount memory with them.
+    displays.retain(|e, _| units.contains(*e));
 }

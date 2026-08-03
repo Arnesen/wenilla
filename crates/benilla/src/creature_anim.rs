@@ -503,7 +503,8 @@ use blood::{blood_spurts, load_blood_tables};
 use env_damage::{hard_landing_dust, load_env_damage_table};
 pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
 use spell_visual::{
-    arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, load_spell_visuals, route_cast_visuals,
+    arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, arm_mount_poof_fx, load_spell_visuals,
+    route_cast_visuals,
 };
 // The aura-slot watcher is the shared trigger for BOTH halves of a state kit, so the CharProc half's
 // own tests (`crate::aura_visual`) drive it directly rather than re-deriving the slot diff.
@@ -606,6 +607,16 @@ pub(crate) struct AnimDriver {
     /// working the divisor out by hand. Recorded rather than re-derived, so the card can never
     /// disagree with what is actually playing.
     gait_rate: f32,
+    /// `UNIT_FIELD_MOUNTDISPLAYID` as of the last pass — the driver's **mount-transition edge**
+    /// detector, the local twin of the client's own UpdateField change-watcher (`0x604329`:
+    /// TYPEID Unit, descriptor offset `0x1fc`, width 4, thunk `0x604570` → `0x5ffa50`). Any
+    /// change is an edge — 0→N (mount), N→N′ (swap) and N→0 (dismount) alike — because the
+    /// reference's handler is one watcher whose two legs BOTH arm bone 0 of the body: the build
+    /// `0x607b44` op4(bone 0, **91 `Mount`**, cross-fade, PRIMARY), the teardown `0x607ce0` op4
+    /// seq **0 `Stand`**. The arm is a plain last-writer-wins play, so it *displaces a full-body
+    /// one-shot the transition catches in flight* — which our gait-slot mount pin alone never did
+    /// (decision 0927).
+    mount_display: u32,
     /// The Special wanted LAST frame — the driver's Special **edge** detector (decision 0864).
     /// An edge is a play in the client (the jump/pose entry, the FALLINGFAR latch's Fall, the
     /// land pick), so it clears the deferred-combat cache like any normal arm (`0x5fe48e`);
@@ -710,6 +721,7 @@ impl Default for AnimDriver {
             ranged_held: false,
             loop_window: None,
             gait_rate: 1.0,
+            mount_display: 0,
             last_special: None,
             frozen: None,
         }
@@ -816,6 +828,9 @@ impl Plugin for CreatureAnimPlugin {
                     arm_loot_fx,
                     // Its level-edge sibling: the ding (decision 0305) — same shape, same home.
                     arm_level_up_fx,
+                    // …and its mount-edge sibling: the poof (decision 0927). Same hardcoded-effect
+                    // spawn shape, one field over.
+                    arm_mount_poof_fx,
                     // The aura-slot watcher: state kits persist for the aura's life (the bread).
                     arm_aura_state_fx,
                     blood_spurts,

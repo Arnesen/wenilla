@@ -7,7 +7,7 @@
 use benilla_protocol::messages::{mail_action, mail_error, MailListEntry};
 
 use crate::net::{ClientCommand, NetCommands};
-use crate::ui_items::EquipErrors;
+use crate::ui_items::{EquipError, EquipErrors};
 use crate::ui_mail::{mail_error_text, MailOpen, MailPending, MailSendAck};
 
 /// `SessionEvent::MailList` (`SMSG_MAIL_LIST_RESULT`) — replace the session's rows + fire the inbox
@@ -63,7 +63,14 @@ pub(super) fn send_mail_result(
     // nothing extra with it here (the GetMailList re-sync below reflects the emptied row). [_item]
     if action == mail_action::SEND {
         if error == mail_error::EQUIP_ERROR {
-            equip_errors.0.push((equip_error.unwrap_or(0) as u8, None));
+            equip_errors.0.push(EquipError {
+                reason: equip_error.unwrap_or(0) as u8,
+                required_level: None,
+                // SMSG_SEND_MAIL_RESULT carries only the code, never a bag slot. 255 is the
+                // wire's own "the player's own array" sentinel — reason 16's substitution
+                // correctly declines to name a container it was never told about.
+                bag_slot: 255,
+            });
         }
         mail.send_acks.push(MailSendAck {
             ok: error == mail_error::OK,
@@ -80,7 +87,11 @@ pub(super) fn send_mail_result(
                 let _ = commands.0.send(ClientCommand::GetMailList { mailbox });
             }
         }
-        mail_error::EQUIP_ERROR => equip_errors.0.push((equip_error.unwrap_or(0) as u8, None)),
+        mail_error::EQUIP_ERROR => equip_errors.0.push(EquipError {
+            reason: equip_error.unwrap_or(0) as u8,
+            required_level: None,
+            bag_slot: 255,
+        }),
         other => mail.errors.push(mail_error_text(other)),
     }
 }

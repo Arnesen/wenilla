@@ -182,9 +182,29 @@ pub(super) struct SceneGates<'w> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct WaterInterleave<'w, 's> {
     water: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
+    /// The spatial pre-filter every classification routes through: these lanes ask per DRAW
+    /// (every admitted emitter, every ribbon, every transparent mesh batch), and the full-walk
+    /// `surfaces_at` at that grain was the 2026-08-03 12-fps regression (`liquid::spatial`).
+    index: Res<'w, crate::liquid::WaterIndex>,
     underwater: Res<'w, crate::liquid::Underwater>,
     rooms: Query<'w, 's, &'static crate::wmo_portal::UnitWmoRoom>,
     parents: Query<'w, 's, &'static ChildOf>,
+}
+
+impl WaterInterleave<'_, '_> {
+    /// The eye's side of the water — the term that inverts EVERY verdict (`far = above XOR
+    /// submerged`). The mesh lane's reactive classifier re-runs its full walk on the frame this
+    /// flips; per-draw callers just read it through [`far_side_of_water_at`].
+    pub(crate) fn eye_submerged(&self) -> bool {
+        self.underwater.0.any()
+    }
+
+    /// True when the loaded-surface population changed since the borrowing system last ran (the
+    /// [`crate::liquid::WaterIndex`] rebuild edge) — any batch may have gained or lost the water
+    /// plane under it, so the mesh lane's reactive classifier promotes the frame to a full walk.
+    pub(crate) fn surfaces_changed(&self) -> bool {
+        self.index.is_changed()
+    }
 }
 
 /// Is this draw on the EYE's **far side** of its local water plane — the point-and-slack core.
@@ -209,23 +229,33 @@ pub(crate) fn far_side_of_water_at(
     r: f32,
 ) -> bool {
     let wow = benilla_assets::coords::bevy_to_wow(point_world);
-    let mut seed = claim_seed;
-    let mut room = None;
-    for _ in 0..8 {
-        let Some(e) = seed else { break };
-        if let Ok(rm) = w.rooms.get(e) {
-            room = Some(rm);
-            break;
+    // The spatial pre-filter first — these lanes ask per DRAW, and the full `surfaces_at` walk
+    // at that grain was the 2026-08-03 12-fps regression (`liquid::spatial`). No candidate
+    // surface over this XY (the dominant dry-land case) is "no admitted surface" under every
+    // claim, so the room walk below is skipped with the scan.
+    let candidates = w.index.over(wow[0], wow[1]);
+    let above = if candidates.is_empty() {
+        true
+    } else {
+        let mut seed = claim_seed;
+        let mut room = None;
+        for _ in 0..8 {
+            let Some(e) = seed else { break };
+            if let Ok(rm) = w.rooms.get(e) {
+                room = Some(rm);
+                break;
+            }
+            seed = w.parents.get(e).ok().map(ChildOf::parent);
         }
-        seed = w.parents.get(e).ok().map(ChildOf::parent);
-    }
-    let claim = crate::liquid::unit_claim(room);
-    let above = match crate::liquid::surfaces_at(w.water.iter(), wow, claim)
-        .map(|z| wow[2] - z)
-        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
-    {
-        Some(d) => is_above(d, r),
-        None => true,
+        let claim = crate::liquid::unit_claim(room);
+        let surfaces = candidates.iter().filter_map(|&e| w.water.get(e).ok());
+        match crate::liquid::surfaces_at(surfaces, wow, claim)
+            .map(|z| wow[2] - z)
+            .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+        {
+            Some(d) => is_above(d, r),
+            None => true,
+        }
     };
     if w.underwater.0.any() {
         above

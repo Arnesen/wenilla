@@ -152,6 +152,15 @@ mod tests {
         assert_eq!(equip_error_key(59), "ERR_CANT_BE_DISENCHANTED");
     }
 
+    /// Reason 16 keeps the GENERIC key in this table — the substitution is the drain's fork, not
+    /// a second table entry, because choosing it needs the named bag (`feed::bag_family_name`).
+    /// Both 15 and 16 map here; only 16 can be overridden, and only when its bag resolves.
+    #[test]
+    fn the_wrong_bag_reasons_share_the_generic_key() {
+        assert_eq!(equip_error_key(15), "ERR_WRONG_BAG_TYPE");
+        assert_eq!(equip_error_key(16), "ERR_WRONG_BAG_TYPE");
+    }
+
     /// Past the enum the binary clamps rather than falling through: its jump table is bounded
     /// `cmp ecx,0x42; ja`, and the default pad is errorId 9 = `ERR_BAG_FULL`. Ours used to print
     /// a hex debug line here.
@@ -209,5 +218,18 @@ mod tests {
         assert_eq!(g(equip_error_key(51)).unwrap(), "Your bank is full");
         // The past-the-enum clamp resolves too — it is a real line, not a placeholder.
         assert_eq!(g(equip_error_key(67)).unwrap(), "That bag is full.");
+        // Reason 16's two outcomes, both on real data: the generic line the table gives, and the
+        // substituted one the drain swaps in once `feed::bag_family_name` resolves a bag. The
+        // `%s` fill is a BagFamily name ("Arrows"), pinned in `benilla_formats::itembagfamily`.
+        assert_eq!(
+            g(equip_error_key(16)).unwrap(),
+            "That item doesn't go in that container."
+        );
+        assert_eq!(
+            g("ERR_WRONG_BAG_TYPE_SUBCLASS")
+                .unwrap()
+                .replace("%s", "Arrows"),
+            "Only Arrows can be placed in that."
+        );
     }
 }

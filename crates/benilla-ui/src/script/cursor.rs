@@ -345,6 +345,26 @@ impl super::UiScript {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Lua globals: GetCursorInfo / CursorHasItem / CursorHasSpell / ClearCursor / SplitContainerItem /
 // DeleteCursorItem — all top-level (the real client's `GetCursorInfo` &c. are not namespaced).
+impl super::UiScript {
+    /// Arm (or disarm) **the targeting cursor's item half** — the engine mirror of
+    /// `TargetingWantsItem 0x6e6330`. While armed, a bag click ([`super::container`]) or a
+    /// paper-doll click ([`doll::pickup_inventory_item`]) queues its `(bag, slot)` into the pick
+    /// list instead of running the cursor gesture, exactly as the reference's two pickup
+    /// functions reroute (`0x4f9b30` @ `4f9c54`, `0x4c7300` @ `4c76df`). The app owns the word:
+    /// it arms on a resolved item-targeted cast and clears on the bind, a cancel, or ESC
+    /// (decision 0923 — before it, this was the CraftFrame's private enchant pick).
+    pub fn set_item_pick_armed(&mut self, armed: bool) {
+        self.model_mut().item_pick_armed = armed;
+    }
+
+    /// Drain the `(bag, slot)` clicks the armed item half consumed since the last call. A doll
+    /// click reports as [`EQUIPMENT_BAG`] + its 1-based inventory slot — the ONE bag space, so
+    /// the app resolves both seams with one lookup.
+    pub fn take_item_picks(&mut self) -> Vec<(i64, u32)> {
+        std::mem::take(&mut self.model_mut().item_picks)
+    }
+}
+
 // The paper-doll globals (`PickupInventoryItem` &c.) install from [`doll`]; the action-bar
 // globals (`PickupAction`/`PlaceAction`) install from [`bar`].
 // ─────────────────────────────────────────────────────────────────────────────────────────────

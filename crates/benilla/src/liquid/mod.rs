@@ -38,12 +38,15 @@
 
 //! ## Layout
 //!
-//! Two concerns, so two files behind this face:
+//! Three concerns, so three files behind this face:
 //!
 //! * [`query`] — **where the liquid is, and whether you are in it.** The world-space grid every
 //!   surface publishes ([`WaterChunkInfo`]), the position queries the swim/sound/foam/lighting
 //!   systems ask it ([`liquid_at`], [`water_surface_at`]), and the per-frame camera submersion
 //!   verdict ([`Underwater`]). Nothing here renders.
+//! * [`spatial`] — **which surfaces are near an XY**, without walking them all: the grid-hash
+//!   [`WaterIndex`] the per-draw consumers (the water-plane interleave's three lanes) pre-filter
+//!   through. The once-a-frame askers keep the plain walk.
 //! * [`surface`] — **the Bevy render glue.** The per-kind animated materials, the two spawn paths
 //!   (MCLQ and WMO MLIQ), the flat mesh build, and the 24 fps frame cycler.
 //!
@@ -59,6 +62,7 @@ use crate::terrain::LiquidMaterial;
 mod query;
 #[cfg(test)]
 mod real_data;
+mod spatial;
 mod surface; // the against-real-client-files tests — they span both halves
 
 // The submodules are private, so this list IS the subsystem's face: everything the rest of the
@@ -68,6 +72,7 @@ pub(crate) use query::{
     camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
     FoamPatch, LiquidClaim, LiquidSource, Underwater, WaterChunkInfo, WmoPool,
 };
+pub(crate) use spatial::WaterIndex;
 pub(crate) use surface::{spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource};
 
 /// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
@@ -88,6 +93,11 @@ impl Plugin for LiquidPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LiquidMaterial>::default())
             .init_resource::<Underwater>()
+            .init_resource::<WaterIndex>()
+            // PreUpdate: surfaces stream in/out via Update-side commands, so the edge is visible
+            // here the frame after — before any of that frame's consumers ask. A despawn's stale
+            // entry in between self-filters at the consumer (`Query::get` misses).
+            .add_systems(PreUpdate, spatial::maintain_water_index)
             .add_systems(Startup, surface::setup_liquid.after(AssetSet::Open))
             .add_systems(
                 Update,

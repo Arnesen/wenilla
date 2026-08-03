@@ -415,11 +415,16 @@ fn drag_drop_onto_another_button_hops_the_displaced_action() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The Count fontstring (decision 0216 §7): shown only for an ITEM-kind action with a positive
-/// `GetActionCount`, blank for a SPELL-kind action or a zero count — and it repaints on
-/// `ACTIONBAR_SLOT_CHANGED` alongside the icon (the same event the identity resolve fires).
+/// The Count fontstring, on the reference's own gate (`ActionButton_UpdateCount`, ref
+/// ActionButton.lua:285-292): **`IsConsumableAction`**, never "count > 0". The director's report —
+/// a mount on the bar wearing a stack number "1" — is the non-consumable case: a mount holds an
+/// on-use spell with zero charges and `InventoryType` 0, so `IsConsumableAction 0x4e5250` answers
+/// false and the ref paints nothing at all. It repaints on `ACTIONBAR_SLOT_CHANGED` alongside the
+/// icon (the same event the identity resolve fires).
 #[test]
-fn count_fontstring_shows_only_for_item_kind_with_a_positive_count() {
+fn count_fontstring_follows_is_consumable_action_not_the_bag_count() {
+    use benilla_ui::script::ActionState;
+
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_action_bar(&s);
@@ -440,30 +445,73 @@ fn count_fontstring_shows_only_for_item_kind_with_a_positive_count() {
         2,
         Some(ActionSlot {
             texture: Some("Interface\\Icons\\INV_Misc_Food_16".into()),
-            kind: 0x80, // ITEM
+            kind: 0x80, // ITEM — a stack of food
             action: 117,
             count: 15,
+        }),
+    );
+    s.set_action_state(
+        2,
+        Some(ActionState {
+            consumable: true,
+            ..Default::default()
+        }),
+    );
+    // The report's own shape: an ITEM action the player holds exactly one of, which is NOT
+    // consumable (a mount). The count is fed all the same; the gate is what must suppress it.
+    s.set_action(
+        3,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Ability_Mount_Undeadhorse".into()),
+            kind: 0x80,
+            action: 13332,
+            count: 11,
+        }),
+    );
+    s.set_action_state(
+        3,
+        Some(ActionState {
+            consumable: false,
+            ..Default::default()
         }),
     );
     s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
     s.resolve();
 
-    let has_count_text = |quads: &[benilla_ui::script::ExtractedQuad], text: &str| {
-        quads
-            .iter()
-            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == text))
+    // Read the fontstrings by name, not by scanning painted text: a single-character count
+    // ("0") is indistinguishable from a neighbouring button's static HotKey label by content.
+    let count_of = |s: &UiScript, n: u32| {
+        s.eval::<String>(&format!(
+            "return BenillaActionButton{n}Count:GetText() or \"\""
+        ))
+        .unwrap()
     };
-    assert!(
-        !has_count_text(&s.extract(), "42"),
+    assert_eq!(
+        count_of(&s, 1),
+        "",
         "SPELL kind never shows a count, however GetActionCount answers"
     );
+    assert_eq!(
+        count_of(&s, 2),
+        "15",
+        "a consumable ITEM shows its bag count"
+    );
+    assert_eq!(
+        count_of(&s, 3),
+        "",
+        "B201: a NON-consumable ITEM (a mount) shows no stack number, whatever the count says"
+    );
+    // …and it really is painted, not just set (the multi-digit value is unambiguous in the quads).
     assert!(
-        has_count_text(&s.extract(), "15"),
-        "ITEM kind with a positive count shows it"
+        s.extract()
+            .iter()
+            .any(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "15")),
+        "the consumable's count reaches the screen"
     );
 
-    // Drop the item stack to 0 (a fresh push at the same action id) and confirm the repaint the
-    // event drives clears the text — the same ACTIONBAR_SLOT_CHANGED path the icon repaints on.
+    // Eat the stack down to nothing. A *consumable* keeps its fontstring and reads a literal "0"
+    // — the ref's `SetText(GetActionCount(...))` is unconditional inside the gate, and 0216 §7's
+    // `count > 0` blank was ours, not the reference's.
     s.set_action(
         2,
         Some(ActionSlot {
@@ -475,7 +523,11 @@ fn count_fontstring_shows_only_for_item_kind_with_a_positive_count() {
     );
     s.fire_event("ACTIONBAR_SLOT_CHANGED", vec![ScriptValue::Int(2)]);
     s.resolve();
-    assert!(!has_count_text(&s.extract(), "15"), "count text cleared");
+    assert_eq!(
+        count_of(&s, 2),
+        "0",
+        "a spent consumable reads 0, it does not go blank"
+    );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 

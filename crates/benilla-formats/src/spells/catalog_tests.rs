@@ -843,3 +843,96 @@ fn the_tooltip_gates_read_effect_and_mask() {
     // §3-EQUIPITEM's naming rule moved to `ItemSubClassCatalog::requirement_name`, where the
     // vocabulary it reads lives — see `itemsubclass::tests` for its coverage against the real DBCs.
 }
+
+/// The item-target family and its gate columns (decision 0923), against the real 5875 file. The
+/// reference's `TargetingWantsItem 0x6e6330` is `flag_word & 0x4010`, and on shipped data those
+/// two bits are **never** mixed with a unit bit — the whole family is `Targets` exactly `0x10`
+/// (the enchant/poison/stone/scope arm, this slice) or exactly `0x4000` (the OPEN_LOCK arm, whose
+/// lock machinery is a separate one). That disjointness is what lets the resolver fork on the
+/// bare word instead of running the reference's bind walk to exhaustion.
+///
+/// The gate columns are the three `0x495d60` reads, pinned on rows whose answer is checkable by
+/// eye: an armor enchant names its `InventoryType` slot (bracer → 9, chest → 5 | robe 20) while a
+/// weapon enchant/poison names a class+subclass instead and leaves the type mask 0.
+#[test]
+fn real_item_target_family_and_its_gate_columns() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("load Spell/SpellIcon");
+
+    // The unit-shaped bits of the flag_word (`cast_target`'s `UNIT_BITS`).
+    const UNIT_BITS: u32 = 0x0002 | 0x0004 | 0x0008 | 0x0080 | 0x0100 | 0x0200 | 0x0400 | 0x8000;
+    let mut item_only = 0usize;
+    let mut locked_only = 0usize;
+    for (id, d) in cat.iter() {
+        if d.targets & 0x4010 == 0 {
+            continue;
+        }
+        assert_eq!(
+            d.targets & UNIT_BITS,
+            0,
+            "spell {id} mixes an item bit with a unit bit — the resolver's fork would be wrong"
+        );
+        match d.targets {
+            0x0010 => item_only += 1,
+            0x4000 => locked_only += 1,
+            other => panic!("spell {id}: unexpected item-family word {other:#x}"),
+        }
+    }
+    assert_eq!(
+        item_only, 363,
+        "Targets == 0x10 — the enchant/poison family"
+    );
+    assert_eq!(locked_only, 103, "Targets == 0x4000 — the OPEN_LOCK family");
+
+    // Bracer enchant: armor (4), any subclass, InventoryType WRIST(9) only.
+    let bracer = cat.get(7418).unwrap();
+    assert_eq!(bracer.targets, 0x10);
+    assert_eq!(bracer.equipped_item_class, 4);
+    assert_eq!(bracer.equipped_item_inventory_type_mask, 1 << 9);
+    // Chest enchant: CHEST(5) or ROBE(20) — the mask that makes a cloth robe legal.
+    let chest = cat.get(7443).unwrap();
+    assert_eq!(
+        chest.equipped_item_inventory_type_mask,
+        (1 << 5) | (1 << 20)
+    );
+    // A weapon-side row gates on class+subclass and leaves the type mask alone.
+    let poison = cat.get(8679).unwrap();
+    assert_eq!(
+        (
+            poison.equipped_item_class,
+            poison.equipped_item_subclass_mask,
+            poison.equipped_item_inventory_type_mask
+        ),
+        (2, 0x2a5f3, 0)
+    );
+
+    // The reference's gate walks all THREE effect slots looking for an enchant effect
+    // (`0x495d60`'s loop, `495de4`–`496050`); [`SpellDisplay`] carries only slot 0. That is
+    // byte-equivalent on shipped data and this is why: across the whole item-target family, not
+    // one row puts its enchant effect anywhere but slot 0. Read raw, since the catalog itself
+    // only keeps `effect_1`.
+    let raw = chain.read_file(SPELL).expect("Spell.dbc");
+    let set = parse(&raw, spell_schema(), "Spell.dbc").expect("parse Spell.dbc");
+    let is_enchant = |e: u32| {
+        e == crate::SPELL_EFFECT_ENCHANT_ITEM || e == crate::SPELL_EFFECT_ENCHANT_ITEM_TEMPORARY
+    };
+    for r in set.records() {
+        if u32_at(r, COL_TARGETS).unwrap_or(0) != 0x10 {
+            continue;
+        }
+        let effects: Vec<u32> = (0..3)
+            .map(|i| u32_at(r, COL_EFFECT_1 + i).unwrap_or(0))
+            .collect();
+        assert!(
+            is_enchant(effects[0]) || !(is_enchant(effects[1]) || is_enchant(effects[2])),
+            "spell {} hides its enchant effect outside slot 0 ({effects:?}) — the one-slot read \
+             in `ui_action::targeting::item_target_refusal` would miss it",
+            u32_at(r, 0).unwrap_or(0)
+        );
+    }
+}

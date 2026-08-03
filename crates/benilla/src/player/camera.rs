@@ -86,55 +86,25 @@ pub(crate) fn head_height(pivot: Option<&CameraPivot>, scale: f32) -> f32 {
         (p.height_local * scale).max(CAM_PIVOT_FLOOR)
     })
 }
-/// The camera **near-plane** distance (yd), shared by the projection ([`setup`]) and the self-avatar
-/// fade's `nearclip` ([`crate::model_fade::self_model_fade_alpha`]) so the model finishes fading exactly
-/// as the near plane would begin to slice it (the reference couples the two; ours is larger than the
-/// client's ~0.1 because our depth range keeps a 1.0 near for precision).
-pub(crate) const CAM_NEAR: f32 = 1.0;
+/// The camera **near-plane** distance (yd) — the reference's own **1/9**, hardcoded in its camera
+/// ctor (`0x50a6c0`: `+0x38 = 0x3de38e39`; the `nearclip` console cvar stores to a global with zero
+/// readers — dead plumbing; wow-re `water-frame-straddle` §4d). Shared by the projection ([`setup`])
+/// and the self-avatar fade's `nearclip` ([`crate::model_fade::self_model_fade_alpha`]) so the model
+/// finishes fading exactly as the near plane would begin to slice it — the reference couples the
+/// two the same way (`cam+0x38 ≈ 0.1`, set per frame in the driver `0x511bc0`).
+///
+/// It was 1.0 from 0062 to 0905 "for depth precision" — a rationale that predates knowing the
+/// pipeline: the projection is `perspective_infinite_reverse_rh` on a float depth buffer
+/// ([`crate::capture::depth_probe`]'s tests draw with the real one), where `depth = near/z` makes
+/// relative precision — and our ULP-relative bias ladder ([`crate::sky_order`]) — independent of
+/// the near value. The small near is what keeps the whole waterline-crossing band (the corner-min
+/// submersion probe, `liquid::detect_submersion`) inches tall instead of a yard.
+pub(crate) const CAM_NEAR: f32 = 1.0 / 9.0;
 /// The camera's vertical field of view (radians) — one constant shared by the projection
-/// ([`setup`]) and the waterline band ([`waterline_band`], which needs the near rectangle's true
-/// height). 45°, the value the projection has always used (Bevy's `PerspectiveProjection` default,
-/// ≈ the reference's 44.1° — [`crate::sun`]'s projection note); naming it here just stops the two
-/// consumers drifting apart.
+/// ([`setup`]) and every consumer that needs the near rectangle's true shape. 45°, the value the
+/// projection has always used (Bevy's `PerspectiveProjection` default, ≈ the reference's 44.1° —
+/// [`crate::sun`]'s projection note); naming it here just stops the consumers drifting apart.
 pub(crate) const CAM_FOVY: f32 = std::f32::consts::FRAC_PI_4;
-/// Margin (yd) added to the geometric near-plane band of the waterline snap ([`waterline_band`]):
-/// float slack + a visual guard so the surface never grazes the near rectangle's very edge.
-const WATERLINE_MARGIN: f32 = 0.05;
-
-/// The half-height of the eye band a liquid plane must never enter: the camera near rectangle's
-/// **world-vertical reach** at the current pitch, plus [`WATERLINE_MARGIN`].
-///
-/// The near rectangle sits `CAM_NEAR` ahead of the eye, spans `±tan(fovy/2)·CAM_NEAR` vertically,
-/// and pitches with the camera (no roll, so its width never contributes world height). Its corners'
-/// world-Y offset from the eye is therefore bounded by `half_h·cos(pitch) + near·sin(|pitch|)` —
-/// with the eye farther than that from a horizontal plane, the rectangle cannot intersect it, so
-/// the waterline can never lie across the screen. ~0.46 yd looking level, ~1.05 yd at steep pitch:
-/// our band is ~10× the reference's because our near plane is (`CAM_NEAR`'s doc) — the *mechanism*
-/// is faithful, the magnitude is necessarily our own.
-pub(super) fn waterline_band(pitch: f32) -> f32 {
-    let half_h = (CAM_FOVY * 0.5).tan() * CAM_NEAR;
-    half_h * pitch.cos().abs() + CAM_NEAR * pitch.sin().abs() + WATERLINE_MARGIN
-}
-
-/// The waterline **snap** (director's call, 2026-08-03: "it's either snap under or above" — never
-/// the half-submerged view with the waterline across the screen): given the desired eye height and
-/// the admitted liquid surface heights under/over its XY, return the corrected eye height, or
-/// `None` when the eye already clears every surface by [`waterline_band`]'s `band`.
-///
-/// The eye keeps the **side it was already on** (`d = eye − surface` signed; `d = 0` counts as
-/// above) and is pushed to `surface ± band` — the nearest surface by |d| wins where several stack.
-/// Pure, in WoW-Z (== Bevy Y), so the rule is testable without ECS scaffolding, like
-/// [`crate::liquid`]'s `submersion_at`.
-pub(super) fn waterline_snap(
-    eye_z: f32,
-    band: f32,
-    surfaces: impl Iterator<Item = f32>,
-) -> Option<f32> {
-    let (d, z) = surfaces
-        .map(|z| (eye_z - z, z))
-        .min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()))?;
-    (d.abs() < band).then_some(if d >= 0.0 { z + band } else { z - band })
-}
 
 /// A small sphere swept from the camera pivot toward the desired camera seat each frame to keep walls
 /// from sliding between the camera and the character (camera collision). Built once at startup like
@@ -421,8 +391,6 @@ pub(super) fn seat_camera(
     cam_t: &mut Transform,
     move_and_slide: &MoveAndSlide,
     cam_probe: &Collider,
-    water: &Query<&crate::liquid::WaterChunkInfo>,
-    eye_claim: crate::liquid::LiquidClaim,
 ) {
     // A keyboard turn carries the camera RIGIDLY (char and camera rotate as one — the reference
     // look, director's call closing 0050's open "camera follow on turn"): an eased chase of a
@@ -478,22 +446,14 @@ pub(super) fn seat_camera(
     };
     let frac = (rig.collision_distance / boom_len).clamp(0.0, 1.0);
     cam_t.translation = head + boom * frac;
-    // The waterline snap: the eye never sits within the near rectangle's reach of a liquid plane,
-    // so the screen is always wholly above or wholly below the surface — never the half-and-half
-    // straddle with the waterline across it (director's call, 2026-08-03; [`waterline_snap`]).
-    // Candidates take the EYE's own room claim, not the player's — a pool in another storey must
-    // not snap a dry camera (the 0696 delegation, applied to this consumer too). Runs before the
-    // dump below so probes read the realized pose, and before the self-fade so a snapped-in eye
-    // still fades the avatar by where the camera actually is. (Known edge, accepted: the vertical
-    // nudge happens after the collision sweep, so waterline + overhead geometry within a yard can
-    // momentarily overlap the probe radius — rare enough to take over re-sweeping per frame.)
-    {
-        let eye_wow = benilla_assets::coords::bevy_to_wow(cam_t.translation);
-        let admitted = crate::liquid::surfaces_at(water.iter(), eye_wow, eye_claim);
-        if let Some(z) = waterline_snap(eye_wow[2], waterline_band(cam.pitch), admitted) {
-            cam_t.translation.y = z; // WoW Z is Bevy Y — no round-trip needed for a height fix
-        }
-    }
+    // No waterline handling here — deliberately. The reference NEVER moves the eye for liquid
+    // (verified negative, wow-re `water-frame-straddle` §4a: zero liquid-height queries in the
+    // camera TU); the no-straddle experience is the *submersion probe's* — the frame flips
+    // submerged the moment the lowest near-plane corner reaches the surface
+    // (`liquid::detect_submersion`, the corner-min probe), and with [`CAM_NEAR`] at the
+    // reference's 1/9 the whole crossing band is a few inches tall. 0905's eye snap — the local
+    // compensation for the old 1.0-yd near plane — is removed with its cause (its record is
+    // superseded; see the 0905-successor decision).
     // `WOW_CAM_DUMP=frame`: the REALIZED pose, per frame, bit-exact — not the pose that was asked for.
     //
     // Every scripted probe sets `yaw`/`pitch`/`distance` and we then reason as though the camera is
@@ -843,44 +803,6 @@ mod tests {
 
     use crate::billboard::BillboardCard;
     use crate::mesh_tag::alpha_bits;
-
-    /// The waterline band is the near rectangle's true world-vertical reach: at level pitch the
-    /// half-height alone, at steep pitch the near distance dominates, and it never collapses below
-    /// the margin — the geometry the snap's whole guarantee rests on.
-    #[test]
-    fn waterline_band_tracks_the_near_rectangle() {
-        let half_h = (CAM_FOVY * 0.5).tan() * CAM_NEAR;
-        assert!((waterline_band(0.0) - (half_h + 0.05)).abs() < 1e-6);
-        // Steeper pitch ⇒ the rectangle's far edge dips farther below the eye than half_h alone.
-        assert!(waterline_band(1.0) > waterline_band(0.0));
-        // Symmetric in look-up vs look-down.
-        assert!((waterline_band(0.7) - waterline_band(-0.7)).abs() < 1e-6);
-    }
-
-    /// The snap rule: inside the band the eye is pushed to `surface ± band` on the side it was
-    /// already on (0 counts as above); outside the band, and with no surface at all, it is left
-    /// alone; where surfaces stack the nearest one judges.
-    #[test]
-    fn waterline_snap_keeps_the_side_and_clears_the_band() {
-        let band = 0.5;
-        // Above, inside the band → pushed up to surface + band.
-        assert_eq!(waterline_snap(10.2, band, [10.0].into_iter()), Some(10.5));
-        // Below, inside the band → pushed down to surface − band.
-        assert_eq!(waterline_snap(9.8, band, [10.0].into_iter()), Some(9.5));
-        // Exactly on the plane counts as above (a deterministic tie, not a flicker source).
-        assert_eq!(waterline_snap(10.0, band, [10.0].into_iter()), Some(10.5));
-        // Clear of the band → untouched.
-        assert_eq!(waterline_snap(10.6, band, [10.0].into_iter()), None);
-        assert_eq!(waterline_snap(9.4, band, [10.0].into_iter()), None);
-        // No admitted surface → untouched.
-        assert_eq!(waterline_snap(10.0, band, std::iter::empty()), None);
-        // Two stacked surfaces: the NEAREST judges — an eye under a high lake but hovering over a
-        // low pool snaps off the pool, not the lake 5 yd up.
-        assert_eq!(
-            waterline_snap(10.1, band, [15.0, 10.0].into_iter()),
-            Some(10.5)
-        );
-    }
 
     /// The self-avatar's zoom-to-first-person fade reaches its BILLBOARD cards — the night-elf eye
     /// glow (ledger B71: two additive quads left burning in mid-air after the body was hidden).

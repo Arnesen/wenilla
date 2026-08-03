@@ -162,10 +162,26 @@ pub(crate) fn wire_pos(bag: i64, slot1: u32) -> Option<(u8, u8)> {
     }
 }
 
+/// One inventory refusal off the wire — everything the error line's two argument-taking reasons
+/// need. Both fills are per-reason and neither is ever set for the other's code, so they ride as
+/// plain fields rather than an enum (decision 0916: exactly two of the 67 reasons format an
+/// argument, and the reference sources them from different places).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EquipError {
+    /// The wire `InventoryResult`.
+    pub reason: u8,
+    /// Reason 1's `%d` — the packet's own `requiredLevel` field.
+    pub required_level: Option<u32>,
+    /// Reason 16's `%s` source — the destination bag's ABSOLUTE player slot (255 = the player's
+    /// own array, which names no bag). Not read off the wire for the message: it is a *slot*, and
+    /// the drain resolves it to the bag's `BagFamily` name.
+    pub bag_slot: u8,
+}
+
 /// Inventory refusals (`SMSG_INVENTORY_CHANGE_FAILURE`) queued by the net bridge for the UI error
-/// line — `(reason, required_level)`; the equip twin of [`crate::ui_action::CastErrors`].
+/// line — the equip twin of [`crate::ui_action::CastErrors`].
 #[derive(Resource, Default)]
-pub(crate) struct EquipErrors(pub Vec<(u8, Option<u32>)>);
+pub(crate) struct EquipErrors(pub Vec<EquipError>);
 
 /// Pre-formatted red error lines from the net drain (`UI_ERROR_MESSAGE` verbatim text — the
 /// death durability notice today; anything whose message isn't a code map). Drained beside
@@ -498,6 +514,12 @@ pub(crate) enum ItemUseRoute {
     /// Arm #3 (`0x5d8dd2`): a non-zero `StartQuest` offers its quest and **returns**, long before
     /// the cast tail at `0x5d9249`. An offer is not a cast.
     QuestOffer { npc: u64, quest: u32 },
+    /// The **toggle-cancel** arm (`0x5d9234`–`0x5d9246`): the item's own ON_USE spell is live on
+    /// the caster as a cancelable active-icon aura, so the click sends `CMSG_CANCEL_AURA` for it
+    /// and **returns `false` with no cast** — the item seam's separately-compiled twin of the
+    /// action button's spell-branch toggle (`0x4e55f0`/`0x4e60c1`, [`crate::ui_action::toggle`]).
+    /// This is what makes clicking your mount item while mounted **dismount** you.
+    ToggleCancel(u32),
     /// The cast tail (`0x5d9249`–`0x5d9258` → `0x6e5a90` → `TryCast`): run the whole ladder.
     Cast(u32),
     /// `0x5d8c80` found no ON_USE block, so it returns 0 and the tail hands `TryCast` spell id
@@ -509,7 +531,12 @@ pub(crate) enum ItemUseRoute {
 
 /// [`ItemUseRoute`]'s decision. `guid: None` (the instance never resolved) cannot address a
 /// questgiver, so it falls through to the ordinary path — the same fallback the equip fork makes.
-pub(crate) fn item_use_route(it: ItemUse) -> ItemUseRoute {
+///
+/// `aura_cancels` is the toggle predicate applied to the item's ON_USE spell id — the caller's
+/// [`crate::ui_action::toggle::active_action_toggle`], passed in so this stays a pure function of
+/// the click. The **order is the reference's**: the quest offer forks first (`0x5d8dcc`, well
+/// above), then the toggle scan (`0x5d9157`), then the cast tail (`0x5d9249`).
+pub(crate) fn item_use_route(it: ItemUse, aura_cancels: impl Fn(u32) -> bool) -> ItemUseRoute {
     if let Some(npc) = it.guid.filter(|_| it.start_quest != 0) {
         return ItemUseRoute::QuestOffer {
             npc,
@@ -517,6 +544,7 @@ pub(crate) fn item_use_route(it: ItemUse) -> ItemUseRoute {
         };
     }
     match it.use_spell {
+        Some(spell) if aura_cancels(spell) => ItemUseRoute::ToggleCancel(spell),
         Some(spell) => ItemUseRoute::Cast(spell),
         None => ItemUseRoute::Nothing,
     }
@@ -545,13 +573,50 @@ pub(crate) fn item_use_route(it: ItemUse) -> ItemUseRoute {
 /// moving item click sent a doomed packet, and the bar's ITEM arm carried a private duplicate of
 /// the cooldown rung the bag and doll clicks never got.
 ///
+/// The **toggle-cancel** arm is this seam's other half, and it is why clicking your mount item
+/// while mounted dismounts you rather than drawing "You are mounted". `CGItem::Use` carries a
+/// separately-compiled twin of the action button's spell-branch toggle, `0x5d9157`–`0x5d9246`,
+/// sitting *above* the cast tail:
+///
+/// ```text
+/// 5d915a  edi = OnUseSpellId(item)              ; 0x5d8c80, the same block scan use_spell reads
+/// 5d917c  SpellRec[edi] + 0x1d8 (ActiveIconID) != 0   else fall through to the cast
+/// 5d9197  for slot in 0..0x30:                  ; UNIT_FIELD_AURA[48], block +0xa4
+/// 5d919a      aura[slot] == edi
+/// 5d91b7   && AURAFLAGS nibble bit0 set         ; block +0x164, 2 slots per byte
+/// 5d91c5      -> 5d9234: CancelAura(edi) (0x6e7040 -> CMSG_CANCEL_AURA 0x136), return false
+/// ```
+///
+/// It is the identical predicate to `0x4e55f0` — [`crate::ui_action::toggle::active_action_toggle`]
+/// — just reached with the *item's* spell instead of the slot's, so the one predicate serves both
+/// (wow-re `shapeshift-plaincast-toggle.md`'s own `0x6e7040` call-site census lists `0x5d9237`
+/// under `0x5d8d00` as "action button, container-**item** branch").
+///
 /// Returns whether anything left for the server — `false` for the reference's silent no-op.
 pub(crate) fn send_item_use(
     it: ItemUse,
     ctx: &crate::ui_action::cast_target::CastContext,
     ladder: &mut crate::ui_action::CastLadder,
 ) -> bool {
-    match item_use_route(it) {
+    // The toggle predicate, resolved once against the caster's live aura slots. Both inputs are
+    // already here: the spell's ActiveIconID column and the caster's descriptor.
+    let aura_cancels = |spell: u32| {
+        let Some(d) = ladder.spells.as_ref().and_then(|s| s.catalog.get(spell)) else {
+            return false;
+        };
+        ctx.rel
+            .self_store
+            .is_some_and(|store| crate::ui_action::toggle::active_action_toggle(spell, d, store))
+    };
+    match item_use_route(it, aura_cancels) {
+        ItemUseRoute::ToggleCancel(spell) => {
+            debug!("ui_items: item use {spell} re-pressed — its aura cancels, no cast");
+            let _ = ladder
+                .commands
+                .0
+                .send(crate::net::ClientCommand::CancelAura { spell_id: spell });
+            true
+        }
         ItemUseRoute::QuestOffer { npc, quest } => {
             let _ = ladder
                 .commands
@@ -731,6 +796,11 @@ pub(crate) struct ItemSets(pub(crate) benilla_formats::ItemSetCatalog);
 #[derive(Resource)]
 pub(crate) struct ItemSubClasses(pub(crate) benilla_formats::ItemSubClassCatalog);
 
+/// The ItemBagFamily.dbc catalog — reason 16's `%s`, i.e. what a specialised bag accepts
+/// ("Only Arrows can be placed in that."). See [`feed`]'s `bag_family_name`, decision 0916.
+#[derive(Resource)]
+pub(crate) struct ItemBagFamilies(pub(crate) benilla_formats::ItemBagFamilyCatalog);
+
 /// Startup (after the MPQ chain opens): the item-tooltip DBCs. On failure a resource is simply
 /// absent — set items render without their SET block, subclass gates read as absent.
 fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<crate::assets::WorldAssets>>) {
@@ -752,6 +822,16 @@ fn load_item_dbcs(mut commands: Commands, world_assets: Option<Res<crate::assets
             commands.insert_resource(ItemSubClasses(cat));
         }
         Err(e) => warn!("ui_items: ItemSubClass.dbc failed to load: {e:#}"),
+    }
+    match benilla_formats::load_item_bag_families(&mut chain) {
+        Ok(cat) => {
+            info!(
+                "ui_items: ItemBagFamily.dbc loaded ({} families)",
+                cat.len()
+            );
+            commands.insert_resource(ItemBagFamilies(cat));
+        }
+        Err(e) => warn!("ui_items: ItemBagFamily.dbc failed to load: {e:#}"),
     }
 }
 
@@ -843,13 +923,14 @@ mod tests {
         assert_eq!(wire_pos(KEYRING_CONTAINER, 0), None);
     }
 
-    /// The pure fork ([`item_use_route`], decisions 0664/0914), all three arms: a non-zero
+    /// The pure fork ([`item_use_route`], decisions 0664/0914), all four arms: a non-zero
     /// `StartQuest` diverts to `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid (arm #3,
-    /// `0x5d8dd2` — it returns before the cast tail); an ON_USE spell runs the ladder; **no** ON_USE
-    /// block sends nothing at all, because `0x5d8c80` returns 0 and TryCast's null-rec bail
-    /// (`6e4bac`) refuses spell id 0. That last arm is the one 0914 changed: we used to ship a
-    /// `CMSG_USE_ITEM` vmangos answers `EQUIP_ERR_ITEM_NOT_FOUND` — a red "Item not found." on
-    /// every right-click of a plain trade good, which the reference never shows.
+    /// `0x5d8dd2` — it returns before the cast tail); an ON_USE spell whose aura is live on the
+    /// caster **cancels** (`0x5d9234`) instead of casting; an ON_USE spell otherwise runs the
+    /// ladder; **no** ON_USE block sends nothing at all, because `0x5d8c80` returns 0 and TryCast's
+    /// null-rec bail (`6e4bac`) refuses spell id 0. That last arm is the one 0914 changed: we used
+    /// to ship a `CMSG_USE_ITEM` vmangos answers `EQUIP_ERR_ITEM_NOT_FOUND` — a red "Item not
+    /// found." on every right-click of a plain trade good, which the reference never shows.
     #[test]
     fn the_item_use_fork_routes_quest_offer_cast_and_nothing() {
         // "An Unsent Letter" (entry 2874, StartQuest 373 — live `mangos.item_template`): the item
@@ -865,29 +946,71 @@ mod tests {
             use_spell,
             on_object: None,
         };
+        let never = |_| false;
         assert_eq!(
-            item_use_route(it(Some(letter), 373, None)),
+            item_use_route(it(Some(letter), 373, None), never),
             ItemUseRoute::QuestOffer {
                 npc: letter,
                 quest: 373
             }
         );
         assert_eq!(
-            item_use_route(it(Some(letter), 0, Some(8690))),
+            item_use_route(it(Some(letter), 0, Some(8690)), never),
             ItemUseRoute::Cast(8690),
             "a hearthstone takes the cast tail"
         );
         assert_eq!(
-            item_use_route(it(Some(letter), 0, None)),
+            item_use_route(it(Some(letter), 0, None), never),
             ItemUseRoute::Nothing,
             "no ON_USE block — the ref sends nothing"
         );
         // No resolved instance (the template is still in flight): a query against guid 0 is
         // impossible, so the ordinary path runs — the equip fork's own fallback.
         assert_eq!(
-            item_use_route(it(None, 373, Some(8690))),
+            item_use_route(it(None, 373, Some(8690)), never),
             ItemUseRoute::Cast(8690)
         );
+    }
+
+    /// **The mount click, both ways** (the director, 08-03: "clicking the mount while mounted
+    /// should dismount"). `CGItem::Use`'s toggle scan sits above the cast tail, so an item whose
+    /// ON_USE spell is already live on the caster cancels its aura and never casts — and the same
+    /// item clicked while the aura is *not* live takes the ordinary ladder. The predicate itself
+    /// (ActiveIconID ≠ 0 ∧ a cancelable aura slot) is pinned in `ui_action::toggle`; here it is
+    /// stubbed, so this pins the FORK and its ORDER.
+    #[test]
+    fn a_live_aura_makes_the_item_click_cancel_instead_of_cast() {
+        const SUMMON_HORSE: u32 = 17462;
+        let it = |start_quest, use_spell| ItemUse {
+            guid: Some(0x4000_0000_0000_0BAD),
+            start_quest,
+            bag_index: 255,
+            slot: 23,
+            spell_index: 0,
+            use_spell,
+            on_object: None,
+        };
+        let mounted = |spell: u32| spell == SUMMON_HORSE;
+        assert_eq!(
+            item_use_route(it(0, Some(SUMMON_HORSE)), mounted),
+            ItemUseRoute::ToggleCancel(SUMMON_HORSE),
+            "mounted: the click dismounts — CMSG_CANCEL_AURA, no CMSG_USE_ITEM",
+        );
+        assert_eq!(
+            item_use_route(it(0, Some(SUMMON_HORSE)), |_| false),
+            ItemUseRoute::Cast(SUMMON_HORSE),
+            "not mounted: the very same click casts",
+        );
+        // Order: the quest offer forks at `0x5d8dcc`, above the toggle scan at `0x5d9157`.
+        assert_eq!(
+            item_use_route(it(373, Some(SUMMON_HORSE)), mounted),
+            ItemUseRoute::QuestOffer {
+                npc: 0x4000_0000_0000_0BAD,
+                quest: 373
+            },
+        );
+        // …and an item with no ON_USE block has nothing to cancel, whatever the predicate says.
+        assert_eq!(item_use_route(it(0, None), |_| true), ItemUseRoute::Nothing);
     }
 
     /// A dozen representative `InventoryType`s (decision 0208 phase 1b's own ask), spanning the

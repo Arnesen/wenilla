@@ -38,6 +38,17 @@ pub(super) fn pickup_inventory_item(model: &mut Model, id: u32) -> bool {
     if !(1..=23).contains(&id) {
         return false;
     }
+    // The targeting cursor's item half, on the doll (decision 0923). The reference's doll pickup
+    // `0x4c7300` carries the byte-IDENTICAL rung to the bag one — `4c76df: call 0x6e48a0`
+    // (IsTargeting), `4c76e8: call 0x6e6330` (TargetingWantsItem), `4c76fb: call 0x495d60` (bind
+    // this item), then return with nothing picked up — and it is what makes poisoning or
+    // sharpening the weapon you are *wearing* possible at all. Reported in the ONE bag space
+    // ([`EQUIPMENT_BAG`] + the 1-based slot), so the app's drain resolves both seams identically.
+    // A held payload wins, exactly as in the bag path (the ref's own `4c73af` pair precedes it).
+    if model.item_pick_armed && model.cursor.is_none() {
+        model.item_picks.push((EQUIPMENT_BAG, id));
+        return false;
+    }
     match model.cursor.take() {
         None => {
             let picked = model
@@ -627,5 +638,45 @@ mod tests {
                 count: None,
             }]
         );
+    }
+
+    /// The targeting cursor's item half reroutes BOTH pickup seams (decision 0923), and the
+    /// held-payload check precedes it in both — the reference's own order (`4f9c38` before
+    /// `4f9c54`; `4c73af` before `4c76df`). Without the doll seam a rogue could not poison the
+    /// weapon they are wearing; without the payload gate, dragging an item across a bag while a
+    /// poison is armed would silently fire the cast at whatever you dropped it on.
+    #[test]
+    fn the_armed_item_half_reroutes_bag_and_doll_clicks() {
+        let mut s = UiScript::new().unwrap();
+        s.set_inventory_slots(doll_slots());
+        s.set_container(0, Some(one_fitting_bag_item()));
+
+        // Unarmed, both seams do their ordinary gesture and queue nothing.
+        assert!(s.eval::<bool>("return PickupInventoryItem(1)").unwrap());
+        assert!(s.cursor_item().is_some());
+        assert!(s.take_item_picks().is_empty());
+
+        // Armed but HOLDING: the payload wins, exactly as the reference orders it.
+        s.set_item_pick_armed(true);
+        s.run("C_Container.PickupContainerItem(0, 1)").unwrap();
+        assert!(
+            s.take_item_picks().is_empty(),
+            "a click while carrying an item is a place, not a bind"
+        );
+
+        // Armed with an empty cursor: both seams bind instead of picking up, and neither
+        // disturbs the cursor.
+        s.run("ClearCursor()").unwrap();
+        assert!(s.cursor_item().is_none());
+        assert!(!s.eval::<bool>("return PickupInventoryItem(1)").unwrap());
+        assert!(!s
+            .eval::<bool>("return C_Container.PickupContainerItem(0, 1)")
+            .unwrap());
+        assert_eq!(
+            s.take_item_picks(),
+            vec![(EQUIPMENT_BAG, 1), (0, 1)],
+            "the doll reports in the ONE bag space; the bag reports its own id"
+        );
+        assert!(s.cursor_item().is_none(), "a bind never stages a payload");
     }
 }

@@ -45,9 +45,25 @@ mod journal;
 /// triangles from THIS instead, through the same WoW→Bevy bake the render form was built with
 /// (`submesh_to_static_mesh`: `wow_to_bevy` per vertex, billboard cards centred at their pivot).
 /// Attached beside `Mesh3d` at every spawn site that also attaches a pick key ([`WorldObject`] /
-/// `ModelPart`); a keyed entity without one (the model-less cube fallback) is picked by its `Aabb`.
+/// `ModelPart`). A keyed entity carrying neither this nor [`PickBox`] is **not pickable** — pick
+/// geometry is declared, never inferred from a bound (decision 0929).
 #[derive(Component, Clone)]
 pub struct PickMesh(pub std::sync::Arc<benilla_formats::RenderSubmesh>);
+
+/// "My `Aabb` **is** my pick geometry" — the model-less cube fallback ([`crate::entities::attach`]),
+/// whose cuboid is exactly its bound, so a slab test is the exact answer and 12 triangles would only
+/// be a slower way to say it.
+///
+/// It exists as a **positive declaration** because the alternative — inferring it from the *absence*
+/// of a [`PickMesh`] — silently promoted every other keyed-but-mesh-less drawn entity into a solid
+/// invisible box. That is what broke the inspector inside a city WMO (decision 0929): a WMO group's
+/// MLIQ pool is a drawn `Mesh3d` with no resident geometry, it inherits the building's
+/// [`WorldObject`] from the placement's blanket tag, and its render mesh keeps the **whole** MLIQ
+/// vertex grid — dry cells included, sitting at height 0 while the drawn lava is 86–127 yd below.
+/// Ironforge's thirteen pools therefore hung ~100-yard invisible boxes over the entire city, and the
+/// box-entry hit won every pick: every hover, on anything, answered "Wmo · ironforge.wmo".
+#[derive(Component, Clone, Copy)]
+pub struct PickBox;
 
 /// One triangle-accurate hit from [`cast_pick_ray`]: the world-space point, the hit triangle's
 /// geometric normal (two-sided — the orientation is the authored winding's), and the distance along
@@ -60,7 +76,8 @@ pub struct RayHit {
 
 /// The one query every mesh picker casts against: a part's resident geometry, its world pose, the
 /// render world's own visibility verdict (the cast honours it, as `RayCastVisibility::VisibleInView`
-/// did), and its bound for the broad phase.
+/// did), its bound for the broad phase, and whether that bound is itself the pick shape
+/// ([`PickBox`]).
 pub type PickParts<'w, 's> = Query<
     'w,
     's,
@@ -69,6 +86,7 @@ pub type PickParts<'w, 's> = Query<
         &'static GlobalTransform,
         &'static ViewVisibility,
         Option<&'static Aabb>,
+        Has<PickBox>,
     ),
 >;
 
@@ -195,10 +213,16 @@ pub fn pick_at_cursor(
 ///
 /// Broad phase: a world-space slab test on each candidate's `Aabb` (entry distance), nearest entry
 /// first, so the narrow walk stops as soon as a confirmed hit is closer than every remaining box. A
-/// part with no bound (a `NoFrustumCulling` fx part) is narrow-tested unconditionally; a keyed
-/// entity with a bound but no [`PickMesh`] (the model-less cube fallback, whose cuboid *is* its
-/// box) takes its box entry as the hit. Triangles test **two-sided**, like the unit picker's narrow
-/// phase — a generous pick beats a strict one at silhouette edges.
+/// part with no bound (a `NoFrustumCulling` fx part) is narrow-tested unconditionally; a
+/// [`PickBox`] entity takes its box entry as the hit, its cuboid being exactly its bound.
+/// Triangles test **two-sided**, like the unit picker's narrow phase — a generous pick beats a
+/// strict one at silhouette edges.
+///
+/// **Pick geometry is required, never inferred** (decision 0929): an entity that is neither a
+/// [`PickMesh`] nor a [`PickBox`] is not pickable, however identified or bounded it is. The box hit
+/// used to be the fallback for *any* keyed entity with an `Aabb` and no mesh, which quietly turned
+/// a WMO's MLIQ pool — a drawn mesh with no resident geometry, wearing its building's identity —
+/// into a city-sized invisible occluder. See [`PickBox`].
 pub fn cast_pick_ray(
     ray: Ray3d,
     pickable: &HashSet<Entity>,
@@ -208,22 +232,24 @@ pub fn cast_pick_ray(
     let (origin, dir) = (ray.origin, *ray.direction);
     let mut candidates: Vec<(f32, Entity)> = Vec::new();
     for &entity in pickable {
-        let Ok((mesh, gt, vis, aabb)) = parts.get(entity) else {
+        let Ok((mesh, gt, vis, aabb, is_box)) = parts.get(entity) else {
             continue;
         };
         if !vis.get() {
             continue; // not drawn in any view this frame — the old cast's VisibleInView rule
         }
-        let entry = match (aabb, mesh) {
-            (Some(aabb), _) => {
+        let entry = match (aabb, mesh, is_box) {
+            (Some(aabb), Some(_), _) | (Some(aabb), None, true) => {
                 let (min, max) = world_aabb(aabb, gt);
                 match ray_aabb(origin, dir, min, max) {
                     Some(t) => t,
                     None => continue,
                 }
             }
-            (None, Some(_)) => 0.0,
-            (None, None) => continue,
+            (None, Some(_), _) => 0.0,
+            // No pick geometry — a drawn mesh nobody armed for the ray (a liquid surface), or a
+            // `PickBox` with no bound to be. Not pickable, rather than pickable as its bound.
+            (_, None, _) => continue,
         };
         candidates.push((entry, entity));
     }
@@ -234,12 +260,13 @@ pub fn cast_pick_ray(
         if !all_hits && best < entry {
             break; // every remaining box starts beyond the confirmed nearest hit
         }
-        let Ok((mesh, gt, _, _)) = parts.get(entity) else {
+        let Ok((mesh, gt, _, _, _)) = parts.get(entity) else {
             continue;
         };
         let hit = match mesh {
             Some(m) => ray_pick_mesh(m, gt, origin, dir),
-            // The cube fallback: its box entry is exactly its surface (the cuboid IS its Aabb).
+            // A `PickBox` (the broad phase admitted no other mesh-less candidate): its box entry is
+            // exactly its surface, the cuboid BEING its Aabb.
             None => Some(RayHit {
                 point: origin + dir * entry,
                 normal: -dir,
@@ -812,6 +839,79 @@ mod tests {
         assert!(hit.normal.abs_diff_eq(Vec3::Y, 1e-4) || hit.normal.abs_diff_eq(-Vec3::Y, 1e-4));
         // …and a miss stays a miss.
         assert!(ray_pick_mesh(&mesh, &gt, Vec3::new(20.0, 6.0, 0.0), Vec3::NEG_Y).is_none());
+    }
+
+    /// Cast a ray at a hand-built world and report `(entity, distance)` for every hit, nearest
+    /// first — the whole ray, so a candidate that was silently dropped is distinguishable from one
+    /// that merely lost.
+    fn cast_in(world: &mut World, origin: Vec3, dir: Vec3) -> Vec<(Entity, f32)> {
+        use bevy::ecs::system::RunSystemOnce;
+        fn cast(
+            In((origin, dir)): In<(Vec3, Vec3)>,
+            ids: Query<Entity, With<ViewVisibility>>,
+            parts: PickParts,
+        ) -> Vec<(Entity, f32)> {
+            let all: HashSet<Entity> = ids.iter().collect();
+            let ray = Ray3d::new(origin, Dir3::new(dir).expect("a non-zero ray"));
+            cast_pick_ray(ray, &all, &parts, true)
+                .into_iter()
+                .map(|(e, h)| (e, h.distance))
+                .collect()
+        }
+        world
+            .run_system_once_with(cast, (origin, dir))
+            .expect("cast")
+    }
+
+    /// Everything a drawn, bounded, visible part needs to be a pick candidate — minus the geometry,
+    /// which each test supplies (or deliberately withholds).
+    fn drawn(world: &mut World, at: Vec3, half: Vec3) -> EntityWorldMut<'_> {
+        use bevy::camera::visibility::SetViewVisibility;
+        let mut e = world.spawn((
+            GlobalTransform::from(Transform::from_translation(at)),
+            Aabb::from_min_max(-half, half),
+            ViewVisibility::HIDDEN,
+        ));
+        e.get_mut::<ViewVisibility>()
+            .expect("just spawned")
+            .set_visible();
+        e
+    }
+
+    /// **Decision 0929.** A drawn, identified, bounded entity with NO pick geometry — a WMO group's
+    /// MLIQ pool, whose render mesh keeps the whole (mostly dry) vertex grid and so bounds a box
+    /// ~100 yd tall over a city — must be transparent to the ray. It used to be picked at its box
+    /// entry, which put an invisible occluder in front of everything: inside Ironforge every hover,
+    /// on any NPC or GameObject, answered "Wmo · ironforge.wmo".
+    #[test]
+    fn a_bounded_mesh_less_entity_is_not_a_pick_occluder() {
+        let mut world = World::new();
+        // The pool's box straddles the camera (entry 0.0 — it wins any distance sort it enters).
+        let pool = drawn(&mut world, Vec3::ZERO, Vec3::new(60.0, 60.0, 60.0)).id();
+        // The NPC behind it: real geometry at 10 yd (`wow_tri` spans x,z ∈ [-1,1] at y = 0).
+        let npc = drawn(&mut world, Vec3::new(0.0, -10.0, 0.0), Vec3::splat(1.0))
+            .insert(PickMesh(std::sync::Arc::new(wow_tri())))
+            .id();
+        let hits = cast_in(&mut world, Vec3::ZERO, Vec3::NEG_Y);
+        assert!(
+            !hits.iter().any(|(e, _)| *e == pool),
+            "the mesh-less pool must not be pickable at all, yet it hit: {hits:?}",
+        );
+        assert_eq!(hits.first().map(|(e, _)| *e), Some(npc));
+    }
+
+    /// The other half of the same law: an entity that DECLARES its box is its shape ([`PickBox`] —
+    /// the model-less cube fallback) is still picked, at the box entry.
+    #[test]
+    fn a_declared_pick_box_is_picked_at_its_box_entry() {
+        let mut world = World::new();
+        let cube = drawn(&mut world, Vec3::new(0.0, -10.0, 0.0), Vec3::splat(2.0))
+            .insert(PickBox)
+            .id();
+        let hits = cast_in(&mut world, Vec3::ZERO, Vec3::NEG_Y);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, cube);
+        assert!((hits[0].1 - 8.0).abs() < 1e-4, "{hits:?}"); // the box's near face
     }
 
     /// A billboard card's render form is centred at its pivot (`build_submesh_mesh`); the pick must

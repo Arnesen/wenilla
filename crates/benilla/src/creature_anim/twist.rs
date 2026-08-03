@@ -82,6 +82,30 @@ fn twist_shares(gap: f32) -> (f32, f32) {
     (spine, head)
 }
 
+/// The shares actually ARMED on a unit — [`twist_shares`] with the **mounted spine gate** applied.
+///
+/// The SpineLow channel is armed only on an UNMOUNTED unit: `CGUnit+0xdc == 0` (wow-re
+/// `body-facing-pipeline.md` Q3, alongside the per-model capability bit `+0xd58 & 0x80` we model as
+/// "the skeleton authors the key bone"). `+0xdc` is the **mount model** pointer — the same field
+/// `0x614cd0` passes to `0x7106c0` as "model `[+0xd8]` or mount `[+0xdc]`". The HEAD channel
+/// (`+0xd58 & 0x100`) carries no mount gate. So a strafing rider counter-twists its head alone
+/// while the shoulders ride the saddle rigidly; applying both wobbled a mounted strafe's head AND
+/// shoulders far past the reference (the director's mounted A/B — the observation that found this).
+///
+/// The gate is on the channel ARM, not on the share math, so the head keeps its full `gap − spine`
+/// share and — unlike the unmounted case — no longer lands exactly on the aim. And the spine's
+/// share goes to **zero** rather than the channel being skipped: the zero path rewrites the bone
+/// back to its animated base, which is the reference's disarm (`0x711f10(4, 0, 0x80)`); skipping
+/// would freeze our last twist into any frame the clip does not re-key.
+///
+/// (`+0xdc`'s semantics are flagged INFERRED in that note. It is taken here because the mechanism
+/// PREDICTS the reference: the director reported the mounted over-wobble before this gate was
+/// found, and it is the gate that accounts for it.)
+fn armed_shares(gap: f32, mounted: bool) -> (f32, f32) {
+    let (spine, head) = twist_shares(gap);
+    (if mounted { 0.0 } else { spine }, head)
+}
+
 /// Compose the counter-twist onto the animated bone locals — PostUpdate, in the pose post-pass
 /// window ([`super::PosePost`]: after the evaluator wrote this frame's pose, before the model
 /// compose folds it).
@@ -104,9 +128,13 @@ pub(super) fn apply_body_twist(
     anchors: Query<&super::RigAnchor>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
+    stores: Query<&crate::net::ObjectStore>,
 ) {
     for (unit, mut twist) in &mut units {
-        let (spine, head) = twist_shares(twist.yaw_gap);
+        let mounted = stores
+            .get(unit)
+            .is_ok_and(|s| s.0.unit_mount_display_id() != 0);
+        let (spine, head) = armed_shares(twist.yaw_gap, mounted);
         let twist = &mut *twist;
         for (channel, angle) in [(&mut twist.spine, spine), (&mut twist.head, head)] {
             let Some(ch) = channel else { continue };
@@ -189,8 +217,23 @@ pub(super) fn plugin(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::twist_shares;
+    use super::{armed_shares, twist_shares};
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    /// **A mounted rider counter-twists its HEAD only** — the `CGUnit+0xdc == 0` gate on the
+    /// SpineLow channel. The head's share is untouched by the gate (it is on the channel arm, not
+    /// the share math), so the two no longer sum to the gap and the head sits off the aim.
+    #[test]
+    fn mounted_disarms_the_spine_and_leaves_the_head_share_alone() {
+        let (spine, head) = armed_shares(-FRAC_PI_2, true);
+        assert_eq!(spine, 0.0, "the saddle holds the shoulders rigid");
+        assert_eq!(
+            head, -FRAC_PI_4,
+            "the head keeps its full gap − spine share"
+        );
+        // Unmounted, the same gap arms both — the 45°+45° close.
+        assert_eq!(armed_shares(-FRAC_PI_2, false), twist_shares(-FRAC_PI_2));
+    }
 
     #[test]
     fn pure_strafe_gap_closes_exactly_at_the_head() {

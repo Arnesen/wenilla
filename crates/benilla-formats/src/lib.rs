@@ -27,6 +27,8 @@ pub use creatures::{load_creature_catalog, CreatureCatalog, CreatureModel, NpcAp
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod itembagfamily;
+pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;

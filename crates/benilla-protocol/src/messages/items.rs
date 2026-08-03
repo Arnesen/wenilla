@@ -184,6 +184,33 @@ impl ItemInfo {
         self.spells.iter().find(|s| s.trigger == 0).map(|s| s.index)
     }
 
+    /// Is this item **consumable** in the sense the action bar's Count fontstring means?
+    /// `IsConsumableAction 0x4e5250`, byte-read (`4e52b9`–`4e52ea`), after it has resolved the
+    /// slot's item template:
+    ///
+    /// ```text
+    /// [rec+0x2c] InventoryType == 0x18 (AMMO) or 0x19 (THROWN)          -> true   (4e52b9-4e52c4)
+    /// OR  ∃ i∈[0,5):  SpellId[i]      [rec+0x11c+4i] != 0                        (4e52d0)
+    ///              ∧  SpellTrigger[i] [rec+0x130+4i] == 0   (ON_USE)             (4e52d7)
+    ///              ∧  SpellCharges[i] [rec+0x144+4i] <  0   (destroy-on-use)     (4e52dc)
+    /// otherwise                                                         -> false
+    /// ```
+    ///
+    /// **Negative** charges — not merely finite ones — are the test: the sign is vmangos's own
+    /// "the ITEM is consumed once the charges run out" convention, so a potion (`-1`) counts and a
+    /// wand-like item with positive charges does not. Nothing here looks at `Class`: a mount
+    /// (`Class` 15 Miscellaneous, `InventoryType` 0, on-use spell with `SpellCharges` 0) is **not**
+    /// consumable, which is why the reference shows no stack number under a mount on the bar.
+    ///
+    /// [`Self::spells`] already drops the `SpellId == 0` blocks, so iterating it is the `4e52d5`
+    /// skip.
+    pub fn is_consumable(&self) -> bool {
+        const INVTYPE_AMMO: u32 = 0x18;
+        const INVTYPE_THROWN: u32 = 0x19;
+        matches!(self.inventory_type, INVTYPE_AMMO | INVTYPE_THROWN)
+            || self.spells.iter().any(|s| s.trigger == 0 && s.charges < 0)
+    }
+
     /// Can this item be placed on an action-bar slot? `PlaceAction`'s only item filter, byte-read
     /// (wow-re `action-item-slot.md` §5, `4e6571`–`4e6598`): **an on-use spell OR equippable**.
     /// No quality, bind, class/subclass, container or level test exists anywhere on that path — a
@@ -550,6 +577,10 @@ const TARGET_FLAG_UNIT: u16 = 0x0002;
 /// `TARGET_FLAG_DEST_LOCATION` — a ground point, the same bit and the same three `f32` WoW coords
 /// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
 const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
+/// `TARGET_FLAG_ITEM` — a bound *item* target, the same bit and the same packed guid an
+/// item-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_on_item`]). One block
+/// builder, two opcodes (decision 0923).
+const TARGET_FLAG_ITEM: u16 = 0x0010;
 
 /// The `SpellCastTargets` block a `CMSG_USE_ITEM` carries — built by the *same* code as a
 /// `CMSG_CAST_SPELL`'s. `SendCast 0x6e54f0` picks the opcode from its item-vs-caster discriminator
@@ -576,6 +607,12 @@ pub enum UseItemTarget {
     /// **thrown** item: dynamite, grenades, bombs, the Goblin Mortar (46 of the 1.12 on-use item
     /// spells, decision 0914). Same block a ground-targeted spell writes; only the opcode differs.
     Dest([f32; 3]),
+    /// `TARGET_FLAG_ITEM` + the packed guid — the targeting cursor's **item** commit: a poison, a
+    /// sharpening stone, a weapon oil, an enchanting scroll applied to the item you clicked in a
+    /// bag or on the paper doll (decision 0923). The reference reaches it through the very same
+    /// `BindTarget 0x6e5b40` a unit goes through (`0x495d60` @ `496056`), so the block is the same
+    /// block; only which bit is set differs.
+    Item(u64),
 }
 
 /// Body of `CMSG_USE_ITEM` (VERIFIED vmangos `UseItem::ReadFromWorldPacket` + opcode 171
@@ -599,6 +636,10 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
         }
         UseItemTarget::Object(guid) => {
             body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
+            guid
+        }
+        UseItemTarget::Item(guid) => {
+            body.extend_from_slice(&TARGET_FLAG_ITEM.to_le_bytes());
             guid
         }
         UseItemTarget::Dest(dest) => {
@@ -692,12 +733,24 @@ pub fn set_ammo(entry: u32) -> Vec<u8> {
 
 /// Read `SMSG_INVENTORY_CHANGE_FAILURE` (VERIFIED vmangos `InventoryChangeFailure::AppendBodyTo`):
 /// `u8 reason` (`InventoryResult`; 0 = OK, no tail), then — only when failed — a `u32` required
-/// level *iff* `reason == 1` (`CANT_EQUIP_LEVEL_I`), the two full item guids, and the bag subslot.
-/// Returns `(reason, required_level, item_guid)`.
-pub(super) fn read_inventory_change_failure(r: &mut &[u8]) -> io::Result<(u8, Option<u32>, u64)> {
+/// level *iff* `reason == 1` (`CANT_EQUIP_LEVEL_I`), the two full item guids, and the bag slot.
+///
+/// The trailing `u8` is **the destination bag's absolute player slot**, not a subslot: vmangos
+/// declares it *"slot of target bag that has storing condition (can be InventorySlots or
+/// BankBagSlots)"* and fills it with `bagSlot = bag` at each `CanStoreItem` refusal
+/// (`Player.cpp:8899`ff), where `bag` is `INVENTORY_SLOT_BAG_0` (255, the player's own array) or
+/// an equipped bag's slot. The reference reads it the same way — its reason-16 helper
+/// `0x5ede00` bails on `slot == 0xFF` and otherwise indexes the player's slot array by it (wow-re
+/// `inventory-change-failure-display.md` §6). It is the `%s` source of *"Only Arrows can be
+/// placed in that."*; see `benilla::ui_items::feed`.
+///
+/// Returns `(reason, required_level, item_guid, bag_slot)`.
+pub(super) fn read_inventory_change_failure(
+    r: &mut &[u8],
+) -> io::Result<(u8, Option<u32>, u64, u8)> {
     let reason = read_u8(r)?;
     if reason == 0 {
-        return Ok((0, None, 0));
+        return Ok((0, None, 0, 0));
     }
     let required_level = if reason == 1 {
         Some(read_u32_le(r)?)
@@ -706,8 +759,8 @@ pub(super) fn read_inventory_change_failure(r: &mut &[u8]) -> io::Result<(u8, Op
     };
     let item_guid = read_u64_le(r)?;
     let _item2 = read_u64_le(r)?;
-    let _bag_subslot = read_u8(r)?;
-    Ok((reason, required_level, item_guid))
+    let bag_slot = read_u8(r)?;
+    Ok((reason, required_level, item_guid, bag_slot))
 }
 
 /// Read `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos
@@ -787,7 +840,10 @@ mod tests {
         // reason 0 (EQUIP_ERR_OK) ships no tail.
         let buf = [0u8];
         let mut r = &buf[..];
-        assert_eq!(read_inventory_change_failure(&mut r).unwrap(), (0, None, 0));
+        assert_eq!(
+            read_inventory_change_failure(&mut r).unwrap(),
+            (0, None, 0, 0)
+        );
     }
 
     #[test]
@@ -802,7 +858,7 @@ mod tests {
         let mut r = &buf[..];
         assert_eq!(
             read_inventory_change_failure(&mut r).unwrap(),
-            (1, Some(40), 0x1122_3344_5566_7788)
+            (1, Some(40), 0x1122_3344_5566_7788, 7)
         );
     }
 
@@ -836,7 +892,7 @@ mod tests {
         let mut r = &buf[..];
         assert_eq!(
             read_inventory_change_failure(&mut r).unwrap(),
-            (3, None, 0xDEAD_BEEF_0000_0001)
+            (3, None, 0xDEAD_BEEF_0000_0001, 0)
         );
     }
 }

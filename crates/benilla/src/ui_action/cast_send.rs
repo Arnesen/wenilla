@@ -101,7 +101,69 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
 }
 
+/// What a targeting-cursor click bound — the two things `BindLocation 0x6e60f0` /
+/// `BindTarget 0x6e5b40` can fill into a standing flag_word once the ladder has already run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TargetedBind {
+    /// The terrain click's point, in WoW coords (decision 0792).
+    Dest([f32; 3]),
+    /// The bag / paper-doll click's item guid (decision 0923).
+    Item(u64),
+}
+
 impl CastLadder<'_, '_> {
+    /// **The targeting cursor's commit tail**, shared by both halves. The ladder itself already
+    /// ran when the cursor went up — the click owes only what `SendCast 0x6e54f0`'s tail owes:
+    /// the packet (same block, two opcodes, [`CastCommit`] picking which), the pending arm, and
+    /// the GCD. Then the word clears.
+    ///
+    /// One function because there is one tail: the ground click and the item click differ in
+    /// exactly one field of one packet, and a tail written twice is a tail that drifts (the
+    /// lesson decision 0914 wrote up one layer above this).
+    pub(crate) fn commit_targeted(
+        &mut self,
+        spell_id: u32,
+        commit: CastCommit,
+        bound: TargetedBind,
+    ) {
+        let cmd = match commit {
+            // Two opcodes on the spell side (`CMSG_CAST_SPELL` carries the dest and the item bit
+            // in different builders), one on the item side — the block itself is the same block.
+            CastCommit::Spell => match bound {
+                TargetedBind::Dest(dest) => ClientCommand::CastSpellAtDest { spell_id, dest },
+                TargetedBind::Item(item_guid) => ClientCommand::CastSpellItem {
+                    spell_id,
+                    item_guid,
+                },
+            },
+            CastCommit::Item {
+                bag_index,
+                slot,
+                spell_index,
+                ..
+            } => ClientCommand::UseItem {
+                bag_index,
+                slot,
+                spell_index,
+                target: match bound {
+                    TargetedBind::Dest(dest) => UseItemTarget::Dest(dest),
+                    TargetedBind::Item(guid) => UseItemTarget::Item(guid),
+                },
+            },
+        };
+        let _ = self.commands.0.send(cmd);
+        let now = Instant::now();
+        if commit.is_item() {
+            self.pending.arm_item(spell_id, now);
+        } else {
+            self.pending.arm(spell_id, now);
+        }
+        if let Some(d) = self.spells.as_ref().and_then(|s| s.catalog.get(spell_id)) {
+            self.cooldowns.start_gcd(spell_id, d, now);
+        }
+        self.ground.clear();
+    }
+
     /// Run the ladder for `spell_id` and commit as `commit` says — the only entry point.
     pub(crate) fn send(
         &mut self,
@@ -346,7 +408,17 @@ fn send_spell_cast(
                 // `0xceac48` included) across the cursor, so the world click's `0x6e54f0` still
                 // emits USE_ITEM for a thrown grenade or a stick of dynamite.
                 debug!("ui_action: cast {spell_id} awaits its ground click — targeting cursor up");
-                ground.enter(spell_id, commit);
+                ground.enter(spell_id, commit, super::targeting::TargetingWants::Location);
+                return;
+            }
+            cast_target::CastWireTarget::ItemTargeting => {
+                // The same cursor's item half (decision 0923) — the bag / paper-doll click seam
+                // binds, and its `0x495d60` owes the commit tail. A poison, a sharpening stone,
+                // an enchanting scroll, a Craft-window enchant: same entry, same word, same
+                // pending-cast block carried across the cursor, so the click still emits
+                // USE_ITEM for an item's own ON_USE and CAST_SPELL for a known enchant.
+                debug!("ui_action: cast {spell_id} awaits its item click — targeting cursor up");
+                ground.enter(spell_id, commit, super::targeting::TargetingWants::Item);
                 return;
             }
             cast_target::CastWireTarget::Refused(reason) => {
@@ -673,6 +745,84 @@ mod tests {
             Ok(ClientCommand::UseItem {
                 slot: 81,
                 target: UseItemTarget::Object(0xF110_000C_1F00_A3B2),
+                ..
+            })
+        ));
+    }
+
+    /// The targeting cursor's ONE commit tail (decision 0923), all four cells of its
+    /// commit × bind grid. Both halves of the cursor share it precisely so this table can't grow
+    /// a fifth, divergent copy: a thrown grenade and a poison bottle are the same `CMSG_USE_ITEM`
+    /// with a different bit set, and a Flamestrike and a Craft-window enchant are the same
+    /// pending-cast block under two `CMSG_CAST_SPELL` builders. Every cell also arms the pending
+    /// guard and clears the word — asserted once, since the tail is one function.
+    #[test]
+    fn the_targeting_commit_tail_covers_both_halves() {
+        use benilla_protocol::messages::UseItemTarget;
+        const DEST: [f32; 3] = [1.0, 2.0, 3.0];
+        const ITEM: u64 = 0xF150_0000_0000_ABCD;
+        let (mut world, rx) = world();
+        let commit = |world: &mut World, commit: CastCommit, bound: TargetedBind| {
+            world.insert_resource(crate::ui_cast::PendingCast::default());
+            world
+                .resource_mut::<super::super::targeting::SpellTargeting>()
+                .enter(
+                    HEARTHSTONE,
+                    commit,
+                    super::super::targeting::TargetingWants::Item,
+                );
+            world
+                .run_system_once(move |mut ladder: CastLadder| {
+                    ladder.commit_targeted(HEARTHSTONE, commit, bound);
+                })
+                .expect("the tail runs as a one-shot system");
+        };
+
+        commit(&mut world, CastCommit::Spell, TargetedBind::Dest(DEST));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpellAtDest { dest: DEST, .. })
+        ));
+        assert!(
+            !world
+                .resource::<super::super::targeting::SpellTargeting>()
+                .active(),
+            "the commit clears the one word"
+        );
+        assert!(
+            world
+                .resource::<crate::ui_cast::PendingCast>()
+                .in_flight(Instant::now()),
+            "and arms the in-flight guard the click owes"
+        );
+
+        commit(&mut world, CastCommit::Spell, TargetedBind::Item(ITEM));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpellItem {
+                item_guid: ITEM,
+                ..
+            })
+        ));
+
+        commit(&mut world, HEARTH_COMMIT, TargetedBind::Dest(DEST));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::UseItem {
+                bag_index: 255,
+                slot: 24,
+                target: UseItemTarget::Dest(DEST),
+                ..
+            })
+        ));
+
+        commit(&mut world, HEARTH_COMMIT, TargetedBind::Item(ITEM));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::UseItem {
+                bag_index: 255,
+                slot: 24,
+                target: UseItemTarget::Item(ITEM),
                 ..
             })
         ));

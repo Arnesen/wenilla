@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use super::super::SelfGuid;
 use crate::items::Items;
 use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
-use crate::ui_items::EquipErrors;
+use crate::ui_items::{EquipError, EquipErrors};
 use crate::ui_loot::{LootErrors, LootLatch, LootState};
 use crate::ui_loot_roll::LootRolls;
 
@@ -176,12 +176,17 @@ pub(super) fn inventory_failure(
     reason: u8,
     required_level: Option<u32>,
     item_guid: u64,
+    bag_slot: u8,
     equip_errors: &mut EquipErrors,
     pending: &mut PendingItemOps,
     lock_cleared: &mut LockClearedByFailure,
 ) {
-    debug!("net: inventory failure {reason:#04x} (item {item_guid:#x})");
-    equip_errors.0.push((reason, required_level));
+    debug!("net: inventory failure {reason:#04x} (item {item_guid:#x}, bag slot {bag_slot})");
+    equip_errors.0.push(EquipError {
+        reason,
+        required_level,
+        bag_slot,
+    });
     lock_cleared.0.extend(pending.clear_by_failure(item_guid));
 }
 

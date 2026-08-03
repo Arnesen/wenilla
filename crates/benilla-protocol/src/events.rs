@@ -476,6 +476,9 @@ pub enum SessionEvent {
         reason: u8,
         required_level: Option<u32>,
         item_guid: u64,
+        /// The destination bag's ABSOLUTE player slot — the `%s` source of reason 16's
+        /// "Only Arrows can be placed in that."; 255 = the player's own array (no bag to name).
+        bag_slot: u8,
     },
     /// A unit began melee auto-attack (`SMSG_ATTACKSTART` — including the echo of our own
     /// `CMSG_ATTACKSWING`).

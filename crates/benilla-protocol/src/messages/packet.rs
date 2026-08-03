@@ -357,6 +357,8 @@ pub enum ServerPacket {
         reason: u8,
         required_level: Option<u32>,
         item_guid: u64,
+        /// The destination bag's ABSOLUTE player slot (255 = the player's own array).
+        bag_slot: u8,
     },
     /// `SMSG_INITIAL_SPELLS` — the player's spell book + active cooldowns, once at login
     /// (layout in [`super::spellbook::read_initial_spells`]).

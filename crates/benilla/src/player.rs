@@ -363,16 +363,10 @@ fn control(
         // (decisions 0634 + 0696, the "swim in air" family). Fourth slot here rather than a 17th
         // top-level param.
         Res<crate::wmo_portal::PlayerWmoRoom>,
-        // The CAMERA eye's own claim, for the waterline snap — the eye's room is not the player's
-        // (0696's lesson, applied to this consumer): a pool in another storey must not snap a dry
-        // camera. Published by the portal pass AFTER input, so this is last frame's room — a
-        // one-frame stale claim at a doorway-plus-waterline crossing, accepted.
-        Res<crate::wmo_portal::CameraInteriorClaim>,
     ),
 ) {
     let (water, transports, child_of) = (&world_q.0, &world_q.1, &world_q.2);
     let claim = crate::liquid::player_claim(&world_q.3);
-    let cam_claim = crate::liquid::camera_claim(&world_q.4);
     let (left_click, right_click) = (&mut *click_test.0, &mut *click_test.1);
     let Ok((mut cam_t, mut cam, camera)) = cameras.single_mut() else {
         return;
@@ -583,8 +577,6 @@ fn control(
                 &mut cam_t,
                 &move_and_slide,
                 cam_probe,
-                water,
-                cam_claim,
             );
             return;
         }
@@ -1377,8 +1369,6 @@ fn control(
             &mut cam_t,
             &move_and_slide,
             cam_probe,
-            water,
-            cam_claim,
         );
 
         // The cast bar's local self-cancel trigger (`ui_cast::local_self_cancel`): a fresh

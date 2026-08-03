@@ -292,9 +292,10 @@ pub struct SpellVisualCatalog {
     /// The `"HARDCODED *"`-named rows, name → path — the client's engine-spawned effect set,
     /// resolved BY NAME once at boot exactly like this (`0x61f5b0` matches a 14-string baked
     /// table against the name column: loot art, footsteps, breath, level-up…; wow-re
-    /// `loot-corpse-effect.md` + `levelup-ding.md`). Two consumers today: "HARDCODED Loot Art"
-    /// (id 14 → `Particles\LootFX.mdl`, the corpse sparkle) and "HARDCODED Unit Level Up"
-    /// (id 21 → `Spells\LevelUp\LevelUp.mdl`, the ding).
+    /// `loot-corpse-effect.md` + `levelup-ding.md`). Three consumers today: "HARDCODED Loot Art"
+    /// (id 14 → `Particles\LootFX.mdl`, the corpse sparkle), "HARDCODED Unit Level Up"
+    /// (id 21 → `Spells\LevelUp\LevelUp.mdl`, the ding) and "HARDCODED Mount Poof"
+    /// (id 1185 → `Spells\DruidMorph_Impact_Base.mdx`, the mount-up cloud — decision 0927).
     hardcoded: HashMap<String, String>,
 }
 
@@ -319,6 +320,15 @@ impl SpellVisualCatalog {
             effect_paths,
             hardcoded: HashMap::new(),
         }
+    }
+
+    /// Seed one `"HARDCODED …"` name → model path, for fixtures exercising the engine-spawned
+    /// effects (the loot sparkle, the level-up ding, the mount poof). The live path is the boot
+    /// name-resolve inside [`load_spell_visual_catalog`], which is what `0x61f5b0` does.
+    #[must_use]
+    pub fn with_hardcoded(mut self, name: &str, path: &str) -> Self {
+        self.hardcoded.insert(name.to_string(), path.to_string());
+        self
     }
 
     /// A `SpellVisual.dbc` row's stage kits by its id (`Spell.dbc` column 115, `spells::SpellDisplay::visual`).

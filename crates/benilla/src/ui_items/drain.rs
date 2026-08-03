@@ -138,6 +138,8 @@ pub(super) fn drain_container_uses(
     mut equip_sound: MessageWriter<crate::sound::AutoEquipSound>,
     mut item_text: ResMut<crate::ui_item_text::ItemTextOpen>,
     targeting: crate::ui_action::cast_target::CastTargeting,
+    // The client-side pending ("gray") lock — the right-click-open arm arms it (decision 0916).
+    mut pending_items: ResMut<PendingItemOps>,
     mut ladder: crate::ui_action::CastLadder,
 ) {
     let Some(mut script) = script else {
@@ -364,6 +366,27 @@ pub(super) fn drain_container_uses(
             debug!(
                 "ui_items: open item {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
                 c.guid
+            );
+            // **The gray lock, armed before the send** — the reference's emitter `0x5edc80` calls
+            // the lock setter `0x4953e0` at `0x5edcd9` and only then ships `CMSG_OPEN_ITEM`
+            // (wow-re `inventory-change-failure-display.md` §8, decision 0916). So a clam,
+            // lockbox or loot bag greys the instant you right-click it and stays grey until the
+            // server answers — the loot landing (a resolving field update) or a refusal
+            // (`EQUIP_ERR_ITEM_LOCKED` on a still-locked junkbox), both of which
+            // `PendingItemOps` already clears on.
+            //
+            // Deliberately NOT armed on the gift-unwrap arm above, which sends the same opcode:
+            // its emitter `0x5edd60` contains no setter call. That asymmetry is the reference's,
+            // verified, and copying it is the point.
+            let (guid, count) = self_q
+                .iter()
+                .next()
+                .map(|store| slot_guid_count(Some(store), bag, slot, &ladder.items))
+                .unwrap_or((0, 0));
+            pending_items.add([(bag, slot, guid, count)]);
+            script.fire_event(
+                "ITEM_LOCK_CHANGED",
+                vec![ScriptValue::Int(bag), ScriptValue::Int(i64::from(slot))],
             );
             let _ = ladder.commands.0.send(ClientCommand::OpenItem {
                 bag_index,

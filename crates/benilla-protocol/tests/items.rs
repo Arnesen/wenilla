@@ -64,6 +64,25 @@ fn item_query_wire() {
         hx("13030140000000803f0000004000004040")
     );
 
+    // The ITEM form (decision 0923): the targeting cursor's item commit — a poison / sharpening
+    // stone / weapon oil applied to the weapon you clicked. TARGET_FLAG_ITEM (0x0010) + the packed
+    // guid, the same block cast_spell_on_item writes; the reference reaches both through the one
+    // BindTarget 0x6e5b40 (0x495d60 @ 496056). Packed guid 0xF1500000_0000ABCD = mask 0xc3 (bytes
+    // 0, 1, 6, 7 nonzero) then those four bytes.
+    assert_eq!(
+        messages::use_item(255, 24, 0, messages::UseItemTarget::Item(1)),
+        hx("ff180010000101")
+    );
+    assert_eq!(
+        messages::use_item(
+            255,
+            24,
+            0,
+            messages::UseItemTarget::Item(0xF150_0000_0000_ABCD)
+        ),
+        hx("ff18001000c3cdab50f1")
+    );
+
     // CMSG_AUTOEQUIP_ITEM (vmangos AutoEquipItem::ReadFromWorldPacket): bagIndex, slot.
     assert_eq!(messages::auto_equip_item(255, 25), hx("ff19"));
 
@@ -88,9 +107,12 @@ fn item_query_wire() {
             reason,
             required_level,
             item_guid,
+            bag_slot,
         } => {
             assert_eq!((reason, required_level), (1, Some(10)));
             assert_eq!(item_guid, 0x4000_0000_0000_0042);
+            // The trailing byte is the destination BAG's absolute player slot, not a subslot.
+            assert_eq!(bag_slot, 0);
         }
         other => panic!("level refusal, got {}", other.name()),
     }

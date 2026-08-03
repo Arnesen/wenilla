@@ -569,10 +569,12 @@ impl Plugin for EntitiesPlugin {
             // authority composes into its own pick — so classify runs before `ModelVisSet`, and
             // the pick sees this frame's side; everything else (equipment, spell-fx, fade twins)
             // is swapped here directly, after the fade resolve whose choice it re-derives from
-            // the current handle. The self feather stays deliberately unordered: it only writes
-            // while the camera is within arm's reach of the player's own parts, and the 0905
-            // waterline snap keeps the eye a full band off the surface — eye and part are then
-            // on the same side of the plane, where both writers agree on the near handle.
+            // the current handle. The self feather stays deliberately unordered: it composes the
+            // same marker through `far_resolved`, so the two writers can only disagree on a
+            // frame the marker itself flips — a one-frame stale side on the player's own parts
+            // at the instant the eye crosses the surface, inside the whole-screen atmosphere
+            // swap that crossing already is (the same accepted class as the interior law's
+            // one-frame lag, 0919).
             .init_resource::<crate::model_render::FarSideTwins>()
             .add_systems(
                 Update,

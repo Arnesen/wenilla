@@ -17,8 +17,8 @@ use crate::pending_item_ops::{LockClearedByFailure, PendingItemOps};
 use super::equip_error::equip_error_key;
 use super::{
     find_equip_slot, has_key, item_link, keyring_size, slot_guid_count, EquipErrors, BAGS,
-    BAG_SLOT_FIRST, BANK_BAGS, BANK_BAG_ID_FIRST, BANK_CONTAINER, BANK_SLOTS, KEYRING_CONTAINER,
-    KEYRING_SLOTS, PACK_SLOTS,
+    BAG_SLOT_FIRST, BANK_BAGS, BANK_BAG_ID_FIRST, BANK_BAG_SLOT_FIRST, BANK_CONTAINER, BANK_SLOTS,
+    KEYRING_CONTAINER, KEYRING_SLOTS, PACK_SLOTS,
 };
 
 /// The feed's memory of what it last pushed, for per-bag change events. No cooldown-churn gate:
@@ -515,6 +515,51 @@ fn resolve_slot(
     })
 }
 
+/// Reason 16's `%s`: the destination bag's **`BagFamily` name** — "Arrows", "Soul Shards",
+/// "Herbs" — for *"Only %s can be placed in that."* `None` = no bag to name, so the caller keeps
+/// the generic `ERR_WRONG_BAG_TYPE` line.
+///
+/// `bag_slot` is the wire's ABSOLUTE player slot (see
+/// `benilla_protocol::messages::items::read_inventory_change_failure`), and the reference's helper
+/// `0x5ede00` bails on exactly two shapes we mirror: `slot == 0xFF` (`INVENTORY_SLOT_BAG_0`, the
+/// player's own array — a backpack/equipment refusal names no container), and a slot past the
+/// player's slot array. Everything else it indexes straight into that array and resolves as an
+/// item.
+///
+/// Despite the errorId's `_SUBCLASS` name this reads the bag's `BagFamily`, **not** its
+/// ItemSubClass — which is what makes a quiver say "Only Arrows can be placed in that." rather
+/// than naming the quiver's own type (`benilla_formats::itembagfamily`, and the DBC read there).
+///
+/// The bank-bag leg (63..=68) is ours by symmetry rather than byte-pinned: the reference bounds
+/// this on `[player+0x1d38]`, whose value wow-re did not resolve, so whether a bank bag reaches
+/// the substitution or falls to the generic line is unverified. Both outcomes are ordinary
+/// sentences; resolving it is the strictly more useful one, and it is flagged here rather than
+/// silently assumed.
+fn bag_family_name(
+    player: Option<&ObjectStore>,
+    bag_slot: u8,
+    items: &mut Items,
+    families: Option<&benilla_formats::ItemBagFamilyCatalog>,
+    commands: &NetCommands,
+) -> Option<String> {
+    let store = player?;
+    let families = families?;
+    let guid = match bag_slot {
+        // The equipped bag slots.
+        s if (BAG_SLOT_FIRST..BAG_SLOT_FIRST + BAGS).contains(&s) => store.0.player_inv_slot(s),
+        // The purchasable bank bag slots.
+        s if (BANK_BAG_SLOT_FIRST..BANK_BAG_SLOT_FIRST + BANK_BAGS).contains(&s) => {
+            store.0.player_bank_bag_slot(s - BANK_BAG_SLOT_FIRST)
+        }
+        // 255 = the player's own array, and anything past the bag slots: no container to name.
+        _ => None,
+    }
+    .filter(|&g| g != 0)?;
+    let entry = items.object(guid)?.object_entry().filter(|&e| e != 0)?;
+    let family = items.template(entry, guid, commands)?.bag_family;
+    families.name(family).map(str::to_string)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
@@ -527,6 +572,8 @@ pub(super) fn feed_containers(
     cooldowns: Res<crate::cooldowns::Cooldowns>,
     spells: Option<Res<crate::ui_action::Spells>>,
     mut equip_errors: ResMut<EquipErrors>,
+    // Reason 16's `%s` source (decision 0916); absent = every 16 keeps the generic line.
+    bag_families: Option<Res<crate::ui_items::ItemBagFamilies>>,
     mut error_lines: ResMut<crate::ui_items::UiErrorLines>,
     mut pending: ResMut<PendingItemOps>,
     mut lock_cleared: ResMut<LockClearedByFailure>,
@@ -552,8 +599,29 @@ pub(super) fn feed_containers(
     // `ui_action::cast_fail` already runs. No hex debug line on the player's screen: a code we
     // failed to map can't reach here (the table is total), and a key we typo'd is caught by
     // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
-    for (reason, level) in equip_errors.0.drain(..) {
-        let key = equip_error_key(reason);
+    let player = self_q.iter().next();
+    for e in equip_errors.0.drain(..) {
+        // Reason 16's substitution — the ONE reason whose text is chosen by the app rather than
+        // by the table, because the choice needs the named bag (decision 0916). The reference's
+        // helper `0x5ede00(player, bagSlot)` resolves the bag and calls
+        // `DisplayError(ERR_WRONG_BAG_TYPE_SUBCLASS, familyName)` *itself*, returning 1 so the
+        // caller skips the generic line; a bag that doesn't resolve leaves the generic
+        // `ERR_WRONG_BAG_TYPE` standing. Same fork, same fallback.
+        let subclass_fill = (e.reason == 16)
+            .then(|| {
+                bag_family_name(
+                    player,
+                    e.bag_slot,
+                    &mut items,
+                    bag_families.as_deref().map(|c| &c.0),
+                    &commands,
+                )
+            })
+            .flatten();
+        let key = match subclass_fill {
+            Some(_) => "ERR_WRONG_BAG_TYPE_SUBCLASS",
+            None => equip_error_key(e.reason),
+        };
         let text = script
             .lua()
             .globals()
@@ -562,8 +630,14 @@ pub(super) fn feed_containers(
         if text.is_empty() {
             continue;
         }
-        let text = match level {
+        // The two argument-taking reasons, each filling its own specifier. Neither code ever
+        // carries the other's fill, so the order is bookkeeping, not precedence.
+        let text = match e.required_level {
             Some(d) => text.replace("%d", &d.to_string()),
+            None => text,
+        };
+        let text = match subclass_fill {
+            Some(family) => text.replace("%s", &family),
             None => text,
         };
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
@@ -571,7 +645,6 @@ pub(super) fn feed_containers(
     for line in error_lines.0.drain(..) {
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(line)]);
     }
-    let player = self_q.iter().next();
 
     // The pending-lock resolving clear (decision 0216 §4 / 0218 §3 "the field-update watcher"):
     // walk the SAME guids the slot loop below is about to read and release any op whose slots have

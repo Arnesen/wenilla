@@ -612,23 +612,61 @@ pub(crate) struct FarSideOfWater;
 /// else (equipment, spell-fx attachments, entity fade twins) is swapped here directly, after the
 /// fade resolve, deriving near-vs-far from the CURRENT handle so an upstream overwrite is
 /// re-classified the same frame instead of fought over.
-#[allow(clippy::type_complexity)]
+///
+/// **Reactive, not per-frame** (decision 0930; 0922 named the lever). A batch's verdict is a
+/// function of its transform, its handle, its layers, its ancestors' room claim, the loaded
+/// surfaces, and the eye's side — so a *clean* batch is skipped, and only the changed set
+/// re-classifies (~2.6k of ~40k parts on a measured Stormwind frame; the full sweep cost 2.2 ms).
+/// The frame promotes to the full walk — byte-identical to the old per-frame behaviour — whenever
+/// a global term moves: the eye crosses the surface (every verdict inverts), surfaces stream
+/// in/out, or any part despawned (the twin GC below needs its full mark; between full frames a
+/// pair orphaned by a handle overwrite — a fade settling to its cutout — lingers harmlessly, kept
+/// fresh by the mirror above, until the next edge sweeps it). The room-claim trigger fans DOWN:
+/// the claim lives on the unit root, the batches are its descendants, and a claim can change with
+/// the unit standing still (a building streaming in under it re-claims at the same spot).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn classify_water_side(
     interleave: crate::particles::WaterInterleave,
     mut twins: ResMut<FarSideTwins>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut near_edits: MessageReader<AssetEvent<WowModelMaterial>>,
     mut commands: Commands,
-    mut parts: Query<(
-        Entity,
-        &GlobalTransform,
-        Option<&bevy::camera::visibility::RenderLayers>,
-        &mut MeshMaterial3d<WowModelMaterial>,
-        Has<crate::model_fade::DoodadFade>,
-        Has<FarSideOfWater>,
+    // The material-handle leg needs a ParamSet: `Changed<MeshMaterial3d>` reads the same ticks
+    // the walk's `&mut` writes (Bevy B0001), so the dirty-entity list is collected from `p0`
+    // before `p1` is borrowed. The transform/layers legs read ticks the walk only reads, so they
+    // stay plain sibling queries.
+    mut set: ParamSet<(
+        Query<
+            Entity,
+            (
+                With<GlobalTransform>,
+                Changed<MeshMaterial3d<WowModelMaterial>>,
+            ),
+        >,
+        Query<(
+            Entity,
+            &GlobalTransform,
+            Option<&bevy::camera::visibility::RenderLayers>,
+            &mut MeshMaterial3d<WowModelMaterial>,
+            Has<crate::model_fade::DoodadFade>,
+            Has<FarSideOfWater>,
+        )>,
     )>,
+    moved: Query<
+        Entity,
+        (
+            With<MeshMaterial3d<WowModelMaterial>>,
+            Or<(
+                Changed<GlobalTransform>,
+                Changed<bevy::camera::visibility::RenderLayers>,
+            )>,
+        ),
+    >,
+    reclaimed: Query<Entity, Changed<crate::wmo_portal::UnitWmoRoom>>,
+    children: Query<&Children>,
+    mut removed: RemovedComponents<MeshMaterial3d<WowModelMaterial>>,
+    mut eye_was_submerged: Local<Option<bool>>,
 ) {
-    use bevy::camera::visibility::RenderLayers;
     // A texanim/tint ticker mutates the NEAR asset in place every drawn frame
     // (`doodad_anim::tick_anim_materials`); mirror the edit into the live twin, or a far-side
     // waterfall batch freezes its scroll the moment it classifies far. Our own twin writes touch
@@ -649,96 +687,176 @@ pub(crate) fn classify_water_side(
                 .expect("far twin slot is strongly held");
         }
     }
-    let mut used: std::collections::HashSet<AssetId<WowModelMaterial>> =
-        std::collections::HashSet::new();
-    for (entity, gt, layers, mut mat, authority_owned, marked) in &mut parts {
-        // A booth-layered batch belongs to its own camera and scene — no world water applies
-        // (the effect lane's own booth guard, `particles::sim`).
-        if layers.is_some_and(|l| !l.intersects(&RenderLayers::default())) {
-            continue;
-        }
-        let cur = mat.0.id();
-        let (near, swapped) = match twins.to_near.get(&cur) {
-            Some(n) => (n.clone(), true),
-            None => (mat.0.clone(), false),
-        };
-        // This lane's current verdict: the marker (what every composing owner reads); the raw
-        // handle state seconds it for the lanes this system swaps itself.
-        let far_now = marked || swapped;
-        let qualifies = match materials.get(near.id()) {
-            Some(m) => {
-                matches!(m.base.alpha_mode, AlphaMode::Blend) && m.extension.model_flags.x <= 0.5
-            }
-            None => false,
-        };
-        if !qualifies {
-            // A marked part that settled back onto its opaque cutout (fade over, aura released)
-            // stops being a transparent draw at all — its side is nobody's business until it
-            // feathers again.
-            if marked {
-                commands.entity(entity).remove::<FarSideOfWater>();
-            }
-            continue;
-        }
-        used.insert(near.id());
-        let far = crate::particles::far_side_of_water(&interleave, Some(entity), gt.translation());
-        if far == far_now {
-            continue;
-        }
-        // The swap's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which batches crossed the plane this
-        // frame and which way — the numeric read for a sort question no pixel can answer, and
-        // naturally sparse (transitions only, never per-frame spam).
-        if crate::dbg_trace::enabled() {
-            let p = gt.translation();
-            crate::dbg_trace::line(
-                "fx",
-                &format!(
-                    "{} mesh e={entity} at=[{:.1},{:.1},{:.1}]",
-                    if far { "far-side" } else { "near-side" },
-                    p.x,
-                    p.y,
-                    p.z
-                ),
+    let eye = interleave.eye_submerged();
+    // `last()` drains the reader — `next()` would leave the tail readable and promote NEXT frame
+    // to a spurious second full walk.
+    let full = *eye_was_submerged != Some(eye)
+        || interleave.surfaces_changed()
+        || removed.read().last().is_some();
+    *eye_was_submerged = Some(eye);
+
+    if full {
+        // The full walk — every part, plus the twin GC's exact mark-and-sweep.
+        let mut used: std::collections::HashSet<AssetId<WowModelMaterial>> =
+            std::collections::HashSet::new();
+        for item in set.p1().iter_mut() {
+            classify_part(
+                &interleave,
+                &mut twins,
+                &mut materials,
+                &mut commands,
+                Some(&mut used),
+                item,
             );
         }
-        if far {
-            // Build (or fetch) the twin either way — every composing owner needs it live in the
-            // map before its own pick can resolve it.
-            let far_h = if let Some(h) = twins.to_far.get(&near.id()) {
-                h.clone()
-            } else {
-                // `qualifies` above already proved the near asset exists.
-                let twin = far_twin_of(materials.get(near.id()).unwrap());
-                let h = materials.add(twin);
-                twins.to_far.insert(near.id(), h.clone());
-                twins.to_near.insert(h.id(), near.clone());
-                h
-            };
-            commands.entity(entity).insert(FarSideOfWater);
-            if !authority_owned {
-                mat.0 = far_h;
+        // Drop twin pairs whose near identity no live batch carries any more — the twin dies
+        // with its users. A respawned model refetches its near handle from its spawner's cache
+        // and the pair rebuilds lazily on the next far classification.
+        if !twins.to_far.is_empty() {
+            let stale: Vec<AssetId<WowModelMaterial>> = twins
+                .to_far
+                .keys()
+                .filter(|k| !used.contains(*k))
+                .copied()
+                .collect();
+            for k in stale {
+                if let Some(f) = twins.to_far.remove(&k) {
+                    twins.to_near.remove(&f.id());
+                }
             }
-        } else {
-            commands.entity(entity).remove::<FarSideOfWater>();
-            if !authority_owned {
-                mat.0 = near;
+        }
+    } else {
+        // The reactive frame: only the changed set. `p0` collects first — the ParamSet frees it
+        // before `p1` — then the transform/layers leg and the room-claim fan-out come straight
+        // off their filters. An entity dirty on two legs classifies twice; the second pass
+        // no-ops (`far == far_now`).
+        let handle_dirty: Vec<Entity> = set.p0().iter().collect();
+        let mut parts = set.p1();
+        for e in moved.iter().chain(handle_dirty) {
+            if let Ok(item) = parts.get_mut(e) {
+                classify_part(
+                    &interleave,
+                    &mut twins,
+                    &mut materials,
+                    &mut commands,
+                    None,
+                    item,
+                );
+            }
+        }
+        // A changed claim re-classifies the holder's whole subtree — the claim lives on the unit
+        // root, the batches are its descendants (a nested holder shadows for its own subtree;
+        // re-classifying it from here anyway is idempotent).
+        let mut stack: Vec<Entity> = reclaimed.iter().collect();
+        while let Some(e) = stack.pop() {
+            if let Ok(ch) = children.get(e) {
+                stack.extend(ch.iter());
+            }
+            if let Ok(item) = parts.get_mut(e) {
+                classify_part(
+                    &interleave,
+                    &mut twins,
+                    &mut materials,
+                    &mut commands,
+                    None,
+                    item,
+                );
             }
         }
     }
-    // Drop twin pairs whose near identity no live batch carries any more — the twin dies with
-    // its users. A respawned model refetches its near handle from its spawner's cache and the
-    // pair rebuilds lazily on the next far classification.
-    if !twins.to_far.is_empty() {
-        let stale: Vec<AssetId<WowModelMaterial>> = twins
-            .to_far
-            .keys()
-            .filter(|k| !used.contains(*k))
-            .copied()
-            .collect();
-        for k in stale {
-            if let Some(f) = twins.to_far.remove(&k) {
-                twins.to_near.remove(&f.id());
-            }
+}
+
+/// One batch entity's classification — the shared body of [`classify_water_side`]'s full and
+/// reactive paths. `used` collects the near identities live batches carry (the twin GC's mark);
+/// the reactive path passes `None` and leaves the sweep to the next full frame.
+fn classify_part(
+    interleave: &crate::particles::WaterInterleave,
+    twins: &mut FarSideTwins,
+    materials: &mut Assets<WowModelMaterial>,
+    commands: &mut Commands,
+    used: Option<&mut std::collections::HashSet<AssetId<WowModelMaterial>>>,
+    (entity, gt, layers, mut mat, authority_owned, marked): (
+        Entity,
+        &GlobalTransform,
+        Option<&bevy::camera::visibility::RenderLayers>,
+        Mut<MeshMaterial3d<WowModelMaterial>>,
+        bool,
+        bool,
+    ),
+) {
+    use bevy::camera::visibility::RenderLayers;
+    // A booth-layered batch belongs to its own camera and scene — no world water applies
+    // (the effect lane's own booth guard, `particles::sim`).
+    if layers.is_some_and(|l| !l.intersects(&RenderLayers::default())) {
+        return;
+    }
+    let cur = mat.0.id();
+    let (near, swapped) = match twins.to_near.get(&cur) {
+        Some(n) => (n.clone(), true),
+        None => (mat.0.clone(), false),
+    };
+    // This lane's current verdict: the marker (what every composing owner reads); the raw
+    // handle state seconds it for the lanes this system swaps itself.
+    let far_now = marked || swapped;
+    let qualifies = match materials.get(near.id()) {
+        Some(m) => {
+            matches!(m.base.alpha_mode, AlphaMode::Blend) && m.extension.model_flags.x <= 0.5
+        }
+        None => false,
+    };
+    if !qualifies {
+        // A marked part that settled back onto its opaque cutout (fade over, aura released)
+        // stops being a transparent draw at all — its side is nobody's business until it
+        // feathers again.
+        if marked {
+            commands.entity(entity).remove::<FarSideOfWater>();
+        }
+        return;
+    }
+    if let Some(used) = used {
+        used.insert(near.id());
+    }
+    let far = crate::particles::far_side_of_water(interleave, Some(entity), gt.translation());
+    if far == far_now {
+        return;
+    }
+    // The swap's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which batches crossed the plane this
+    // frame and which way — the numeric read for a sort question no pixel can answer, and
+    // naturally sparse (transitions only, never per-frame spam).
+    if crate::dbg_trace::enabled() {
+        let p = gt.translation();
+        crate::dbg_trace::line(
+            "fx",
+            &format!(
+                "{} mesh e={entity} at=[{:.1},{:.1},{:.1}]",
+                if far { "far-side" } else { "near-side" },
+                p.x,
+                p.y,
+                p.z
+            ),
+        );
+    }
+    if far {
+        // Build (or fetch) the twin either way — every composing owner needs it live in the
+        // map before its own pick can resolve it.
+        let far_h = if let Some(h) = twins.to_far.get(&near.id()) {
+            h.clone()
+        } else {
+            // `qualifies` above already proved the near asset exists.
+            let twin = far_twin_of(materials.get(near.id()).unwrap());
+            let h = materials.add(twin);
+            twins.to_far.insert(near.id(), h.clone());
+            twins.to_near.insert(h.id(), near.clone());
+            h
+        };
+        commands.entity(entity).insert(FarSideOfWater);
+        if !authority_owned {
+            mat.0 = far_h;
+        }
+    } else {
+        commands.entity(entity).remove::<FarSideOfWater>();
+        if !authority_owned {
+            mat.0 = near;
         }
     }
 }

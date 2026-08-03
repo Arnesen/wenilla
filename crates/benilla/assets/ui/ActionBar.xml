@@ -29,10 +29,10 @@
           the event set registers on the BAR frame and fans to all 12 buttons, instead of the
           ref's per-button Register/Unregister churn on HasAction (12 fixed buttons make the
           skip-empties optimization noise; the handlers themselves are the ref's).
-        - Count (decision 0216 §7, slice 4): the ref gates it on IsConsumableAction; we simplify to
-          "an ITEM-kind action with a positive bag count" (GetActionCount always answers 0 for a
-          non-item kind, so the gate is really just `count > 0`) — not every consumable is
-          detectable as such without the full consumable-flag column, which nothing else needs yet.
+        - Count: ActionButton_UpdateCount transcribed, gated on IsConsumableAction exactly as the
+          ref does (0216 §7's "count > 0" simplification is retired — it put a stack number under
+          a mount, which has no stack; the engine-side law is ItemInfo::is_consumable, byte-cited
+          from 0x4e5250).
         - Empty-slot grid (ref ActionButton.lua:241-259's ShowGrid/HideGrid, a per-button COUNTER):
           simplified to one bar-level BOOLEAN — the cursor is a single global payload, so no two
           "shows" can ever nest, and a counter would just be a boolean with extra steps. Unlike the
@@ -382,6 +382,19 @@
             end
         end
 
+        -- ref ActionButton.lua:285-292 ActionButton_UpdateCount, transcribed. The gate is
+        -- IsConsumableAction, NOT "count > 0": a consumable you have run out of shows a literal
+        -- "0", and an item that is not consumable (a mount, a trinket, a bag) shows nothing at
+        -- all, however many copies you hold.
+        function BenillaActionButton_UpdateCount(button)
+            local action = BenillaActionButton_Action(button)
+            if IsConsumableAction(action) then
+                button.count:SetText(GetActionCount(action))
+            else
+                button.count:SetText("")
+            end
+        end
+
         function BenillaActionButton_Update(button)
             local action = BenillaActionButton_Action(button)
             if HasAction(action) then
@@ -389,12 +402,7 @@
                 button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
                 button:Show()
                 button.rangeTimer = -1
-                local count = GetActionCount(action)
-                if count > 0 then
-                    button.count:SetText(count)
-                else
-                    button.count:SetText("")
-                end
+                BenillaActionButton_UpdateCount(button)
                 BenillaActionButton_UpdateState(button)
                 BenillaActionButton_UpdateUsable(button)
                 BenillaActionButton_UpdateCooldown(button)
