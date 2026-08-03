@@ -80,11 +80,9 @@ pub(super) fn drain_container_autoequips(
 /// but a stray Lua call is still refused rather than sent as nonsense.
 pub(super) fn drain_inventory_uses(
     script: Option<NonSendMut<UiScript>>,
-    mut items: ResMut<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    commands: Res<NetCommands>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
+    targeting: crate::ui_action::cast_target::CastTargeting,
+    mut ladder: crate::ui_action::CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -100,10 +98,10 @@ pub(super) fn drain_inventory_uses(
         let (guid, start_quest, spell_index, use_spell) = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &items))
+            .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.items))
             .and_then(|guid| {
-                let entry = items.object(guid)?.object_entry()?;
-                let t = items.template(entry, guid, &commands)?;
+                let entry = ladder.items.object(guid)?.object_entry()?;
+                let t = ladder.items.template(entry, guid, &ladder.commands)?;
                 // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
                 // template is already in hand here for `start_quest`, so name the real one.
                 Some((
@@ -123,10 +121,10 @@ pub(super) fn drain_inventory_uses(
                 slot,
                 spell_index,
                 use_spell,
+                on_object: None,
             },
-            &mut pending,
-            &mut cast_errors,
-            &commands,
+            &targeting.context(),
+            &mut ladder,
         );
     }
 }
@@ -134,15 +132,13 @@ pub(super) fn drain_inventory_uses(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drain_container_uses(
     script: Option<NonSendMut<UiScript>>,
-    mut items: ResMut<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    commands: Res<NetCommands>,
     merchant: Res<crate::ui_merchant::MerchantOpen>,
     bank: Res<crate::ui_bank::BankOpen>,
     mut equip_sound: MessageWriter<crate::sound::AutoEquipSound>,
     mut item_text: ResMut<crate::ui_item_text::ItemTextOpen>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
+    targeting: crate::ui_action::cast_target::CastTargeting,
+    mut ladder: crate::ui_action::CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -158,11 +154,11 @@ pub(super) fn drain_container_uses(
         let item_guid = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0, &items));
+            .and_then(|store| slot_guid(&store.0, bag, slot0, &ladder.items));
         match item_guid {
             Some(guid) => {
                 debug!("ui_items: repair lua bag {bag} slot {slot} (item {guid:#x})");
-                let _ = commands.0.send(ClientCommand::RepairItem {
+                let _ = ladder.commands.0.send(ClientCommand::RepairItem {
                     vendor,
                     item_guid: guid,
                 });
@@ -181,11 +177,11 @@ pub(super) fn drain_container_uses(
             let item_guid = self_q
                 .iter()
                 .next()
-                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items));
+                .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items));
             match item_guid {
                 Some(guid) => {
                     debug!("ui_items: sell lua bag {bag} slot {slot} (item {guid:#x})");
-                    let _ = commands.0.send(ClientCommand::SellItem {
+                    let _ = ladder.commands.0.send(ClientCommand::SellItem {
                         vendor,
                         item_guid: guid,
                         count: 0,
@@ -211,13 +207,13 @@ pub(super) fn drain_container_uses(
             let withdrawing = bag == super::BANK_CONTAINER || (5..=10).contains(&bag);
             if withdrawing {
                 debug!("ui_items: withdraw (lua bag {bag} → wire {bag_index}/{wire_slot})");
-                let _ = commands.0.send(ClientCommand::AutoStoreBankItem {
+                let _ = ladder.commands.0.send(ClientCommand::AutoStoreBankItem {
                     bag: bag_index,
                     slot: wire_slot,
                 });
             } else {
                 debug!("ui_items: deposit (lua bag {bag} → wire {bag_index}/{wire_slot})");
-                let _ = commands.0.send(ClientCommand::AutoBankItem {
+                let _ = ladder.commands.0.send(ClientCommand::AutoBankItem {
                     bag: bag_index,
                     slot: wire_slot,
                 });
@@ -231,13 +227,13 @@ pub(super) fn drain_container_uses(
         let clicked = self_q
             .iter()
             .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items))
+            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &ladder.items))
             .and_then(|guid| {
-                let obj = items.object(guid)?;
+                let obj = ladder.items.object(guid)?;
                 let inst_flags = obj.item_flags().unwrap_or(0);
                 let item_text_id = obj.item_text_id().unwrap_or(0);
                 let entry = obj.object_entry()?;
-                let t = items.template(entry, guid, &commands)?;
+                let t = ladder.items.template(entry, guid, &ladder.commands)?;
                 Some(Clicked {
                     guid,
                     entry,
@@ -277,10 +273,13 @@ pub(super) fn drain_container_uses(
                     "ui_items: set ammo entry {} (lua bag {bag} slot {slot})",
                     c.entry
                 );
-                let _ = commands.0.send(ClientCommand::SetAmmo { entry: c.entry });
+                let _ = ladder
+                    .commands
+                    .0
+                    .send(ClientCommand::SetAmmo { entry: c.entry });
             } else {
                 debug!("ui_items: auto-equip (lua bag {bag} → wire {bag_index}/{wire_slot})");
-                let _ = commands.0.send(ClientCommand::AutoEquipItem {
+                let _ = ladder.commands.0.send(ClientCommand::AutoEquipItem {
                     bag_index,
                     slot: wire_slot,
                 });
@@ -299,7 +298,7 @@ pub(super) fn drain_container_uses(
                 "ui_items: unwrap gift {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
                 c.guid
             );
-            let _ = commands.0.send(ClientCommand::OpenItem {
+            let _ = ladder.commands.0.send(ClientCommand::OpenItem {
                 bag_index,
                 slot: wire_slot,
             });
@@ -323,10 +322,10 @@ pub(super) fn drain_container_uses(
                     slot: wire_slot,
                     spell_index: c.spell_index,
                     use_spell: c.use_spell,
+                    on_object: None,
                 },
-                &mut pending,
-                &mut cast_errors,
-                &commands,
+                &targeting.context(),
+                &mut ladder,
             );
             continue;
         }
@@ -366,7 +365,7 @@ pub(super) fn drain_container_uses(
                 "ui_items: open item {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
                 c.guid
             );
-            let _ = commands.0.send(ClientCommand::OpenItem {
+            let _ = ladder.commands.0.send(ClientCommand::OpenItem {
                 bag_index,
                 slot: wire_slot,
             });
@@ -383,10 +382,10 @@ pub(super) fn drain_container_uses(
                 slot: wire_slot,
                 spell_index: clicked.map_or(0, |c| c.spell_index),
                 use_spell: clicked.and_then(|c| c.use_spell),
+                on_object: None,
             },
-            &mut pending,
-            &mut cast_errors,
-            &commands,
+            &targeting.context(),
+            &mut ladder,
         );
     }
 }

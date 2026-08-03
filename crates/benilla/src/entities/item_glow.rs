@@ -48,7 +48,7 @@
 
 use std::collections::HashMap;
 
-use benilla_formats::{EnchantVisualCatalog, ItemVisualCatalog, ITEM_VISUAL_SLOTS};
+use benilla_formats::{EnchantCatalog, ItemVisualCatalog, ITEM_VISUAL_SLOTS};
 use bevy::prelude::*;
 
 use crate::model_render::m2_url;
@@ -58,23 +58,25 @@ use super::equipment::{ItemDisplays, ItemModelKind};
 use super::spell_fx::{attach_effect_visuals, EffectHost, FxTintAnims};
 use super::{DisplayModel, ModelHandle};
 
-/// The glow chain's data + the effect-model cache: the two joined DBC catalogs, plus a
-/// path-keyed [`DisplayModel`] per glow model (the [`super::spell_fx::SpellFx`] pattern — entries
-/// are created by [`ensure_glow_models`] at equipment-resolve time and built by
-/// `super::update_display_models` the same frame). Optional resource: without the DBCs nothing
+/// The glow chain's data + the effect-model cache: the joined `ItemVisuals`/`ItemVisualEffects`
+/// catalog, plus a path-keyed [`DisplayModel`] per glow model (the [`super::spell_fx::SpellFx`]
+/// pattern — entries are created by [`ensure_glow_models`] at equipment-resolve time and built by
+/// `super::update_display_models` the same frame). Optional resource: without the DBC nothing
 /// glows, exactly as before this lane existed.
+///
+/// The enchant half of the fork lives in [`crate::items::Enchants`] — the same
+/// `SpellItemEnchantment` load the tooltip's enchant line reads (decision 0915). Without it a
+/// weapon still shows its INTRINSIC glow; only the enchant leg goes quiet.
 #[derive(Resource)]
 pub(crate) struct ItemGlows {
     pub(super) visuals: ItemVisualCatalog,
-    pub(super) enchants: EnchantVisualCatalog,
     pub(super) models: HashMap<String, DisplayModel>,
 }
 
 impl ItemGlows {
-    pub(super) fn new(visuals: ItemVisualCatalog, enchants: EnchantVisualCatalog) -> Self {
+    pub(super) fn new(visuals: ItemVisualCatalog) -> Self {
         ItemGlows {
             visuals,
-            enchants,
             models: HashMap::new(),
         }
     }
@@ -91,16 +93,19 @@ impl ItemGlows {
 /// client returns `-1` from the enchant resolver precisely so the two can't double up); otherwise
 /// the **first** enchant slot whose `SpellItemEnchantment` row carries a nonzero visual. `0` when
 /// neither does.
+/// `enchants` absent (the DBC failed to load) means only the base leg can answer.
 pub(in crate::entities) fn effective_visual(
     glows: &ItemGlows,
+    enchants: Option<&EnchantCatalog>,
     base: i32,
     item_enchants: impl IntoIterator<Item = u32>,
 ) -> i32 {
     if glows.visuals.effects(base).is_some() {
         return base;
     }
+    let Some(enchants) = enchants else { return 0 };
     for enchant in item_enchants {
-        if let Some(visual) = glows.enchants.visual(enchant) {
+        if let Some(visual) = enchants.visual(enchant) {
             return visual;
         }
     }
@@ -330,7 +335,7 @@ pub(super) fn attach_item_glows(
 mod tests {
     use super::*;
 
-    fn catalog(visual_rows: &[u32], enchant_rows: &[(u32, i32)]) -> ItemGlows {
+    fn catalog(visual_rows: &[u32], enchant_rows: &[(u32, i32)]) -> (ItemGlows, EnchantCatalog) {
         let visuals = visual_rows
             .iter()
             .map(|id| {
@@ -342,9 +347,9 @@ mod tests {
                 )
             })
             .collect();
-        ItemGlows::new(
-            ItemVisualCatalog::from_visuals(visuals),
-            EnchantVisualCatalog::from_visuals(enchant_rows.iter().copied().collect()),
+        (
+            ItemGlows::new(ItemVisualCatalog::from_visuals(visuals)),
+            EnchantCatalog::from_rows(enchant_rows.iter().copied().collect(), HashMap::new()),
         )
     }
 
@@ -353,17 +358,27 @@ mod tests {
     /// enchant slots with no visual are walked past rather than ending the scan.
     #[test]
     fn base_visual_wins_over_enchant_and_suppresses_it() {
-        let glows = catalog(&[25, 61], &[(1, 61), (7, 25)]);
+        let (glows, ench) = catalog(&[25, 61], &[(1, 61), (7, 25)]);
+        let ench = Some(&ench);
         // Base 25 exists → base, even with an enchant that also carries one.
-        assert_eq!(effective_visual(&glows, 25, [1]), 25);
+        assert_eq!(effective_visual(&glows, ench, 25, [1]), 25);
         // No base → the enchant's.
-        assert_eq!(effective_visual(&glows, 0, [1]), 61);
+        assert_eq!(effective_visual(&glows, ench, 0, [1]), 61);
         // A visual-less enchant in the way: the scan continues to the one that has it.
-        assert_eq!(effective_visual(&glows, 0, [999, 7]), 25);
+        assert_eq!(effective_visual(&glows, ench, 0, [999, 7]), 25);
         // Nothing anywhere.
-        assert_eq!(effective_visual(&glows, 0, [999]), 0);
+        assert_eq!(effective_visual(&glows, ench, 0, [999]), 0);
         // The shipped `-1` base is not a row: it neither glows nor suppresses the enchant.
-        assert_eq!(effective_visual(&glows, -1, [1]), 61);
-        assert_eq!(effective_visual(&glows, -1, []), 0);
+        assert_eq!(effective_visual(&glows, ench, -1, [1]), 61);
+        assert_eq!(effective_visual(&glows, ench, -1, []), 0);
+    }
+
+    /// No enchant catalog (the DBC failed to load): the INTRINSIC leg still answers in full, and
+    /// only the enchant leg goes quiet — the split's whole safety claim.
+    #[test]
+    fn without_the_enchant_catalog_only_the_base_leg_answers() {
+        let (glows, _) = catalog(&[25, 61], &[(1, 61)]);
+        assert_eq!(effective_visual(&glows, None, 25, [1]), 25);
+        assert_eq!(effective_visual(&glows, None, 0, [1]), 0);
     }
 }

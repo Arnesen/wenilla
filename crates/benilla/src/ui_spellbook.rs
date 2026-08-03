@@ -43,7 +43,8 @@ use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
 use crate::ui_action::{
-    cast_target, melee_auto_attack_icon, ranged_weapon_icon, send_spell_cast, PlayerActions, Spells,
+    cast_target, melee_auto_attack_icon, ranged_weapon_icon, CastCommit, CastLadder, PlayerActions,
+    Spells,
 };
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
@@ -349,23 +350,10 @@ fn leading_number(s: &str) -> u32 {
 
 /// Drain `take_spell_casts` through the SAME cast tail `drain_action_uses` uses for a SPELL-kind
 /// action (decision 0216 §8: "root-cause rule: one cast-send path") — `ui_action::send_spell_cast`.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 fn drain_spell_casts(
     script: Option<NonSendMut<UiScript>>,
     targeting: cast_target::CastTargeting,
-    commands: Res<NetCommands>,
-    self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
-    spells: Option<Res<Spells>>,
-    cast_items: Res<Items>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
-    mut cooldowns: ResMut<crate::cooldowns::Cooldowns>,
-    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
-    mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
-    mut trade_skill_opens: ResMut<crate::ui_tradeskill::TradeSkillOpens>,
-    mut ground: ResMut<crate::ui_action::SpellTargeting>,
-    mut ecs: Commands,
+    mut ladder: CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -377,11 +365,14 @@ fn drain_spell_casts(
         // (`0x4b348b`–`0x4b35e5`) with its non-cancelable silent no-op (`0x4b35cf`). This is the
         // leg `UseAction` does NOT have — a druid's `/cast Cat Form` powershift-out and a
         // shaman's Ghost Wolf re-cast both land here.
-        if let (Some(sp), Some(store)) = (spells.as_ref(), targeting.self_store.iter().next()) {
+        if let (Some(sp), Some(store)) =
+            (ladder.spells.as_ref(), targeting.self_store.iter().next())
+        {
             if let Some(d) = sp.catalog.get(spell_id) {
                 if crate::ui_action::toggle::active_action_toggle(spell_id, d, store) {
                     debug!("ui_spellbook: cast {spell_id} re-pressed — aura cancels");
-                    let _ = commands
+                    let _ = ladder
+                        .commands
                         .0
                         .send(crate::net::ClientCommand::CancelAura { spell_id });
                     continue;
@@ -391,7 +382,8 @@ fn drain_spell_casts(
                 match crate::ui_action::toggle::form_recast_disposition(d, form, row) {
                     Some(true) => {
                         debug!("ui_spellbook: cast {spell_id} — the active form cancels");
-                        let _ = commands
+                        let _ = ladder
+                            .commands
                             .0
                             .send(crate::net::ClientCommand::CancelAura { spell_id });
                         continue;
@@ -408,23 +400,7 @@ fn drain_spell_casts(
             "ui_spellbook: cast {spell_id} (target {:?})",
             targeting.selection.guid
         );
-        send_spell_cast(
-            spell_id,
-            &targeting.context(),
-            &commands,
-            &self_player,
-            spells.as_deref(),
-            &cast_items,
-            &mut sheath,
-            &mut ecs,
-            &mut pending,
-            &mut queued_melee,
-            &mut cooldowns,
-            &mut cast_errors,
-            &mut auto_repeat,
-            &mut trade_skill_opens,
-            &mut ground,
-        );
+        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
     }
 }
 

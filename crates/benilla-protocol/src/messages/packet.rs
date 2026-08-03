@@ -443,6 +443,14 @@ pub enum ServerPacket {
         item_guid: u64,
         spell_id: u32,
     },
+    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — how long one item's TEMPORARY enchant has left (layout in
+    /// [`super::items::read_item_enchant_time`]). The tooltip's countdown has no other source
+    /// (decision 0920).
+    ItemEnchantTime {
+        item_guid: u64,
+        slot: u32,
+        seconds: u32,
+    },
     /// `SMSG_COOLDOWN_EVENT` — start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's
     /// parked timers now (layout in [`super::spellbook::read_cooldown_event`]).
     CooldownEvent {
@@ -995,8 +1003,12 @@ pub enum ServerPacket {
         text: String,
     },
     /// `SMSG_RECEIVED_MAIL` — a mail arrived (instant for text-only, on the delivery timer's
-    /// expiry otherwise); the wire's lone `u32` is always 0 on vmangos, so nothing rides this.
-    ReceivedMail,
+    /// expiry otherwise). `seconds` is the delay until it is "waiting", in the countdown's units:
+    /// vmangos only ever sends `0.0` ("now"), but the real client reads a float here and runs it
+    /// through the countdown's set-value ladder (decision 0913).
+    ReceivedMail {
+        seconds: f32,
+    },
     /// `MSG_QUERY_NEXT_MAIL_TIME`'s reply (same opcode as our empty-body request): `0.0` = unread
     /// mail waiting, `-86400.0` = none.
     NextMailTime {
@@ -1090,6 +1102,7 @@ impl ServerPacket {
             ServerPacket::CancelAutoRepeat => "SMSG_CANCEL_AUTO_REPEAT".into(),
             ServerPacket::SpellCooldownList { .. } => "SMSG_SPELL_COOLDOWN".into(),
             ServerPacket::ItemCooldown { .. } => "SMSG_ITEM_COOLDOWN".into(),
+            ServerPacket::ItemEnchantTime { .. } => "SMSG_ITEM_ENCHANT_TIME_UPDATE".into(),
             ServerPacket::CooldownEvent { .. } => "SMSG_COOLDOWN_EVENT".into(),
             ServerPacket::ClearCooldown { .. } => "SMSG_CLEAR_COOLDOWN".into(),
             ServerPacket::CooldownCheat { .. } => "SMSG_COOLDOWN_CHEAT".into(),
@@ -1212,7 +1225,7 @@ impl ServerPacket {
             ServerPacket::MailList { .. } => "SMSG_MAIL_LIST_RESULT".into(),
             ServerPacket::SendMailResult { .. } => "SMSG_SEND_MAIL_RESULT".into(),
             ServerPacket::ItemTextQueryResponse { .. } => "SMSG_ITEM_TEXT_QUERY_RESPONSE".into(),
-            ServerPacket::ReceivedMail => "SMSG_RECEIVED_MAIL".into(),
+            ServerPacket::ReceivedMail { .. } => "SMSG_RECEIVED_MAIL".into(),
             ServerPacket::NextMailTime { .. } => "MSG_QUERY_NEXT_MAIL_TIME".into(),
             ServerPacket::TradeStatus { .. } => "SMSG_TRADE_STATUS".into(),
             ServerPacket::TradeStatusExtended { .. } => "SMSG_TRADE_STATUS_EXTENDED".into(),

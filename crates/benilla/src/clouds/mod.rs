@@ -75,7 +75,10 @@ impl Plugin for CloudsPlugin {
             .add_systems(
                 Update,
                 (
-                    tick_clouds,
+                    // After the submersion verdict: the surfacing edge (wet→dry) must fire the
+                    // full rebuild the SAME frame the dome un-hides, or the first visible frame
+                    // still shows the submerged-era tile.
+                    tick_clouds.after(crate::liquid::SubmersionVerdict),
                     // After the resolve: the dome and the painted skybox must agree WITHIN a frame,
                     // or one frame draws both (the ordering `crate::sky`'s gate already takes) —
                     // and after the submersion verdict, for the same one-frame-agreement reason.
@@ -96,6 +99,7 @@ impl Plugin for CloudsPlugin {
 /// incremental 32-row band scroll (or the frozen capture clock) — and re-upload the colored
 /// RGBA texels when they changed (the reference's per-regen `0x58ac70` upload of the `0x6cfb00`
 /// color buffer, Addendum A §3).
+#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
 fn tick_clouds(
     mut cov: ResMut<CloudCoverage>,
     light: Res<WowLighting>,
@@ -103,7 +107,19 @@ fn tick_clouds(
     clock: Option<Res<layer::CloudLayer>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<layer::CloudMaterial>>,
+    underwater: Res<crate::liquid::Underwater>,
+    mut was_submerged: Local<bool>,
 ) {
+    // The surfacing edge — the reference's wet→dry detector `0x680ac3` fires `0x6d2210(1)`, the
+    // FULL-rebuild selector (`bl!=0` → `0x6cff90`), the frame the eye leaves the liquid
+    // (byte-VERIFIED, wow-re `water-frame-straddle.md` §4b + `cloud-coverage-pipeline.md` §0).
+    // Without it the incremental 32-row scroll restores the field band-by-band over ~0.4 s+ —
+    // the sky pass returns instantly (0902's gate) but the clouds creep back in behind it,
+    // the "delayed pop-in" the director sighted. Dry→wet takes no edge, exactly like the
+    // reference: the sky pass is skipped while submerged, so nobody sees the tile.
+    let submerged = underwater.0.any();
+    let surfaced = *was_submerged && !submerged;
+    *was_submerged = submerged;
     let density = light.cloud_density;
     // The color-pass inputs (`0x6cfb00`'s per-frame setup), from the resolved lighting.
     let frame = kernel::CloudFrame {
@@ -114,13 +130,16 @@ fn tick_clouds(
         glow_dir: light.cloud_glow_dir,
         glow_track: light.cloud_glow_track,
     };
+    if surfaced && std::env::var_os("WOW_CLOUD_DUMP").is_some() {
+        eprintln!("[cloud] surfaced -> full rebuild (C {density:.3})");
+    }
     if std::env::var_os("WOW_CLOUD_DUMP").is_some() && cov.last_frame != Some(frame) {
         eprintln!(
             "[cloud] C {density:.3} sun {:?} slope {:?} gbase {:?} bcc {:.2} glow_dir {:?} track {:.2}",
             frame.sun, frame.slope, frame.gbase, frame.bcc, frame.glow_dir, frame.glow_track
         );
     }
-    let changed = if !cov.primed || (cov.frozen && density != cov.last_density) {
+    let changed = if !cov.primed || surfaced || (cov.frozen && density != cov.last_density) {
         cov.primed = true;
         cov.last_density = density;
         cov.last_frame = Some(frame);

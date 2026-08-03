@@ -13,21 +13,15 @@
 //! Both run `.after(UiInput)` so a click's intent goes out the same frame it was made. The two
 //! queues are disjoint per gesture, so their relative order does not matter.
 
-use std::time::Instant;
-
 use bevy::prelude::*;
 
 use benilla_protocol::messages::{ActionButton, ACTION_KIND_ITEM, ACTION_KIND_SPELL};
 use benilla_ui::script::UiScript;
 
-use crate::items::Items;
-use crate::net::{ClientCommand, NetCommands, SelfPlayer};
+use crate::net::{ClientCommand, NetCommands};
 
-use super::cast_send::send_spell_cast;
-use super::{
-    attack_mounted_refusal, cast_target, AutoRepeatActive, CastErrors, PlayerActions, Spells,
-    UiErrorKeys, SPELL_ATTACK,
-};
+use super::cast_send::{CastCommit, CastLadder};
+use super::{attack_mounted_refusal, cast_target, PlayerActions, UiErrorKeys, SPELL_ATTACK};
 
 /// What clicking an ITEM action does, and to which copy — [`item_action_route`]'s verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,31 +81,15 @@ pub(super) fn item_action_route(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set
 pub(super) fn drain_action_uses(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
     targeting: cast_target::CastTargeting,
-    commands: Res<NetCommands>,
-    self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
-    mut items: ResMut<Items>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
     mut acquire: MessageWriter<crate::target::AttackNearestRequest>,
-    spells: Option<Res<Spells>>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
-    mut cooldowns: ResMut<crate::cooldowns::Cooldowns>,
-    // The error sinks + the targeting mode, one tuple param (Bevy's 16-param ceiling): the
-    // reason-coded cast line, the by-key local line, and the ground-targeting state the SPELL
-    // arm's toggle-cancel and the cast path's entry both write (decision 0792).
-    mut errors: (
-        ResMut<CastErrors>,
-        ResMut<UiErrorKeys>,
-        ResMut<super::targeting::SpellTargeting>,
-    ),
-    mut auto_repeat: ResMut<AutoRepeatActive>,
-    mut trade_skill_opens: ResMut<crate::ui_tradeskill::TradeSkillOpens>,
-    mut ecs: Commands,
+    // The by-key local error line — the only sink here that is not the ladder's own
+    // (`ladder.cast_errors` is the reason-coded one, `ladder.ground` the targeting mode).
+    mut ui_errors: ResMut<UiErrorKeys>,
+    mut ladder: CastLadder,
 ) {
     let selection = &targeting.selection;
     let Some(mut script) = script else {
@@ -127,7 +105,7 @@ pub(super) fn drain_action_uses(
                 // The mounted attack block ([`attack_mounted_refusal`]): the ref's validator
                 // refuses BEFORE the with-target swing and before the nearest-enemy scan
                 // (`0x613039` precedes `0x6130b5`), so both arms gate here.
-                if attack_mounted_refusal(targeting.self_store.iter().next(), &mut errors.1) {
+                if attack_mounted_refusal(targeting.self_store.iter().next(), &mut ui_errors) {
                     continue;
                 }
                 match selection.guid {
@@ -138,8 +116,8 @@ pub(super) fn drain_action_uses(
                         // sound: the attack path passes `(newState=1, bInstant=1, bFireEvent=1)`
                         // at `0x5ecd80` (wow-re `sheath-policy.md`). The setter's idempotency
                         // is the client's own "no-op if already melee".
-                        if let Ok((e, _)) = self_player.single() {
-                            sheath.write(crate::creature_anim::SheathRequest {
+                        if let Ok((e, _)) = ladder.self_player.single() {
+                            ladder.sheath.write(crate::creature_anim::SheathRequest {
                                 entity: e,
                                 state: 1,
                                 ceremony: false,
@@ -147,14 +125,14 @@ pub(super) fn drain_action_uses(
                         }
                         // Melee attack-start cancels a running auto-repeat UNCONDITIONALLY —
                         // the client's `0x5ecd8c` (wow-re `nocked-ammo-cancel.md` §Q-B-5).
-                        let self_e = self_player.single().ok().map(|(e, _)| e);
+                        let self_e = ladder.self_player.single().ok().map(|(e, _)| e);
                         crate::creature_anim::cancel_auto_repeat_local(
                             self_e,
-                            &mut auto_repeat,
-                            &mut ecs,
-                            &commands,
+                            &mut ladder.auto_repeat,
+                            &mut ladder.ecs,
+                            &ladder.commands,
                         );
-                        let _ = commands.0.send(ClientCommand::AttackSwing { guid });
+                        let _ = ladder.commands.0.send(ClientCommand::AttackSwing { guid });
                     }
                     // No target: the client's attack resolver runs the nearest-enemy core and
                     // swings at the winner (`0x612df0` @ `6130b5`) — `target::scan` answers.
@@ -170,12 +148,12 @@ pub(super) fn drain_action_uses(
                 // targeting cursor is up cancels the targeting instead of re-arming it —
                 // press-again-to-cancel, before TryCast ever runs. (A spellbook re-press stays
                 // the ref's abort-and-re-enter — it never passes through UseAction.)
-                if errors.2.spell() == Some(b.action) {
+                if ladder.ground.spell() == Some(b.action) {
                     debug!(
                         "ui_action: cast {} re-pressed — targeting toggles off",
                         b.action
                     );
-                    errors.2.clear();
+                    ladder.ground.clear();
                     continue;
                 }
                 // The active-action toggle (`0x4e55f0` → the `0x4e60c1` cancel; wow-re
@@ -183,11 +161,12 @@ pub(super) fn drain_action_uses(
                 // its button cancels its own aura — Ghost Wolf, the druid forms, Stealth. The
                 // form-match toggle is deliberately NOT here (the ref's `UseAction` has no such
                 // leg — the `CastSpell` dispatcher alone carries it; keep the asymmetry).
-                if let Some(d) = spells.as_ref().and_then(|s| s.catalog.get(b.action)) {
+                if let Some(d) = ladder.spells.as_ref().and_then(|s| s.catalog.get(b.action)) {
                     if let Some(store) = targeting.self_store.iter().next() {
                         if super::toggle::active_action_toggle(b.action, d, store) {
                             debug!("ui_action: cast {} re-pressed — aura cancels", b.action);
-                            let _ = commands
+                            let _ = ladder
+                                .commands
                                 .0
                                 .send(crate::net::ClientCommand::CancelAura { spell_id: b.action });
                             continue;
@@ -195,23 +174,7 @@ pub(super) fn drain_action_uses(
                     }
                 }
                 debug!("ui_action: cast {} (target {:?})", b.action, selection.guid);
-                send_spell_cast(
-                    b.action,
-                    &targeting.context(),
-                    &commands,
-                    &self_player,
-                    spells.as_deref(),
-                    &items,
-                    &mut sheath,
-                    &mut ecs,
-                    &mut pending,
-                    &mut queued_melee,
-                    &mut cooldowns,
-                    &mut errors.0,
-                    &mut auto_repeat,
-                    &mut trade_skill_opens,
-                    &mut errors.2,
-                );
+                ladder.send(b.action, &targeting.context(), CastCommit::Spell);
             }
             // An item action names an item ENTRY, not a position, so the click has to find a copy
             // — [`item_action_route`] is that law. A miss (the copy left the bags between the
@@ -222,7 +185,10 @@ pub(super) fn drain_action_uses(
                 let Some(store) = targeting.self_store.iter().next() else {
                     continue;
                 };
-                let template = items.template(b.action, 0, &commands).cloned();
+                let template = ladder
+                    .items
+                    .template(b.action, 0, &ladder.commands)
+                    .cloned();
                 // The reference reads the template first and bails on a null record; ours is all
                 // but always cached by click time (the icon resolve needed it).
                 let Some(template) = template else {
@@ -233,7 +199,7 @@ pub(super) fn drain_action_uses(
                     continue;
                 };
                 let route = item_action_route(&template, |s| {
-                    crate::ui_items::find_item(&store.0, &items, b.action, s)
+                    crate::ui_items::find_item(&store.0, &ladder.items, b.action, s)
                 });
                 let ((bag_index, slot0, guid), equip) = match route {
                     ItemRoute::Use(pos) => (pos, false),
@@ -253,34 +219,19 @@ pub(super) fn drain_action_uses(
                     // equippable quest-starter on the bar equips, exactly as the reference does
                     // (decision 0664).
                     debug!("ui_action: item action {action} auto-equip (wire {bag_index}/{slot0})");
-                    let _ = commands.0.send(ClientCommand::AutoEquipItem {
+                    let _ = ladder.commands.0.send(ClientCommand::AutoEquipItem {
                         bag_index,
                         slot: slot0,
                     });
                 } else {
-                    // The item twin of the cast path's local not-ready refusal
-                    // (`IsItemOnCooldown 0x6e2fc0`: the on-use spell against the cooldown list)
-                    // — reason 0x28 is the client's "Item is not ready yet.".
-                    let on_cooldown = template.use_spell.filter(|u| {
-                        cooldowns.is_on_cooldown(
-                            u.spell_id,
-                            spells.as_ref().and_then(|s| s.catalog.get(u.spell_id)),
-                            Instant::now(),
-                        )
-                    });
-                    if let Some(u) = on_cooldown {
-                        debug!("ui_action: item action {action} refused locally — on cooldown");
-                        errors.0 .0.push((u.spell_id, 0x28));
-                        continue;
-                    }
                     // …then the shared use fork (`CGItem::Use` — the bar's engine calls the very
                     // same function at `0x4e607b`), so a quest-starter on the bar offers its quest
                     // instead of a `CMSG_USE_ITEM` the server can only refuse (decision 0664). The
                     // wire's third byte is the spell BLOCK ordinal, not a flag (decision 0666).
-                    // The fork carries the in-flight gate — an item use IS a cast through the same
-                    // `TryCast` (decision 0908; [`crate::ui_items::send_item_use`] is the law), so
-                    // the mount's second click no longer ships a duplicate the server bounces back
-                    // as a cast-bar cancel.
+                    // The fork runs the WHOLE cast ladder — an item use IS a cast through the same
+                    // `TryCast` (decisions 0908/0914; [`crate::ui_items::send_item_use`] is the
+                    // law), so the cooldown/GCD/in-flight/mounted/moving/form rungs and the local
+                    // "Item is not ready yet." live there now, for the bag and doll clicks too.
                     let spell_index = template.use_spell_index().unwrap_or(0);
                     debug!(
                         "ui_action: item action {action} use (wire {bag_index}/{slot0}, spell #{spell_index})"
@@ -293,10 +244,10 @@ pub(super) fn drain_action_uses(
                             slot: slot0,
                             spell_index,
                             use_spell: template.use_spell.map(|u| u.spell_id),
+                            on_object: None,
                         },
-                        &mut pending,
-                        &mut errors.0,
-                        &commands,
+                        &targeting.context(),
+                        &mut ladder,
                     );
                 }
             }

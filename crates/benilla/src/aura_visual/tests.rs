@@ -247,6 +247,8 @@ fn app_with_chains() -> App {
     app.add_message::<crate::creature_anim::SpellKitFx>();
     app.add_message::<crate::creature_anim::SpellKitSound>();
     app.add_message::<AuraProc>();
+    // The water-plane twin map the alpha author composes with (empty here — no water in a fixture).
+    app.init_resource::<crate::model_render::FarSideTwins>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
             (
@@ -489,6 +491,8 @@ fn the_author_owns_the_tree_then_releases_at_opaque() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.init_resource::<crate::interior::InteriorReauthor>();
+    // The water-plane twin map the author composes with (empty — no water in a fixture).
+    app.init_resource::<crate::model_render::FarSideTwins>();
     app.add_systems(Update, apply_aura_alpha);
 
     let fm = FadeMaterials {

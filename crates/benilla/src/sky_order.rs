@@ -86,15 +86,19 @@ pub(crate) const WHITE_MOON_BIAS: f32 = -8.1e5;
 pub(crate) const MOON02_BIAS: f32 = -8.0e5;
 /// The cloud dome — last of the sky pass (`0x6d4a71`): clouds blend over a setting sun.
 pub(crate) const CLOUDS_BIAS: f32 = -6.0e5;
-/// **Far-side model effects** — the water-plane interleave's early half (byte-VERIFIED, wow-re
-/// `water-frame-straddle.md`): the reference splits M2 transparents into an above-water and a
-/// below-water list per model (per **emitter** for particles — each classifies onto exactly ONE
-/// list, `0x7084a0`), and `0x483460` draws the list on the eye's FAR side of the water plane
-/// *before* the water pass, the near side *after*. An effect classified far-side takes this rung
-/// (plus its owner-last rung, capped at 32) so it lands under [`WATER_BIAS`]; near-side effects
+/// **Far-side model transparents** — the water-plane interleave's early half (byte-VERIFIED,
+/// wow-re `water-frame-straddle.md`): the reference splits M2 transparents into an above-water
+/// and a below-water list per model (per **emitter** for particles — each classifies onto exactly
+/// ONE list, `0x7084a0`), and `0x483460` draws the list on the eye's FAR side of the water plane
+/// *before* the water pass, the near side *after*. A draw classified far-side takes this rung —
+/// an effect plus its owner-last rung (capped at 32), a translucent M2 mesh batch plus its batch
+/// eps (≤ ~65 × 1e-3, `model_render::BATCH_ORDER_SORT_EPS`), a zfill twin minus its 8 — so it
+/// lands under [`WATER_BIAS`] with the owner-last law intact inside the band; near-side draws
 /// keep their natural slot above it. The flip on submersion is the interleave inversion
-/// (`0x4836d6 cmp eax,0xf`). Sort-only — the effect lane splits sort bias from raster bias.
-pub(crate) const EFFECT_FAR_SIDE_BIAS: f32 = -4.0e4;
+/// (`0x4836d6 cmp eax,0xf`). Sort-only on every lane: the effect stream splits sort from raster
+/// by construction, and the mesh lane's far twin zeroes the raster constant back in
+/// `WowModelExt::specialize` (`clutter_fade.z` bit 11).
+pub(crate) const FAR_SIDE_BIAS: f32 = -4.0e4;
 /// **The water surface** — river/ocean/WMO water draw in a fixed frame slot between the two
 /// transparent halves (`0x6701d0 → 0x6816d0`: ocean → river → WMO liquid → foam), never view-z
 /// sorted against model transparents. One rung below the world band puts every unclassified
@@ -120,11 +124,12 @@ const _: () = {
     assert!(SUN_DISC_BIAS - STARS_BIAS > 1.0e4);
     assert!(WHITE_MOON_BIAS > SUN_DISC_BIAS && MOON02_BIAS > WHITE_MOON_BIAS);
     assert!(CLOUDS_BIAS - MOON02_BIAS > 1.0e4);
-    // The water-plane interleave: sky < far-side effects < water < world transparents (the
-    // near-side default). The far-side band is far-effect-bias + owner rung; owner rungs are
-    // capped well under the 1e4 margin (benilla_formats::owner_last_rung's ceiling).
-    assert!(EFFECT_FAR_SIDE_BIAS - CLOUDS_BIAS > 1.0e4);
-    assert!(WATER_BIAS - EFFECT_FAR_SIDE_BIAS > 1.0e4);
+    // The water-plane interleave: sky < far-side transparents < water < world transparents (the
+    // near-side default). The far-side band is FAR_SIDE_BIAS − 8 (a zfill twin) … + owner rung;
+    // owner rungs are capped well under the 1e4 margin (benilla_formats::owner_last_rung's
+    // ceiling) and the mesh batch eps under that.
+    assert!(FAR_SIDE_BIAS - CLOUDS_BIAS > 1.0e4);
+    assert!(WATER_BIAS - FAR_SIDE_BIAS > 1.0e4);
     assert!(-3.0e3 - WATER_BIAS > 1.0e4); // world view-z floor = −far (the ~3 km projection) stays above
     assert!(crate::ground_fx::GROUND_FX_DEPTH_BIAS - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - crate::ground_fx::GROUND_FX_DEPTH_BIAS > 1.0e4);

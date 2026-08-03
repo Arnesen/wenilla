@@ -252,6 +252,7 @@ mod tests {
             locked: false,
             equip_slots: vec![1],
             creator: None,
+            enchants: Vec::new(),
         });
         slots[11] = Some(InvSlotView {
             bar_placeable: true,
@@ -266,6 +267,7 @@ mod tests {
             locked: false,
             equip_slots: vec![11, 12], // FINGER1|FINGER2 — the doll↔doll swap fixture
             creator: None,
+            enchants: Vec::new(),
         });
         slots[19] = Some(InvSlotView {
             bar_placeable: true,
@@ -280,6 +282,7 @@ mod tests {
             locked: false,
             equip_slots: vec![19],
             creator: None,
+            enchants: Vec::new(),
         });
         slots
     }
@@ -302,6 +305,7 @@ mod tests {
                 readable: false,
                 creator: None,
                 flags: 0,
+                enchants: Vec::new(),
             },
         );
         ContainerState {
@@ -443,6 +447,7 @@ mod tests {
             locked: false,
             equip_slots: vec![20, 21, 22, 23],
             creator: None,
+            enchants: Vec::new(),
         });
         s.set_inventory_slots(slots);
 
@@ -480,6 +485,7 @@ mod tests {
                 readable: false,
                 creator: None,
                 flags: 0,
+                enchants: Vec::new(),
             },
         );
         s.set_container(

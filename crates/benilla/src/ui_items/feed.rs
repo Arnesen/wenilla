@@ -179,6 +179,7 @@ fn template_view(
         page_text: t.page_text,
         sell_price: t.sell_price,
         item_set: t.item_set,
+        random_property: t.random_property,
     }
 }
 
@@ -413,6 +414,7 @@ fn resolve_slot(
     guid: u64,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
+    enchants: Option<&crate::items::Enchants>,
     commands: &NetCommands,
     cooldowns: &crate::cooldowns::Cooldowns,
     spells: Option<&benilla_formats::SpellCatalog>,
@@ -423,34 +425,54 @@ fn resolve_slot(
     if guid == 0 {
         return None;
     }
-    let (entry, count, durability, readable, creator, flags) = match items.object(guid) {
-        Some(fields) => (
-            fields.object_entry().unwrap_or(0),
-            fields.item_stack_count().unwrap_or(1),
-            // The live instance pair — the wire updates ITEM_FIELD_DURABILITY on damage/repair
-            // (death 10%, spirit healer 25%); max 0 = indestructible ⇒ no line.
-            fields
-                .item_durability()
-                .zip(fields.item_max_durability())
-                .filter(|&(_, max)| max > 0),
-            // The instance carries letter text (a mail permanent copy) — the same gate the
-            // right-click reader fork uses (`ui_items::drain`); the hover magnifier keys off it.
-            // Template-`PageText` books join when the books read path lands (decision 0572).
-            fields.item_text_id().is_some_and(|id| id != 0),
-            // `ITEM_FIELD_CREATOR` → the ask-once name cache: the tooltip's "Written by %s" /
-            // "<Made by %s>" line. `None` while the query is in flight — the changed re-push
-            // repaints the hover when the answer lands (the ref's cache-callback shape).
-            fields
-                .item_creator()
-                .filter(|&g| g != 0)
-                .and_then(|g| names.resolve(g, commands).map(str::to_string)),
-            // `ITEM_FIELD_FLAGS` — the tooltip's UNLOCKED (0x4) / WRAPPED (0x8) sub-gates.
-            fields.item_flags().unwrap_or(0),
-        ),
-        // The player descriptor references a guid whose create hasn't landed (yet) — occupied,
-        // unresolved.
-        None => return Some(ContainerSlot::default()),
-    };
+    // The temporary-enchant countdowns, read off the deadline store BEFORE the object borrow below
+    // (both live on `Items`): one `Option<ms>` per enchant slot.
+    let enchant_ms: [Option<u64>; 7] =
+        std::array::from_fn(|s| items.enchant_remaining_ms(guid, s as u32));
+    let (entry, count, durability, readable, creator, flags, enchant_lines) =
+        match items.object(guid) {
+            Some(fields) => (
+                fields.object_entry().unwrap_or(0),
+                fields.item_stack_count().unwrap_or(1),
+                // The live instance pair — the wire updates ITEM_FIELD_DURABILITY on damage/repair
+                // (death 10%, spirit healer 25%); max 0 = indestructible ⇒ no line.
+                fields
+                    .item_durability()
+                    .zip(fields.item_max_durability())
+                    .filter(|&(_, max)| max > 0),
+                // The instance carries letter text (a mail permanent copy) — the same gate the
+                // right-click reader fork uses (`ui_items::drain`); the hover magnifier keys off it.
+                // Template-`PageText` books join when the books read path lands (decision 0572).
+                fields.item_text_id().is_some_and(|id| id != 0),
+                // `ITEM_FIELD_CREATOR` → the ask-once name cache: the tooltip's "Written by %s" /
+                // "<Made by %s>" line. `None` while the query is in flight — the changed re-push
+                // repaints the hover when the answer lands (the ref's cache-callback shape).
+                fields
+                    .item_creator()
+                    .filter(|&g| g != 0)
+                    .and_then(|g| names.resolve(g, commands).map(str::to_string)),
+                // `ITEM_FIELD_FLAGS` — the tooltip's UNLOCKED (0x4) / WRAPPED (0x8) sub-gates.
+                fields.item_flags().unwrap_or(0),
+                // The instance's own 7 enchant slots — the tooltip's enchant lines (0915/0920). An
+                // item we hold streams as an OBJECT, so all seven are here, with their charges and
+                // their `SMSG_ITEM_ENCHANT_TIME_UPDATE` countdowns; the wire's 2-slot broadcast is
+                // what everyone ELSE's items are limited to.
+                crate::items::enchant_lines(
+                    (0..7).map(|s| {
+                        (
+                            s,
+                            fields.item_enchant(s).unwrap_or(0),
+                            fields.item_enchant_charges(s),
+                            enchant_ms[usize::from(s)],
+                        )
+                    }),
+                    enchants,
+                ),
+            ),
+            // The player descriptor references a guid whose create hasn't landed (yet) —
+            // occupied, unresolved.
+            None => return Some(ContainerSlot::default()),
+        };
     if entry == 0 {
         return Some(ContainerSlot::default());
     }
@@ -464,6 +486,7 @@ fn resolve_slot(
             readable,
             creator,
             flags,
+            enchants: enchant_lines,
             ..Default::default()
         });
     };
@@ -480,6 +503,7 @@ fn resolve_slot(
         readable,
         creator,
         flags,
+        enchants: enchant_lines,
         equip_slots: find_equip_slot(t.inventory_type),
         bar_placeable: t.placeable_on_action_bar(),
         cooldown: t.use_spell.and_then(|u| {
@@ -496,6 +520,8 @@ pub(super) fn feed_containers(
     script: Option<NonSendMut<UiScript>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
+    // `SpellItemEnchantment`'s name column — the tooltip's enchant lines (decision 0915).
+    enchants: Option<Res<crate::items::Enchants>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
@@ -513,19 +539,33 @@ pub(super) fn feed_containers(
     let now = std::time::Instant::now();
     let ui_now = script.now();
     let spell_catalog = spells.as_deref().map(|s| &s.catalog);
+    let enchant_rows = enchants.as_deref();
     // Inventory refusals surface as the client's red error line (the cast path's exact shape):
-    // the wire code keys into the VM's own GlobalStrings ([`equip_error_key`]), reason 1 filling
-    // its `%d` with the packet's required level. A code with no 1.12 string (59, past-the-enum)
-    // — or a key missing from the VM, which would be OUR load bug — prints the hex debug line
-    // rather than vanishing: these are server refusals the player must see.
+    // the wire code keys into the VM's own GlobalStrings ([`equip_error_key`], total), reason 1
+    // filling its `%d` with the packet's required level.
+    //
+    // **An unresolvable or empty key prints NOTHING** — this is the reference's own behaviour,
+    // not a fallback: `CGGameUI::DisplayError` is called unconditionally and the sink's
+    // `cmp byte [ecx],0` guard (`0x4945b4`) drops an empty string before it renders or sounds.
+    // It is what silences reason 59, the lock-clear sentinel that rides alongside a real refusal
+    // and used to print a second, hex-debug line over it (B198) — and it is the same law
+    // `ui_action::cast_fail` already runs. No hex debug line on the player's screen: a code we
+    // failed to map can't reach here (the table is total), and a key we typo'd is caught by
+    // `equip_error`'s resolution test against the real `GlobalStrings.lua`, not at runtime.
     for (reason, level) in equip_errors.0.drain(..) {
-        let text = equip_error_key(reason)
-            .and_then(|key| script.lua().globals().get::<String>(key).ok())
-            .map(|t| match level {
-                Some(d) => t.replace("%d", &d.to_string()),
-                None => t,
-            })
-            .unwrap_or_else(|| format!("Inventory error ({reason:#04x})"));
+        let key = equip_error_key(reason);
+        let text = script
+            .lua()
+            .globals()
+            .get::<String>(key)
+            .unwrap_or_default();
+        if text.is_empty() {
+            continue;
+        }
+        let text = match level {
+            Some(d) => text.replace("%d", &d.to_string()),
+            None => text,
+        };
         script.fire_event("UI_ERROR_MESSAGE", vec![ScriptValue::Str(text)]);
     }
     for line in error_lines.0.drain(..) {
@@ -557,6 +597,7 @@ pub(super) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
+                enchant_rows,
                 &commands,
                 &cooldowns,
                 spell_catalog,
@@ -609,6 +650,7 @@ pub(super) fn feed_containers(
                     guid,
                     &mut items,
                     icons.as_deref(),
+                    enchant_rows,
                     &commands,
                     &cooldowns,
                     spell_catalog,
@@ -641,6 +683,7 @@ pub(super) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
+                enchant_rows,
                 &commands,
                 &cooldowns,
                 spell_catalog,
@@ -689,6 +732,7 @@ pub(super) fn feed_containers(
                     guid,
                     &mut items,
                     icons.as_deref(),
+                    enchant_rows,
                     &commands,
                     &cooldowns,
                     spell_catalog,
@@ -725,6 +769,7 @@ pub(super) fn feed_containers(
                 guid,
                 &mut items,
                 icons.as_deref(),
+                enchant_rows,
                 &commands,
                 &cooldowns,
                 spell_catalog,

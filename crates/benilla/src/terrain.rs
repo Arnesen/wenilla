@@ -63,6 +63,12 @@ pub struct WowModelKey {
     /// `M2UseZFill` clone command, wow-re `m2-blend-promotion-zfill.md` §4): `specialize` masks the
     /// colour writes off, turns blend off, and forces depth-write ON.
     zfill: bool,
+    /// Far side of the water plane (`clutter_fade.z` bit 11 — `model_render`'s far twin, the
+    /// water-plane interleave's mesh lane): the material's huge negative SORT bias must stay
+    /// sort-only, so `specialize` zeroes the rasterizer `DepthBiasState` constant the base
+    /// `StandardMaterial` derived from the same field (at −4e4 that constant is a ~0.5% relative
+    /// depth pull — enough to clip a blade's coplanar sheen/glow layers behind the blade itself).
+    far_side: bool,
     // NB: the WMO authored batch order is deliberately NOT a key axis. It used to be (a
     // per-batch-index `DepthBiasState` constant), which made every batch index its own pipeline —
     // the city first-sight compile stall (decision 0837). The coplanar-layering nudge now rides
@@ -82,6 +88,7 @@ impl From<&WowModelExt> for WowModelKey {
             modulate: markers & 0x80 != 0,
             modulate2x: markers & 0x100 != 0,
             zfill: markers & 0x200 != 0,
+            far_side: markers & 0x800 != 0,
         }
     }
 }
@@ -208,6 +215,18 @@ impl MaterialExtension for WowModelExt {
             ds.depth_write_enabled = !key.bind_group_data.no_depth_write;
             if key.bind_group_data.no_depth_test {
                 ds.depth_compare = CompareFunction::Always;
+            }
+        }
+        // A far-side-of-water twin's bias is a SORT rung only (the water-plane interleave,
+        // `sky_order::FAR_SIDE_BIAS`): the base `StandardMaterial::specialize` has just packed the
+        // same f32 into the rasterizer `DepthBiasState` constant (bevy 0.18 `pbr_material.rs`,
+        // `depth_stencil.bias.constant`), where −4e4 ULPs would pull every far fragment ~0.5%
+        // deeper and clip a blade's coplanar sheen/glow against the blade's own opaque depth.
+        // Zero it back — the effect lane splits sort from raster by construction; this bit is the
+        // mesh lane's split.
+        if key.bind_group_data.far_side {
+            if let Some(ds) = descriptor.depth_stencil.as_mut() {
+                ds.bias.constant = 0;
             }
         }
         // The WMO authored-batch-order depth nudge (the coplanar MOBA layering determinism) is NOT

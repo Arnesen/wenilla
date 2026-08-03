@@ -90,14 +90,20 @@ impl ItemVisualCatalog {
     }
 }
 
-/// `SpellItemEnchantment.dbc`'s **visual column** (field 22): an enchant id → the ItemVisuals id
-/// its glow comes from. Only the 102 rows that carry one are kept; everything else about the
-/// enchant table (its effects, points, name) belongs to whoever needs it, not here.
-pub struct EnchantVisualCatalog {
+/// `SpellItemEnchantment.dbc`'s two consumer columns, from one load of the one table: the
+/// **visual** (field 22) an enchant glows with, and the **name** (field 13, the enUS slot of the
+/// 1.12 localized-string block) the item tooltip prints for it. Two lanes read this table — the
+/// weapon-glow chain (decision 0805) and the tooltip's enchant line (decision 0915) — and one
+/// adapter serves both: two loaders over one DBC is how a schema drifts.
+///
+/// Sparse on both axes: 102 of the 1460 rows carry a visual, and a row without a name simply has
+/// none. The rest of the table (effects, points, args) belongs to whoever needs it, not here.
+pub struct EnchantCatalog {
     visuals: HashMap<u32, i32>,
+    names: HashMap<u32, String>,
 }
 
-impl EnchantVisualCatalog {
+impl EnchantCatalog {
     /// The ItemVisuals id an enchant glows with, or `None` for an enchant with no visual. The
     /// value is signed for the same reason as [`ItemVisualCatalog::effects`] — one shipped row
     /// carries `-1`.
@@ -105,23 +111,31 @@ impl EnchantVisualCatalog {
         self.visuals.get(&enchant_id).copied()
     }
 
-    /// Build from an explicit map — tests and synthetic fixtures.
-    pub fn from_visuals(visuals: HashMap<u32, i32>) -> Self {
-        EnchantVisualCatalog { visuals }
+    /// The enchant's display name as the table stores it — `"Agility +15"`, `"Crusader"`,
+    /// `"Stamina +7"`. `None` for an unknown id or a row with an empty name string.
+    pub fn name(&self, enchant_id: u32) -> Option<&str> {
+        self.names.get(&enchant_id).map(String::as_str)
+    }
+
+    /// Build from explicit maps — tests and synthetic fixtures.
+    pub fn from_rows(visuals: HashMap<u32, i32>, names: HashMap<u32, String>) -> Self {
+        EnchantCatalog { visuals, names }
     }
 
     /// Iterate `(enchant id, ItemVisuals id)` for the rows that carry one (order unspecified) —
     /// the cross-table join checks read it.
-    pub fn iter(&self) -> impl Iterator<Item = (u32, i32)> + '_ {
+    pub fn iter_visuals(&self) -> impl Iterator<Item = (u32, i32)> + '_ {
         self.visuals.iter().map(|(k, v)| (*k, *v))
     }
 
-    pub fn len(&self) -> usize {
+    /// How many enchants carry a glow — the glow lane's startup census.
+    pub fn visual_count(&self) -> usize {
         self.visuals.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.visuals.is_empty()
+    /// How many enchants carry a printable name — the tooltip lane's.
+    pub fn name_count(&self) -> usize {
+        self.names.len()
     }
 }
 
@@ -146,9 +160,10 @@ pub(crate) fn item_visual_effects_schema() -> Schema {
     s
 }
 
-/// `SpellItemEnchantment.dbc` — 24 fields / 96-byte records in build 5875. Only field 22
-/// (`ItemVisual`) is read; the rest are typed to keep the field-count check exact. The eight
-/// `Name_Lang` slots + their mask are the 1.12 localized-string block (only `enUS` is filled).
+/// `SpellItemEnchantment.dbc` — 24 fields / 96-byte records in build 5875. Fields 13 (`Name0`)
+/// and 22 (`ItemVisual`) are read; the rest are typed to keep the field-count check exact. The
+/// eight `Name_Lang` slots + their mask are the 1.12 localized-string block (only `enUS`, the
+/// first, is filled).
 pub(crate) fn spell_item_enchantment_schema() -> Schema {
     let mut s = Schema::new("SpellItemEnchantment");
     s.add_field(SchemaField::new("ID", FieldType::UInt32));
@@ -201,8 +216,9 @@ pub fn load_item_visual_catalog(chain: &mut Chain) -> Result<ItemVisualCatalog> 
     Ok(ItemVisualCatalog { visuals })
 }
 
-/// Load `SpellItemEnchantment.dbc`'s visual column off the patch chain.
-pub fn load_enchant_visual_catalog(chain: &mut Chain) -> Result<EnchantVisualCatalog> {
+/// Load `SpellItemEnchantment.dbc`'s two consumer columns off the patch chain — one parse, both
+/// lanes (see [`EnchantCatalog`]).
+pub fn load_enchant_catalog(chain: &mut Chain) -> Result<EnchantCatalog> {
     let bytes = chain
         .read_file(SPELL_ITEM_ENCHANTMENT)
         .with_context(|| format!("reading {SPELL_ITEM_ENCHANTMENT}"))?;
@@ -212,14 +228,19 @@ pub fn load_enchant_visual_catalog(chain: &mut Chain) -> Result<EnchantVisualCat
         "SpellItemEnchantment",
     )?;
     let mut visuals = HashMap::new();
+    let mut names = HashMap::new();
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
         let visual = u32_at(r, 22).unwrap_or(0) as i32;
         if visual != 0 {
             visuals.insert(id, visual);
         }
+        // `str_at` drops the empty string, so a nameless row simply never lands.
+        if let Some(name) = str_at(&rs, r, 13) {
+            names.insert(id, name);
+        }
     }
-    Ok(EnchantVisualCatalog { visuals })
+    Ok(EnchantCatalog { visuals, names })
 }
 
 #[cfg(test)]
@@ -347,11 +368,11 @@ mod tests {
         }
         let mut chain = crate::open_chain(&data).expect("open chain");
         let visuals = load_item_visual_catalog(&mut chain).expect("load ItemVisuals");
-        let enchants = load_enchant_visual_catalog(&mut chain).expect("load SpellItemEnchantment");
-        assert_eq!(enchants.len(), 102, "enchants carrying a visual");
+        let enchants = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
+        assert_eq!(enchants.visual_count(), 102, "enchants carrying a visual");
 
         let resolved = enchants
-            .iter()
+            .iter_visuals()
             .filter(|(_, v)| visuals.effects(*v).is_some())
             .count();
         assert_eq!(resolved, 101, "…all but the one -1 row resolve to a row");
@@ -375,5 +396,37 @@ mod tests {
         // A plain +stat enchant carries none (241 "Weapon Damage +2", 929 "Stamina +7").
         assert_eq!(enchants.visual(241), None);
         assert_eq!(enchants.visual(929), None);
+    }
+
+    /// The **name** column (field 13), on real data — the string the tooltip's enchant line
+    /// prints (decision 0915). Pinned on the case that opened the lane plus one of each other
+    /// shape, and on the two properties the consumer rests on: the name is stored in the table's
+    /// own word order (`"Agility +15"`, NOT a reformat), and it is independent of the visual
+    /// column — a glowing enchant and a plain +stat one both have one.
+    #[test]
+    fn real_enchant_names_read_off_the_table() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let enchants = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
+
+        // 2564 = the permanent weapon enchant on the director's Hatchet of Sundered Bone: a name
+        // AND a visual (125 → GreenGlow_Low), the two columns joined on one row.
+        assert_eq!(enchants.name(2564), Some("Agility +15"));
+        assert_eq!(enchants.visual(2564), Some(125));
+        // Named, no glow — the +stat family.
+        assert_eq!(enchants.name(241), Some("Weapon Damage +2"));
+        assert_eq!(enchants.name(929), Some("Stamina +7"));
+        // Glow, and a name that is a proper noun rather than a stat phrase.
+        assert_eq!(enchants.name(1900), Some("Crusader"));
+        // An id past the table names nothing at all.
+        assert_eq!(enchants.name(999_999), None);
+        assert!(
+            enchants.name_count() > enchants.visual_count(),
+            "far more enchants print a name than carry a glow"
+        );
     }
 }

@@ -257,10 +257,7 @@ pub(super) fn attach_entity_visuals(
     // The mount children's build state (decision 0441): a mounted unit's rider waits on its mount
     // child's attach — the seat is the mount's attachment-0 joint out of this `BoneAttach`; the
     // `NetEntity` is the staleness check (the field moved while the unit was still pending).
-    mount_children: Query<
-        (Has<VisualAttached>, Option<&super::BoneAttach>, &NetEntity),
-        With<super::mount::MountBody>,
-    >,
+    mount_children: super::mount::MountChildren,
     // The ItemDisplayInfo catalog (armor region textures, decision 0074). Read-only here; the
     // held-item systems in the same chain hold it mutably in their own turns.
     displays: Option<Res<super::ItemDisplays>>,
@@ -345,108 +342,47 @@ pub(super) fn attach_entity_visuals(
         if let Some(parts) = model {
             // ── Mounts (decision 0441): a mounted unit is TWO skeletons. The mount is a child
             // entity carrying a plain creature `NetEntity` — this very system builds it like any
-            // beast next frame(s) — and the rider's joints then root under the mount's
-            // attachment-0 seat joint. Until the mount child has attached, the unit builds
-            // nothing (no naked-at-the-ground flash; the model loads dominate the wait anyway).
-            // A mount child itself has no `ObjectStore`, so it can never take this branch.
+            // beast next frame(s) — and the rider's rig then roots under the mount's attachment-0
+            // seat joint. Until the mount child has attached, the unit builds nothing (no
+            // naked-at-the-ground flash; the model loads dominate the wait anyway). A mount child
+            // itself has no `ObjectStore`, so it can never take this branch.
+            //
+            // This is the **first build** of a unit the field already says is mounted (a
+            // born-mounted NPC, a mounted player streaming in). A field change on a unit that is
+            // already standing is `mount::reseat_mounts`' job, and it re-seats the standing rig
+            // rather than coming back through here — the two share the seat leg below.
             let mount_display = match net.kind {
                 EntityKind::Unit | EntityKind::Player => stores
                     .get(entity)
                     .map_or(0, |s| s.0.unit_mount_display_id()),
                 _ => 0,
             };
-            // Reconcile a stale mount child first: the field moved (or zeroed) while this unit
-            // was still pending, or the child entity is gone — drop it and retry fresh next frame.
-            if let Some(&super::mount::MountChild(child)) = mount_child {
-                let built = mount_children.get(child).map(|(_, _, n)| n.display_id).ok();
-                if built != Some(Some(mount_display)) {
-                    if let Ok(mut ec) = commands.get_entity(child) {
-                        ec.despawn();
-                    }
-                    commands.entity(entity).remove::<super::mount::MountChild>();
-                    continue;
-                }
-            }
             // Where the rider's root bones parent: the unit entity, or the mounted seat anchor.
             let mut rider_root = entity;
             if mount_display != 0 {
-                // The mount scale law (byte-verified, wow-re mount-composition B3): rendered =
-                // `SCALE_X × CreatureDisplayInfo.creatureModelScale` — the CDI column ALONE (no
-                // CreatureModelData.modelScale). The unit root already bakes SCALE_X, so the
-                // child carries just the column; the seat anchor counter-scales it so the rider
-                // keeps its own size (the client's compensating own/mount base ratio).
-                let mount_scale = creatures
-                    .as_deref()
-                    .and_then(|c| c.catalog.display_scale(mount_display))
-                    .unwrap_or(1.0);
-                match mount_child {
-                    None => {
-                        // Spawn the mount child. Its `NetEntity` registers the display want
-                        // (`update_display_models` scans every NetEntity), and this system
-                        // attaches it as a creature. Scale: the CDI column alone (the byte law
-                        // above); the unit root's SCALE_X composes through the hierarchy.
-                        let child = commands
-                            .spawn((
-                                NetEntity {
-                                    kind: EntityKind::Unit,
-                                    display_id: Some(mount_display),
-                                    scale: mount_scale,
-                                },
-                                super::mount::MountBody { host: entity },
-                                Transform::default(),
-                                Visibility::default(),
-                            ))
-                            .id();
-                        if reattached {
-                            // A mount-up on a unit already in view isn't a spawn — the mount
-                            // joins the rebuild's fade-skip.
-                            commands.entity(child).insert(super::equipment::Reattached);
-                        }
-                        commands.entity(entity).add_child(child);
-                        commands
-                            .entity(entity)
-                            .insert(super::mount::MountChild(child));
-                        continue; // wait for the mount to attach
-                    }
-                    Some(&super::mount::MountChild(child)) => {
-                        match mount_children.get(child) {
-                            Ok((true, Some(bones), _)) => {
-                                if let Some(&(bone, offset)) = bones.points.get(&0) {
-                                    if let Some(joint) = bones.anchor(bone) {
-                                        // The seat anchor: a child of the mount's attachment-0
-                                        // joint at the authored offset, counter-scaled so the
-                                        // rider keeps its own size (byte-verified: the client's
-                                        // body carries a compensating own/mount base ratio —
-                                        // wow-re mount-composition B3).
-                                        let anchor = commands
-                                            .spawn((
-                                                Transform::from_translation(offset).with_scale(
-                                                    Vec3::splat(1.0 / mount_scale.max(0.001)),
-                                                ),
-                                                Visibility::default(),
-                                                // The rider's model frame lives inside the
-                                                // MOUNT's anchor subtree — the world pass
-                                                // cascades a re-seat into the rider's palette
-                                                // (decision 0724).
-                                                crate::creature_anim::RigFrame(entity),
-                                            ))
-                                            .id();
-                                        commands.entity(joint).add_child(anchor);
-                                        rider_root = anchor;
-                                    }
-                                } else {
-                                    // The reference logs exactly this and leaves the body at the
-                                    // unit matrix (`0x60ce70`'s present-test miss).
-                                    warn!(
-                                        "MOUNTDISPLAYIDNOMOUNTATTACHMENT: display {mount_display} \
-                                         authors no attachment 0 — rider stays at the unit matrix"
-                                    );
-                                }
-                            }
-                            _ => continue, // the mount child is still building — wait
-                        }
-                    }
+                match super::mount::seat_or_spawn_mount(
+                    &mut commands,
+                    &mount_children,
+                    creatures.as_deref(),
+                    entity,
+                    mount_child.map(|&super::mount::MountChild(c)| c),
+                    mount_display,
+                    reattached,
+                ) {
+                    // The mount model is still building (or was just ordered) — wait.
+                    super::mount::Seat::Wait => continue,
+                    super::mount::Seat::Frame(anchor) => rider_root = anchor,
+                    // The reference logs and leaves the body at the unit matrix
+                    // (`0x60ce70`'s present-test miss) — `seat_or_spawn_mount` wrote the warning.
+                    super::mount::Seat::UnitMatrix => {}
                 }
+            } else if let Some(&super::mount::MountChild(child)) = mount_child {
+                // The field zeroed while this unit was still pending — drop the mount it ordered,
+                // or the build below would stand a riderless horse under a dismounted body.
+                if let Ok(mut ec) = commands.get_entity(child) {
+                    ec.despawn();
+                }
+                commands.entity(entity).remove::<super::mount::MountChild>();
             }
             // Real model: submesh children inherit the entity's (pose-driven) transform; bake scale onto it.
             let kind = match net.kind {

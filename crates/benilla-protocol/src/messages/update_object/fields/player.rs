@@ -44,6 +44,39 @@ impl ObjectFields {
     pub fn item_text_id(&self) -> Option<u32> {
         self.get_u32(45)
     }
+    /// `ITEM_FIELD_ENCHANTMENT + 3*slot` — the enchant id in one of an item OBJECT's **7**
+    /// enchantment slots (`slot < 7`; PERM = 0, TEMP = 1, then the five random-property slots).
+    /// `None` = empty / not sent.
+    ///
+    /// This is the item's own array, and it is the FULL one: vmangos
+    /// `UpdateFields_1_12_1.h` gives `ITEM_FIELD_ENCHANTMENT = OBJECT_END + 0x10, Size: 21,
+    /// PUBLIC` = 7 slots × 3 fields (id, duration, charges — `Item.h:117-119`), so field
+    /// `22 + 3*slot`. Distinct from [`Self::player_visible_item_enchant`], the 2-slot
+    /// (PERM, TEMP) copy broadcast on a *unit's* descriptor for everyone else to render from:
+    /// an item object streams only to its owner, so seven slots are readable for our own gear
+    /// and two for anybody else's.
+    ///
+    /// **Signed**, because the sign is load-bearing at exactly one consumer and nowhere else: the
+    /// tooltip resolves the `SpellItemEnchantment` row from `abs(id)` and uses the sign only to
+    /// paint the line pure-red instead of green (wow-re `tooltip-content-law.md` §E3).
+    pub fn item_enchant(&self, slot: u8) -> Option<i32> {
+        (slot < 7)
+            .then(|| self.get_u32(FIELD_ITEM_ENCHANTMENT + 3 * u16::from(slot)))?
+            .map(|id| id as i32)
+            .filter(|&id| id != 0)
+    }
+    /// `ITEM_FIELD_ENCHANTMENT + 3*slot + 2` — that slot's remaining enchant **charges**; `0` =
+    /// none. The tooltip appends `" (N Charges)"` to the slot's line when it is nonzero.
+    ///
+    /// The triple's MIDDLE field (the duration) is deliberately not exposed: the reference's
+    /// tooltip never reads it. A temporary enchant's countdown comes from
+    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` instead (`items::Items::enchant_remaining_ms`).
+    pub fn item_enchant_charges(&self, slot: u8) -> u32 {
+        (slot < 7)
+            .then(|| self.get_u32(FIELD_ITEM_ENCHANTMENT + 3 * u16::from(slot) + 2))
+            .flatten()
+            .unwrap_or(0)
+    }
     /// `ITEM_FIELD_DURABILITY` — an item's current durability (field 46: chain-locked between the
     /// tested STACK_COUNT 14 and CONTAINER_NUM_SLOTS 48 = ITEM_END anchors).
     pub fn item_durability(&self) -> Option<u32> {

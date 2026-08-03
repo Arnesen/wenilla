@@ -8,25 +8,21 @@ use benilla_protocol::messages::{mail_action, mail_error, MailListEntry};
 
 use crate::net::{ClientCommand, NetCommands};
 use crate::ui_items::EquipErrors;
-use crate::ui_mail::{mail_error_text, MailOpen, MailPending, MailSendAck, CHECKED_READ};
+use crate::ui_mail::{mail_error_text, MailOpen, MailPending, MailSendAck};
 
 /// `SessionEvent::MailList` (`SMSG_MAIL_LIST_RESULT`) — replace the session's rows + fire the inbox
 /// repaint (via the feed's diff). The inbox handler auto-purges expired mail: any row whose timer ran
 /// out (`expire_days <= 0`) is deleted server-side (`CMSG_MAIL_DELETE`) and dropped here (wow-re §5,
 /// `ui/scratch/mail-interaction.md`).
 ///
-/// Also clears [`MailPending`] (decision 0544 P3) when the surviving list has nothing left unread:
-/// vmangos recomputes its own `unReadMails` count whenever it serves the list, but never re-notifies
-/// the client's countdown float directly — the float is purely client-local. Mirroring "every row
-/// read (or no rows at all) ⇒ HasNewMail() goes false" is the observable law the reference itself
-/// exhibits (opening/checking the inbox clears the minimap icon); a list that still has an unread row
-/// leaves the countdown alone (a fresh unrelated mail may be independently pending).
-pub(super) fn mail_list(
-    mails: Vec<MailListEntry>,
-    mail: &mut MailOpen,
-    commands: &NetCommands,
-    pending: &mut MailPending,
-) {
+/// **It does not touch [`crate::ui_mail::MailPending`]** — and that is a positive fact, not an
+/// omission (decision 0913). This arm used to clear the countdown when the surviving list had
+/// nothing unread, on the inferred grounds that "checking your mail clears the icon" had to be the
+/// list's doing. A full write-xref of the countdown float in wow-re says otherwise: nothing on the
+/// inbox path writes it. The icon clears because **opening a letter arms the deferred-refresh flag
+/// and the mailbox *close* re-asks the server** — modelled in [`crate::ui_mail`], where the close
+/// edge lives.
+pub(super) fn mail_list(mails: Vec<MailListEntry>, mail: &mut MailOpen, commands: &NetCommands) {
     let mailbox = mail.mailbox;
     mail.mails = mails
         .into_iter()
@@ -44,9 +40,6 @@ pub(super) fn mail_list(
             }
         })
         .collect();
-    if mail.mails.iter().all(|e| e.checked & CHECKED_READ != 0) {
-        pending.0 = None;
-    }
 }
 
 /// `SessionEvent::SendMailResult` (`SMSG_SEND_MAIL_RESULT`) — route per action/error (decision 0544
@@ -99,22 +92,32 @@ pub(super) fn mail_item_text(text_id: u32, text: String, mail: &mut MailOpen) {
     mail.pending_bodies.remove(&text_id);
 }
 
-/// `SessionEvent::ReceivedMail` (`SMSG_RECEIVED_MAIL`) — mail just arrived: the wire body carries no
-/// payload (always `u32 0`, decision 0544), so the *event itself* is the notification. Set the
-/// countdown to `0.0` (`HasNewMail()` flips true — wow-re §5 §7) and, if a mailbox session is open,
-/// re-sync its list: a server push bypasses `CheckInbox`'s 60 s client-side throttle (decision 0544
-/// P3) — the reference's own case for "the inbox visibly updates while you're standing at it".
-pub(super) fn received_mail(pending: &mut MailPending, mail: &MailOpen, commands: &NetCommands) {
-    pending.0 = Some(0.0);
+/// `SessionEvent::ReceivedMail` (`SMSG_RECEIVED_MAIL`) — mail just arrived. `seconds` is the wire's
+/// delay float (vmangos always sends `0.0` = "now"); it runs the countdown's set-value ladder,
+/// which takes the **busy** branch when a mailbox window is open — arming the deferred refresh
+/// instead of moving the icon under the player's nose (wow-re `0x4ad620`, decision 0913).
+///
+/// The list re-sync is ours, not the reference's, and stays: a server push bypasses `CheckInbox`'s
+/// 60 s client-side throttle (decision 0544 P3), so a mail arriving while you stand at the mailbox
+/// shows up. The reference reaches the same place by its close-time re-query; leaving a mail you
+/// were just told about invisible for up to a minute is the worse client, and this costs one packet.
+pub(super) fn received_mail(
+    seconds: f32,
+    pending: &mut MailPending,
+    mail: &MailOpen,
+    commands: &NetCommands,
+) {
+    pending.apply_received_mail(seconds, mail.mailbox.is_some());
     if let Some(mailbox) = mail.mailbox {
         let _ = commands.0.send(ClientCommand::GetMailList { mailbox });
     }
 }
 
-/// `SessionEvent::NextMailTime` (`MSG_QUERY_NEXT_MAIL_TIME`'s reply, one `f32`) — seed the
-/// countdown (decision 0544 P3, wow-re §5 §7): `0.0` = mail waiting now, negative (vmangos always
-/// sends `-86400.0`) = none, a hypothetical positive value counts down per frame in `crate::ui_mail`'s
-/// `feed_mail` and flips `HasNewMail()` true at `0`.
+/// `SessionEvent::NextMailTime` (`MSG_QUERY_NEXT_MAIL_TIME`'s reply, one `f32`) — store the
+/// server's float verbatim and signal `UPDATE_PENDING_MAIL` **unconditionally** (wow-re `0x4ad5f0`,
+/// signal site `0x4ad605`; decision 0913). `0.0` = mail waiting now, negative (vmangos always sends
+/// `-86400.0`) = none, a positive value counts down per frame in `crate::ui_mail`'s `feed_mail` and
+/// flips `HasNewMail()` true as it lands inside ε.
 pub(super) fn next_mail_time(seconds: f32, pending: &mut MailPending) {
-    pending.0 = Some(seconds);
+    pending.apply_query_reply(seconds);
 }

@@ -107,7 +107,7 @@ pub use char_stats::{
     weapon_subclass_skill, InvSlotView, InventorySlots, PlayerCombatStats, INVENTORY_SLOT_COUNT,
     SKILL_UNARMED,
 };
-pub use container::{ContainerMove, ContainerSlot, ContainerState, UiCursorMode};
+pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
 pub use craft::{CraftReagent, CraftRecipe, CraftState};
 pub use cursor::{CursorAction, CursorItem, CursorPayload, CursorSpell, WorldPick, EQUIPMENT_BAG};
 pub use death::{DeathAction, DeathUiState};

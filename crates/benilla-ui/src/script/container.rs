@@ -65,6 +65,32 @@ pub struct ContainerSlot {
     /// UNLOCKED `0x4`, the wrapped-gift arm WRAPPED `0x8` (see
     /// [`super::char_stats::InvSlotView::flags`], the doll twin).
     pub flags: u32,
+    /// The instance's enchant slots, resolved by the app ([`super::EnchantView`]) and in
+    /// enchant-slot order: it joins the id through `SpellItemEnchantment.dbc`'s name column and
+    /// hands over the row's name plus the three facts the line law needs to place and paint it.
+    /// Empty = unenchanted, or the enchant DBC never loaded. Decisions 0915/0920.
+    pub enchants: Vec<super::EnchantView>,
+}
+
+/// One enchant slot as the tooltip renders it (wow-re `ui/scratch/tooltip-content-law.md` §E3,
+/// byte-verified; decision 0920). The app resolves the DBC row; every rule below is the engine's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EnchantView {
+    /// `ITEM_FIELD_ENCHANTMENT` slot: **0** permanent · **1** temporary · **2..6** the
+    /// random-property suffix. It decides the colour band — only 0 and 1 are ever coloured.
+    pub slot: u8,
+    /// The enchant id was NEGATIVE. `abs(id)` names the row either way — the sign's only effect is
+    /// to paint slots 0/1 pure-red instead of green (`0x52ca29–0x52ca49`).
+    pub negative: bool,
+    /// The `SpellItemEnchantment` row's name, verbatim (`"Agility +15"`, `"Crusader"`) — the
+    /// reference copies the string with no format at all (`0x52ca8b–0x52caa1`).
+    pub name: String,
+    /// The slot's `ITEM_FIELD_ENCHANTMENT` charges dword — nonzero appends " (N Charges)".
+    pub charges: u32,
+    /// Milliseconds left on a TEMPORARY enchant, from `SMSG_ITEM_ENCHANT_TIME_UPDATE` (the item's
+    /// own duration field is never read for this). `Some` replaces the plain name with the
+    /// countdown phrasing; `None` = no timer, or expired.
+    pub remaining_ms: Option<u64>,
 }
 
 /// One bag's snapshot: its name, capacity, and occupied slots (1-based).
@@ -556,6 +582,7 @@ mod tests {
                 readable: false,
                 creator: None,
                 flags: 0,
+                enchants: Vec::new(),
             },
         );
         // An in-flight slot: the create arrived, the template answer hasn't.
@@ -731,6 +758,7 @@ mod tests {
                 readable: false,
                 creator: None,
                 flags: 0,
+                enchants: Vec::new(),
             },
         );
         s.set_container(0, Some(state));

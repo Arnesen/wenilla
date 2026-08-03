@@ -43,6 +43,11 @@ pub(super) fn apply_model_visibility(
     // (`[0xc7b748]` is the branch, not a participant). Without this exemption, standing inside
     // Stratholme would window-cull Stratholme's own walls.
     claim: Res<crate::wmo_portal::CameraInteriorClaim>,
+    // The water-plane classification (`model_render::classify_water_side`) — read-only here: this
+    // system owns the DoodadFade handle pick, so the far-side axis composes INTO that pick (the
+    // marker + the twin map) instead of a second writer re-swapping the handle it just wrote —
+    // the exact fight decision 0025's one-authority law exists to prevent.
+    far_twins: Res<crate::model_render::FarSideTwins>,
     mut q: Query<(
         &ModelPart,
         &GlobalTransform,
@@ -54,6 +59,7 @@ pub(super) fn apply_model_visibility(
         Option<&WmoGroupVis>,
         Option<&crate::doodad_anim::MatAnim>,
         Has<crate::exterior_cull::ExteriorScene>,
+        Has<crate::model_render::FarSideOfWater>,
     )>,
     // The building's own MLIQ surfaces (canals, dungeon pools, Ragefire's lava). They carry a
     // `WmoGroupVis` like every other piece of their group but no `ModelPart` — they are not model
@@ -87,7 +93,7 @@ pub(super) fn apply_model_visibility(
     // serial walk alone blew half the 16.7 ms budget (the Stormwind fps hunt). Every write below
     // is change-gated, so the steady state is a pure read fan-out.
     q.par_iter_mut().for_each(
-        |(part, xf, mut vis, fade, tag, mat, aabb, group_vis, mat_anim, exterior)| {
+        |(part, xf, mut vis, fade, tag, mat, aabb, group_vis, mat_anim, exterior, far_side)| {
             let toggled_on =
                 m.kind_visible[part.kind.index()] && m.blend_visible[blend_index(part.blend)];
             // `farclip` is the *world-doodad/WMO* draw distance only. Creatures/GameObjects come from the
@@ -212,10 +218,21 @@ pub(super) fn apply_model_visibility(
             }
             if let Some(f) = fade {
                 if let Some(mut mat) = mat {
-                    let want = if fade_alpha < 1.0 {
+                    let base = if fade_alpha < 1.0 {
                         &f.blend
                     } else {
                         &f.cutout
+                    };
+                    // A feathering doodad on the eye's far side of the water plane takes the far
+                    // twin of the SAME pick (the water-plane interleave, `sky_order::FAR_SIDE_BIAS`)
+                    // — the classification is the marker's, the pick stays this system's. The
+                    // cutout never composes: an opaque draw settles against the water by depth. A
+                    // map miss = the twin isn't built yet (classify runs on transparent draws
+                    // only); keep the base and pick it up next frame.
+                    let want = if far_side && fade_alpha < 1.0 {
+                        far_twins.far_of(base).unwrap_or(base)
+                    } else {
+                        base
                     };
                     if mat.0 != *want {
                         mat.0 = want.clone();

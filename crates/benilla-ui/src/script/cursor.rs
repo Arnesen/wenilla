@@ -460,6 +460,7 @@ mod tests {
                 readable: false,
                 creator: None,
                 flags: 0,
+                enchants: Vec::new(),
             },
         );
         crate::script::container::ContainerState {

@@ -556,6 +556,7 @@ fn shipped_bag_frame_drives_end_to_end() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(

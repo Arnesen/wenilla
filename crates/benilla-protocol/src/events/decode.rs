@@ -173,6 +173,15 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             item_guid,
             spell_id,
         }],
+        ServerPacket::ItemEnchantTime {
+            item_guid,
+            slot,
+            seconds,
+        } => vec![SessionEvent::ItemEnchantTime {
+            item_guid,
+            slot,
+            seconds,
+        }],
         ServerPacket::CooldownEvent { spell_id, caster } => {
             vec![SessionEvent::CooldownEvent { spell_id, caster }]
         }
@@ -722,7 +731,7 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
         ServerPacket::ItemTextQueryResponse { text_id, text } => {
             vec![SessionEvent::MailItemText { text_id, text }]
         }
-        ServerPacket::ReceivedMail => vec![SessionEvent::ReceivedMail],
+        ServerPacket::ReceivedMail { seconds } => vec![SessionEvent::ReceivedMail { seconds }],
         ServerPacket::NextMailTime { seconds } => {
             vec![SessionEvent::NextMailTime { seconds }]
         }

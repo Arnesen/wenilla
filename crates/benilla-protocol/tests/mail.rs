@@ -336,16 +336,22 @@ fn item_text_query_response_wire() {
 
 #[test]
 fn received_mail_wire() {
-    // SMSG_RECEIVED_MAIL: one u32, always 0 on vmangos.
-    let body = 0u32.to_le_bytes();
-    match messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &body).unwrap() {
-        ServerPacket::ReceivedMail => {}
+    // SMSG_RECEIVED_MAIL: one f32 delay, the same countdown units as MSG_QUERY_NEXT_MAIL_TIME's
+    // reply (decision 0913 — the real client reads these four bytes as a float). vmangos writes
+    // them as `uint32(0)`, and 0x00000000 *is* 0.0f, so its only value decodes as "waiting now".
+    let vmangos_body = 0u32.to_le_bytes();
+    match messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &vmangos_body).unwrap() {
+        ServerPacket::ReceivedMail { seconds } => assert_eq!(seconds, 0.0),
         other => panic!("received mail, got {}", other.name()),
     }
-    let packet = messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &body).unwrap();
-    match decode(packet).pop().unwrap() {
-        SessionEvent::ReceivedMail => {}
-        other => panic!("received mail event, got {other:?}"),
+    // A server that sends a real delay round-trips it.
+    for seconds in [0.0f32, 120.0f32] {
+        let body = seconds.to_le_bytes();
+        let packet = messages::parse_server(messages::opcode::SMSG_RECEIVED_MAIL, &body).unwrap();
+        match decode(packet).pop().unwrap() {
+            SessionEvent::ReceivedMail { seconds: got } => assert_eq!(got, seconds),
+            other => panic!("received mail event, got {other:?}"),
+        }
     }
 }
 

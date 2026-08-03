@@ -21,6 +21,10 @@ pub(super) const QUALITY_RGB: [[f32; 3]; 7] = [
 pub(super) const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 pub(super) const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 pub(super) const RED: [f32; 4] = [1.0, 32.0 / 255.0, 32.0 / 255.0, 1.0];
+/// The tooltip's OTHER red — `0xc0d398 = ffff0000`, a pure red distinct from the (255,32,32) the
+/// requirement lines wear. Two lines use it, both in the enchant family: a **negative** enchant id
+/// in slot 0/1, and ITEM_ENCHANT_DISCLAIMER (wow-re §1-ENCHANT §E3/§E4).
+pub(super) const ENCHANT_RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 pub(super) const GOLD: [f32; 4] = [1.0, 210.0 / 255.0, 0.0, 1.0];
 pub(super) const GRAY: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 /// The owned set member's pale cream — byte-read `0xc0d368 = ffffff97` (writer `0x529050`).

@@ -1039,6 +1039,13 @@ pub(super) fn apply_net_updates(
                 item_guid,
                 spell_id,
             } => item_cooldown(item_guid, spell_id, &items, &mut ui_actions.10),
+            // The temporary-enchant countdown's ONLY feed (decision 0920): park the deadline on the
+            // item store, which every tooltip surface reads back through `enchant_remaining_ms`.
+            SessionEvent::ItemEnchantTime {
+                item_guid,
+                slot,
+                seconds,
+            } => items.set_enchant_deadline(item_guid, slot, seconds),
             SessionEvent::CooldownEvent { spell_id, caster } => {
                 cooldown_event(spell_id, caster, &self_guid, &mut ui_actions.10)
             }
@@ -1208,7 +1215,7 @@ pub(super) fn apply_net_updates(
             // mailbox session the feed reads (`crate::ui_mail`); the arrival pair feeds
             // `MailPending` (`HasNewMail()`/the minimap icon).
             SessionEvent::MailList { mails } => {
-                mail::mail_list(mails, &mut mail_open, &net_commands, &mut mail_pending)
+                mail::mail_list(mails, &mut mail_open, &net_commands)
             }
             SessionEvent::SendMailResult {
                 mail_id,
@@ -1229,8 +1236,8 @@ pub(super) fn apply_net_updates(
             SessionEvent::MailItemText { text_id, text } => {
                 mail::mail_item_text(text_id, text, &mut mail_open)
             }
-            SessionEvent::ReceivedMail => {
-                mail::received_mail(&mut mail_pending, &mail_open, &net_commands)
+            SessionEvent::ReceivedMail { seconds } => {
+                mail::received_mail(seconds, &mut mail_pending, &mail_open, &net_commands)
             }
             SessionEvent::NextMailTime { seconds } => {
                 mail::next_mail_time(seconds, &mut mail_pending)

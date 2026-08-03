@@ -66,9 +66,10 @@ mod item_glow;
 use item_glow::{attach_item_glows, ItemGlows};
 
 /// Mounts (decision 0441): the `UNIT_FIELD_MOUNTDISPLAYID` → second-creature-visual projection —
-/// the mount child + seat components and the transition's diff-and-rebuild.
+/// the mount child + seat components and the transition's **re-seat** (B199: the reference
+/// re-parents the rider's model onto the mount, it never rebuilds it).
 pub(crate) mod mount;
-use mount::refresh_mounts;
+use mount::reseat_mounts;
 
 /// Live descriptor appearance (decision 0695): a `Values` delta moving the display id swaps the
 /// model in place (druid forms, GM morphs — ledger B69/F04) and one moving `SCALE_X` eases the
@@ -470,9 +471,12 @@ impl Plugin for EntitiesPlugin {
                     // on the same parts, the equipment geosets re-selected, every attachment left
                     // alone (decision 0835, the reference's own shape).
                     attach::redress_player_looks,
-                    // A mount transition does the same (decision 0441): the field diff tears the
-                    // visual down, attach rebuilds it mounted (or dismounted) next frame(s).
-                    refresh_mounts,
+                    // A mount transition does the same, and for the same reason (B199): the
+                    // field diff **re-seats** the standing rig — onto the mount's attachment-0
+                    // joint, or back onto its own frame — where it used to tear the whole rider
+                    // down and let attach rebuild it. The reference re-parents the body model
+                    // (`0x712f70`/`0x713020`); it never re-creates it.
+                    reseat_mounts,
                     // A live display-id / scale change (decision 0695): the display swap is the
                     // same teardown-and-rebuild; the scale change arms the reference's 2 s ease.
                     // The rig heal (decision 0863) rides the same nest (Bevy's 20-tuple ceiling):
@@ -556,6 +560,26 @@ impl Plugin for EntitiesPlugin {
                     retire_unit_appear_fade,
                 )
                     .chain(),
+            )
+            // The water-plane interleave's MESH half (the sibling of the effect half in
+            // `particles::sim`): every transparent M2 batch classifies against the water plane
+            // and takes its far-side twin, so the surface paints over a submerged model's
+            // sheen/glow layers. Two lanes: entities whose handle the Visibility authority owns
+            // (the `DoodadFade` holders it pins every frame, decision 0025) get a MARKER the
+            // authority composes into its own pick — so classify runs before `ModelVisSet`, and
+            // the pick sees this frame's side; everything else (equipment, spell-fx, fade twins)
+            // is swapped here directly, after the fade resolve whose choice it re-derives from
+            // the current handle. The self feather stays deliberately unordered: it only writes
+            // while the camera is within arm's reach of the player's own parts, and the 0905
+            // waterline snap keeps the eye a full band off the surface — eye and part are then
+            // on the same side of the plane, where both writers agree on the near handle.
+            .init_resource::<crate::model_render::FarSideTwins>()
+            .add_systems(
+                Update,
+                crate::model_render::classify_water_side
+                    .after(crate::liquid::SubmersionVerdict)
+                    .after(apply_render_fade)
+                    .before(crate::debug_panel::ModelVisSet),
             )
             // …and publish those same ramps as ONE number per model instance, for the consumers
             // that are not meshes and so cannot read a `MeshTag`: an emitter's particles and a
@@ -668,25 +692,26 @@ fn setup_entities(
         }
         Err(e) => warn!("item displays unavailable, units hold nothing: {e:#}"),
     }
-    // The item/enchant glow chain (decision 0805) — both tables or neither: a glow needs the
-    // ItemVisuals join to name a model and the enchant column to know a temporary one. Absent,
-    // weapons simply draw unadorned.
-    match (
-        benilla_formats::load_item_visual_catalog(&mut chain),
-        benilla_formats::load_enchant_visual_catalog(&mut chain),
-    ) {
-        (Ok(visuals), Ok(enchants)) => {
+    // The glow chain's ItemVisuals join (decision 0805). Absent, weapons draw unadorned.
+    match benilla_formats::load_item_visual_catalog(&mut chain) {
+        Ok(visuals) => {
+            info!("item visual catalog: {} glow rows", visuals.len());
+            commands.insert_resource(ItemGlows::new(visuals));
+        }
+        Err(e) => warn!("item visuals unavailable, weapons never glow: {e:#}"),
+    }
+    // `SpellItemEnchantment`'s two consumer columns — the enchant half of that glow chain, and
+    // the tooltip's enchant line (decision 0915). One load, one resource, both lanes.
+    match benilla_formats::load_enchant_catalog(&mut chain) {
+        Ok(enchants) => {
             info!(
-                "item visual catalog: {} glow rows, {} enchants with a glow",
-                visuals.len(),
-                enchants.len()
+                "enchant catalog: {} named, {} carrying a glow",
+                enchants.name_count(),
+                enchants.visual_count()
             );
-            commands.insert_resource(ItemGlows::new(visuals, enchants));
+            commands.insert_resource(crate::items::Enchants(enchants));
         }
-        (v, e) => {
-            let err = v.err().or(e.err());
-            warn!("item visuals unavailable, weapons never glow: {err:#?}");
-        }
+        Err(e) => warn!("enchants unavailable: no enchant glow, no enchant line: {e:#}"),
     }
     match benilla_formats::load_durability_tables(&mut chain) {
         Ok(tables) => commands.insert_resource(crate::ui_merchant::RepairTables(tables)),

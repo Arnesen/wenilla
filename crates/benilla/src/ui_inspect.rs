@@ -105,10 +105,17 @@ impl Plugin for InspectUiPlugin {
 /// Everything an item *object* would supply is absent by construction (see the module doc), so the
 /// count is the ref's own always-1 and durability/flags/locks/creator/equip-fit stay at their inert
 /// defaults — an inspected item is not draggable, lockable, or repairable.
+///
+/// The **enchant lines are the one exception** (decision 0915): a unit's descriptor broadcasts the
+/// enchants of what it wears — `PLAYER_VISIBLE_ITEM_<slot>_0 + 1 + j` — so an inspected weapon's
+/// enchant is readable without any object. 1.12 fills exactly two of those seven slots (PERM,
+/// TEMP: vmangos `SetVisibleItemSlot`'s `MAX_INSPECTED_ENCHANTMENT_SLOT`), and that is the same
+/// data the reference's own inspect tooltip has.
 fn inspect_slot_view(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
+    enchant_rows: Option<&crate::items::Enchants>,
     commands: &NetCommands,
     slot0: u8,
 ) -> Option<InvSlotView> {
@@ -129,6 +136,17 @@ fn inspect_slot_view(
         quality: quality as i32,
         name,
         link,
+        // All 7 slots, exactly as the reference's own inspect leg copies and renders them
+        // (§E7) — a 1.12 server happens to fill only PERM and TEMP. No item object here, so no
+        // charges and no `SMSG_ITEM_ENCHANT_TIME_UPDATE` countdown: the reference's inspect
+        // tooltip has neither either.
+        enchants: crate::items::enchant_lines(
+            (0..7).map(|j| {
+                let id = store.0.player_visible_item_enchant(slot0, j).unwrap_or(0);
+                (j, id as i32, 0, None)
+            }),
+            enchant_rows,
+        ),
         ..Default::default()
     })
 }
@@ -141,6 +159,8 @@ fn feed_inspect(
     mut booth: ResMut<InspectBooth>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
+    // `SpellItemEnchantment`'s name column — the inspected item's enchant line (decision 0915).
+    enchants: Option<Res<crate::items::Enchants>>,
     commands: Res<NetCommands>,
     index: Res<GuidIndex>,
     stores: Query<&ObjectStore>,
@@ -236,8 +256,14 @@ fn feed_inspect(
     };
     let mut slots: InventorySlots = Default::default();
     for slot in 1..=19u8 {
-        slots[usize::from(slot)] =
-            inspect_slot_view(store, &mut items, icons.as_deref(), &commands, slot - 1);
+        slots[usize::from(slot)] = inspect_slot_view(
+            store,
+            &mut items,
+            icons.as_deref(),
+            enchants.as_deref(),
+            &commands,
+            slot - 1,
+        );
     }
     let view = InspectView {
         unit: token.clone(),

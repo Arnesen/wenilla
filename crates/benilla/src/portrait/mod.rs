@@ -1440,6 +1440,7 @@ mod tests {
                     recursion: None,
                     geometry: None,
                     owner_reach: 0.0,
+                    water_bound: (Vec3::ZERO, 0.0),
                 })
                 .collect(),
         }

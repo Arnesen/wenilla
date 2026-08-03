@@ -1121,6 +1121,7 @@ fn seed_bag_window(
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         }
     };
     // ~5 items scattered across the 16 slots, a mix of stacked and unstacked, under their real
@@ -1209,6 +1210,7 @@ fn seed_equipped_bags(
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         };
 
     // Seed the four equipped-bag EQUIPMENT slots (live inv ids 20..23 = Bag0Slot..Bag3Slot) with a

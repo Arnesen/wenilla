@@ -45,6 +45,7 @@ fn one_item_backpack() -> ContainerState {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     ContainerState {

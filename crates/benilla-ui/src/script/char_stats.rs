@@ -196,6 +196,12 @@ pub struct InvSlotView {
     /// The RESOLVED `ITEM_FIELD_CREATOR` name — the equipped-item tooltip's green
     /// "<Made by %s>" line (see [`super::container::ContainerSlot::creator`], the bag twin).
     pub creator: Option<String>,
+    /// The instance's resolved enchant slots, in slot order — the doll twin of
+    /// [`super::container::ContainerSlot::enchants`] (decisions 0915/0920). Our own equipped item
+    /// reads all 7 slots off its streamed item object; an INSPECTED player's record carries 7 too
+    /// and the reference renders all 7 from it — but a 1.12 server fills only PERM and TEMP, so in
+    /// practice that is what an inspect hover shows.
+    pub enchants: Vec<super::EnchantView>,
 }
 
 /// The inventory-slot snapshot: index 0 = ammo, 1..=19 the equipment slots, 20..=23 the four

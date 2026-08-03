@@ -267,11 +267,18 @@ pub(super) fn act_on_right_click(
                         debug!(
                             "right-click gameobject open-by-key: use item ({bag_index},{slot}) blk {spell_index} at {guid:#x}"
                         );
+                        // NOT through [`crate::ui_action::CastLadder`] yet — this arm and the
+                        // `OpenLock` cast above are the last two sends outside the one ladder, and
+                        // folding them in is its own slice: the system is already at the
+                        // SystemParam ceiling, the resolver would have to carry the key's ON_USE
+                        // *spell* as well as its block ordinal, and the binder has no GameObject
+                        // arm (`CastCommit::Item::on_object` is the seam that awaits it). Stated
+                        // gap, decision 0914.
                         let _ = net.0.send(ClientCommand::UseItem {
                             bag_index,
                             slot,
                             spell_index,
-                            go_target: Some(guid),
+                            target: benilla_protocol::messages::UseItemTarget::Object(guid),
                         });
                     }
                     GoAction::Refuse(err) => {

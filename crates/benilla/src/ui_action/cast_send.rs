@@ -12,15 +12,123 @@
 //!
 //! A refusal here is **local and pre-commit**, exactly like the reference's: no packet, no GCD, no
 //! pending arm, no autorepeat key — just the red error line's reason code.
+//!
+//! **An item use is a cast, and takes this same ladder** (decision 0914). `CGItem::Use 0x5d8d00`'s
+//! ordinary tail (`5d9249`–`5d9258`) calls `0x6e5a90`, whose whole body is `call 0x6e4b60` —
+//! `TryCast`, with the **item as an ordinary third argument** (`ret 0xc`: item, targetLo,
+//! targetHi). Inside TryCast that argument is read exactly twice — at `6e4d76`, where it only
+//! computes a display flag and does *not* skip the IsCasting gate below it, and at `6e4f33`, where
+//! it is forwarded to the requirement validator `0x6094f0`. Every rung between entry and the
+//! commit is therefore the same code for a spell and for an item, which is why [`CastCommit`] is a
+//! *parameter* of this function and not a second path. Two rungs fork on it, and only two: the
+//! validator's first rung (`60952b`: item → the item cooldown query `0x6e2ed0` and error **0x28**
+//! "Item is not ready yet."; no item → `0x6e2ea0` and **0x3c** "Spell is not ready yet.") and the
+//! commit's opcode (`0x6e57d8 push 0xab` vs `push 0x12e`).
 
 use std::time::Instant;
 
+use benilla_protocol::messages::UseItemTarget;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::items::Items;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
 
 use super::{cast_target, reagent_totem_refusal, state, AutoRepeatActive, CastErrors, Spells};
+
+/// **What the commit writes** — `SendCast 0x6e54f0`'s one branch on item-present. The sender
+/// discriminates on whether the pending-cast block's guid (`0xceac48`, filled at `6e4f8d`–`6e4fa6`
+/// from the ITEM's guid when TryCast was handed one, else the caster's) is the caster's, and the
+/// item arm falls through to `0x6e57d8 push 0xab` = `CMSG_USE_ITEM` (wow-re `action-item-slot.md`
+/// §8, `cursor-system.md` §8.4a — both byte-read).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CastCommit {
+    /// `CMSG_CAST_SPELL 0x12e` — no item bound.
+    Spell,
+    /// `CMSG_USE_ITEM 0xab` — the item's wire position and template spell ordinal (decision 0666),
+    /// plus the GameObject the caller bound explicitly, if any.
+    Item {
+        bag_index: u8,
+        slot: u8,
+        spell_index: u8,
+        /// The key-in-a-lock arm (decision 0769) — `CGItem::Use`'s own target argument, non-zero
+        /// only for the lock chain. A caller-bound guid short-circuits the binder below, exactly
+        /// as TryCast's target resolve (`6e4ef4`) takes the pair it was passed.
+        on_object: Option<u64>,
+    },
+}
+
+impl CastCommit {
+    /// Whether this commit carries an item — the discriminator every forked rung reads.
+    pub(crate) fn is_item(self) -> bool {
+        matches!(self, CastCommit::Item { .. })
+    }
+
+    /// The local not-ready reason for this commit (`0x6094f0`'s forked first rung).
+    fn not_ready_reason(self) -> u8 {
+        if self.is_item() {
+            0x28
+        } else {
+            0x3c
+        }
+    }
+}
+
+/// **The one cast-send path's whole input set, as ONE [`SystemParam`]** — so a caller needs two
+/// params (this and [`cast_target::CastTargeting`]) instead of fifteen, so a new rung's input
+/// lands in every caller at once, and so [`CastLadder::send`] is structurally the only way into
+/// [`send_spell_cast`] (the root-cause rule: never duplicate a send path — make it impossible).
+///
+/// Every caster surface takes it: the action bar's two arms, the spellbook, the stance bar, the
+/// trade-skill and craft windows, the bag/paper-doll item click, and the ground-targeting commit.
+#[derive(SystemParam)]
+pub(crate) struct CastLadder<'w, 's> {
+    pub(crate) commands: Res<'w, NetCommands>,
+    pub(crate) self_player:
+        Query<'w, 's, (Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
+    pub(crate) spells: Option<Res<'w, Spells>>,
+    /// The item cache — the pre-send totem/reagent check reads it (decision 0552), and the item
+    /// arms resolve templates through it.
+    pub(crate) items: ResMut<'w, Items>,
+    pub(crate) sheath: MessageWriter<'w, crate::creature_anim::SheathRequest>,
+    pub(crate) ecs: Commands<'w, 's>,
+    pub(crate) pending: ResMut<'w, crate::ui_cast::PendingCast>,
+    pub(crate) queued_melee: ResMut<'w, crate::ui_cast::QueuedMeleeSpell>,
+    pub(crate) cooldowns: ResMut<'w, crate::cooldowns::Cooldowns>,
+    pub(crate) cast_errors: ResMut<'w, CastErrors>,
+    pub(crate) auto_repeat: ResMut<'w, AutoRepeatActive>,
+    pub(crate) trade_skill_opens: ResMut<'w, crate::ui_tradeskill::TradeSkillOpens>,
+    pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
+}
+
+impl CastLadder<'_, '_> {
+    /// Run the ladder for `spell_id` and commit as `commit` says — the only entry point.
+    pub(crate) fn send(
+        &mut self,
+        spell_id: u32,
+        ctx: &cast_target::CastContext,
+        commit: CastCommit,
+    ) {
+        send_spell_cast(
+            spell_id,
+            ctx,
+            commit,
+            &self.commands,
+            &self.self_player,
+            self.spells.as_deref(),
+            &self.items,
+            &mut self.sheath,
+            &mut self.ecs,
+            &mut self.pending,
+            &mut self.queued_melee,
+            &mut self.cooldowns,
+            &mut self.cast_errors,
+            &mut self.auto_repeat,
+            &mut self.trade_skill_opens,
+            &mut self.ground,
+        );
+    }
+}
 
 /// Send one spell cast at the current selection — the client's local cast-send follow-through
 /// (the client's `0x6e54f0` tail): a ranged-attribute spell arms the **ranged stance** now
@@ -38,9 +146,10 @@ use super::{cast_target, reagent_totem_refusal, state, AutoRepeatActive, CastErr
 /// `CMSG_CAST_SPELL` the server bounces back as a spurious cast-bar cancel. Ranged/auto-repeat
 /// shots keep their own lifecycle — they never arm the guard and are never blocked by it.
 #[allow(clippy::too_many_arguments)] // every input the follow-through + the send itself need
-pub(crate) fn send_spell_cast(
+fn send_spell_cast(
     spell_id: u32,
     ctx: &cast_target::CastContext,
+    commit: CastCommit,
     commands: &NetCommands,
     self_player: &Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     spells: Option<&Spells>,
@@ -88,9 +197,14 @@ pub(crate) fn send_spell_cast(
     // path): a spell/category cooldown refuses at the source with the client's own reason 0x3c
     // ("Spell is not ready yet.") — never sent, exactly like the real client. The GCD is
     // faithfully NOT part of this test (0x6e1690 skips the GCD fields).
+    // …and the leg that forks on item-present, verbatim: the validator branches at `60952b` on
+    // its item argument — item → the item cooldown query `0x6e2ed0` and reason **0x28** "Item is
+    // not ready yet." (`609549`), no item → `0x6e2ea0` and **0x3c** (`609616`). (Ours keys one
+    // cooldown store by spell id for both; the ref's item query keys by the item ENTRY as well —
+    // a named gap, decision 0914.)
     if cooldowns.is_on_cooldown(spell_id, def, now) {
         debug!("ui_action: cast {spell_id} refused locally — on cooldown");
-        cast_errors.0.push((spell_id, 0x3c));
+        cast_errors.0.push((spell_id, commit.not_ready_reason()));
         return;
     }
     // The GCD leg of the local not-ready ladder ([`Cooldowns::gcd_locked`], decision 0379): a
@@ -100,7 +214,7 @@ pub(crate) fn send_spell_cast(
     // vanished-pie bug. GCD-free presses (Heroic Strike's queue, Attack, Shoot) pass.
     if def.is_some_and(|d| cooldowns.gcd_locked(d, now)) {
         debug!("ui_action: cast {spell_id} refused locally — the GCD is running");
-        cast_errors.0.push((spell_id, 0x3c));
+        cast_errors.0.push((spell_id, commit.not_ready_reason()));
         return;
     }
     // The cast classes at this seam. A ranged/auto-repeat shot (Auto Shot, wand Shoot, Throw) is
@@ -206,28 +320,43 @@ pub(crate) fn send_spell_cast(
     // ArmCast (`0x6e5250`): resolve the wire target from the spell's targeting constraints —
     // never the raw selection ([`cast_target`] module docs). A refusal is local and pre-commit,
     // like the ref's residual flag_word: no send, no GCD, no pending arm, no autorepeat key.
-    let target = match cast_target::resolve_cast_target(
-        def,
-        ctx.selection_guid,
-        ctx.self_guid,
-        ctx.auto_self_cast,
-        &ctx.rel,
-    ) {
-        cast_target::CastWireTarget::SelfImplicit => None,
-        cast_target::CastWireTarget::Unit(guid) => Some(guid),
-        cast_target::CastWireTarget::GroundTargeting => {
-            // Enter the targeting-cursor mode's location half (decision 0792) — nothing is
-            // sent, nothing armed: the ref's cursor entry (`6e50c8`) runs none of the commit
-            // tail; the world click's commit owes the GCD and the pending arm.
-            debug!("ui_action: cast {spell_id} awaits its ground click — targeting cursor up");
-            ground.enter(spell_id);
-            return;
-        }
-        cast_target::CastWireTarget::Refused(reason) => {
-            debug!("ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})");
-            cast_errors.0.push((spell_id, reason));
-            return;
-        }
+    // A caller-bound GameObject short-circuits the walk, exactly as TryCast's target resolve
+    // (`6e4ef4` → `0x612df0` over the guid pair it was PASSED) takes an explicit target: the key
+    // chain calls `CGItem::Use` with the lock's guid, the bag click with zero (decision 0769).
+    let explicit_object = match commit {
+        CastCommit::Item { on_object, .. } => on_object,
+        CastCommit::Spell => None,
+    };
+    let target = match explicit_object {
+        Some(_) => None,
+        None => match cast_target::resolve_cast_target(
+            def,
+            ctx.selection_guid,
+            ctx.self_guid,
+            ctx.auto_self_cast,
+            &ctx.rel,
+        ) {
+            cast_target::CastWireTarget::SelfImplicit => None,
+            cast_target::CastWireTarget::Unit(guid) => Some(guid),
+            cast_target::CastWireTarget::GroundTargeting => {
+                // Enter the targeting-cursor mode's location half (decision 0792) — nothing is
+                // sent, nothing armed: the ref's cursor entry (`6e50c8`) runs none of the commit
+                // tail; the world click's commit owes the GCD and the pending arm. The COMMIT
+                // rides along: the ref keeps the whole pending-cast block (the item guid at
+                // `0xceac48` included) across the cursor, so the world click's `0x6e54f0` still
+                // emits USE_ITEM for a thrown grenade or a stick of dynamite.
+                debug!("ui_action: cast {spell_id} awaits its ground click — targeting cursor up");
+                ground.enter(spell_id, commit);
+                return;
+            }
+            cast_target::CastWireTarget::Refused(reason) => {
+                debug!(
+                    "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
+                );
+                cast_errors.0.push((spell_id, reason));
+                return;
+            }
+        },
     };
     // The local range gate (the client's TryCast runs `CanTargetUnit 0x6e4440` →
     // `IsTargetInRange 0x6e47b0` BEFORE the commit `0x6e54f0`): an out-of-range / too-close
@@ -294,11 +423,34 @@ pub(crate) fn send_spell_cast(
             }
         }
     }
-    let _ = commands
-        .0
-        .send(ClientCommand::CastSpell { spell_id, target });
+    // The commit's ONE branch (`SendCast 0x6e54f0`): same block, two opcodes.
+    let _ = commands.0.send(match commit {
+        CastCommit::Spell => ClientCommand::CastSpell { spell_id, target },
+        CastCommit::Item {
+            bag_index,
+            slot,
+            spell_index,
+            on_object,
+        } => ClientCommand::UseItem {
+            bag_index,
+            slot,
+            spell_index,
+            target: match (on_object, target) {
+                (Some(go), _) => UseItemTarget::Object(go),
+                (None, Some(unit)) => UseItemTarget::Unit(unit),
+                (None, None) => UseItemTarget::SelfImplicit,
+            },
+        },
+    });
     if normal_cast {
-        pending.arm(spell_id, now);
+        // One inflight id, every cast source (`0xceca88`). The item arm's provisional is shorter
+        // because `CMSG_USE_ITEM` has legs vmangos answers with `SMSG_INVENTORY_CHANGE_FAILURE`
+        // and no cast result at all — [`crate::ui_cast::PendingCast`]'s own doc, decision 0908.
+        if commit.is_item() {
+            pending.arm_item(spell_id, now);
+        } else {
+            pending.arm(spell_id, now);
+        }
     } else if on_next_swing {
         queued_melee.arm(spell_id);
     }
@@ -340,5 +492,189 @@ pub(crate) fn send_spell_cast(
     // byte-verified) — a later `SMSG_CAST_RESULT` failure clears it again (`0x6e1630`).
     if let Some(d) = def {
         cooldowns.start_gcd(spell_id, d, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::Reputations;
+    use bevy::ecs::system::RunSystemOnce;
+    use crossbeam_channel::Receiver;
+
+    const HEARTHSTONE: u32 = 8690;
+    const MOUNT: u32 = 470;
+    /// The hearthstone's own wire position on a fresh character: player array, backpack slot 1.
+    const HEARTH_COMMIT: CastCommit = CastCommit::Item {
+        bag_index: 255,
+        slot: 24,
+        spell_index: 0,
+        on_object: None,
+    };
+
+    static EMPTY_REPUTATIONS: Reputations = Reputations(Vec::new());
+
+    /// A context with nothing selected — every rung that needs world state is inert, so these
+    /// tests pin the two rungs that fork on the commit and the commit itself.
+    fn ctx() -> cast_target::CastContext<'static> {
+        cast_target::CastContext {
+            selection_guid: None,
+            self_guid: Some(0x0000_0000_0000_0007),
+            auto_self_cast: false,
+            rel: cast_target::TargetRelations {
+                target_store: None,
+                self_store: None,
+                factions: None,
+                reputations: &EMPTY_REPUTATIONS,
+            },
+            range: cast_target::RangeInputs::default(),
+            self_move_flags: 0,
+        }
+    }
+
+    /// A World carrying exactly the resources [`CastLadder`] gathers. No `Spells` — an absent
+    /// catalog makes `def` `None`, which is the shape of every rung that guards on `if let
+    /// Some(d) = def`: they are inert, and what is left is the ladder's spine.
+    fn world() -> (World, Receiver<ClientCommand>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut world = World::new();
+        world.insert_resource(NetCommands(tx));
+        world.init_resource::<Items>();
+        world.init_resource::<crate::ui_cast::PendingCast>();
+        world.init_resource::<crate::ui_cast::QueuedMeleeSpell>();
+        world.init_resource::<crate::cooldowns::Cooldowns>();
+        world.init_resource::<CastErrors>();
+        world.init_resource::<AutoRepeatActive>();
+        world.init_resource::<crate::ui_tradeskill::TradeSkillOpens>();
+        world.init_resource::<super::super::targeting::SpellTargeting>();
+        // The sheath request the commit tail writes for a ranged spell — a bare World has no
+        // message storage until it is asked for.
+        world.init_resource::<Messages<crate::creature_anim::SheathRequest>>();
+        (world, rx)
+    }
+
+    fn send(world: &mut World, spell_id: u32, commit: CastCommit) {
+        world
+            .run_system_once(move |mut ladder: CastLadder| {
+                ladder.send(spell_id, &ctx(), commit);
+            })
+            .expect("the ladder runs as a one-shot system");
+    }
+
+    /// **B200's regression test, at the ladder** (decisions 0908/0914): an item use is a cast
+    /// through the same `TryCast` a spell press runs, so the in-flight rung (`6e4d97`) refuses the
+    /// double-click — the same spell silently (`6e4d43`), a different one with 0x61 — and neither
+    /// reaches the wire. Before this, the duplicate `CMSG_USE_ITEM` drew
+    /// `SPELL_FAILED_SPELL_IN_PROGRESS` naming the *running* cast's own spell, which red-faded its
+    /// bar while the cast completed anyway.
+    #[test]
+    fn a_double_clicked_item_never_ships_the_duplicate() {
+        let (mut world, rx) = world();
+
+        send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })),
+            "the first click commits as USE_ITEM and arms the one inflight id"
+        );
+
+        send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
+        assert!(rx.try_recv().is_err(), "no duplicate on the wire");
+        assert!(
+            world.resource::<CastErrors>().0.is_empty(),
+            "the same spell's re-press is the ref's SILENT bail (6e4d43), not a red line"
+        );
+
+        send(&mut world, MOUNT, HEARTH_COMMIT);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![(MOUNT, 0x61)],
+            "a different spell mid-cast is 6e4d97's \"Another action is in progress\""
+        );
+    }
+
+    /// The one rung that forks on item-present: `0x6094f0`'s first leg branches at `60952b` on its
+    /// item argument — item → the item cooldown query and reason **0x28** "Item is not ready yet."
+    /// (`609549`); no item → the spell query and **0x3c** (`609616`). Ours is one cooldown store
+    /// with two reasons. This rung used to live in the action bar's ITEM arm alone, so a bag or
+    /// paper-doll click ignored cooldowns entirely and shipped a doomed packet (decision 0914).
+    #[test]
+    fn the_not_ready_reason_forks_on_item_present() {
+        let (mut world, rx) = world();
+        let use_spell = benilla_protocol::messages::ItemUseSpell {
+            spell_id: HEARTHSTONE,
+            cooldown_ms: 1_800_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        world
+            .resource_mut::<crate::cooldowns::Cooldowns>()
+            .start_item(6948, &use_spell, None, Instant::now());
+
+        send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
+        assert!(rx.try_recv().is_err(), "an item on cooldown never sends");
+        assert_eq!(world.resource::<CastErrors>().0, vec![(HEARTHSTONE, 0x28)]);
+
+        world.resource_mut::<CastErrors>().0.clear();
+        send(&mut world, HEARTHSTONE, CastCommit::Spell);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![(HEARTHSTONE, 0x3c)],
+            "the very same cooldown reads \"Spell is not ready yet.\" without an item"
+        );
+    }
+
+    /// The commit's own branch (`SendCast 0x6e54f0`): one ladder, one targets block, two opcodes.
+    /// The key-in-a-lock arm's caller-bound GameObject short-circuits the binder and rides the
+    /// block as `TARGET_FLAG_GAMEOBJECT|LOCKED` (decision 0769), which is why `on_object` is part
+    /// of the commit rather than a separate send.
+    #[test]
+    fn the_commit_picks_the_opcode_and_the_block() {
+        use benilla_protocol::messages::UseItemTarget;
+        let (mut world, rx) = world();
+
+        send(&mut world, HEARTHSTONE, CastCommit::Spell);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpell {
+                spell_id: HEARTHSTONE,
+                target: None
+            })
+        ));
+
+        // `init_resource` would keep the armed guard — the point here is the commit, not the
+        // in-flight rung the test above owns.
+        world.insert_resource(crate::ui_cast::PendingCast::default());
+        send(&mut world, HEARTHSTONE, HEARTH_COMMIT);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::UseItem {
+                bag_index: 255,
+                slot: 24,
+                spell_index: 0,
+                target: UseItemTarget::SelfImplicit
+            })
+        ));
+
+        world.insert_resource(crate::ui_cast::PendingCast::default());
+        send(
+            &mut world,
+            HEARTHSTONE,
+            CastCommit::Item {
+                bag_index: 255,
+                slot: 81,
+                spell_index: 0,
+                on_object: Some(0xF110_000C_1F00_A3B2),
+            },
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::UseItem {
+                slot: 81,
+                target: UseItemTarget::Object(0xF110_000C_1F00_A3B2),
+                ..
+            })
+        ));
     }
 }

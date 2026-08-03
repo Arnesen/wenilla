@@ -17,7 +17,10 @@ fn item_query_wire() {
 
     // CMSG_USE_ITEM (vmangos UseItem::ReadFromWorldPacket): bagIndex, slot, spellSlot, then a
     // self-shaped target block (u16 mask 0). Backpack slot 1 = bag 255 + player-array slot 23.
-    assert_eq!(messages::use_item(255, 23, 0, None), hx("ff17000000"));
+    assert_eq!(
+        messages::use_item(255, 23, 0, messages::UseItemTarget::SelfImplicit),
+        hx("ff17000000")
+    );
 
     // The KEY-IN-A-LOCK form (decision 0769): the same three bytes, then a SpellCastTargets with
     // mask TARGET_FLAG_GAMEOBJECT|TARGET_FLAG_LOCKED (0x0800|0x4000 = 0x4800) and the object's
@@ -28,15 +31,37 @@ fn item_query_wire() {
     // Keyring slot 1 = bag 255 + player-array slot 81 (0x51). The guid 0xF110000C1F00A3B2 has two
     // zero bytes (indices 2 and 5), so it packs to mask 0xDB + the other six, low byte first.
     assert_eq!(
-        messages::use_item(255, 81, 0, Some(0xF110_000C_1F00_A3B2)),
+        messages::use_item(
+            255,
+            81,
+            0,
+            messages::UseItemTarget::Object(0xF110_000C_1F00_A3B2)
+        ),
         hx("ff51000048dbb2a31f0c10f1"),
     );
 
     // The packed form really does drop zero bytes: guid 1 is mask 0x01 + a single byte, and the
     // spellSlot ordinal rides in the third byte.
     assert_eq!(
-        messages::use_item(255, 81, 2, Some(1)),
+        messages::use_item(255, 81, 2, messages::UseItemTarget::Object(1)),
         hx("ff510200480101")
+    );
+
+    // The UNIT form (decision 0914): an item whose spell binds a unit the way a spell's does — a
+    // bandage, a soulstone — writes TARGET_FLAG_UNIT (0x0002) + the packed guid, the SAME block a
+    // CMSG_CAST_SPELL writes. In the real client one builder serves both opcodes: SendCast
+    // 0x6e54f0 picks 0xab-vs-0x12e from its item discriminator and then writes ArmCast's block.
+    assert_eq!(
+        messages::use_item(255, 24, 0, messages::UseItemTarget::Unit(1)),
+        hx("ff180002000101")
+    );
+
+    // The DEST form (decision 0914): the targeting-cursor commit for a THROWN item — dynamite, a
+    // grenade, the Goblin Mortar. TARGET_FLAG_DEST_LOCATION (0x0040) + three f32 WoW coords, the
+    // same tail cast_spell_at_dest writes. 1.0f32 = 0x3f800000, 2.0 = 0x40000000, 3.0 = 0x40400000.
+    assert_eq!(
+        messages::use_item(19, 3, 1, messages::UseItemTarget::Dest([1.0, 2.0, 3.0])),
+        hx("13030140000000803f0000004000004040")
     );
 
     // CMSG_AUTOEQUIP_ITEM (vmangos AutoEquipItem::ReadFromWorldPacket): bagIndex, slot.

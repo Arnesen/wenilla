@@ -84,6 +84,7 @@ fn ammo_attach(ranged_inv_type: Option<u32>, nock_latched: bool) -> Option<u16> 
 /// the glow chain's DBCs are absent — the item simply draws unadorned, as before decision 0805.
 fn resolve_glow(
     glows: Option<&mut ItemGlows>,
+    enchant_rows: Option<&benilla_formats::EnchantCatalog>,
     displays: &ItemDisplays,
     display: u32,
     enchants: impl IntoIterator<Item = u32>,
@@ -93,7 +94,7 @@ fn resolve_glow(
         return NO_GLOW;
     };
     let base = displays.catalog.get(display).map_or(0, |d| d.item_visual);
-    let visual = item_glow::effective_visual(glows, base, enchants);
+    let visual = item_glow::effective_visual(glows, enchant_rows, base, enchants);
     item_glow::ensure_glow_models(glows, visual, asset_server);
     visual
 }
@@ -126,12 +127,15 @@ pub(in crate::entities) fn resolve_equipment(
     creatures: Option<Res<Creatures>>,
     // The item/enchant glow chain (decision 0805): resolved here beside the item itself, so a glow
     // model is requested the same frame its weapon is and an enchant change rides the item diff.
+    // The enchant column rides its own resource (decision 0915) — shared with the tooltip lane.
     glows: Option<ResMut<ItemGlows>>,
+    enchants: Option<Res<crate::items::Enchants>>,
 ) {
     let Some(mut held) = held else {
         return;
     };
     let mut glows = glows;
+    let enchant_rows = enchants.as_deref().map(|e| &e.0);
     for (
         entity,
         net_entity,
@@ -301,6 +305,7 @@ pub(in crate::entities) fn resolve_equipment(
             });
             let visual = resolve_glow(
                 glows.as_deref_mut(),
+                enchant_rows,
                 &held,
                 display,
                 enchants.into_iter().flatten(),
@@ -336,6 +341,7 @@ pub(in crate::entities) fn resolve_equipment(
             // hand attach does. No enchant lane here: this is a model, not an equipped item.
             let visual = resolve_glow(
                 glows.as_deref_mut(),
+                enchant_rows,
                 &held,
                 ammo.display_id,
                 [],

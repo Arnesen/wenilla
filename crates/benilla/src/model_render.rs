@@ -505,6 +505,244 @@ pub(crate) fn zfill_material(
     handle
 }
 
+/// `clutter_fade.z` marker bit 11: this material is a **far-side-of-water twin** ([`far_twin_of`])
+/// — the water-plane interleave's mesh lane ([`crate::sky_order::FAR_SIDE_BIAS`], where the byte
+/// story lives). `WowModelExt::specialize` keys on it to keep the huge negative SORT rung out of
+/// the rasterizer `DepthBiasState` (at −4e4 that constant is a ~0.5% relative depth pull — enough
+/// to clip a blade's coplanar sheen/glow layers behind the blade's own opaque depth).
+pub(crate) const FAR_SIDE_MARKER: u16 = 1 << 11;
+
+/// The far-side twin of one transparent model material: the same look, dropped one water rung —
+/// [`crate::sky_order::FAR_SIDE_BIAS`] under its authored sort slot — so the water surface paints
+/// over it, plus the [`FAR_SIDE_MARKER`] pipeline bit that keeps the rung sort-only. Pure, so the
+/// twin's shape is testable without an `Assets` store; the identity holds for every variant the
+/// swap can meet (steady blend, fade twin, zfill twin — their own marker bits ride along).
+fn far_twin_of(near: &WowModelMaterial) -> WowModelMaterial {
+    let mut far = near.clone();
+    far.base.depth_bias = far_sort_bias(far.base.depth_bias);
+    far.extension.clutter_fade.z = far_markers(far.extension.clutter_fade.z);
+    far
+}
+
+/// The twin's sort slot: one water rung under wherever the source sat (a zfill twin keeps its −8
+/// under the far batches it primes; a colour batch keeps its batch eps).
+fn far_sort_bias(near: f32) -> f32 {
+    near + crate::sky_order::FAR_SIDE_BIAS
+}
+
+/// The twin's `clutter_fade.z` marker word: [`FAR_SIDE_MARKER`] added, every other pipeline
+/// marker preserved (a fade twin's cutout, a zfill twin's prime, the multiply blends and the fog
+/// policy all keep their identity on the far side of the plane).
+fn far_markers(z: f32) -> f32 {
+    f32::from(z as u16 | FAR_SIDE_MARKER)
+}
+
+/// The far twins alive right now: near material id → far twin, and the far id → near handle
+/// restore path. Both handles are strong — a twin pair lives exactly as long as some batch entity
+/// still carries its near identity (the sweep at the tail of [`classify_water_side`]), the same
+/// entity-bound lifetime `FadeMaterials`' handles get from their component.
+#[derive(Resource, Default)]
+pub(crate) struct FarSideTwins {
+    to_far: std::collections::HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
+    to_near: std::collections::HashMap<AssetId<WowModelMaterial>, Handle<WowModelMaterial>>,
+}
+
+impl FarSideTwins {
+    /// The far twin of `near`, if one is live — the read-only side every material-handle owner
+    /// composes with, safe from a parallel walk. A miss means [`classify_water_side`] hasn't
+    /// built it yet: the caller keeps the near handle and picks the twin up next frame.
+    pub(crate) fn far_of(
+        &self,
+        near: &Handle<WowModelMaterial>,
+    ) -> Option<&Handle<WowModelMaterial>> {
+        self.to_far.get(&near.id())
+    }
+}
+
+/// The far-axis compose every material-handle OWNER applies at its own write site: the handle it
+/// wants, dropped one water rung when the entity is marked [`FarSideOfWater`]. This is what lets
+/// N legitimate writers (the fade resolve, the aura author, the self feather, the doodad-fade
+/// authority) and the classifier all converge on ONE handle per frame — each derives its pick
+/// from state and composes the same axis, so change-gates hold and nobody re-swaps what another
+/// just wrote (the first cut fought exactly that way, per frame, forever). A cutout/opaque pick
+/// composes to itself: far twins exist only for transparent-pass materials, so the lookup misses
+/// and the pick stands.
+pub(crate) fn far_resolved<'a>(
+    want: &'a Handle<WowModelMaterial>,
+    far: bool,
+    twins: &'a FarSideTwins,
+) -> &'a Handle<WowModelMaterial> {
+    if far {
+        twins.far_of(want).unwrap_or(want)
+    } else {
+        want
+    }
+}
+
+/// This batch entity's transparent draw is on the eye's FAR side of the water plane — written by
+/// [`classify_water_side`], sparse (present only while far). For entities whose material handle
+/// the Visibility authority owns (the `DoodadFade` holders it pins to cutout/blend every frame,
+/// decision 0025's one-authority law), the marker IS the classification: the authority composes
+/// it into its own pick via [`FarSideTwins::far_of`] instead of a second writer fighting it —
+/// the same compose-don't-overwrite shape the fade alpha itself takes through that system.
+#[derive(Component)]
+pub(crate) struct FarSideOfWater;
+
+/// Classify every transparent M2 batch against the water plane and swap it onto (or off) its
+/// far-side twin — the MESH half of the water-plane interleave (byte-VERIFIED, wow-re
+/// `water-frame-straddle.md`: the reference splits CM2Scene transparents into above/below-water
+/// lists per model and draws the eye's far side *before* the water pass; 0911 shipped the effect
+/// half and named this one — the sighting it predicted arrived as "the sword reads crisp through
+/// the surface": the blade's Mod2x sheen and glow overlays drew after the water, untinted).
+///
+/// The grain is the reference's: every batch entity of one model instance carries the instance's
+/// own transform (the mesh offsets live in vertex space), so classifying each at its
+/// `GlobalTransform` IS the per-model split — one liquid hit at the model's placement, all its
+/// batches on one list. Straddlers keep the near-side default per batch (the reference splits
+/// those with hardware clip planes, `M2UseClipPlanes` — a deviation this system inherits from
+/// 0911 and names, not fixes). WMO translucents never classify (the reference's lists are
+/// CM2Scene's; the WMO leg draws its own), and opaque/cutout batches settle by depth like any
+/// world geometry.
+///
+/// **Two lanes, one classification.** Entities whose handle the Visibility authority owns — the
+/// `DoodadFade` holders `debug_panel::apply_model_visibility` pins to cutout/blend every frame —
+/// get the [`FarSideOfWater`] marker and a pre-built twin; the authority composes both into its
+/// own pick (decision 0025's one-authority law — the first cut swapped their handles from here
+/// and the two writers re-swapped the same 550 coastal doodads every frame, forever). Everything
+/// else (equipment, spell-fx attachments, entity fade twins) is swapped here directly, after the
+/// fade resolve, deriving near-vs-far from the CURRENT handle so an upstream overwrite is
+/// re-classified the same frame instead of fought over.
+#[allow(clippy::type_complexity)]
+pub(crate) fn classify_water_side(
+    interleave: crate::particles::WaterInterleave,
+    mut twins: ResMut<FarSideTwins>,
+    mut materials: ResMut<Assets<WowModelMaterial>>,
+    mut near_edits: MessageReader<AssetEvent<WowModelMaterial>>,
+    mut commands: Commands,
+    mut parts: Query<(
+        Entity,
+        &GlobalTransform,
+        Option<&bevy::camera::visibility::RenderLayers>,
+        &mut MeshMaterial3d<WowModelMaterial>,
+        Has<crate::model_fade::DoodadFade>,
+        Has<FarSideOfWater>,
+    )>,
+) {
+    use bevy::camera::visibility::RenderLayers;
+    // A texanim/tint ticker mutates the NEAR asset in place every drawn frame
+    // (`doodad_anim::tick_anim_materials`); mirror the edit into the live twin, or a far-side
+    // waterfall batch freezes its scroll the moment it classifies far. Our own twin writes touch
+    // only far ids (never `to_far` keys), so this can't feed back.
+    let edited: Vec<AssetId<WowModelMaterial>> = near_edits
+        .read()
+        .filter_map(|ev| match ev {
+            AssetEvent::Modified { id } if twins.to_far.contains_key(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for id in edited {
+        if let (Some(near), Some(far)) = (materials.get(id).cloned(), twins.to_far.get(&id)) {
+            let far = far.id();
+            // Can't fail: `to_far` holds the twin's strong handle, so its slot is live.
+            materials
+                .insert(far, far_twin_of(&near))
+                .expect("far twin slot is strongly held");
+        }
+    }
+    let mut used: std::collections::HashSet<AssetId<WowModelMaterial>> =
+        std::collections::HashSet::new();
+    for (entity, gt, layers, mut mat, authority_owned, marked) in &mut parts {
+        // A booth-layered batch belongs to its own camera and scene — no world water applies
+        // (the effect lane's own booth guard, `particles::sim`).
+        if layers.is_some_and(|l| !l.intersects(&RenderLayers::default())) {
+            continue;
+        }
+        let cur = mat.0.id();
+        let (near, swapped) = match twins.to_near.get(&cur) {
+            Some(n) => (n.clone(), true),
+            None => (mat.0.clone(), false),
+        };
+        // This lane's current verdict: the marker (what every composing owner reads); the raw
+        // handle state seconds it for the lanes this system swaps itself.
+        let far_now = marked || swapped;
+        let qualifies = match materials.get(near.id()) {
+            Some(m) => {
+                matches!(m.base.alpha_mode, AlphaMode::Blend) && m.extension.model_flags.x <= 0.5
+            }
+            None => false,
+        };
+        if !qualifies {
+            // A marked part that settled back onto its opaque cutout (fade over, aura released)
+            // stops being a transparent draw at all — its side is nobody's business until it
+            // feathers again.
+            if marked {
+                commands.entity(entity).remove::<FarSideOfWater>();
+            }
+            continue;
+        }
+        used.insert(near.id());
+        let far = crate::particles::far_side_of_water(&interleave, Some(entity), gt.translation());
+        if far == far_now {
+            continue;
+        }
+        // The swap's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which batches crossed the plane this
+        // frame and which way — the numeric read for a sort question no pixel can answer, and
+        // naturally sparse (transitions only, never per-frame spam).
+        if crate::dbg_trace::enabled() {
+            let p = gt.translation();
+            crate::dbg_trace::line(
+                "fx",
+                &format!(
+                    "{} mesh e={entity} at=[{:.1},{:.1},{:.1}]",
+                    if far { "far-side" } else { "near-side" },
+                    p.x,
+                    p.y,
+                    p.z
+                ),
+            );
+        }
+        if far {
+            // Build (or fetch) the twin either way — every composing owner needs it live in the
+            // map before its own pick can resolve it.
+            let far_h = if let Some(h) = twins.to_far.get(&near.id()) {
+                h.clone()
+            } else {
+                // `qualifies` above already proved the near asset exists.
+                let twin = far_twin_of(materials.get(near.id()).unwrap());
+                let h = materials.add(twin);
+                twins.to_far.insert(near.id(), h.clone());
+                twins.to_near.insert(h.id(), near.clone());
+                h
+            };
+            commands.entity(entity).insert(FarSideOfWater);
+            if !authority_owned {
+                mat.0 = far_h;
+            }
+        } else {
+            commands.entity(entity).remove::<FarSideOfWater>();
+            if !authority_owned {
+                mat.0 = near;
+            }
+        }
+    }
+    // Drop twin pairs whose near identity no live batch carries any more — the twin dies with
+    // its users. A respawned model refetches its near handle from its spawner's cache and the
+    // pair rebuilds lazily on the next far classification.
+    if !twins.to_far.is_empty() {
+        let stale: Vec<AssetId<WowModelMaterial>> = twins
+            .to_far
+            .keys()
+            .filter(|k| !used.contains(*k))
+            .copied()
+            .collect();
+        for k in stale {
+            if let Some(f) = twins.to_far.remove(&k) {
+                twins.to_near.remove(&f.id());
+            }
+        }
+    }
+}
+
 /// Replace the fog-policy bits (4-6) inside a packed `clutter_fade.z` marker word, preserving
 /// every other pipeline marker — bits 0-3 AND the Mod/Mod2x multiply markers in bits 7-8
 /// (decision 0528). The mask lives here, beside the packer above: the portrait booth's rig twin
@@ -586,5 +824,36 @@ mod tests {
         // And bevy's pipeline key truncates it to 0 — the bias may never mint pipelines (0837):
         // sub-1.0 biases all cast to the same i32 constant.
         assert_eq!(deepest as i32, 0);
+    }
+
+    /// The far-side twin is its source shifted exactly one water rung with the marker bit added —
+    /// and every OTHER marker bit rides along untouched (a fade twin's cutout, a zfill twin's
+    /// prime, the multiply blends and the fog policy all keep their pipeline identity on the far
+    /// side of the plane). The band stays coherent: a far zfill twin still primes before the far
+    /// colour batches it serves, and the deepest batch eps still clears the water rung's margin.
+    #[test]
+    fn far_twin_keeps_the_source_identity_one_rung_down() {
+        assert_eq!(
+            super::far_sort_bias(super::ZFILL_SORT_BIAS),
+            crate::sky_order::FAR_SIDE_BIAS + super::ZFILL_SORT_BIAS,
+            "one rung down from wherever the source sat"
+        );
+        assert!(
+            super::far_sort_bias(super::ZFILL_SORT_BIAS)
+                < super::far_sort_bias(super::BATCH_ORDER_SORT_EPS * 512.0),
+            "a far zfill twin still primes before its model's far colour batches"
+        );
+        let src = super::ZFILL_MARKER | super::TWIN_CUTOUT_MARKER | (3 << 4);
+        let z = super::far_markers(f32::from(src)) as u16;
+        assert_ne!(z & super::FAR_SIDE_MARKER, 0, "the sort-only pipeline bit");
+        assert_eq!(
+            z & !super::FAR_SIDE_MARKER,
+            src,
+            "every other marker preserved"
+        );
+        // The marker word stays f32-exact with every bit up to FAR_SIDE set (integers ≤ 2^12
+        // are exact in f32 — the packing's soundness bound).
+        let all = src | super::FAR_SIDE_MARKER | 0x0f;
+        assert_eq!(f32::from(all) as u16, all);
     }
 }

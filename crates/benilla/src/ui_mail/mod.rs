@@ -22,21 +22,28 @@
 //! window when the player leaves the mailbox's interaction range (wow-re §5: the client's generic
 //! interaction-target range gate — past it every mail `CMSG` silently fails its `CheckMailBox`).
 //!
-//! **The arrival layer ([`MailPending`], decisions 0544 P3 / 0904, wow-re §5 `mail-interaction.md`
-//! §4).** `HasNewMail()` mirrors the real client's own model: a countdown float (`0x845eac`) fed by
-//! `MSG_QUERY_NEXT_MAIL_TIME`'s reply and `SMSG_RECEIVED_MAIL`, stepped down per frame, and read as
-//! **`|countdown| < ε`** — *near zero*, not `<= 0` ([`MailPending::has_new_mail`]; the sign matters,
-//! decision 0904: vmangos's "no mail" reply is `-86400.0`, which a `<= 0` predicate reads as "you
-//! have mail" at every login). vmangos only ever sends `0.0` ("waiting now") or `-86400.0` ("none")
-//! — never a positive value — but the countdown is implemented in full since that's the client's
-//! real model, not a `0.0`/`-86400.0` special case. [`send_query_next_mail_time_on_enter`] fires the
-//! query once per world-enter (0548 §7: "once at UI/login load"); [`feed_mail`] steps the
-//! float every frame ([`MailPending::step`]), pushes `HasNewMail()` to the VM
-//! ([`benilla_ui::script::UiScript::set_has_new_mail`]) and fires `UPDATE_PENDING_MAIL` on every
-//! value transition — the only event the reference `MiniMapMailFrame` listens for
-//! (`Minimap.xml` l.278-289: `OnEvent` just re-checks `HasNewMail()` and shows/hides; no
-//! `MAIL_INBOX_UPDATE`/`MAIL_CLOSED` registration exists in the reference despite the icon
-//! logically depending on the inbox state).
+//! **The arrival layer ([`MailPending`], decisions 0544 P3 / 0904 / 0913, wow-re
+//! `ui/scratch/mail-pending-countdown.md`).** `HasNewMail()` mirrors the real client's own model: a
+//! countdown float (`0x845eac`) read as **`|countdown| < ε`** — *near zero*, not `<= 0` (the sign
+//! matters, decision 0904: vmangos's "no mail" reply is `-86400.0`, which a `<= 0` predicate reads
+//! as "you have mail" at every login). vmangos only ever sends `0.0` ("waiting now") or `-86400.0`
+//! ("none") — never a positive value — but the countdown is implemented in full since that's the
+//! client's real model, not a two-value special case.
+//!
+//! **The icon's whole life is that float**, because `MiniMapMailFrame` is the *only* listener of
+//! `UPDATE_PENDING_MAIL` in all of 1.12 FrameXML and its handler is a bare idempotent
+//! `if HasNewMail() then Show() else Hide()` (`Minimap.xml` l.278-289) — it never listens for
+//! `MAIL_INBOX_UPDATE`/`MAIL_CLOSED` despite the icon logically depending on the inbox state. So
+//! **checking your mail clears the icon by a route that never touches the inbox** (decision 0913):
+//! opening a letter arms the deferred-refresh flag ([`MailPending::arm_refresh`], the reference's
+//! `[0xb6efcc]`), and the mailbox *close* re-asks the server — the sender stamping the countdown to
+//! [`MAIL_TIME_NO_MAIL`] and the reply settling it. The same stamp-then-ask runs at every
+//! world-enter ([`send_query_next_mail_time_on_enter`]), which is why the reference icon also blinks
+//! off across a loading screen.
+//!
+//! [`feed_mail`] steps the float every frame ([`MailPending::step`]), keeps
+//! [`benilla_ui::script::UiScript::set_has_new_mail`] current, and fires `UPDATE_PENDING_MAIL` at
+//! the three sites the reference fires it (see [`MailPending::notify`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -52,10 +59,12 @@ use crate::net::{ClientCommand, EnteredWorldMessage, NetCommands, ObjectStore, S
 use crate::ui_script::UiInput;
 use crate::ui_session::{close_npc_session_out_of_range, NpcSession};
 
-/// `checked` mask bits (VERIFIED vmangos `Mail.h`, decision 0544): READ, RETURNED, COPIED. `READ`
-/// is `pub(crate)` — [`crate::net::apply::mail::mail_list`] reuses it to clear [`MailPending`]
-/// when a fresh list arrives with nothing left unread (decision 0544 P3).
-pub(crate) const CHECKED_READ: u32 = 0x1;
+mod pending;
+
+pub(crate) use pending::MailPending;
+
+/// `checked` mask bits (VERIFIED vmangos `Mail.h`, decision 0544): READ, RETURNED, COPIED.
+const CHECKED_READ: u32 = 0x1;
 const CHECKED_RETURNED: u32 = 0x2;
 const CHECKED_COPIED: u32 = 0x4;
 
@@ -186,48 +195,6 @@ impl NpcSession for MailOpen {
     }
 }
 
-/// The login-scoped unread-mail model (decision 0544 P3): the client's own countdown, in seconds
-/// until the next mail is "waiting" — `None` = never queried yet (`HasNewMail()` reads false, the
-/// reference's pre-first-query state). Independent of [`MailOpen`] (that's session-scoped to one
-/// open window; this survives it closing) — a separate resource is the cleaner split than fields
-/// bolted onto `MailOpen`. Filled by [`crate::net::apply::mail::next_mail_time`]/
-/// [`crate::net::apply::mail::received_mail`]; decremented and read by [`feed_mail`].
-#[derive(Resource, Default)]
-pub(crate) struct MailPending(pub(crate) Option<f32>);
-
-/// The `HasNewMail()` / countdown-step epsilon — the real client's `[0x8029d4]` = `2^-22`, the
-/// `fabs(x)`-vs-this threshold both `0x4afea0` (`HasNewMail`) and `0x4ade60` (the per-frame step)
-/// compare against (VERIFIED byte-exact in wow-re, `crates/ui/src/glue_geom_4a8.rs::EPS_BITS`).
-const MAIL_TIME_EPSILON: f32 = f32::from_bits(0x3480_0000); // 2^-22, wow-re's `EPS_BITS`
-
-impl MailPending {
-    /// `HasNewMail()` (decisions 0544 P3 / 0904; wow-re §5 §4, `0x4afea0` byte-exact:
-    /// `fld [0x845eac]; fabs; fcomp [0x8029d4]`) — true iff the countdown is **within ε of zero**.
-    ///
-    /// Near-zero, *not* `<= 0`: the sign carries meaning. vmangos answers
-    /// `MSG_QUERY_NEXT_MAIL_TIME` with `-86400.0` when nothing is unread (`MailHandler.cpp`
-    /// `HandleQueryNextMailTime`: `HasUnreadMail() ? 0.0f : -float(DAY)`), so a `<= 0` predicate
-    /// lights the minimap icon on every login for a character with no mail (decision 0904).
-    fn has_new_mail(&self) -> bool {
-        self.0.is_some_and(|s| s.abs() < MAIL_TIME_EPSILON)
-    }
-
-    /// The per-frame countdown step (wow-re §5 §4, `0x4ade60` byte-exact — carved as
-    /// `glue_geom_4a8::step_value`): a **non-positive countdown is left alone** (the `-86400.0`
-    /// "no mail" sentinel must never drift toward zero, and a reached-zero countdown must not sail
-    /// past it into negative — either would flip [`Self::has_new_mail`] the wrong way), and a
-    /// positive one steps down floor-clamped at `0.0`. The subtraction runs the client's x87 chain
-    /// (f64 under PC_53, narrowed at the store).
-    fn step(&mut self, delta_secs: f32) {
-        if let Some(cur) = self.0.as_mut() {
-            if *cur > 0.0 {
-                let diff = f64::from(*cur) - f64::from(delta_secs); // fsub, then fcom vs 0.0
-                *cur = if diff > 0.0 { diff as f32 } else { 0.0 };
-            }
-        }
-    }
-}
-
 pub(crate) struct UiMailPlugin;
 
 impl Plugin for UiMailPlugin {
@@ -253,14 +220,21 @@ impl Plugin for UiMailPlugin {
     }
 }
 
-/// `MSG_QUERY_NEXT_MAIL_TIME`, sent once per world-enter (decision 0544 P3/0548 §7 — "the 0x284
-/// query goes out once at UI/login load... not on a recurring timer") to seed [`MailPending`]/
-/// `HasNewMail()` for a character that already had mail waiting at login.
+/// `MSG_QUERY_NEXT_MAIL_TIME`, sent once per **world-enter** — VERIFIED faithful (decision 0913):
+/// the query's two callers are the mail module's init tail and the close-with-pending path, and
+/// that init hangs off the world-enter cascade `0x4908c0` (`PLAYER_ENTERING_WORLD` + 37 subsystem
+/// inits), whose guard is re-armed by the paired teardown — so it runs per world-enter (login,
+/// worldport, instance transfer, `ReloadUI`), not once per process as an earlier note had it.
+///
+/// The init stamps the countdown to [`MAIL_TIME_NO_MAIL`] before asking, which is why the reference
+/// icon blinks off across a loading screen and comes back with the reply.
 fn send_query_next_mail_time_on_enter(
     mut entered: MessageReader<EnteredWorldMessage>,
     commands: Res<NetCommands>,
+    mut pending: ResMut<MailPending>,
 ) {
     if entered.read().next().is_some() {
+        pending.on_query_sent();
         let _ = commands.0.send(ClientCommand::QueryNextMailTime);
     }
 }
@@ -479,6 +453,16 @@ fn feed_mail(
         script.fire_event("MAIL_SEND_SUCCESS", vec![]);
     } else if closed {
         script.fire_event("MAIL_CLOSED", vec![]);
+        // The close core's tail (wow-re `0x4acdad`/`0x4acdb1`, decision 0913): a session where a
+        // mail was read — or one arrived while the window was open — re-asks the server, and the
+        // sender stamps the countdown to "no mail" on the way out. This is the whole mechanism by
+        // which checking your mail clears the minimap icon; nothing on the inbox path touches it.
+        // Both close paths converge here (explicit `CloseMail` and the walk-away range close), as
+        // they do in the reference through the same generic dispatcher.
+        if pending.take_refresh() {
+            pending.on_query_sent();
+            let _ = commands.0.send(ClientCommand::QueryNextMailTime);
+        }
     } else if mail.mailbox.is_some() {
         // A re-click re-shows the (already open) window; MAIL_SHOW's CheckInbox refreshes the list.
         if show_requested {
@@ -492,15 +476,22 @@ fn feed_mail(
     *last = fresh;
     *last_mailbox = mail.mailbox;
 
-    // The arrival layer (decisions 0544 P3 / 0904): step the client-local countdown, then push/fire
-    // on every `HasNewMail()` value transition — the reference `MiniMapMailFrame`'s only listened
-    // event (`Minimap.xml` l.278-289, quoted in the module doc).
+    // The arrival layer (decisions 0544 P3 / 0904 / 0913): step the client-local countdown, keep
+    // the VM's `HasNewMail()` answer current, and fire `UPDATE_PENDING_MAIL` only where the
+    // reference fires it. The two are deliberately separate: the *push* keeps the Lua getter
+    // truthful whenever it is asked, while the *event* is edge-triggered at three sites only (the
+    // query reply, a near-zero arrival, the step crossing ε) — so, exactly as in the reference, the
+    // query sender's "no mail" stamp does not move the icon until the reply lands.
+    // `MiniMapMailFrame` is the sole listener in all of 1.12 FrameXML and its handler is an
+    // idempotent Show/Hide (`Minimap.xml` l.278-289, quoted in the module doc).
     pending.step(time.delta_secs());
     let has_new_mail = pending.has_new_mail();
     if has_new_mail != *last_has_new_mail {
         script.set_has_new_mail(has_new_mail);
-        script.fire_event("UPDATE_PENDING_MAIL", vec![]);
         *last_has_new_mail = has_new_mail;
+    }
+    if pending.take_notify() {
+        script.fire_event("UPDATE_PENDING_MAIL", vec![]);
     }
 }
 
@@ -516,6 +507,7 @@ fn drain_mail(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     items: Res<Items>,
     time: Res<Time>,
+    mut pending: ResMut<MailPending>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -552,6 +544,13 @@ fn drain_mail(
         else {
             continue;
         };
+        // Arm the deferred refresh on **every** open, read or not: the reference's `GetInboxText`
+        // calls the mark-as-read sender unconditionally, and the `[0xb6efcc] = 1` inside it is
+        // unconditional too (`0x4adda6`) — so opening any letter is what makes the close re-ask the
+        // server, and that is what clears the minimap icon (decision 0913). Arming it on an
+        // already-read mail costs at most one redundant query on close; failing to arm it would
+        // strand the icon lit, so the eager side is the safe side.
+        pending.arm_refresh();
         if !read {
             mail.mark_read(index);
             let _ = commands
@@ -828,57 +827,5 @@ mod tests {
         assert!(row.has_body);
         // The item name/texture are in flight (no template answer yet).
         assert!(row.item_name.is_none());
-    }
-
-    /// `HasNewMail()` is `|countdown| < ε`, not `countdown <= 0` (decision 0904). The regression
-    /// this pins: vmangos's "no unread mail" answer is `-86400.0`, and the old `<= 0` predicate
-    /// read it as "you have mail" — the phantom minimap icon on every login.
-    #[test]
-    fn has_new_mail_is_near_zero_not_non_positive() {
-        // Never queried — the reference's pre-first-query state.
-        assert!(!MailPending(None).has_new_mail());
-        // vmangos's two real answers.
-        assert!(MailPending(Some(0.0)).has_new_mail());
-        assert!(!MailPending(Some(-86400.0)).has_new_mail());
-        // The threshold itself: inside ε counts, ε and beyond does not — either sign.
-        assert!(MailPending(Some(MAIL_TIME_EPSILON / 2.0)).has_new_mail());
-        assert!(MailPending(Some(-MAIL_TIME_EPSILON / 2.0)).has_new_mail());
-        assert!(!MailPending(Some(MAIL_TIME_EPSILON)).has_new_mail());
-        assert!(!MailPending(Some(-MAIL_TIME_EPSILON)).has_new_mail());
-        // A still-running countdown is not "waiting now".
-        assert!(!MailPending(Some(30.0)).has_new_mail());
-    }
-
-    /// The per-frame step (`0x4ade60`): non-positive is untouched, positive steps down and floors
-    /// at exactly `0.0` — so a countdown that expires flips `HasNewMail()` true and *stays* true.
-    #[test]
-    fn step_leaves_non_positive_alone_and_floors_at_zero() {
-        // The "no mail" sentinel never drifts toward zero, however long the session runs.
-        let mut none_waiting = MailPending(Some(-86400.0));
-        for _ in 0..100 {
-            none_waiting.step(1.0 / 60.0);
-        }
-        assert_eq!(none_waiting.0, Some(-86400.0));
-        assert!(!none_waiting.has_new_mail());
-
-        // A reached-zero countdown stays at zero rather than sailing past into negative.
-        let mut expired = MailPending(Some(0.0));
-        expired.step(1.0 / 60.0);
-        assert_eq!(expired.0, Some(0.0));
-        assert!(expired.has_new_mail());
-
-        // A positive countdown steps down, then floors (never overshoots past 0).
-        let mut counting = MailPending(Some(0.5));
-        counting.step(0.125); // exact in binary — the step's value is pinned, not approximated
-        assert_eq!(counting.0, Some(0.375));
-        assert!(!counting.has_new_mail());
-        counting.step(10.0);
-        assert_eq!(counting.0, Some(0.0));
-        assert!(counting.has_new_mail());
-
-        // Never queried stays never-queried.
-        let mut unqueried = MailPending(None);
-        unqueried.step(1.0);
-        assert_eq!(unqueried.0, None);
     }
 }

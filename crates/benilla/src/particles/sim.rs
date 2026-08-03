@@ -175,7 +175,7 @@ pub(super) struct SceneGates<'w> {
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
 }
 
-/// The **water-plane interleave** inputs ([`crate::sky_order::EFFECT_FAR_SIDE_BIAS`], where the
+/// The **water-plane interleave** inputs ([`crate::sky_order::FAR_SIDE_BIAS`], where the
 /// byte story lives): the loaded liquid surfaces, the eye's submersion verdict, and the room
 /// components an anchor's liquid claim resolves from. One `SystemParam` for the same 16-cap
 /// reason as [`SceneGates`].
@@ -187,51 +187,97 @@ pub(crate) struct WaterInterleave<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
 }
 
-/// Is this emitter's cloud on the EYE's **far side** of its local water plane?
+/// Is this draw on the EYE's **far side** of its local water plane — the point-and-slack core.
 ///
-/// The reference classifies every particle emitter onto exactly ONE of the two transparent
-/// lists — above-water or below-water — by its own position against the owning model's liquid
-/// hit (`0x7084a0`), and the frame interleave draws the far-side list *before* the water pass
-/// (dry eye: below-water is far; submerged: above-water is — `0x4836d6`). This is that
-/// classification: the anchor against the nearest **admitted** surface over its XY, the claim
-/// resolved from the nearest ancestor with a room verdict (a joint owner sits under its unit;
-/// `Unknown` when nothing carries one — it admits both sources, still floor-bounded per pool).
-/// No admitted surface → near side, the reference's pass-1 default.
-pub(crate) fn far_side_of_water(
+/// The reference splits its transparents into the above-water and below-water lists and the
+/// frame interleave draws the eye's far side *before* the water pass (dry eye: below is far;
+/// submerged: above is — `0x4836d6`). Membership is `above ⇔ d ≥ −r` against the nearest
+/// **admitted** surface over the point's XY (claim from the nearest ancestor with a room
+/// verdict; `Unknown` admits both sources, still floor-bounded per pool). **No admitted surface
+/// ⇒ the above list** (`+0x19c == 0 → A = 1`, wow-re `water-frame-straddle.md` §2) — the NEAR
+/// side for a dry eye and the FAR side for a submerged one: shore content seen from under the
+/// water draws before the surface, so the surface tints it (0921's correction of 0911's
+/// "no surface → near").
+///
+/// `r` is the caller's lane law: the model bound-sphere slack for emitters and ribbons
+/// ([`model_far_side`]), `0` for the mesh lane's no-clip-planes fallback (`A = d ≥ 0`,
+/// `0x7079ed`; decision 0919).
+pub(crate) fn far_side_of_water_at(
     w: &WaterInterleave,
     claim_seed: Option<Entity>,
-    anchor_world: Vec3,
+    point_world: Vec3,
+    r: f32,
 ) -> bool {
-    let wow = benilla_assets::coords::bevy_to_wow(anchor_world);
+    let wow = benilla_assets::coords::bevy_to_wow(point_world);
     let mut seed = claim_seed;
     let mut room = None;
     for _ in 0..8 {
         let Some(e) = seed else { break };
-        if let Ok(r) = w.rooms.get(e) {
-            room = Some(r);
+        if let Ok(rm) = w.rooms.get(e) {
+            room = Some(rm);
             break;
         }
         seed = w.parents.get(e).ok().map(ChildOf::parent);
     }
     let claim = crate::liquid::unit_claim(room);
-    let Some(d) = crate::liquid::surfaces_at(w.water.iter(), wow, claim)
+    let above = match crate::liquid::surfaces_at(w.water.iter(), wow, claim)
         .map(|z| wow[2] - z)
         .min_by(|a, b| a.abs().total_cmp(&b.abs()))
-    else {
-        return false;
+    {
+        Some(d) => is_above(d, r),
+        None => true,
     };
-    far_side(d, w.underwater.0.any())
+    if w.underwater.0.any() {
+        above
+    } else {
+        !above
+    }
 }
 
-/// The side law alone, pure for the unit test: `d` = anchor − surface (WoW Z), `submerged` =
-/// the eye's state. Dry eye ⇒ the below-water list is far; submerged ⇒ the above-water one.
-/// `d = 0` sits with the above-water list, matching [`crate::player::camera`]'s waterline tie.
-fn far_side(d: f32, submerged: bool) -> bool {
-    if submerged {
-        d >= 0.0
-    } else {
-        d < 0.0
+/// The mesh lane's wrapper: the sign test at the batch's own transform (r = 0) — the
+/// reference's no-clip-planes fallback, `model_render::classify_water_side`'s law (0919).
+pub(crate) fn far_side_of_water(
+    w: &WaterInterleave,
+    claim_seed: Option<Entity>,
+    anchor_world: Vec3,
+) -> bool {
+    far_side_of_water_at(w, claim_seed, anchor_world, 0.0)
+}
+
+/// The emitter/ribbon lane: **the water side is the MODEL's** (byte-VERIFIED, wow-re
+/// `water-frame-straddle.md` §6 — the 0921 correction of 0911's per-emitter gloss). The type-4
+/// walk dots the plane ONCE per model in its prologue — `world_matrix × bound-box centre`,
+/// slack `r = |matrix row 0| × header sphere radius` — and every emitter of the model reads
+/// that one cached boolean (`[ebp-8]` at `0x7085fa`); the ribbon leg reads the model's side-A
+/// verbatim (`0x7081f1`). So a shoulder flame cannot blink at the waterline: the verdict rides
+/// the model's deep, stable bound centre with a whole radius of slack, never the bobbing bone.
+///
+/// `model` = the instance-root entity — the cloud ANCHOR field ("the MODEL, never the bone"),
+/// whose `GlobalTransform` is the instance matrix; `bound` = the asset's
+/// [`benilla_assets::ModelEmitter::water_bound`]. No resolvable matrix → the sign test at
+/// `fallback_point` (the emitter's live anchor), r = 0.
+pub(crate) fn model_far_side(
+    w: &WaterInterleave,
+    model: Option<Entity>,
+    model_gt: Option<&GlobalTransform>,
+    bound: (Vec3, f32),
+    fallback_point: Vec3,
+) -> bool {
+    match model_gt {
+        Some(gt) => {
+            let point = gt.transform_point(bound.0);
+            let r = gt.affine().matrix3.x_axis.length() * bound.1;
+            far_side_of_water_at(w, model, point, r)
+        }
+        None => far_side_of_water_at(w, model, fallback_point, 0.0),
     }
+}
+
+/// The membership law alone, pure for the unit test: `above ⇔ d ≥ −r` (the reference's
+/// `fcompp; test ah,0x41; jp` at `0x7084cf` — a tie at `d == −r` lands above; NaN lands below,
+/// which `>=` gives for free). `d` = point − surface (WoW Z), `r ≥ 0` the lane's slack.
+fn is_above(d: f32, r: f32) -> bool {
+    d >= -r
 }
 
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
@@ -471,6 +517,7 @@ pub(super) fn simulate_particles(
             seq,
             rng,
             owner_reach,
+            water_bound,
             texture,
             recursion: _,
             children,
@@ -478,10 +525,15 @@ pub(super) fn simulate_particles(
             model_instances,
             gated: _,
         } = &mut *emitter;
-        // The water-interleave claim seed, captured before the draw-anchor local shadows the
-        // `anchor` field below: the owner (creature/GameObject/joint) when streamed, else the
-        // cloud anchor (the MODEL) — whichever exists is where the room walk starts.
-        let claim_seed = (*owner).or(*anchor);
+        // The water-interleave MODEL frame, captured before the draw-anchor local shadows the
+        // `anchor` field below: the cloud anchor is "the MODEL, never the bone" — its transform
+        // is the instance matrix the classification dots (`model_far_side`), and the room walk
+        // starts there too. The owner (possibly a JOINT) only seconds it as the walk seed when
+        // no anchor exists — a joint's transform is not the instance matrix, so that leg keeps
+        // the sign-test fallback (`water_gt = None`).
+        let water_model = (*anchor).or(*owner);
+        let water_gt = (*anchor).and_then(|e| transforms.get(e).ok().copied());
+        let water_bound = *water_bound;
         *age += dt;
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
         // owner needs nothing beyond refreshing `placement` — the cloud rides the anchor for free
@@ -894,11 +946,20 @@ pub(super) fn simulate_particles(
         // local water plane drops under the water pass, so the surface paints over it — the
         // swimming-enchant erase was these two sorting by raw view-z and flipping with camera
         // angle. Booth emitters belong to their own camera and take no world rung.
-        // Classified at the EMITTER's own live position (`placement`), not the model anchor —
-        // the reference's grain (`0x7084a0` reads the emitter): a swimmer's body sits below the
-        // line while their shoulder emitter sits above it, and the model-anchor shortcut would
-        // put the visible glow on the wrong list.
-        let far = !is_booth && far_side_of_water(&interleave, claim_seed, placement.translation);
+        // Classified at the MODEL — its transformed bound centre with the bound-radius slack —
+        // never at the emitter's live position: the reference dots the plane once per model in
+        // the walk prologue and every emitter reads that verdict (byte-VERIFIED, 0921 correcting
+        // 0911's per-emitter reading of `0x7084a0`). This is what makes a shoulder flame stable
+        // at the waterline: the bobbing bone doesn't enter, and the whole cloud only flips when
+        // the model's centre is a full radius under.
+        let far = !is_booth
+            && model_far_side(
+                &interleave,
+                water_model,
+                water_gt.as_ref(),
+                water_bound,
+                placement.translation,
+            );
         // The classification's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which clouds dropped under
         // the water pass this frame — the numeric read for "the swimmer's enchant survives the
         // surface", where a pixel can't say which side a draw sorted to.
@@ -916,7 +977,7 @@ pub(super) fn simulate_particles(
         }
         let bias = super::owner_last_bias(*owner_reach)
             + if far {
-                crate::sky_order::EFFECT_FAR_SIDE_BIAS
+                crate::sky_order::FAR_SIDE_BIAS
             } else {
                 0.0
             };
@@ -1001,22 +1062,27 @@ pub(super) fn simulate_particles(
 #[cfg(test)]
 mod tests {
     use super::{
-        far_side, inherit_trigger, integrate_particle, ChildEmitter, Particle, StepEnv, Vec3,
+        inherit_trigger, integrate_particle, is_above, ChildEmitter, Particle, StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
 
-    /// The water-plane interleave's side law (`0x4836d6`): dry eye ⇒ the below-water list is the
-    /// far one; submerged ⇒ the above-water list is. `d = 0` sits with the above-water list.
+    /// The membership law (`0x7084cf`): `above ⇔ d ≥ −r` — the tie at `d == −r` lands ABOVE
+    /// (the reference's `jp` keeps it), NaN lands BELOW (unordered → the below push), and with
+    /// no slack (the mesh lane's r = 0) it degenerates to the sign test with `d = 0` above —
+    /// the same tie side as [`crate::player::camera`]'s waterline. The eye then picks which
+    /// list is FAR (`0x4836d6`): dry ⇒ below, submerged ⇒ above — exercised at the callers.
     #[test]
-    fn far_side_follows_the_eye() {
-        // Dry eye: below the surface is far (drawn before the water), above is near.
-        assert!(far_side(-0.5, false));
-        assert!(!far_side(0.5, false));
-        assert!(!far_side(0.0, false));
-        // Submerged: the sides swap.
-        assert!(far_side(0.5, true));
-        assert!(far_side(0.0, true));
-        assert!(!far_side(-0.5, true));
+    fn membership_is_d_at_least_minus_r() {
+        // The slack: a model bobbing within its own radius of the plane stays ABOVE — the
+        // shoulder flame's stability at the waterline (0921).
+        assert!(is_above(-0.5, 2.0));
+        assert!(is_above(-2.0, 2.0), "tie at d == -r lands above");
+        assert!(!is_above(-2.1, 2.0));
+        // r = 0 (the mesh lane): the sign test, 0 above.
+        assert!(is_above(0.0, 0.0));
+        assert!(!is_above(-0.1, 0.0));
+        // NaN → below, the reference's unordered-compare branch — `>=` gives it for free.
+        assert!(!is_above(f32::NAN, 2.0));
     }
 
     fn particle(pos: Vec3, vel: Vec3) -> Particle {

@@ -94,6 +94,7 @@ fn inventory_with_head_item() -> InventorySlots {
         locked: false,
         equip_slots: vec![1],
         creator: None,
+        enchants: Vec::new(),
     });
     slots
 }
@@ -118,6 +119,7 @@ fn backpack_with_fitting_helm() -> benilla_ui::script::ContainerState {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     benilla_ui::script::ContainerState {

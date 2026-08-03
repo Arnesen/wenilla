@@ -38,6 +38,7 @@ fn one_item_backpack() -> ContainerState {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     ContainerState {
@@ -192,6 +193,7 @@ fn escape_closes_an_open_stack_split_frame() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(

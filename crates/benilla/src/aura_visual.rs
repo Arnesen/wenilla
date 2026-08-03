@@ -695,6 +695,7 @@ type AuraParts<'w, 's> = Query<
         Option<&'static InteriorLit>,
         Option<&'static RenderFade>,
         Has<PendingAppearFade>,
+        Has<crate::model_render::FarSideOfWater>,
     ),
     // Disjointness for the card pass (both want `&mut MeshTag`); a card never carries
     // `FadeMaterials`, so this filter excludes nothing that would otherwise match — the same
@@ -729,6 +730,7 @@ pub(crate) fn apply_aura_alpha(
     mut roots: Query<(Entity, &mut AuraNodes)>,
     children_of: Query<&Children>,
     mut parts: AuraParts,
+    far_twins: Res<crate::model_render::FarSideTwins>,
     mut cards: Query<(
         &crate::billboard::BillboardCard,
         &mut MeshTag,
@@ -752,6 +754,7 @@ pub(crate) fn apply_aura_alpha(
             now,
             &children_of,
             &mut parts,
+            &far_twins,
             &mut reauthor,
             &mut walked,
         );
@@ -803,17 +806,19 @@ fn author_cards(
 /// property that its attached models render off (the same reason
 /// [`crate::model_fade::apply_despawn_fade`] and the self feather both walk descendants, not
 /// children).
+#[allow(clippy::too_many_arguments)] // the author's full channel set, threaded down the walk
 fn author_descendants(
     entity: Entity,
     alpha: f32,
     now: f32,
     children_of: &Query<&Children>,
     parts: &mut AuraParts,
+    far_twins: &crate::model_render::FarSideTwins,
     reauthor: &mut crate::interior::InteriorReauthor,
     walked: &mut bevy::ecs::entity::EntityHashSet,
 ) {
     walked.insert(entity);
-    if let Ok((fm, mut tag, mut mat, anim, lit, fade, pending)) = parts.get_mut(entity) {
+    if let Ok((fm, mut tag, mut mat, anim, lit, fade, pending, far_side)) = parts.get_mut(entity) {
         // A part still WAITING on its appear-fade is deliberately invisible until the ramp arms (its
         // tag alpha is seeded near-zero at spawn), so authoring it would flash a streaming-in unit's
         // geometry at the aura alpha for the pending window. Every other author of this channel
@@ -836,8 +841,14 @@ fn author_descendants(
                 tag.0 = bits;
             }
             // The INSTANCE alpha decides the pass; a settled-opaque release hands the law's steady
-            // material back and asks the classifier to re-author, so nothing is left on a stale one.
-            let want = fm.material_for(lit, alpha < 1.0).clone();
+            // material back and asks the classifier to re-author, so nothing is left on a stale
+            // one. The water-plane axis composes here like everywhere else (`far_resolved`).
+            let want = crate::model_render::far_resolved(
+                fm.material_for(lit, alpha < 1.0),
+                far_side,
+                far_twins,
+            )
+            .clone();
             if mat.0 != want {
                 mat.0 = want;
                 if alpha >= 1.0 && lit.is_some() {
@@ -850,7 +861,16 @@ fn author_descendants(
     }
     if let Ok(kids) = children_of.get(entity) {
         for kid in kids {
-            author_descendants(*kid, alpha, now, children_of, parts, reauthor, walked);
+            author_descendants(
+                *kid,
+                alpha,
+                now,
+                children_of,
+                parts,
+                far_twins,
+                reauthor,
+                walked,
+            );
         }
     }
 }

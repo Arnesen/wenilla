@@ -29,6 +29,10 @@ pub(super) struct ItemInstance {
     /// Instance `ITEM_FIELD_FLAGS` — the openable lock sub-gate reads UNLOCKED `0x4`
     /// (`0x52e30c`) and the wrapped-gift arm WRAPPED `0x8` (`0x52e31d`).
     pub flags: u32,
+    /// The instance's enchant slots, app-resolved and in slot order (law line 17 / §1-ENCHANT,
+    /// decisions 0915/0920) — see [`crate::script::EnchantView`]. Empty on an unenchanted item and
+    /// on every template/link source (no instance, nothing enchanted).
+    pub enchants: Vec<crate::script::EnchantView>,
     /// May this source emit the ITEM_OPENABLE line? = the reference's `p6 == 0` — "this tooltip
     /// carries **no** caller-supplied instance block" (`[this+0x440]`, tested at `0x52e2e8`: when
     /// it is set, the builder evaluates only READABLE and skips the openable tree entirely).
@@ -54,8 +58,9 @@ pub(super) struct ItemInstance {
 /// Render one item template into the tooltip — the BYTE-VERIFIED emission law of the shared
 /// renderer `0x52b650` (wow-re `ui/scratch/tooltip-content-law.md`, §5-cross-checked 2026-07-10;
 /// the proficiency-cell and SET legs byte-read directly 2026-07-11; the creator/readable
-/// instance tail byte-read 2026-07-20), minus the instance-only families still unfed
-/// (soulbound override, enchants, cooldown-remaining, the gift-wrap family).
+/// instance tail byte-read 2026-07-20; the enchant lines of line 17 fed 2026-08-03, decision
+/// 0915), minus the instance-only families still unfed (soulbound override, cooldown-remaining,
+/// the gift-wrap family).
 pub(super) fn render_view(
     lua: &Lua,
     this: &Table,
@@ -276,6 +281,58 @@ pub(super) fn render_view(
             ))?;
         }
     }
+    // **Line 17 — the enchant family** (wow-re `tooltip-content-law.md` §1-ENCHANT, byte-carved
+    // 2026-08-03 on this lane's dispatch; decisions 0915/0920). One contiguous block
+    // `[0x52c991, 0x52cc69)` between the resistances and the durability precompute, and three arms
+    // that are mutually exclusive by construction — the per-slot loop falls through to the
+    // proposed-enchant pair and jumps the block's end, so RANDOM_ENCHANT is reachable only when
+    // there was no id source at all (§E1).
+    //
+    // The **colour is per slot**, and this is the correction the carve landed (§E3): the value is a
+    // computed local, defaulting to WHITE, overwritten **only for slots 0 and 1** — green
+    // `0xc0d3ac` for a positive id, pure-red `0xc0d398` for a negative one. Slots 2..6 — the
+    // random-property suffix enchants — are **always white**, whatever the sign. (Our first cut
+    // painted every slot green.) The sign never picks a different DBC row; the app already
+    // resolved that off `abs(id)`.
+    //
+    // Two gates sit above the loop. **ITEM_SIGNABLE** (template Flags bit `0x2000`, a petition or
+    // guild charter) forces every id to 0 with no fallback (`0x52c9e0: test ah,0x20`) — such an
+    // item shows no enchant line even if its instance carries ids. And with **no id source at all**
+    // the block instead prints the template-only `ITEM_RANDOM_ENCHANT` placeholder (§E5).
+    let signable = v.flags & 0x2000 != 0;
+    let enchant_slots = match signable {
+        true => &[][..],
+        false => inst.map(|i| i.enchants.as_slice()).unwrap_or_default(),
+    };
+    // "No id source" is the reference's own three-way fork (§E1): a wrapped gift, or no item
+    // object AND no caller-supplied instance block. Ours reduces to "this hover carries no
+    // instance" — a template or link hover — plus the wrapped-gift bit, which is the same set.
+    let no_id_source = inst.is_none_or(|i| i.flags & 0x8 != 0);
+    if no_id_source && !signable && v.random_property != 0 {
+        add(("<Random enchantment>".into(), GREEN))?;
+    }
+    for e in enchant_slots {
+        let color = match (e.slot < 2, e.negative) {
+            (true, false) => GREEN,
+            (true, true) => ENCHANT_RED,
+            (false, _) => WHITE,
+        };
+        // A TEMPORARY enchant's countdown REPLACES the plain name in the same line and keeps that
+        // colour — it is never a second line (§E3). The bucket ladder (day/hour/min/sec) and its
+        // ceil-vs-truncate split are [`enchant_time_left`]'s; its source is
+        // `SMSG_ITEM_ENCHANT_TIME_UPDATE`, never the item's own duration field.
+        let mut text = match e.remaining_ms {
+            Some(ms) => enchant_time_left(&e.name, ms),
+            None => e.name.clone(),
+        };
+        // " (N Charges)" — the slot's own charges dword through ITEM_SPELL_CHARGES, then the
+        // literal `" (%s)" 0x854820` (`0x52caa6–0x52cb38`). Only an owned item object carries
+        // charges; the session/inspect legs ship ids alone, so this is naturally absent there.
+        if e.charges != 0 {
+            text.push_str(&format!(" ({})", charges_phrase(e.charges)));
+        }
+        add((text, color))?;
+    }
     if let Some((cur, max)) = inst.and_then(|i| i.durability).filter(|&(_, max)| max > 0) {
         // Red iff BROKEN (durability 0) — the byte law (wow-re ui.md tooltip content law:
         // "durability (red iff broken==0)", the AddLine colour pointer `0xc0d390`, the same
@@ -366,10 +423,8 @@ pub(super) fn render_view(
         };
         addw((format!("{prefix}{text}"), GREEN))?;
     }
-    match v.charges {
-        1 => add(("1 Charge".into(), WHITE))?,
-        n if n > 1 => add((format!("{n} Charges"), WHITE))?,
-        _ => {}
+    if v.charges > 0 {
+        add((charges_phrase(v.charges as u32), WHITE))?;
     }
     // The item-SET block (§22, ABOVE the compact cut), byte-read at the builder's
     // `0x52d8a0..0x52e0f5`: a blank gold line, the gold "name (owned/total)" header, the
@@ -471,4 +526,78 @@ pub(super) fn render_view(
         add(("<Right Click to Read>".into(), GREEN))?;
     }
     Ok(())
+}
+
+/// A temporary enchant's line text — the name with its countdown, the reference's own bucket
+/// ladder (wow-re `tooltip-content-law.md` §E3 → `0x52fa50`, byte-verified): a runtime key
+/// `ITEM_ENCHANT_TIME_LEFT_<DAYS|HOURS|MIN|SEC>` chosen by the largest unit that fits, with the
+/// count taken as **ceil** in the day/hour/minute arms and **truncated** in the seconds arm. The
+/// day/hour keys carry a `_P1` plural twin in the shipped GlobalStrings; minutes and seconds do
+/// not, so those read "(1 min)" at one minute exactly as they read "(9 min)".
+///
+/// Templates are the shipped enUS values (`Interface\FrameXML\GlobalStrings.lua:2406-2411`),
+/// inlined like every other string in this builder.
+fn enchant_time_left(name: &str, ms: u64) -> String {
+    const SEC: u64 = 1_000;
+    const MIN: u64 = 60 * SEC;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    let ceil = |unit: u64| ms.div_ceil(unit);
+    match ms {
+        _ if ms >= DAY => match ceil(DAY) {
+            1 => format!("{name} (1 day)"),
+            n => format!("{name} ({n} days)"),
+        },
+        _ if ms >= HOUR => match ceil(HOUR) {
+            1 => format!("{name} (1 hour)"),
+            n => format!("{name} ({n} hrs)"),
+        },
+        _ if ms >= MIN => format!("{name} ({} min)", ceil(MIN)),
+        _ => format!("{name} ({} sec)", ms / SEC),
+    }
+}
+
+/// `ITEM_SPELL_CHARGES` — "%d Charge" / "%d Charges" (`GlobalStrings.lua:2448-2449`, the `_P1`
+/// plural twin). One rule for both consumers: the standalone charges line (law line 21) and the
+/// enchant line's ` (…)` suffix (§E3).
+fn charges_phrase(n: u32) -> String {
+    match n {
+        1 => "1 Charge".into(),
+        n => format!("{n} Charges"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The countdown's bucket ladder (wow-re §1-ENCHANT §E3 → `0x52fa50`): the largest unit that
+    /// fits wins, the count is **ceil** in the day/hour/minute arms and **truncated** in seconds,
+    /// and the day/hour arms have singular/plural twins while minutes and seconds do not.
+    #[test]
+    fn enchant_countdown_buckets_and_rounding() {
+        let t = |ms| enchant_time_left("Rockbiter", ms);
+        // Seconds truncate: 1900 ms is "1 sec", not 2.
+        assert_eq!(t(1_900), "Rockbiter (1 sec)");
+        assert_eq!(t(59_999), "Rockbiter (59 sec)");
+        // Minutes ceil: one second past 4 minutes already reads 5.
+        assert_eq!(t(60_000), "Rockbiter (1 min)");
+        assert_eq!(t(241_000), "Rockbiter (5 min)");
+        // Hours ceil, with the shipped plural spelling ("hrs", not "hours").
+        assert_eq!(t(3_600_000), "Rockbiter (1 hour)");
+        assert_eq!(t(3_600_001), "Rockbiter (2 hrs)");
+        // Days ceil.
+        assert_eq!(t(86_400_000), "Rockbiter (1 day)");
+        assert_eq!(t(86_400_001), "Rockbiter (2 days)");
+        // Zero never reaches here (the app drops an expired timer), but it must not panic.
+        assert_eq!(t(0), "Rockbiter (0 sec)");
+    }
+
+    /// `ITEM_SPELL_CHARGES` and its `_P1` plural twin — one rule, both consumers (the standalone
+    /// charges line and the enchant line's suffix).
+    #[test]
+    fn charges_phrase_picks_the_plural() {
+        assert_eq!(charges_phrase(1), "1 Charge");
+        assert_eq!(charges_phrase(5), "5 Charges");
+    }
 }

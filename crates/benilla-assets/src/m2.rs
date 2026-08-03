@@ -170,6 +170,13 @@ pub struct ModelEmitter {
     /// decisions 0719/0721). Computed by [`benilla_formats::m2_owner_reach`], which is where the
     /// reasoning lives.
     pub owner_reach: f32,
+    /// The OWNER model's authored bound sphere — the water-plane classification input (wow-re
+    /// `water-frame-straddle.md` §6, byte-VERIFIED): the reference dots `world_matrix ×
+    /// (bbox_min+bbox_max)/2` against the plane once per MODEL and every emitter reads that one
+    /// verdict, with the slack `above ⇔ d ≥ −r`, `r = |matrix row 0| × sphere radius`. Centre in
+    /// **Bevy model space** (the same frame the instance transform maps), radius model-local
+    /// yards. `(ZERO, 0)` when the header carries no bounds — the sign test at the anchor.
+    pub water_bound: (Vec3, f32),
 }
 
 /// Whether looping `anim` would look like anything other than the **static mesh** — the doodad
@@ -232,6 +239,10 @@ pub struct ModelRibbon {
     /// trails otherwise interleave with its own body, 6 batches deep, and which batches are over
     /// which streamer *changes frame to frame* as they whip (decision 0721).
     pub owner_reach: f32,
+    /// The owner model's bound sphere for the water-plane side — same field, same law as
+    /// [`ModelEmitter::water_bound`]: the ribbon leg reads the MODEL's side-A boolean verbatim
+    /// (wow-re `water-frame-straddle.md` §6 — `cmp [ebp-0x24],0` at `0x7081f1`), slack included.
+    pub water_bound: (Vec3, f32),
 }
 
 /// One M2 light block of an [`M2Model`]: the raw [`M2Light`] record plus — like
@@ -272,6 +283,18 @@ impl AssetLoader for M2ModelLoader {
         // authors (quad emitters, ribbon trails, model-particle instances) takes the rung it sizes,
         // because the reference draws them all in the one post-batch bracket.
         let owner_reach = benilla_formats::m2_owner_reach(&subs);
+        // The water-plane classification sphere, once for the whole model — the header AABB's
+        // midpoint (Bevy model frame) + the header sphere radius. See [`ModelEmitter::water_bound`].
+        let water_bound = bounds.as_ref().map_or((Vec3::ZERO, 0.0), |b| {
+            (
+                wow_to_bevy([
+                    (b.bbox_min[0] + b.bbox_max[0]) * 0.5,
+                    (b.bbox_min[1] + b.bbox_max[1]) * 0.5,
+                    (b.bbox_min[2] + b.bbox_max[2]) * 0.5,
+                ]),
+                b.sphere_radius,
+            )
+        });
         // The collision hull (collide-iff-hull): keep only a non-empty mesh so the spawn site can skip
         // hull-less props cheaply.
         let collision = parse_m2_collision_hull(&bytes)
@@ -369,6 +392,7 @@ impl AssetLoader for M2ModelLoader {
                     recursion,
                     geometry,
                     owner_reach,
+                    water_bound,
                 }
             })
             .collect();
@@ -394,6 +418,7 @@ impl AssetLoader for M2ModelLoader {
                     texture,
                     bone_pivot,
                     owner_reach,
+                    water_bound,
                 }
             })
             .collect();

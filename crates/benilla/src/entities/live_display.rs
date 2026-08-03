@@ -13,13 +13,20 @@
 //! handler instead **eases the render scale over 2 s with a cosine smoothstep** (byte-verified,
 //! `0x614bbf`). All wow-re: `questgiver-marker.md` §W6, `w2d2.md` §2.x, `object-layer.md`.
 //!
-//! Our shape is the house diff-and-rebuild ([`super::mount::refresh_mounts`]): the visual was
-//! BUILT with [`AppliedDisplay`], the
-//! live truth is the descriptor store, and a difference tears the visual down for
-//! `attach_entity_visuals` to rebuild — fade-skipped (a shapeshift isn't a spawn), waiting out the
-//! new model's async load rather than flashing a cube. The collision height restamps **in the same
-//! commit** as the swap — the 0645 rule that the collision box and the drawn body can never
-//! disagree is exactly why neither restamped alone before this.
+//! Our shape is a diff-and-rebuild: the visual was BUILT with [`AppliedDisplay`], the live truth
+//! is the descriptor store, and a difference tears the visual down for `attach_entity_visuals` to
+//! rebuild — fade-skipped (a shapeshift isn't a spawn), waiting out the new model's async load
+//! rather than flashing a cube. The collision height restamps **in the same commit** as the swap —
+//! the 0645 rule that the collision box and the drawn body can never disagree is exactly why
+//! neither restamped alone before this.
+//!
+//! A **teardown is right here and only here**: a display swap is a different model, so there is
+//! nothing to keep. The two siblings that used to share this shape no longer do — a gear change
+//! re-dresses in place (0835) and a mount transition re-seats in place (B199), because in the
+//! reference neither touches the body model at all. What survives a teardown is the unit's own
+//! per-unit state, and one piece of it is load-bearing: its [`super::spell_fx::FxAttached`] list
+//! outlives the model exactly as the reference's `+0xb4` does, so its persistent instances
+//! re-spawn onto the new body rather than being lost with the old one.
 
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
@@ -62,15 +69,15 @@ fn live_display_id(kind: EntityKind, store: &ObjectStore) -> Option<u32> {
 }
 
 /// Diff each attached entity's live descriptor appearance against what its visual was built with,
-/// and apply the change: a **display-id** move swaps the model (teardown → rebuild, the
-/// [`super::mount::refresh_mounts`] shape) and a **scale** move arms the 2 s ease — both restamp
+/// and apply the change: a **display-id** move swaps the model (teardown → rebuild — the one
+/// transition that still earns one) and a **scale** move arms the 2 s ease — both restamp
 /// [`CollisionHeight`] in the same commit (its two inputs are exactly these two fields; decision
 /// 0645's stamp-once rule was correct only while neither could change).
 ///
 /// The self-avatar needs nothing special: it is the streamed entity (decision 0042), so the swap
 /// rebuilds its body like any other unit and `player::mirror_self_collision_height` re-syncs the
 /// swim lines from the restamp next frame. Mount children carry no [`ObjectStore`], so they can
-/// never take this path (their display is the host's field, diffed by `refresh_mounts`).
+/// never take this path (their display is the host's field, diffed by `mount::reseat_mounts`).
 #[allow(clippy::type_complexity)]
 pub(super) fn refresh_live_display(
     mut commands: Commands,
@@ -101,7 +108,7 @@ pub(super) fn refresh_live_display(
                 );
                 net.display_id = Some(live);
                 restamp = true;
-                // The refresh_mounts teardown set + our own diff key: children (parts, joints,
+                // The full visual teardown set + our own diff key: children (parts, anchors,
                 // held roots, mount child) despawn, the per-instance visual components strip, and
                 // `attach_entity_visuals` rebuilds next frame(s) with the new display —
                 // fade-skipped via `Reattached` (a shapeshift isn't a spawn).

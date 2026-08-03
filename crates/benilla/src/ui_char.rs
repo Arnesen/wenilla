@@ -393,16 +393,22 @@ fn combat_stats(
 /// the same feed `ui_items::feed_containers` reads for a bag slot's own `.locked`). `slot0` is
 /// the wire `EQUIPMENT_SLOT_*`/`INV_SLOT` index (0..22 — equipment 0..18, the four equipped-bag
 /// icons 19..22); the live-API id `slot_view` reports through is `slot0 + 1` either way.
+#[allow(clippy::too_many_arguments)] // the slot resolve's full read set — the bag feed's twin
 fn slot_view(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
+    enchant_rows: Option<&crate::items::Enchants>,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
     slot0: u8,
 ) -> Option<InvSlotView> {
     let guid = store.0.player_inv_slot(slot0)?;
+    // The temp-enchant countdowns, read before the object borrow (both live on `Items`) — the bag
+    // feed's twin.
+    let enchant_ms: [Option<u64>; 7] =
+        std::array::from_fn(|s| items.enchant_remaining_ms(guid, s as u32));
     let obj = items.object(guid)?;
     let entry = obj.object_entry()?;
     let count = obj.item_stack_count().unwrap_or(1).max(1);
@@ -425,6 +431,20 @@ fn slot_view(
         .item_creator()
         .filter(|&g| g != 0)
         .and_then(|g| names.resolve(g, commands).map(str::to_string));
+    // The item's own 7 enchant slots — the equipped tooltip's enchant lines (decision 0915). OUR
+    // gear streams as item objects, so this is the full array; an INSPECTED player's tooltip sees
+    // only the 2 slots their descriptor broadcasts (`ui_inspect`), as the reference does.
+    let enchants = crate::items::enchant_lines(
+        (0..7).map(|s| {
+            (
+                s,
+                obj.item_enchant(s).unwrap_or(0),
+                obj.item_enchant_charges(s),
+                enchant_ms[usize::from(s)],
+            )
+        }),
+        enchant_rows,
+    );
     let t = items.template(entry, guid, commands);
     let (name, quality, display, link, equip_slots, class, bar_placeable) = match t {
         Some(t) => (
@@ -469,6 +489,7 @@ fn slot_view(
         equip_slots,
         bar_placeable,
         creator,
+        enchants,
     })
 }
 
@@ -510,6 +531,7 @@ fn inventory_slots(
     store: &ObjectStore,
     items: &mut Items,
     icons: Option<&ItemDisplays>,
+    enchant_rows: Option<&crate::items::Enchants>,
     commands: &NetCommands,
     pending: &PendingItemOps,
     names: &mut crate::names::NameCache,
@@ -547,17 +569,37 @@ fn inventory_slots(
             // Ammo is a named deferral too: no drag path reaches the bar from this slot.
             bar_placeable: false,
             creator: None,
+            // Ammo carries no enchant slots to read: the wire never streams an ammo instance
+            // here, only the template id off the player descriptor.
+            enchants: Vec::new(),
         });
     }
     for slot in 1..=19u8 {
-        inv[usize::from(slot)] = slot_view(store, items, icons, commands, pending, names, slot - 1);
+        inv[usize::from(slot)] = slot_view(
+            store,
+            items,
+            icons,
+            enchant_rows,
+            commands,
+            pending,
+            names,
+            slot - 1,
+        );
     }
     // Bag0Slot..Bag3Slot (ids 20..23, PaperDollItemFrame.dbc-verified) — the bag bar's icon
     // source: the equipped bag ITEM at INV_SLOT 19..22 (BAG_SLOT_FIRST../SLOT_BAG_FIRST in the
     // container feed's own numbering), same `slot_view` resolution as any equipment slot.
     for (i, slot) in (20u8..=23).enumerate() {
-        inv[usize::from(slot)] =
-            slot_view(store, items, icons, commands, pending, names, 19 + i as u8);
+        inv[usize::from(slot)] = slot_view(
+            store,
+            items,
+            icons,
+            enchant_rows,
+            commands,
+            pending,
+            names,
+            19 + i as u8,
+        );
     }
     inv
 }
@@ -568,6 +610,8 @@ fn feed_char(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     mut items: ResMut<Items>,
     icons: Option<Res<ItemDisplays>>,
+    // `SpellItemEnchantment`'s name column — the equipped tooltip's enchant lines (decision 0915).
+    enchants: Option<Res<crate::items::Enchants>>,
     commands: Res<NetCommands>,
     mut feed: ResMut<CharFeedState>,
     mut booth: ResMut<PaperDollBooth>,
@@ -692,6 +736,7 @@ fn feed_char(
         store,
         &mut items,
         icons.as_deref(),
+        enchants.as_deref(),
         &commands,
         &pending,
         &mut names,

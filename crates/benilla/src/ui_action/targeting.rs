@@ -59,6 +59,11 @@ pub(crate) struct SpellTargeting(Option<GroundTargeting>);
 
 struct GroundTargeting {
     spell_id: u32,
+    /// What the world click will commit. The ref keeps the whole pending-cast block across the
+    /// cursor — the cast **item's** guid at `0xceac48` included — so `0x6e54f0`'s discriminator
+    /// still picks `CMSG_USE_ITEM` when the click lands: a thrown grenade, a stick of dynamite, a
+    /// Goblin Mortar (decision 0914; 46 of the 1.12 on-use item spells arm this cursor).
+    commit: super::cast_send::CastCommit,
 }
 
 impl SpellTargeting {
@@ -73,8 +78,13 @@ impl SpellTargeting {
         self.0.as_ref().map(|t| t.spell_id)
     }
 
-    pub(crate) fn enter(&mut self, spell_id: u32) {
-        self.0 = Some(GroundTargeting { spell_id });
+    pub(crate) fn enter(&mut self, spell_id: u32, commit: super::cast_send::CastCommit) {
+        self.0 = Some(GroundTargeting { spell_id, commit });
+    }
+
+    /// What the pending ground cast will commit as when the click lands.
+    fn commit(&self) -> Option<super::cast_send::CastCommit> {
+        self.0.as_ref().map(|t| t.commit)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -190,7 +200,7 @@ pub(crate) fn commit_ground_cast_on_click(
     if clicks.read().last().is_none() {
         return;
     }
-    let Some(spell_id) = targeting.spell() else {
+    let (Some(spell_id), Some(commit)) = (targeting.spell(), targeting.commit()) else {
         return;
     };
     let Some(point) = occlusion.point else {
@@ -203,11 +213,28 @@ pub(crate) fn commit_ground_cast_on_click(
         "ui_action: ground cast {spell_id} committed at wow ({:.2}, {:.2}, {:.2})",
         dest[0], dest[1], dest[2]
     );
-    let _ = net
-        .0
-        .send(ClientCommand::CastSpellAtDest { spell_id, dest });
+    // Same block, two opcodes — `SendCast 0x6e54f0`'s one discriminator survives the cursor
+    // (decision 0914): a thrown grenade commits as `CMSG_USE_ITEM` with the DEST block.
+    let _ = net.0.send(match commit {
+        super::cast_send::CastCommit::Spell => ClientCommand::CastSpellAtDest { spell_id, dest },
+        super::cast_send::CastCommit::Item {
+            bag_index,
+            slot,
+            spell_index,
+            ..
+        } => ClientCommand::UseItem {
+            bag_index,
+            slot,
+            spell_index,
+            target: benilla_protocol::messages::UseItemTarget::Dest(dest),
+        },
+    });
     let now = Instant::now();
-    pending.arm(spell_id, now);
+    if commit.is_item() {
+        pending.arm_item(spell_id, now);
+    } else {
+        pending.arm(spell_id, now);
+    }
     if let Some(d) = spells.as_ref().and_then(|s| s.catalog.get(spell_id)) {
         cooldowns.start_gcd(spell_id, d, now);
     }

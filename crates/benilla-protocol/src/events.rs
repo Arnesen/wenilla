@@ -546,6 +546,15 @@ pub enum SessionEvent {
     },
     /// Put an item instance on the client's fixed 30 s use cooldown (`SMSG_ITEM_COOLDOWN`).
     ItemCooldown { item_guid: u64, spell_id: u32 },
+    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE` — the seconds left on one item's TEMPORARY enchant, in the
+    /// named enchant slot. The **only** feed for the tooltip's countdown: the item's own
+    /// `ITEM_FIELD_ENCHANTMENT` duration field is never read for it (wow-re
+    /// `ui/scratch/tooltip-content-law.md` §E3; decision 0920). `seconds == 0` = expired.
+    ItemEnchantTime {
+        item_guid: u64,
+        slot: u32,
+        seconds: u32,
+    },
     /// Start an on-hold (`SPELL_ATTR_COOLDOWN_ON_EVENT`) cooldown's parked timers now
     /// (`SMSG_COOLDOWN_EVENT`).
     CooldownEvent { spell_id: u32, caster: u64 },
@@ -967,8 +976,9 @@ pub enum SessionEvent {
     /// (a mail's nonzero `item_text_id` triggers the ask-once fetch; decision 0544).
     MailItemText { text_id: u32, text: String },
     /// `SMSG_RECEIVED_MAIL` — a mail arrived (instant for text-only, on the delivery timer's
-    /// expiry otherwise); the wire's always-0 `u32` carries nothing, so the event does either.
-    ReceivedMail,
+    /// expiry otherwise). `seconds` is the delay until it is "waiting", in the pending-mail
+    /// countdown's units (vmangos only ever sends `0.0` = now; decision 0913).
+    ReceivedMail { seconds: f32 },
     /// `MSG_QUERY_NEXT_MAIL_TIME`'s reply (same opcode as our empty-body request): `0.0` = unread
     /// mail waiting, `-86400.0` = none. Drives `HasNewMail()`/`UPDATE_PENDING_MAIL` (decision 0544
     /// P3).

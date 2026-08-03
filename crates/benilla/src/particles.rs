@@ -39,8 +39,8 @@ mod sim;
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
 // The water-plane interleave classification — shared with the ribbon sim (a trail is one of the
-// model's emitters and classifies the same way; `sky_order::EFFECT_FAR_SIDE_BIAS`).
-pub(crate) use sim::{far_side_of_water, WaterInterleave};
+// model's emitters and classifies the same way; `sky_order::FAR_SIDE_BIAS`).
+pub(crate) use sim::{far_side_of_water, model_far_side, WaterInterleave};
 
 /// Hard cap on a single emitter's live particle count — a backstop against a pathological model. Real
 /// props sit far under this (a campfire's steady state is `rate·lifespan` ≈ 30 + 24 particles).
@@ -210,6 +210,10 @@ pub struct ParticleEmitter {
     /// (see [`owner_last_bias`]). Children carry the parent's, not their recursion model's: a
     /// child draws at the parent's anchor, so it is the parent's owner it has to clear.
     owner_reach: f32,
+    /// The owner model's bound sphere (Bevy model-local centre, model-local radius) — the
+    /// water-plane classification input ([`ModelEmitter::water_bound`]; the law is
+    /// `sim::model_far_side`). Model-local: the live matrix supplies position and scale.
+    water_bound: (Vec3, f32),
     /// The particle texture — the sim withholds pushing quads until it's resident: a
     /// still-loading or failed-to-decode texture would otherwise flash the engine fallback
     /// (white/magenta) through the additive blend. Particles still simulate meanwhile.
@@ -592,6 +596,7 @@ pub fn spawn_emitter(
                     seq,
                     rng,
                     owner_reach,
+                    water_bound: emitter.water_bound,
                     texture,
                     gated: false,
                     recursion: emitter.recursion.clone(),

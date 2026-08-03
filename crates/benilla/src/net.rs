@@ -590,15 +590,15 @@ pub(crate) enum ClientCommand {
     /// server should cast (`ItemInfo::use_spell_index`) — 0 for every item whose on-use spell is
     /// its first block, which is nearly all of them.
     ///
-    /// `go_target` aims the use at a GameObject. That is the **key-in-a-lock** packet (decision
-    /// 0769): opening a locked door with a key is "use the key at the door", not a bare cast of the
-    /// key's spell — and `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot only when the cast
-    /// carries `m_CastItem`, which only this packet supplies. `None` for every ordinary use.
+    /// `target` is the cast-targets block, bound by the one cast ladder exactly as a
+    /// [`Self::CastSpell`]'s is — the real client's `SendCast 0x6e54f0` writes one block for both
+    /// opcodes. `Object` is the key-in-a-lock arm (decision 0769); `Unit` a bandage/soulstone;
+    /// `SelfImplicit` every ordinary consumable.
     UseItem {
         bag_index: u8,
         slot: u8,
         spell_index: u8,
-        go_target: Option<u64>,
+        target: benilla_protocol::messages::UseItemTarget,
     },
     /// Open a bag item (`CMSG_OPEN_ITEM`, same bag addressing) — the drain's fork for an
     /// *openable* click (`ItemInfo::openable`): a clam, an unlocked lockbox, a wrapped gift. The

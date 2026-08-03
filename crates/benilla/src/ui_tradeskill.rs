@@ -37,7 +37,7 @@ use crate::creature_anim::{CastEvent, CastEventKind};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, send_spell_cast, PlayerActions, Spells};
+use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
 use crate::ui_items::count_of;
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
@@ -429,63 +429,17 @@ const ATTR_IS_TRADESKILL: u32 = 0x20;
 /// Drain the Lua intents and run the repeat machine: `DoTradeSkill` latches the count and casts
 /// through the ONE cast-send path (0216 §8); our own GO for the latched spell re-casts until dry;
 /// a fail or `CloseTradeSkill` stops everything.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (send_spell_cast's own)
 fn drain_trade_skill(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<TradeSkillOpen>,
     mut repeat: ResMut<TradeSkillRepeat>,
     mut cast_events: MessageReader<CastEvent>,
     targeting: cast_target::CastTargeting,
-    commands: Res<NetCommands>,
-    self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
-    // The cast catalog + the item cache the pre-send totem/reagent check reads (decision
-    // 0552) + the targeting mode the one cast path threads (0792), one tuple param (Bevy's
-    // 16-param ceiling).
-    spell_inputs: (
-        Option<Res<Spells>>,
-        Res<Items>,
-        ResMut<crate::ui_action::SpellTargeting>,
-    ),
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
-    mut cooldowns: ResMut<crate::cooldowns::Cooldowns>,
-    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
-    mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
-    mut opens: ResMut<TradeSkillOpens>,
-    mut ecs: Commands,
+    mut ladder: CastLadder,
 ) {
-    let (spells, cast_items, mut ground) = spell_inputs;
     let Some(mut script) = script else {
         return;
     };
-    let mut cast =
-        |spell_id: u32,
-         ecs: &mut Commands,
-         pending: &mut crate::ui_cast::PendingCast,
-         queued_melee: &mut crate::ui_cast::QueuedMeleeSpell,
-         cooldowns: &mut crate::cooldowns::Cooldowns,
-         cast_errors: &mut crate::ui_action::CastErrors,
-         auto_repeat: &mut crate::ui_action::AutoRepeatActive,
-         sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>| {
-            send_spell_cast(
-                spell_id,
-                &targeting.context(),
-                &commands,
-                &self_player,
-                spells.as_deref(),
-                &cast_items,
-                sheath,
-                ecs,
-                pending,
-                queued_melee,
-                cooldowns,
-                cast_errors,
-                auto_repeat,
-                &mut opens,
-                &mut ground,
-            );
-        };
 
     for (spell_id, count) in script.take_trade_skill_dos() {
         if open.line.is_none() {
@@ -495,20 +449,11 @@ fn drain_trade_skill(
         debug!("ui_tradeskill: DoTradeSkill({spell_id}) ×{count}");
         repeat.spell_id = spell_id;
         repeat.remaining = count.max(1);
-        cast(
-            spell_id,
-            &mut ecs,
-            &mut pending,
-            &mut queued_melee,
-            &mut cooldowns,
-            &mut cast_errors,
-            &mut auto_repeat,
-            &mut sheath,
-        );
+        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
     }
 
     // The repeat machine's continuation: our own cast edges for the latched spell.
-    let self_entity = self_player.single().ok().map(|(e, _)| e);
+    let self_entity = ladder.self_player.single().ok().map(|(e, _)| e);
     for ev in cast_events.read() {
         if repeat.remaining == 0 || Some(ev.entity) != self_entity || ev.spell_id != repeat.spell_id
         {
@@ -522,16 +467,7 @@ fn drain_trade_skill(
                         "ui_tradeskill: recast {} ({} left)",
                         repeat.spell_id, repeat.remaining
                     );
-                    cast(
-                        repeat.spell_id,
-                        &mut ecs,
-                        &mut pending,
-                        &mut queued_melee,
-                        &mut cooldowns,
-                        &mut cast_errors,
-                        &mut auto_repeat,
-                        &mut sheath,
-                    );
+                    ladder.send(repeat.spell_id, &targeting.context(), CastCommit::Spell);
                 }
             }
             CastEventKind::Fail => {

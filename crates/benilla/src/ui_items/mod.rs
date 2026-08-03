@@ -449,6 +449,28 @@ pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCom
     })
 }
 
+/// One resolved item-use click, as [`send_item_use`] needs it: the wire position, the two
+/// template scalars the fork reads, and the on-use SPELL the cast tail is keyed on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ItemUse {
+    /// The live instance's guid (`None` = it didn't resolve; the fork falls through to a plain use).
+    pub(crate) guid: Option<u64>,
+    /// Template `StartQuest` — non-zero diverts to the quest offer, ahead of the cast tail.
+    pub(crate) start_quest: u32,
+    /// The wire position (`255` = the player array).
+    pub(crate) bag_index: u8,
+    /// The wire slot, 0-based.
+    pub(crate) slot: u8,
+    /// The template spell BLOCK ordinal the server should cast (decision 0666).
+    pub(crate) spell_index: u8,
+    /// The template's ON_USE spell id — `0x5d8c80`'s answer: the first template block whose
+    /// `SpellId != 0` **and** `SpellTrigger == 0`. `None` = there is no such block.
+    pub(crate) use_spell: Option<u32>,
+    /// The GameObject this use is aimed at — the key-in-a-lock arm (decision 0769), which is
+    /// `CGItem::Use`'s own target argument. `None` for every ordinary click.
+    pub(crate) on_object: Option<u64>,
+}
+
 /// **The item-use fork** — our `CGItem::Use` (`0x5d8d00`): the one place that decides what "using"
 /// an item actually sends. The reference has exactly one such function and every use surface calls
 /// it — the bag click (`Script::UseContainerItem` @ `0x4fa430`), the doll click
@@ -468,104 +490,96 @@ pub(crate) fn has_key(store: &ObjectFields, items: &mut Items, commands: &NetCom
 ///
 /// `guid: None` (the template/instance didn't resolve) falls through to the plain use, whose
 /// refusal is at least visible — the same fallback the equip fork makes.
-pub(crate) fn item_use_command(
-    guid: Option<u64>,
-    start_quest: u32,
-    bag_index: u8,
-    slot: u8,
-    spell_index: u8,
-) -> crate::net::ClientCommand {
-    match guid.filter(|_| start_quest != 0) {
-        Some(item) => crate::net::ClientCommand::QuestgiverQuery {
-            npc: item,
-            quest: start_quest,
-        },
-        None => crate::net::ClientCommand::UseItem {
-            bag_index,
-            slot,
-            // The template BLOCK ordinal the server should cast, not a flag (decision 0666); the
-            // callers that hold the template name it, the doll drain sends 0.
-            spell_index,
-            // A bag/doll click uses the item on yourself; only the lock chain aims one at an
-            // object (decision 0769 — `target::click`'s key arm).
-            go_target: None,
-        },
+///
+/// [`ItemUseRoute`] is that decision as a value — the pure fork, split from [`send_item_use`] so
+/// the law is testable without a World.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemUseRoute {
+    /// Arm #3 (`0x5d8dd2`): a non-zero `StartQuest` offers its quest and **returns**, long before
+    /// the cast tail at `0x5d9249`. An offer is not a cast.
+    QuestOffer { npc: u64, quest: u32 },
+    /// The cast tail (`0x5d9249`–`0x5d9258` → `0x6e5a90` → `TryCast`): run the whole ladder.
+    Cast(u32),
+    /// `0x5d8c80` found no ON_USE block, so it returns 0 and the tail hands `TryCast` spell id
+    /// **0** — whose rec lookup `[0xc0d788 + 0]` is null and whose `6e4bac` bail returns false
+    /// with **nothing sent**. (Before decision 0914 we sent anyway, and vmangos answered
+    /// `EQUIP_ERR_ITEM_NOT_FOUND` — a red "Item not found." the reference never shows.)
+    Nothing,
+}
+
+/// [`ItemUseRoute`]'s decision. `guid: None` (the instance never resolved) cannot address a
+/// questgiver, so it falls through to the ordinary path — the same fallback the equip fork makes.
+pub(crate) fn item_use_route(it: ItemUse) -> ItemUseRoute {
+    if let Some(npc) = it.guid.filter(|_| it.start_quest != 0) {
+        return ItemUseRoute::QuestOffer {
+            npc,
+            quest: it.start_quest,
+        };
+    }
+    match it.use_spell {
+        Some(spell) => ItemUseRoute::Cast(spell),
+        None => ItemUseRoute::Nothing,
     }
 }
 
-/// One resolved item-use click, as [`send_item_use`] needs it: the wire position, the two
-/// template scalars the fork reads, and the on-use SPELL the cast tail is keyed on.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ItemUse {
-    /// The live instance's guid (`None` = it didn't resolve; the fork falls through to a plain use).
-    pub(crate) guid: Option<u64>,
-    /// Template `StartQuest` — non-zero diverts to the quest offer, ahead of the cast tail.
-    pub(crate) start_quest: u32,
-    /// The wire position (`255` = the player array).
-    pub(crate) bag_index: u8,
-    /// The wire slot, 0-based.
-    pub(crate) slot: u8,
-    /// The template spell BLOCK ordinal the server should cast (decision 0666).
-    pub(crate) spell_index: u8,
-    /// The template's on-use SPELL id. `None` = this item casts nothing, so it never reaches the
-    /// reference's cast tail and takes neither the gate nor the arm.
-    pub(crate) use_spell: Option<u32>,
-}
-
-/// **The item-use fork's cast tail** — [`item_use_command`] plus the one gate that makes an item
-/// use a *cast* rather than a bare packet, and the only place a `CMSG_USE_ITEM` leaves benilla.
+/// **The item-use fork's cast tail** — the only place a `CMSG_USE_ITEM` leaves benilla, and the
+/// seam where an item use enters the *one* cast ladder.
 ///
-/// The reference has no separate item-send path at all. `CGItem::Use 0x5d8d00`'s tail reaches
-/// `0x5d9249`–`0x5d9258` and calls `0x6e5a90(item, spell, target)`, whose whole 54-byte body is
-/// `call 0x6e4b60` — **`TryCast`**, the same function the spellbook, `/cast` and the action bar's
-/// SPELL arm run (VERIFIED at the bytes in wow-re's `system/ui/scratch/disasm-full.txt`;
-/// independently recorded in its `action-button-state-api.md` §"dispatcher `0x6e5a90`
-/// (→ `CastSpell 0x6e4b60`)" and `cursor-system.md` §536). So an item use inherits TryCast's
-/// **IsCasting refusal** (`0x6e3d30` over the inflight id `0xceca88`, byte-verified in
-/// `wave-cast.md`): the same spell bails silently (`6e4d43`), a different one errors 0x61
-/// "Another action is in progress" — and never sends.
+/// The reference has no separate item-send path at all. `CGItem::Use 0x5d8d00`'s ordinary tail
+/// (`5d9249`–`5d9258`) calls `0x6e5a90`, whose whole 54-byte body is `call 0x6e4b60` —
+/// **`TryCast`**, the same function the spellbook, `/cast` and the action bar's SPELL arm run,
+/// with the **item as an ordinary argument** (`ret 0xc`). Inside TryCast that argument is read
+/// exactly twice, and neither read skips a gate: `6e4d76` computes a display flag ahead of the
+/// IsCasting check, and `6e4f33` forwards the item to the requirement validator `0x6094f0`. The
+/// commit `SendCast 0x6e54f0` then picks the opcode from it (`0x6e57d8 push 0xab`). So an item
+/// use takes the whole ladder — cooldown, GCD, in-flight, mounted, moving, form, reagents, target
+/// bind, range — and [`crate::ui_action::CastLadder::send`] is where all of that lives (decision
+/// 0914; verified at the bytes in wow-re's `system/ui/scratch/disasm-full.txt`, corroborated by
+/// its `action-item-slot.md` §8 and `cursor-system.md` §8.4a).
 ///
-/// Ours did not, and that was decision 0908's bug (director's report B200): double-clicking a
-/// mount shipped a second `CMSG_USE_ITEM`, vmangos answered it `SPELL_FAILED_SPELL_IN_PROGRESS`
-/// (`Spell::prepare`'s `IsNonMeleeSpellCasted` gate), and the failure — spell-id-keyed like every
-/// reap, and naming the *same* spell as the running cast — red-faded the **running** cast's bar
-/// while the original cast completed anyway. The spell arm had had this rung since the identical
-/// spam-cancel bug ([`crate::ui_cast::PendingCast`]'s own doc); the item arm bypassed it because
-/// it bypassed the ladder. One guard resource, every cast source arms and checks it — the
-/// reference's one inflight id.
+/// Decision 0908 put only the in-flight rung here — the fix for the director's B200, where
+/// double-clicking a mount shipped a second `CMSG_USE_ITEM`, vmangos answered it
+/// `SPELL_FAILED_SPELL_IN_PROGRESS`, and the failure (spell-id-keyed, naming the *same* spell as
+/// the running cast) red-faded the running bar while the cast completed anyway. 0914 finishes the
+/// job: the rest of the ladder was still bypassed, so a bag click ignored cooldowns, a mounted or
+/// moving item click sent a doomed packet, and the bar's ITEM arm carried a private duplicate of
+/// the cooldown rung the bag and doll clicks never got.
 ///
-/// Returns whether the use went out (`false` = refused by the gate), for the callers that log.
+/// Returns whether anything left for the server — `false` for the reference's silent no-op.
 pub(crate) fn send_item_use(
     it: ItemUse,
-    pending: &mut crate::ui_cast::PendingCast,
-    cast_errors: &mut crate::ui_action::CastErrors,
-    commands: &crate::net::NetCommands,
+    ctx: &crate::ui_action::cast_target::CastContext,
+    ladder: &mut crate::ui_action::CastLadder,
 ) -> bool {
-    let command = item_use_command(
-        it.guid,
-        it.start_quest,
-        it.bag_index,
-        it.slot,
-        it.spell_index,
-    );
-    // The quest offer returns long before the cast tail in the reference too (arm #3 at
-    // `0x5d8dd2`, well ahead of `0x5d9249`) — an offer is not a cast, so no gate and no arm. Same
-    // for an item with no on-use spell: it never reaches the tail either.
-    let (crate::net::ClientCommand::UseItem { .. }, Some(spell)) = (&command, it.use_spell) else {
-        let _ = commands.0.send(command);
-        return true;
-    };
-    let now = std::time::Instant::now();
-    if pending.in_flight(now) {
-        if pending.current(now) != Some(spell) {
-            cast_errors.0.push((spell, 0x61));
+    match item_use_route(it) {
+        ItemUseRoute::QuestOffer { npc, quest } => {
+            let _ = ladder
+                .commands
+                .0
+                .send(crate::net::ClientCommand::QuestgiverQuery { npc, quest });
+            true
         }
-        debug!("ui_items: item use (spell {spell}) suppressed — a cast is already in flight");
-        return false;
+        ItemUseRoute::Nothing => {
+            debug!(
+                "ui_items: the item at wire {}/{} has no ON_USE block — nothing sent (TryCast's null-rec bail)",
+                it.bag_index, it.slot
+            );
+            false
+        }
+        ItemUseRoute::Cast(spell) => {
+            ladder.send(
+                spell,
+                ctx,
+                crate::ui_action::CastCommit::Item {
+                    bag_index: it.bag_index,
+                    slot: it.slot,
+                    spell_index: it.spell_index,
+                    on_object: it.on_object,
+                },
+            );
+            true
+        }
     }
-    let _ = commands.0.send(command);
-    pending.arm_item(spell, now);
-    true
 }
 
 /// The client's quality→color escape for an item link (`GetItemQualityColor`'s table) — shared by
@@ -793,10 +807,9 @@ impl Plugin for UiItemsPlugin {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_equip_slot, item_use_command, keyring_size, send_item_use, wire_pos, ItemUse,
+        find_equip_slot, item_use_route, keyring_size, wire_pos, ItemUse, ItemUseRoute,
         KEYRING_CONTAINER,
     };
-    use crate::net::ClientCommand;
     use benilla_ui::script::EQUIPMENT_BAG;
 
     /// The keyring's level ladder, both ends of every rung — the reference's `GetKeyRingSize`
@@ -830,154 +843,51 @@ mod tests {
         assert_eq!(wire_pos(KEYRING_CONTAINER, 0), None);
     }
 
-    /// The use fork ([`item_use_command`], decision 0664): a non-zero `StartQuest` diverts to
-    /// `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid; everything else — including an
-    /// item whose template never resolved — stays a plain `CMSG_USE_ITEM` on the wire position.
+    /// The pure fork ([`item_use_route`], decisions 0664/0914), all three arms: a non-zero
+    /// `StartQuest` diverts to `CMSG_QUESTGIVER_QUERY_QUEST` addressed to the ITEM's guid (arm #3,
+    /// `0x5d8dd2` — it returns before the cast tail); an ON_USE spell runs the ladder; **no** ON_USE
+    /// block sends nothing at all, because `0x5d8c80` returns 0 and TryCast's null-rec bail
+    /// (`6e4bac`) refuses spell id 0. That last arm is the one 0914 changed: we used to ship a
+    /// `CMSG_USE_ITEM` vmangos answers `EQUIP_ERR_ITEM_NOT_FOUND` — a red "Item not found." on
+    /// every right-click of a plain trade good, which the reference never shows.
     #[test]
-    fn item_use_forks_a_quest_starter_to_the_giver_query() {
+    fn the_item_use_fork_routes_quest_offer_cast_and_nothing() {
         // "An Unsent Letter" (entry 2874, StartQuest 373 — live `mangos.item_template`): the item
-        // guid is the questgiver, not the bag position.
+        // guid is the questgiver, not the bag position. No quest-starter carries an on-use spell
+        // (0 of the 215 live ones), but the quest arm wins even if one did.
         let letter = 0x4000_0000_0000_0BAD_u64;
-        assert!(matches!(
-            item_use_command(Some(letter), 373, 255, 23, 0),
-            ClientCommand::QuestgiverQuery { npc, quest } if npc == letter && quest == 373
-        ));
-        // A plain consumable (StartQuest 0) is the unchanged USE.
-        assert!(matches!(
-            item_use_command(Some(letter), 0, 255, 23, 1),
-            ClientCommand::UseItem {
-                bag_index: 255,
-                slot: 23,
-                // The template BLOCK ordinal rides through untouched (decision 0666).
-                spell_index: 1,
-                // A bag click never aims at an object (decision 0769).
-                go_target: None
-            }
-        ));
-        // No resolved instance (template still in flight): the fallback is the USE whose refusal
-        // is at least visible — never a query against guid 0.
-        assert!(matches!(
-            item_use_command(None, 373, 19, 4, 0),
-            ClientCommand::UseItem {
-                bag_index: 19,
-                slot: 4,
-                spell_index: 0,
-                go_target: None
-            }
-        ));
-    }
-
-    /// The cast tail's in-flight gate (decision 0908) — the fix for the director's B200: an item
-    /// use is a cast through the same `TryCast` a spell press runs (`0x5d9258` → `0x6e5a90` →
-    /// `0x6e4b60`), so a second one while the first is still in flight never reaches the wire.
-    /// Before this, the duplicate `CMSG_USE_ITEM` drew `SPELL_FAILED_SPELL_IN_PROGRESS` naming the
-    /// *running* cast's own spell, which red-faded its bar while the cast completed anyway.
-    #[test]
-    fn a_second_item_use_mid_cast_never_reaches_the_wire() {
-        const HEARTHSTONE: u32 = 8690;
-        const MOUNT: u32 = 470;
-        let hearth = |use_spell| ItemUse {
-            guid: Some(0x4000_0000_0000_0001),
-            start_quest: 0,
+        let it = |guid, start_quest, use_spell| ItemUse {
+            guid,
+            start_quest,
             bag_index: 255,
-            slot: 24,
+            slot: 23,
             spell_index: 0,
             use_spell,
+            on_object: None,
         };
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let net = crate::net::NetCommands(tx);
-        let mut pending = crate::ui_cast::PendingCast::default();
-        let mut errors = crate::ui_action::CastErrors::default();
-
-        assert!(send_item_use(
-            hearth(Some(HEARTHSTONE)),
-            &mut pending,
-            &mut errors,
-            &net
-        ));
-        assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })),
-            "the first click goes out and arms the guard"
-        );
-
-        // The double-click: the same spell bails SILENTLY — the ref's `6e4d43` same-spell leg.
-        assert!(!send_item_use(
-            hearth(Some(HEARTHSTONE)),
-            &mut pending,
-            &mut errors,
-            &net
-        ));
-        assert!(rx.try_recv().is_err(), "no duplicate on the wire");
-        assert!(
-            errors.0.is_empty(),
-            "the same spell's re-press is silent, not a red line"
-        );
-
-        // A *different* item mid-cast is the ref's `6e4d97` leg: reason 0x61, still no packet.
-        assert!(!send_item_use(
-            hearth(Some(MOUNT)),
-            &mut pending,
-            &mut errors,
-            &net
-        ));
-        assert!(rx.try_recv().is_err());
         assert_eq!(
-            errors.0,
-            vec![(MOUNT, 0x61)],
-            "\"Another action is in progress\""
+            item_use_route(it(Some(letter), 373, None)),
+            ItemUseRoute::QuestOffer {
+                npc: letter,
+                quest: 373
+            }
         );
-    }
-
-    /// What the gate must NOT hold: the arms that return before the reference's cast tail. A
-    /// quest-starter offers its quest (arm #3, `0x5d8dd2`) and an item with no on-use spell never
-    /// reaches `0x5d9249` at all — neither is a cast, so neither is gated or arms the guard.
-    #[test]
-    fn the_gate_spares_the_arms_that_are_not_casts() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let net = crate::net::NetCommands(tx);
-        let mut pending = crate::ui_cast::PendingCast::default();
-        let mut errors = crate::ui_action::CastErrors::default();
-        let letter = 0x4000_0000_0000_0BAD_u64;
-
-        // Arm the guard as if a hearthstone were casting.
-        pending.arm_item(8690, std::time::Instant::now());
-
-        assert!(send_item_use(
-            ItemUse {
-                guid: Some(letter),
-                start_quest: 373,
-                bag_index: 255,
-                slot: 23,
-                spell_index: 0,
-                use_spell: None
-            },
-            &mut pending,
-            &mut errors,
-            &net,
-        ));
-        assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::QuestgiverQuery { .. })),
-            "an offer is not a cast — it goes out mid-cast"
+        assert_eq!(
+            item_use_route(it(Some(letter), 0, Some(8690))),
+            ItemUseRoute::Cast(8690),
+            "a hearthstone takes the cast tail"
         );
-
-        assert!(send_item_use(
-            ItemUse {
-                guid: Some(letter),
-                start_quest: 0,
-                bag_index: 19,
-                slot: 4,
-                spell_index: 0,
-                use_spell: None
-            },
-            &mut pending,
-            &mut errors,
-            &net,
-        ));
-        assert!(
-            matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })),
-            "a spell-less item casts nothing, so the in-flight cast cannot block it"
+        assert_eq!(
+            item_use_route(it(Some(letter), 0, None)),
+            ItemUseRoute::Nothing,
+            "no ON_USE block — the ref sends nothing"
         );
-        assert!(errors.0.is_empty());
+        // No resolved instance (the template is still in flight): a query against guid 0 is
+        // impossible, so the ordinary path runs — the equip fork's own fallback.
+        assert_eq!(
+            item_use_route(it(None, 373, Some(8690))),
+            ItemUseRoute::Cast(8690)
+        );
     }
 
     /// A dozen representative `InventoryType`s (decision 0208 phase 1b's own ask), spanning the

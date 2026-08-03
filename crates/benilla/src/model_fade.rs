@@ -350,6 +350,10 @@ pub fn self_model_fade_alpha(dist: f32, nearclip: f32, window: f32) -> f32 {
 pub(crate) fn apply_render_fade(
     time: Res<Time>,
     mut commands: Commands,
+    // The water-plane axis (`model_render::classify_water_side`), composed into this writer's
+    // own pick via `far_resolved` — every owner of the handle channel derives the same composed
+    // handle from state, so the ramp and the classifier converge instead of re-swapping.
+    far_twins: Res<crate::model_render::FarSideTwins>,
     mut q: Query<(
         Entity,
         &RenderFade,
@@ -358,10 +362,11 @@ pub(crate) fn apply_render_fade(
         Option<&crate::doodad_anim::MatAnim>,
         Option<&FadeMaterials>,
         Option<&crate::interior::InteriorLit>,
+        Has<crate::model_render::FarSideOfWater>,
     )>,
 ) {
     let now = time.elapsed_secs();
-    for (entity, fade, mut tag, mut mat, anim, fm, lit) in &mut q {
+    for (entity, fade, mut tag, mut mat, anim, fm, lit, far_side) in &mut q {
         let t = if fade.duration > 0.0 {
             (now - fade.started) / fade.duration
         } else {
@@ -386,7 +391,11 @@ pub(crate) fn apply_render_fade(
         // `FadeMaterials` has no twin to swap to (it never fades in practice — every arming site
         // pairs the two); its alpha still ramps, so it can never hang invisible.
         if let Some(fm) = fm {
-            let want = fm.material_for(lit, alpha < 1.0);
+            let want = crate::model_render::far_resolved(
+                fm.material_for(lit, alpha < 1.0),
+                far_side,
+                &far_twins,
+            );
             if mat.0 != *want {
                 mat.0 = want.clone();
             }

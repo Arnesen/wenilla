@@ -251,6 +251,7 @@ pub mod quest_slot_state {
 // slot arrays are PRIVATE-flagged: the server sends them only for our own player, which is
 // exactly the consumer (our bags). Each slot is a 2-field guid.
 const FIELD_ITEM_STACK_COUNT: u16 = 14; // OBJECT_END(6) + 0x8 (the ITEM-block comments are still true)
+const FIELD_ITEM_ENCHANTMENT: u16 = 22; // OBJECT_END + 0x10, Size 21 = 7 slots × 3 (id/duration/charges)
 const FIELD_CONTAINER_NUM_SLOTS: u16 = 48; // ITEM_END = 6 + 0x2A (comment says 42 — stale, 6 low)
 const FIELD_CONTAINER_SLOT_1: u16 = 50; // ITEM_END + 0x2; 36 slots × 2
 

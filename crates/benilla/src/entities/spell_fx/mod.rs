@@ -977,8 +977,23 @@ pub(super) fn attach_spell_fx(
                     return false;
                 }
             }
-            if inst.root.is_some() {
-                return true;
+            // A root that died as **collateral**: [`FxAttached`] lives on the unit and outlives
+            // its model — exactly as the reference's per-CGUnit `+0xb4` effect list does — so a
+            // teardown of the unit's visual (a live display swap, `live_display`; before 0835 a
+            // gear change; before B199's fix a mount transition) leaves the instance holding a
+            // dangling entity, and this gate's `root.is_some()` then means it is never rebuilt.
+            // The aura watcher cannot notice either: it is edge-driven off the slot set, and the
+            // aura never left it. 0835 named this open; here it closes. A **persistent** instance
+            // re-spawns onto the rebuilt body (its aura is still live, so its visual must be);
+            // a self-terminating flash or one already playing its `Decay` out simply goes.
+            if let Some(root) = inst.root {
+                if commands.get_entity(root).is_ok() {
+                    return true;
+                }
+                if !inst.persistent || inst.decaying {
+                    return false;
+                }
+                inst.root = None;
             }
             // Still pending: a self-terminating instance gets a generous deadline so a unit whose
             // model never materialises (the cube fallback) can't accumulate unspawnable flashes —
@@ -1137,5 +1152,100 @@ pub(super) fn fire_fx_anim_events(
     if last.len() > seen.len() {
         let live: bevy::ecs::entity::EntityHashSet = seen.iter().copied().collect();
         last.retain(|e, _| live.contains(e));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::AssetPlugin;
+    use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
+
+    /// One recorded instance, spawned (`root`) and awaiting nothing.
+    fn instance(root: Entity, persistent: bool) -> FxInstance {
+        FxInstance {
+            spell_id: 13033, // Ice Barrier
+            persistent,
+            class: FxClass::AuraState,
+            stage: FxStage::State,
+            tag: 0x13,
+            path: "Spells\\IceShield_State.mdx".into(),
+            root: Some(root),
+            expires: None,
+            decaying: false,
+        }
+    }
+
+    /// An app with just what `attach_spell_fx` reads, plus one unit carrying an instance per
+    /// entry of `persistent` — each with a freshly spawned root. Returns the app, the unit and the
+    /// roots in order.
+    fn standing(persistent: &[bool]) -> (App, Entity, Vec<Entity>) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<WowModelMaterial>()
+            .init_asset::<SkinnedMeshInverseBindposes>()
+            .init_resource::<SpellFx>()
+            .init_resource::<FxTintAnims>()
+            .init_resource::<crate::rig_palette::RigPalettes>()
+            .add_systems(Update, attach_spell_fx);
+        let roots: Vec<Entity> = persistent
+            .iter()
+            .map(|_| app.world_mut().spawn_empty().id())
+            .collect();
+        let instances = roots
+            .iter()
+            .zip(persistent)
+            .map(|(&root, &p)| instance(root, p))
+            .collect();
+        let unit = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                GlobalTransform::default(),
+                FxAttached { instances },
+            ))
+            .id();
+        (app, unit, roots)
+    }
+
+    /// Each surviving instance's `(persistent, root)` after one pass.
+    fn instances_of(app: &App, unit: Entity) -> Vec<(bool, Option<Entity>)> {
+        app.world()
+            .entity(unit)
+            .get::<FxAttached>()
+            .unwrap()
+            .instances
+            .iter()
+            .map(|i| (i.persistent, i.root))
+            .collect()
+    }
+
+    /// **0835's named-open item, closed.** `FxAttached` lives on the unit and outlives its model —
+    /// exactly as the reference's per-CGUnit `+0xb4` effect list does — so a teardown of the unit's
+    /// visual (a live display swap) leaves each instance holding a dangling root, and the spawn
+    /// gate's `root.is_some()` then means it is never rebuilt. The aura watcher cannot notice: it
+    /// is edge-driven off the slot set, and the aura never left it. A **persistent** instance must
+    /// come back; a self-terminating flash must not.
+    #[test]
+    fn a_persistent_instance_whose_root_died_as_collateral_is_re_armed() {
+        let (mut app, unit, roots) = standing(&[true, false]);
+        // The teardown: a display swap despawns the unit's whole visual under them.
+        for root in roots {
+            app.world_mut().entity_mut(root).despawn();
+        }
+        app.update();
+        assert_eq!(
+            instances_of(&app, unit),
+            vec![(true, None)],
+            "the aura's instance is re-armed for the spawn pass; the flash is dropped",
+        );
+    }
+
+    /// A live root is left strictly alone — the gate is "is it still there?", not "re-spawn me".
+    #[test]
+    fn a_live_root_is_never_disturbed() {
+        let (mut app, unit, roots) = standing(&[true]);
+        app.update();
+        assert_eq!(instances_of(&app, unit), vec![(true, Some(roots[0]))]);
     }
 }

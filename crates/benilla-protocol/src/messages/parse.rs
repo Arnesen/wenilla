@@ -428,6 +428,14 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
                 spell_id,
             }
         }
+        opcode::SMSG_ITEM_ENCHANT_TIME_UPDATE => {
+            let (item_guid, slot, seconds) = items::read_item_enchant_time(&mut r)?;
+            ServerPacket::ItemEnchantTime {
+                item_guid,
+                slot,
+                seconds,
+            }
+        }
         opcode::SMSG_COOLDOWN_EVENT => {
             let (spell_id, caster) = spellbook::read_cooldown_event(&mut r)?;
             ServerPacket::CooldownEvent { spell_id, caster }
@@ -980,10 +988,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
             let (text_id, text) = mail::read_item_text_query_response(&mut r)?;
             ServerPacket::ItemTextQueryResponse { text_id, text }
         }
-        opcode::SMSG_RECEIVED_MAIL => {
-            let _ = mail::read_received_mail(&mut r)?;
-            ServerPacket::ReceivedMail
-        }
+        opcode::SMSG_RECEIVED_MAIL => ServerPacket::ReceivedMail {
+            seconds: mail::read_received_mail(&mut r)?,
+        },
         opcode::MSG_QUERY_NEXT_MAIL_TIME => ServerPacket::NextMailTime {
             seconds: mail::read_query_next_mail_time(&mut r)?,
         },

@@ -300,12 +300,17 @@ pub(super) fn read_item_text_query_response(r: &mut &[u8]) -> io::Result<(u32, S
     Ok((read_u32_le(r)?, read_cstring(r)?))
 }
 
-/// Read `SMSG_RECEIVED_MAIL` (VERIFIED vmangos `Server/Packets/Mail.cpp`,
-/// `ReceivedMail::AppendBodyTo`): one `u32`, always `0` on vmangos — kept for fidelity though no
-/// consumer reads it back. Sent when a mail *arrives* (instant for text-only, on the delivery
-/// timer's expiry otherwise).
-pub(super) fn read_received_mail(r: &mut &[u8]) -> io::Result<u32> {
-    read_u32_le(r)
+/// Read `SMSG_RECEIVED_MAIL`: one **`f32` delay** — the seconds until the mail is "waiting", the
+/// same countdown units as [`read_query_next_mail_time`]. Sent when a mail *arrives* (instant for
+/// text-only, on the delivery timer's expiry otherwise).
+///
+/// The real client reads these four bytes as a float and feeds them to the pending-mail countdown's
+/// set-value ladder (VERIFIED wow-re, handler `0x4ad620`; decision 0913). vmangos writes them as
+/// `uint32(0)` (`MailHandler.cpp::SendNewMail`) and `0x00000000` *is* `0.0f`, so the two agree
+/// exactly on the only value vmangos ever sends — reading it the way the client does costs nothing
+/// and keeps a server that sends a real delay working.
+pub(super) fn read_received_mail(r: &mut &[u8]) -> io::Result<f32> {
+    read_f32_le(r)
 }
 
 /// Read `MSG_QUERY_NEXT_MAIL_TIME`'s reply (same opcode both directions — our request is an EMPTY

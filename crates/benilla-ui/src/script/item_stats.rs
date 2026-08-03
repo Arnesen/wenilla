@@ -112,6 +112,11 @@ pub struct ItemTemplateView {
     pub sell_price: u32,
     /// `itemset` — nonzero renders the SET block ([`ItemSetView`], asked once by set id).
     pub item_set: u32,
+    /// `RandomProperty` (template `+0x1b8`) — the item CAN roll a "… of the Bear" suffix. Its one
+    /// consumer is the enchant family's third arm: with no instance to read a roll from, the
+    /// tooltip prints the `<Random enchantment>` placeholder instead of any per-slot line (wow-re
+    /// §1-ENCHANT §E5). Decision 0920.
+    pub random_property: u32,
 }
 
 /// The player state the red-line law compares against (decision 0274 P1): pushed by the app

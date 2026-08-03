@@ -366,3 +366,317 @@ fn broken_instance_hover_renders_zero_durability() {
         "broken (0) paints red"
     );
 }
+
+/// The **enchant lines** (law line 17, decision 0915) — the director's report: an axe carrying
+/// Enchant Weapon - Agility showed its green glow in the world and said nothing in the tooltip.
+///
+/// Three claims at once: the line renders from the instance's resolved enchant text, it sits
+/// **between the resistances and the durability line** (the law's 16 → 17 → 18), and it is green.
+/// The control is the template/link hover of the same item — no instance, no enchant, no line.
+#[test]
+fn an_enchanted_instance_renders_its_enchant_line_before_durability() {
+    let mut s = script();
+    let mut slots = HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            count: 1,
+            quality: Some(4),
+            item_id: 22816,
+            durability: Some((105, 105)),
+            // What the app resolved from `ITEM_FIELD_ENCHANTMENT` slot 0 → enchant 2564 →
+            // `SpellItemEnchantment`'s own name string. Slot 0 = permanent, positive id.
+            enchants: vec![EnchantView {
+                slot: 0,
+                name: "Agility +15".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.set_item_template(
+        22816,
+        ItemTemplateView {
+            name: "Hatchet of Sundered Bone".into(),
+            quality: 4,
+            class: 2,
+            resistances: [0, 0, 7, 0, 0, 0],
+            max_durability: 105,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = super::lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    let at = |needle: &str| {
+        texts
+            .iter()
+            .position(|t| t.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} line in {texts:?}"))
+    };
+    assert!(
+        at("+7 Nature Resistance") < at("Agility +15") && at("Agility +15") < at("Durability"),
+        "the enchant line sits between resistances and durability: {texts:?}"
+    );
+    assert_eq!(
+        lines[at("Agility +15")].1,
+        [0.0, 1.0, 0.0, 1.0],
+        "the enchant line is green"
+    );
+
+    // The control: the same item as a TEMPLATE hover has no instance, so no enchant line.
+    s.run(r#"TT:SetItemById(22816)"#).unwrap();
+    let lines = super::lines_of(&mut s);
+    assert!(
+        !lines.iter().any(|(t, _)| t.starts_with("Agility")),
+        "a template hover carries no instance and so no enchant line: {lines:?}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The **enchant colour bands** — the correction the byte-carve landed (wow-re §1-ENCHANT §E3,
+/// decision 0920). The colour is per SLOT, not per family: only slots 0 (permanent) and 1
+/// (temporary) are ever coloured — green for a positive id, the tooltip's OTHER red
+/// (`0xc0d398 = ffff0000`, distinct from the requirement lines' `ffff2020`) for a negative one —
+/// and the random-property slots 2..6 are always white whatever the sign. Our first cut painted
+/// every slot green.
+#[test]
+fn enchant_line_colour_is_per_slot_and_sign() {
+    let mut s = script();
+    let mut slots = HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            count: 1,
+            quality: Some(3),
+            item_id: 7777,
+            enchants: vec![
+                EnchantView {
+                    slot: 0,
+                    name: "Crusader".into(),
+                    ..Default::default()
+                },
+                EnchantView {
+                    slot: 1,
+                    name: "Cursed".into(),
+                    negative: true,
+                    ..Default::default()
+                },
+                EnchantView {
+                    slot: 3,
+                    name: "Stamina +7".into(),
+                    ..Default::default()
+                },
+                // A suffix slot with a NEGATIVE id is still white — the band, not the sign, rules.
+                EnchantView {
+                    slot: 4,
+                    name: "Spirit +3".into(),
+                    negative: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.set_item_template(
+        7777,
+        ItemTemplateView {
+            name: "Test Blade".into(),
+            quality: 3,
+            class: 2,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = super::lines_of(&mut s);
+    let color_of = |needle: &str| {
+        lines
+            .iter()
+            .find(|(t, _)| t.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} line in {lines:?}"))
+            .1
+    };
+    assert_eq!(color_of("Crusader"), [0.0, 1.0, 0.0, 1.0], "slot 0, id > 0");
+    assert_eq!(
+        color_of("Cursed"),
+        [1.0, 0.0, 0.0, 1.0],
+        "slot 1, id < 0 → the pure red 0xc0d398, NOT the requirement red"
+    );
+    assert_eq!(
+        color_of("Stamina +7"),
+        [1.0, 1.0, 1.0, 1.0],
+        "a suffix slot is white"
+    );
+    assert_eq!(
+        color_of("Spirit +3"),
+        [1.0, 1.0, 1.0, 1.0],
+        "…and stays white even with a negative id"
+    );
+}
+
+/// The temporary enchant's countdown REPLACES the name in the same line (never a second one), and
+/// the charges suffix rides after it — §E3's `0x52fa50` bucket ladder and the `" (%s)"` join. The
+/// countdown's source is `SMSG_ITEM_ENCHANT_TIME_UPDATE`, so a slot with no packet shows the bare
+/// name: that is the control here.
+#[test]
+fn temporary_enchant_line_carries_its_countdown_and_charges() {
+    let mut s = script();
+    let mut slots = HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            count: 1,
+            quality: Some(1),
+            item_id: 7777,
+            enchants: vec![
+                EnchantView {
+                    slot: 1,
+                    name: "Rockbiter Weapon".into(),
+                    remaining_ms: Some(275_000), // 4 min 35 s → "(5 min)"
+                    charges: 5,
+                    ..Default::default()
+                },
+                EnchantView {
+                    slot: 0,
+                    name: "Crusader".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.set_item_template(
+        7777,
+        ItemTemplateView {
+            name: "Test Blade".into(),
+            quality: 1,
+            class: 2,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetBagItem(0, 1)
+    "#,
+    )
+    .unwrap();
+    let lines = super::lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert!(
+        texts.contains(&"Rockbiter Weapon (5 min) (5 Charges)"),
+        "one line: name, countdown, charges — got {texts:?}"
+    );
+    assert!(
+        texts.contains(&"Crusader"),
+        "a slot with no packet keeps the bare name — got {texts:?}"
+    );
+}
+
+/// `<Random enchantment>` (§E5) — the template-only placeholder: a random-property item with NO
+/// instance to read a roll from prints it, green, and the per-slot lines and this one are mutually
+/// exclusive by construction. The control is the same template hovered as a real enchanted
+/// instance: the roll is known, so the placeholder gives way to the slot lines.
+#[test]
+fn random_property_template_hover_shows_the_placeholder() {
+    let mut s = script();
+    s.set_item_template(
+        8888,
+        ItemTemplateView {
+            name: "Bloodrazor".into(),
+            quality: 2,
+            class: 2,
+            random_property: 42,
+            ..Default::default()
+        },
+    );
+    s.run(
+        r#"
+        local a = CreateFrame("Button", "Slot"); a:SetPoint("CENTER", 0, 0); a:SetSize(10, 10)
+        local tt = CreateFrame("GameTooltip", "TT")
+        tt:SetOwner(Slot, "ANCHOR_RIGHT")
+        tt:SetItemById(8888)
+    "#,
+    )
+    .unwrap();
+    let lines = super::lines_of(&mut s);
+    let placeholder = lines
+        .iter()
+        .find(|(t, _)| t == "<Random enchantment>")
+        .expect("the template hover shows the placeholder");
+    assert_eq!(placeholder.1, [0.0, 1.0, 0.0, 1.0], "green");
+
+    // With a real instance (the roll is known) the placeholder is gone and the slots print.
+    let mut slots = HashMap::new();
+    slots.insert(
+        1,
+        ContainerSlot {
+            count: 1,
+            quality: Some(2),
+            item_id: 8888,
+            enchants: vec![EnchantView {
+                slot: 2,
+                name: "Stamina +7".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    s.set_container(
+        0,
+        Some(ContainerState {
+            name: Some("Backpack".into()),
+            num_slots: 16,
+            slots,
+        }),
+    );
+    s.run(r#"TT:SetBagItem(0, 1)"#).unwrap();
+    let lines = super::lines_of(&mut s);
+    let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+    assert!(
+        !texts.contains(&"<Random enchantment>") && texts.contains(&"Stamina +7"),
+        "an instance's known roll replaces the placeholder — got {texts:?}"
+    );
+}

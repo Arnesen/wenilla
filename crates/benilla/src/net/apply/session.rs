@@ -207,7 +207,7 @@ pub(super) fn disconnected(
     mail.clear_session();
     // The arrival countdown is login-scoped (decision 0544 P3): a fresh login re-queries
     // `MSG_QUERY_NEXT_MAIL_TIME` at world-enter, so nothing carries over across a reconnect.
-    mail_pending.0 = None;
+    *mail_pending = crate::ui_mail::MailPending::default();
     // An open trade dies with the socket too (decision 0592) — the reconnect starts with no trade.
     trade.clear_session();
     // The bank window dies with the socket (decision 0604) — a reconnect re-opens via the banker.

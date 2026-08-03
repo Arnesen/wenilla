@@ -27,11 +27,11 @@ use benilla_ui::script::{CraftReagent, CraftRecipe, CraftState, UiScript};
 use crate::entities::ItemDisplays;
 use crate::items::Items;
 use crate::net::{NetCommands, ObjectStore, SelfPlayer};
-use crate::ui_action::{cast_target, send_spell_cast, PlayerActions, Spells};
+use crate::ui_action::{cast_target, CastCommit, CastLadder, PlayerActions, Spells};
 use crate::ui_items::count_of;
 use crate::ui_script::UiInput;
 use crate::ui_spellbook::SkillLines;
-use crate::ui_tradeskill::{SpellFocus, TradeSkillOpens};
+use crate::ui_tradeskill::SpellFocus;
 use crate::ui_unit::UnitFeed;
 
 /// `SPELL_ATTR_IS_TRADESKILL` — the item-recipe marker (0227's add-gate bit). Craft recipes
@@ -58,18 +58,6 @@ pub(crate) struct CraftOpen {
 pub(crate) struct PendingItemCast {
     pub(crate) spell_id: u32,
 }
-
-/// The one-cast-send-path resource set `drain_craft` threads into `send_spell_cast`, tupled to
-/// fit Bevy's 16-param ceiling (the apply-side grouped-tuple precedent).
-type CastTail<'w> = (
-    ResMut<'w, crate::ui_cast::PendingCast>,
-    ResMut<'w, crate::ui_cast::QueuedMeleeSpell>,
-    ResMut<'w, crate::cooldowns::Cooldowns>,
-    ResMut<'w, crate::ui_action::CastErrors>,
-    ResMut<'w, crate::ui_action::AutoRepeatActive>,
-    ResMut<'w, TradeSkillOpens>,
-    ResMut<'w, crate::ui_action::SpellTargeting>,
-);
 
 pub(crate) struct UiCraftPlugin;
 
@@ -275,32 +263,15 @@ fn feed_craft(
 /// Drain the Lua intents: `DoCraft` on an item-targeted enchant ARMS the pick ([`PendingItemCast`]
 /// — the container drain completes it); on a self-craft (rod making) casts through the one
 /// cast-send path immediately. `CloseCraft` closes the window and disarms any pick.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (send_spell_cast's own)
 fn drain_craft(
     script: Option<NonSendMut<UiScript>>,
     mut open: ResMut<CraftOpen>,
     mut pending_pick: ResMut<PendingItemCast>,
-    spells: Option<Res<Spells>>,
     skill_lines: Option<Res<SkillLines>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    items: Res<Items>,
     targeting: cast_target::CastTargeting,
-    commands: Res<NetCommands>,
-    self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
-    // The cast-send tail's resource set, tupled (Bevy's 16-param ceiling; one concern).
-    cast_tail: CastTail,
-    mut ecs: Commands,
+    mut ladder: CastLadder,
 ) {
-    let (
-        mut pending,
-        mut queued_melee,
-        mut cooldowns,
-        mut cast_errors,
-        mut auto_repeat,
-        mut trade_opens,
-        mut ground,
-    ) = cast_tail;
     let Some(mut script) = script else {
         return;
     };
@@ -310,7 +281,8 @@ fn drain_craft(
             debug!("ui_craft: DoCraft({spell_id}) with no open window — ignored");
             continue;
         }
-        let needs_item = spells
+        let needs_item = ladder
+            .spells
             .as_deref()
             .and_then(|s| s.catalog.get(spell_id))
             .map(|d| {
@@ -327,23 +299,7 @@ fn drain_craft(
             Some(false) => {
                 debug!("ui_craft: DoCraft({spell_id}) — self craft");
                 pending_pick.spell_id = 0;
-                send_spell_cast(
-                    spell_id,
-                    &targeting.context(),
-                    &commands,
-                    &self_player,
-                    spells.as_deref(),
-                    &items,
-                    &mut sheath,
-                    &mut ecs,
-                    &mut pending,
-                    &mut queued_melee,
-                    &mut cooldowns,
-                    &mut cast_errors,
-                    &mut auto_repeat,
-                    &mut trade_opens,
-                    &mut ground,
-                );
+                ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
             }
             None => debug!("ui_craft: DoCraft({spell_id}) — unknown spell, ignored"),
         }
@@ -365,14 +321,17 @@ fn drain_craft(
         let guid = self_store
             .single()
             .ok()
-            .and_then(|store| crate::ui_items::slot_guid(&store.0, bag, slot0, &items));
+            .and_then(|store| crate::ui_items::slot_guid(&store.0, bag, slot0, &ladder.items));
         match guid {
             Some(item_guid) => {
                 debug!("ui_craft: enchant pick — cast {armed} at item {item_guid:#x}");
-                let _ = commands.0.send(crate::net::ClientCommand::CastSpellItem {
-                    spell_id: armed,
-                    item_guid,
-                });
+                let _ = ladder
+                    .commands
+                    .0
+                    .send(crate::net::ClientCommand::CastSpellItem {
+                        spell_id: armed,
+                        item_guid,
+                    });
             }
             None => debug!("ui_craft: enchant pick on an empty slot — kept armed"),
         }

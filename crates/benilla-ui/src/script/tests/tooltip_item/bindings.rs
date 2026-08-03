@@ -77,6 +77,7 @@ fn shift_compare_fires_seats_and_renders_the_compare_shape() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(

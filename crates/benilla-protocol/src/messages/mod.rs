@@ -107,7 +107,7 @@ pub use group::{
 pub use items::{
     auto_equip_item, auto_store_bag_item, destroy_item, item_query, open_item, set_ammo,
     split_item, swap_inv_item, swap_item, use_item, ItemDamage, ItemInfo, ItemSpellEntry,
-    ItemUseSpell, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED,
+    ItemUseSpell, UseItemTarget, BAG_PLAYER_INVENTORY, ITEM_DYNFLAG_UNLOCKED, ITEM_DYNFLAG_WRAPPED,
     ITEM_FLAG_LOOTABLE, ITEM_FLAG_WRAPPER, SLOT_BAG_FIRST, SLOT_PACK_FIRST,
 };
 pub use loot::{

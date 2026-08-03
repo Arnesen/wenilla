@@ -104,10 +104,11 @@
 
         -- ref-Minimap.xml MiniMapMailFrame's OnEvent, verbatim logic (l.281-289): UPDATE_PENDING_MAIL
         -- is the ONLY event the reference registers on this frame — no MAIL_INBOX_UPDATE/MAIL_CLOSED
-        -- exists there despite the icon logically depending on inbox state. benilla's arrival feed
-        -- (`ui_mail::feed_mail`, decision 0544 P3) fires UPDATE_PENDING_MAIL on every HasNewMail()
-        -- value transition, which already covers a read-to-empty inbox — so mirroring just this one
-        -- event is faithful, not a simplification.
+        -- exists there despite the icon logically depending on inbox state. That is not an oversight
+        -- to paper over: reading your mail clears the icon through the pending-mail countdown, never
+        -- through the inbox (opening a letter arms a deferred refresh; closing the mailbox re-asks
+        -- the server). `ui_mail::MailPending` models that countdown and fires UPDATE_PENDING_MAIL at
+        -- exactly the reference's three signal sites — decision 0913.
         function MiniMapMailFrame_OnEvent()
             if ( event == "UPDATE_PENDING_MAIL" ) then
                 if ( HasNewMail() ) then

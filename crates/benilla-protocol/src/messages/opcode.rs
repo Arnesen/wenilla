@@ -153,6 +153,14 @@ pub const SMSG_COOLDOWN_EVENT: u16 = 0x0135; // 309
 pub const SMSG_CLEAR_COOLDOWN: u16 = 0x01DE; // 478
 pub const SMSG_COOLDOWN_CHEAT: u16 = 0x01E1; // 481
 
+/// `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos `Opcodes_1_12_1.h`: 491) — the **only** source
+/// of a temporary enchant's remaining time. The item's `ITEM_FIELD_ENCHANTMENT` duration field is
+/// never read for it: the reference's tooltip reads a client-side per-slot deadline array
+/// (`[obj + slot*4 + 0x324]`) whose only writers are this packet's handler `0x5e4f82` and the item
+/// refresh `0x5ebe34` (wow-re `ui/scratch/tooltip-content-law.md` §E3, byte-verified). Body in
+/// [`super::items::read_item_enchant_time`]; decision 0920.
+pub const SMSG_ITEM_ENCHANT_TIME_UPDATE: u16 = 0x01EB; // 491
+
 /// Pushback (VERIFIED vmangos `Opcodes_1_12_1.h`: 482): sent to the caster when a cast takes damage
 /// and the server delays it (`Spell::Delayed`, `Spell.cpp:7472` — a raw `u64` caster guid + `u32`
 /// delaytime ms). The cast bar slides its window out by it (`SPELLCAST_DELAYED`); a normal hit never

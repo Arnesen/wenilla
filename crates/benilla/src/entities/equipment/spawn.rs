@@ -971,6 +971,7 @@ mod tests {
             recursion: None,
             geometry: None,
             owner_reach: 0.0,
+            water_bound: (Vec3::ZERO, 0.0),
         }];
         displays.models.insert((7, SHOULDER_KIND), dm);
         app.insert_resource(displays);
@@ -1233,6 +1234,7 @@ mod tests {
                     recursion: None,
                     geometry: None,
                     owner_reach: 0.0,
+                    water_bound: (Vec3::ZERO, 0.0),
                 }];
             }
             displays.models.insert((display, kind), dm);

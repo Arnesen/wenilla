@@ -543,31 +543,73 @@ const TARGET_FLAG_GAMEOBJECT: u16 = 0x0800;
 /// `cursor-system.md` §8.4), so the mask we write is the mask it writes.
 const TARGET_FLAG_LOCKED: u16 = 0x4000;
 
+/// `TARGET_FLAG_UNIT` — a bound unit target: the same bit, and the same packed guid, a
+/// `CMSG_CAST_SPELL` writes. In the real client ONE block builder serves both opcodes, so one bit
+/// table serves both here.
+const TARGET_FLAG_UNIT: u16 = 0x0002;
+/// `TARGET_FLAG_DEST_LOCATION` — a ground point, the same bit and the same three `f32` WoW coords
+/// a ground-targeted `CMSG_CAST_SPELL` writes ([`super::spells::cast_spell_at_dest`]).
+const TARGET_FLAG_DEST_LOCATION: u16 = 0x0040;
+
+/// The `SpellCastTargets` block a `CMSG_USE_ITEM` carries — built by the *same* code as a
+/// `CMSG_CAST_SPELL`'s. `SendCast 0x6e54f0` picks the opcode from its item-vs-caster discriminator
+/// (`0x6e57d8 push 0xab` when the pending-cast block's guid is the item's, `push 0x12e` when it is
+/// the caster's) and then writes the one targets block `ArmCast 0x6e5250` bound — item or not
+/// (wow-re `action-item-slot.md` §8: "body `{u8 bagIndex, u8 slot, u8 spell_index}` + the
+/// cast-targets block"; `cursor-system.md` §8.4a for the split).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum UseItemTarget {
+    /// Mask 0 (`TARGET_FLAG_SELF`) — the implicit self-cast an ordinary consumable sends, whose
+    /// target the server resolves itself. What 81% of the 1.12 on-use items bind to.
+    #[default]
+    SelfImplicit,
+    /// `TARGET_FLAG_UNIT` + the packed guid — an item whose spell binds a unit exactly as a
+    /// spell's does: a bandage, a soulstone, an offensive trinket.
+    Unit(u64),
+    /// `TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED` + the packed guid — the **key-in-a-lock**
+    /// case (decision 0769): opening a locked door or chest with a key is not a spell cast, it is
+    /// *using the key at the object*. It matters that this is USE_ITEM and not a bare cast:
+    /// `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot **only** when `m_CastItem` is set
+    /// (`Spell.cpp:7892`), which only this packet supplies.
+    Object(u64),
+    /// `TARGET_FLAG_DEST_LOCATION` + three `f32` WoW coords — the targeting-cursor commit for a
+    /// **thrown** item: dynamite, grenades, bombs, the Goblin Mortar (46 of the 1.12 on-use item
+    /// spells, decision 0914). Same block a ground-targeted spell writes; only the opcode differs.
+    Dest([f32; 3]),
+}
+
 /// Body of `CMSG_USE_ITEM` (VERIFIED vmangos `UseItem::ReadFromWorldPacket` + opcode 171
 /// `Opcodes_1_12_1.h`): `bagIndex` (a bag's player-array slot 19–22, or [`BAG_PLAYER_INVENTORY`]
 /// with an absolute `slot`), `slot` (0-based within the bag), `spellSlot` (which of the template's
-/// 5 spell effects — 0, the "use" effect, for a plain use), then a `SpellCastTargets` block.
-///
-/// `go_target` is the **key-in-a-lock** case (decision 0769): opening a locked door or chest with a
-/// key is not a spell cast, it is *using the key at the object*, and the packet is this one with
-/// `TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED` and the object's packed guid (wow-re
-/// `cursor-system.md` §8.4, byte-read: the sender `0x6e54f0` discriminates on cast-item-vs-caster
-/// and the item arm falls to `0x6e57d8 push 0xab`). It matters that this is USE_ITEM and not a bare
-/// cast: `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot **only** when `m_CastItem` is set
-/// (`Spell.cpp:7892`), which only this packet supplies. `None` writes mask 0 — the self-shaped
-/// block a consumable sends, whose implicit target the server resolves itself.
-pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, go_target: Option<u64>) -> Vec<u8> {
+/// 5 spell effects — 0, the "use" effect, for a plain use), then a `SpellCastTargets` block
+/// ([`UseItemTarget`]).
+pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) -> Vec<u8> {
     let mut body = Vec::with_capacity(5);
     body.push(bag_index);
     body.push(slot);
     body.push(spell_slot);
-    match go_target {
-        None => body.extend_from_slice(&0u16.to_le_bytes()),
-        Some(guid) => {
-            body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
-            crate::wire::write_packed_guid(guid, &mut body).expect("write to Vec cannot fail");
+    let guid = match target {
+        UseItemTarget::SelfImplicit => {
+            body.extend_from_slice(&0u16.to_le_bytes());
+            return body;
         }
-    }
+        UseItemTarget::Unit(guid) => {
+            body.extend_from_slice(&TARGET_FLAG_UNIT.to_le_bytes());
+            guid
+        }
+        UseItemTarget::Object(guid) => {
+            body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
+            guid
+        }
+        UseItemTarget::Dest(dest) => {
+            body.extend_from_slice(&TARGET_FLAG_DEST_LOCATION.to_le_bytes());
+            for c in dest {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+            return body;
+        }
+    };
+    crate::wire::write_packed_guid(guid, &mut body).expect("write to Vec cannot fail");
     body
 }
 
@@ -668,6 +710,22 @@ pub(super) fn read_inventory_change_failure(r: &mut &[u8]) -> io::Result<(u8, Op
     Ok((reason, required_level, item_guid))
 }
 
+/// Read `SMSG_ITEM_ENCHANT_TIME_UPDATE` (VERIFIED vmangos
+/// `WorldPackets::Item::ItemEnchantTimeUpdate::AppendBodyTo`, `Server/Packets/Item.cpp:161-169`):
+/// item guid, enchant **slot**, remaining **seconds**, then the owning player's guid (present from
+/// build 1.10.2 up, so always in 1.12). Returns `(item_guid, slot, seconds)`; the trailing player
+/// guid is dropped — the packet only ever concerns our own items and the item guid already names
+/// which one.
+///
+/// `seconds == 0` means expired, and the reference stores that as **no timer** (`0x5d9cc0` writes
+/// a `0` deadline whenever `seconds <= 0`), not as "0 seconds left".
+pub(super) fn read_item_enchant_time(r: &mut &[u8]) -> io::Result<(u64, u32, u32)> {
+    let item_guid = read_u64_le(r)?;
+    let slot = read_u32_le(r)?;
+    let seconds = read_u32_le(r)?;
+    Ok((item_guid, slot, seconds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +804,25 @@ mod tests {
             read_inventory_change_failure(&mut r).unwrap(),
             (1, Some(40), 0x1122_3344_5566_7788)
         );
+    }
+
+    /// `SMSG_ITEM_ENCHANT_TIME_UPDATE`'s body, byte-exact against vmangos's writer: guid, slot,
+    /// seconds, then the player guid we drop. Pinned because a wrong width here would silently
+    /// park a garbage deadline (decision 0920).
+    #[test]
+    fn item_enchant_time_reads_guid_slot_seconds() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x4000_0000_0000_00f7u64.to_le_bytes()); // itemGuid
+        buf.extend_from_slice(&1u32.to_le_bytes()); // slot 1 = TEMP
+        buf.extend_from_slice(&600u32.to_le_bytes()); // seconds
+        buf.extend_from_slice(&0x0000_0000_0000_0001u64.to_le_bytes()); // playerGuid (dropped)
+        let mut r = &buf[..];
+        assert_eq!(
+            read_item_enchant_time(&mut r).unwrap(),
+            (0x4000_0000_0000_00f7, 1, 600)
+        );
+        // The trailing player guid stays unread — the reader consumes exactly its three fields.
+        assert_eq!(r.len(), 8);
     }
 
     #[test]

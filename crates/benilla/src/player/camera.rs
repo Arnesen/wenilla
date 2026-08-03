@@ -569,7 +569,7 @@ pub(super) fn seat_camera(
 /// compose (`wow_model.wgsl`: `out_rgb *= faded_alpha`) takes the card to black, which for an ADD blend
 /// is gone. That deliberately avoids `Visibility`, which the card's own hidden-owner mirror authors every
 /// frame in a different system.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)] // one Bevy system's full input set
 pub(crate) fn apply_self_model_fade(
     rig: Res<CameraControl>,
     self_player: Query<(Entity, Option<&crate::aura_visual::AuraNodes>), With<SelfPlayer>>,
@@ -581,6 +581,7 @@ pub(crate) fn apply_self_model_fade(
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
             Option<&crate::interior::InteriorLit>,
+            Has<crate::model_render::FarSideOfWater>,
         ),
         (
             Without<RenderFade>,
@@ -599,7 +600,11 @@ pub(crate) fn apply_self_model_fade(
         Option<&FadeMaterials>,
         Option<&mut MeshMaterial3d<WowModelMaterial>>,
         Option<&crate::interior::InteriorLit>,
+        Has<crate::model_render::FarSideOfWater>,
     )>,
+    // The water-plane axis, composed into every pick below (`far_resolved`) like every other
+    // owner of the handle channel — the feather and the classifier converge, never re-swap.
+    far_twins: Res<crate::model_render::FarSideTwins>,
     mut reauthor: ResMut<crate::interior::InteriorReauthor>,
     mut was_fading: Local<bool>,
 ) {
@@ -627,11 +632,12 @@ pub(crate) fn apply_self_model_fade(
         feather,
         &children_of,
         &mut parts,
+        &far_twins,
         &mut reauthor,
         &mut walked,
     );
     let alpha = feather.clamp(0.0, 1.0);
-    for (card, mut tag, anim, fm, mat, lit) in &mut cards {
+    for (card, mut tag, anim, fm, mat, lit, far_side) in &mut cards {
         if !card
             .follows()
             .is_some_and(|anchor| walked.contains(&anchor))
@@ -654,7 +660,11 @@ pub(crate) fn apply_self_model_fade(
         // (decision 0836). No `Visibility` here: that channel belongs to the card's hidden-owner
         // mirror in another system.
         if let (Some(fm), Some(mut mat)) = (fm, mat) {
-            let want = fm.material_for(lit, alpha < 1.0);
+            let want = crate::model_render::far_resolved(
+                fm.material_for(lit, alpha < 1.0),
+                far_side,
+                &far_twins,
+            );
             if mat.0 != *want {
                 mat.0 = want.clone();
             }
@@ -680,6 +690,7 @@ fn apply_self_fade_to_descendants(
             &mut MeshMaterial3d<WowModelMaterial>,
             &mut Visibility,
             Option<&crate::interior::InteriorLit>,
+            Has<crate::model_render::FarSideOfWater>,
         ),
         (
             Without<RenderFade>,
@@ -687,11 +698,12 @@ fn apply_self_fade_to_descendants(
             Without<crate::billboard::BillboardCard>,
         ),
     >,
+    far_twins: &crate::model_render::FarSideTwins,
     reauthor: &mut crate::interior::InteriorReauthor,
     walked: &mut EntityHashSet,
 ) {
     walked.insert(entity);
-    if let Ok((fm, mut tag, mut mat, mut vis, lit)) = parts.get_mut(entity) {
+    if let Ok((fm, mut tag, mut mat, mut vis, lit, far_side)) = parts.get_mut(entity) {
         if alpha >= 1.0 {
             // The release edge (runs once, on the frame the fade ends — decision 0213): un-hide,
             // restore the alpha field this system owns, and hand the material back to the part's
@@ -706,7 +718,8 @@ fn apply_self_fade_to_descendants(
             if tag.0 != bits {
                 tag.0 = bits;
             }
-            let want = fm.material_for(lit, false);
+            let want =
+                crate::model_render::far_resolved(fm.material_for(lit, false), far_side, far_twins);
             if mat.0 != *want {
                 mat.0 = want.clone();
             }
@@ -736,7 +749,8 @@ fn apply_self_fade_to_descendants(
             // exterior twin at shade byte 0 read as full outdoor intensity deep indoors
             // (director-caught, 2026-07-13). Shared with the appear/despawn ramp since 0755, so
             // the two can never disagree about which twin a law wants.
-            let want = fm.material_for(lit, true);
+            let want =
+                crate::model_render::far_resolved(fm.material_for(lit, true), far_side, far_twins);
             if mat.0 != *want {
                 mat.0 = want.clone();
             }
@@ -744,7 +758,15 @@ fn apply_self_fade_to_descendants(
     }
     if let Ok(children) = children_of.get(entity) {
         for &child in children {
-            apply_self_fade_to_descendants(child, alpha, children_of, parts, reauthor, walked);
+            apply_self_fade_to_descendants(
+                child,
+                alpha,
+                children_of,
+                parts,
+                far_twins,
+                reauthor,
+                walked,
+            );
         }
     }
 }
@@ -878,6 +900,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<CameraControl>();
         app.init_resource::<crate::interior::InteriorReauthor>();
+        // The water-plane twin map the feather composes with (empty — no water in a fixture).
+        app.init_resource::<crate::model_render::FarSideTwins>();
         app.add_systems(Update, apply_self_model_fade);
 
         // The avatar: root -> joint (the eye-glow bone). Its card follows the joint.

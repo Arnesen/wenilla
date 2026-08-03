@@ -43,7 +43,7 @@ use crate::cooldowns::Cooldowns;
 use crate::items::Items;
 use crate::net::{ClientCommand, GuidIndex, NetCommands, ObjectStore, Reputations, SelfPlayer};
 use crate::target::Selection;
-use crate::ui_action::{cast_target, send_spell_cast, usable, PlayerActions, Spells};
+use crate::ui_action::{cast_target, usable, CastCommit, CastLadder, PlayerActions, Spells};
 use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
@@ -182,24 +182,11 @@ fn feed_shapeshift_bar(
 
 /// Drain `CastShapeshiftForm`'s queued form spells: cancel the active form (unless its
 /// `SpellShapeshiftForm.dbc` flags block it — the silent no-op), cast any other.
-#[allow(clippy::too_many_arguments)] // a Bevy system's full input set (send_spell_cast's own)
 fn drain_shapeshift_casts(
     script: Option<NonSendMut<UiScript>>,
     targeting: cast_target::CastTargeting,
-    commands: Res<NetCommands>,
-    self_player: Query<(Entity, Has<crate::creature_anim::Engaged>), With<SelfPlayer>>,
     self_store: Query<&ObjectStore, With<SelfPlayer>>,
-    spells: Option<Res<Spells>>,
-    cast_items: Res<Items>,
-    mut sheath: MessageWriter<crate::creature_anim::SheathRequest>,
-    mut pending: ResMut<crate::ui_cast::PendingCast>,
-    mut queued_melee: ResMut<crate::ui_cast::QueuedMeleeSpell>,
-    mut cooldowns: ResMut<Cooldowns>,
-    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
-    mut auto_repeat: ResMut<crate::ui_action::AutoRepeatActive>,
-    mut trade_skill_opens: ResMut<crate::ui_tradeskill::TradeSkillOpens>,
-    mut ground: ResMut<crate::ui_action::SpellTargeting>,
-    mut ecs: Commands,
+    mut ladder: CastLadder,
 ) {
     let Some(mut script) = script else {
         return;
@@ -210,39 +197,27 @@ fn drain_shapeshift_casts(
             .next()
             .map(|s| s.0.unit_shapeshift_form())
             .unwrap_or(0);
-        let d = spells.as_ref().and_then(|s| s.catalog.get(spell_id));
+        let d = ladder.spells.as_ref().and_then(|s| s.catalog.get(spell_id));
         // The active-form fork — shared with the plain `CastSpell` dispatcher's twin
         // (`crate::ui_action::toggle`): cancel unless the `0x4b4963` flags1-&-0x2 guard makes
         // it a silent no-op (warrior stances).
-        let row = spells
+        let row = ladder
+            .spells
             .as_ref()
             .and_then(|s| s.forms.get(&u32::from(form_byte)));
         match d.and_then(|d| crate::ui_action::toggle::form_recast_disposition(d, form_byte, row)) {
             Some(true) => {
                 debug!("ui_shapeshift: cancel form aura {spell_id}");
-                let _ = commands.0.send(ClientCommand::CancelAura { spell_id });
+                let _ = ladder
+                    .commands
+                    .0
+                    .send(ClientCommand::CancelAura { spell_id });
                 continue;
             }
             Some(false) => continue,
             None => {}
         }
         debug!("ui_shapeshift: cast form {spell_id}");
-        send_spell_cast(
-            spell_id,
-            &targeting.context(),
-            &commands,
-            &self_player,
-            spells.as_deref(),
-            &cast_items,
-            &mut sheath,
-            &mut ecs,
-            &mut pending,
-            &mut queued_melee,
-            &mut cooldowns,
-            &mut cast_errors,
-            &mut auto_repeat,
-            &mut trade_skill_opens,
-            &mut ground,
-        );
+        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
     }
 }

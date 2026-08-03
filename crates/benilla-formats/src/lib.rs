@@ -59,7 +59,7 @@ mod item_sounds;
 pub use item_sounds::{load_item_group_sounds, ItemGesture, ItemGroupSoundsCatalog};
 mod item_visuals;
 pub use item_visuals::{
-    load_enchant_visual_catalog, load_item_visual_catalog, EnchantVisualCatalog, ItemVisualCatalog,
+    load_enchant_catalog, load_item_visual_catalog, EnchantCatalog, ItemVisualCatalog,
     ITEM_VISUAL_SLOTS,
 };
 mod ground_effects;

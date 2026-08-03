@@ -59,7 +59,10 @@ mod weapon_icon;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CooldownEvents;
 
-pub(crate) use cast_send::send_spell_cast;
+// The one cast path, and the only way in: every caster surface takes [`CastLadder`] as a single
+// SystemParam and commits through [`CastCommit`] — `send_spell_cast` itself is private to
+// `cast_send`, so a second send path cannot be written by accident (decision 0914).
+pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
     attack_mounted_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
     UiErrorKeys,

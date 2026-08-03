@@ -329,6 +329,7 @@ fn bag_tooltip_hangs_left_when_the_slot_sits_in_the_right_half() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -407,6 +408,7 @@ fn hovered_bag_tooltip_fills_itself_when_the_stats_land() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -513,6 +515,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     slots.insert(
@@ -531,6 +534,7 @@ fn vendor_bag_hover_shows_sell_price_and_arms_the_pouch_cursor() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -723,6 +727,7 @@ fn drag_across_two_slots_queues_the_same_move_a_click_pickup_would() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -809,6 +814,7 @@ fn a_second_bag_window_feeds_and_paints_via_the_bag_bar() {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -937,6 +943,7 @@ fn open_backpack_with_a_five_stack(s: &mut UiScript) -> (f32, f32) {
             readable: false,
             creator: None,
             flags: 0,
+            enchants: Vec::new(),
         },
     );
     s.set_container(
@@ -1223,6 +1230,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
         locked: false,
         equip_slots: vec![20],
         creator: None,
+        enchants: Vec::new(),
     });
     s.set_inventory_slots(inv);
     s.run("BenillaBagBarSlot_OnEnter(BenillaBagBarSlot1)")

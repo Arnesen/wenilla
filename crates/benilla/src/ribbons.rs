@@ -81,6 +81,10 @@ pub struct RibbonTrail {
     /// SAME rung as the quad clouds beside it (0721). Was the material's `depth_bias`; now the
     /// draw record's sort-key add.
     bias: f32,
+    /// The owner model's bound sphere ([`ModelRibbon::water_bound`]) — the water-plane side is
+    /// the MODEL's (0921): the ribbon leg reads the model's side-A boolean verbatim, slack
+    /// included, so the trail flips with its model's bound centre, never with its whipping head.
+    water_bound: (Vec3, f32),
 }
 
 impl RibbonTrail {
@@ -172,6 +176,7 @@ pub fn spawn_ribbon(
                     // the same rung the quad clouds take, from the same authored reach,
                     // because a trail is one of the model's emitters.
                     bias: crate::particles::owner_last_bias(ribbon.owner_reach * owner_scale),
+                    water_bound: ribbon.water_bound,
                 },
             ))
             .id(),
@@ -221,6 +226,7 @@ pub(crate) fn simulate_ribbons(
             age,
             texture,
             bias,
+            water_bound,
         } = &mut *trail;
         // The keyed look tracks sample on the trail's clip clock (see [`RibbonTrail::age`]):
         // heights at edge-commit time (each edge keeps the width it was born with — the
@@ -369,11 +375,21 @@ pub(crate) fn simulate_ribbons(
                 // particle "unfogged" file flag — pass 0.)
                 fog: EffectFog::for_blend(0, def.blend),
                 anchor,
-                // The owner rung, dropped under the water pass when the head node sits on the
-                // eye's far side of its water plane — the same interleave the quad clouds take.
+                // The owner rung, dropped under the water pass when the MODEL sits on the eye's
+                // far side of its water plane — the model's bound centre with the bound-radius
+                // slack, never the whipping head node (0921: the ribbon leg reads the model's
+                // side-A boolean verbatim, `0x7081f1`). The model frame is `alpha_src` — "the
+                // MODEL INSTANCE" — with the owner (possibly a joint) seconding as the walk
+                // seed; an unresolvable matrix falls back to the sign test at the head.
                 bias: *bias
-                    + if crate::particles::far_side_of_water(&interleave, *owner, anchor) {
-                        crate::sky_order::EFFECT_FAR_SIDE_BIAS
+                    + if crate::particles::model_far_side(
+                        &interleave,
+                        alpha_src.or(*owner),
+                        alpha_src.and_then(|e| transforms.get(e).ok()),
+                        *water_bound,
+                        anchor,
+                    ) {
+                        crate::sky_order::FAR_SIDE_BIAS
                     } else {
                         0.0
                     },
