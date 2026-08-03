@@ -48,6 +48,7 @@ use benilla_formats::SpellCatalog;
 use benilla_protocol::messages::{UnitAuraSlot, AURA_FLAG_CANCELABLE, UNIT_AURA_POSITIVE_SLOTS};
 use benilla_ui::script::{AuraState, ScriptValue, TrackingState, UiScript};
 
+use crate::char_select::ClientState;
 use crate::net::{ClientCommand, Guid, NetCommands, ObjectStore, SelfPlayer};
 use crate::target::Selection;
 use crate::ui_action::Spells;
@@ -57,9 +58,13 @@ use crate::ui_unit::UnitFeed;
 /// The self-only aura durations, keyed by raw `UNIT_FIELD_AURA` slot — the decoded
 /// `SMSG_UPDATE_AURA_DURATION` payload, stamped with the real time it arrived. Written by the net
 /// apply path (which owns the event stream), read by [`feed_auras`]. A slot's entry is overwritten
-/// by each fresh packet (apply/refresh) and dropped only when the avatar goes — never per-frame on
-/// slot occupancy, which would delete every stamp in the frame before its own aura arrives
-/// (decision 0846). Bounded by construction: one entry per raw slot, ≤ 48.
+/// by each fresh packet (apply/refresh) and dropped only when the *session* ends (leaving
+/// `InWorld`) — never per-frame on slot occupancy, which would delete every stamp in the frame
+/// before its own aura arrives (decision 0846), and never on the avatar entity's absence, which a
+/// cross-map worldport produces mid-session while the auras themselves live on (decision 0900).
+/// This is the reference's `0xbc5f68` expiry array: raw-slot-keyed, written only by the duration
+/// packet, and a process global that no world change touches. Bounded by construction: one entry
+/// per raw slot, ≤ 48.
 #[derive(Resource, Default)]
 pub(crate) struct AuraDurations {
     by_slot: HashMap<u8, DurationStamp>,
@@ -139,10 +144,14 @@ impl Plugin for UiAuraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AuraDurations>()
             .init_resource::<PlayerAuraCache>()
+            .init_resource::<AuraFeedMemory>()
             // Feed before the VM dispatch (like the unit feed), so a frame's OnEvent sees the fresh
             // list; drain the cancels after, once the VM has queued them.
             .add_systems(Update, feed_auras.in_set(UnitFeed).before(UiInput))
-            .add_systems(Update, drain_aura_cancels.after(UiInput));
+            .add_systems(Update, drain_aura_cancels.after(UiInput))
+            // The ONLY teardown of the aura state, and it hangs off the session edge — never off
+            // the avatar entity's existence, which a worldport interrupts mid-session (0900).
+            .add_systems(OnExit(ClientState::InWorld), end_session_aura_state);
     }
 }
 
@@ -185,8 +194,10 @@ fn reconcile(cache: &mut Vec<CachedAura>, live: &[UnitAuraSlot], now: f64) {
 /// a `UNIT_AURA` trigger.
 type AuraProjection = (u32, u8, bool, Option<String>);
 
-/// The feed's edge-detection memory: per token, the projection of the list last pushed.
-#[derive(Default)]
+/// The feed's edge-detection memory: per token, the projection of the list last pushed. A resource
+/// rather than a `Local` (the [`crate::ui_unit::UnitFeedState`] pattern) because the session-end
+/// teardown resets it from its own system — see [`end_session_aura_state`].
+#[derive(Resource, Default)]
 struct AuraFeedMemory {
     present: bool,
     last: Vec<AuraProjection>,
@@ -321,28 +332,36 @@ fn feed_auras(
     selection: Res<Selection>,
     stores: Query<&ObjectStore>,
     spells: Option<Res<Spells>>,
-    mut durations: ResMut<AuraDurations>,
+    // Read-only over the stamps: the feed joins them, the net apply path writes them, and only the
+    // session end drops them (decision 0900). Nothing the feed sees may invalidate one.
+    durations: Res<AuraDurations>,
     mut cache: ResMut<PlayerAuraCache>,
     time: Res<Time<Real>>,
-    mut mem: Local<AuraFeedMemory>,
+    mut mem: ResMut<AuraFeedMemory>,
 ) {
     let Some(mut script) = script else {
         return;
     };
     let Ok((store, self_guid)) = self_q.single() else {
-        // No avatar yet: clear once, so a stale list can't linger across a logout.
-        if mem.present || mem.target_last.is_some() {
-            script.set_auras("player", None);
-            script.set_auras("target", None);
-            script.set_tracking(None);
-            cache.auras.clear();
-            // The stamps go with the cache: nothing prunes them per-frame (see the note in the
-            // join below), so losing the avatar is where they are dropped. A stale one could not
-            // survive a re-entry anyway — the freshness gate rejects a stamp older than the aura —
-            // but leaving the map to accumulate across logins would be sloppy state.
-            durations.by_slot.clear();
-            *mem = AuraFeedMemory::default();
-        }
+        // No avatar entity — and that is NOT, on its own, the end of the aura state, so nothing is
+        // torn down here (that is [`end_session_aura_state`]'s job, on the session edge). A
+        // cross-map worldport despawns every tracked entity, ours included, and the new map
+        // re-streams it under a fresh entity with the same guid (`net::apply::tag_self_player`'s
+        // own note); for the frames of that gap there is no avatar while every aura on us is still
+        // live, and the server sends nothing to rebuild the timers with — vmangos emits
+        // `SMSG_UPDATE_AURA_DURATION` only on an aura's apply/refresh and at
+        // `Map::ExistingPlayerLogin` (the already-online relog), never on a worldport.
+        //
+        // The reference has nothing to lose across that gap: its buff cache (`0xbc6040`) and expiry
+        // array (`0xbc5f68`) are process globals, zeroed once at startup (`0x4e40c0`, reached only
+        // from the one-shot init at `0x48f5a9`, itself called only from `0x401602`) and otherwise
+        // touched by exactly two sites — the duration packet's setter `0x4e43a6` and
+        // `GetPlayerBuffTimeLeft`'s reader `0x4e4467`. That is the whole xref set: `0xbc5f68`
+        // appears three times in `WoW.exe`. Nothing clears them on a world change, so a debuff's
+        // countdown simply carries across the loading screen. Clearing here was the "after a tele
+        // my disease has no timer" defect (decision 0900): the stamps were dropped, and even
+        // without that every survivor's `appeared_at` restarted at the re-stream, so the freshness
+        // gate below would have rejected whatever stamps remained.
         return;
     };
 
@@ -371,7 +390,7 @@ fn feed_auras(
     // freshness gate below, which compares a stamp against the aura it would be joined to rather
     // than against a slot's momentary emptiness — the defence 0257 §3 built for exactly this.
     // The map cannot grow: it is keyed by raw slot (≤ 48), each entry overwritten by the next
-    // packet for that slot, and cleared with the rest of the aura state when the avatar goes.
+    // packet for that slot, and cleared with the rest of the aura state when the session ends.
 
     let script_now = script.now();
 
@@ -566,6 +585,35 @@ fn join_duration(
         .unwrap_or((0.0, 0.0))
 }
 
+/// The end of the session (`OnExit(ClientState::InWorld)` — a confirmed `/logout`, back to the glue
+/// layer): drop the whole aura state, lists and duration stamps alike, so nothing reaches the next
+/// character's bar.
+///
+/// This is the *only* place the state is dropped, and the edge it hangs off is the point. The
+/// reference drops nothing, ever — `0xbc5f68` is zeroed once at client startup and written only by
+/// the duration packet (decision 0900) — because at this boundary it was protected by a server that
+/// re-sent every aura's duration in its login preamble; mangos still carries the bare
+/// `// SMSG_UPDATE_AURA_DURATION` placeholder where that packet went in
+/// `Player::SendInitialPacketsBeforeAddToMap`, and vmangos never fills it in. So a stamp we kept
+/// across a logout would sit in its raw slot with nothing to overwrite it, and the next character's
+/// aura in that slot could inherit a timer that was never theirs. One divergence from the reference,
+/// at the one boundary where the reference relied on a server we don't have.
+fn end_session_aura_state(
+    script: Option<NonSendMut<UiScript>>,
+    mut durations: ResMut<AuraDurations>,
+    mut cache: ResMut<PlayerAuraCache>,
+    mut mem: ResMut<AuraFeedMemory>,
+) {
+    if let Some(mut script) = script {
+        script.set_auras("player", None);
+        script.set_auras("target", None);
+        script.set_tracking(None);
+    }
+    cache.auras.clear();
+    durations.by_slot.clear();
+    *mem = AuraFeedMemory::default();
+}
+
 /// Drain the spell ids `CancelUnitBuff` queued this frame and send one `CMSG_CANCEL_AURA` each. The
 /// server cancels by spell, not slot (decision 0257 B8); it refuses anything the wire's
 /// `AFLAG_CANCELABLE` bit didn't allow, which the binding already gated on.
@@ -581,6 +629,88 @@ fn drain_aura_cancels(script: Option<NonSendMut<UiScript>>, net: Res<NetCommands
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plugin's own wiring, on a bare app: enough resources for the Update systems to run, and
+    /// the state machine the teardown hangs off. No `UiScript` (it is `NonSend` and needs the whole
+    /// FrameXML VM) — the systems that touch it take it as an `Option` and skip, which is exactly
+    /// what this test wants to observe: what happens to the *state* across the session edge.
+    fn aura_app() -> App {
+        // The cancel drain's outbound channel. Nothing sends on it here (its only source is the
+        // script VM, which this app has none of), so the dropped receiver is inert.
+        let (tx, _) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .insert_state(ClientState::InWorld)
+            .init_resource::<Selection>()
+            .insert_resource(NetCommands(tx))
+            .add_plugins(UiAuraPlugin);
+        app
+    }
+
+    /// Seed the app with one live aura carrying a running timer — the state a teleport must not
+    /// disturb and a logout must.
+    fn seed_one_timed_aura(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<AuraDurations>()
+            .set(32, 300_000, 10.0);
+        app.world_mut()
+            .resource_mut::<PlayerAuraCache>()
+            .auras
+            .push(CachedAura {
+                slot: 32, // the first harmful slot — a debuff, like the report's disease
+                spell_id: 11976,
+                appeared_at: 10.0,
+                flags: 0x8,
+                level: 60,
+                stacks: 1,
+            });
+        app.world_mut().resource_mut::<AuraFeedMemory>().present = true;
+    }
+
+    /// **Decision 0900, pinned.** A cross-map worldport despawns every tracked entity — our avatar
+    /// included — and the new map re-streams it, so for a stretch of frames mid-session there is no
+    /// `SelfPlayer` while every aura on us is still live. Nothing may tear the aura state down on
+    /// that: vmangos re-sends `SMSG_UPDATE_AURA_DURATION` only on apply/refresh (and at an
+    /// already-online relog), never on a worldport, so a dropped stamp is gone for the aura's whole
+    /// remaining life — the director's "after a tele my disease has no timer".
+    ///
+    /// The session edge is the one place it *does* go, and this pins both halves — the second one
+    /// squarely, the first one for what a VM-less app can reach: the Update schedule leaves a
+    /// seeded, avatar-less aura state alone. The teardown having exactly one site, on that edge, is
+    /// what makes the first half hold in the real app, and that is structural, not asserted here.
+    #[test]
+    fn the_aura_state_survives_an_avatar_less_frame_and_dies_only_with_the_session() {
+        let mut app = aura_app();
+        seed_one_timed_aura(&mut app);
+
+        // Frames with no avatar entity at all — the worldport gap.
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<PlayerAuraCache>().auras.len(),
+            1,
+            "the display cache survives the gap — its `appeared_at` is the freshness gate's anchor"
+        );
+        assert!(
+            app.world()
+                .resource::<AuraDurations>()
+                .by_slot
+                .contains_key(&32),
+            "the duration stamp survives the gap — nothing will re-send it"
+        );
+
+        // The session ends: `/logout` back to the glue layer.
+        app.world_mut()
+            .resource_mut::<NextState<ClientState>>()
+            .set(ClientState::CharSelect);
+        app.update();
+        assert!(app.world().resource::<PlayerAuraCache>().auras.is_empty());
+        assert!(app.world().resource::<AuraDurations>().by_slot.is_empty());
+        assert!(
+            !app.world().resource::<AuraFeedMemory>().present,
+            "the edge memory resets too, so the next character's first list counts as an edge"
+        );
+    }
 
     fn slot(slot: u8, spell_id: u32) -> UnitAuraSlot {
         UnitAuraSlot {

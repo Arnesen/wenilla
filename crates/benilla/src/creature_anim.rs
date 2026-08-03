@@ -515,7 +515,13 @@ pub(crate) use spell_visual::{
 };
 
 /// The per-unit animation state machine.
+///
+/// `Transform` is required, not optional: the driver reads the entity's render scale as the
+/// locomotion rate divisor (decision 0903), so a driver on a transform-less entity would silently
+/// stop being driven at all. Every real unit is spawned with one — the requirement is here so a
+/// hand-assembled entity (a test world, a future harness) can't quietly miss it.
 #[derive(Component)]
+#[require(Transform)]
 pub(crate) struct AnimDriver {
     mode: Mode,
     /// The gait id currently targeted while in [`Mode::Gait`] (so we cross-fade only on a change). `None`
@@ -593,6 +599,13 @@ pub(crate) struct AnimDriver {
     /// walks a multi-part dance. `None` = the main arm is a one-shot (its budget is a `Count`
     /// repeat) or a deliberate freeze (ranged Load / Loot).
     loop_window: Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    /// The playback rate last written to the base slot — `speed / (moveSpeed · |modelScale|)`
+    /// ([`select::playback_rate`], decision 0903); `1.0` for anything that is not a rate-scaled
+    /// locomotion clip. Purely an **instrument**: the hover inspector's anim line reads it, so
+    /// "this creature's walk looks too fast" is answerable by hovering the creature instead of by
+    /// working the divisor out by hand. Recorded rather than re-derived, so the card can never
+    /// disagree with what is actually playing.
+    gait_rate: f32,
     /// The Special wanted LAST frame — the driver's Special **edge** detector (decision 0864).
     /// An edge is a play in the client (the jump/pose entry, the FALLINGFAR latch's Fall, the
     /// land pick), so it clears the deferred-combat cache like any normal arm (`0x5fe48e`);
@@ -618,6 +631,12 @@ impl AnimDriver {
             Mode::Swing { id, .. } => Some(id),
         };
         (base, self.overlay.map(|o| o.id))
+    }
+
+    /// The playback rate the base slot is running at ([`Self::gait_rate`]) — the inspector card's
+    /// `rate` readout. `1.0` for every clip outside the locomotion whitelist.
+    pub(crate) fn rate(&self) -> f32 {
+        self.gait_rate
     }
 }
 
@@ -681,6 +700,7 @@ impl Default for AnimDriver {
             deferred: None,
             ranged_held: false,
             loop_window: None,
+            gait_rate: 1.0,
             last_special: None,
         }
     }

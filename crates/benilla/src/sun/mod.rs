@@ -125,17 +125,21 @@ impl Plugin for SunPlugin {
                 PostUpdate,
                 (follow_sun, follow_moons, follow_stars).in_set(crate::billboard::BillboardPlace),
             )
-            // The WMO-skybox suppression, ordered after the resolve for the same reason
-            // `crate::sky`'s dome gate is: both backdrops must agree WITHIN a frame, or a frame
-            // shows the painted sky with our stars still punched through it.
+            // The WMO-skybox + submersion suppression, ordered after both resolves for the same
+            // reason `crate::sky`'s dome gate is: backdrop and atmosphere must agree WITHIN a
+            // frame, or a frame shows the painted sky with our stars still punched through it
+            // (or the murk with the sun still up).
             .add_systems(
                 Update,
-                apply_celestial_visibility.after(crate::wmo_sky::WmoSkyResolve),
+                apply_celestial_visibility
+                    .after(crate::wmo_sky::WmoSkyResolve)
+                    .after(crate::liquid::SubmersionVerdict),
             );
     }
 }
 
-/// Hide the sky pass's own elements while a WMO skybox owns the sky ([`crate::wmo_sky`]).
+/// Hide the sky pass's own elements while a WMO skybox owns the sky ([`crate::wmo_sky`]) — or while
+/// the eye is **submerged**.
 ///
 /// `CSky::Render` gates its six draws on **one shared boolean** — `0x6d49cd` sets it, a filled skybox
 /// slot clears it (`0x6d49fb`/`0x6d4a2e`, once a slot's weight exceeds `[0x808aac]` = 0.99), and
@@ -144,23 +148,32 @@ impl Plugin for SunPlugin {
 /// five. Live-confirmed: standing in King's Square the reference's whole `[0.975, 0.98]` slice is
 /// three `count=12` draws — the skybox cube — and nothing else.
 ///
+/// The **submerged eye** suppresses the same set one level up: the scene driver's `0x6812a4`
+/// submerged test skips the whole `CSky::Render` call (byte-VERIFIED, wow-re terrain "the liquid
+/// render state" — "the surface is drawn identically from below; what changes underwater is
+/// scene-wide atmosphere only"). Without it the discs keep drawing under the murk, tinted by the
+/// underwater LightParams' celestial band — which is black there, so the sun read as a black ball
+/// from under water (director report, 2026-08-03).
+///
 /// **The GLARES are deliberately exempt.** They are not in this pass: the reference renders them
 /// last, on their own path (`0x483740 → 0x6d48c0 → 0x7e57e0`), which the boolean never reaches — so
-/// a sun flare still blooms over the painted sky. The gradient band is [`crate::sky`]'s dome and the
-/// cloud dome is [`crate::clouds`]'s; each keeps its own authority (decision 0025) reading this same
-/// resource.
+/// a sun flare still blooms over the painted sky. (Whether the glare path carries its own submersion
+/// gate is a wow-re question in flight; until it lands the flare keeps its envelope behaviour.) The
+/// gradient band is [`crate::sky`]'s dome and the cloud dome is [`crate::clouds`]'s; each keeps its
+/// own authority (decision 0025) reading these same resources.
 #[allow(clippy::type_complexity)]
 fn apply_celestial_visibility(
     wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    underwater: Res<crate::liquid::Underwater>,
     mut suns: Query<(&SunSprite, &mut Visibility), Without<MoonSprite>>,
     mut moons: Query<(&MoonSprite, &mut Visibility), Without<SunSprite>>,
     mut stars: Query<&mut Visibility, (With<StarDome>, Without<SunSprite>, Without<MoonSprite>)>,
 ) {
-    let owned = wmo_skybox.0.is_some();
+    let suppressed = wmo_skybox.0.is_some() || underwater.0.any();
     // `Inherited`, not `Visible`: these sprites hang off the celestial rig and must keep deferring to
     // it when the skybox stands down, exactly as the cloud dome's gate does.
     let want = |in_sky_pass: bool| {
-        if in_sky_pass && owned {
+        if in_sky_pass && suppressed {
             Visibility::Hidden
         } else {
             Visibility::Inherited

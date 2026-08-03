@@ -123,7 +123,9 @@ impl Plugin for SkyPlugin {
                     update_sky_colors,
                     // The dome stands down for a WMO skybox, so its gate must read the SETTLED
                     // resolve, not whichever side of it the executor picked (`crate::wmo_sky`).
-                    apply_sky_visibility.after(crate::wmo_sky::WmoSkyResolve),
+                    apply_sky_visibility
+                        .after(crate::wmo_sky::WmoSkyResolve)
+                        .after(crate::liquid::SubmersionVerdict),
                 ),
             )
             // Camera-anchored placement runs post-propagation (the BillboardPlace slot) off the
@@ -243,18 +245,22 @@ fn follow_camera(
 }
 
 /// Hide/show the dome from the debug panel's "disable sky dome" toggle — and stand it down entirely
-/// while a **WMO skybox** owns the backdrop ([`crate::wmo_sky`]): a building whose group asks for its
-/// MOSB model replaces this gradient, it does not layer over it. With the dome hidden the
-/// `ClearColor` backdrop (the row-7 fog colour, or black via "black backdrop") shows through.
+/// while a **WMO skybox** owns the backdrop ([`crate::wmo_sky`]), or while the eye is **submerged**:
+/// a building whose group asks for its MOSB model replaces this gradient, it does not layer over it,
+/// and underwater the reference skips the whole sky pass (the scene driver's `0x6812a4` submerged
+/// test gates `CSky::Render 0x6d4940` — stars, discs, gradient band and cloud dome together;
+/// byte-VERIFIED, wow-re terrain "the liquid render state"). With the dome hidden the `ClearColor`
+/// backdrop (the row-7 fog colour — submerged, the murk — or black via "black backdrop") shows through.
 fn apply_sky_visibility(
     debug: Res<DebugState>,
     wmo_skybox: Res<crate::wmo_sky::CameraWmoSkybox>,
+    underwater: Res<crate::liquid::Underwater>,
     mut dome: Query<&mut Visibility, With<Sky>>,
 ) {
     let Ok(mut vis) = dome.single_mut() else {
         return;
     };
-    let want = if debug.lighting.disable_sky_dome || wmo_skybox.0.is_some() {
+    let want = if debug.lighting.disable_sky_dome || wmo_skybox.0.is_some() || underwater.0.any() {
         Visibility::Hidden
     } else {
         Visibility::Visible

@@ -22,14 +22,16 @@
 //! window when the player leaves the mailbox's interaction range (wow-re §5: the client's generic
 //! interaction-target range gate — past it every mail `CMSG` silently fails its `CheckMailBox`).
 //!
-//! **The arrival layer ([`MailPending`], decision 0544 P3, wow-re §5 `mail-interaction.md` §7).**
-//! `HasNewMail()` mirrors the real client's own model: a countdown float (`0x845eac`) fed by
-//! `MSG_QUERY_NEXT_MAIL_TIME`'s reply and `SMSG_RECEIVED_MAIL`, decremented per frame, flipping
-//! true at `<= 0.0`. vmangos only ever sends `0.0` ("waiting now") or `-86400.0` ("none") — never
-//! a positive value — but the countdown is implemented in full since that's the client's real
-//! model, not a `0.0`/`-86400.0` special case. [`send_query_next_mail_time_on_enter`] fires the
-//! query once per world-enter (0548 §7: "once at UI/login load"); [`feed_mail`] decrements the
-//! float every frame, pushes `HasNewMail()` to the VM
+//! **The arrival layer ([`MailPending`], decisions 0544 P3 / 0904, wow-re §5 `mail-interaction.md`
+//! §4).** `HasNewMail()` mirrors the real client's own model: a countdown float (`0x845eac`) fed by
+//! `MSG_QUERY_NEXT_MAIL_TIME`'s reply and `SMSG_RECEIVED_MAIL`, stepped down per frame, and read as
+//! **`|countdown| < ε`** — *near zero*, not `<= 0` ([`MailPending::has_new_mail`]; the sign matters,
+//! decision 0904: vmangos's "no mail" reply is `-86400.0`, which a `<= 0` predicate reads as "you
+//! have mail" at every login). vmangos only ever sends `0.0` ("waiting now") or `-86400.0` ("none")
+//! — never a positive value — but the countdown is implemented in full since that's the client's
+//! real model, not a `0.0`/`-86400.0` special case. [`send_query_next_mail_time_on_enter`] fires the
+//! query once per world-enter (0548 §7: "once at UI/login load"); [`feed_mail`] steps the
+//! float every frame ([`MailPending::step`]), pushes `HasNewMail()` to the VM
 //! ([`benilla_ui::script::UiScript::set_has_new_mail`]) and fires `UPDATE_PENDING_MAIL` on every
 //! value transition — the only event the reference `MiniMapMailFrame` listens for
 //! (`Minimap.xml` l.278-289: `OnEvent` just re-checks `HasNewMail()` and shows/hides; no
@@ -193,13 +195,36 @@ impl NpcSession for MailOpen {
 #[derive(Resource, Default)]
 pub(crate) struct MailPending(pub(crate) Option<f32>);
 
+/// The `HasNewMail()` / countdown-step epsilon — the real client's `[0x8029d4]` = `2^-22`, the
+/// `fabs(x)`-vs-this threshold both `0x4afea0` (`HasNewMail`) and `0x4ade60` (the per-frame step)
+/// compare against (VERIFIED byte-exact in wow-re, `crates/ui/src/glue_geom_4a8.rs::EPS_BITS`).
+const MAIL_TIME_EPSILON: f32 = f32::from_bits(0x3480_0000); // 2^-22, wow-re's `EPS_BITS`
+
 impl MailPending {
-    /// `HasNewMail()` (decision 0544 P3, wow-re §5 §7): the countdown has reached zero (vmangos
-    /// sends only `0.0` or `-86400.0`, never a positive value in between, but the countdown model
-    /// is implemented in full — a positive reply would count down and flip true at `0`, exactly
-    /// as the real client's own `0x845eac` float does).
+    /// `HasNewMail()` (decisions 0544 P3 / 0904; wow-re §5 §4, `0x4afea0` byte-exact:
+    /// `fld [0x845eac]; fabs; fcomp [0x8029d4]`) — true iff the countdown is **within ε of zero**.
+    ///
+    /// Near-zero, *not* `<= 0`: the sign carries meaning. vmangos answers
+    /// `MSG_QUERY_NEXT_MAIL_TIME` with `-86400.0` when nothing is unread (`MailHandler.cpp`
+    /// `HandleQueryNextMailTime`: `HasUnreadMail() ? 0.0f : -float(DAY)`), so a `<= 0` predicate
+    /// lights the minimap icon on every login for a character with no mail (decision 0904).
     fn has_new_mail(&self) -> bool {
-        self.0.is_some_and(|s| s <= 0.0)
+        self.0.is_some_and(|s| s.abs() < MAIL_TIME_EPSILON)
+    }
+
+    /// The per-frame countdown step (wow-re §5 §4, `0x4ade60` byte-exact — carved as
+    /// `glue_geom_4a8::step_value`): a **non-positive countdown is left alone** (the `-86400.0`
+    /// "no mail" sentinel must never drift toward zero, and a reached-zero countdown must not sail
+    /// past it into negative — either would flip [`Self::has_new_mail`] the wrong way), and a
+    /// positive one steps down floor-clamped at `0.0`. The subtraction runs the client's x87 chain
+    /// (f64 under PC_53, narrowed at the store).
+    fn step(&mut self, delta_secs: f32) {
+        if let Some(cur) = self.0.as_mut() {
+            if *cur > 0.0 {
+                let diff = f64::from(*cur) - f64::from(delta_secs); // fsub, then fcom vs 0.0
+                *cur = if diff > 0.0 { diff as f32 } else { 0.0 };
+            }
+        }
     }
 }
 
@@ -467,12 +492,10 @@ fn feed_mail(
     *last = fresh;
     *last_mailbox = mail.mailbox;
 
-    // The arrival layer (decision 0544 P3): decrement the client-local countdown, then push/fire
+    // The arrival layer (decisions 0544 P3 / 0904): step the client-local countdown, then push/fire
     // on every `HasNewMail()` value transition — the reference `MiniMapMailFrame`'s only listened
     // event (`Minimap.xml` l.278-289, quoted in the module doc).
-    if let Some(secs) = pending.0.as_mut() {
-        *secs -= time.delta_secs();
-    }
+    pending.step(time.delta_secs());
     let has_new_mail = pending.has_new_mail();
     if has_new_mail != *last_has_new_mail {
         script.set_has_new_mail(has_new_mail);
@@ -805,5 +828,57 @@ mod tests {
         assert!(row.has_body);
         // The item name/texture are in flight (no template answer yet).
         assert!(row.item_name.is_none());
+    }
+
+    /// `HasNewMail()` is `|countdown| < ε`, not `countdown <= 0` (decision 0904). The regression
+    /// this pins: vmangos's "no unread mail" answer is `-86400.0`, and the old `<= 0` predicate
+    /// read it as "you have mail" — the phantom minimap icon on every login.
+    #[test]
+    fn has_new_mail_is_near_zero_not_non_positive() {
+        // Never queried — the reference's pre-first-query state.
+        assert!(!MailPending(None).has_new_mail());
+        // vmangos's two real answers.
+        assert!(MailPending(Some(0.0)).has_new_mail());
+        assert!(!MailPending(Some(-86400.0)).has_new_mail());
+        // The threshold itself: inside ε counts, ε and beyond does not — either sign.
+        assert!(MailPending(Some(MAIL_TIME_EPSILON / 2.0)).has_new_mail());
+        assert!(MailPending(Some(-MAIL_TIME_EPSILON / 2.0)).has_new_mail());
+        assert!(!MailPending(Some(MAIL_TIME_EPSILON)).has_new_mail());
+        assert!(!MailPending(Some(-MAIL_TIME_EPSILON)).has_new_mail());
+        // A still-running countdown is not "waiting now".
+        assert!(!MailPending(Some(30.0)).has_new_mail());
+    }
+
+    /// The per-frame step (`0x4ade60`): non-positive is untouched, positive steps down and floors
+    /// at exactly `0.0` — so a countdown that expires flips `HasNewMail()` true and *stays* true.
+    #[test]
+    fn step_leaves_non_positive_alone_and_floors_at_zero() {
+        // The "no mail" sentinel never drifts toward zero, however long the session runs.
+        let mut none_waiting = MailPending(Some(-86400.0));
+        for _ in 0..100 {
+            none_waiting.step(1.0 / 60.0);
+        }
+        assert_eq!(none_waiting.0, Some(-86400.0));
+        assert!(!none_waiting.has_new_mail());
+
+        // A reached-zero countdown stays at zero rather than sailing past into negative.
+        let mut expired = MailPending(Some(0.0));
+        expired.step(1.0 / 60.0);
+        assert_eq!(expired.0, Some(0.0));
+        assert!(expired.has_new_mail());
+
+        // A positive countdown steps down, then floors (never overshoots past 0).
+        let mut counting = MailPending(Some(0.5));
+        counting.step(0.125); // exact in binary — the step's value is pinned, not approximated
+        assert_eq!(counting.0, Some(0.375));
+        assert!(!counting.has_new_mail());
+        counting.step(10.0);
+        assert_eq!(counting.0, Some(0.0));
+        assert!(counting.has_new_mail());
+
+        // Never queried stays never-queried.
+        let mut unqueried = MailPending(None);
+        unqueried.step(1.0);
+        assert_eq!(unqueried.0, None);
     }
 }

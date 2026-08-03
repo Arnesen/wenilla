@@ -992,12 +992,33 @@ pub(super) fn gait_is_locomotion(state: &MovementState, walk_speed: f32) -> bool
         .is_some_and(|id| is_locomotion(*id))
 }
 
-/// The playback rate for a clip given the unit's live speed (wow-5875-re `0x5fe2f0`): `speed / moveSpeed`
-/// for a rate-scaled locomotion clip, else 1×. (The client also divides by the model's scale magnitude,
-/// 1.0 for an unscaled character.) Guarded on `moveSpeed > 0`.
-pub(super) fn playback_rate(clip: &AnimClip, speed: f32) -> f32 {
-    if clip.move_speed > 0.0 && RATE_SCALED.contains(&clip.anim_id) {
-        speed / clip.move_speed
+/// The playback rate for a clip given the unit's live speed and its rendered model scale — the
+/// client's `0x5fe2f0` divide, VERIFIED byte-for-byte (wow-5875-re `swim-mechanism.md` §TU-I,
+/// `0x5fe4be..0x5fe550`):
+///
+/// ```text
+/// 5fe508  call 0x711a20   ; DIVISOR = |modelScale| · sequence.moveSpeed
+/// 5fe515  fcomp 0.0 ; jne ; GUARD A: divisor > 0     (else stay 1×)
+/// 5fe528  call 0x5fee80   ; GUARD B: the locomotion id whitelist (else stay 1×)
+/// 5fe53c  call 0x7c4c90   ; NUMERATOR = the flag-scalar current speed
+/// 5fe541  fdiv            ; rate = speed / (moveSpeed · |modelScale|)
+/// ```
+///
+/// **`model_scale` is the half we were missing** (decision 0903). A sequence's `moveSpeed` is the
+/// ground speed its authored cycle covers *at the model's authored size*; render that model at `s×`
+/// and one cycle covers `s×` the ground, so the legs must cycle `s×` slower to hold the same speed.
+/// Without the divisor every off-1.0-scale creature ran its gait exactly `s×` too fast — a Gordok
+/// Ogre-Mage (`CreatureDisplayInfo.CreatureModelScale` 2.2) scurried its walk at 2.2× rate, and a
+/// 1.5× riding sabre its run at 1.5×.
+///
+/// The scale to pass is the **rendered world scale of the model actually playing the clip**: for a
+/// unit, `OBJECT_FIELD_SCALE_X` (the server has already folded the DBC scale in — `entities::attach`);
+/// for a mount child, its own `CreatureDisplayInfo` column composed under the rider's `SCALE_X` — what
+/// the client's `[unit+0xdc] ?: [unit+0xd8]` model pick resolves to.
+pub(super) fn playback_rate(clip: &AnimClip, speed: f32, model_scale: f32) -> f32 {
+    let divisor = clip.move_speed * model_scale.abs();
+    if divisor > 0.0 && RATE_SCALED.contains(&clip.anim_id) {
+        speed / divisor
     } else {
         1.0
     }

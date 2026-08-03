@@ -663,6 +663,22 @@ pub(crate) fn describe_at<'a>(
     out.into_iter().map(|(_, line)| line).collect()
 }
 
+/// Every **admitted** liquid surface height over `wow`'s XY under the given claim — the same
+/// delegation [`submersion_at`] applies (the 0634/0696 scoping: a pool in another building or
+/// storey never answers), with no over/under verdict attached: the consumer that needs surfaces
+/// the subject is merely *near* — above or below — is the camera's waterline snap
+/// (`player::camera::waterline_snap`), which keeps the eye out of the near-plane band around
+/// every admitted plane. Kept here so the delegation rule has one owner; `answers` stays private.
+pub(crate) fn surfaces_at<'a>(
+    liquids: impl Iterator<Item = &'a WaterChunkInfo> + 'a,
+    wow: [f32; 3],
+    claim: LiquidClaim,
+) -> impl Iterator<Item = f32> + 'a {
+    liquids
+        .filter(move |w| w.answers(claim, wow[2]))
+        .filter_map(move |w| w.surface_z_at(wow[0], wow[1]))
+}
+
 /// [`liquid_at`] restricted to **water** kinds — the query for the consumers that are about water
 /// specifically (the wade splash, footstep depth, the remote-motion spline's depth), which must not
 /// fire in the Great Forge's lava or Undercity's slime. Swim mode deliberately does NOT use this one.

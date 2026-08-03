@@ -2206,3 +2206,121 @@ fn a_run_starting_under_a_cast_still_transplants_it_up() {
         "a locomotion re-arm moves the cast to the torso instead of cutting it"
     );
 }
+
+/// A walker's model: Stand plus a Walk(4) authored at the 2.5 yd/s design speed every 1.12.1
+/// creature and character rig shares (byte-read from `ogremage.m2` and `humanmale.m2` with
+/// `benilla-extract m2seq`).
+fn walker_model() -> ModelAnimations {
+    let mut walk = clip(4, 2, true);
+    walk.move_speed = 2.5;
+    ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![clip(0, 1, true), walk],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    }
+}
+
+/// The rate the driver actually wrote onto the walk node — the number the fix is about, read back
+/// off the live `AnimationPlayer` rather than off the driver's own bookkeeping.
+fn walk_rate(app: &App, unit: Entity) -> f32 {
+    app.world()
+        .entity(unit)
+        .get::<AnimationPlayer>()
+        .unwrap()
+        .animation(AnimationNodeIndex::new(2))
+        .expect("the walk node is playing")
+        .speed()
+}
+
+/// The director's ogre, end to end through the real system (decision 0903): a Gordok Ogre-Mage
+/// (`CreatureDisplayInfo.CreatureModelScale` 2.2, so `OBJECT_FIELD_SCALE_X` 2.2) walking at
+/// vmangos' `speed_walk` 1.6 × 2.5 = 4.0 yd/s must cycle its legs at 4.0 / (2.5 × 2.2) = 0.73×.
+/// Scale-blind it read 1.60× — the "too fast walk" report. The control is the same unit at scale
+/// 1.0, which must still read the un-divided 1.60×: the fix may not touch ordinary-size creatures.
+#[test]
+fn a_scaled_creatures_walk_cycles_slower_than_an_unscaled_ones() {
+    let walking = MovementState {
+        flags: move_flags::FORWARD,
+        speed: 4.0,
+        ..Default::default()
+    };
+    let mut app = app();
+    let ogre = app
+        .world_mut()
+        .spawn((
+            walker_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Transform::from_scale(Vec3::splat(2.2)),
+            walking,
+        ))
+        .id();
+    let human = app
+        .world_mut()
+        .spawn((
+            walker_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Transform::from_scale(Vec3::splat(1.0)),
+            walking,
+        ))
+        .id();
+    app.update();
+    assert!(
+        (walk_rate(&app, ogre) - 0.727_27).abs() < 1e-3,
+        "the 2.2x ogre walks its cycle 2.2x slower, not at the scale-blind 1.60x: got {}",
+        walk_rate(&app, ogre)
+    );
+    assert!(
+        (walk_rate(&app, human) - 1.6).abs() < 1e-3,
+        "an unscaled unit is untouched by the divisor: got {}",
+        walk_rate(&app, human)
+    );
+}
+
+/// The mounted half of the same law: the client's divisor reads the MOUNT model
+/// (`[unit+0xdc] ?: [unit+0xd8]`), whose rendered scale is the rider's `OBJECT_FIELD_SCALE_X`
+/// times the mount's own `CreatureDisplayInfo` column (wow-re `0x613ef0`). Our mount child carries
+/// only that column on its transform, so the driver must compose the host's in — a 1.5× sabre
+/// under a 2.0× rider divides by 3.0, not 1.5.
+#[test]
+fn a_mounts_gait_rate_composes_the_riders_scale_with_the_mounts() {
+    let mut app = app();
+    let rider = app
+        .world_mut()
+        .spawn((
+            Transform::from_scale(Vec3::splat(2.0)),
+            MovementState {
+                flags: move_flags::FORWARD,
+                speed: 4.0,
+                ..Default::default()
+            },
+        ))
+        .id();
+    let mount = app
+        .world_mut()
+        .spawn((
+            walker_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Transform::from_scale(Vec3::splat(1.5)),
+            crate::entities::mount::MountBody { host: rider },
+        ))
+        .id();
+    app.update();
+    // 4.0 / (2.5 · 1.5 · 2.0) = 0.533… — the mount also inherits the rider's movement view, so the
+    // speed feeding the divide is the rider's, exactly as the client's per-unit call reads it.
+    assert!(
+        (walk_rate(&app, mount) - 0.533_33).abs() < 1e-3,
+        "the mount divides by rider x mount scale: got {}",
+        walk_rate(&app, mount)
+    );
+}

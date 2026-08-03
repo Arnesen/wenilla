@@ -259,7 +259,11 @@ impl Plugin for LightingPlugin {
                 (update_time_lighting, apply_sky_backdrop)
                     .chain()
                     // The storm blend reads this frame's weather densities (decision 0302).
-                    .after(crate::weather::WeatherTick),
+                    .after(crate::weather::WeatherTick)
+                    // The submerged atmosphere reads THIS frame's submersion verdict — unordered,
+                    // the murk could arrive a frame after the eye went under (and out of step with
+                    // the sky-pass suppression, which reads the same verdict).
+                    .after(crate::liquid::SubmersionVerdict),
             );
         // The shared global-light buffer (build_light_data after the resolve above; the extract +
         // render-world upload). Materials read this instead of carrying their own light copy.

@@ -16,7 +16,7 @@ use crate::SPAWN_XY;
 
 use super::{
     CameraControl, CameraProbe, FlyCam, MoveSpeed, Player, PlayerCapsule, CAM_COLLISION_RADIUS,
-    CAM_DIST_DEFAULT, CAM_NEAR, CAPSULE_HEIGHT, CAPSULE_RADIUS,
+    CAM_DIST_DEFAULT, CAM_FOVY, CAM_NEAR, CAPSULE_HEIGHT, CAPSULE_RADIUS,
 };
 
 /// Default avatar speed in yards/second — the **VERIFIED** vanilla run speed (`MOVE_RUN` 7.0). Ctrl
@@ -101,6 +101,7 @@ pub(super) fn setup_player(
         Projection::from(PerspectiveProjection {
             far: cam_far,
             near: CAM_NEAR,
+            fov: CAM_FOVY,
             ..default()
         }),
         // HDR render target (linear `Rgba16Float`) — the prerequisite for Bevy's `Bloom`. `Hdr` is a

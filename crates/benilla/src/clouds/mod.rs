@@ -77,8 +77,11 @@ impl Plugin for CloudsPlugin {
                 (
                     tick_clouds,
                     // After the resolve: the dome and the painted skybox must agree WITHIN a frame,
-                    // or one frame draws both (the ordering `crate::sky`'s gate already takes).
-                    layer::apply_cloud_visibility.after(crate::wmo_sky::WmoSkyResolve),
+                    // or one frame draws both (the ordering `crate::sky`'s gate already takes) —
+                    // and after the submersion verdict, for the same one-frame-agreement reason.
+                    layer::apply_cloud_visibility
+                        .after(crate::wmo_sky::WmoSkyResolve)
+                        .after(crate::liquid::SubmersionVerdict),
                 ),
             )
             // Camera-anchored placement post-propagation, like the sky dome (decision 0504).

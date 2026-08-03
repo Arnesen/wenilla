@@ -280,6 +280,11 @@ pub(super) fn drive_animations(
             Has<SelfPlayer>,
             Option<&crate::entities::mount::MountBody>,
             Has<crate::net::CreatureSwimming>,
+            // The rendered model scale — `OBJECT_FIELD_SCALE_X`, baked onto the entity transform by
+            // `entities::attach`. The locomotion playback rate divides by it (decision 0903), so an
+            // ogre at 2.2× cycles its legs 2.2× slower than a same-speed human. Read-only: nothing
+            // in this system moves a unit.
+            &Transform,
         ),
     )>,
     // A mount child's movement view is its HOST's (decision 0441): the same
@@ -293,6 +298,11 @@ pub(super) fn drive_animations(
         Option<&UnitSpeeds>,
         Option<&FacingStep>,
         Has<crate::net::CreatureSwimming>,
+        // …and the rider's own `OBJECT_FIELD_SCALE_X`: a mount child's transform carries only its
+        // `CreatureDisplayInfo` column, and the mount renders at the PRODUCT of the two (the
+        // byte-verified mount composition, wow-re `0x613ef0`). The rate divisor wants that product
+        // — the mount model's world scale — not the child's local column (decision 0903).
+        &Transform,
     )>,
     mut swings: MessageReader<SwingMessage>,
     mut impacts: MessageReader<SwingImpact>,
@@ -413,26 +423,33 @@ pub(super) fn drive_animations(
         wielded,
         cast_hold,
         facing_step,
-        (engaged, auto_repeat, ranged_hold, is_self, mount_body, creature_swimming),
+        (engaged, auto_repeat, ranged_hold, is_self, mount_body, creature_swimming, transform),
     ) in &mut units
     {
         // A mount child drives from its HOST's movement view (decision 0441) — same inputs the
         // rider's own pass reads, so the mount plays exactly the locomotion the rider suppresses.
         // A vanished host (teardown race) reads as stationary until the child despawns with it.
-        let (spline, remote, movement, speeds, facing_step, creature_swimming) = match mount_body {
-            Some(mb) => match mount_hosts.get(mb.host) {
-                Ok((s, r, m, sp, f, sw)) => (s, r, m, sp, f, sw),
-                Err(_) => (None, None, None, None, None, false),
-            },
-            None => (
-                spline,
-                remote,
-                movement,
-                speeds,
-                facing_step,
-                creature_swimming,
-            ),
-        };
+        // The host also supplies the missing half of the mount's world scale (see the query docs).
+        let (spline, remote, movement, speeds, facing_step, creature_swimming, host_scale) =
+            match mount_body {
+                Some(mb) => match mount_hosts.get(mb.host) {
+                    Ok((s, r, m, sp, f, sw, t)) => (s, r, m, sp, f, sw, t.scale.x),
+                    Err(_) => (None, None, None, None, None, false, 1.0),
+                },
+                None => (
+                    spline,
+                    remote,
+                    movement,
+                    speeds,
+                    facing_step,
+                    creature_swimming,
+                    1.0,
+                ),
+            };
+        // The rendered world scale of the model playing these clips — the `0x5fe2f0` rate divisor's
+        // `|modelScale|` (decision 0903). A plain unit's transform already IS its world scale; a
+        // mount child's is its display column, which composes under the rider's.
+        let model_scale = transform.scale.x * host_scale;
         let walk = speeds.map_or(DEFAULT_WALK_SPEED, |s| s.0.walk);
         // Dead ⇒ health 0 with a real max. Absent health counts as ZERO (`unit_is_dead`): a create
         // block omits zero fields, so an already-dead corpse streams in with no HEALTH at all —
@@ -1193,8 +1210,10 @@ pub(super) fn drive_animations(
                     // mid-air revive must re-select, not hold the corpse pose.)
                     if let Some(c) = drv.gait.and_then(|g| find_resolved(anims, g, catalog)) {
                         for v in anims.clips.iter().filter(|v| v.anim_id == c.anim_id) {
+                            let rate = playback_rate(v, mv.speed, model_scale);
                             if let Some(active) = player.animation_mut(v.node) {
-                                active.set_speed(playback_rate(v, mv.speed));
+                                active.set_speed(rate);
+                                drv.gait_rate = rate;
                             }
                         }
                     }
@@ -1321,8 +1340,10 @@ pub(super) fn drive_animations(
                             // (decision 0123) — sync the rate on whichever variation node is
                             // live (a stale fade-out node getting the same rate is harmless).
                             for v in anims.clips.iter().filter(|v| v.anim_id == c.anim_id) {
+                                let rate = playback_rate(v, mv.speed, model_scale);
                                 if let Some(active) = player.animation_mut(v.node) {
-                                    active.set_speed(playback_rate(v, mv.speed));
+                                    active.set_speed(rate);
+                                    drv.gait_rate = rate;
                                 }
                             }
                             // One completed pass of the ranged Load clip arms the HOLD twin
@@ -1359,7 +1380,7 @@ pub(super) fn drive_animations(
                                     "PLAY gait {} (was {:?}) rate {:.2}",
                                     c.anim_id,
                                     drv.gait,
-                                    playback_rate(c, mv.speed)
+                                    playback_rate(c, mv.speed, model_scale)
                                 ),
                             );
                         }
@@ -1381,7 +1402,8 @@ pub(super) fn drive_animations(
                             drv.loop_window = Some((c.node, budget));
                             bevy::animation::RepeatAnimation::Forever
                         };
-                        play_clip(&mut tr, &mut player, c, repeat, playback_rate(c, mv.speed));
+                        drv.gait_rate = playback_rate(c, mv.speed, model_scale);
+                        play_clip(&mut tr, &mut player, c, repeat, drv.gait_rate);
                         drv.gait = Some(target);
                         // A fresh pick of the drawn HOLD re-nocks (INTERIM, decision 0409): the
                         // hold resuming after a fire clip (or after the Load promotion) shows
@@ -1509,12 +1531,18 @@ pub(super) fn drive_animations(
         // a boolean, not a countdown, so a fade doesn't spam a line per frame.
         if is_self && crate::dbg_trace::enabled() {
             let state = format!(
-                "mode={:?} gait={:?} special={:?} flags={:08x} speed={:.2} upper={:?}{}",
+                "mode={:?} gait={:?} special={:?} flags={:08x} speed={:.2} scale={:.2} \
+                 rate={:.2} upper={:?}{}",
                 drv.mode,
                 drv.gait,
                 special,
                 mv.flags,
                 mv.speed,
+                // The rate's new input and its result (decision 0903): `speed` alone stopped
+                // predicting the gait's playback the moment the model scale joined the divisor,
+                // so a "the gait looks wrong" trace carrying only speed could no longer answer it.
+                model_scale,
+                drv.gait_rate,
                 drv.overlay.map(|ov| ov.id),
                 if drv.overlay_fade.is_some() {
                     "+fade"

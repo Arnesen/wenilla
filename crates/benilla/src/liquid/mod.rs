@@ -65,10 +65,19 @@ mod surface; // the against-real-client-files tests — they span both halves
 // client may name. `LiquidHit` and `LiquidSurface` are deliberately absent — they are returned and
 // spawned, never named from outside; add them here the day something needs to.
 pub(crate) use query::{
-    camera_claim, describe_at, liquid_at, player_claim, unit_claim, water_surface_at, FoamPatch,
-    LiquidClaim, LiquidSource, Underwater, WaterChunkInfo, WmoPool,
+    camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
+    FoamPatch, LiquidClaim, LiquidSource, Underwater, WaterChunkInfo, WmoPool,
 };
 pub(crate) use surface::{spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource};
+
+/// The frame slot where [`Underwater`] is written — the label every consumer of the submersion
+/// verdict orders itself `.after(..)`. The submerged view is a whole-screen swap (atmosphere, clear
+/// colour, and the sky-pass suppression all flip on it), so a consumer reading a frame-old verdict
+/// shows one mixed frame on every surface crossing — the murk with the sun still up, or clear water
+/// with the sky already gone. One label, so the "same frame" contract is written once instead of
+/// re-derived per consumer.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SubmersionVerdict;
 
 /// The water subsystem: load the per-kind frame arrays + shared materials at startup, then cycle the
 /// animation frame each update. Spawning the per-chunk surfaces happens in the terrain streamer (via
@@ -89,7 +98,9 @@ impl Plugin for LiquidPlugin {
                     // the eye's position, and a frame-old room would flash the wrong atmosphere for
                     // one frame on every doorway crossing — which, for a whole-screen filter, is
                     // exactly the artefact that reads worst.
-                    query::detect_submersion.after(crate::wmo_portal::WmoPvsSet),
+                    query::detect_submersion
+                        .after(crate::wmo_portal::WmoPvsSet)
+                        .in_set(SubmersionVerdict),
                 ),
             )
             // The surface-render kill-switch (see [`hide_liquid_surfaces`]) — inert without the env

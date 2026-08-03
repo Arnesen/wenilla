@@ -586,9 +586,19 @@ fn inspect_ui(
         };
         let (base, overlay) = d.playing();
         let base = base.map(&fmt).unwrap_or_else(|| "—".into());
+        // The base slot's live playback rate (decision 0903) — `speed / (moveSpeed · modelScale)`
+        // on a locomotion clip, a flat 1× on everything else. Shown so a "its walk is too fast"
+        // report is a hover away from a number instead of a hand-worked divisor; suppressed at
+        // exactly 1× so the ordinary case doesn't carry noise.
+        let rate = d.rate();
+        let rate = if (rate - 1.0).abs() > 1e-3 {
+            format!(" · rate {rate:.2}×")
+        } else {
+            String::new()
+        };
         match overlay {
-            Some(o) => format!("anim {base} + overlay {}", fmt(o)),
-            None => format!("anim {base}"),
+            Some(o) => format!("anim {base} + overlay {}{rate}", fmt(o)),
+            None => format!("anim {base}{rate}"),
         }
     });
     // The light lane + the attach that found it (decision 0776). Absent until the classifier has

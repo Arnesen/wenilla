@@ -379,15 +379,39 @@ fn reconcile_ranged_exemption_and_remote_pull_through() {
 #[test]
 fn backpedal_rate_speeds_up_a_slow_design_speed() {
     // Backpedaling at 4.5 yd/s against WalkBack authored for 2.5 → 1.8× (the "too slow" fix).
-    assert!((playback_rate(&clip(13, 2.5), 4.5) - 1.8).abs() < 1e-5);
-    assert!((playback_rate(&clip(5, 7.0), 7.0) - 1.0).abs() < 1e-5);
+    assert!((playback_rate(&clip(13, 2.5), 4.5, 1.0) - 1.8).abs() < 1e-5);
+    assert!((playback_rate(&clip(5, 7.0), 7.0, 1.0) - 1.0).abs() < 1e-5);
 }
 
 #[test]
 fn non_locomotion_clips_play_at_unit_rate() {
-    assert_eq!(playback_rate(&clip(0, 0.0), 9.0), 1.0); // idle
-    assert_eq!(playback_rate(&clip(38, 0.0), 9.0), 1.0); // jump hang (moveSpeed 0)
-    assert_eq!(playback_rate(&clip(60, 2.0), 9.0), 1.0); // an id outside the scaled set
+    assert_eq!(playback_rate(&clip(0, 0.0), 9.0, 1.0), 1.0); // idle
+    assert_eq!(playback_rate(&clip(38, 0.0), 9.0, 1.0), 1.0); // jump hang (moveSpeed 0)
+    assert_eq!(playback_rate(&clip(60, 2.0), 9.0, 1.0), 1.0); // an id outside the scaled set
+}
+
+/// The `0x5fe2f0` divisor is `moveSpeed · |modelScale|`, not `moveSpeed` alone (decision 0903) —
+/// the real numbers behind the director's two reports, so a regression names the creature it broke.
+#[test]
+fn a_big_model_cycles_its_legs_slower_for_the_same_ground_speed() {
+    // The Gordok Ogre-Mage (creature 11443, display 12472): `CreatureModelScale` 2.2, walking at
+    // vmangos' `speed_walk` 1.6 × the 2.5 yd/s base = 4.0 yd/s, against ogremage.m2's Walk(4)
+    // authored `moveSpeed` 2.5. Scale-blind that reads 1.60× — the scurry the director reported.
+    assert!((playback_rate(&clip(4, 2.5), 4.0, 2.2) - 0.727_27).abs() < 1e-4);
+    // The riding sabre (model 457, `CreatureModelScale` 1.5) at a 60% mount's 11.2 yd/s against
+    // Run(5)'s authored 6.94: 1.08×, not the scale-blind 1.61×.
+    assert!((playback_rate(&clip(5, 6.94), 11.2, 1.5) - 1.075_89).abs() < 1e-4);
+    // An unscaled model is the identity — every 1.0-scale creature and player is unaffected.
+    assert!((playback_rate(&clip(5, 6.94), 11.2, 1.0) - 1.613_83).abs() < 1e-4);
+}
+
+/// GUARD A tests the *divisor*, so a degenerate scale falls through to 1× instead of dividing by
+/// zero (a 0-scale unit is reachable: `OBJECT_FIELD_SCALE_X` is server-set and briefly 0 on a
+/// half-applied morph). `|modelScale|` is a magnitude — a negative scale mirrors, never reverses.
+#[test]
+fn a_degenerate_model_scale_falls_through_to_unit_rate() {
+    assert_eq!(playback_rate(&clip(4, 2.5), 4.0, 0.0), 1.0);
+    assert!((playback_rate(&clip(4, 2.5), 4.0, -2.2) - 0.727_27).abs() < 1e-4);
 }
 
 #[test]
@@ -904,6 +928,6 @@ fn the_prowl_idle_is_the_lowest_priority_stand() {
 /// at 1× however fast the unit is actually travelling.
 #[test]
 fn the_prowl_creep_is_not_rate_scaled() {
-    assert_eq!(playback_rate(&clip(STEALTH_WALK, 2.5), 7.0), 1.0);
-    assert_ne!(playback_rate(&clip(4, 2.5), 7.0), 1.0);
+    assert_eq!(playback_rate(&clip(STEALTH_WALK, 2.5), 7.0, 1.0), 1.0);
+    assert_ne!(playback_rate(&clip(4, 2.5), 7.0, 1.0), 1.0);
 }
