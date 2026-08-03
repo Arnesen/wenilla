@@ -26,6 +26,14 @@ pub struct AnimClip {
     /// The sequence's authored design movement speed (`ModelAnimation::move_speed`, yd/s) — the
     /// denominator the locomotion playback-rate scaler divides the unit's live speed by, so a fast
     /// mover cycles its legs proportionally faster. `0.0` for a non-locomotion clip (left at rate 1×).
+    ///
+    /// **Signed, and the sign is load-bearing — never `abs()` it.** A backwards gait is authored
+    /// NEGATIVE (`RidingKodo.m2` seq 14, WalkBackwards: `-2.5`), and the client's rate guard is a
+    /// strict `divisor > 0` (`0x5fe2f0`, §5-verified — decisions 0903/0910/0912). So an authored
+    /// backwards clip plays at a flat 1×, while a model that has *no* WalkBackwards and falls back
+    /// to Walk (`+2.5`) gets speed-scaled. That asymmetry is the reference's behaviour; taking the
+    /// magnitude here — an inviting-looking tidy-up — inverts it on every model authoring a reverse
+    /// gait.
     pub move_speed: f32,
     /// The sequence's blend-in time (`ModelAnimation::blend_time`, seconds) — the cross-fade duration the
     /// spawn site uses when transitioning *into* this clip, so a gait change eases instead of snapping.

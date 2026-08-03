@@ -93,6 +93,32 @@ struct ProbeChat {
 /// controller ever saw it.
 pub(crate) struct ProbeKeyPlugin;
 
+/// Keep a probe run's window **un-occludable** — the one defence against macOS's ~1 fps
+/// throttle for a fully covered window (decisions 0713/0777, method.md's `caffeinate` note).
+///
+/// It used to live inside the FPS probe alone, which reads as "a frame-rate concern". It is not:
+/// **every** scripted probe schedule is wall-clock ([`ProbeClock`]), so a throttled run doesn't
+/// just measure slowly, it *executes the wrong script* — this session's mounted-jump run fired
+/// `W@16` and `Space@19` in the SAME frame at ~1 fps, i.e. it jumped from a standstill instead of
+/// mid-run, and the leg had to be re-read to notice (decision 0906). Any probe env arms it, so a
+/// key/chat/Lua probe defends itself exactly like the FPS one. Write-gated: re-marking `Window`
+/// every frame would re-apply its whole state through winit.
+pub(crate) struct ProbeFocusPlugin;
+
+impl Plugin for ProbeFocusPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, keep_probe_window_on_top);
+    }
+}
+
+fn keep_probe_window_on_top(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
+    if let Ok(mut w) = windows.single_mut() {
+        if w.window_level != bevy::window::WindowLevel::AlwaysOnTop {
+            w.window_level = bevy::window::WindowLevel::AlwaysOnTop;
+        }
+    }
+}
+
 impl Plugin for ProbeKeyPlugin {
     fn build(&self, app: &mut App) {
         let spec = std::env::var("WOW_PROBE_KEY").unwrap_or_default();
@@ -651,18 +677,8 @@ fn drive_live_fps(
     match probe.phase {
         LiveFpsPhase::Done => {}
         LiveFpsPhase::Waiting => {
-            // A probe window that can't be covered can't be occlusion-throttled: macOS drops
-            // any FULLY covered window to ~1 fps drawables, and a detached probe launch spawns
-            // unfocused, possibly entirely behind other windows. Asserted from the FIRST tick,
-            // not at the uncap: an occluded SETTLE phase streams the world at ~1 fps and
-            // under-warms the scene before sampling even starts. Probe-only — a normal run
-            // never enters this system. (Write-gated: re-marking `Window` every frame would
-            // re-apply its whole state through winit.)
-            if let Ok(mut w) = windows.single_mut() {
-                if w.window_level != bevy::window::WindowLevel::AlwaysOnTop {
-                    w.window_level = bevy::window::WindowLevel::AlwaysOnTop;
-                }
-            }
+            // (The un-occludable window that keeps the SETTLE phase from streaming the world at
+            // ~1 fps is [`ProbeFocusPlugin`]'s now — every probe needs it, not just this one.)
             if time.elapsed_secs() < probe.at || self_player.is_empty() {
                 return;
             }

@@ -175,6 +175,65 @@ pub(super) struct SceneGates<'w> {
     camera_claim: Res<'w, crate::wmo_portal::CameraInteriorClaim>,
 }
 
+/// The **water-plane interleave** inputs ([`crate::sky_order::EFFECT_FAR_SIDE_BIAS`], where the
+/// byte story lives): the loaded liquid surfaces, the eye's submersion verdict, and the room
+/// components an anchor's liquid claim resolves from. One `SystemParam` for the same 16-cap
+/// reason as [`SceneGates`].
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct WaterInterleave<'w, 's> {
+    water: Query<'w, 's, &'static crate::liquid::WaterChunkInfo>,
+    underwater: Res<'w, crate::liquid::Underwater>,
+    rooms: Query<'w, 's, &'static crate::wmo_portal::UnitWmoRoom>,
+    parents: Query<'w, 's, &'static ChildOf>,
+}
+
+/// Is this emitter's cloud on the EYE's **far side** of its local water plane?
+///
+/// The reference classifies every particle emitter onto exactly ONE of the two transparent
+/// lists — above-water or below-water — by its own position against the owning model's liquid
+/// hit (`0x7084a0`), and the frame interleave draws the far-side list *before* the water pass
+/// (dry eye: below-water is far; submerged: above-water is — `0x4836d6`). This is that
+/// classification: the anchor against the nearest **admitted** surface over its XY, the claim
+/// resolved from the nearest ancestor with a room verdict (a joint owner sits under its unit;
+/// `Unknown` when nothing carries one — it admits both sources, still floor-bounded per pool).
+/// No admitted surface → near side, the reference's pass-1 default.
+pub(crate) fn far_side_of_water(
+    w: &WaterInterleave,
+    claim_seed: Option<Entity>,
+    anchor_world: Vec3,
+) -> bool {
+    let wow = benilla_assets::coords::bevy_to_wow(anchor_world);
+    let mut seed = claim_seed;
+    let mut room = None;
+    for _ in 0..8 {
+        let Some(e) = seed else { break };
+        if let Ok(r) = w.rooms.get(e) {
+            room = Some(r);
+            break;
+        }
+        seed = w.parents.get(e).ok().map(ChildOf::parent);
+    }
+    let claim = crate::liquid::unit_claim(room);
+    let Some(d) = crate::liquid::surfaces_at(w.water.iter(), wow, claim)
+        .map(|z| wow[2] - z)
+        .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+    else {
+        return false;
+    };
+    far_side(d, w.underwater.0.any())
+}
+
+/// The side law alone, pure for the unit test: `d` = anchor − surface (WoW Z), `submerged` =
+/// the eye's state. Dry eye ⇒ the below-water list is far; submerged ⇒ the above-water one.
+/// `d = 0` sits with the above-water list, matching [`crate::player::camera`]'s waterline tie.
+fn far_side(d: f32, submerged: bool) -> bool {
+    if submerged {
+        d >= 0.0
+    } else {
+        d < 0.0
+    }
+}
+
 /// Per-frame: emit, integrate, and expand each emitter's pool into the shared effect-quad
 /// stream ([`super::buffer::EffectQuads`]).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // one Bevy system's full input set
@@ -184,6 +243,8 @@ pub(super) fn simulate_particles(
     // The draw-set gate's scene inputs — the far-clip wall (0678) and the exterior window test
     // (0786); see [`SceneGates`].
     gates: SceneGates,
+    // The water-plane interleave inputs — see [`WaterInterleave`] and [`far_side_of_water`].
+    interleave: WaterInterleave,
     mut commands: Commands,
     cam: Query<(Entity, &GlobalTransform, &Frustum, &Camera, &Projection), With<WorldCamera>>,
     // Owner reads (joints/units/roots — never emitter or child-draw entities): disjoint from
@@ -417,6 +478,10 @@ pub(super) fn simulate_particles(
             model_instances,
             gated: _,
         } = &mut *emitter;
+        // The water-interleave claim seed, captured before the draw-anchor local shadows the
+        // `anchor` field below: the owner (creature/GameObject/joint) when streamed, else the
+        // cloud anchor (the MODEL) — whichever exists is where the room walk starts.
+        let claim_seed = (*owner).or(*anchor);
         *age += dt;
         // Anchored mode (see [`Particle`]): positions are emitter-relative, so tracking a moving
         // owner needs nothing beyond refreshing `placement` — the cloud rides the anchor for free
@@ -824,8 +889,37 @@ pub(super) fn simulate_particles(
         // render via [`super::model::update_model_particles`].
         let want_quads = def.geometry_model.is_none() && images.contains(&*texture);
         // Every effect of one model takes the SAME rung (0719/0721) — computed here per frame,
-        // where it used to be baked into the material's `depth_bias` at spawn.
-        let bias = super::owner_last_bias(*owner_reach);
+        // where it used to be baked into the material's `depth_bias` at spawn. Plus the
+        // water-plane interleave ([`far_side_of_water`]): a cloud on the eye's far side of its
+        // local water plane drops under the water pass, so the surface paints over it — the
+        // swimming-enchant erase was these two sorting by raw view-z and flipping with camera
+        // angle. Booth emitters belong to their own camera and take no world rung.
+        // Classified at the EMITTER's own live position (`placement`), not the model anchor —
+        // the reference's grain (`0x7084a0` reads the emitter): a swimmer's body sits below the
+        // line while their shoulder emitter sits above it, and the model-anchor shortcut would
+        // put the visible glow on the wrong list.
+        let far = !is_booth && far_side_of_water(&interleave, claim_seed, placement.translation);
+        // The classification's own trace (`WOW_MOVE_TRACE_TAGS=fx`): which clouds dropped under
+        // the water pass this frame — the numeric read for "the swimmer's enchant survives the
+        // surface", where a pixel can't say which side a draw sorted to.
+        if far && !particles.is_empty() && crate::dbg_trace::enabled() {
+            crate::dbg_trace::line(
+                "fx",
+                &format!(
+                    "far-side cloud at=[{:.1},{:.1},{:.1}] n={}",
+                    placement.translation.x,
+                    placement.translation.y,
+                    placement.translation.z,
+                    particles.len()
+                ),
+            );
+        }
+        let bias = super::owner_last_bias(*owner_reach)
+            + if far {
+                crate::sky_order::EFFECT_FAR_SIDE_BIAS
+            } else {
+                0.0
+            };
         let start = quads.begin();
         if want_quads && !particles.is_empty() {
             expand_quads(def, particles, &frame, placement, &cam, &mut quads.verts);
@@ -906,8 +1000,24 @@ pub(super) fn simulate_particles(
 
 #[cfg(test)]
 mod tests {
-    use super::{inherit_trigger, integrate_particle, ChildEmitter, Particle, StepEnv, Vec3};
+    use super::{
+        far_side, inherit_trigger, integrate_particle, ChildEmitter, Particle, StepEnv, Vec3,
+    };
     use bevy::prelude::{Quat, Transform};
+
+    /// The water-plane interleave's side law (`0x4836d6`): dry eye ⇒ the below-water list is the
+    /// far one; submerged ⇒ the above-water list is. `d = 0` sits with the above-water list.
+    #[test]
+    fn far_side_follows_the_eye() {
+        // Dry eye: below the surface is far (drawn before the water), above is near.
+        assert!(far_side(-0.5, false));
+        assert!(!far_side(0.5, false));
+        assert!(!far_side(0.0, false));
+        // Submerged: the sides swap.
+        assert!(far_side(0.5, true));
+        assert!(far_side(0.0, true));
+        assert!(!far_side(-0.5, true));
+    }
 
     fn particle(pos: Vec3, vel: Vec3) -> Particle {
         Particle {

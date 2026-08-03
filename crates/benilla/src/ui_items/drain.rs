@@ -83,6 +83,8 @@ pub(super) fn drain_inventory_uses(
     mut items: ResMut<Items>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
     commands: Res<NetCommands>,
+    mut pending: ResMut<crate::ui_cast::PendingCast>,
+    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -95,7 +97,7 @@ pub(super) fn drain_inventory_uses(
         let slot = (id - 1) as u8;
         // The doll's own slot ids ARE the wire slots (`wire_pos`'s EQUIPMENT_BAG law), so the
         // equipped instance resolves off the player's INV array directly.
-        let (guid, start_quest, spell_index) = self_q
+        let (guid, start_quest, spell_index, use_spell) = self_q
             .iter()
             .next()
             .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &items))
@@ -104,17 +106,28 @@ pub(super) fn drain_inventory_uses(
                 let t = items.template(entry, guid, &commands)?;
                 // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
                 // template is already in hand here for `start_quest`, so name the real one.
-                Some((Some(guid), t.start_quest, t.use_spell_index().unwrap_or(0)))
+                Some((
+                    Some(guid),
+                    t.start_quest,
+                    t.use_spell_index().unwrap_or(0),
+                    t.use_spell.map(|u| u.spell_id),
+                ))
             })
-            .unwrap_or((None, 0, 0));
+            .unwrap_or((None, 0, 0, None));
         debug!("ui_items: use equipped item, lua slot {id} (wire 255/{slot})");
-        let _ = commands.0.send(super::item_use_command(
-            guid,
-            start_quest,
-            BAG_PLAYER_INVENTORY,
-            slot,
-            spell_index,
-        ));
+        super::send_item_use(
+            super::ItemUse {
+                guid,
+                start_quest,
+                bag_index: BAG_PLAYER_INVENTORY,
+                slot,
+                spell_index,
+                use_spell,
+            },
+            &mut pending,
+            &mut cast_errors,
+            &commands,
+        );
     }
 }
 
@@ -128,6 +141,8 @@ pub(super) fn drain_container_uses(
     bank: Res<crate::ui_bank::BankOpen>,
     mut equip_sound: MessageWriter<crate::sound::AutoEquipSound>,
     mut item_text: ResMut<crate::ui_item_text::ItemTextOpen>,
+    mut pending: ResMut<crate::ui_cast::PendingCast>,
+    mut cast_errors: ResMut<crate::ui_action::CastErrors>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -233,6 +248,7 @@ pub(super) fn drain_container_uses(
                     // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
                     // template is right here, so send the real one rather than assuming 0.
                     spell_index: t.use_spell_index().unwrap_or(0),
+                    use_spell: t.use_spell.map(|u| u.spell_id),
                     unwraps_gift: t.unwraps_gift(inst_flags),
                     opens_loot: t.opens_loot(),
                 })
@@ -299,13 +315,19 @@ pub(super) fn drain_container_uses(
                 "ui_items: quest-starter {:#x} offers quest {}",
                 c.guid, c.start_quest
             );
-            let _ = commands.0.send(super::item_use_command(
-                Some(c.guid),
-                c.start_quest,
-                bag_index,
-                wire_slot,
-                c.spell_index,
-            ));
+            super::send_item_use(
+                super::ItemUse {
+                    guid: Some(c.guid),
+                    start_quest: c.start_quest,
+                    bag_index,
+                    slot: wire_slot,
+                    spell_index: c.spell_index,
+                    use_spell: c.use_spell,
+                },
+                &mut pending,
+                &mut cast_errors,
+                &commands,
+            );
             continue;
         }
         // #6 — readable: an item INSTANCE carrying `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made
@@ -353,13 +375,19 @@ pub(super) fn drain_container_uses(
         // The tail: a plain use (food, potions, hearthstone). The quest arm already fired above,
         // so the shared fork's own quest leg is inert here by construction.
         debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot})");
-        let _ = commands.0.send(super::item_use_command(
-            clicked.map(|c| c.guid),
-            0,
-            bag_index,
-            wire_slot,
-            clicked.map_or(0, |c| c.spell_index),
-        ));
+        super::send_item_use(
+            super::ItemUse {
+                guid: clicked.map(|c| c.guid),
+                start_quest: 0,
+                bag_index,
+                slot: wire_slot,
+                spell_index: clicked.map_or(0, |c| c.spell_index),
+                use_spell: clicked.and_then(|c| c.use_spell),
+            },
+            &mut pending,
+            &mut cast_errors,
+            &commands,
+        );
     }
 }
 
@@ -378,6 +406,9 @@ struct Clicked {
     display_info_id: u32,
     start_quest: u32,
     spell_index: u8,
+    /// The template's on-use SPELL id — what the cast tail's in-flight guard is keyed on
+    /// (decision 0908); `None` = this item casts nothing.
+    use_spell: Option<u32>,
     /// `ItemInfo::unwraps_gift` for this instance — dispatcher arm #2.
     unwraps_gift: bool,
     /// `ItemInfo::opens_loot` for this template — dispatcher arm #8.

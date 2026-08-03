@@ -277,17 +277,27 @@ pub(super) fn drain_action_uses(
                     // same function at `0x4e607b`), so a quest-starter on the bar offers its quest
                     // instead of a `CMSG_USE_ITEM` the server can only refuse (decision 0664). The
                     // wire's third byte is the spell BLOCK ordinal, not a flag (decision 0666).
+                    // The fork carries the in-flight gate — an item use IS a cast through the same
+                    // `TryCast` (decision 0908; [`crate::ui_items::send_item_use`] is the law), so
+                    // the mount's second click no longer ships a duplicate the server bounces back
+                    // as a cast-bar cancel.
                     let spell_index = template.use_spell_index().unwrap_or(0);
                     debug!(
                         "ui_action: item action {action} use (wire {bag_index}/{slot0}, spell #{spell_index})"
                     );
-                    let _ = commands.0.send(crate::ui_items::item_use_command(
-                        Some(guid),
-                        template.start_quest,
-                        bag_index,
-                        slot0,
-                        spell_index,
-                    ));
+                    crate::ui_items::send_item_use(
+                        crate::ui_items::ItemUse {
+                            guid: Some(guid),
+                            start_quest: template.start_quest,
+                            bag_index,
+                            slot: slot0,
+                            spell_index,
+                            use_spell: template.use_spell.map(|u| u.spell_id),
+                        },
+                        &mut pending,
+                        &mut errors.0,
+                        &commands,
+                    );
                 }
             }
             Some(b) => {

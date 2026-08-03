@@ -993,15 +993,18 @@ pub(super) fn gait_is_locomotion(state: &MovementState, walk_speed: f32) -> bool
 }
 
 /// The playback rate for a clip given the unit's live speed and its rendered model scale — the
-/// client's `0x5fe2f0` divide, VERIFIED byte-for-byte (wow-5875-re `swim-mechanism.md` §TU-I,
-/// `0x5fe4be..0x5fe550`):
+/// client's `0x5fe2f0` divide, VERIFIED byte-for-byte and §5 cross-checked (wow-5875-re
+/// `anim-rate-divisor.md`, the canonical note; `0x5fe4be..0x5fe550`):
 ///
 /// ```text
-/// 5fe508  call 0x711a20   ; DIVISOR = |modelScale| · sequence.moveSpeed
+/// 5fe508  call 0x711a20   ; DIVISOR = ‖row0(M+0xbc)‖ · M2Sequence[reqId].moveSpeed
 /// 5fe515  fcomp 0.0 ; jne ; GUARD A: divisor > 0     (else stay 1×)
 /// 5fe528  call 0x5fee80   ; GUARD B: the locomotion id whitelist (else stay 1×)
 /// 5fe53c  call 0x7c4c90   ; NUMERATOR = the flag-scalar current speed
-/// 5fe541  fdiv            ; rate = speed / (moveSpeed · |modelScale|)
+/// 5fe541  fdiv            ; rate = speed / (moveSpeed · scale)
+///
+/// M      = CGUnit+0xdc (the mount) if nonzero, else CGUnit+0xd8 (the body)
+/// ‖row0‖ = (mounted ? CGUnit+0x9c : 1.0) · CGUnit+0x94 · CGUnit+0x90
 /// ```
 ///
 /// **`model_scale` is the half we were missing** (decision 0903). A sequence's `moveSpeed` is the
@@ -1011,17 +1014,45 @@ pub(super) fn gait_is_locomotion(state: &MovementState, walk_speed: f32) -> bool
 /// Ogre-Mage (`CreatureDisplayInfo.CreatureModelScale` 2.2) scurried its walk at 2.2× rate, and a
 /// 1.5× riding sabre its run at 1.5×.
 ///
-/// The scale to pass is the **rendered world scale of the model actually playing the clip**: for a
-/// unit, `OBJECT_FIELD_SCALE_X` (the server has already folded the DBC scale in — `entities::attach`);
-/// for a mount child, its own `CreatureDisplayInfo` column composed under the rider's `SCALE_X` — what
-/// the client's `[unit+0xdc] ?: [unit+0xd8]` model pick resolves to.
+/// The scale to pass is the **rendered world scale of the model actually playing the clip** — which
+/// is what the two terms above are: `CGUnit+0x90` is `OBJECT_FIELD_SCALE_X` (the server has already
+/// folded the DBC scale in — `entities::attach`), and `+0x9c` is a mount's own
+/// `CreatureDisplayInfo` column, composed under the rider's. Our unit transform and mount-child
+/// transform carry exactly those, so `transform.scale.x × host` reproduces the product (decision
+/// 0910). Two exactness notes from the cross-check:
+///
+/// - The client takes the **L2 length of row 0** of the model's world matrix, not an `abs()`. For a
+///   *uniform* scale — which every unit of ours is (`Vec3::splat`) — the two are identical at any
+///   rotation, since row 0 is `s · (a unit row)`. `abs()` is the cheaper spelling of the same
+///   number, and is only a distinction if unit scale ever stops being uniform.
+/// - `CGUnit+0x94`, a spell-visual scale multiplier clamped to `[0.75, 2.0]` (1.0 when idle), is a
+///   **third** factor we do not carry — because we have no producer for it: the aura CharProc
+///   dispatch (`crate::aura_visual::node_for`) implements Alpha/Tint/AnimRate and nothing that
+///   scales a unit. Whoever builds that layer must multiply it in here, or a scaling spell visual
+///   will re-time the gait wrongly for its duration. (`CGUnit+0x98`, the fourth slot, is a literal
+///   constant 1.0 in the binary — its constructor is its only writer.)
 pub(super) fn playback_rate(clip: &AnimClip, speed: f32, model_scale: f32) -> f32 {
+    scaled_rate(clip, speed, model_scale).unwrap_or(1.0)
+}
+
+/// [`playback_rate`] as the scaler's own question — **`Some` only where the scaler applies at
+/// all**: both of `0x5fe2f0`'s guards passed (a positive divisor, a locomotion id).
+///
+/// The distinction is what the per-frame rate write
+/// ([`sync_base_rate`](super::driver::play::sync_base_rate)) needs, and it is not pedantry: the
+/// scaler is one rate producer among several. The combat fast-path doubles an already-playing
+/// swing to 2× (decision 0406, op6 `2.0f`), the whiff slows a missed one to 0.5×, decision 0503
+/// freezes an airborne snapshot to 0×. Each owns the clip it wrote, and a per-frame write that
+/// returned a blanket `1.0` for "the guards failed" would silently stomp all three (it did — the
+/// suite caught it, decision 0906).
+/// The `abs()` is on the **scale only** — deliberately, and the asymmetry is the client's (decision
+/// 0912). `‖row0‖` is a matrix-row length, so it is never negative; `moveSpeed` is *signed*, and a
+/// backwards gait is authored negative (`RidingKodo.m2` WalkBackwards, `-2.5`). Guard A's strict
+/// `> 0` therefore leaves an authored backwards clip at a flat 1× while a model that falls back to
+/// forward Walk (`+2.5`) gets speed-scaled. Do not "tidy" this into `move_speed.abs()`.
+pub(super) fn scaled_rate(clip: &AnimClip, speed: f32, model_scale: f32) -> Option<f32> {
     let divisor = clip.move_speed * model_scale.abs();
-    if divisor > 0.0 && RATE_SCALED.contains(&clip.anim_id) {
-        speed / divisor
-    } else {
-        1.0
-    }
+    (divisor > 0.0 && RATE_SCALED.contains(&clip.anim_id)).then(|| speed / divisor)
 }
 
 /// Build the unified movement view, in precedence order: a populated [`MovementState`] (our avatar,

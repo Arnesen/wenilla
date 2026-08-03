@@ -10,7 +10,7 @@ use bevy::animation::transition::AnimationTransitions;
 use bevy::animation::RepeatAnimation;
 use bevy::prelude::*;
 
-use super::super::find_resolved;
+use super::super::{find_resolved, AnimDriver};
 use super::select::{self, jump_land_pick, Mode, Special};
 
 /// Cross-fade the player into an **already-resolved** clip over its blend-in time. `repeat` sets its
@@ -127,6 +127,63 @@ pub(super) fn play(
     }
 }
 
+/// Write the **playback rate** of whatever the full-body slot currently holds — run once per frame,
+/// after the mode machine has settled, in every mode alike.
+///
+/// The client's rate write lives **outside the selector** (`0x5fe2f0`, per-frame over the armed
+/// clip), so it is not the gait's private business: it applies to a landing, a bracket, a swing —
+/// anything the base slot holds. Ours used to be two loops inside [`Mode::Gait`]'s arms, which left
+/// every other mode playing at its arm-time literal `1.0` — and that is the jump-landing bug
+/// (decision 0906). [`jump_land_pick`] requests JumpLandRun **187**, and **every creature model
+/// resolves 187 → Run(5)** through its own baked PlayableAnimationLookup: Horse, Tiger (the druid
+/// travel form) and Cat all carry `playable[187] = 5`; only character models author 187 itself. So
+/// a mount's landing clip *is* its gallop cycle — a rate-scaled locomotion clip — and playing it at
+/// 1× ran it at ~65% of the cadence a mount's 14 yd/s calls for (Horse Run moveSpeed 9.028) for the
+/// clip's whole 0.8 s, snapping straight only when the gait re-picked after it. On foot the same
+/// defect is invisible: the character's own 187 carries moveSpeed 6.944 against a run speed of 7.0,
+/// so the correct rate *is* 1×.
+///
+/// It writes **only where the scaler applies** ([`select::scaled_rate`]) — a locomotion clip with
+/// an authored design speed. Everything else keeps whatever armed it: the scaler is one rate
+/// producer among several (the combat fast-path's 2×, the whiff's 0.5×, 0503's 0× freeze), and a
+/// blanket `1.0` here stomps all three.
+///
+/// [`AnimDriver::frozen`] names the one node this must leave alone even so — the airborne snapshot
+/// decision 0503 stopped on purpose ([`leave_special`]), whose clip *is* rate-scaled (Jump 38 is in
+/// the locomotion set; it is only the real assets' `moveSpeed = 0` that would spare it) — and is
+/// cleared as soon as anything else is armed.
+///
+/// It also records what the slot ended up running at in [`AnimDriver::gait_rate`] — the hover
+/// card's `rate` readout and the trace's `rate=` (decision 0903). Read back off the node rather
+/// than recomputed, so the instrument reports the swing's 2× or the freeze's 0× as faithfully as
+/// it reports a gait.
+pub(super) fn sync_base_rate(
+    drv: &mut AnimDriver,
+    tr: &AnimationTransitions,
+    player: &mut AnimationPlayer,
+    anims: &ModelAnimations,
+    speed: f32,
+    model_scale: f32,
+) {
+    let Some(node) = tr.get_main_animation() else {
+        return;
+    };
+    if drv.frozen != Some(node) {
+        drv.frozen = None;
+        if let Some(rate) = anims
+            .clips
+            .iter()
+            .find(|c| c.node == node)
+            .and_then(|c| select::scaled_rate(c, speed, model_scale))
+        {
+            if let Some(active) = player.animation_mut(node) {
+                active.set_speed(rate);
+            }
+        }
+    }
+    drv.gait_rate = player.animation(node).map_or(1.0, |a| a.speed());
+}
+
 /// Whether the one-shot clip `id` has finished playing (resolved through the model's own baked
 /// fallback first, decision 0082 — matching [`play`], which is what started it) — or the model lacks
 /// even the substitute, so the machine doesn't wait forever. Checked across the id's **variations**
@@ -214,6 +271,7 @@ pub(super) fn leave_special(
     catalog: Option<&AnimDataCatalog>,
     rng: &mut u32,
     window: &mut Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    frozen: &mut Option<bevy::animation::graph::AnimationNodeIndex>,
 ) -> Mode {
     // The client blends OUT of a cut airborne clip from a **pose snapshot** — op4 `0x7121a0`
     // with blendFlag≠0 copies the outgoing pose to `+0xc4` and *decays the frozen pose* under
@@ -225,12 +283,14 @@ pub(super) fn leave_special(
     // the outgoing node reproduces the snapshot-decay. Scoped to the airborne cut, where the
     // divergence is visible; the client's snapshot law is universal (every blended arm), and
     // adopting it for all cross-fades is 0503's recorded follow-up.
+    // …and the frozen node is NAMED (decision 0906), so the per-frame rate write
+    // ([`sync_base_rate`]) skips it instead of restarting the clock a line above just stopped.
     if matches!(sp, Special::Jump | Special::Fall) {
-        if let Some(active) = tr
-            .get_main_animation()
-            .and_then(|n| player.animation_mut(n))
-        {
-            active.set_speed(0.0);
+        if let Some(node) = tr.get_main_animation() {
+            if let Some(active) = player.animation_mut(node) {
+                active.set_speed(0.0);
+                *frozen = Some(node);
+            }
         }
     }
     if let Some(next) = special {

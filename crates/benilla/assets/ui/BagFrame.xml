@@ -653,7 +653,12 @@
             button.bagId = bagId
             button.icon = getglobal(button:GetName() .. "Icon")
             if BenillaActionBarArt_SeatAbove then BenillaActionBarArt_SeatAbove(button) end
-            button:RegisterForClicks("LeftButtonUp")
+            -- Both buttons (ref BagSlotButtonTemplate inherits PaperDollItemSlotButtonTemplate, and
+            -- its OnLoad calls PaperDollItemSlotButton_OnLoad — PaperDollFrame.lua:86 — so a bag-bar
+            -- slot registers the pair like every doll slot; MainMenuBarBagButtons.xml:78 does the
+            -- same for the backpack). BagSlotButton_OnClick reads no button: right-click opens the
+            -- bag, exactly as left does.
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             -- Drag-to-equip (decision 0208 phase 1b's deferred bag-icon arm, now landed): the bar
             -- slot is a paper-doll equipment slot for bags. LEFT drag picks the equipped bag up;
             -- a drag/receive drops a carried bag in to equip it (PickupInventoryItem — the exact

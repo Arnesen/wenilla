@@ -217,11 +217,20 @@
                 button.hotkey:SetText(BENILLA_ACTIONBAR_HOTKEYS[index])
             end
             table.insert(BENILLA_ACTION_BUTTONS, button)
+            -- BOTH mouse buttons, ref-verbatim (ActionButton_OnLoad, ActionButton.lua:108-109):
+            -- an action button is a two-button button. The OnClick body reads no `arg1` — in the
+            -- ref either button runs the same PickupAction/UseAction fork — so right-click USES
+            -- the action, which is how food and spells are used off the bar. Without this the
+            -- widget default ({"LeftButtonUp"}, `benilla_ui::script::button`) silently swallowed
+            -- every right-click on the bar (director's report B200).
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             -- The drag trio (decision 0216 §3/§7): click-carry and drag share one downstream path
             -- by construction (OnClick/OnDragStart both call PickupAction; OnReceiveDrag calls
-            -- PlaceAction — ref ActionBarFrame.xml:12-38). LOCK_ACTIONBAR stays the vanilla
+            -- PlaceAction — ref ActionBarFrame.xml:12-38). Both buttons drag, ref-verbatim too
+            -- (l.108) — a started drag suppresses the click, so right-press-and-move relocates the
+            -- action while right-click-in-place still uses it. LOCK_ACTIONBAR stays the vanilla
             -- default (unlocked), so unlike the ref's cvar guard, drag is always live here.
-            button:RegisterForDrag("LeftButton")
+            button:RegisterForDrag("LeftButton", "RightButton")
             BenillaActionButton_Update(button)
         end
 

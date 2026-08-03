@@ -195,6 +195,9 @@ pub(crate) fn simulate_ribbons(
     // Trails belong to the world lane (no booth ribbons; a booth-parked owner's strip is eaten
     // by the shader's farclip wall, exactly as on the material path).
     world_cam: Query<Entity, With<WorldCamera>>,
+    // The water-plane interleave inputs — a trail is one of the model's emitters and classifies
+    // above/below water like the quad clouds ([`crate::particles::far_side_of_water`]).
+    interleave: crate::particles::WaterInterleave,
     mut trails: Query<(
         Entity,
         &mut RibbonTrail,
@@ -366,7 +369,14 @@ pub(crate) fn simulate_ribbons(
                 // particle "unfogged" file flag — pass 0.)
                 fog: EffectFog::for_blend(0, def.blend),
                 anchor,
-                bias: *bias,
+                // The owner rung, dropped under the water pass when the head node sits on the
+                // eye's far side of its water plane — the same interleave the quad clouds take.
+                bias: *bias
+                    + if crate::particles::far_side_of_water(&interleave, *owner, anchor) {
+                        crate::sky_order::EFFECT_FAR_SIDE_BIAS
+                    } else {
+                        0.0
+                    },
                 raster_bias: 0,
                 main_entity: entity,
                 light: None, // trails never carry a light override (world lane only)

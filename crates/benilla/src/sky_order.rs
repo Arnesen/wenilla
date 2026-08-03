@@ -86,6 +86,24 @@ pub(crate) const WHITE_MOON_BIAS: f32 = -8.1e5;
 pub(crate) const MOON02_BIAS: f32 = -8.0e5;
 /// The cloud dome — last of the sky pass (`0x6d4a71`): clouds blend over a setting sun.
 pub(crate) const CLOUDS_BIAS: f32 = -6.0e5;
+/// **Far-side model effects** — the water-plane interleave's early half (byte-VERIFIED, wow-re
+/// `water-frame-straddle.md`): the reference splits M2 transparents into an above-water and a
+/// below-water list per model (per **emitter** for particles — each classifies onto exactly ONE
+/// list, `0x7084a0`), and `0x483460` draws the list on the eye's FAR side of the water plane
+/// *before* the water pass, the near side *after*. An effect classified far-side takes this rung
+/// (plus its owner-last rung, capped at 32) so it lands under [`WATER_BIAS`]; near-side effects
+/// keep their natural slot above it. The flip on submersion is the interleave inversion
+/// (`0x4836d6 cmp eax,0xf`). Sort-only — the effect lane splits sort bias from raster bias.
+pub(crate) const EFFECT_FAR_SIDE_BIAS: f32 = -4.0e4;
+/// **The water surface** — river/ocean/WMO water draw in a fixed frame slot between the two
+/// transparent halves (`0x6701d0 → 0x6816d0`: ocean → river → WMO liquid → foam), never view-z
+/// sorted against model transparents. One rung below the world band puts every unclassified
+/// world transparent after the water (the reference's near-side default) and the far-side
+/// effects before it. Magnitude: must clear the far plane (a few ×10³) so no world view-z can
+/// reorder a water chunk across it, while staying small as a rasterizer bias (this one rides a
+/// `StandardMaterial` base, so it IS also a depth-test bias — ~0.24% depth pull, half of what
+/// the nameplates ship at +4e4; the water-noon/name-water capture diffs are the shoreline check).
+pub(crate) const WATER_BIAS: f32 = -2.0e4;
 /// The sun/moon glare quads — the frame's last render (`0x483740` tail): over the clouds and the
 /// rain, under the nameplates; the z-buffer (their forced far depth, `celestial.wgsl`) is what
 /// occludes them. Only ~6× the far plane, not ~10⁵: a rung this far up is also a rasterizer bias
@@ -102,6 +120,12 @@ const _: () = {
     assert!(SUN_DISC_BIAS - STARS_BIAS > 1.0e4);
     assert!(WHITE_MOON_BIAS > SUN_DISC_BIAS && MOON02_BIAS > WHITE_MOON_BIAS);
     assert!(CLOUDS_BIAS - MOON02_BIAS > 1.0e4);
+    // The water-plane interleave: sky < far-side effects < water < world transparents (the
+    // near-side default). The far-side band is far-effect-bias + owner rung; owner rungs are
+    // capped well under the 1e4 margin (benilla_formats::owner_last_rung's ceiling).
+    assert!(EFFECT_FAR_SIDE_BIAS - CLOUDS_BIAS > 1.0e4);
+    assert!(WATER_BIAS - EFFECT_FAR_SIDE_BIAS > 1.0e4);
+    assert!(-3.0e3 - WATER_BIAS > 1.0e4); // world view-z floor = −far (the ~3 km projection) stays above
     assert!(crate::ground_fx::GROUND_FX_DEPTH_BIAS - CLOUDS_BIAS > 1.0e4);
     assert!(GLARE_BIAS - crate::ground_fx::GROUND_FX_DEPTH_BIAS > 1.0e4);
     assert!(crate::nameplates::NAMEPLATE_DEPTH_BIAS - GLARE_BIAS > 1.0e4);

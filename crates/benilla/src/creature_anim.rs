@@ -612,6 +612,15 @@ pub(crate) struct AnimDriver {
     /// the *level* must not (mid-air the airborne-freeze issues no plays, so a fast-path park
     /// survives to its clip's end).
     last_special: Option<Special>,
+    /// The **airborne snapshot** node whose clock [`driver::play::leave_special`] stopped
+    /// (decision 0503 — the client blends out of a cut airborne clip from a frozen pose, not from
+    /// a still-running one). The per-frame rate write
+    /// ([`driver::play::sync_base_rate`](driver::play)) must not restart it, so it is named here
+    /// rather than inferred from a zero speed — a rate-scaled clip legitimately reads 0 when the
+    /// body is standing still, and skipping *that* would strand it frozen forever. Self-clearing:
+    /// the moment anything else is armed the node stops being the main animation and the sync
+    /// drops the name (decision 0906).
+    frozen: Option<bevy::animation::graph::AnimationNodeIndex>,
 }
 
 impl AnimDriver {
@@ -702,6 +711,7 @@ impl Default for AnimDriver {
             loop_window: None,
             gait_rate: 1.0,
             last_special: None,
+            frozen: None,
         }
     }
 }

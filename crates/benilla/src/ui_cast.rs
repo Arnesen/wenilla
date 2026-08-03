@@ -49,6 +49,19 @@ pub(crate) struct CastBarFeed(pub(crate) Vec<CastBarEdge>);
 /// guard first, never reaches it. Generous on purpose — the resolution packets do the real clearing.
 const SEND_PROVISIONAL: Duration = Duration::from_secs(5);
 
+/// The same provisional for an **item** use's cast ([`PendingCast::arm_item`]) — deliberately much
+/// tighter, because the two arms have different worst cases *on this wire*. Every
+/// `CMSG_CAST_SPELL` vmangos accepts is answered (`Spell::SendCastResult` on any rejection,
+/// `SMSG_SPELL_START`/`GO` otherwise), so a spell's guard is always cleared by a packet and
+/// [`SEND_PROVISIONAL`] never actually governs. `CMSG_USE_ITEM` has legs that answer with
+/// `SMSG_INVENTORY_CHANGE_FAILURE` and **no cast result at all** — `HandleUseItemOpcode`'s
+/// equip-error gates (`CanUseItem`, the in-combat non-combat-spell refusal, item-not-found) —
+/// and there the provisional IS the safety net, so it has to be short enough that a silently
+/// refused use cannot lock casting out for long. It only ever covers the send→`SMSG_SPELL_START`
+/// window anyway: [`PendingCast::refine`] stretches the guard to the server's real cast time the
+/// moment START names it, so a use that *does* become a cast is guarded for its whole length.
+const ITEM_SEND_PROVISIONAL: Duration = Duration::from_millis(1_500);
+
 /// Pushback slack added to the server's cast time at `SMSG_SPELL_START`, so a cast the server
 /// delays (`SMSG_SPELL_DELAYED`) still guards past its stretched end.
 const CAST_SLACK: Duration = Duration::from_secs(2);
@@ -105,6 +118,21 @@ impl PendingCast {
         self.0 = Some(PendingCastState {
             spell_id,
             deadline: now + SEND_PROVISIONAL,
+        });
+    }
+
+    /// Arm the guard on an **item** use's send. The reference has no separate item-cast slot: the
+    /// item-use dispatcher's cast tail (`CGItem::Use 0x5d8d00` @ `0x5d9258`) calls `0x6e5a90`,
+    /// whose entire 54-byte body is `call 0x6e4b60` — `TryCast` itself (VERIFIED at the bytes,
+    /// wow-re `disasm-full.txt`; corroborated by its `action-button-state-api.md` §"dispatcher
+    /// `0x6e5a90` (→ `CastSpell 0x6e4b60`)" and `cursor-system.md` §536). So an item use writes
+    /// the SAME inflight id (`0xceca88`) and is refused by the same IsCasting gate — which is why
+    /// [`crate::ui_items::send_item_use`] runs both. Differs from [`PendingCast::arm`] only in the
+    /// deadline ([`ITEM_SEND_PROVISIONAL`], whose doc is the why).
+    pub(crate) fn arm_item(&mut self, spell_id: u32, now: Instant) {
+        self.0 = Some(PendingCastState {
+            spell_id,
+            deadline: now + ITEM_SEND_PROVISIONAL,
         });
     }
 

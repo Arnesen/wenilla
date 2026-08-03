@@ -500,7 +500,11 @@
                 </Anchors>
                 <Scripts>
                     <OnLoad>
-                        this:RegisterForClicks("LeftButtonDown", "LeftButtonUp")
+                        <!-- All four transitions, ref-verbatim (MessageFrameScrollButton_OnLoad,
+                             ChatFrame.lua:1583): the OnClick body reads no button, so a right-click
+                             scrolls exactly like a left one, and the DOWN halves are what arm the
+                             hold-repeat. -->
+                        this:RegisterForClicks("LeftButtonDown", "LeftButtonUp", "RightButtonUp", "RightButtonDown")
                     </OnLoad>
                     <OnClick>
                         BenillaChatScrollButton_OnClick(this, arg2, "down", "igChatScrollDown")
@@ -521,7 +525,8 @@
                 </Anchors>
                 <Scripts>
                     <OnLoad>
-                        this:RegisterForClicks("LeftButtonDown", "LeftButtonUp")
+                        <!-- All four, ref-verbatim — see the down button's note. -->
+                        this:RegisterForClicks("LeftButtonDown", "LeftButtonUp", "RightButtonUp", "RightButtonDown")
                     </OnLoad>
                     <OnClick>
                         BenillaChatScrollButton_OnClick(this, arg2, "up", "igChatScrollUp")

@@ -246,6 +246,63 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// An action button is a TWO-button button (decision 0908; director's report B200: "I can't right
+/// click food on my bar to eat it or right click spells"). The ref's `ActionButton_OnLoad`
+/// registers `("LeftButtonUp", "RightButtonUp")` (ActionButton.lua:109) and its OnClick body reads
+/// no `arg1` — so either button runs the same fork and right-click USES the action. The widget
+/// default is `{"LeftButtonUp"}` (`benilla_ui::script::button::wants_click`), so without the
+/// explicit registration the input path silently swallowed every right-click on the bar. Driven
+/// through the real shipped XML and the real `mouse_button` path, which is the only place the
+/// registration set is consulted.
+#[test]
+fn a_right_click_on_an_action_button_uses_the_action() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\INV_Misc_Food_11".into()),
+            kind: 0x80, // an ITEM action — the food/mount case the report is about
+            action: 4540,
+            count: 5,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.resolve();
+
+    // Button 1's center (geometry as in the tests above): (26, 22).
+    s.mouse_button(26.0, 22.0, "RightButton", true);
+    s.mouse_button(26.0, 22.0, "RightButton", false);
+    assert_eq!(
+        s.take_action_uses(),
+        vec![1],
+        "right-click queues the same UseAction a left-click does"
+    );
+
+    // The middle button is registered by neither the ref nor us: it stays swallowed, which is what
+    // proves the assertion above is the REGISTRATION and not the gate having been removed.
+    s.mouse_button(26.0, 22.0, "MiddleButton", true);
+    s.mouse_button(26.0, 22.0, "MiddleButton", false);
+    assert!(
+        s.take_action_uses().is_empty(),
+        "an unregistered button still reaches nothing"
+    );
+
+    // Shift+right-click picks up, exactly as shift+left does — the OnClick fork is button-blind.
+    s.set_modifiers(true, false, false);
+    s.mouse_button(26.0, 22.0, "RightButton", true);
+    s.mouse_button(26.0, 22.0, "RightButton", false);
+    s.set_modifiers(false, false, false);
+    assert!(s.take_action_uses().is_empty());
+    assert!(
+        s.cursor_payload().is_some(),
+        "shift+right-click carries the action, like shift+left"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Decision 0216 §7 (byte-verified 0218 §4) driven through the REAL shipped XML, not the engine
 /// unit tests directly — the modifier-key mirror gating `PickupAction` vs `UseAction`, end to end.
 #[test]

@@ -336,6 +336,15 @@ pub(super) fn setup_liquid(
                     alpha_mode,
                     cull_mode: None,
                     double_sided: true,
+                    // The transparent water kinds take the fixed water-pass slot: below every
+                    // unclassified world transparent, above the far-side effects (the reference's
+                    // 0x483460 interleave — `sky_order::WATER_BIAS`, where the byte story lives).
+                    // Opaque kinds (magma/slime) draw in the opaque pass and take no rung.
+                    depth_bias: if kind.is_fullbright() {
+                        0.0
+                    } else {
+                        crate::sky_order::WATER_BIAS
+                    },
                     ..default()
                 },
                 extension: LiquidExt {

@@ -414,6 +414,21 @@ fn a_degenerate_model_scale_falls_through_to_unit_rate() {
     assert!((playback_rate(&clip(4, 2.5), 4.0, -2.2) - 0.727_27).abs() < 1e-4);
 }
 
+/// The SIGN of `moveSpeed` is load-bearing, and the `abs()` belongs to the scale ALONE (decision
+/// 0912, §5-verified). A backwards gait is authored negative — `RidingKodo.m2` seq 14 is
+/// WalkBackwards at **−2.5**, byte-read here with `benilla-extract m2seq` — and Guard A is a strict
+/// `divisor > 0`, so the reference leaves that clip at a flat 1×. A model authoring NO
+/// WalkBackwards falls back to forward Walk (+2.5) and *is* speed-scaled. Pinned because
+/// `move_speed.abs()` is an inviting-looking tidy-up that would invert both halves at once.
+#[test]
+fn an_authored_backwards_gait_is_not_rate_scaled_but_its_fallback_is() {
+    // The authored clip (RidingKodo WalkBackwards, −2.5) — flat 1×, at any scale.
+    assert_eq!(playback_rate(&clip(13, -2.5), 4.5, 1.0), 1.0);
+    assert_eq!(playback_rate(&clip(13, -2.5), 4.5, 2.2), 1.0);
+    // …while a model lacking it substitutes forward Walk and scales normally.
+    assert!((playback_rate(&clip(13, 2.5), 4.5, 1.0) - 1.8).abs() < 1e-5);
+}
+
 #[test]
 fn ranged_load_idle_selects_by_weapon_and_ranks_below_ready() {
     // The 0x5fd530 LUT (0099 phase 5): ranged-slot subclass → the held Load/Hold clip.

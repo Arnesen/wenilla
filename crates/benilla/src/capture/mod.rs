@@ -102,7 +102,8 @@ pub(crate) use probe_rig::{rig_char_name_from_env, ProbeRigPlugin};
 pub(crate) use probe_taxi::ProbeTaxiPlugin;
 pub(crate) use probes::{
     EntityCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin, ProbeChatPlugin,
-    ProbeClock, ProbeExitPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
+    ProbeClock, ProbeExitPlugin, ProbeFocusPlugin, ProbeKeyPlugin, ProbeLuaPlugin,
+    ProbeResizePlugin,
 };
 use scenarios::{Scenario, SubjectKind, UiFixture, GROUND_EYE, SCENARIOS};
 

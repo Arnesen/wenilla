@@ -181,6 +181,11 @@
         function BenillaBankBagButton_OnLoad(button, id)
             button:SetID(id)
             button.icon = getglobal(button:GetName() .. "Icon")
+            -- Both buttons, ref-verbatim (BankItemButtonBagTemplate's OnLoad runs
+            -- BankFrameBagButton_OnLoad -> BankFrameBaseButton_OnLoad, BankFrame.lua:12); the vault
+            -- slots get the same pair through BenillaBagSlot_OnLoad. The OnClick below reads no
+            -- button — right-click places/opens exactly as left does.
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
             button:RegisterForDrag("LeftButton")
         end
 

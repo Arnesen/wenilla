@@ -80,8 +80,9 @@ enum Command {
         internal_path: String,
     },
     /// Dump an M2's animation sequences in file order: `AnimationData.dbc` id, loop/clamp flag,
-    /// duration, variation frequency, replay range — the variation/replay instrument
-    /// (decisions 0114/0117; sequences sharing an id are its variation chain).
+    /// duration, authored design speed (the rate divisor), variation frequency, replay range —
+    /// the variation/replay instrument (decisions 0114/0117; sequences sharing an id are its
+    /// variation chain).
     M2seq {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,

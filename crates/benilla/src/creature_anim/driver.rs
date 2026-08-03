@@ -303,6 +303,8 @@ pub(super) fn drive_animations(
         // byte-verified mount composition, wow-re `0x613ef0`). The rate divisor wants that product
         // — the mount model's world scale — not the child's local column (decision 0903).
         &Transform,
+        // …and whether the rider is US, which only the debug trace reads (decision 0906).
+        Has<SelfPlayer>,
     )>,
     mut swings: MessageReader<SwingMessage>,
     mut impacts: MessageReader<SwingImpact>,
@@ -335,7 +337,7 @@ pub(super) fn drive_animations(
     mut rng: Local<u32>,
     // The SELF unit's last-written anim state line of the `WOW_MOVE_TRACE` debug trace (the
     // diff-only filter; see the trace block after the mode machine).
-    mut anim_trace_last: Local<Option<String>>,
+    mut anim_trace_last: Local<std::collections::HashMap<Entity, String>>,
 ) {
     let (emote_sounds, loot_latch, time) = aux;
     let dt = time.delta_secs();
@@ -430,26 +432,47 @@ pub(super) fn drive_animations(
         // rider's own pass reads, so the mount plays exactly the locomotion the rider suppresses.
         // A vanished host (teardown race) reads as stationary until the child despawns with it.
         // The host also supplies the missing half of the mount's world scale (see the query docs).
-        let (spline, remote, movement, speeds, facing_step, creature_swimming, host_scale) =
-            match mount_body {
-                Some(mb) => match mount_hosts.get(mb.host) {
-                    Ok((s, r, m, sp, f, sw, t)) => (s, r, m, sp, f, sw, t.scale.x),
-                    Err(_) => (None, None, None, None, None, false, 1.0),
-                },
-                None => (
-                    spline,
-                    remote,
-                    movement,
-                    speeds,
-                    facing_step,
-                    creature_swimming,
-                    1.0,
-                ),
-            };
+        //
+        // `ridden_by_self` only feeds the debug trace: while mounted, the animation the director is
+        // *looking at* is the mount child's (the rider is pinned to Mount 91), so a trace that
+        // followed `SelfPlayer` alone went blind on exactly the body in question — which is how a
+        // gallop cadence report had to be diagnosed from asset bytes instead of a run
+        // (decision 0906). It deliberately does NOT feed `is_self`: the sheath reconcile and the
+        // wire echoes below mean the player's OWN unit, and a mount is not it.
+        let (
+            spline,
+            remote,
+            movement,
+            speeds,
+            facing_step,
+            creature_swimming,
+            host_scale,
+            ridden_by_self,
+        ) = match mount_body {
+            Some(mb) => match mount_hosts.get(mb.host) {
+                Ok((s, r, m, sp, f, sw, t, host_self)) => {
+                    (s, r, m, sp, f, sw, t.scale.x, host_self)
+                }
+                Err(_) => (None, None, None, None, None, false, 1.0, false),
+            },
+            None => (
+                spline,
+                remote,
+                movement,
+                speeds,
+                facing_step,
+                creature_swimming,
+                1.0,
+                false,
+            ),
+        };
         // The rendered world scale of the model playing these clips — the `0x5fe2f0` rate divisor's
         // `|modelScale|` (decision 0903). A plain unit's transform already IS its world scale; a
         // mount child's is its display column, which composes under the rider's.
         let model_scale = transform.scale.x * host_scale;
+        let traced = is_self || ridden_by_self;
+        // Which body a trace line is about — the rider's own, or the mount it is sitting on.
+        let subject = if mount_body.is_some() { "mount " } else { "" };
         let walk = speeds.map_or(DEFAULT_WALK_SPEED, |s| s.0.walk);
         // Dead ⇒ health 0 with a real max. Absent health counts as ZERO (`unit_is_dead`): a create
         // block omits zero fields, so an already-dead corpse streams in with no HEALTH at all —
@@ -458,9 +481,9 @@ pub(super) fn drive_animations(
         // Mounted (decision 0441): `UNIT_FIELD_MOUNTDISPLAYID` nonzero — the wire's one mounted
         // signal. The rider's base pins to Mount(91) below, Specials/one-shot full-body routes are
         // suppressed, and the sheath reconcile force-stows; the locomotion the selector would have
-        // picked plays on the MOUNT child entity instead (its own driver pass, fed the host's
-        // movement view by `sync_mount_motion`). A mount child itself has no `ObjectStore`, so it
-        // can never read as mounted here.
+        // picked plays on the MOUNT child entity instead (its own driver pass, fed the host's own
+        // movement view through `MountBody.host` — the `mount_hosts` fetch at the top of this
+        // loop). A mount child itself has no `ObjectStore`, so it can never read as mounted here.
         let mounted = store.is_some_and(|s| s.0.unit_mount_display_id() != 0);
         // First time we drive this unit (nothing chosen yet) — used to settle a corpse to its end pose.
         let first = drv.gait.is_none() && drv.mode == Mode::Gait;
@@ -962,6 +985,7 @@ pub(super) fn drive_animations(
                 } else if special != Some(sp) {
                     // What we're entering is no longer wanted before the enter even finished — preempt
                     // to the new Special, to the gait (a pose cut by movement), or to this one's exit.
+                    let drv = &mut *drv; // two disjoint field borrows below (window + frozen)
                     drv.mode = leave_special(
                         sp,
                         special,
@@ -974,6 +998,7 @@ pub(super) fn drive_animations(
                         catalog,
                         &mut rng,
                         &mut drv.loop_window,
+                        &mut drv.frozen,
                     );
                 } else if oneshot_finished(&player, anims, sp.enter(), catalog) {
                     play(
@@ -993,6 +1018,7 @@ pub(super) fn drive_animations(
             }
             Mode::Looping(sp) => {
                 if special != Some(sp) {
+                    let drv = &mut *drv; // two disjoint field borrows below (window + frozen)
                     drv.mode = leave_special(
                         sp,
                         special,
@@ -1005,6 +1031,7 @@ pub(super) fn drive_animations(
                         catalog,
                         &mut rng,
                         &mut drv.loop_window,
+                        &mut drv.frozen,
                     );
                 }
             }
@@ -1083,6 +1110,7 @@ pub(super) fn drive_animations(
                     if incoming_locomotion {
                         transplant_up(&mut drv, &mut player, &tr, anims, entity, id);
                     }
+                    let drv = &mut *drv; // two disjoint field borrows below (window + frozen)
                     drv.mode = if let Some(sp) = under {
                         leave_special(
                             sp,
@@ -1096,6 +1124,7 @@ pub(super) fn drive_animations(
                             catalog,
                             &mut rng,
                             &mut drv.loop_window,
+                            &mut drv.frozen,
                         )
                     } else if let Some(sp) = special {
                         enter_special(
@@ -1206,17 +1235,9 @@ pub(super) fn drive_animations(
                     // pins further down the chain (the stationary cast hold, the loot kneel, the
                     // Ready/ranged idles, the state-emote idle) cannot swap the clip until
                     // touchdown. Rate stays synced — the client's per-frame rate write is outside
-                    // the selector. (DEATH is excluded: the dead-override owns that gait, and a
+                    // the selector, so it is [`play::sync_base_rate`]'s below and this arm does
+                    // nothing at all. (DEATH is excluded: the dead-override owns that gait, and a
                     // mid-air revive must re-select, not hold the corpse pose.)
-                    if let Some(c) = drv.gait.and_then(|g| find_resolved(anims, g, catalog)) {
-                        for v in anims.clips.iter().filter(|v| v.anim_id == c.anim_id) {
-                            let rate = playback_rate(v, mv.speed, model_scale);
-                            if let Some(active) = player.animation_mut(v.node) {
-                                active.set_speed(rate);
-                                drv.gait_rate = rate;
-                            }
-                        }
-                    }
                 } else {
                     // A bracket-less step-off fall landing needs NO case of its own: the arc never
                     // latched FALLINGFAR, so the `0x602c60` land dispatcher is a verified no-op
@@ -1336,16 +1357,11 @@ pub(super) fn drive_animations(
                         .find_map(|&id| find_resolved(anims, id, catalog));
                     if drv.gait == Some(target) {
                         if let Some(c) = clip {
-                            // The armed clip may be a *rolled variation* of the resolved head
-                            // (decision 0123) — sync the rate on whichever variation node is
-                            // live (a stale fade-out node getting the same rate is harmless).
-                            for v in anims.clips.iter().filter(|v| v.anim_id == c.anim_id) {
-                                let rate = playback_rate(v, mv.speed, model_scale);
-                                if let Some(active) = player.animation_mut(v.node) {
-                                    active.set_speed(rate);
-                                    drv.gait_rate = rate;
-                                }
-                            }
+                            // The gait is already armed and stays armed — its rate is
+                            // [`play::sync_base_rate`]'s per-frame write below, which finds
+                            // whichever *rolled variation* (decision 0123) is actually the live
+                            // one rather than sweeping every node of the id.
+                            //
                             // One completed pass of the ranged Load clip arms the HOLD twin
                             // (the `ranged_load` map above) — next frame the idle cross-fades
                             // to the drawn hold instead of replaying the nock.
@@ -1370,14 +1386,14 @@ pub(super) fn drive_animations(
                         // watchdog window). A re-armed Stand landing on its rare look-around
                         // variations IS the idle fidget.
                         let (c, budget) = roll_loop(anims, c, relaxed, &mut rng);
-                        if is_self && crate::dbg_trace::enabled() {
+                        if traced && crate::dbg_trace::enabled() {
                             // Every fresh gait play, including a same-clip replay (which the
                             // settled-state diff below cannot see) — the exact restart-from-head
                             // event a "frames snap" report is hunting.
                             crate::dbg_trace::line(
                                 "anim",
                                 &format!(
-                                    "PLAY gait {} (was {:?}) rate {:.2}",
+                                    "{subject}PLAY gait {} (was {:?}) rate {:.2}",
                                     c.anim_id,
                                     drv.gait,
                                     playback_rate(c, mv.speed, model_scale)
@@ -1430,6 +1446,17 @@ pub(super) fn drive_animations(
                 }
             }
         }
+
+        // ── The base slot's **playback rate**, written once per frame over whatever the mode
+        // machine settled on — the client's rate write sits OUTSIDE the selector (`0x5fe2f0`), so
+        // it is not the gait's private business (decision 0906). The landing is why it matters:
+        // JumpLandRun 187 resolves to **Run(5)** on every creature model's baked lookup, so a
+        // mount's or a travel form's land clip is its own gallop cycle and must be rate-scaled
+        // like any other locomotion — at the arm's literal 1× it ran ~35% slow for the clip's
+        // whole 0.8 s. It also records the result in `gait_rate` — the number the hover card and
+        // the trace's `rate=` read (decision 0903) — so those stay honest in every mode too. See
+        // [`play::sync_base_rate`].
+        play::sync_base_rate(&mut drv, &tr, &mut player, anims, mv.speed, model_scale);
 
         // ── Masked one-shot completion — the **fade-to-rest** (decision 0878, correcting 0087 (c)):
         // a finished overlay is NOT stopped. The client latches the completion in its per-frame
@@ -1529,10 +1556,20 @@ pub(super) fn drive_animations(
         // settled key-bone state: without it a torso report ("the cast got cut") could not be told
         // from a base one at all (decision 0878). `+fade` marks the 150 ms fade-to-rest running —
         // a boolean, not a countdown, so a fade doesn't spam a line per frame.
-        if is_self && crate::dbg_trace::enabled() {
+        //
+        // `base=` is the **resolved** clip the full-body slot actually holds — not the id the
+        // selector *asked* for, which `gait=`/`mode=` already carry. A cadence report ("the run
+        // goes slow when I land") is unreadable without it: the request was JumpLandRun 187, the
+        // clip playing was Run 5, and `rate=` was the wrong number for exactly that clip
+        // (decision 0906). `?` = the slot holds a node this model has no clip record for.
+        if traced && crate::dbg_trace::enabled() {
+            let base = tr
+                .get_main_animation()
+                .and_then(|n| anims.clips.iter().find(|c| c.node == n))
+                .map_or_else(|| "?".to_string(), |c| c.anim_id.to_string());
             let state = format!(
-                "mode={:?} gait={:?} special={:?} flags={:08x} speed={:.2} scale={:.2} \
-                 rate={:.2} upper={:?}{}",
+                "{subject}mode={:?} gait={:?} base={base} special={:?} flags={:08x} \
+                 speed={:.2} scale={:.2} rate={:.2} upper={:?}{}",
                 drv.mode,
                 drv.gait,
                 special,
@@ -1550,9 +1587,9 @@ pub(super) fn drive_animations(
                     ""
                 },
             );
-            if anim_trace_last.as_deref() != Some(&state) {
+            if anim_trace_last.get(&entity) != Some(&state) {
                 crate::dbg_trace::line("anim", &state);
-                *anim_trace_last = Some(state);
+                anim_trace_last.insert(entity, state);
             }
         }
 

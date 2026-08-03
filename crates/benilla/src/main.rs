@@ -742,6 +742,25 @@ fn main() -> AppExit {
     if std::env::var("WOW_RIG").is_ok() {
         app.add_plugins(capture::ProbeRigPlugin);
     }
+    // Any scripted probe keeps its window un-occludable: a fully covered macOS window drops to
+    // ~1 fps drawables, and every probe schedule is wall-clock — a throttled run doesn't measure
+    // slowly, it runs the wrong script (see `capture::ProbeFocusPlugin`, decision 0906).
+    // (`WOW_LIVE_FPS` is in the list because an occluded SETTLE phase streams the world at ~1 fps
+    // and under-warms the scene before sampling even starts — the assertion has to be live from
+    // the first tick, not at the uncap.)
+    if [
+        "WOW_PROBE",
+        "WOW_PROBE_CHAT",
+        "WOW_PROBE_KEY",
+        "WOW_PROBE_LUA",
+        "WOW_RIG",
+        "WOW_LIVE_FPS",
+    ]
+    .iter()
+    .any(|k| std::env::var(k).is_ok())
+    {
+        app.add_plugins(capture::ProbeFocusPlugin);
+    }
     // The probe-chat one-shot: `WOW_PROBE_CHAT=".go xyz …"` sends GM/chat lines once in-world —
     // the "park the probe character anywhere" instrument (see `capture::ProbeChatPlugin`).
     if std::env::var("WOW_PROBE_CHAT").is_ok() {

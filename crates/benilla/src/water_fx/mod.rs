@@ -197,8 +197,12 @@ struct FoamAssets {
     wake: Handle<Image>,
 }
 
-/// The foam draw's sort-bias over its water (the old material's `depth_bias: 1.0`).
-const FOAM_BIAS: f32 = 1.0;
+/// The foam draw's sort-bias: **just over its water**, riding the water-pass rung. The reference
+/// draws foam inside the water group, right after the liquid surfaces (`0x6816d0`: ocean → river
+/// → WMO liquid → foam) — so when the water pass moved to its fixed frame slot
+/// ([`crate::sky_order::WATER_BIAS`]), the foam moved with it: still +1 over the surface for the
+/// coplanar tie, now *below* the near-side world transparents like the reference's.
+const FOAM_BIAS: f32 = crate::sky_order::WATER_BIAS + 1.0;
 
 /// Load the stencils raw (CLAMP, no mips — the reference's measured sampler state).
 fn setup_water_fx(

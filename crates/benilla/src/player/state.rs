@@ -405,6 +405,16 @@ pub(crate) struct Player {
     /// streams a `MSG_MOVE_SET_FACING` that frame, moving or standing, so observers see us aim
     /// (decision 0617). Updated every frame whether or not a packet went out.
     pub(super) last_facing: f32,
+    /// The **position we last told the server** (WoW coords, exactly the floats that went on the
+    /// wire). Diffed against this frame's live position to catch a drift we would otherwise never
+    /// report: our resolver settles a resting body a fraction of a millimetre after the packet that
+    /// reported the rest (a landing, a login, a teleport onto a server-authored pose), and while
+    /// standing still nothing else goes out. vmangos compares an incoming position to its stored one
+    /// with EXACT float equality and interrupts a movement-interrupt cast on any difference, so a
+    /// stale copy turns the next packet — in practice the first `MSG_MOVE_SET_FACING` of a
+    /// right-drag — into a mid-cast "you moved". Decision 0907; the reconcile lives in
+    /// [`super::movement_net::stream_self_movement`].
+    pub(super) last_pos: [f32; 3],
     /// The stand state we last volunteered (`CMSG_STANDSTATECHANGE`) whose echo into our
     /// `UNIT_FIELD_BYTES_1` hasn't landed yet — the local commit (the client's `SetStandState`
     /// `0x6127b0` applies immediately *and* sends; decision 0080c). `None` = at the echoed value.

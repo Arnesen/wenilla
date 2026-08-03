@@ -360,6 +360,40 @@ fn purchase_flow_shows_popup_queues_the_intent_and_the_row_hides_when_full() {
     );
 }
 
+/// The bank's bag buttons take BOTH mouse buttons (decision 0908): the ref's
+/// `BankItemButtonBagTemplate` OnLoad runs `BankFrameBagButton_OnLoad` →
+/// `BankFrameBaseButton_OnLoad`, which registers `("LeftButtonUp","RightButtonUp")`
+/// (BankFrame.lua:12), and `BankFrameItemButtonBag_OnClick` reads no button. Ours registered
+/// nothing, so the widget default (`{"LeftButtonUp"}`) swallowed every right-click. Asserted on
+/// the click sound the handler plays before any of its own forks — the one observable that does
+/// not need a bag object fed into the slot.
+#[test]
+fn a_bank_bag_button_answers_the_right_button_too() {
+    let mut s = setup();
+    s.set_bank(Some(BankState::default()));
+    s.fire_event("BANKFRAME_OPENED", vec![]);
+    s.resolve();
+    let _ = s.take_sounds();
+
+    let (cx, cy): (f64, f64) = s
+        .eval(
+            "return (BenillaBankBagButton1:GetLeft() + BenillaBankBagButton1:GetRight()) / 2, \
+                    (BenillaBankBagButton1:GetTop() + BenillaBankBagButton1:GetBottom()) / 2",
+        )
+        .unwrap();
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    let consumed = s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    assert!(consumed, "the right-click lands on the button");
+    assert_eq!(
+        s.take_sounds(),
+        vec![benilla_ui::script::SoundRequest::KitName(
+            "BAGMENUBUTTONPRESS".into()
+        )],
+        "a right-click runs the same OnClick a left-click does"
+    );
+    assert!(s.errors().is_empty(), "click errors: {:?}", s.errors());
+}
+
 /// Test 6 — Clicking item slot 1 with an empty cursor queues a `PickupContainerItem(-1, 1)` — read off
 /// the cursor's own resulting payload (`bag_tests`' pattern: drive the real click through
 /// `mouse_button`, not a bare `run()`, so the XML's `OnClick`/`RegisterForClicks` wiring is

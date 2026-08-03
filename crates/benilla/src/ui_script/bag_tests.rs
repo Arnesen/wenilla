@@ -270,10 +270,22 @@ fn bag_bar_buttons_light_while_their_bag_is_open() {
     );
 
     // A bar-slot click reopens bag 2 and relights it (the click auto-toggle + the ref's
-    // re-derive tail agree here).
-    s.run("BenillaBagBarSlot_OnClick(BenillaBagBarSlot2)")
+    // re-derive tail agree here). Driven as a RIGHT-click through the real input path: the ref's
+    // BagSlotButtonTemplate inherits PaperDollItemSlotButtonTemplate, whose OnLoad registers
+    // ("LeftButtonUp", "RightButtonUp") — PaperDollFrame.lua:86 — and BagSlotButton_OnClick reads
+    // no button, so either one opens the bag. Ours registered LeftButtonUp only until 0908.
+    let (cx, cy): (f64, f64) = s
+        .eval(
+            "return (BenillaBagBarSlot2:GetLeft() + BenillaBagBarSlot2:GetRight()) / 2, \
+                    (BenillaBagBarSlot2:GetTop() + BenillaBagBarSlot2:GetBottom()) / 2",
+        )
         .unwrap();
-    assert!(checked(&mut s, "BenillaBagBarSlot2"), "bar click relights");
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    assert!(
+        checked(&mut s, "BenillaBagBarSlot2"),
+        "a RIGHT-click on the bar slot reopens bag 2, exactly as a left one does"
+    );
 
     // ESC's sweep closes everything → every ring dark.
     s.run("CloseAllWindows()").unwrap();

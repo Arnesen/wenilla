@@ -10,7 +10,7 @@
 //! what we send verbatim and observers extrapolate it from the moveFlags, so any divergence strands them
 //! on stale state: a flag we set but never clear is a *phantom* walk/spin, and an out-of-range value is
 //! silently dropped before relay (vmangos rejects `|orientation| > 4π` in `VerifyMovementInfo`,
-//! regardless of anticheat). Two rules keep us honest, both enforced here at the wire boundary:
+//! regardless of anticheat). Three rules keep us honest, all enforced here at the wire boundary:
 //! - **Every outbound `orientation` is normalized into `[0, 2π)`** — `face_yaw`/`cam.yaw` are unbounded
 //!   accumulators, but the real client always sends a normalized facing and the server's validity gate
 //!   demands it.
@@ -18,6 +18,12 @@
 //!   Stop and clears our flags on entering free-fly; the held frames of a post-teleport settle stream
 //!   zeroed flags (so [`stream_self_movement`]'s own diff emits the Stop) — so observers never
 //!   extrapolate motion that isn't happening locally.
+//! - **The server's copy of our *position* may never go stale** — the reconcile at the bottom of
+//!   [`stream_self_movement`] (decision 0907). A resting body whose resolver settles it a fraction
+//!   of a millimetre after the packet that reported the rest used to keep that to itself, and
+//!   vmangos — which compares positions with exact float equality — read the next packet's
+//!   accumulated delta as movement and cancelled the cast in flight. Drift at rest is news; it goes
+//!   out the frame it happens.
 
 use benilla_assets::coords::bevy_to_wow;
 use benilla_protocol::{JumpInfo, TransportPose};
@@ -68,6 +74,18 @@ const OUTBOUND_FLAG_MASK: u32 = move_flags::FORWARD
     | move_flags::WATER_WALKING
     | move_flags::SAFE_FALL
     | move_flags::HOVER
+    | move_flags::ON_TRANSPORT;
+
+/// The bits that mean **the body is genuinely in motion**, and so that its position is expected to
+/// change every frame: the direction bits, the airborne arc, swimming, and riding a transport. The
+/// position reconcile at the bottom of [`stream_self_movement`] fires only when NONE of them is set
+/// — at rest, a position change is news; in motion it is the whole point of the transition +
+/// heartbeat stream (0052/0053), which already carries it. Turning in place is deliberately absent:
+/// a keyboard turn moves nothing, so a drift under it is still news.
+const IN_MOTION: u32 = move_flags::ANY_MOVE
+    | move_flags::FALLING
+    | move_flags::FALLING_FAR
+    | move_flags::SWIMMING
     | move_flags::ON_TRANSPORT;
 
 /// This frame's **arc edges** — the airborne lifecycle as the send law reads it. One struct rather
@@ -177,6 +195,9 @@ pub(super) fn stream_self_movement(
             jump: wire_jump,
             transport,
         });
+        // The ack's `MovementInfo` relocates the mover server-side exactly like a Move packet, so
+        // it is also a position report — the reconcile below must not re-send what it just told.
+        player.last_pos = wow_pos;
     }
     let prev = player.move_flags;
     let added = wire_flags & !prev;
@@ -210,6 +231,9 @@ pub(super) fn stream_self_movement(
                 transport,
             });
             sent = true;
+            // What the server now believes, for the reconcile below — every packet in this family
+            // carries `wow_pos`, and vmangos relocates the mover to it (`HandleMoverRelocation`).
+            player.last_pos = wow_pos;
         }};
     }
     const FB: u32 = move_flags::FORWARD | move_flags::BACKWARD;
@@ -329,6 +353,31 @@ pub(super) fn stream_self_movement(
     if !sent && wire_flags != 0 && !falling && now - player.last_heartbeat >= HEARTBEAT_INTERVAL {
         send_move!(MoveKind::Heartbeat);
     }
+    // ── The position reconcile (decision 0907) ── **the server's copy of where we are may never go
+    // stale.** Our resolver settles a body that is already at rest by a fraction of a millimetre
+    // *after* the packet that reported the rest: a landing reports the touchdown pose and the next
+    // frame's step-down snap takes 2e-5 yd off it; a login/teleport lands on a server-authored
+    // position our own collision resolves a hair differently. Until 0617 nothing carried that
+    // difference, and while standing still nothing else goes out — so the client and the server
+    // silently held two different positions, and the next packet of ANY kind delivered the whole
+    // accumulated delta at once.
+    //
+    // vmangos reads that delta as movement, on an **exact float compare**: `Player::SetPosition`
+    // sets `positionChanged = old_x != x || old_y != y || old_z != z` and hands it to
+    // `Unit::HandleInterruptsOnMovement`, which runs `InterruptSpellsWithInterruptFlags(
+    // SPELL_INTERRUPT_FLAG_MOVEMENT)`. No epsilon: 2e-5 yd cancels a cast exactly as a yard would.
+    // (Verified in the deployed server's source, `Objects/Player.cpp` + `Objects/Unit.cpp`; the
+    // 0.5-yd tolerance elsewhere in `Spell::update` is a different, later test.)
+    //
+    // The observable was the director's: right-dragging to look around killed a cast. Mouse-look is
+    // the one thing that puts packets on the wire while standing still (SET_FACING at frame
+    // cadence), so it was the messenger — the first one after a run, a jump, or a login carried a
+    // stale-position "you moved" into the middle of the cast. Reporting the drift when it *happens*
+    // — at rest, so once per settle rather than per frame — keeps the two copies identical, and a
+    // cast then dies to real movement only.
+    if !sent && wire_flags & IN_MOTION == 0 && wow_pos != player.last_pos {
+        send_move!(MoveKind::Heartbeat);
+    }
     if sent {
         player.last_heartbeat = now;
     }
@@ -352,10 +401,12 @@ pub(super) fn park_mover(sender: &Sender<ClientCommand>, player: &mut Player) {
         return;
     }
     let facing = player.face_yaw.rem_euclid(std::f32::consts::TAU);
+    let pos = bevy_to_wow(player.pos);
+    player.last_pos = pos; // the park is a position report too (decision 0907's reconcile)
     let _ = sender.send(ClientCommand::Move {
         kind: MoveKind::Stop,
         flags: 0,
-        pos: bevy_to_wow(player.pos),
+        pos,
         orientation: facing,
         pitch: 0.0, // flags cleared → not swimming → no pitch tail written
         fall_time: 0,
@@ -820,6 +871,86 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec![MoveKind::StartStrafeRight, MoveKind::SetFacing]);
+    }
+
+    /// One idle frame at `pos`, nothing else happening — the shape every reconcile test needs.
+    fn idle_frame(tx: &Sender<ClientCommand>, player: &mut Player, pos: bevy::prelude::Vec3) {
+        player.pos = pos;
+        stream_self_movement(
+            tx,
+            player,
+            player.move_flags,
+            0.0,
+            ArcEdges {
+                jumped: false,
+                air_nudged: false,
+                landed: false,
+                started_falling: false,
+                fall_time: 0,
+            },
+            0.0,
+            &[],
+            None,
+        );
+    }
+
+    #[test]
+    fn a_resting_body_that_drifts_reports_it_once() {
+        // Decision 0907. Our resolver settles a body already at rest a fraction of a millimetre after
+        // the packet that reported the rest (a landing, a login, a teleport onto a server-authored
+        // pose), and standing still nothing else goes out — so the server's copy of our position went
+        // stale, and the next packet of any kind (in practice a right-drag's SET_FACING) delivered the
+        // whole delta at once. vmangos compares positions with EXACT float equality and reads any
+        // difference as movement, cancelling a movement-interrupt cast. So: at rest, a changed
+        // position IS the news, and one heartbeat carries it — then silence again.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut player = Player::default();
+        idle_frame(&tx, &mut player, bevy::prelude::Vec3::new(1.0, 2.0, 3.0));
+        let ClientCommand::Move {
+            kind, flags, pos, ..
+        } = rx.try_recv().expect("the drift is reported")
+        else {
+            panic!("expected a Move command");
+        };
+        assert_eq!(kind, MoveKind::Heartbeat);
+        assert_eq!(flags, 0, "at rest — the reconcile invents no motion");
+        assert_eq!(pos, bevy_to_wow(bevy::prelude::Vec3::new(1.0, 2.0, 3.0)));
+        // The same position again: the server's copy is current, so nothing goes out.
+        idle_frame(&tx, &mut player, bevy::prelude::Vec3::new(1.0, 2.0, 3.0));
+        assert!(
+            rx.try_recv().is_err(),
+            "an unchanged resting position is silent — one packet per settle, not per frame"
+        );
+        // A settle that is one float wide still counts: vmangos's compare has no epsilon.
+        idle_frame(
+            &tx,
+            &mut player,
+            bevy::prelude::Vec3::new(1.0, f32::from_bits(2.0f32.to_bits() - 1), 3.0),
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "a one-ULP settle is exactly what the server's exact compare would read as movement"
+        );
+    }
+
+    #[test]
+    fn the_reconcile_never_fires_while_the_body_is_in_motion() {
+        // In motion the position changes every frame BY DESIGN, and the transition + ~500 ms
+        // heartbeat stream is what carries it (0052/0053) — a per-frame reconcile there would be a
+        // packet flood, and the reference sends nothing of the kind. The gate is the motion mask, so
+        // a runner mid-stride and a body mid-arc are both silent between their own packets.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for flags in [move_flags::FORWARD, move_flags::FALLING] {
+            let mut player = Player {
+                move_flags: flags, // already streaming this state: no transition this frame
+                ..Default::default()
+            };
+            idle_frame(&tx, &mut player, bevy::prelude::Vec3::new(9.0, 9.0, 9.0));
+            assert!(
+                rx.try_recv().is_err(),
+                "moving ({flags:#x}): the position rides the movement stream, not a reconcile"
+            );
+        }
     }
 
     #[test]

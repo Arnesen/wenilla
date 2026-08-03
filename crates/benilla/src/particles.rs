@@ -38,6 +38,9 @@ mod sim;
 
 use emit::{emit_local, next_u32, rand01, rand_s11};
 use sim::simulate_particles;
+// The water-plane interleave classification — shared with the ribbon sim (a trail is one of the
+// model's emitters and classifies the same way; `sky_order::EFFECT_FAR_SIDE_BIAS`).
+pub(crate) use sim::{far_side_of_water, WaterInterleave};
 
 /// Hard cap on a single emitter's live particle count — a backstop against a pathological model. Real
 /// props sit far under this (a campfire's steady state is `rate·lifespan` ≈ 30 + 24 particles).

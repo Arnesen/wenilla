@@ -2225,6 +2225,46 @@ fn walker_model() -> ModelAnimations {
     }
 }
 
+/// A **mount's** model, as the real assets are shaped (decision 0906): Horse.m2 authors no
+/// JumpLandRun 187 at all, and its baked PlayableAnimationLookup answers a 187 request with
+/// **Run(5)** — `playable[187] = 5`, the same row Tiger.m2 (the druid travel form) and Cat.m2
+/// carry. The Run clip's authored design speed is the horse's real 9.028 yd/s.
+fn mount_model() -> ModelAnimations {
+    let mut run = clip(5, 2, true);
+    run.move_speed = 9.028; // Horse.m2 sequence 16's ModelAnimation::move_speed
+    let mut table = vec![
+        benilla_formats::PlayableAnim {
+            resolved_id: 0,
+            dir_flags: 0,
+        };
+        203
+    ];
+    for id in [0u16, 5, 37, 38, 39] {
+        table[id as usize].resolved_id = id;
+    }
+    // A mount authors neither Sprint 143 (what the selector picks at mount speed) nor
+    // JumpLandRun 187 (what the landing picks): its baked table answers BOTH with the gallop
+    // cycle, so the whole galloping-jump-landing sequence is one clip at three rates.
+    table[143].resolved_id = 5;
+    table[187].resolved_id = 5;
+    ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),
+            run,
+            clip(37, 3, false), // JumpStart
+            clip(38, 4, true),  // Jump hang
+            clip(39, 5, false), // JumpEnd
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: table,
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    }
+}
+
 /// The rate the driver actually wrote onto the walk node — the number the fix is about, read back
 /// off the live `AnimationPlayer` rather than off the driver's own bookkeeping.
 fn walk_rate(app: &App, unit: Entity) -> f32 {
@@ -2323,4 +2363,88 @@ fn a_mounts_gait_rate_composes_the_riders_scale_with_the_mounts() {
         "the mount divides by rider x mount scale: got {}",
         walk_rate(&app, mount)
     );
+}
+
+/// The director's report (decision 0906): "jumping while running forward, mounted or in druid
+/// travel form, slows the running animation on landing and it takes ~1-2 s to snap back".
+///
+/// The landing request is JumpLandRun 187; on every creature model that resolves to **Run(5)**,
+/// a rate-scaled locomotion clip — so the land clip IS the gallop cycle and must run at
+/// `speed / moveSpeed` like the gait it continues. It used to be armed at the call site's literal
+/// `1.0` and nothing rewrote it until `Mode::Land` ended, which is the clip's whole length of
+/// visibly-slow legs. The rate write is per-frame and mode-independent now (`sync_base_rate`), so
+/// the landing runs at the same rate the airborne gait did.
+#[test]
+fn a_mounted_landing_runs_at_the_gaits_rate_not_at_one_times() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            mount_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            Transform::from_scale(Vec3::splat(1.0)),
+            MovementState::default(),
+        ))
+        .id();
+    // Galloping forward at a 100% mount's 14 yd/s: Run at 14 / 9.028 ≈ 1.551×.
+    let running = MovementState {
+        flags: move_flags::FORWARD,
+        speed: 14.0,
+        ..Default::default()
+    };
+    app.world_mut().entity_mut(unit).insert(running);
+    app.update();
+    let rate = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<AnimationPlayer>()
+            .unwrap()
+            .animation(AnimationNodeIndex::new(2)) // the Run node
+            .map(|a| a.speed())
+    };
+    let expected = 14.0 / 9.028;
+    assert!(
+        rate(&app).is_some_and(|r| (r - expected).abs() < 1e-4),
+        "the gallop scales by speed: {:?} vs {expected}",
+        rate(&app)
+    );
+
+    // Up: the jump bracket takes the body (JumpStart, then the hang).
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        flags: move_flags::FORWARD | move_flags::FALLING,
+        speed: 14.0,
+        vertical_speed: 7.9,
+        ..Default::default()
+    });
+    app.update();
+    assert!(
+        matches!(
+            drv_of(&app, unit).mode,
+            super::super::select::Mode::Entering(super::super::select::Special::Jump)
+        ),
+        "an upward launch enters the jump bracket"
+    );
+
+    // Touchdown, still holding forward: the land pick is 187 → the model plays Run for it.
+    app.world_mut().entity_mut(unit).insert(running);
+    app.update();
+    assert_eq!(
+        drv_of(&app, unit).mode,
+        super::super::select::Mode::Land {
+            id: 187,
+            flags: move_flags::FORWARD
+        },
+        "a forward landing picks JumpLandRun"
+    );
+    assert!(
+        rate(&app).is_some_and(|r| (r - expected).abs() < 1e-4),
+        "the landing clip is the gallop cycle and runs at the gallop's rate: {:?} vs {expected}",
+        rate(&app)
+    );
+}
+
+fn drv_of(app: &App, unit: Entity) -> &AnimDriver {
+    app.world().entity(unit).get::<AnimDriver>().unwrap()
 }
