@@ -20,21 +20,31 @@
 //! tag many creature attack clips never author — ogre.m2 authors it in 1 of its ~14 attack
 //! variations, so ogre hits were near-silent):
 //!
-//! - a **natural-weapon** swing (`$AHn` fired the dispatch) plays the attacker's
-//!   `CreatureSoundData.CustomAttack[n]` column INSTEAD of the generic weapon impact — the
-//!   `SWINGNOHITSOUND` latch (`0x6247d0` §f);
-//! - otherwise: parry → the attacker row's parry slot (metal/wood by the victim's weapon),
-//!   block → the shield slot, a landed hit → the `WeaponImpactSounds` impact/crit slot for the
-//!   victim's material (`CreatureImpactType`);
-//! - plus the victim's injury vocal (`Injury`/`InjuryCritical`/`InjuryCrushing`) on every
-//!   damaging, undefended hit.
+//! It is **two blocks in the client's order**, not one pick (decision 0899):
+//!
+//! 1. `0x6247d0`'s own weapon-sound block, at the attacker — a **natural-weapon** swing
+//!    (`$AHn` fired the dispatch) plays the attacker's `CreatureSoundData.CustomAttack[n]`
+//!    column INSTEAD of the generic weapon impact (the `SWINGNOHITSOUND` latch, `0x6247d0` §f);
+//!    otherwise a landed hit plays the `WeaponImpactSounds` impact/crit slot for the victim's
+//!    material (`CreatureImpactType`).
+//! 2. `0x624530`'s **victimState-keyed clang**, at the victim — parry (`0x6245bb` →
+//!    `0x623640(sel=0)`) takes the attacker row's parry slot (metal/wood by the victim's
+//!    weapon), block (`0x6245d8` → `sel=1`) the shield slot. This block is reached on **every**
+//!    impact tag: the `$AHn` digit block "has zero effect on the victim dispatch", so a beast's
+//!    bite and the parry clang both sound.
+//!
+//! Plus the victim's injury vocal (`Injury`/`InjuryCritical`/`InjuryCrushing`) on every
+//! damaging, undefended hit.
 //!
 //! A `text_only` flush (supersede/attack-stop) drops its sounds — only the floating number
 //! flushes (decision 0149's flush law, inherited from the shared dispatch).
 //!
 //! INTERIM readings (flagged for a wow-re pass): victims' armor lands on the flesh slot (the
 //! chain/plate slots need the armor-material chain);
-//! blocks assume a metal shield; the injury vocal plays on every damaging hit (the client may
+//! blocks assume a metal shield; a defended outcome suppresses block 1's generic weapon impact
+//! (the tail's latch test `0x624936` carries no victimState gate in the trace, so whether it
+//! also plays under a clang is unpinned);
+//! the injury vocal plays on every damaging hit (the client may
 //! throttle); the deflect (`0x457f20`) and immune/absorb (`0x458610`) positioned stubs' kit ids
 //! are unpinned, so those branches stay silent here; the natural-weapon column is gated on
 //! contact like the weapon impact (whether the digit block also plays on a whiff is unpinned).
@@ -129,6 +139,44 @@ fn no_contact(swing: &SwingMessage) -> bool {
             swing.victim_state,
             VICTIM_DODGE | VICTIM_EVADE | VICTIM_IMMUNE | VICTIM_DEFLECT
         )
+}
+
+/// A defended outcome — parry or block. These take their sound from the victim dispatch's
+/// victimState-keyed clang ([`defense_clang`]), never from the attacker's weapon-sound block.
+fn defended(victim_state: u32) -> bool {
+    matches!(victim_state, VICTIM_PARRY | VICTIM_BLOCK)
+}
+
+/// `0x624530`'s clang: the attacker's weapon row × the victim's defense (`0x623640`). Parry
+/// picks metal/wood by the victim's own weapon body; block takes the shield slot. Crit does not
+/// tier it — the parry/shield columns carry the same kit in both tables.
+fn defense_clang(
+    row: &benilla_formats::WeaponImpactRow,
+    victim_state: u32,
+    victim_wooden: bool,
+) -> u32 {
+    let slot = match (victim_state, victim_wooden) {
+        (VICTIM_PARRY, true) => impact_slot::PARRY_WOOD,
+        (VICTIM_PARRY, false) => impact_slot::PARRY_METAL,
+        _ => impact_slot::SHIELD_METAL,
+    };
+    row.impact[slot]
+}
+
+/// `0x6247d0`'s generic weapon impact for a landed hit: the victim's `CreatureImpactType`
+/// material slot off the attacker's weapon row, crit-tiered.
+fn landed_impact(row: &benilla_formats::WeaponImpactRow, impact_type: u32, crit: bool) -> u32 {
+    let slot = match impact_type {
+        1 => impact_slot::STONE,
+        2 => impact_slot::WOOD,
+        3 => impact_slot::ETHEREAL,
+        _ => impact_slot::FLESH,
+    };
+    if crit {
+        row.crit[slot]
+    } else {
+        row.impact[slot]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,52 +282,54 @@ fn combat_sounds(
         };
         let crit = swing.hit_info & HITINFO_CRITICAL != 0;
         if !no_contact(swing) {
+            // The attacker's weapon row (`0x625460(attacker, leftswing)`) — shared by both
+            // blocks below. `None` for a wand/thrown: no melee row, nothing to strike with.
+            let offhand = swing.hit_info & 0x4 != 0;
+            let (subclass, wooden) = swing_weapon(attacker.and_then(|(_, w, _)| w), offhand);
+            let row = impacts.0.get(subclass, !wooden);
+            let defended = defended(swing.victim_state);
+
+            // `0x6247d0`'s own weapon-sound block, BEFORE the victim dispatch: the `$AHn` digit
+            // column, else the generic `WeaponImpactSounds` impact behind the SWINGNOHITSOUND
+            // latch. A defended outcome takes its sound from the dispatch below instead
+            // (INTERIM, decision 0899: the tail's latch test `0x624936` carries no victimState
+            // gate in the trace, so whether the generic impact ALSO plays under a clang is
+            // unpinned — we suppress, which is what the game sounds like).
             if let Some(n) = imp.natural {
-                // The `$AHn` digit column: the attacker's own natural-weapon sound replaces the
-                // generic weapon impact (the SWINGNOHITSOUND latch).
+                // The attacker's own natural-weapon sound replaces the generic weapon impact.
                 let vocal = attacker
                     .and_then(|(_, _, net)| net.display_id)
                     .and_then(|d| voices.0.for_display(d))
                     .and_then(|v| v.custom_attack.get(usize::from(n)).copied())
                     .unwrap_or(0);
                 play(&mut kits, &mut out, vocal, pos, "natural impact");
-            } else {
-                let offhand = swing.hit_info & 0x4 != 0;
-                let (subclass, wooden) = swing_weapon(attacker.and_then(|(_, w, _)| w), offhand);
-                if let Some(row) = impacts.0.get(subclass, !wooden) {
-                    let kit = match swing.victim_state {
-                        VICTIM_PARRY => {
-                            // The parry family by the *victim's* weapon body (INTERIM heuristic).
-                            let victim_wooden = victim
-                                .map(|(_, w, _)| swing_weapon(w, false).1)
-                                .unwrap_or(false);
-                            row.impact[if victim_wooden {
-                                impact_slot::PARRY_WOOD
-                            } else {
-                                impact_slot::PARRY_METAL
-                            }]
-                        }
-                        VICTIM_BLOCK => row.impact[impact_slot::SHIELD_METAL],
-                        _ => {
-                            // A landed hit: the victim's material slot (players/rowless → flesh).
-                            let material = victim
-                                .and_then(|(_, _, net)| net.display_id)
-                                .and_then(|d| voices.0.for_display(d))
-                                .map(|v| v.impact_type)
-                                .unwrap_or(0);
-                            let slot = match material {
-                                1 => impact_slot::STONE,
-                                2 => impact_slot::WOOD,
-                                3 => impact_slot::ETHEREAL,
-                                _ => impact_slot::FLESH,
-                            };
-                            let table = if crit { &row.crit } else { &row.impact };
-                            table[slot]
-                        }
-                    };
+            } else if !defended {
+                if let Some(row) = row {
+                    // A landed hit: the victim's material slot (players/rowless → flesh).
+                    let material = victim
+                        .and_then(|(_, _, net)| net.display_id)
+                        .and_then(|d| voices.0.for_display(d))
+                        .map(|v| v.impact_type)
+                        .unwrap_or(0);
+                    let kit = landed_impact(row, material, crit);
                     play(&mut kits, &mut out, kit, pos, "impact");
                 }
-                // else: no melee row (wand/thrown) — nothing to strike with.
+            }
+
+            // `0x624530`'s victimState-keyed clang (`0x6245bb` parry → `0x623640(sel=0)`,
+            // `0x6245d8` block → `sel=1`), emitted at the VICTIM (`vtable+0x14` on `this`).
+            // Reached on EVERY impact tag — the `$AHn` digit block "has zero effect on the
+            // victim dispatch" (wow-re `melee-impact-timing.md` §f): a wolf's bite and the
+            // parry clang both sound. Decision 0899 — 0525 wrongly let the natural column
+            // swallow this, so every beast you parried was silent.
+            if let (true, Some(row)) = (defended, row) {
+                // The parry family by the *victim's* weapon body (INTERIM heuristic).
+                let victim_wooden = victim
+                    .map(|(_, w, _)| swing_weapon(w, false).1)
+                    .unwrap_or(false);
+                let kit = defense_clang(row, swing.victim_state, victim_wooden);
+                let at = victim.map(|(t, ..)| t.translation).unwrap_or(pos);
+                play(&mut kits, &mut out, kit, at, "defense clang");
             }
         }
 
@@ -314,4 +364,65 @@ fn combat_sounds(
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(Startup, load_weapon_impacts.after(AssetSet::Open))
         .add_systems(Update, combat_sounds.in_set(WorldStage::Present));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row shaped like the real 5875 Sword1H-metal row (byte-verified ids): flesh 143/144,
+    /// parry-metal 1002, parry-wood 1001, shield-metal 3263.
+    fn sword1h_metal() -> benilla_formats::WeaponImpactRow {
+        let mut impact = [0u32; 10];
+        let mut crit = [0u32; 10];
+        impact[impact_slot::FLESH] = 143;
+        crit[impact_slot::FLESH] = 144;
+        impact[impact_slot::STONE] = 3206;
+        impact[impact_slot::SHIELD_METAL] = 3263;
+        crit[impact_slot::SHIELD_METAL] = 3263;
+        impact[impact_slot::PARRY_METAL] = 1002;
+        impact[impact_slot::PARRY_WOOD] = 1001;
+        benilla_formats::WeaponImpactRow { impact, crit }
+    }
+
+    /// The clang picks the parry family by the VICTIM's weapon body, the shield slot for a
+    /// block — and never crit-tiers (the data carries one kit in both tables).
+    #[test]
+    fn defense_clang_picks_parry_by_victim_body_and_shield_for_block() {
+        let row = sword1h_metal();
+        assert_eq!(defense_clang(&row, VICTIM_PARRY, false), 1002);
+        assert_eq!(defense_clang(&row, VICTIM_PARRY, true), 1001);
+        assert_eq!(defense_clang(&row, VICTIM_BLOCK, false), 3263);
+        assert_eq!(defense_clang(&row, VICTIM_BLOCK, true), 3263);
+    }
+
+    /// Parry and block are the defended pair — the outcomes whose sound comes from the victim
+    /// dispatch's clang instead of the attacker's weapon-sound block. A landed hit is not.
+    #[test]
+    fn only_parry_and_block_are_defended() {
+        assert!(defended(VICTIM_PARRY));
+        assert!(defended(VICTIM_BLOCK));
+        for other in [
+            0,
+            1,
+            VICTIM_DODGE,
+            4,
+            VICTIM_EVADE,
+            VICTIM_IMMUNE,
+            VICTIM_DEFLECT,
+        ] {
+            assert!(!defended(other), "victimState {other} is not a defense");
+        }
+    }
+
+    /// The landed hit reads the victim's `CreatureImpactType` slot, crit-tiered; an unknown
+    /// material falls to flesh (players carry no creature row).
+    #[test]
+    fn landed_impact_reads_material_slot_crit_tiered() {
+        let row = sword1h_metal();
+        assert_eq!(landed_impact(&row, 0, false), 143);
+        assert_eq!(landed_impact(&row, 0, true), 144);
+        assert_eq!(landed_impact(&row, 1, false), 3206);
+        assert_eq!(landed_impact(&row, 99, false), 143, "unknown → flesh");
+    }
 }

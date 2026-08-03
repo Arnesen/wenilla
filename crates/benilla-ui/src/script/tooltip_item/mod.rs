@@ -309,10 +309,13 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                                 creator: s.creator.clone(),
                                 has_text: false,
                                 flags: s.flags,
-                                // Unobservable either way: nothing openable is equippable, so the
-                                // doll hover has no case to show. Left `false` (wow-re
-                                // §1-OPENABLE's p6 reading) rather than flipped on the bag's
-                                // evidence — see `ItemInstance::openable_source`.
+                                // `SetInventoryItem 0x532ee0` also has p6=0 legs (`0x533106`,
+                                // `0x5332ad`) — the "this binding can never emit OPENABLE" claim
+                                // is dead here too (wow-re `right-click-open.md` §1.2). Which leg
+                                // each takes is not pinned, and the case is unobservable anyway:
+                                // nothing openable is equippable, so the doll hover has no clam to
+                                // show. Left `false` deliberately — inventing a selector we have
+                                // not read would be the §4 trade, and there is nothing to gain.
                                 openable_source: false,
                             },
                         )
@@ -367,24 +370,33 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .and_then(|c| c.slots.get(&slot))
                     .filter(|s| s.item_id != 0)
                 {
-                    Some(s) => (
-                        s.item_id,
-                        s.count.max(1),
-                        s.cooldown.is_some_and(|(rem, _, en)| en && rem > 0),
-                        s.link.clone(),
-                        s.quality.unwrap_or(1),
-                        render::ItemInstance {
-                            durability: s.durability,
-                            creator: s.creator.clone(),
-                            has_text: s.readable,
-                            flags: s.flags,
-                            // The bag hover DOES emit `<Right Click to Open>` — director-observed
-                            // (a clam in a bag), against wow-re §1-OPENABLE's p6 reading. See
-                            // `ItemInstance::openable_source`: that gate is under re-derivation,
-                            // and the observation is the ground truth we build on.
-                            openable_source: true,
-                        },
-                    ),
+                    // The reference's own leg selector, byte-read: `SetBagItem 0x534620` asks the
+                    // item-cooldown query `0x6e2ed0` and takes the p6=1 (instance-block) leg iff
+                    // **all three** of enable/start/duration are non-zero — a genuinely running
+                    // cooldown. That one boolean is both the Lua `hasCooldown` return and the
+                    // openable gate's inverse, so they are computed once, here (decision 0896).
+                    Some(s) => {
+                        let has_cd = s
+                            .cooldown
+                            .is_some_and(|(start, dur, en)| en && start > 0 && dur > 0);
+                        (
+                            s.item_id,
+                            s.count.max(1),
+                            has_cd,
+                            s.link.clone(),
+                            s.quality.unwrap_or(1),
+                            render::ItemInstance {
+                                durability: s.durability,
+                                creator: s.creator.clone(),
+                                has_text: s.readable,
+                                flags: s.flags,
+                                // p6 == 0 ⇔ no running cooldown. A clam shows the green line; the
+                                // same clam mid-cooldown would show ITEM_COOLDOWN_TIME instead
+                                // (that line has no feed here yet — a separate, pre-existing gap).
+                                openable_source: !has_cd,
+                            },
+                        )
+                    }
                     None => return Ok(MultiValue::from_vec(vec![Value::Nil])),
                 }
             };

@@ -19,26 +19,34 @@ crates, and no bundled game assets: benilla reads its data at runtime from your 
 - **Models & animation** — GPU-skinned M2s with the full animation controller (cross-fades,
   one-shots, fidgets), a near feature-complete particle system, ribbons, and animated gameobjects
   (doors, chests, mailboxes, lifts).
-- **Characters** — customization end to end, the armor-region texture composite, held weapons and
-  sheathing, and mounts.
+- **Characters** — customization end to end, the armor-region texture composite, held weapons with
+  sheathing and enchant glows, shapeshift forms, stealth's fade, and mounts.
 - **Movement & travel** — a WoW-feel controller (run/strafe/jump/swim/step-up), networked movement
-  in both directions, a follow-camera with collision, ridden boats and zeppelins, and taxi flights.
+  in both directions, the server-granted modes (slow fall, levitate, water walking, roots and
+  stuns), a follow-camera with collision, ridden boats and zeppelins, and taxi flights.
 - **Networking** — SRP6 auth through world-session crypto, the object-descriptor mirror into the
-  ECS, and live wire coverage for movement, chat, spells and auras, party, mail, trade, vendors,
-  bank, trainers, quests, loot with group rolls, and death.
+  ECS, and live wire coverage for movement, chat, spells and auras, party, duels, inspect, the
+  social lists, mail, trade, vendors, bank, trainers, professions, quests, loot with group rolls,
+  item use and locks, and death.
 - **UI** — a from-scratch FrameXML + Lua UI engine driving the built-in interface: login and
-  character screens, the full HUD, the classic windows (bags, spellbook, talents, quests, mail,
-  merchant, trade, bank, world map, …), chat, and tooltips.
+  character screens, the full HUD (cast bars, breath and fatigue timers, combo points), the classic
+  windows (bags and keyring, spellbook, talents, quests, professions, social, inspect, mail,
+  merchant, trade, bank, world map, …), chat with its slash commands, nameplates, floating combat
+  text, chat bubbles, and tooltips.
 - **Combat** — melee with the faithful swing law, ranged and Auto Shot, casting with GCD, cooldowns
-  and the cancel ladder, and the spell-visual pipeline (kits, missiles, impacts, ground rings).
+  and the cancel ladder, combo points, ground-targeted casting, crowd control that really holds you
+  (roots, stuns, the Ice Block freeze), and the spell-visual pipeline (kits, missiles, impacts,
+  ground rings).
 - **Audio** — music, ambience, and SFX under the client's own selection and crossfade rules, with
   interior/underwater transitions and zone reverb.
 
 ## Not built yet
 
-Guilds, the auction house, hunter/warlock pets, duels and inspect, the social panel
-(friends/who), PvP systems, the macros/options/key-binding screens, and third-party addon
-loading — the Lua/FrameXML engine currently runs only the built-in UI.
+Guilds (past the name over a head), the auction house, hunter/warlock pet control (the pet bar),
+battlegrounds, honor and the zone-control PvP overlays (the PvP flag itself shows), the fishing
+minigame, camera-possession spells (Mind Vision, Sentry Totem), the try-on preview (dressing
+room), the macros/options/key-binding screens, and third-party addon loading — the Lua/FrameXML
+engine currently runs only the built-in UI.
 
 ## Running it
 

@@ -209,124 +209,179 @@ pub(super) fn drain_container_uses(
             }
             continue;
         }
-        // The openable fork: a clam, an unlocked lockbox, a wrapped gift. `CMSG_OPEN_ITEM`, not
-        // `CMSG_USE_ITEM` — the server's `HandleOpenItemOpcode` is the only handler that answers
-        // with `SendLoot(item guid, LOOT_CORPSE)`, i.e. a loot window over a thing in your bag;
-        // sending USE_ITEM instead casts the item's (absent) on-use spell and nothing happens,
-        // which is exactly the "no way to open clams" symptom. The predicate is
-        // `ItemInfo::openable` — literally the same call the tooltip's `<Right Click to Open>`
-        // line makes, so the promise and the packet cannot drift apart.
-        //
-        // It sits ABOVE the readable fork because the reference's own tooltip law makes the two
-        // mutually exclusive with **openable winning** (wow-re `tooltip-content-law.md`
-        // §1-OPENABLE, the `jmp` past the READABLE test): a wrapped gift that also carries letter
-        // text opens, it does not read. Below the merchant/bank intercepts, which outrank every
-        // ordinary click.
-        let openable = self_q
+        // Everything the reference's click law reads off the clicked slot, resolved once. `None` =
+        // an empty slot, or a template still in flight — the click then falls all the way through
+        // to a plain USE, whose refusal is at least visible (the template is all but always cached
+        // by click time; the bag needed it for the icon).
+        let clicked = self_q
             .iter()
             .next()
             .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items))
             .and_then(|guid| {
                 let obj = items.object(guid)?;
                 let inst_flags = obj.item_flags().unwrap_or(0);
+                let item_text_id = obj.item_text_id().unwrap_or(0);
                 let entry = obj.object_entry()?;
-                items
-                    .template(entry, guid, &commands)?
-                    .openable(inst_flags)
-                    .then_some(guid)
+                let t = items.template(entry, guid, &commands)?;
+                Some(Clicked {
+                    guid,
+                    entry,
+                    item_text_id,
+                    inventory_type: t.inventory_type,
+                    display_info_id: t.display_info_id,
+                    start_quest: t.start_quest,
+                    // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
+                    // template is right here, so send the real one rather than assuming 0.
+                    spell_index: t.use_spell_index().unwrap_or(0),
+                    unwraps_gift: t.unwraps_gift(inst_flags),
+                    opens_loot: t.opens_loot(),
+                })
             });
-        if let Some(guid) = openable {
-            debug!("ui_items: open item {guid:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})");
+
+        // The reference's equip-vs-use fork (`0x4fa3b9`/`0x4fa3bd`, wow-re `right-click-open.md`
+        // §2), with the ammo sub-fork `cursor-dragdrop-slots.md` pins: the auto-equip sender
+        // `0x5e1480` sends `CMSG_SET_AMMO` (the item entry) for an ammo-class item,
+        // `CMSG_AUTOEQUIP_ITEM` for any other equippable (inventoryType != 0 — weapons, armor,
+        // bags). display_id feeds the synthetic pickup→place auto-equip sound (this path never
+        // moves the cursor; a drag already gets that pair via the cursor-payload transitions).
+        //
+        // The arm carries the reference's own **quest guard** (`0x4fa3bd`–`0x4fa3cc`, decision
+        // 0664): it equips only when `StartQuest` (`[rec+0x1a8]`) is 0, so a quest-starter falls
+        // through *whatever* its inventoryType — the five equippable ones (Pendant of Myzrael,
+        // Arena Master, …) offer their quest on a right-click, they don't put themselves on.
+        //
+        // **Everything below this fork is `0x5d8d00`, the USE dispatcher, in ITS OWN order**
+        // (wow-re `right-click-open.md` §3) — an equippable item never reaches any of it.
+        if let Some(c) = clicked.filter(|c| c.start_quest == 0 && c.inventory_type != 0) {
+            if c.inventory_type == INVTYPE_AMMO {
+                // Ammo loads by entry (`CMSG_SET_AMMO`), NOT the equip swap wire — the stack stays
+                // in the bag and `PLAYER_AMMO_ID` references it (decision 0526). The server
+                // refuses a wrong/absent ranged weapon via `SMSG_INVENTORY_CHANGE_FAILURE`.
+                debug!(
+                    "ui_items: set ammo entry {} (lua bag {bag} slot {slot})",
+                    c.entry
+                );
+                let _ = commands.0.send(ClientCommand::SetAmmo { entry: c.entry });
+            } else {
+                debug!("ui_items: auto-equip (lua bag {bag} → wire {bag_index}/{wire_slot})");
+                let _ = commands.0.send(ClientCommand::AutoEquipItem {
+                    bag_index,
+                    slot: wire_slot,
+                });
+            }
+            equip_sound.write(crate::sound::AutoEquipSound {
+                display_id: c.display_info_id,
+            });
+            continue;
+        }
+        // #2 — the wrapped gift (`0x5d8d92`/`0x5d8d9d` → emitter `0x5edd60`): `CMSG_OPEN_ITEM`
+        // unwraps it. FIRST in the dispatcher, ahead of the quest and readable arms, so a gift
+        // that also carries letter text unwraps rather than reads. (vmangos answers this one with
+        // an entry swap out of `character_gifts`, not a loot window.)
+        if let Some(c) = clicked.filter(|c| c.unwraps_gift) {
+            debug!(
+                "ui_items: unwrap gift {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
+                c.guid
+            );
             let _ = commands.0.send(ClientCommand::OpenItem {
                 bag_index,
                 slot: wire_slot,
             });
             continue;
         }
-        // The readable fork: an item INSTANCE carrying `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made
-        // permanent letter) opens the reader instead of a use — client-side, no permission
-        // packet (vmangos' `CMSG_READ_ITEM` handler gates on the *template*'s PageText, which is
-        // 0 for the Plain Letter; the text rides the ask-once `CMSG_ITEM_TEXT_QUERY` instead).
-        let read = self_q
-            .iter()
-            .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items))
-            .and_then(|guid| {
-                items
-                    .object(guid)
-                    .and_then(|o| o.item_text_id())
-                    .filter(|&t| t != 0)
-                    .map(|t| (guid, t))
-            });
-        if let Some((guid, text_id)) = read {
-            debug!("ui_items: read item {guid:#x} (text {text_id}, lua bag {bag} slot {slot})");
-            item_text.open(guid, text_id);
+        // #3 — the quest-starter (`0x5d8dd2`, decision 0664): the item's own guid is the
+        // questgiver. Placed at the reference's position rather than at the tail, so a starter
+        // that is *also* readable or lootable offers its quest instead of reading/opening. Routed
+        // through the one shared use fork, which is what turns a non-zero StartQuest into the
+        // item-guid query.
+        if let Some(c) = clicked.filter(|c| c.start_quest != 0) {
+            debug!(
+                "ui_items: quest-starter {:#x} offers quest {}",
+                c.guid, c.start_quest
+            );
+            let _ = commands.0.send(super::item_use_command(
+                Some(c.guid),
+                c.start_quest,
+                bag_index,
+                wire_slot,
+                c.spell_index,
+            ));
             continue;
         }
-        // The real client's equip-vs-use fork, with the ammo sub-fork wow-re
-        // `cursor-dragdrop-slots.md` pins: the auto-equip sender `0x5e1480` sends `CMSG_SET_AMMO`
-        // (the item entry) for an ammo-class item, `CMSG_AUTOEQUIP_ITEM` for any other equippable
-        // (inventoryType != 0 — weapons, armor, bags), and only a non-equippable is a USE (food,
-        // potions, hearthstone). The template is all but always cached by click time (the bag
-        // needed it for the icon); unresolved falls back to USE, whose refusal is at least visible.
-        // display_id feeds the synthetic pickup→place auto-equip sound (this path never moves the
-        // cursor; a drag already gets that pair via the cursor-payload transitions).
+        // #6 — readable: an item INSTANCE carrying `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made
+        // permanent letter) opens the reader — client-side, no permission packet (vmangos'
+        // `CMSG_READ_ITEM` handler gates on the *template*'s PageText, which is 0 for the Plain
+        // Letter; the text rides the ask-once `CMSG_ITEM_TEXT_QUERY` instead).
         //
-        // The equip arm carries the reference's own **quest guard** (`0x4fa3bd`–`0x4fa3cc`,
-        // decision 0664): `Script::UseContainerItem` equips only when the cache record's
-        // `StartQuest` (`[rec+0x1a8]`) is 0, so a quest-starter goes to the use fork *whatever* its
-        // inventoryType — the five equippable ones (Pendant of Myzrael, Arena Master, …) offer their
-        // quest on a right-click, they don't put themselves on.
-        let resolved = self_q
-            .iter()
-            .next()
-            .and_then(|store| slot_guid(&store.0, bag, slot0.unwrap_or(0), &items))
-            .and_then(|guid| {
-                let entry = items.object(guid)?.object_entry()?;
-                let t = items.template(entry, guid, &commands)?;
-                Some((
-                    guid,
-                    entry,
-                    t.inventory_type,
-                    t.display_info_id,
-                    t.start_quest,
-                    // The wire's spell byte is a template BLOCK ordinal (decision 0666) — the
-                    // template is right here, so send the real one rather than assuming 0.
-                    t.use_spell_index().unwrap_or(0),
-                ))
-            });
-        let equippable = resolved.is_some_and(|(_, _, inv_type, _, q, _)| q == 0 && inv_type != 0);
-        match resolved {
-            // Ammo loads by entry (`CMSG_SET_AMMO`), NOT the equip swap wire — the stack stays in
-            // the bag and `PLAYER_AMMO_ID` references it (decision 0526). The server refuses a
-            // wrong/absent ranged weapon via `SMSG_INVENTORY_CHANGE_FAILURE`.
-            Some((_, entry, INVTYPE_AMMO, display_id, _, _)) if equippable => {
-                debug!("ui_items: set ammo entry {entry} (lua bag {bag} slot {slot})");
-                let _ = commands.0.send(ClientCommand::SetAmmo { entry });
-                equip_sound.write(crate::sound::AutoEquipSound { display_id });
-            }
-            Some((_, _, _, display_id, _, _)) if equippable => {
-                debug!("ui_items: auto-equip (lua bag {bag} → wire {bag_index}/{wire_slot})");
-                let _ = commands.0.send(ClientCommand::AutoEquipItem {
-                    bag_index,
-                    slot: wire_slot,
-                });
-                equip_sound.write(crate::sound::AutoEquipSound { display_id });
-            }
-            _ => {
-                let (guid, start_quest, spell_index) =
-                    resolved.map_or((None, 0, 0), |(guid, _, _, _, q, i)| (Some(guid), q, i));
-                debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot}, starts quest {start_quest})");
-                let _ = commands.0.send(super::item_use_command(
-                    guid,
-                    start_quest,
-                    bag_index,
-                    wire_slot,
-                    spell_index,
-                ));
-            }
+        // The dispatcher's arm **#5** — the same local open off the *template*'s `PageText`
+        // (`0x5d8e4c`) — has no feed here yet (books/pages aren't built). When it lands it belongs
+        // immediately above this one, and still above the open arm: the send order is the INVERSE
+        // of the tooltip's, where OPENABLE wins over READABLE. A template that is both readable
+        // and lootable therefore *shows* `<Right Click to Open>` and *reads* on click — the
+        // reference's own inversion, byte-verified, not a slip of ours.
+        if let Some(c) = clicked.filter(|c| c.item_text_id != 0) {
+            debug!(
+                "ui_items: read item {:#x} (text {}, lua bag {bag} slot {slot})",
+                c.guid, c.item_text_id
+            );
+            item_text.open(c.guid, c.item_text_id);
+            continue;
         }
+        // #8 — the open arm (`0x5d8f7c: test al,4` → emitter `0x5edc80`): a **bare** template
+        // LOOTABLE test. `CMSG_OPEN_ITEM`, not `CMSG_USE_ITEM` — the server's
+        // `HandleOpenItemOpcode` is the only handler that answers with
+        // `SendLoot(item guid, LOOT_CORPSE)`, i.e. a loot window over a thing in your bag; sending
+        // USE_ITEM instead casts the item's (absent) on-use spell and nothing happens, which was
+        // exactly the "no way to open clams" symptom.
+        //
+        // Deliberately looser than the tooltip line's predicate (`ItemInfo::shows_open_line`): the
+        // send consults **neither** LockID nor the instance UNLOCKED bit (VERIFIED both ways — no
+        // `[rec+0x1ac]` operand exists anywhere on the send path). So a still-locked junkbox DOES
+        // send, and the server's `EQUIP_ERR_ITEM_LOCKED` is where the player's "Item is locked"
+        // line comes from. Gating locally would eat the click in silence (decision 0896).
+        if let Some(c) = clicked.filter(|c| c.opens_loot) {
+            debug!(
+                "ui_items: open item {:#x} (lua bag {bag} → wire {bag_index}/{wire_slot})",
+                c.guid
+            );
+            let _ = commands.0.send(ClientCommand::OpenItem {
+                bag_index,
+                slot: wire_slot,
+            });
+            continue;
+        }
+        // The tail: a plain use (food, potions, hearthstone). The quest arm already fired above,
+        // so the shared fork's own quest leg is inert here by construction.
+        debug!("ui_items: use item (lua bag {bag} → wire {bag_index}/{wire_slot})");
+        let _ = commands.0.send(super::item_use_command(
+            clicked.map(|c| c.guid),
+            0,
+            bag_index,
+            wire_slot,
+            clicked.map_or(0, |c| c.spell_index),
+        ));
     }
+}
+
+/// One clicked bag slot, resolved: the live instance's guid and the template scalars the
+/// reference's fork chain tests, read once so the chain above is a plain ordered cascade rather
+/// than five repeats of the same lookup. Copy-cheap on purpose — no borrow of [`Items`] outlives
+/// the resolve.
+#[derive(Clone, Copy)]
+struct Clicked {
+    guid: u64,
+    /// `OBJECT_FIELD_ENTRY` — the ammo arm addresses by entry, not by slot (decision 0526).
+    entry: u32,
+    /// Instance `ITEM_FIELD_ITEM_TEXT_ID` (a mail-made permanent letter); 0 = not a letter.
+    item_text_id: u32,
+    inventory_type: u32,
+    display_info_id: u32,
+    start_quest: u32,
+    spell_index: u8,
+    /// `ItemInfo::unwraps_gift` for this instance — dispatcher arm #2.
+    unwraps_gift: bool,
+    /// `ItemInfo::opens_loot` for this template — dispatcher arm #8.
+    opens_loot: bool,
 }
 
 /// Drain the pick/place/swap/split moves `PickupContainerItem`/`SplitContainerItem` queued and

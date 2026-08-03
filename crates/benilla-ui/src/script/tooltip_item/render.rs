@@ -29,24 +29,25 @@ pub(super) struct ItemInstance {
     /// Instance `ITEM_FIELD_FLAGS` — the openable lock sub-gate reads UNLOCKED `0x4`
     /// (`0x52e30c`) and the wrapped-gift arm WRAPPED `0x8` (`0x52e31d`).
     pub flags: u32,
-    /// May this source emit the ITEM_OPENABLE line at all?
+    /// May this source emit the ITEM_OPENABLE line? = the reference's `p6 == 0` — "this tooltip
+    /// carries **no** caller-supplied instance block" (`[this+0x440]`, tested at `0x52e2e8`: when
+    /// it is set, the builder evaluates only READABLE and skips the openable tree entirely).
     ///
-    /// wow-re §1-OPENABLE (byte-census 2026-07-20) reads a `[this+0x440]` gate at `0x52e2e8` as
-    /// bypassing the whole openable tree for every `p6=1` binding, and concludes that
-    /// `SetBagItem` — the binding your own bags hover through — can NEVER emit it. **That
-    /// conclusion is contradicted by ground truth:** the director's screenshot shows a Small
-    /// Barnacled Clam hovered IN A BAG with the green `<Right Click to Open>` line, and vmangos's
-    /// own `ITEM_FLAG_LOOTABLE` comment names that exact client behaviour ("It or lockid set
-    /// enable for client show 'Right click to open'"). A line that could only ever appear on the
-    /// send-mail / auction-sell / buyback tooltips would also be behaviourally absurd. The note is
-    /// additionally self-inconsistent there (§1-CREATOR puts the GIFTCREATOR read at `0x52e32a`,
-    /// inside the region §1-OPENABLE calls the openable emit + jump), so the transcription — not
-    /// the observation — is the suspect. A wow-re §5 re-derivation of `[0x52e2e0, 0x52e376)` is in
-    /// flight; until it lands, the bag hover follows the director's eyes.
+    /// **This is not a per-binding constant.** wow-re's earlier §1-OPENABLE said `SetBagItem`
+    /// passes `p6=1` and so could *never* show the line — which is why our bag hover had no green
+    /// line at all, and which the director's screenshot of a clam falsified. The re-derivation
+    /// (wow-re `right-click-open.md` §1, §5 pair 2026-08-02) found the cause: the old p6 table was
+    /// enumerated per *binding* from the instance-block **writers**, so it only ever saw the p6=1
+    /// leg. A per-**call-site** census of all 31 `0x52b650` sites finds five callers with two or
+    /// more legs, and `SetBagItem 0x534620` is one: `0x534900` p6=1 and `0x53493e` p6=0.
     ///
-    /// The flag is kept rather than deleted because the *template-vs-instance* distinction it also
-    /// carries is settled (gate 1, `0x52e2e0`: no object ⇒ no line — you can't right-click a
-    /// hyperlink), and because the p6 split may still be real for the sources we cannot observe.
+    /// What selects the leg is the item-cooldown query `0x6e2ed0` at `0x53483a` — p6=1 iff
+    /// **enable, start and duration are all non-zero**, i.e. iff the item has a *running
+    /// cooldown*. That same block writes `this+0x408 = start + duration − now`, whose sole
+    /// consumer is the ITEM_COOLDOWN_TIME line and the builder's `hasCooldown` return. So on the
+    /// bag binding the two lines are structurally exclusive: **an item on cooldown shows
+    /// "Cooldown remaining", the same item off cooldown shows `<Right Click to Open>`.**
+    /// Decision 0896.
     pub openable_source: bool,
 }
 
@@ -449,12 +450,18 @@ pub(super) fn render_view(
             }
         }
     }
-    // ITEM_OPENABLE / ITEM_READABLE — ONE line, openable wins (the if/else at
-    // `0x52e2f2..0x52e35d`, wow-re §1-OPENABLE): openable = a p6=0 source AND the template
-    // loot flag `0x4` behind its lock sub-gate (LockID set → only once the instance carries
-    // UNLOCKED `0x4`), or a wrapped gift (template WRAPPER `0x200` + instance WRAPPED `0x8`);
-    // readable = template PageText (the CGItem vtable `+0x74` getter `0x5d9e10`) OR the
-    // instance letter text. Both green.
+    // ITEM_OPENABLE / ITEM_READABLE — ONE line, openable wins outright (the `jmp 0x52e35d` past
+    // the READABLE test; `0x52e2f2..0x52e35d`, wow-re `right-click-open.md` §1.4, re-verified
+    // unchanged by the 2026-08-02 §5 pair): openable = a p6=0 source ([`ItemInstance::
+    // openable_source`]) AND the template loot flag `0x4` behind its lock sub-gate (LockID set →
+    // only once the instance carries UNLOCKED `0x4`), or a wrapped gift (template WRAPPER `0x200`
+    // + instance WRAPPED `0x8`); readable = template PageText (the CGItem vtable `+0x74` getter
+    // `0x5d9e10`) OR the instance letter text. Both green.
+    //
+    // Note the lock sub-gate is the LINE's, not the CLICK's: the send arm tests the bare template
+    // bit, so a locked junkbox stays silent here while its right-click still goes out and draws
+    // the server's "Item is locked" (decision 0896, `ItemInfo::opens_loot`). The click order is
+    // also the inverse of this one — READABLE wins there.
     let openable = inst.openable_source
         && ((v.flags & 0x4 != 0 && (v.lock_id == 0 || inst.flags & 0x4 != 0))
             || (v.flags & 0x200 != 0 && inst.flags & 0x8 != 0));

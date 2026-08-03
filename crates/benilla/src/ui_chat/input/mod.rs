@@ -529,9 +529,14 @@ pub(super) fn drain_chat_input(
                 chat_out.assist.write(crate::target::AssistRequest { name });
             }
             // `/follow` (decision 0890) — the subject is resolved by `crate::target` and the motion
-            // is `crate::player`'s; chat only carries the ask. Bare follows the current selection.
+            // is `crate::player`'s; chat only carries the ask. The two arms are the ref handler's
+            // own two calls: bare is `FollowUnit("target")`, named is `FollowByName(name)` with no
+            // second argument, i.e. prefix matching live.
             ParsedChat::Follow { name } => {
-                chat_out.follow.write(crate::player::FollowRequest { name });
+                chat_out.follow.write(match name {
+                    Some(name) => crate::player::FollowRequest::Name { name, exact: false },
+                    None => crate::player::FollowRequest::Unit("target".into()),
+                });
             }
             // The ref's handler is `SlashCmdList["PVP"] = function() TogglePVP() end` — one line
             // over the same binding the popup row calls, so it enters the same intent queue

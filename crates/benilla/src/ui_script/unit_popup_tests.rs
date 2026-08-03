@@ -4,7 +4,7 @@
 //! `SetItemRef` player branch + its minimal `FriendsFrame` stand-in (`ItemRef.xml`). Proven
 //! serverless through the real hit/route paths.
 
-use benilla_ui::script::{PartyRequest, UiScript, UnitState};
+use benilla_ui::script::{FollowRequest, PartyRequest, UiScript, UnitState};
 
 fn load_xml(s: &UiScript, file: &str) {
     let text = std::fs::read_to_string(
@@ -53,6 +53,9 @@ fn bake_strings(s: &UiScript) {
         -- `Interface\FrameXML\GlobalStrings.lua:2327` off the 1.12.1 patch chain — which is what the
         -- app itself runs at boot (`load_global_strings`); this stub only stands in for it here.
         INSPECT = "Inspect"
+        -- The follow row's label (decision 0893), likewise the real
+        -- `GlobalStrings.lua:1981` value off the 1.12.1 patch chain.
+        FOLLOW = "Follow"
         CANCEL = "Cancel"
         RAID_TARGET_ICON = "Raid Target Icon"
     "#,
@@ -176,15 +179,16 @@ fn solo_target_right_click_invites_a_player() {
         s.eval::<bool>("return DropDownList1:IsVisible()").unwrap(),
         "a friendly player target opens the PLAYER menu solo"
     );
-    // title (Ally) + Whisper + Inspect + Invite + Trade + Duel + Cancel — only FOLLOW is still
-    // DEFERRED, and the raid-target submenu needs a party. (Trade came out of the deferred set in
-    // decision 0592 P1, Inspect in 0631, Duel in 0633 — Inspect precedes Invite/Trade/Duel in the
-    // reference's own PLAYER menu order, which is why every row below it sits one later than it did
-    // before 0631.)
+    // title (Ally) + Whisper + Inspect + Invite + Trade + Follow + Duel + Cancel — nothing in the
+    // PLAYER menu is DEFERRED any more, and only the raid-target submenu (which needs a party) is
+    // absent. (Trade came out of the deferred set in decision 0592 P1, Inspect in 0631, Duel in
+    // 0633, Follow in 0893 — Inspect precedes Invite/Trade/Follow/Duel in the reference's own
+    // PLAYER menu order, which is why every row below it sits one later than it did before 0631,
+    // and Duel one later again than before 0893.)
     assert_eq!(
         s.eval::<i64>("return DropDownList1.numButtons").unwrap(),
-        7,
-        "title + Whisper + Inspect + Invite + Trade + Duel + Cancel"
+        8,
+        "title + Whisper + Inspect + Invite + Trade + Follow + Duel + Cancel"
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button3:GetText()")
@@ -203,6 +207,11 @@ fn solo_target_right_click_invites_a_player() {
     );
     assert_eq!(
         s.eval::<String>("return DropDownList1Button6:GetText()")
+            .unwrap(),
+        "Follow"
+    );
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button7:GetText()")
             .unwrap(),
         "Duel"
     );
@@ -282,6 +291,73 @@ fn solo_target_trade_click_queues_an_initiate() {
         s.take_trade_initiates(),
         vec!["target".to_string()],
         "clicking Trade queues an initiate against the target token"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Clicking the **Follow** row (un-deferred in decision 0893) through the real hit path reaches
+/// `FollowByName("Ally", 1)` — and the `1` is the point of the test, not decoration. That second
+/// argument is the resolver's exact-only flag: the menu already knows the unit's name to the
+/// letter, so unlike `/follow rag` it must not prefix-match its way onto a bystander. A dispatch
+/// that dropped the argument would still queue a follow and still look right on screen, which is
+/// exactly the kind of break a row-label assertion cannot see.
+#[test]
+fn solo_target_follow_click_queues_an_exact_by_name_follow() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    bake_strings(&s);
+    load_popup_frames(&s);
+
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Me".into()),
+            is_player: true,
+            ..UnitState::default()
+        }),
+    );
+    s.set_unit(
+        "target",
+        Some(UnitState {
+            exists: true,
+            name: Some("Ally".into()),
+            health: 40,
+            max_health: 40,
+            is_player: true,
+            reaction: 5,
+            ..UnitState::default()
+        }),
+    );
+    s.fire_event("PLAYER_TARGET_CHANGED", vec![]);
+    s.resolve();
+    assert!(s.errors().is_empty(), "load errors: {:?}", s.errors());
+
+    let (cx, cy) = s
+        .eval::<(f64, f64)>("return BenillaTargetFrame:GetCenter()")
+        .unwrap();
+    s.mouse_button(cx as f32, cy as f32, "RightButton", true);
+    s.mouse_button(cx as f32, cy as f32, "RightButton", false);
+    s.resolve();
+    assert_eq!(
+        s.eval::<String>("return DropDownList1Button6:GetText()")
+            .unwrap(),
+        "Follow",
+        "Follow is the sixth row (title + Whisper + Inspect + Invite + Trade + Follow)"
+    );
+
+    let (fx, fy) = s
+        .eval::<(f64, f64)>("return DropDownList1Button6:GetCenter()")
+        .unwrap();
+    s.mouse_button(fx as f32, fy as f32, "LeftButton", true);
+    s.mouse_button(fx as f32, fy as f32, "LeftButton", false);
+    assert_eq!(
+        s.take_follow_requests(),
+        vec![FollowRequest::ByName {
+            name: "Ally".into(),
+            exact: true,
+        }],
+        "the popup follows by NAME and exactly — not by unit token, and not prefix-matched"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

@@ -16,10 +16,13 @@
       exactly zero times — so the row was a deviation that made this menu read wrong against the
       reference. `/pvp` is the toggle the client has.
     - DEFERRED ENTRIES: rows whose backing system doesn't exist yet are HIDDEN outright (the
-      BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: FOLLOW (its CMSG
-      family is its own slice), TARGET (the friends list), GUILD_PROMOTE/GUILD_LEAVE (the guild
-      arc), RESET_INSTANCES (instances). TRADE came out with decision 0592 P1, DUEL with 0633,
-      INSPECT with 0631. Everything a menu SHOWS works. The PET menu and the RAID_* rank rows stay
+      BENILLA_UNITPOPUP_DEFERRED set in HideButtons) rather than shown-dead: TARGET (the friends
+      list), GUILD_PROMOTE/GUILD_LEAVE (the guild arc), RESET_INSTANCES (instances). TRADE came out
+      with decision 0592 P1, DUEL with 0633, INSPECT with 0631, FOLLOW with 0890's follow-up — and
+      that last entry's stated reason ("its CMSG family is its own slice") was simply WRONG: 0890
+      verified auto-follow sends nothing at all, it is pure client-side movement, so the row was
+      waiting on a wire slice that does not exist. It was the motion law it really needed.
+      Everything a menu SHOWS works. The PET menu and the RAID_* rank rows stay
       in the tables but are unreachable (no "pet" token, no raid roster) — their OnClick branches
       are trimmed with the rest.
     - Lua 5.1: the ref's 5.0 `for i, v in t do` iteration is ipairs/pairs here; strsub → the
@@ -131,7 +134,7 @@
 
         -- The DEFERRED set (header): entries hidden until their backing arc lands.
         BENILLA_UNITPOPUP_DEFERRED = {
-            FOLLOW = 1, TARGET = 1,
+            TARGET = 1,
             GUILD_PROMOTE = 1, GUILD_LEAVE = 1, RESET_INSTANCES = 1,
         };
 
@@ -567,8 +570,14 @@
                 -- Open the inspect window (decision 0631) — the ref UnitPopup_OnClick's INSPECT arm
                 -- verbatim: InspectUnit(unit), which gates on CanInspect and sends CMSG_INSPECT.
                 InspectUnit(unit);
+            elseif ( button == "FOLLOW" ) then
+                -- Begin auto-following — the ref UnitPopup_OnClick's FOLLOW arm verbatim, by NAME
+                -- and EXACT. That `1` is the resolver's exact-only flag, and it matters: this menu
+                -- already knows the unit's name to the letter, so unlike `/follow rag` it must not
+                -- prefix-match its way onto a bystander. Client-side movement only, no wire.
+                FollowByName(name, 1);
             end
-            -- DEFERRED branches trimmed with their rows (header): TARGET/FOLLOW,
+            -- DEFERRED branches trimmed with their rows (header): TARGET,
             -- GUILD_*, RESET_INSTANCES, PET_*, RAID_LEADER/PROMOTE/DEMOTE/REMOVE.
             PlaySound("UChatScrollButton");
         end

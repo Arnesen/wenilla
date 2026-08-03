@@ -426,8 +426,10 @@ fn required_level_one_is_hidden() {
 /// then READABLE off the instance text id (its template's PageText is 0 — the
 /// director-reported gap). An unresolved creator (name query in flight) emits no line. LOCKED
 /// yields to the instance UNLOCKED bit — which is also what un-gates ITEM_OPENABLE: a bag hover
-/// on an openable instance DOES show the green `<Right Click to Open>` (director-observed on a
-/// clam; see `ItemInstance::openable_source` for why this overrides §1-OPENABLE's p6 reading).
+/// on an openable instance shows the green `<Right Click to Open>` (director-observed on a clam;
+/// wow-re `right-click-open.md` §1 re-derived the `p6` leg selector that had it suppressed).
+/// A **running cooldown** takes SetBagItem's other leg and suppresses the line — the two are
+/// structurally exclusive on this binding (decision 0896).
 #[test]
 fn instance_tail_creator_and_readable() {
     let mut s = script();
@@ -474,11 +476,21 @@ fn instance_tail_creator_and_readable() {
     slots.insert(3, slot(2589, false, Some("Geoffrey"), 0)); // crafted, still locked
     slots.insert(4, slot(2589, false, None, 0x4)); // unlocked → LOCKED gone, open line on
     slots.insert(5, slot(7973, false, None, 0)); // the clam: lockless, openable outright
+                                                 // The same clam with a RUNNING cooldown — `SetBagItem`'s p6=1 leg, which skips the openable
+                                                 // tree entirely (the ITEM_COOLDOWN_TIME line takes its place in the reference; that line has
+                                                 // no feed here yet, so this slot renders bare).
+    slots.insert(
+        6,
+        ContainerSlot {
+            cooldown: Some((1_000, 30_000, true)),
+            ..slot(7973, false, None, 0)
+        },
+    );
     s.set_container(
         0,
         Some(ContainerState {
             name: Some("Backpack".into()),
-            num_slots: 5,
+            num_slots: 6,
             slots,
         }),
     );
@@ -526,5 +538,18 @@ fn instance_tail_creator_and_readable() {
         .unwrap();
     let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
     assert_eq!(texts, vec!["Small Barnacled Clam", "<Right Click to Open>"]);
+    // The same clam mid-cooldown takes SetBagItem's OTHER leg (p6=1) — the openable tree is
+    // skipped wholesale, so the green line is gone (the reference prints ITEM_COOLDOWN_TIME in
+    // its place; unfed here). `hasCooldown`, the binding's own return, is the same boolean.
+    let has_cd: bool = s
+        .eval(r#"TT:SetOwner(getglobal("SlotL"), "ANCHOR_RIGHT"); return TT:SetBagItem(0, 6)"#)
+        .unwrap();
+    assert!(has_cd, "the cooldown leg is what the return value reports");
+    let texts: Vec<String> = lines_of(&mut s).into_iter().map(|(t, _)| t).collect();
+    assert_eq!(
+        texts,
+        vec!["Small Barnacled Clam"],
+        "a running cooldown suppresses ITEM_OPENABLE — the two lines are exclusive here"
+    );
     assert!(s.take_errors().is_empty());
 }

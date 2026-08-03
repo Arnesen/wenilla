@@ -7,11 +7,13 @@ by the FadingFrame kit when the app fires the ZONE_CHANGED family off the player
 (`area.rs`).
 
 Quoted from ref-ZoneText.xml as the live 5875 patch chain ships it (patch.MPQ overrides the
-interface.MPQ copy — decision 0246), reduced by ONE frame: AutoFollowStatus (the /follow status
-text, the only thing ref-ZoneText.lua actually contains) stays behind until follow support
-exists. The FadingFrame kit (ref-FadingFrame.lua, its own TOC line right before ZoneText.xml)
-is inlined verbatim below instead: ZoneTextFrame/SubZoneTextFrame are its only consumers in the
-whole 1.12 FrameXML (grep-verified over the extraction), so it rides with them.
+interface.MPQ copy — decision 0246) — now all THREE of its frames, the third being
+AutoFollowStatus (the /follow status text, and the only thing ref-ZoneText.lua actually
+contains), which waited here until follow support existed and no longer does. The FadingFrame
+kit (ref-FadingFrame.lua, its own TOC line right before ZoneText.xml) is inlined verbatim below
+too: ZoneTextFrame/SubZoneTextFrame are its only consumers in the whole 1.12 FrameXML
+(grep-verified over the extraction), so it rides with them. AutoFollowStatus is NOT one of
+them — it rolls its own fade, which is why the kit stays a two-frame affair.
 
 The subtle law worth naming (it looks like a bug and is not): SubZoneTextString — a child of
 SubZoneTextFrame — anchors to regions of the *other* frame (ZoneTextString / PVPInfoTextString),
@@ -28,6 +30,15 @@ PvP info shows only on NEW_AREA (SetZoneText(1)).
         CONTESTED_TERRITORY = CONTESTED_TERRITORY or "Contested Territory";
         FACTION_CONTROLLED_TERRITORY = FACTION_CONTROLLED_TERRITORY or "%s Territory"; -- Faction name
         FREE_FOR_ALL_TERRITORY = FREE_FOR_ALL_TERRITORY or "PvP Area";
+        AUTOFOLLOWSTART = AUTOFOLLOWSTART or "Following %s.";
+        AUTOFOLLOWSTOP = AUTOFOLLOWSTOP or "You stop following %s.";
+
+        -- The ref's localization identity (UIParent.lua), so the AutoFollowStatus body below can
+        -- stay verbatim. Guarded like everything else here rather than leaning on UnitPopup.xml
+        -- happening to load first — a one-line helper is no place to acquire a load-order edge.
+        if ( not TEXT ) then
+            TEXT = function(s) return s end
+        end
 
         -- ── ref-FadingFrame.lua, verbatim ──────────────────────────────────────────────────────
         function FadingFrame_SetFadeInTime(this, time)
@@ -112,6 +123,49 @@ PvP info shows only on NEW_AREA (SetZoneText(1)).
             if ( not showPVPInfo ) then
                 PVPInfoTextString:SetText("");
                 SubZoneTextString:SetPoint("TOP", "ZoneTextString", "BOTTOM", 0, 0);
+            end
+        end
+
+        -- ── ref-ZoneText.lua, verbatim ─────────────────────────────────────────────────────────
+        -- The auto-follow status line. Note it does NOT use the FadingFrame kit above: its own
+        -- OnUpdate rolls a plain linear alpha fade with no fade-in and no hold, started only on
+        -- AUTOFOLLOW_END. BEGIN is a full reset (fadeTime cleared, alpha restored, shown), which
+        -- is why a follow that switches subject needs no END first.
+        AUTOFOLLOW_STATUS_FADETIME = 4.0;
+
+        function AutoFollowStatus_OnLoad()
+            this:RegisterEvent("AUTOFOLLOW_BEGIN");
+            this:RegisterEvent("AUTOFOLLOW_END");
+            this:RegisterEvent("PLAYER_ENTERING_WORLD");
+        end
+
+        function AutoFollowStatus_OnEvent(event)
+            if ( event == "AUTOFOLLOW_BEGIN" ) then
+                this.unit = arg1;
+                this.fadeTime = nil;
+                this:SetAlpha(1.0);
+                AutoFollowStatusText:SetText(format(TEXT(AUTOFOLLOWSTART),this.unit));
+                this:Show();
+            end
+            if ( event == "AUTOFOLLOW_END" ) then
+                this.fadeTime = AUTOFOLLOW_STATUS_FADETIME;
+                AutoFollowStatusText:SetText(format(TEXT(AUTOFOLLOWSTOP),this.unit));
+                this:Show();
+            end
+            if ( event == "PLAYER_ENTERING_WORLD" ) then
+                this:Hide();
+            end
+        end
+
+        function AutoFollowStatus_OnUpdate(elapsed)
+            if( this.fadeTime ) then
+                if( elapsed >= this.fadeTime ) then
+                    this:Hide();
+                else
+                    this.fadeTime = this.fadeTime - elapsed;
+                    local alpha = this.fadeTime / AUTOFOLLOW_STATUS_FADETIME;
+                    this:SetAlpha(alpha);
+                end
             end
         end
     ]]></Script>
@@ -235,6 +289,48 @@ PvP info shows only on NEW_AREA (SetZoneText(1)).
             </OnEvent>
             <OnUpdate>
                 FadingFrame_OnUpdate();
+            </OnUpdate>
+        </Scripts>
+    </Frame>
+    <!-- The auto-follow status line, quoted from ref-ZoneText.xml. The only thing ref-ZoneText.lua
+         actually contains, and the reason that .lua exists at all; it waited here until follow
+         support did (decisions 0890, 0893). `setAllPoints` over UIParent, so the line sits dead
+         centre of the screen. BACKGROUND strata: it is under everything, which is why a full-screen
+         panel hides it.
+
+         ONE DEVIATION, forced: the ref anchors the string CENTER to **WorldFrame**, and benilla has
+         no WorldFrame — it is the reference's 3D-scene layer frame, which our renderer does not
+         model as a frame at all. This is the ONLY `relativeTo="WorldFrame"` in the whole 1.12
+         FrameXML (grep-verified over the extraction), so it buys no convention; left verbatim it
+         merely logged an unresolved-anchor WARN every boot and fell back to the owner. UIParent is
+         the right substitute and not an approximation: both are full-screen in the reference, so
+         their CENTERs coincide, and AutoFollowStatus is setAllPoints over UIParent anyway. -->
+    <Frame name="AutoFollowStatus" parent="UIParent" setAllPoints="true" frameStrata="BACKGROUND" hidden="true">
+        <Layers>
+            <Layer level="ARTWORK">
+                <FontString name="AutoFollowStatusText" inherits="GameFontNormal">
+                    <Anchors>
+                        <Anchor point="CENTER" relativeTo="UIParent">
+                            <Offset>
+                                <AbsDimension x="0" y="0"/>
+                            </Offset>
+                        </Anchor>
+                    </Anchors>
+                    <FontHeight>
+                        <AbsValue val="20"/>
+                    </FontHeight>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Scripts>
+            <OnLoad>
+                AutoFollowStatus_OnLoad();
+            </OnLoad>
+            <OnEvent>
+                AutoFollowStatus_OnEvent(event);
+            </OnEvent>
+            <OnUpdate>
+                AutoFollowStatus_OnUpdate(arg1);
             </OnUpdate>
         </Scripts>
     </Frame>

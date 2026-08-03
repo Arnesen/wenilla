@@ -192,25 +192,51 @@ impl ItemInfo {
         self.use_spell.is_some() || self.inventory_type != 0
     }
 
-    /// Does a right-click **open** this concrete instance rather than use it? `instance_flags` is
-    /// the item object's `ITEM_FIELD_FLAGS` (0 for a template-only view, which can never be
-    /// openable — you can't right-click a hyperlink).
+    /// Does the tooltip put the green `<Right Click to Open>` line on this instance?
+    /// `instance_flags` is the item object's `ITEM_FIELD_FLAGS`; a template-only view (a
+    /// hyperlink, a merchant row) passes 0 and, being object-less, gets no line at all — the
+    /// reference's own gate 1 at `0x52e2e0`.
     ///
-    /// The one predicate behind both halves of the affordance: the tooltip's green
-    /// `<Right Click to Open>` line and the `CMSG_OPEN_ITEM` fork. It is the reference's own
-    /// tooltip condition (wow-re `tooltip-content-law.md` §1-OPENABLE, byte-read at
-    /// `0x52e2f8`–`0x52e321`): the template LOOTABLE bit [`ITEM_FLAG_LOOTABLE`] behind its lock
-    /// sub-gate — a [`ItemInfo::lock_id`] item only opens once the instance carries
+    /// VERIFIED wow-re `right-click-open.md` §1.4 (`0x52e2f8`–`0x52e321`), re-derived by a §5 pair
+    /// 2026-08-02: the template LOOTABLE bit [`ITEM_FLAG_LOOTABLE`] behind its **lock sub-gate** —
+    /// a [`ItemInfo::lock_id`] item earns the line only once the instance carries
     /// [`ITEM_DYNFLAG_UNLOCKED`] — **or** a wrapped gift ([`ITEM_FLAG_WRAPPER`] on the template
-    /// plus [`ITEM_DYNFLAG_WRAPPED`] on the instance). vmangos's `HandleOpenItemOpcode` gates on
-    /// exactly the same pair, so the two ends agree: what the tooltip promises is what the server
-    /// will honour, and a still-locked junkbox neither advertises the line nor sends the packet.
-    pub fn openable(&self, instance_flags: u32) -> bool {
+    /// plus [`ITEM_DYNFLAG_WRAPPED`] on the instance).
+    ///
+    /// **This is deliberately NOT the send condition** ([`Self::opens_loot`]). The line is a
+    /// promise, and the reference only makes it when opening will actually work; the *click*
+    /// tests the bare template bit and lets the server refuse a still-locked box with its own
+    /// error line. Decision 0896 — an earlier reading of ours collapsed the two, which would have
+    /// silently swallowed the click on every locked junkbox.
+    pub fn shows_open_line(&self, instance_flags: u32) -> bool {
         let lootable = self.flags & ITEM_FLAG_LOOTABLE != 0
             && (self.lock_id == 0 || instance_flags & ITEM_DYNFLAG_UNLOCKED != 0);
-        let gift =
-            self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED != 0;
-        lootable || gift
+        lootable || self.unwraps_gift(instance_flags)
+    }
+
+    /// Does a right-click on this instance send `CMSG_OPEN_ITEM` to **unwrap a gift**? The first
+    /// arm of the reference's use dispatcher (`0x5d8d00` #2, `0x5d8d92`/`0x5d8d9d` → the `0x5edd60`
+    /// emitter): template [`ITEM_FLAG_WRAPPER`] **and** instance [`ITEM_DYNFLAG_WRAPPED`].
+    ///
+    /// It is a separate predicate from [`Self::opens_loot`] because it sits at a different point
+    /// in the dispatcher's order — *before* the quest-starter and readable arms, where the loot
+    /// arm sits after them. A wrapper template whose instance is no longer wrapped takes the
+    /// begin-wrap cursor path instead (local, no packet; not built yet).
+    pub fn unwraps_gift(&self, instance_flags: u32) -> bool {
+        self.flags & ITEM_FLAG_WRAPPER != 0 && instance_flags & ITEM_DYNFLAG_WRAPPED != 0
+    }
+
+    /// Does a right-click on this template send `CMSG_OPEN_ITEM` to **loot it open**? The
+    /// reference's arm #8 (`0x5d8f7c: test al,4` → the `0x5edc80` emitter): a **bare** template
+    /// [`ITEM_FLAG_LOOTABLE`] test.
+    ///
+    /// VERIFIED wow-re `right-click-open.md` §3, positively *and* negatively — no `LockID`
+    /// (`[rec+0x1ac]`) operand exists anywhere on the send path, checked against a positive
+    /// control. So a **still-locked junkbox does send the packet**, and the server answers
+    /// `EQUIP_ERR_ITEM_LOCKED`, which is where the player's "Item is locked" line comes from.
+    /// Refusing locally instead would eat the click in silence.
+    pub fn opens_loot(&self) -> bool {
+        self.flags & ITEM_FLAG_LOOTABLE != 0
     }
 }
 

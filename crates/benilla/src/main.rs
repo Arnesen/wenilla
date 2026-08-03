@@ -108,6 +108,7 @@ mod ui_char;
 mod ui_chat;
 mod ui_craft;
 mod ui_duel;
+mod ui_follow;
 mod ui_gamma;
 mod ui_gossip;
 mod ui_hide;
@@ -193,6 +194,7 @@ use ui_char::UiCharPlugin;
 use ui_chat::UiChatPlugin;
 use ui_craft::UiCraftPlugin;
 use ui_duel::UiDuelPlugin;
+use ui_follow::UiFollowPlugin;
 use ui_gossip::UiGossipPlugin;
 use ui_item_text::UiItemTextPlugin;
 use ui_items::UiItemsPlugin;
@@ -613,6 +615,9 @@ fn main() -> AppExit {
     // Duels (decision 0633): the wire session, the client-side countdown tick, the four Era
     // events, and the accept/cancel/challenge intents.
     .add_plugins(UiDuelPlugin)
+    // Auto-follow's UI seam: the popup's Follow row + `FollowUnit`/`FollowByName` inbound, and
+    // the AUTOFOLLOW_BEGIN/END pair that drives the centre-screen status line outbound.
+    .add_plugins(UiFollowPlugin)
     // Leaving (decision 0674): the game menu's Logout/Exit Game — the request, the server's
     // 20-second answer narrated as the CAMP/QUIT countdown, and the process exit.
     .add_plugins(UiLogoutPlugin)

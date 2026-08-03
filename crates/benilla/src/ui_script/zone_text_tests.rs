@@ -325,3 +325,87 @@ fn subzone_seat_hangs_under_the_territory_line_on_new_area() {
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
 }
+
+/// `AutoFollowStatus` — the third frame in `ZoneText.xml`, and the only thing `ref-ZoneText.lua`
+/// actually contains (decision 0893). The app fires `AUTOFOLLOW_BEGIN` with the followee's name and
+/// `AUTOFOLLOW_END` with nothing; the frame does the rest.
+///
+/// The load-bearing assertion is that **END reuses the name BEGIN latched**. That is why the app
+/// gets to fire END with no argument at all, and why [`crate::player::FollowState`] latches the
+/// name at start rather than re-reading it — by the time a follow ends, the followee is often gone.
+#[test]
+fn the_autofollow_status_line_names_the_followee_and_fades_on_end() {
+    let mut s = harness();
+    assert!(
+        !visible(&s, "AutoFollowStatus"),
+        "hidden until a follow begins"
+    );
+
+    s.fire_event(
+        "AUTOFOLLOW_BEGIN",
+        vec![benilla_ui::script::ScriptValue::Str("Probeone".into())],
+    );
+    s.resolve();
+    assert!(visible(&s, "AutoFollowStatus"));
+    assert_eq!(text_of(&s, "AutoFollowStatusText"), "Following Probeone.");
+    let alpha: f32 = s.eval("return AutoFollowStatus:GetAlpha()").unwrap();
+    assert!((alpha - 1.0).abs() < 0.01, "full alpha while following");
+
+    // A follow that runs for a while must NOT fade — the fade is armed only by END, and there is
+    // no hold timer to expire (this is not the FadingFrame kit).
+    s.tick(10.0);
+    assert!(visible(&s, "AutoFollowStatus"), "no fade while following");
+    let alpha: f32 = s.eval("return AutoFollowStatus:GetAlpha()").unwrap();
+    assert!((alpha - 1.0).abs() < 0.01, "still opaque after 10 s");
+
+    // END carries no argument: the line reuses the latched name.
+    s.fire_event("AUTOFOLLOW_END", vec![]);
+    s.resolve();
+    assert_eq!(
+        text_of(&s, "AutoFollowStatusText"),
+        "You stop following Probeone.",
+        "END has no argument of its own — the name comes from what BEGIN latched"
+    );
+    // A linear 4 s fade, no hold: half gone at 2 s, hidden past 4.
+    s.tick(2.0);
+    let alpha: f32 = s.eval("return AutoFollowStatus:GetAlpha()").unwrap();
+    assert!((alpha - 0.5).abs() < 0.05, "mid-fade alpha, got {alpha}");
+    s.tick(2.5);
+    assert!(!visible(&s, "AutoFollowStatus"), "gone after the 4 s fade");
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}
+
+/// A follow that switches subject fires `BEGIN` alone (see `crate::ui_follow`'s header). The
+/// reference's own handler treats BEGIN as a full reset — it clears `fadeTime`, restores alpha and
+/// re-shows — so a switch made *during* the end-fade must come back to a clean, opaque line rather
+/// than inheriting the dying one's alpha.
+#[test]
+fn a_begin_during_the_end_fade_resets_the_line() {
+    let mut s = harness();
+    s.fire_event(
+        "AUTOFOLLOW_BEGIN",
+        vec![benilla_ui::script::ScriptValue::Str("Probeone".into())],
+    );
+    s.fire_event("AUTOFOLLOW_END", vec![]);
+    s.tick(3.0); // most of the way through the fade
+    let faded: f32 = s.eval("return AutoFollowStatus:GetAlpha()").unwrap();
+    assert!(faded < 0.4, "mid-fade, got {faded}");
+
+    s.fire_event(
+        "AUTOFOLLOW_BEGIN",
+        vec![benilla_ui::script::ScriptValue::Str("Probetwo".into())],
+    );
+    s.resolve();
+    assert_eq!(text_of(&s, "AutoFollowStatusText"), "Following Probetwo.");
+    let alpha: f32 = s.eval("return AutoFollowStatus:GetAlpha()").unwrap();
+    assert!(
+        (alpha - 1.0).abs() < 0.01,
+        "BEGIN restores alpha, got {alpha}"
+    );
+    s.tick(10.0);
+    assert!(
+        visible(&s, "AutoFollowStatus"),
+        "and clears the pending fade rather than letting it finish"
+    );
+    assert!(s.errors().is_empty(), "errors: {:?}", s.errors());
+}

@@ -1,17 +1,16 @@
-//! `/follow` — the auto-follow movement mode (decision 0890).
+//! `/follow` — the auto-follow movement mode (decisions 0890, 0893).
 //!
 //! The finding that shapes this module: **follow synthesizes keyboard input.** It owns no
 //! translation of its own. Every state change in the reference funnels through the movement
 //! singleton's setter (`0x60e790` sets the move-forward bit `0x100000`, `0x60e7f0` clears it) — the
 //! same setter the MoveForward keybinding drives, one of ~40 stubs in the keybinding command table
 //! at `0x513de0`-`0x514273`. So follow is "hold W for me, and steer", and the right implementation
-//! reuses the controller wholesale rather than growing a second mover (wow-re
-//! `object-layer/scratch/targeting-by-name.md` PART D, §5-cross-checked).
+//! reuses the controller wholesale rather than growing a second mover.
 //!
 //! It also sends **nothing on the wire** — corroborated against vmangos, which has no follow opcode
 //! in 1.12.1. The server only ever sees the ordinary movement stream our synthesized input produces.
 //!
-//! ## The law
+//! ## The motion law
 //!
 //! - **Facing is steered, never snapped** (`0x6103d0`/`0x6108xx`): turn toward the followee at
 //!   [`TURN_RATE`] = π rad/s (180°/s), clamped to `min(remaining, rate × elapsed)`, and stop turning
@@ -24,19 +23,62 @@
 //!   whatever a held forward key yields for *you*, which is why follow falls behind a faster runner.
 //! - **A hysteresis band, not a stop distance** — see [`should_move`]. Arrive is inclusive, resume is
 //!   one-directional. The gap between the two is why follow visibly starts and stops rather than
-//!   juddering on a single threshold.
+//!   juddering on a single threshold. Arrival does **not** end the follow.
 //!
-//! ## The one INFERRED rule
+//! ## The cancel set — what actually makes this a *mode*
 //!
-//! The reference cancels follow when the player turns ~180° away (band 160°-220°), but wow-re could
-//! not trace *what that angle is measured against* — it is explicitly flagged unresolved. Measuring
-//! it against the live bearing alone cannot be right: starting a follow while facing away from the
-//! followee would then cancel on the first tick, before the steer had a chance to turn us.
+//! **Every player-initiated movement START cancels the follow, on the key-DOWN edge.** A key
+//! *release* never does, and neither does the follow's own synthesized input.
 //!
-//! So this module latches [`FollowState::aligned`] the first time the facing comes inside the band
-//! and only cancels *after* that. Observable behaviour: starting a follow facing any direction works
-//! and turns you around; deliberately turning around once you are following drops it. That matches
-//! what the band is plainly *for*, and is marked INFERRED until the reference angle is pinned.
+//! The mechanism sits two layers below the keybinding stubs, which is why reading the handlers
+//! answers "nothing cancels follow" and is wrong about the behaviour — the same failure mode
+//! wow-re's RF-0079 hit on autorun. Every movement START emitter calls **`0x60e990`**, which
+//! cancels at `0x60e9b5` unless the re-entrancy bracket `ds:0xc4da48` **bit 0** is set — and
+//! follow's own four emitters (`0x60e790`, `0x60e7f0`, `0x60e8a0`, `0x60e940`) set that bracket
+//! around their calls. A real key press never sets it. **That asymmetry is the entire mechanism.**
+//!
+//! We need no bracket of our own, because our synthesized input is [`Player::follow_forward`] — a
+//! flag the controller reads, never a key event — so it cannot reach the cancel at all.
+//!
+//! | action | benilla key | verdict |
+//! |---|---|---|
+//! | MoveForward / MoveBackward | `W` / `S` | **cancels** (key-DOWN) |
+//! | TurnLeft / TurnRight | `A` / `D` | **cancels** (key-DOWN) |
+//! | StrafeLeft / StrafeRight | `Q` / `E` | **cancels** (key-DOWN) |
+//! | ToggleAutoRun | `MouseButton::Forward` | **cancels**, on the ON edge only |
+//! | both-mouse-buttons run | `L`+`R` | **cancels**, on the both-held transition |
+//! | mouse-look turning | `R` held | **cancels** while held, however far the mouse moved |
+//! | **Jump** | `Space` | **survives** — the one emitter passing `0x60e990(0,0)` (`0x60dea8`) |
+//! | Sit / stand | — | **survives** (a `CMSG_STANDSTATECHANGE`, no guard call) |
+//! | walk/run toggle | — | **survives** |
+//! | any key release | — | **survives** |
+//!
+//! Plus the non-input cancels: **losing the mover** (death, stun, a taxi hand-off — the reference's
+//! second, rarer site at `0x5146d6`), the followee becoming unresolvable or **dying**, and the
+//! degenerate-bearing guard below.
+//!
+//! ## What is deliberately NOT here
+//!
+//! **The ~180° turn-away cancel is drunk-only, and is therefore absent.** 0890 shipped it as an
+//! INFERRED rule with a latch invented to make the 160°-220° band self-consistent. The band is
+//! real (`0x80c604` = 2.7925267 rad, `0x80c600` = 3.8397243 rad, both strict) — but its whole
+//! evaluation is gated at `0x610a3d` on an argument that is the **inebriation fraction**,
+//! `min([[unit+0xe68]+0x1d], 100) × 0.01`. That byte is proven to be drunkenness by two independent
+//! consumers of the identical expression: the `DRUNK_MESSAGE_SELF%d` formatter at `0x5e2ac3`, and
+//! `0x60001a` comparing the same fraction against 0.5 to pick an animation state. **On a sober
+//! character the band never executes**, so a client that does not model inebriation must not
+//! implement it — and benilla does not. (Its real arming trigger is turn-*convergence*, not "inside
+//! the band", with a stochastic disarm at `0x61092e`; recorded for whoever adds drunkenness.)
+//!
+//! Also refuted by census, each a real "surely this cancels follow?" candidate: taking damage,
+//! entering combat, mounting, beginning a cast, and the followee simply going out of range
+//! (`0x6107e5` explicitly excludes follow's mode at `0x610749`/`0x610752`).
+//!
+//! ## The start gate lives elsewhere
+//!
+//! Who you may begin following — a living, assistable **player**, and only while you are alive,
+//! unstunned and not casting — is [`crate::target::by_name`]'s, because that is where the subject
+//! is resolved. The refusals it raises are real error lines, not silence.
 
 use std::f32::consts::PI;
 
@@ -44,6 +86,7 @@ use bevy::prelude::*;
 
 use crate::net::GuidIndex;
 
+use super::camera::{CameraControl, LookButton};
 use super::state::{MoveSpeed, Player};
 
 /// Follow's facing-turn rate, rad/s — `0xc4d93c`, seeded `0x40490fdb` = π at `0x6111f9`. Its own
@@ -65,22 +108,26 @@ const STOP_DISTANCE: f32 = 3.0;
 /// closes below 3.0 / 4.5 yd however slowly you are moving.
 const RESUME_FACTOR: f32 = 1.5;
 
-/// How far off the bearing the facing must sit for a deliberate turn to drop the follow. The
-/// reference's band is 160°-220°; wrapped into `[0, π]` that is "at least 160° off".
-const CANCEL_ANGLE: f32 = 160.0 * PI / 180.0;
+/// `cos(1°)`. The degenerate-bearing guard at `0x610d32` ends the follow once the followee sits
+/// within one degree of straight up or down (`|dy| / dist > cos 1°`) — at which point the
+/// horizontal bearing a beeline needs is numerically meaningless. Held in `0xc4d9d0`, seeded at
+/// `0x610c8d` from `.rdata 0x80c5f8`.
+const VERTICAL_ALIGN_COS: f32 = 0.999_847_7;
 
 /// Who we are following, and the hysteresis latch — the reference's followed-guid pair `0xc4d980`
-/// (armed `0x6111c9`, cleared `0x60fc1e`) plus the state its band implies.
+/// (armed `0x6111c9`, cleared `0x60fc1e`; **exactly two writers each**, earned by an
+/// opcode-agnostic raw-byte scan for the little-endian addresses, not a literal-displacement grep).
 #[derive(Resource, Default)]
 pub(crate) struct FollowState {
     /// The followee's guid, or `None` when not following.
     pub(crate) guid: Option<u64>,
+    /// The followee's name as it read at the moment the follow began — what
+    /// `AUTOFOLLOW_BEGIN`'s argument carries, and therefore what the status text says. Latched
+    /// rather than re-read so the line can't change under a rename or a cache eviction mid-follow.
+    pub(crate) name: String,
     /// Whether the synthesized forward input is currently held. The band's latch: which threshold
     /// applies depends on which side we are already on.
     moving: bool,
-    /// Whether the facing has come inside [`CANCEL_ANGLE`] at least once since the follow began —
-    /// the guard on the INFERRED turn-away cancel (see the module header).
-    aligned: bool,
     /// `WOW_FOLLOW_TRACE` bookkeeping: when the last trace line went out, and where we were.
     /// `None` until a tick has seeded it.
     traced_at: f64,
@@ -89,10 +136,10 @@ pub(crate) struct FollowState {
 
 impl FollowState {
     /// Begin following `guid`, from a clean band.
-    pub(crate) fn start(&mut self, guid: u64) {
+    pub(crate) fn start(&mut self, guid: u64, name: String) {
         self.guid = Some(guid);
+        self.name = name;
         self.moving = false;
-        self.aligned = false;
         self.traced_at = 0.0;
         self.traced_pos = None;
     }
@@ -100,17 +147,26 @@ impl FollowState {
     /// Stop following. Returns whether we actually were.
     pub(crate) fn stop(&mut self) -> bool {
         self.moving = false;
-        self.aligned = false;
         self.guid.take().is_some()
     }
 }
 
-/// `/follow [name]` — start following. `None` is the bare form (`FollowUnit("target")`), whose
-/// subject is the current selection; a name resolves **players only** and additionally through the
-/// reference's filter mode 2 (`CanAssist` + alive), which is [`crate::target`]'s to apply.
+/// Start following — the app-side funnel every entry point converges on, whether it came from the
+/// chat parser (decision 0881 parses slash lines in Rust) or from the Era API globals the shipped
+/// UI calls ([`benilla_ui::script::FollowRequest`], via [`crate::ui_follow`]).
+///
+/// The two variants are the reference's own two bindings. They differ in how the subject is *found*
+/// — a name resolves players only and through the by-name resolver's filter mode 2, a token takes
+/// whatever it points at — but **not** in what is allowed: the start gate downstream applies to
+/// both alike, which is why `/follow` on a creature refuses either way.
 #[derive(bevy::ecs::message::Message, Clone, Debug)]
-pub(crate) struct FollowRequest {
-    pub(crate) name: Option<String>,
+pub(crate) enum FollowRequest {
+    /// `FollowUnit(unit)` — the bare `/follow` is `FollowUnit("target")`.
+    Unit(String),
+    /// `FollowByName(name, exactMatch)`. `exact` is the second Lua argument: the unit popup's
+    /// Follow row passes `1` (it already knows the exact name and must not prefix-match onto a
+    /// bystander), `/follow <name>` passes nothing.
+    Name { name: String, exact: bool },
 }
 
 /// The distance at which follow **arrives** and lets go of the key (`0x610ad2`-`0x610b1b`):
@@ -136,6 +192,25 @@ fn should_move(was_moving: bool, distance: f32, speed: f32) -> bool {
     }
 }
 
+/// Does this frame's input **destroy** the follow? See the module header's table for the census
+/// and for what is deliberately absent.
+///
+/// `move_start` is the key-DOWN **edge** of any movement start (W/S/A/D/Q/E), never held state —
+/// the reference cancels in the START emitters and its STOP siblings carry no guard call at all,
+/// which is why letting go of a key never resumes a follow you just broke. `autorun_engaged` is
+/// likewise the ON edge only (the OFF edge routes to the unguarded `0x60dc90`). `mouse_look` is a
+/// *level*, not an edge: the camera's facing commit re-enters the guard every frame the look is
+/// held, regardless of how far the mouse actually moved.
+fn follow_cancelled(
+    move_start: bool,
+    autorun_engaged: bool,
+    both_engaged: bool,
+    mouse_look: bool,
+    lost_mover: bool,
+) -> bool {
+    move_start || autorun_engaged || both_engaged || mouse_look || lost_mover
+}
+
 /// Wrap an angle into `(-π, π]`.
 fn wrap_pi(a: f32) -> f32 {
     let t = std::f32::consts::TAU;
@@ -153,6 +228,13 @@ fn bearing_to(delta: Vec3) -> f32 {
     (-delta.x).atan2(-delta.z)
 }
 
+/// Is the followee within one degree of straight up or down? `0x610d32`'s guard — at that point the
+/// horizontal bearing is numerically meaningless and the follow ends rather than spinning.
+fn vertically_degenerate(delta: Vec3) -> bool {
+    let dist = delta.length();
+    dist > f32::EPSILON && delta.y.abs() / dist > VERTICAL_ALIGN_COS
+}
+
 /// Turn `face` toward `bearing` by at most this tick's budget, or leave it alone inside the
 /// deadzone. The reference's `min(remaining, rate × elapsed)` clamp.
 fn steer(face: f32, bearing: f32, dt: f32) -> f32 {
@@ -164,13 +246,47 @@ fn steer(face: f32, bearing: f32, dt: f32) -> f32 {
     face + remaining.clamp(-budget, budget)
 }
 
-/// Drive the follow: re-resolve the followee, steer the facing, and decide whether the synthesized
-/// forward input is held this tick. Runs immediately **before** `control`, which reads
-/// [`Player::follow_forward`] as one more term of its forward axis — the reference's shape exactly,
-/// where follow pushes the same move-forward bit the W key does.
+/// Everything the cancel set reads. Bundled so [`steer_follow`]'s own parameter list stays about
+/// the motion.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct FollowInput<'w> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    buttons: Res<'w, ButtonInput<MouseButton>>,
+    /// The camera rig, for the mouse-look level. Read one frame behind `control`'s own update,
+    /// which is deliberate and harmless: the cancel then lands on the frame *after* the look
+    /// begins, versus the reference's same-frame commit.
+    rig: Res<'w, CameraControl>,
+    /// While a focused UI EditBox owns the keyboard, keyboard reads see "no keys held" — so typing
+    /// "we should go" in chat must not break your follow. `control`'s own gate, applied here for
+    /// the same reason.
+    capture: Res<'w, crate::ui_script::UiKeyboardCapture>,
+}
+
+impl FollowInput<'_> {
+    /// The key-DOWN edge of any movement start. A/D are turn keys normally and strafe keys under
+    /// mouse-look; either way they are a movement start and either way they cancel, so the
+    /// distinction the controller draws does not matter here.
+    fn move_start(&self) -> bool {
+        !self.capture.0
+            && self.keys.any_just_pressed([
+                KeyCode::KeyW,
+                KeyCode::KeyS,
+                KeyCode::KeyA,
+                KeyCode::KeyD,
+                KeyCode::KeyQ,
+                KeyCode::KeyE,
+            ])
+    }
+}
+
+/// Drive the follow: cancel if this frame's input says so, then re-resolve the followee, steer the
+/// facing, and decide whether the synthesized forward input is held this tick. Runs immediately
+/// **before** `control`, which reads [`Player::follow_forward`] as one more term of its forward
+/// axis — the reference's shape exactly, where follow pushes the same move-forward bit W does.
 ///
-/// The player's own turn input runs *after* this in the same frame and therefore wins; that is what
-/// makes the turn-away cancel reachable at all.
+/// The cancel runs before the steer for the reference's own reason: it lives in the movement START
+/// emitters, which run ahead of the axis math (`0x5150a7` vs the emitter tail `0x5151a0`), so the
+/// frame you break a follow on is a frame the follow never steers.
 pub(super) fn steer_follow(
     time: Res<Time>,
     mut follow: ResMut<FollowState>,
@@ -178,8 +294,30 @@ pub(super) fn steer_follow(
     speed: Res<MoveSpeed>,
     index: Res<GuidIndex>,
     transforms: Query<&Transform>,
+    input: FollowInput,
 ) {
     player.follow_forward = false;
+    if follow.guid.is_none() {
+        return;
+    }
+    // ── The cancel set ── before anything else this frame (see the doc above).
+    let both_engaged = input.buttons.pressed(MouseButton::Left)
+        && input.buttons.pressed(MouseButton::Right)
+        && (input.buttons.just_pressed(MouseButton::Left)
+            || input.buttons.just_pressed(MouseButton::Right));
+    if follow_cancelled(
+        input.move_start(),
+        // The ON edge only: `control` toggles `autorun` AFTER this runs, so the flag we read here
+        // is still the pre-toggle value, and "press while off" is exactly the engage.
+        input.buttons.just_pressed(MouseButton::Forward) && !player.autorun,
+        both_engaged,
+        input.rig.look == Some(LookButton::Right),
+        player.modes.rooted || player.server_riding(),
+    ) {
+        info!("follow: cancelled by the player's own movement input");
+        follow.stop();
+        return;
+    }
     let Some(guid) = follow.guid else { return };
     // Re-resolved every tick, nothing cached — a followee that streams out ends the follow
     // (`0x610e40` → `0x6106e7`).
@@ -194,22 +332,19 @@ pub(super) fn steer_follow(
         return;
     };
     let delta = target - player.pos;
+    // The degenerate-bearing guard (`0x610d32`), checked on the FULL 3D delta before the bearing is
+    // taken from the flattened one.
+    if vertically_degenerate(delta) {
+        info!("follow: the followee is within 1° of straight overhead — follow ends");
+        follow.stop();
+        return;
+    }
     let flat = Vec3::new(delta.x, 0.0, delta.z);
     let distance = flat.length();
     if distance < f32::EPSILON {
         return;
     }
     let bearing = bearing_to(flat);
-    // The INFERRED turn-away cancel (module header): only armed once the facing has come inside the
-    // band, so beginning a follow while facing away turns us around instead of cancelling.
-    let off_bearing = wrap_pi(bearing - player.face_yaw).abs();
-    if off_bearing < CANCEL_ANGLE {
-        follow.aligned = true;
-    } else if follow.aligned {
-        info!("follow: turned away from the followee — follow ends");
-        follow.stop();
-        return;
-    }
     player.face_yaw = steer(player.face_yaw, bearing, time.delta_secs());
     let moving = should_move(follow.moving, distance, speed.value);
     if moving != follow.moving {
@@ -338,5 +473,42 @@ mod tests {
             wrap_pi(after - (PI - 0.05)) > 0.0,
             "should wrap forward across ±π"
         );
+    }
+
+    /// The cancel set's table, in its own terms. Each argument is one row of the module header, and
+    /// the two that matter most are the FALSE ones: jump and a plain key release are VERIFIED
+    /// survivors, not oversights — they reach the guard with `realStart = 0` or never reach it.
+    #[test]
+    fn any_movement_start_cancels_but_jump_and_releases_do_not() {
+        // Nothing happening: a follow just keeps following, however long it runs.
+        assert!(!follow_cancelled(false, false, false, false, false));
+        // Each start, alone, is enough.
+        assert!(follow_cancelled(true, false, false, false, false));
+        assert!(follow_cancelled(false, true, false, false, false));
+        assert!(follow_cancelled(false, false, true, false, false));
+        assert!(follow_cancelled(false, false, false, true, false));
+        // Losing the mover — death, stun, a taxi hand-off — is a LEVEL, not an edge.
+        assert!(follow_cancelled(false, false, false, false, true));
+        // Jump and key releases never become any of those arguments (see `FollowInput::move_start`,
+        // which reads `just_pressed` and does not list Space at all), so the all-false row above IS
+        // the jump case — asserted here so deleting Space's absence breaks a test.
+        assert!(
+            !follow_cancelled(false, false, false, false, false),
+            "a jump leaves every cancel input false"
+        );
+    }
+
+    /// The degenerate-bearing guard (`0x610d32`) — a followee straight overhead ends the follow,
+    /// one a degree off the vertical does not. The horizontal case must be nowhere near it.
+    #[test]
+    fn a_followee_straight_overhead_ends_the_follow() {
+        assert!(vertically_degenerate(Vec3::new(0.0, 30.0, 0.0)));
+        assert!(vertically_degenerate(Vec3::new(0.0, -30.0, 0.0)));
+        // 1° off vertical is outside the guard: tan(1°) ≈ 0.01746, so 30 yd up needs > 0.52 yd out.
+        assert!(!vertically_degenerate(Vec3::new(0.6, 30.0, 0.0)));
+        // The ordinary case — a followee on roughly your own level — is untouched.
+        assert!(!vertically_degenerate(Vec3::new(10.0, 2.0, 5.0)));
+        // A zero delta is not "degenerate": it is the arrived case, which the band owns.
+        assert!(!vertically_degenerate(Vec3::ZERO));
     }
 }

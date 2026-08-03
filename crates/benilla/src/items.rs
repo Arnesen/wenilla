@@ -294,13 +294,13 @@ mod tests {
         assert!(items.take_fresh().is_empty(), "a drain empties the queue");
     }
 
-    /// The one predicate both halves of the right-click-to-open affordance ask
-    /// (`ItemInfo::openable`): the tooltip's green line and the `CMSG_OPEN_ITEM` fork. Its whole
-    /// subtlety is the two sub-gates — a `LockID` template stays shut until the INSTANCE carries
-    /// UNLOCKED, and a wrapper template needs the instance's WRAPPED bit — so a template-only
-    /// view (instance flags 0) can never be openable.
+    /// The right-click-to-open predicates — and the fact that the **line and the click are not the
+    /// same test** (decision 0896). The tooltip's `shows_open_line` carries the lock sub-gate (a
+    /// `LockID` template earns the line only once the INSTANCE says UNLOCKED); the click's
+    /// `opens_loot` is the BARE template bit, so a still-locked junkbox sends anyway and the
+    /// server supplies the refusal. Getting that backwards eats the click in silence.
     #[test]
-    fn openable_is_the_lootable_bit_behind_its_lock_and_gift_sub_gates() {
+    fn open_line_carries_the_lock_gate_the_open_send_does_not() {
         let plain = |flags: u32, lock_id: u32| {
             let mut t = info("Small Barnacled Clam");
             t.flags = flags;
@@ -308,19 +308,33 @@ mod tests {
             t
         };
 
-        // The clam: LOOTABLE, no lock — openable outright, instance flags irrelevant.
-        assert!(plain(ITEM_FLAG_LOOTABLE, 0).openable(0));
-        // An ordinary item is never openable, however its instance is flagged.
-        assert!(!plain(0, 0).openable(ITEM_DYNFLAG_UNLOCKED | ITEM_DYNFLAG_WRAPPED));
-        // A junkbox: LOOTABLE but locked — shut until the instance says UNLOCKED.
-        assert!(!plain(ITEM_FLAG_LOOTABLE, 7).openable(0));
-        assert!(plain(ITEM_FLAG_LOOTABLE, 7).openable(ITEM_DYNFLAG_UNLOCKED));
-        // Gift wrap: the WRAPPER template opens only while the instance is still WRAPPED.
-        assert!(!plain(ITEM_FLAG_WRAPPER, 0).openable(0));
-        assert!(plain(ITEM_FLAG_WRAPPER, 0).openable(ITEM_DYNFLAG_WRAPPED));
-        // The wrapped arm ignores the lock gate entirely — it is the sibling `||`, not a nested
-        // case: a wrapped gift of a locked box opens as the gift.
-        assert!(plain(ITEM_FLAG_WRAPPER | ITEM_FLAG_LOOTABLE, 7).openable(ITEM_DYNFLAG_WRAPPED));
+        // The clam: LOOTABLE, no lock — line and send agree, instance flags irrelevant.
+        assert!(plain(ITEM_FLAG_LOOTABLE, 0).shows_open_line(0));
+        assert!(plain(ITEM_FLAG_LOOTABLE, 0).opens_loot());
+        // An ordinary item does neither, however its instance is flagged.
+        assert!(!plain(0, 0).shows_open_line(ITEM_DYNFLAG_UNLOCKED | ITEM_DYNFLAG_WRAPPED));
+        assert!(!plain(0, 0).opens_loot());
+        // A junkbox: LOOTABLE but locked. **The two predicates part company here** — no line
+        // until the instance says UNLOCKED, but the click goes out either way.
+        assert!(!plain(ITEM_FLAG_LOOTABLE, 7).shows_open_line(0));
+        assert!(plain(ITEM_FLAG_LOOTABLE, 7).shows_open_line(ITEM_DYNFLAG_UNLOCKED));
+        assert!(
+            plain(ITEM_FLAG_LOOTABLE, 7).opens_loot(),
+            "the send ignores LockID entirely — the server owns the refusal"
+        );
+        // Gift wrap: the WRAPPER template unwraps only while the instance is still WRAPPED, and
+        // that arm is its own dispatcher position, not a nested case of the loot arm.
+        assert!(!plain(ITEM_FLAG_WRAPPER, 0).unwraps_gift(0));
+        assert!(plain(ITEM_FLAG_WRAPPER, 0).unwraps_gift(ITEM_DYNFLAG_WRAPPED));
+        assert!(
+            !plain(ITEM_FLAG_WRAPPER, 0).opens_loot(),
+            "WRAPPER is not LOOTABLE"
+        );
+        assert!(plain(ITEM_FLAG_WRAPPER, 0).shows_open_line(ITEM_DYNFLAG_WRAPPED));
+        // A wrapped gift of a locked box: the gift arm ignores the lock gate on both sides.
+        let gift_box = plain(ITEM_FLAG_WRAPPER | ITEM_FLAG_LOOTABLE, 7);
+        assert!(gift_box.unwraps_gift(ITEM_DYNFLAG_WRAPPED));
+        assert!(gift_box.shows_open_line(ITEM_DYNFLAG_WRAPPED));
     }
 
     #[test]

@@ -4,9 +4,9 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    backdrop, bank, char_stats, container, craft, cursor, death, duel, gossip, inspect, item_text,
-    loot, loot_roll, mail, merchant, party, quest, quest_log, session, skills, slider, social,
-    spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, FontObject,
+    backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, inspect,
+    item_text, loot, loot_roll, mail, merchant, party, quest, quest_log, session, skills, slider,
+    social, spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, FontObject,
     ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
@@ -180,6 +180,11 @@ pub(crate) struct Model {
     /// [`super::UiScript::take_duel_requests`] drain — the outbound seam ([`duel`]). There is no
     /// duel *snapshot* beside it: everything the UI reads arrives as event arguments.
     pub(crate) duel_requests: Vec<duel::DuelRequest>,
+    /// Follow intents (`FollowUnit`/`FollowByName`) queued since the app's last
+    /// [`super::UiScript::take_follow_requests`] drain — the outbound seam ([`follow`]). The duel
+    /// queue's twin, snapshot-less for the same reason: the only thing the UI reads back is the
+    /// `AUTOFOLLOW_BEGIN`/`AUTOFOLLOW_END` pair the app fires, which carries its own argument.
+    pub(crate) follow_requests: Vec<follow::FollowRequest>,
     /// Session-exit intents (`Logout`/`Quit`/`CancelLogout`/`ForceQuit`) queued since the app's
     /// last [`super::UiScript::take_session_requests`] drain — the outbound seam ([`session`]).
     /// Snapshot-less like the duel queue above: what the UI reads back (the camp/quit countdown)
@@ -707,6 +712,7 @@ impl Model {
             social_requests: Vec::new(),
             tell_requests: Vec::new(),
             duel_requests: Vec::new(),
+            follow_requests: Vec::new(),
             session_requests: Vec::new(),
             pvp_toggles: 0,
             sound_queue: Vec::new(),
