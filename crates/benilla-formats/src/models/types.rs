@@ -86,6 +86,63 @@ impl BillboardKind {
     }
 }
 
+/// How a bone's **effective parent matrix** is rewritten before it composes — M2 bone flag bits
+/// `0x1/0x2/0x4`, the standard `ignore parent translate / scale / rotate` trio.
+///
+/// The reference tests `flags & 7` on every non-root bone (`m2_animate` `0x714961`) and, when any
+/// of the three is set, takes a ~950-byte arm (`0x71496d`–`0x714d0c`) that rebuilds that bone's
+/// parent matrix out of the **model's own root matrix** — pivot-preserved — *and then falls into
+/// the billboard selector unchanged*. It is not an escape hatch from anything: it changes the
+/// INPUT the billboard law is applied to (wow-re `billboard-bone-law.md` §9.1, byte-verified).
+///
+/// The three legs are proven from the binary, matching the standard names: `0x1` at `0x714c92`,
+/// `0x2` at `0x714bdb`, `0x4` at `0x714a6e` alone / `0x714a18` combined with `0x2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentArm {
+    /// `0x1` — the bone's frame is placed at the model root's origin instead of at the pivot its
+    /// animated parent carried it to.
+    pub ignore_translate: bool,
+    /// What `flags & 0x6` does to the parent's basis.
+    pub basis: ParentBasis,
+}
+
+/// The `flags & 0x6` leg of [`ParentArm`] — what happens to the parent matrix's three basis
+/// vectors. (The reference works in row-major/row-vector form, so its "row K" is our column K:
+/// both name the image of model basis vector K, which is what every leg operates on.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentBasis {
+    /// `flags & 6 == 0` (so `flags & 7 == 1` alone): the parent's basis is kept as-is.
+    Keep,
+    /// `flags & 6 == 2` — ignore parent scale: each basis vector is normalized, direction kept.
+    UnitNormalize,
+    /// `flags & 6 == 4` — ignore parent rotation: the ROOT's direction with the parent's
+    /// magnitude (`0x714a6e`'s per-axis `|P_k| / |R_k|` ratio).
+    RootDirection,
+    /// `flags & 6 == 6` — ignore parent rotation AND scale: the root's basis outright
+    /// (`0x714a18`). Every vanilla player mount's rider seat is this or [`Self::RootDirection`],
+    /// which is why the saddle translates with the gallop and never rotates.
+    RootBasis,
+}
+
+impl ParentArm {
+    /// The arm an M2 bone's flag word authors, `None` when `flags & 7 == 0` (the ordinary bone,
+    /// which goes straight to the billboard selector — `je 0x714d0f`).
+    pub fn from_bone_flags(bits: u32) -> Option<Self> {
+        if bits & 0x7 == 0 {
+            return None;
+        }
+        Some(Self {
+            ignore_translate: bits & 0x1 != 0,
+            basis: match bits & 0x6 {
+                0x2 => ParentBasis::UnitNormalize,
+                0x4 => ParentBasis::RootDirection,
+                0x6 => ParentBasis::RootBasis,
+                _ => ParentBasis::Keep,
+            },
+        })
+    }
+}
+
 /// A bone **scale track driven by a global sequence** — the looping "breathe" pulse a glow card rides.
 /// VERIFIED mechanism: the Lamppost glow card sits on a spherical-billboard bone whose scale track
 /// (`interp=1`, `gseq=0`) oscillates `0.86 … 1.04` over the model's 1333 ms global sequence, so the

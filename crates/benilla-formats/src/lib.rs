@@ -164,10 +164,10 @@ pub use models::{
     wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind,
     BoneKeys, BoneScaleAnim, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy,
     FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment,
-    M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, PlayableAnim, RenderSubmesh,
-    RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
-    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot, OWNER_RUNG_BUCKETS,
+    M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
+    PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors,
+    UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
+    WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

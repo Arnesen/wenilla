@@ -553,6 +553,30 @@ fn spell_schema() -> Schema {
 pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
     let icons = crate::dbc::load_spell_icon_map(chain)?;
     let dispel_types = load_spell_dispel_types(chain)?;
+    // The SpellCategory "matches every query" wildcard set (`GetCooldownInfo 0x6e13e0`'s category
+    // leg, `6e1563`/`6e1567`: a category row whose Flags carry bit `0x2` contributes to ANY
+    // queried spell — wow-re `gcd-power-gate.md` §2). In the 5875 data exactly one row carries
+    // it: category 351, wand Shoot's — the whole-bar wand-swing sweep (pinned in catalog_tests).
+    let wildcard_categories: std::collections::HashSet<u32> = {
+        let bytes = chain
+            .read_file("DBFilesClient\\SpellCategory.dbc")
+            .context("reading SpellCategory.dbc")?;
+        let mut s = benilla_dbc::Schema::new("SpellCategory");
+        s.add_field(benilla_dbc::SchemaField::new(
+            "ID",
+            benilla_dbc::FieldType::UInt32,
+        ));
+        s.add_field(benilla_dbc::SchemaField::new(
+            "Flags",
+            benilla_dbc::FieldType::UInt32,
+        ));
+        let rs = parse(&bytes, s, "SpellCategory.dbc")?;
+        rs.records()
+            .iter()
+            .filter(|r| u32_at(r, 1).unwrap_or(0) & 0x2 != 0)
+            .filter_map(|r| u32_at(r, 0))
+            .collect()
+    };
 
     let spell_bytes = chain.read_file(SPELL).context("reading Spell.dbc")?;
     let spells_set = parse(&spell_bytes, spell_schema(), "Spell.dbc")?;
@@ -613,6 +637,11 @@ pub fn load_spell_catalog(chain: &mut Chain) -> Result<SpellCatalog> {
                 }),
                 dispel: u32_at(r, COL_DISPEL).unwrap_or(0),
                 category: u32_at(r, COL_CATEGORY).unwrap_or(0),
+                // The category row's flags-bit-0x2 "matches every query" mark (only wand Shoot's
+                // 351 in the 5875 data) — resolved at load so the cooldown store's category leg
+                // reads it off the record it armed (`gcd-power-gate.md` §2).
+                category_wildcard: u32_at(r, COL_CATEGORY)
+                    .is_some_and(|c| wildcard_categories.contains(&c)),
                 recovery_ms: u32_at(r, COL_RECOVERY_TIME).unwrap_or(0),
                 interrupt_flags: u32_at(r, COL_INTERRUPT_FLAGS).unwrap_or(0),
                 aura_interrupt_flags: u32_at(r, COL_AURA_INTERRUPT_FLAGS).unwrap_or(0),

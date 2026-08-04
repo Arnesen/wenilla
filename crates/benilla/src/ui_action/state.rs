@@ -200,6 +200,7 @@ pub(super) fn feed_action_state(
     actions: Res<PlayerActions>,
     spells: Option<Res<Spells>>,
     mut cooldowns: ResMut<Cooldowns>,
+    clock: Res<crate::ui_script::UiClock>,
     auto_repeat: Res<AutoRepeatActive>,
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
     // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
@@ -224,9 +225,10 @@ pub(super) fn feed_action_state(
         return;
     };
     let now = Instant::now();
-    // This frame's reading of the VM's GetTime clock — `ui_triple`'s conversion base: every
-    // cooldown is pushed as its absolute start on that clock.
-    let ui_now = script.now();
+    // The frame's atomic clock pair — `ui_triple`'s conversion base: every cooldown is pushed as
+    // its absolute start on the GetTime clock, derived through the ONE lawful pair
+    // ([`crate::ui_script::UiClock`]) so a running cooldown re-derives the same start every frame.
+    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     cooldowns.prune(now);
     let gen_changed = memory.last_generation != Some(cooldowns.generation);
     memory.last_generation = Some(cooldowns.generation);
@@ -306,7 +308,6 @@ pub(super) fn feed_action_state(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
-                        now,
                     };
                     let (u, oom) =
                         usable::spell_usable(button.action, d, sp, &ctx, &mut items, &commands);
@@ -327,7 +328,7 @@ pub(super) fn feed_action_state(
                     _ => None,
                 };
                 let info = cooldowns.info(button.action, 0, Some(d), now);
-                st.cooldown = info.ui_triple(now, ui_now);
+                st.cooldown = info.ui_triple(anchor, ui_now);
                 if st.cooldown.is_some() && trace_cd {
                     // The store (Instant clock) vs the widget (GetTime clock) — the sink
                     // stamps the wall time, so drift between the two clocks reads directly.
@@ -363,7 +364,7 @@ pub(super) fn feed_action_state(
                 if let Some(u) = template.as_ref().and_then(|t| t.use_spell) {
                     let d = spells.as_ref().and_then(|s| s.catalog.get(u.spell_id));
                     let info = cooldowns.info(u.spell_id, button.action, d, now);
-                    st.cooldown = info.ui_triple(now, ui_now);
+                    st.cooldown = info.ui_triple(anchor, ui_now);
                 }
             }
             _ => {} // macros: everything cold until a macro window exists

@@ -77,6 +77,35 @@ pub(crate) struct CursorPayloadHeld(pub(crate) bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
 
+/// The frame's atomic (`Instant`, `GetTime`) clock pair — the ONE lawful base for mapping a
+/// store-side `Instant` onto the VM's `GetTime` clock (`CooldownInfo::ui_triple` and kin).
+///
+/// Written at the single `script.tick` site ([`extract::drive_script`]): `ui_now` is the value the
+/// VM clock just advanced to, `anchor` is `Time<Real>`'s own `last_update()` — the exact instant
+/// whose frame-to-frame differences ARE the deltas the VM clock accumulates. Because both legs
+/// advance in lockstep by construction, a conversion `ui_now - (anchor - start)` yields the SAME
+/// number every frame for one fixed `start` — the frame-stability 0375's absolute-start triples
+/// require. Converting through `Instant::now()` sampled inside a feed system instead (the pre-fix
+/// shape) re-measures the tick→feed scheduling gap every frame and wobbles the derived start by
+/// that jitter (±12 ms observed live), turning every running cooldown into a per-frame "changed"
+/// triple — the diff churn 0375 existed to kill.
+#[derive(Resource)]
+pub(crate) struct UiClock {
+    /// The `Instant` leg: `Time<Real>::last_update()` at the tick that produced [`Self::ui_now`].
+    pub(crate) anchor: std::time::Instant,
+    /// The `GetTime` leg: the VM clock's value after that tick (seconds).
+    pub(crate) ui_now: f64,
+}
+
+impl Default for UiClock {
+    fn default() -> Self {
+        Self {
+            anchor: std::time::Instant::now(),
+            ui_now: 0.0,
+        }
+    }
+}
+
 /// Run a Lua chunk, logging (never discarding) a failure. App systems drive the VM with fire-and-
 /// forget chunks; `let _ = script.run(…)` swallows the error — the chat header machine died
 /// mid-chunk on a missing `EditBox:SetTextColor` every single frame and nothing ever said so
@@ -146,6 +175,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<CursorPayloadHeld>()
+            .init_resource::<UiClock>()
             // After `AssetSet::Open` so the patch chain exists at boot: the VM's first load is
             // the real `GlobalStrings.lua` (the reference's own FrameXML order), which the
             // cast-fail display (0427) resolves its messages from.

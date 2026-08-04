@@ -8,7 +8,7 @@
 //! reaches the shared types + caches in the parent via `super::`.
 
 use avian3d::prelude::RigidBody;
-use benilla_assets::ModelSkeleton;
+use benilla_assets::{ModelAnimations, ModelSkeleton};
 use benilla_protocol::EntityKind;
 use bevy::prelude::*;
 
@@ -40,33 +40,17 @@ pub(super) use glue_preview::build_glue_preview;
 mod redress;
 pub(super) use redress::redress_player_looks;
 
-/// Set up the skinned + animated instance shared by creatures/players (decision 0019) and animated
-/// GameObjects (decision 0242): the per-instance joints, the billboard glow rig, and — when the model
-/// authors sequences — the `AnimationPlayer` + graph + `ModelAnimations` plus the base-track driver.
-/// Three flavours share the rig, disjoint so one never touches the other's entities:
-///   * a **creature/player** — the movement-driven gait picker (`AnimDriver`);
-///   * a **state GameObject** (door/button/chest — `go_state_machine`) — the open/close state machine
-///     (`GoAnim`), which cross-fades transitions through `AnimationTransitions`;
-///   * **any other animated GameObject** (a mailbox's wind-swung flags, a banner) — *no* controller:
-///     the reference arms the model's **Stand** sequence (animation id 0, resolved through the
-///     model's own `playableAnimationLookup`) as the universal "loader-idle seed", and loops it iff
-///     `M2Sequence.flags & 1 == 0` (wow-re `gameobject-anim-arm.md` §1/§2, byte-verified `0x71019b`
-///     / `0x714585` — decision 0637, which corrected the earlier "arms the FIRST sequence" reading
-///     this comment used to carry). We arm it here and let the kernel's modulo-wrap run it, ungated
-///     like the creature path (GOs are few — the doodad host's draw-gate isn't warranted for them).
+/// Set up the skinned instance shared by creatures/players (decision 0019) and animated
+/// GameObjects (decision 0242): the per-instance consumer-bone anchors, the pose buffer, the
+/// palette rig slot, and the global-sequence drive.
 ///
-///     The reference *also* runs a second, GameObject-specific arm off `GAMEOBJECT_STATE` +
-///     `GAMEOBJECT_ANIMPROGRESS` (same note, §2), and it lands AFTER this seed, so where both apply
-///     the state arm is what is seen. benilla runs that arm only for the door/button/chest types
-///     ([`crate::go_anim::go_animates`]). **That gate is a known narrowing, and it is not free:**
-///     `benilla-extract goanimscan` measures 251 of 1582 GameObjectDisplayInfo models as
-///     STATE-SENSITIVE (some reachable substate plays a different sequence from this seed), which on
-///     the live world data is **1979 spawns** sitting on such a model with a GO type left off the
-///     machine — books, traps, goobers, generic props. Widening it waits on the wow-re type census
-///     (which of the 30 types allocate the `[GO+0x210]` handler at the `0x5f708c` dispatch); the
-///     seed below is what those types render in the meantime.
+/// The **sequence clock** — the `AnimationPlayer` + graph + [`ModelAnimations`] + the driver that
+/// owns the choice — is NOT set up here; it is [`arm_sequence_clock`], called by the spawn site
+/// whether or not this rig was built (decision 0941). Everything in this function costs a palette
+/// slot and a skinned twin, and is worth spending only on a model whose bones actually move; the
+/// clock is worth arming on every instance, because a sequence drives far more than a pose.
 ///
-/// Global-sequence channels ride along regardless of flavour. This lane spawns **no joint
+/// This lane spawns **no joint
 /// entities** (decision 0724): the pose lives in a [`crate::creature_anim::RigPose`] array on
 /// `entity`, and only the CONSUMER bones — attachment points, event markers, emitter/ribbon/
 /// light hosts, billboard-card bones — get an anchor entity under `joints_root`, re-seated from
@@ -81,8 +65,6 @@ fn setup_skinned_instance(
     entity: Entity,
     joints_root: Entity,
     d: &DisplayModel,
-    kind: EntityKind,
-    go_state_machine: bool,
 ) -> Option<RigBuild> {
     let ibp = d.inverse_bindposes.as_ref()?;
     let nbones = d.skeleton.joints.len();
@@ -159,62 +141,10 @@ fn setup_skinned_instance(
             }
         };
     if let Some(anims) = d.animations.as_ref() {
-        // **Every** GameObject instance gets the loader-idle seed, state machine or not — the
-        // reference's `0x70ebd0` tail arms bone 0 the moment the M2 goes LIVE and has exactly two
-        // callers, so no M2 instance in the client ever exists with nothing armed (wow-re
-        // `gameobject-anim-arm.md` §1/§2e). For a door/chest the object-layer arm lands *after* it
-        // and overrides it (§2, "because it lands after the loader seed, it is the effective arm");
-        // seeding first is what stops the one-frame BIND POSE our state GOs used to render on their
-        // first displayed frame, before `go_anim` had a chance to run — the "explodes for a split
-        // second" report. The seed is played THROUGH the transitions object so that first arm
-        // cleanly fades out of it; playing it bare on the player would leave two clips live at once.
-        let mut player = AnimationPlayer::default();
-        let mut transitions = AnimationTransitions::new();
-        if kind == EntityKind::GameObject {
-            if let Some(clip) = anims.first_seq.and_then(|i| anims.clips.get(i)) {
-                // Loop iff the sequence says so (`M2Sequence.flags & 1 == 0`) — the kernel's own
-                // end-of-band law (wow-re `gameobject-anim-arm.md` §2, byte-verified at
-                // `0x714585`): bit0 clear loops on the modulo wrap, bit0 set plays the window and
-                // then FREEZES at `end_ms`. An unconditional repeat replayed one-shot idles.
-                let active = transitions.play(&mut player, clip.node, std::time::Duration::ZERO);
-                if clip.looping {
-                    active.repeat();
-                }
-            }
-        }
-        commands.entity(entity).insert((
-            player,
-            AnimationGraphHandle(anims.graph.clone()),
-            anims.clone(),
-        ));
-        match kind {
-            EntityKind::GameObject if go_state_machine => {
-                commands.entity(entity).insert((
-                    // Cross-fades the open/close transition over the clip's blend-in time (0242/0049),
-                    // and carries the seed above as the pose the first arm transitions out of.
-                    transitions,
-                    crate::go_anim::GoAnim::default(),
-                ));
-            }
-            // A loader-idle GameObject needs no driver and no transitions — the looping player IS the
-            // whole animation, and nothing will ever arm over it.
-            EntityKind::GameObject => {}
-            _ => {
-                commands
-                    .entity(entity)
-                    .insert((
-                        // Cross-fades over each clip's blend-in time, so a gait change eases (0049).
-                        AnimationTransitions::new(),
-                        AnimDriver::default(),
-                    ))
-                    // A (re)built rig is born live: fresh joints spawn pointing at the root, so a
-                    // stale park marker from the torn-down visual would desync the LOD gate's
-                    // edge-triggered bookkeeping (decision 0448). It re-parks on its own merits.
-                    .remove::<crate::creature_anim::AnimParked>();
-            }
-        }
         // Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses; a GO's
         // free-running flicker): free-clock loops the per-sequence reader drops, driven on their own clock.
+        // Rig-bound (it writes bone slots), unlike the sequence clock — which is armed by
+        // [`arm_sequence_clock`] whether or not this instance ended up with a rig.
         if let Some(drive) =
             crate::creature_anim::GlobalSeqDrive::new_rig(&anims.global_bones, nbones)
         {
@@ -226,6 +156,87 @@ fn setup_skinned_instance(
     // no `AnimationTargetId`s, Bevy's `animate_targets` has nothing of ours to touch.
     commands.entity(entity).insert(pose);
     Some(RigBuild { anchors, slot })
+}
+
+/// Arm this instance's **sequence clock**: the `AnimationPlayer` + graph + [`ModelAnimations`] that
+/// say which sequence is playing and how far into it, plus the driver that owns the choice
+/// ([`crate::go_anim::GoAnim`] for a state GameObject, `AnimDriver` for a unit).
+///
+/// Separate from the rig on purpose (decision 0941). The two used to be one call — the clock was
+/// armed inside [`setup_skinned_instance`], so an instance that wasn't worth skinning got no clock
+/// either. But a skinned pose is only ONE of the things a sequence drives: the particle emitters'
+/// rate/enable/params tracks read it (`EmitClock::Host`), so do the material alpha/colour/UV loops
+/// and the GameObject state arm. 147 GameObject display models animate **only** through those —
+/// no keyed bone anywhere — and for them "no rig" silently meant "no clock", i.e. file slot 0 at
+/// t = 0 for ever: the Molten Core rune's flames read its *Closed* band, where every emission rate
+/// key is 0, and the flame ring's spawn window never opened past its first frame. The clock is a
+/// player and a handle; the rig is a palette slot and a skinned twin. Only the second is worth
+/// gating on whether bones actually move.
+fn arm_sequence_clock(
+    commands: &mut Commands,
+    entity: Entity,
+    anims: &ModelAnimations,
+    kind: EntityKind,
+    go_state_machine: bool,
+) {
+    // **Every** GameObject instance gets the loader-idle seed, state machine or not — the
+    // reference's `0x70ebd0` tail arms bone 0 the moment the M2 goes LIVE and has exactly two
+    // callers, so no M2 instance in the client ever exists with nothing armed (wow-re
+    // `gameobject-anim-arm.md` §1/§2e). For a door/chest the object-layer arm lands *after* it
+    // and overrides it (§2, "because it lands after the loader seed, it is the effective arm");
+    // seeding first is what stops the one-frame BIND POSE our state GOs used to render on their
+    // first displayed frame, before `go_anim` had a chance to run — the "explodes for a split
+    // second" report. The seed is played THROUGH the transitions object so that first arm
+    // cleanly fades out of it; playing it bare on the player would leave two clips live at once.
+    let mut player = AnimationPlayer::default();
+    let mut transitions = AnimationTransitions::new();
+    if kind == EntityKind::GameObject {
+        // `idle_clip`, NOT `first_seq`: the loader arm's identity answer, taken without the
+        // rendering content gate (decision 0936's split). A GameObject whose sequences pose no
+        // bone has no `first_seq` at all and used to arm nothing — which is precisely how its
+        // emitters ended up reading file slot 0 at t = 0 for ever (0941).
+        if let Some(clip) = anims.idle_clip() {
+            // Loop iff the sequence says so (`M2Sequence.flags & 1 == 0`) — the kernel's own
+            // end-of-band law (wow-re `gameobject-anim-arm.md` §2, byte-verified at
+            // `0x714585`): bit0 clear loops on the modulo wrap, bit0 set plays the window and
+            // then FREEZES at `end_ms`. An unconditional repeat replayed one-shot idles.
+            let active = transitions.play(&mut player, clip.node, std::time::Duration::ZERO);
+            if clip.looping {
+                active.repeat();
+            }
+        }
+    }
+    commands.entity(entity).insert((
+        player,
+        AnimationGraphHandle(anims.graph.clone()),
+        anims.clone(),
+    ));
+    match kind {
+        EntityKind::GameObject if go_state_machine => {
+            commands.entity(entity).insert((
+                // Cross-fades the open/close transition over the clip's blend-in time (0242/0049),
+                // and carries the seed above as the pose the first arm transitions out of.
+                transitions,
+                crate::go_anim::GoAnim::default(),
+            ));
+        }
+        // A loader-idle GameObject needs no driver and no transitions — the looping player IS the
+        // whole animation, and nothing will ever arm over it.
+        EntityKind::GameObject => {}
+        _ => {
+            commands
+                .entity(entity)
+                .insert((
+                    // Cross-fades over each clip's blend-in time, so a gait change eases (0049).
+                    AnimationTransitions::new(),
+                    AnimDriver::default(),
+                ))
+                // A (re)built rig is born live: fresh joints spawn pointing at the root, so a
+                // stale park marker from the torn-down visual would desync the LOD gate's
+                // edge-triggered bookkeeping (decision 0448). It re-parks on its own merits.
+                .remove::<crate::creature_anim::AnimParked>();
+        }
+    }
 }
 
 /// A collapsed rig's build result (decision 0724): the consumer anchors by bone + the palette
@@ -444,6 +455,13 @@ pub(super) fn attach_entity_visuals(
             // mesh did). Truly static props keep the static mesh. `skin` is `Some((joints,
             // inverse_bindposes, palette_slot))` when instanced (decision 0720; slot 0 = palette
             // full, parts fall back to the static mesh).
+            // Does this entity run the GameObject open/close state machine (the byte-verified
+            // TYPE_ID census)? Read once — it picks both the rig flavour below and the clock's
+            // driver, and those two must never disagree about the same object.
+            let go_state_machine = net.kind == EntityKind::GameObject
+                && stores
+                    .get(entity)
+                    .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
             let skin: Option<RigBuild> = match (net.kind, dm) {
                 // A creature (or player body — decision 0041) with a real skeleton. The `!is_empty`
                 // guard keeps a degenerate boneless model on the static mesh (its skinned twin would
@@ -479,15 +497,7 @@ pub(super) fn attach_entity_visuals(
                         commands.entity(entity).add_child(node);
                         joints_root = node;
                     }
-                    setup_skinned_instance(
-                        &mut commands,
-                        &mut palettes,
-                        entity,
-                        joints_root,
-                        d,
-                        net.kind,
-                        false,
-                    )
+                    setup_skinned_instance(&mut commands, &mut palettes, entity, joints_root, d)
                 }
                 // A GameObject whose model authors a real skeleton + animation draws through the
                 // skinned twin like a creature. Two flavours share the rig: a door/button/chest
@@ -501,29 +511,42 @@ pub(super) fn attach_entity_visuals(
                 (EntityKind::GameObject, Some(d))
                     if !d.skeleton.joints.is_empty() && d.animations.is_some() =>
                 {
-                    let state_machine = stores
-                        .get(entity)
-                        .is_ok_and(|s| crate::go_anim::go_animates(s.0.gameobject_type_id()));
+                    let state_machine = go_state_machine;
                     let ambient = !matches!(
                         crate::doodad_anim::classify(&d.skeleton, d.animations.as_ref()),
                         crate::doodad_anim::DoodadAnimTier::Static
                     );
-                    (state_machine || ambient)
+                    // A state GO whose model poses NO bone in any sequence gets no rig: skinning
+                    // it could only reproduce the bind-pose mesh it already renders, at the cost
+                    // of a scarce palette slot (decision 0941 — 147 display models are this
+                    // shape). It still gets the clock below, which is the half it was missing.
+                    let poses = d
+                        .animations
+                        .as_ref()
+                        .is_some_and(|a| a.clips.iter().any(|c| c.poses_bones));
+                    ((state_machine && poses) || ambient)
                         .then(|| {
-                            setup_skinned_instance(
-                                &mut commands,
-                                &mut palettes,
-                                entity,
-                                entity,
-                                d,
-                                net.kind,
-                                state_machine,
-                            )
+                            setup_skinned_instance(&mut commands, &mut palettes, entity, entity, d)
                         })
                         .flatten()
                 }
                 _ => None,
             };
+            // The instance's SEQUENCE CLOCK — armed for every M2 instance whose model has one,
+            // rigged or not (decision 0941). The rig above is a palette slot and a skinned twin,
+            // and is worth spending only when bones actually move; the clock is a player and a
+            // handle, and everything per-sequence reads it — the emitters' rate/enable/params
+            // tracks, the material alpha/colour/UV loops, the GameObject state arm. Bundling the
+            // two is what left the boneless-but-animated content (the Molten Core rune's flames,
+            // the flame ring's spreading spawn window) reading file slot 0 at t = 0 for ever.
+            if matches!(
+                net.kind,
+                EntityKind::Unit | EntityKind::Player | EntityKind::GameObject
+            ) {
+                if let Some(anims) = dm.and_then(|d| d.animations.as_ref()) {
+                    arm_sequence_clock(&mut commands, entity, anims, net.kind, go_state_machine);
+                }
+            }
             // The bone-riding surface (decision 0072): the instance's joints + the model's attachment
             // points, so held items (and future bone riders) can hang from the hand/hip/back joints.
             if let (Some(rb), Some(d)) = (&skin, dm) {

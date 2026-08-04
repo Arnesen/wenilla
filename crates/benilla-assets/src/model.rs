@@ -255,14 +255,15 @@ pub struct ModelJoint {
     /// CHILD of a lock-Z bone). Rigged hosts feed this to the billboard joint pass; the per-batch
     /// card split only covers geometry skinned to the billboard bone itself.
     ///
-    /// **`None` for a WELDED billboard bone**, even though the M2 authors the flag — see
-    /// [`build_skeleton`]. A bone whose geometry is stitched into the surrounding mesh cannot be
-    /// re-oriented without dragging that mesh with it, so no palette lane faces it (decision 0935).
+    /// Authored on every bone that carries the flag, welded seam or not: `m2_animate` reads no
+    /// vertex, weight or triangle data at all, so there is no topology gate on the arm (decision
+    /// 0945 superseding 0935). A welded seam stays welded because the replacement is built about
+    /// the bone's own pivot, which is what makes the blended seam ring move by millimetres.
     pub billboard: Option<benilla_formats::BillboardKind>,
-    /// Bone flag `0x04` (see [`benilla_formats::SkeletonBone::ignore_parent_rotation`]): the bone
-    /// keeps the MODEL ROOT's orientation — its pivot rides the parent's full matrix, its rotation
-    /// doesn't. Same palette pass as `billboard`, different replacement rotation.
-    pub ignore_parent_rotation: bool,
+    /// Bone flags `0x1/0x2/0x4` (see [`benilla_formats::SkeletonBone::parent_arm`]): how the
+    /// bone's effective PARENT matrix is rebuilt from the model's own root frame before it
+    /// composes. Applied by the same palette passes as `billboard`, and *before* them.
+    pub parent_arm: Option<benilla_formats::ParentArm>,
 }
 
 /// A model's rest skeleton in Bevy space (decision 0019). Built once per M2 asset; the creature path
@@ -293,23 +294,7 @@ pub struct ModelSkeleton {
 ///   transform (the two pivot translations cancel before scale acts).
 ///
 /// Pivots map WoW→Bevy via [`wow_to_bevy`] (a pure rotation), so the whole skeleton lives in mesh space.
-///
-/// ## The welded-billboard gate (decision 0935)
-///
-/// `welded_billboards` is [`benilla_formats::non_separable_billboard_bones`] for the same model:
-/// billboard bones whose geometry is stitched into the surrounding mesh — partial-weight seam
-/// vertices, or triangles straddling the bone and a static neighbour. **Their arm is dropped
-/// here**, so no palette lane camera-faces them, and the whole model draws in its authored pose.
-///
-/// This is the same predicate the per-batch card split already uses to refuse a welded bone
-/// (`RenderSubmesh::welded_billboard`, 0839), applied one level up. Reading it from that one
-/// function is the point: the card lane's "is this separable" and the palette lane's can never
-/// disagree, which is exactly how the left pauldron ended up camera-faced by one lane while the
-/// other left it alone.
-pub(crate) fn build_skeleton(
-    skel: &Skeleton,
-    welded_billboards: &[u16],
-) -> (ModelSkeleton, Vec<Mat4>) {
+pub(crate) fn build_skeleton(skel: &Skeleton) -> (ModelSkeleton, Vec<Mat4>) {
     let pivots = skeleton_pivots(skel);
     let joints = skel
         .bones
@@ -323,10 +308,8 @@ pub(crate) fn build_skeleton(
             ModelJoint {
                 parent: b.parent,
                 local_translation: pivots[i] - parent_pivot,
-                billboard: b
-                    .billboard
-                    .filter(|_| !welded_billboards.contains(&(i as u16))),
-                ignore_parent_rotation: b.ignore_parent_rotation,
+                billboard: b.billboard,
+                parent_arm: b.parent_arm,
             }
         })
         .collect();
@@ -542,11 +525,19 @@ fn keyframe_curve<T: Animatable + Clone>(
 /// - **rotation** = the WoW quat conjugated into Bevy space (`r·q·r⁻¹`);
 /// - **scale** = the WoW scale with axes permuted to Bevy's (magnitudes; near-always uniform anyway).
 ///
-/// `None` if no channel produced a curve (every bone holds bind pose → nothing worth playing).
+/// Always returns a clip, and a flag for whether any channel produced a **curve**. A sequence
+/// whose bones all hold bind pose still gets one — an empty clip carrying the sequence's own
+/// duration — because the clip is not only a bone pose: it is this model's carrier for the
+/// instance's **sequence clock** (which slot is playing, and how far into it), which the emitter
+/// rate/params tracks, the material-alpha loops and the GameObject state arm all resolve through.
+/// Dropping the track-less ones left 807 corpus models — the ones whose animation is authored
+/// entirely in the *emitter* tracks — with no clock at all, frozen on slot 0 at t=0 for ever
+/// (decision 0941). The flag is what the doodad content gate reads instead (`poses_bones`): a clip
+/// with no curves can only ever render the bind-pose mesh, so it must not spawn a rig.
 pub(crate) fn build_animation_clip(
     anim: &ModelAnimation,
     skeleton: &ModelSkeleton,
-) -> Option<(AnimationClip, PoseClip)> {
+) -> (AnimationClip, PoseClip, bool) {
     let r = wow_to_bevy_quat();
     let mut clip = AnimationClip::default();
     let mut pose = PoseClip::default();
@@ -608,7 +599,13 @@ pub(crate) fn build_animation_clip(
             scale: pose_scale,
         });
     }
-    any.then_some((clip, pose))
+    if !any {
+        // Bevy derives a clip's duration from its curves; with none, the sequence's own band
+        // length is the clock's period — without it the player would wrap on a 0-second loop
+        // (a modulo by zero) and the clock would never leave t=0, which is the whole defect.
+        clip.set_duration(anim.duration.max(1e-3));
+    }
+    (clip, pose, any)
 }
 
 /// Build the weapon-grip **overlay clip** from clamped finger poses ([`benilla_formats::hand_grip_finger_poses`]):
@@ -778,6 +775,62 @@ pub(crate) fn build_global_bones(
 mod tests {
     use super::*;
 
+    /// One sequence record, `bones` supplied by the caller — everything else at a neutral value.
+    fn sequence(duration: f32, bones: Vec<benilla_formats::BoneKeys>) -> ModelAnimation {
+        ModelAnimation {
+            anim_id: 0,
+            seq_index: 0,
+            start_ms: 0,
+            end_ms: (duration * 1000.0) as u32,
+            duration,
+            looping: true,
+            move_speed: 0.0,
+            blend_time: 0.0,
+            bounds_center: [0.0; 3],
+            bounds_radius: 0.0,
+            bounds_min: [0.0; 3],
+            bounds_max: [0.0; 3],
+            frequency: 0,
+            min_replay: 0,
+            max_replay: 0,
+            bones,
+            events: Vec::new(),
+        }
+    }
+
+    /// A sequence whose bones hold bind pose still becomes a clip — an EMPTY one carrying the
+    /// sequence's own duration — because the clip is this model's carrier for the instance's
+    /// **sequence clock** (decision 0941). Dropping it left 807 corpus models whose animation is
+    /// authored purely in their emitter tracks with no clock at all: no player, so no slot and no
+    /// time, so every per-sequence track read file slot 0 at t = 0 for ever. The duration is the
+    /// load-bearing half — Bevy derives a clip's period from its curves, and a 0-second period
+    /// would wrap the player's `seek_time` by a modulo-zero and never leave t = 0.
+    #[test]
+    fn a_boneless_sequence_still_yields_a_clock_clip() {
+        let skeleton = ModelSkeleton {
+            joints: Vec::new(),
+            spine_bone: None,
+            head_bone: None,
+        };
+        let (clip, _pose, poses_bones) =
+            build_animation_clip(&sequence(1.333, Vec::new()), &skeleton);
+        assert!(!poses_bones, "no bone track ⇒ nothing to skin to");
+        assert!(
+            (clip.duration() - 1.333).abs() < 1e-4,
+            "the clock's period is the sequence's own band, not 0: {}",
+            clip.duration()
+        );
+        // The flag is what the doodad content gate reads: a clock-only clip must never spawn a rig.
+        let moving = benilla_formats::BoneKeys {
+            bone: 0,
+            translation: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [0.0, 0.0, 1.0])],
+            rotation: Vec::new(),
+            scale: Vec::new(),
+        };
+        let (_, _, poses_bones) = build_animation_clip(&sequence(1.0, vec![moving]), &skeleton);
+        assert!(poses_bones, "a keyed track ⇒ a real pose");
+    }
+
     /// A [`GlobalSeqChannel`] samples with linear interpolation, clamps at the endpoint keys, and wraps
     /// on its period — the eye-blink shape: `0` (open) held, a fast ramp to `1` (shut), back to `0`, and
     /// the whole thing repeating every `period`. Models the real eyelid keys (ms → seconds).
@@ -856,64 +909,23 @@ mod tests {
         assert!(id.dot(Quat::IDENTITY).abs() > 0.9999, "got {id:?}");
     }
 
-    /// **A welded billboard bone reaches the palette lanes with no arm** (decision 0935).
-    ///
-    /// The shape is the Field Marshal pauldron's: a plain root plus two spherical-billboard spikes,
-    /// both non-separable because their seam rings are stitched into the body. Bone 1 stands for
-    /// them; bone 2 is a separable card bone on the same model, and must keep its arm — the gate is
-    /// per bone, not per model, or every glow card on a model that also carries one welded spike
-    /// would freeze with it.
-    ///
-    /// `ModelJoint::billboard` is the single field both lanes read (`BillboardJointRig::new` and
-    /// `RigPose`), so clearing it here is the whole gate.
-    #[test]
-    fn a_welded_billboard_bone_loses_its_arm_and_a_separable_one_keeps_it() {
-        let bone = |billboard| benilla_formats::SkeletonBone {
-            parent: -1,
-            pivot: [0.0, 0.0, 0.0],
-            key_bone: -1,
-            billboard,
-            ignore_parent_rotation: false,
-        };
-        let skel = Skeleton {
-            bones: vec![
-                bone(None),
-                bone(Some(benilla_formats::BillboardKind::Spherical)),
-                bone(Some(benilla_formats::BillboardKind::Spherical)),
-            ],
-        };
-        let (built, _) = build_skeleton(&skel, &[1]);
-        assert!(built.joints[0].billboard.is_none(), "a plain bone is plain");
-        assert!(
-            built.joints[1].billboard.is_none(),
-            "the welded spike is never camera-faced — facing it drags the mesh it is stitched to"
-        );
-        assert_eq!(
-            built.joints[2].billboard,
-            Some(benilla_formats::BillboardKind::Spherical),
-            "a separable card bone on the same model still faces the camera"
-        );
-        // The empty list is the overwhelmingly common case (no welded bones): nothing is dropped.
-        let (ungated, _) = build_skeleton(&skel, &[]);
-        assert!(
-            ungated.joints[1].billboard.is_some() && ungated.joints[2].billboard.is_some(),
-            "with nothing welded, every authored arm survives"
-        );
-    }
-
-    /// The same gate on the **real shipped asset** — the director's own pauldron.
+    /// **A welded billboard bone still reaches the palette with its arm** (decision 0945,
+    /// superseding 0935's gate) — on the real shipped asset, the director's own pauldron.
     ///
     /// `LShoulder_Plate_PVPAlliance_A_01.m2` authors 3 bones: a plain root and two spherical
-    /// billboard spikes whose 8-vertex 50/50 seam rings stitch them to the body. Measured live, the
-    /// arm displaced those spikes **18° standing on foot and 54° (44°–68°) mounted at a run**, while
-    /// the right pauldron — `RShoulder_…`, 1 bone, no billboard — sat at a flat 0°. That L/R split
-    /// is the whole of the director's report, and it comes from the artwork, not the skeleton (both
-    /// shoulder *bones* measured within 1.5° of each other).
+    /// billboard spikes whose 8-vertex 50/50 seam rings stitch them to the body. 0935 dropped
+    /// their arm on exactly that welding. `m2_animate` reads no vertex, weight or triangle data at
+    /// all — over its whole extent there is a single `movzx byte ptr`, the arm-selector map — so
+    /// no such gate exists in the reference (wow-re `billboard-bone-law.md` §9.4 SQ1). The seam
+    /// survives because the replacement is built about the bone's own pivot, not because the arm
+    /// is skipped.
     ///
-    /// The synthetic test above pins the wiring; this pins that the wiring fires on the file that
-    /// actually caused the bug. Skips when the client isn't installed (the repo ships no assets).
+    /// The predicate itself is still live and still correct where it belongs: the per-batch **card
+    /// split** refuses to lift a welded bone's geometry into its own draw (0839). This test pins
+    /// that the two lanes now disagree *on purpose* — welded for the card split, faced by the
+    /// palette. Skips when the client isn't installed (the repo ships no assets).
     #[test]
-    fn the_field_marshal_pauldron_reaches_the_palette_with_no_arm() {
+    fn a_welded_billboard_bone_still_reaches_the_palette_with_its_arm() {
         let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
         if !data.is_dir() {
             eprintln!("skipping: vanilla client not present at {}", data.display());
@@ -930,12 +942,63 @@ mod tests {
             2,
             "the M2 authors two billboard bones"
         );
-        let welded = benilla_formats::non_separable_billboard_bones(&bytes);
-        assert_eq!(welded, vec![1, 2], "both of them are welded to the body");
-        let (built, _) = build_skeleton(&raw, &welded);
+        assert_eq!(
+            benilla_formats::non_separable_billboard_bones(&bytes),
+            vec![1, 2],
+            "both are welded to the body — the card split still refuses to lift them"
+        );
+        let (built, _) = build_skeleton(&raw);
+        assert_eq!(
+            built
+                .joints
+                .iter()
+                .filter(|j| j.billboard == Some(benilla_formats::BillboardKind::Spherical))
+                .count(),
+            2,
+            "…and the palette faces them anyway: welding is not a gate on the arm"
+        );
+    }
+
+    /// **The mount seat's parent arm survives the bake** — the load-bearing case, on the asset
+    /// that decides it.
+    ///
+    /// `RidingHorse.m2` attachment 0 (the rider seat) rides bone 30, `flags = 0x6` = ignore parent
+    /// rotation + scale. That is why a galloping horse never rocks its rider: the seat's basis is
+    /// replaced by the mount's own root basis before the rider's frame is built from it, so the
+    /// spine's ~21° stride swing is discarded at the saddle while the seat still *translates* with
+    /// it (wow-re §9.1/§9.2, byte-verified). Every vanilla player mount is `0x4`, `0x6`, or has a
+    /// seat whose ancestors don't rotate.
+    #[test]
+    fn the_riding_horse_seat_bone_carries_the_root_basis_arm() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("Creature\\RidingHorse\\RidingHorse.m2")
+            .expect("read the horse");
+        let raw = benilla_formats::parse_m2_skeleton(&bytes).expect("parse its skeleton");
+        let seat = benilla_formats::parse_m2_attachments(&bytes)
+            .expect("parse attachments")
+            .into_iter()
+            .find(|a| a.id == 0)
+            .expect("the horse authors a rider seat");
+        assert_eq!(seat.bone, 30, "the seat rides bone 30");
+        let (built, _) = build_skeleton(&raw);
+        assert_eq!(
+            built.joints[usize::from(seat.bone)].parent_arm,
+            Some(benilla_formats::ParentArm {
+                ignore_translate: false,
+                basis: benilla_formats::ParentBasis::RootBasis,
+            }),
+            "the seat takes the mount's own root basis — the gallop reaches it as translation only"
+        );
+        // The spine bones it hangs off carry no arm: they are what supplies the discarded swing.
         assert!(
-            built.joints.iter().all(|j| j.billboard.is_none()),
-            "no palette lane may camera-face this model — it draws in its authored pose"
+            built.joints[23].parent_arm.is_none() && built.joints[25].parent_arm.is_none(),
+            "the swinging spine bones are ordinary"
         );
     }
 }

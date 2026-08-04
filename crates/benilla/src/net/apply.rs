@@ -645,6 +645,7 @@ pub(super) fn apply_net_updates(
                 &mut ui_actions.15,
                 &mut ui_actions.10,
                 &mut ui_actions.12,
+                ui_actions.11.as_deref(),
                 &net_commands,
                 play_seq.next(),
             ),

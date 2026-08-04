@@ -477,6 +477,11 @@ pub(crate) struct ItemUse {
     pub(crate) bag_index: u8,
     /// The wire slot, 0-based.
     pub(crate) slot: u8,
+    /// The item's template ENTRY — the cooldown store keys item records on `(use_spell, entry)`
+    /// (the client's `[eax+8]==spellId && [eax+0xc]==itemID` match), and the ladder's not-ready
+    /// rung queries exactly that pair for the item leg's 0x28 (decision 0948; closes the
+    /// item-entry gap 0914 named).
+    pub(crate) entry: u32,
     /// The template spell BLOCK ordinal the server should cast (decision 0666).
     pub(crate) spell_index: u8,
     /// The template's ON_USE spell id — `0x5d8c80`'s answer: the first template block whose
@@ -638,6 +643,7 @@ pub(crate) fn send_item_use(
                 crate::ui_action::CastCommit::Item {
                     bag_index: it.bag_index,
                     slot: it.slot,
+                    entry: it.entry,
                     spell_index: it.spell_index,
                     on_object: it.on_object,
                 },
@@ -938,6 +944,7 @@ mod tests {
         // (0 of the 215 live ones), but the quest arm wins even if one did.
         let letter = 0x4000_0000_0000_0BAD_u64;
         let it = |guid, start_quest, use_spell| ItemUse {
+            entry: 0,
             guid,
             start_quest,
             bag_index: 255,
@@ -982,6 +989,7 @@ mod tests {
     fn a_live_aura_makes_the_item_click_cancel_instead_of_cast() {
         const SUMMON_HORSE: u32 = 17462;
         let it = |start_quest, use_spell| ItemUse {
+            entry: 0,
             guid: Some(0x4000_0000_0000_0BAD),
             start_quest,
             bag_index: 255,

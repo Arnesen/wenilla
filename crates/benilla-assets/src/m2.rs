@@ -400,7 +400,7 @@ impl AssetLoader for M2ModelLoader {
 
         // Ribbon emitters (trails): same texture resolution, bone-pivot bake and owner-reach bake
         // as the particles — a trail is one of the model's emitters and draws under the same law.
-        let ribbons = benilla_formats::parse_m2_ribbon_emitters(&bytes)
+        let ribbons: Vec<ModelRibbon> = benilla_formats::parse_m2_ribbon_emitters(&bytes)
             .unwrap_or_default()
             .into_iter()
             .map(|def| {
@@ -436,11 +436,7 @@ impl AssetLoader for M2ModelLoader {
                 def,
             })
             .collect();
-        // The welded-billboard gate (decision 0935): a billboard bone whose geometry is stitched
-        // into the surrounding mesh keeps its authored pose, because facing it drags the mesh.
-        // Same predicate the per-batch card split already refuses on, so the two lanes agree.
-        let welded_billboards = benilla_formats::non_separable_billboard_bones(&bytes);
-        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw, &welded_billboards);
+        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw);
         let inverse_bindposes = ctx.add_labeled_asset(
             "inverse_bindposes".to_string(),
             SkinnedMeshInverseBindposes::from(inverse_bindposes),
@@ -554,7 +550,16 @@ impl AssetLoader for M2ModelLoader {
                 .map_or(0, |p: &benilla_formats::PlayableAnim| p.resolved_id);
             let mut first_seq = None;
             for (i, anim) in sequences.iter().enumerate() {
-                if let Some((clip, pose_clip)) = build_animation_clip(anim, &skeleton) {
+                // EVERY sequence becomes a clip — the clip carries the instance's sequence CLOCK,
+                // not just a bone pose (decision 0941, [`build_animation_clip`]). `poses_bones`
+                // separates the two meanings: the clock is free, the rig is not.
+                {
+                    let (clip, pose_clip, poses_bones) = build_animation_clip(anim, &skeleton);
+                    // `first_seq` stays the RENDERING question — "is this seed worth a skin +
+                    // player" (0130's content gate, and decision 0936's split). The identity
+                    // question, "which sequence does the loader arm", is
+                    // [`ModelAnimations::idle_seq`]/`idle_clip`, which asks the same selection
+                    // without the gate.
                     if first_seq.is_none() && anim.anim_id == idle_id && idle_pose_differs(anim) {
                         first_seq = Some(clips.len());
                     }
@@ -602,6 +607,7 @@ impl AssetLoader for M2ModelLoader {
                         upper_node,
                         frequency: anim.frequency,
                         replay: (anim.min_replay, anim.max_replay),
+                        poses_bones,
                     });
                 }
             }
@@ -647,7 +653,25 @@ impl AssetLoader for M2ModelLoader {
             // empty would silently freeze it.
             let global_bones =
                 build_global_bones(&parse_m2_global_sequence_bones(&bytes), &skeleton);
-            (!clips.is_empty() || !global_bones.is_empty()).then(|| {
+            // The gate is "does ANYTHING in this model vary with the sequence clock" — and its
+            // consumer list was incomplete (decision 0941). A bone-posing clip and a global
+            // sequence were counted; the **per-sequence samplers** were not: the emitters'
+            // rate/enable/params tracks, a ribbon's, and the material alpha/colour/UV loops all
+            // resolve through the instance's playing sequence. 807 corpus models animate ONLY
+            // through those, and denying them `ModelAnimations` denied them the clock itself —
+            // no player, no slot, no time — so every one of those tracks read file slot 0 at
+            // t=0 for ever. Models with none of the three keep the static path: the optimization
+            // decision 0130 measured (~90% of placed doodads) is untouched, and 6342 boneless
+            // models with nothing to sample stay out of the animation lane entirely.
+            let samples_sequence = !emitters.is_empty()
+                || !ribbons.is_empty()
+                || submeshes
+                    .iter()
+                    .any(|s| s.alpha_anim.is_some() || s.uv_anim.is_some() || s.rgb_anim.is_some());
+            (clips.iter().any(|c| c.poses_bones)
+                || !global_bones.is_empty()
+                || (samples_sequence && !clips.is_empty()))
+            .then(|| {
                 let graph = ctx.add_labeled_asset("anim_graph".to_string(), graph);
                 ModelAnimations {
                     graph,

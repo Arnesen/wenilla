@@ -15,7 +15,7 @@
 //!
 //! - [`WarmPass`] + `spawn_menagerie` — the warm pass: one tiny rig per reachable pipeline
 //!   variant — the model lane with its shard-rung and far-side twins, and the sky/water lanes
-//!   (celestial, stars, clouds, gradient dome, WMO skybox, liquid; decision 0937 widened 0837's
+//!   (celestial, stars, clouds, gradient dome, WMO skybox, liquid; decision 0945 widened 0837's
 //!   model-only scope) — parented to the world camera, spawned when the entry cover rises; the
 //!   loading screen's clear condition holds on [`WarmPass::satisfied`] until the pipeline cache
 //!   drains (10 s backstop, 0737's rule), then the menagerie despawns. Captures skip it.

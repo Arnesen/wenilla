@@ -187,6 +187,50 @@ pub(crate) fn resolve_lock(
     }
 }
 
+/// **`0x5f8260`** — the *targeting cursor's* lock question, and this chain's **third** consumer
+/// (decision 0949). Reached from the object dispatcher `0x4828d0`'s targeting step
+/// (`0x482910 → 0x6e6460`, whose GameObject arm calls it at `6e670f` with the GO, the cast-item
+/// guid `0xceac48` and the pending spell id `[0xceac58]`).
+///
+/// Where [`resolve_lock`] (`0x5f83d0`) asks *"can I open this with anything I have?"*, this asks
+/// the narrower *"does **this pending spell** open **this lock**?"*. Three differences, all in the
+/// bytes:
+///
+/// - It walks the **spell's** three effect slots, not the player's known spells — `5f82c0`'s outer
+///   loop over `SpellRec+0xf4/f8/fc` with `cmp …, 0x21` (`SPELL_EFFECT_OPEN_LOCK`), matching
+///   `EffectMiscValue[k]` (`[ebx+0xb4]`) against the slot's `Index[i]`.
+/// - **It never compares skill values.** `0x5f83d0`'s satisfaction test (`0x5f850f`,
+///   [`required_skill`]) has no counterpart here. A matched `LockType` that passes the Action gate
+///   is the whole predicate — so the cursor lights on a chest your skill cannot yet open, the
+///   click sends, and the *server* refuses. That is the same "no gate on the object leg" 0939
+///   found at `BindTarget`, and it is why this is not simply [`resolve_lock`] reused.
+/// - A GameObject with **no `Lock.dbc` row is `false`**, not "open" (`0x5f8180` null → `5f8273`
+///   returns 0) — the opposite of [`resolve_lock`]'s lockless arm, and correct: you cannot Pick
+///   Lock a mailbox, and the cursor greys over one.
+///
+/// The Action gate ([`LockSlot::available`]) is shared with both siblings — same `0x5f81d0`, so
+/// the cursor, the tooltip and the click cannot disagree about whether a slot applies.
+///
+/// **Not transcribed:** the `SPELL_EFFECT_OPEN_LOCK_ITEM` (59) arm at `5f831c`, which matches the
+/// **cast item's** entry against a `LOCK_KEY_ITEM` slot (`5f8360`: `Type[i] == 1`, `5f836c`: the
+/// item's entry `== Index[i]`, then the same gate). It needs a per-effect id the catalog does not
+/// carry yet, and it only fires for a key's own ON_USE spell armed at a GameObject — a seam 0939
+/// built but no 5875 key is known to use. Named residual, decision 0949.
+pub(crate) fn spell_opens_lock(
+    slots: &[LockSlot],
+    spell: &benilla_formats::SpellDisplay,
+    go: GoFacts,
+) -> bool {
+    let Some(lock_type) = spell.open_lock_type() else {
+        return false;
+    };
+    slots.iter().any(|slot| {
+        slot.key_type == LOCK_KEY_SKILL
+            && slot.index == lock_type
+            && slot.available(go.state, go.flag_locked)
+    })
+}
+
 /// The slot's required skill: `Skill[i]`, or **`GAMEOBJECT_LEVEL × 5`** when it is zero
 /// (`0x5f84be..0x5f84ca` — the resolver; `0x5f3490..0x5f349f` recomputes the same value for the
 /// `0xe0` toast's `%d`). A zero `Skill` is *not* "no requirement": every gathering node in the game
@@ -226,6 +270,87 @@ mod tests {
             skill,
             action,
         }
+    }
+
+    /// **`0x5f8260` is not `0x5f83d0`** (decision 0949). The cursor's question differs from the
+    /// right-click resolver's in three ways that all show on screen, and getting any of them
+    /// wrong greys the wrong chest.
+    #[test]
+    fn the_cursor_lock_predicate_ignores_skill_and_refuses_the_lockless() {
+        use benilla_formats::SpellDisplay;
+        // Pick Lock: LockType 1 (Lockpicking), providing 300 at level 60.
+        let pick_lock = SpellDisplay {
+            open_lock: Some(benilla_formats::OpenLock {
+                effect: 0,
+                lock_type: 1,
+            }),
+            ..SpellDisplay::default()
+        };
+        let unlocked = GoFacts {
+            state: GO_STATE_READY,
+            flag_locked: true,
+            level: 60,
+        };
+
+        // A Lockpicking slot demanding 300 skill, Action 1 (applies while flagged locked).
+        let matching = [skill_slot(1, 300, 1), LockSlot::default()];
+        assert!(
+            spell_opens_lock(&matching, &pick_lock, unlocked),
+            "the right LockType through an applicable slot lights the cursor"
+        );
+
+        // **The skill value is never read** — `0x5f850f` has no counterpart in `0x5f8260`. A slot
+        // demanding far more than Pick Lock provides STILL lights: the click sends and the server
+        // refuses. This is the single biggest difference from `resolve_lock`.
+        let brutal = [skill_slot(1, 9999, 1), LockSlot::default()];
+        assert!(
+            spell_opens_lock(&brutal, &pick_lock, unlocked),
+            "0x5f8260 compares no skill values — an out-of-reach lock still lights"
+        );
+
+        // Wrong LockType (3 = Mining) — a lockpick greys over an ore vein.
+        let mining = [skill_slot(3, 0, 1), LockSlot::default()];
+        assert!(!spell_opens_lock(&mining, &pick_lock, unlocked));
+
+        // The shared Action gate still applies: Action 0 means "only when NOT flagged locked".
+        assert!(!spell_opens_lock(
+            &[skill_slot(1, 0, 0)],
+            &pick_lock,
+            unlocked
+        ));
+        assert!(spell_opens_lock(
+            &[skill_slot(1, 0, 0)],
+            &pick_lock,
+            GoFacts {
+                flag_locked: false,
+                ..unlocked
+            }
+        ));
+
+        // **No lock row at all is FALSE, not "open"** (`0x5f8180` null → `5f8273`) — the exact
+        // opposite of `resolve_lock`'s lockless arm. You cannot Pick Lock a mailbox.
+        assert!(!spell_opens_lock(&[], &pick_lock, unlocked));
+        assert!(!spell_opens_lock(
+            &[LockSlot::default()],
+            &pick_lock,
+            unlocked
+        ));
+
+        // A spell with no OPEN_LOCK effect opens nothing, whatever the lock says.
+        assert!(!spell_opens_lock(
+            &matching,
+            &SpellDisplay::default(),
+            unlocked
+        ));
+
+        // A KEY slot is not the SKILL arm's business (the effect-59 arm is a named residual).
+        let key = [LockSlot {
+            key_type: LOCK_KEY_ITEM,
+            index: 1,
+            skill: 0,
+            action: 1,
+        }];
+        assert!(!spell_opens_lock(&key, &pick_lock, unlocked));
     }
 
     /// The requirement fallback (`0x5f84be`): a zero `Skill[i]` means GO-level × 5, not "free".

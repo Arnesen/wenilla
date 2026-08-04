@@ -53,6 +53,7 @@ pub(super) fn drive_script(
     // cooldown store and the server, which is exactly "I can charge before the sweep ends"
     // (verified live: an occluded run's UI clock fell 27 s behind in 43 s of wall time).
     time: Res<Time<Real>>,
+    mut ui_clock: ResMut<super::UiClock>,
     mut quads: ResMut<UiQuads>,
     world_assets: Option<ResMut<WorldAssets>>,
     mut images: ResMut<Assets<Image>>,
@@ -126,6 +127,15 @@ pub(super) fn drive_script(
         script.set_screen_size(w / s, if h > 0.0 { h / s } else { 768.0 });
         script.tick(time.delta_secs());
     }
+    // The frame's clock pair ([`super::UiClock`]): the VM value the tick just produced, anchored
+    // at the exact `Instant` whose frame-to-frame deltas that clock accumulates — `Time<Real>`'s
+    // own last-update. Every Instant→GetTime conversion goes through this pair; sampling
+    // `Instant::now()` at a conversion site instead re-measures the tick→feed scheduling gap
+    // every frame and wobbles the derived start by that jitter (the resource's own doc).
+    *ui_clock = super::UiClock {
+        anchor: time.last_update().unwrap_or_else(std::time::Instant::now),
+        ui_now: script.now(),
+    };
     let us_tick = lap();
     // ── The FontString measure round-trip, BEFORE the resolve ────────────────────────────────
     // `fontstrings_needing_measure` reads only `region_data` — each FontString's text, font, and
@@ -755,6 +765,7 @@ mod clip_plumb_tests {
         app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
+        app.init_resource::<crate::ui_script::UiClock>();
         // The uiScale dial at its identity Default (1.0) — tests pin the byte-identity base;
         // the shipped app inserts the taste default instead (decision 0584).
         app.init_resource::<crate::ui_script::UiScaleCvar>();
@@ -837,6 +848,7 @@ mod clip_plumb_tests {
         app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
+        app.init_resource::<crate::ui_script::UiClock>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {
@@ -892,6 +904,7 @@ mod extract_gate_tests {
         app.init_resource::<crate::hover_log::UiFrameCost>();
         app.init_resource::<Time>();
         app.init_resource::<Time<Real>>();
+        app.init_resource::<crate::ui_script::UiClock>();
         app.init_resource::<crate::ui_script::UiScaleCvar>();
         app.world_mut().spawn((
             Window {

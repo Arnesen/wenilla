@@ -1,5 +1,8 @@
-//! The **ground-targeting AoE reticle** — the terrain-projected decal the targeting cursor
-//! drags across the world (decision 0797; byte-pinned in wow-re `ground-target-reticle.md`).
+//! The **ground-targeting AoE reticle** — the terrain-projected decal a **location** cast's
+//! cursor drags across the world (decisions 0797 / 0943; byte-pinned in wow-re
+//! `ground-target-reticle.md`). Only a word that passes `TargetingWantsLocation`'s `& 0x60` has
+//! one: the other two seams (a bag click, a world GameObject click) arm the same cursor and draw
+//! no decal at all — see [`update_reticle`]'s guard.
 //!
 //! For every ordinary area spell (Blizzard, Flamestrike — no object-placement effect), the
 //! reference draws a **projected decal**, not a model: box = the picked ground point ± r in the
@@ -37,7 +40,7 @@ use crate::net::{ObjectStore, SelfPlayer};
 use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
 use crate::player::WorldCamera;
 use crate::target::{PickOcclusion, WorldCursor};
-use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells};
+use crate::ui_action::{ground_cast_radius, SpellTargeting, Spells, TargetingWants};
 
 /// The default footprint when the radius is 0 — out of range, or a rowless spell
 /// (`[0xb4b3b0] == 0.0 → 1.3888889`, the ref's literal).
@@ -83,10 +86,21 @@ pub(super) fn setup_reticle(mut commands: Commands, asset_server: Res<AssetServe
     commands.init_resource::<ReticleState>();
 }
 
-/// Place/size/state the reticle each frame while the targeting cursor is up. Runs after the
-/// targeting cursor drive in the target chain: `WorldCursor.unable` IS the frame's range
-/// verdict (the one `CheckGroundPointInRange` caller — the cursor and the decal state are the
-/// same read in the ref).
+/// Place/size/state the reticle each frame while a **location** cast awaits its click. Runs
+/// after the targeting cursor drive in the target chain: `WorldCursor.unable` IS the frame's
+/// range verdict (the one `CheckGroundPointInRange` caller — the cursor and the decal state are
+/// the same read in the ref).
+///
+/// **Both of `0x4820f0`'s guards, in its order** (decision 0943): `4820f9 IsTargeting 0x6e48a0`
+/// **and** `482106 TargetingWantsLocation 0x6e6320` — either false and it returns having never
+/// touched the draw state, which the hover handler already reset to `3` = *do not draw*
+/// (`481840`, every pass). The *word's* mask decides, not the mere fact of targeting: a lock or
+/// an enchant word (`0x4000` / `0x0010`) fails `& 0x60`, so no decal is drawn for one. The
+/// reference does not even reach here for such a word — `0x481050`'s targeting arm builds the
+/// pick flags from the word alone, and one without `0x60` gets no bit `0x1`, so the pick reports
+/// state 2 (object → `0x4828d0`) or 0, never state 1. Our picks are not word-gated, so this
+/// consumer carries the guard; asking [`SpellTargeting::spell_for`] rather than `spell()` is what
+/// keeps the next seam from forgetting it.
 pub(super) fn update_reticle(
     targeting: Res<SpellTargeting>,
     occlusion: Res<PickOcclusion>,
@@ -97,9 +111,12 @@ pub(super) fn update_reticle(
     mut state: ResMut<ReticleState>,
 ) {
     let state = &mut *state;
-    let (Some(spell_id), Some(point)) = (targeting.spell(), occlusion.point) else {
-        // Not targeting, or the pick hit nothing (sky): nothing is drawn — the ref resets the
-        // draw state on every hover pass before the pick.
+    let (Some(spell_id), Some(point)) = (
+        targeting.spell_for(TargetingWants::Location),
+        occlusion.point,
+    ) else {
+        // Not targeting, targeting a word that wants no location, or the pick hit nothing (sky):
+        // nothing is drawn — the ref resets the draw state on every hover pass before the pick.
         state.shown = false;
         return;
     };
@@ -196,4 +213,65 @@ pub(super) fn push_reticle(
             light: None,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_action::CastCommit;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// **`0x4820f0`'s second guard** (decision 0943). One armed cursor, three seams, one decal:
+    /// only a word that answers `TargetingWantsLocation`'s `& 0x60` may draw. Before this, the
+    /// reticle asked `IsTargeting` alone, so arming Pick Lock (`0x4000`), Opening (`0x4800`) or an
+    /// enchant (`0x0010`) dropped a green AoE circle on the ground under a cursor whose click is a
+    /// hover-pick — director-reported, and true of the item seam since 0928.
+    ///
+    /// The ground is a real trimesh so "nothing drawn" is a verdict and not an empty scene: the
+    /// same fixture with a DEST word must draw, or this test proves nothing.
+    #[test]
+    fn only_a_location_word_draws_a_decal() {
+        let drawn_for = |word: u16| {
+            let mut world = World::new();
+            world.init_resource::<ReticleState>();
+            world.init_resource::<WorldCursor>();
+            world.init_resource::<SpellTargeting>();
+            world.insert_resource(PickOcclusion {
+                distance: 10.0,
+                point: Some(Vec3::ZERO),
+            });
+            world
+                .resource_mut::<SpellTargeting>()
+                .enter(2120, CastCommit::Spell, word);
+            // A flat 100×100 yd ground quad at y = 0, world-space verts (the marked colliders'
+            // identity-pose contract) — inside the ±2.0 slab and wide enough for any radius.
+            let q = 50.0;
+            world.spawn((
+                GroundDecalSurface,
+                Collider::trimesh(
+                    vec![
+                        Vec3::new(-q, 0.0, -q),
+                        Vec3::new(q, 0.0, -q),
+                        Vec3::new(q, 0.0, q),
+                        Vec3::new(-q, 0.0, q),
+                    ],
+                    vec![[0, 1, 2], [0, 2, 3]],
+                ),
+            ));
+            world.run_system_once(update_reticle).unwrap();
+            world.resource::<ReticleState>().shown
+        };
+
+        // Blizzard's bare DEST word — the seam the decal belongs to.
+        assert!(drawn_for(0x0040), "a DEST word draws its reticle");
+        // SOURCE|DEST is still `& 0x60`.
+        assert!(drawn_for(0x0060), "a SOURCE|DEST word draws its reticle");
+        // The three words the director saw a grenade circle under.
+        for word in [0x4000, 0x4800, 0x0010, 0x0800] {
+            assert!(
+                !drawn_for(word),
+                "word {word:#06x} wants no location — no decal"
+            );
+        }
+    }
 }

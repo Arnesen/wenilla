@@ -69,7 +69,9 @@ pub(crate) use errors::{
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
 // spellbook/stance/craft drains thread the mode through the one cast-send path (decision 0792).
-pub(crate) use targeting::{ground_cast_radius, SpellTargeting};
+// `TargetingWants` travels with it because the chain also holds a *seam-specific* consumer — the
+// ground reticle, which draws for the location word alone (decision 0943).
+pub(crate) use targeting::{ground_cast_radius, SpellTargeting, TargetingWants};
 // `pub(crate)`: the spellbook shows the same borrowed weapon icon its bar buttons do, pre-resolved
 // once per page (decisions 0230/0231).
 pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon};

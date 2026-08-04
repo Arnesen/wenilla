@@ -553,8 +553,26 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
         .with_context(|| format!("parsing M2 '{name}'"))?;
     let m = fmt.model();
     let seqs = benilla_formats::parse_m2_animations(&data);
-    println!("idx  keybone  flags       bb  parent  pivot                       keyed (seq[idx] T/R/S counts)");
+    // `ign` is `flags & 0x7` spelled out — which of the parent's Translate/Scale/Rotate this bone
+    // REFUSES, taking the model root's instead (decision 0945). The raw flags hex could always be
+    // read for it and never was: three billboard rounds and a mount round each looked at
+    // `RidingHorse` bone 30's `0x00000006` and none read it as "the saddle discards the gallop",
+    // which decision 0932 then measured as a 21° rider swing and called faithful. A bone-table
+    // dump exists to answer "what does this bone actually inherit"; now it says so in words.
+    println!(
+        "idx  keybone  flags       bb  ign  parent  pivot                       \
+         keyed (seq[idx] T/R/S counts)"
+    );
     for (i, b) in m.bones.iter().enumerate() {
+        let ignore: String = match b.flags.bits() & 0x7 {
+            0 => "-".into(),
+            bits => ["T", "S", "R"]
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| bits & (1 << k) != 0)
+                .map(|(_, n)| *n)
+                .collect(),
+        };
         let keyed: Vec<String> = seqs
             .iter()
             .enumerate()
@@ -569,7 +587,7 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
             })
             .collect();
         println!(
-            "{i:>3}  {:>7}  {:#010x}  {:>2}  {:>6}  ({:>7.3}, {:>7.3}, {:>7.3})  {}",
+            "{i:>3}  {:>7}  {:#010x}  {:>2}  {ignore:>3}  {:>6}  ({:>7.3}, {:>7.3}, {:>7.3})  {}",
             b.key_bone,
             b.flags.bits(),
             yn(b.is_billboard()),
@@ -1194,6 +1212,261 @@ pub fn m2alpha(chain: &mut Chain, internal_path: &str) -> Result<()> {
             print!("  {cell:>13}");
         }
         println!();
+    }
+    Ok(())
+}
+
+/// Decode a particle emitter's file-flag word into the mechanism names the runtime keys off
+/// (each is a [`benilla_formats::ParticleEmitterDef`] predicate), plus any bit the loader maps
+/// to nothing — an unmapped bit on a model that looks wrong is a lead, not noise.
+fn part_flags(flags: u32) -> String {
+    const NAMED: [(u32, &str); 11] = [
+        (0x0010, "modelSpace"),
+        (0x0020, "sizeByInstanceScale"),
+        (0x0040, "inheritEmitterMotion"),
+        (0x0080, "killOutbound(sphere)"),
+        (0x0100, "sphereUp(sphere)"),
+        (0x0200, "tumbleRandomSign"),
+        (0x0400, "tailClampsToAge"),
+        (0x1000, "xyQuad"),
+        (0x2000, "groundSnap"),
+        (0x4000, "followEmitterDelta"),
+        (0x8000, "burst"),
+    ];
+    let mut out: Vec<String> = NAMED
+        .iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, n)| (*n).to_string())
+        .collect();
+    let residue = flags & !NAMED.iter().fold(0, |a, (bit, _)| a | bit);
+    if residue != 0 {
+        out.push(format!("unmapped 0x{residue:x}"));
+    }
+    if out.is_empty() {
+        "none".into()
+    } else {
+        out.join(" ")
+    }
+}
+
+/// One baked track's keys as `t=v` pairs (seconds from the slot's band start).
+fn keys_str(keys: &[(f32, f32)]) -> String {
+    keys.iter()
+        .map(|&(t, v)| format!("{t:.3}={v:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Dump one M2's particle emitters in full — see the `M2part` command doc.
+pub fn m2part(chain: &mut Chain, internal_path: &str) -> Result<()> {
+    let name = normalize(internal_path);
+    let data = chain
+        .read_file(&name)
+        .with_context(|| format!("reading '{name}' from chain"))?;
+    let emitters = benilla_formats::parse_m2_particle_emitters(&data)
+        .map_err(|e| anyhow::anyhow!("parsing particle emitters of '{name}': {e}"))?;
+    if emitters.is_empty() {
+        println!("{name}: no particle emitters");
+        return Ok(());
+    }
+    println!("{name} — {} particle emitter(s)", emitters.len());
+
+    let d = benilla_formats::ParamsNow::default();
+    let defaults = [
+        d.emission_speed,
+        d.speed_variation,
+        d.vertical_range,
+        d.horizontal_range,
+        d.gravity,
+        d.lifespan,
+        d.area_length,
+        d.area_width,
+        d.z_source,
+    ];
+
+    for (i, e) in emitters.iter().enumerate() {
+        let [px, py, pz] = e.position;
+        println!(
+            "\n#{i:<3} bone {:<4} pos ({px:.3}, {py:.3}, {pz:.3})  {:?} · {:?} · {}",
+            e.bone,
+            e.shape,
+            e.blend,
+            match e.head_tail {
+                0 => "head",
+                1 => "tail",
+                _ => "head+tail",
+            }
+        );
+        println!(
+            "     texture {}  atlas {}x{}  flags 0x{:04x} [{}]",
+            e.texture.as_deref().unwrap_or("(none)"),
+            e.tile_cols,
+            e.tile_rows,
+            e.flags,
+            part_flags(e.flags)
+        );
+        if let Some(g) = &e.geometry_model {
+            println!("     geometry model (3-D particles): {g}");
+        }
+        if let Some(r) = &e.recursion_model {
+            println!("     recursion model (child emitters): {r}");
+        }
+        if let Some(s) = &e.spline {
+            let pt = |p: &[f32; 3]| format!("({:.2},{:.2},{:.2})", p[0], p[1], p[2]);
+            println!(
+                "     spline: {} control points, {} .. {}",
+                s.points.len(),
+                s.points.first().map(pt).unwrap_or_default(),
+                s.points.last().map(pt).unwrap_or_default(),
+            );
+        }
+
+        // Emission timing: the rate/gate pair, per file sequence slot.
+        match e.timing.constant_rate() {
+            Some(r) => println!("     rate {r:.2}/s (same in every sequence)"),
+            None => {
+                println!(
+                    "     rate ANIMATED (peak {:.2}/s), per slot:",
+                    e.timing.peak_rate()
+                );
+                for (slot, (looping, rate, _)) in e.timing.slot_views().iter().enumerate() {
+                    if let Some(keys) = rate {
+                        println!(
+                            "       slot {slot} {} {}",
+                            if *looping { "loop" } else { "once" },
+                            keys_str(keys)
+                        );
+                    }
+                }
+            }
+        }
+        let gates: Vec<String> = e
+            .timing
+            .slot_views()
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, (_, _, gate))| {
+                gate.map(|keys| format!("slot {slot}: {}", keys_str(keys)))
+            })
+            .collect();
+        println!(
+            "     gate {}",
+            if gates.is_empty() {
+                "always on (keyless)".to_string()
+            } else {
+                gates.join(" · ")
+            }
+        );
+
+        // The nine emission parameter tracks: the flat ones on one line, the moving ones spelled
+        // out per slot (decision 0844 — a flattened track is exactly how a spread-out effect
+        // collapses to a point).
+        let views = e.params.channel_views();
+        let mut flat: Vec<String> = Vec::new();
+        let mut animated: Vec<String> = Vec::new();
+        for (ch, (label, slots)) in views.iter().enumerate() {
+            let vals: Vec<f32> = slots
+                .iter()
+                .flatten()
+                .flat_map(|k| k.iter().map(|&(_, v)| v))
+                .collect();
+            let (lo, hi) = vals
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            if vals.is_empty() {
+                flat.push(format!("{label} {:.3}*", defaults[ch]));
+            } else if (hi - lo).abs() < 1e-6 {
+                flat.push(format!("{label} {lo:.3}"));
+            } else {
+                flat.push(format!("{label} {lo:.3}..{hi:.3} ANIM"));
+                for (slot, keys) in slots.iter().enumerate() {
+                    if let Some(keys) = keys {
+                        animated.push(format!("       {label} slot {slot}: {}", keys_str(keys)));
+                    }
+                }
+            }
+        }
+        println!(
+            "     params: {}   (* = keyless, loader default)",
+            flat.join("  ")
+        );
+        for line in &animated {
+            println!("{line}");
+        }
+
+        println!(
+            "     drag {:.3}  spin {:.3}  tailTime {:.3}  inheritScale {:.3}",
+            e.drag, e.spin, e.tail_time, e.inherit_scale
+        );
+        println!(
+            "     twinkle speed {:.3} pct {:.3} range {:.3}..{:.3} [{}]",
+            e.twinkle_speed,
+            e.twinkle_percent,
+            e.twinkle_min,
+            e.twinkle_max,
+            if (e.twinkle_max - e.twinkle_min).abs() < 1e-6 {
+                "degenerate — steady at ramp size"
+            } else {
+                "active"
+            }
+        );
+
+        let ol = &e.over_life;
+        println!("     over-life (mid {:.3}):", ol.mid);
+        for (k, c) in ol.color.iter().enumerate() {
+            println!(
+                "       colour k{k}  r {:.3} g {:.3} b {:.3}  a {:.3}",
+                c[0], c[1], c[2], c[3]
+            );
+        }
+        println!(
+            "       size    {:.3} -> {:.3} -> {:.3} yd (half-extent)",
+            ol.scale[0], ol.scale[1], ol.scale[2]
+        );
+        println!(
+            "       cells   head A {}->{} B {}->{} · tail A {}->{} B {}->{} · repeat {:.2}/{:.2}",
+            ol.head_cells[0].begin,
+            ol.head_cells[0].end,
+            ol.head_cells[1].begin,
+            ol.head_cells[1].end,
+            ol.tail_cells[0].begin,
+            ol.tail_cells[0].end,
+            ol.tail_cells[1].begin,
+            ol.tail_cells[1].end,
+            ol.repeat[0],
+            ol.repeat[1]
+        );
+
+        // The derived read: what this record actually puts on screen.
+        let rate = e.timing.peak_rate();
+        let life = e.params.peak_lifespan();
+        let speed = views[0]
+            .1
+            .iter()
+            .flatten()
+            .flat_map(|k| k.iter().map(|&(_, v)| v.abs()))
+            .fold(0.0f32, f32::max);
+        // Drag caps total travel near `speed/drag` (the integrator's exponential decay); with no
+        // drag a particle simply coasts for its lifetime.
+        let reach = if e.drag > 1e-6 {
+            (speed / e.drag).min(speed * life)
+        } else {
+            speed * life
+        };
+        let size_lo = ol.scale.iter().copied().fold(f32::MAX, f32::min);
+        let size_hi = ol.scale.iter().copied().fold(f32::MIN, f32::max);
+        println!(
+            "     derived: {} · reach ~{reach:.2} yd · size {size_lo:.3}..{size_hi:.3} yd · peak alpha {:.2}",
+            if e.burst() {
+                format!("burst of ~{rate:.0} particles, life {life:.2}s")
+            } else {
+                format!(
+                    "steady ~{:.0} live (rate {rate:.1}/s × life {life:.2}s)",
+                    rate * life
+                )
+            },
+            ol.color.iter().map(|c| c[3]).fold(0.0f32, f32::max)
+        );
     }
     Ok(())
 }

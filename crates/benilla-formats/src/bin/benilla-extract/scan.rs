@@ -3524,3 +3524,119 @@ pub fn idleslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     );
     Ok(())
 }
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the models whose animation is
+/// authored **entirely outside the bone tracks** — sequences exist, per-sequence consumers exist
+/// (particle emitters, ribbons, material alpha/colour, UV transforms), and **not one sequence
+/// keys a bone**.
+///
+/// That combination is the blind spot of a renderer whose sequence clock rides a *bone* animation
+/// clip: with no keyed bone there is no clip, so there is no player, so nothing ever says which
+/// sequence is playing or how far into it — and every per-sequence consumer degrades to "file slot
+/// 0, at t = 0", permanently. The emitters still build, pool and tick; they just read the wrong
+/// column of a table that never advances. Found on the Molten Core rune + flame ring (decision
+/// 0941): the rune's slot 0 is its *Closed* band, where every emission rate key is 0 (no flames at
+/// all), and the ring's spline spawn-window opens `0 → 1` over its first second, so frozen at t=0
+/// all 180 particles are born at one point of a 2.8-yd circle — one bright blob.
+///
+/// The `[GO]` mark is the cross-tab that matters: a `GameObjectDisplayInfo` model reaches the
+/// world through the **hosted** clock (`EmitClock::Host`), which is the lane that freezes at
+/// `t = 0`. A placed doodad of the same shape still runs its spawn-age clock (only its *slot* is
+/// pinned — decision 0760's axis), so it is wrong in a different, milder way.
+///
+/// PARTIAL models — some sequences key bones, some don't — are tallied, not listed: there the
+/// clock exists, but the unkeyed sequences are unreachable (no clip to arm), so a GameObject
+/// substate or a creature animation id that resolves to one plays nothing.
+pub fn seqclockscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    // Which models a GameObject can display — the hosted-clock lane.
+    let go_models: HashSet<String> = benilla_formats::load_gameobject_catalog(chain)
+        .map(|c| c.iter().map(|(_, p)| model_key(p)).collect())
+        .unwrap_or_default();
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut with_seqs, mut frozen, mut frozen_go, mut partial, mut inert) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut frozen_emitters = 0usize;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            continue;
+        }
+        with_seqs += 1;
+        // Exactly the runtime's own test (`build_animation_clip`): a sequence becomes a clip iff
+        // some bone track produced a key inside its band.
+        let keyed = seqs
+            .iter()
+            .filter(|a| {
+                a.bones.iter().any(|b| {
+                    !b.translation.is_empty() || !b.rotation.is_empty() || !b.scale.is_empty()
+                })
+            })
+            .count();
+        // Counted over EVERY model with sequences, consumers or not: it measures clip
+        // REACHABILITY (can an arm find this sequence at all), which is a property of the model.
+        if keyed > 0 && keyed < seqs.len() {
+            partial += 1;
+        }
+        let Ok(s) = benilla_formats::parse_m2_animation_summary(&bytes) else {
+            continue;
+        };
+        // The per-sequence consumers: everything that samples a track on the playing sequence's
+        // clock. A constant (≤1 key) colour/alpha track is excluded — it reads the same in every
+        // slot, so a frozen clock costs it nothing.
+        let consumers = s.particle_emitter_count
+            + s.ribbon_emitter_count
+            + s.color_alpha_tracks.1
+            + s.color_rgb_tracks.1
+            + s.transparency_tracks.1
+            + s.texture_transform_count;
+        if keyed == 0 && consumers == 0 {
+            // The same shape with nothing to sample: a clock costs it nothing and buys it
+            // nothing. Counted because it IS the cost side of giving every sequenced model a
+            // clock — these are the models that gain an inert one.
+            inert += 1;
+        }
+        if consumers > 0 && keyed == 0 {
+            frozen += 1;
+            frozen_emitters += s.particle_emitter_count;
+            let is_go = go_models.contains(&name.to_ascii_lowercase());
+            if is_go {
+                frozen_go += 1;
+            }
+            println!(
+                "{}{name}\n    seqs {:>3} (0 keyed) · emitters {:>2} ribbons {} · alpha {} rgb {} \
+                 transp {} · uvanim {} · gseq {}",
+                if is_go { "[GO] " } else { "     " },
+                seqs.len(),
+                s.particle_emitter_count,
+                s.ribbon_emitter_count,
+                s.color_alpha_tracks.1,
+                s.color_rgb_tracks.1,
+                s.transparency_tracks.1,
+                s.texture_transform_count,
+                s.global_seq_channels.len(),
+            );
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {with_seqs} with sequences: {frozen} CLOCKLESS \
+         ({frozen_emitters} emitters) — sequences + per-sequence consumers, not one keyed bone; \
+         {frozen_go} of them GameObject display models (the hosted lane, frozen at slot 0 t=0). \
+         {partial} PARTIAL models have unkeyed sequences a clip lookup can never reach; \
+         {inert} more are boneless with nothing to sample (a clock there is inert)."
+    );
+    Ok(())
+}

@@ -3,21 +3,28 @@
 //! arrays instead.
 //!
 //! **Model pass** ([`compose_rig_models`], pre-propagation): a pose-dirty rig forward-folds its
-//! `locals` into model-space affines and re-seats its consumer **anchors** (children of the rig's
-//! `joints_root`) from them — so ordinary propagation carries every consumer subtree (held items,
-//! nested effect rigs, the mount seat) at this frame's pose, exactly as the joint hierarchy did.
-//! Runs after [`PosePost`] (body twist, global sequences — the writers that follow the evaluator).
+//! `locals` into model-space affines — **including the `flags & 0x7` parent-matrix arm**, which
+//! needs nothing but model space (`RigPose::compose`) — and re-seats its consumer **anchors**
+//! (children of the rig's `joints_root`) from them, so ordinary propagation carries every consumer
+//! subtree (held items, nested effect rigs, the mount seat) at this frame's pose, exactly as the
+//! joint hierarchy did. Runs after [`PosePost`] (body twist, global sequences — the writers that
+//! follow the evaluator).
 //!
 //! **World pass** ([`finalize_rig_worlds`], post-propagation, inside
 //! [`crate::billboard::BillboardPlace`]): per rig needing it — pose-dirty, `joints_root` moved,
 //! or camera-faced — compose the world chain `world_from_model × local…`, apply the byte-law
-//! bone replacements (`billboard_joint_palette`'s math verbatim: billboard kinds take the camera
-//! basis, bone flag `0x04` resets to the holder's rotation, descendants chain onto the replaced
+//! bone replacements (`billboard_joint_palette`'s math verbatim: the arm again, in its world-space
+//! form, then billboard kinds take the camera basis, and descendants chain onto the replaced
 //! frames), write the palette rows (`world × inverse_bindpose`, decision 0720), and re-seat the
 //! anchors sitting on replaced subtrees — including the same rigid-child re-walk and the same
 //! nested-rig do-not-enter rule as the entity pass. A re-seated subtree that carries another
 //! rig's model frame (the mounted rider's seat anchor, [`RigFrame`]) cascades: that rig
 //! re-finalizes in the same pass, so its palette never lags its seat.
+//!
+//! The arm appearing in BOTH passes is not a double application — each pass builds its own chain
+//! once, in its own space, and the two agree (see `RigPose::compose`). What it is NOT allowed to
+//! be is world-pass-only: the anchors are seated from the model pass, so an arm that ran only
+//! afterwards left every attached subtree riding the un-armed frame (decision 0945).
 //!
 //! A parked, stationary rig runs neither pass and uploads zero bytes (decision 0448's park
 //! observables carry over unchanged).
@@ -25,7 +32,7 @@
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 
-use crate::billboard::{billboard_basis, BillboardJointRig};
+use crate::billboard::{billboard_basis, parent_arm_matrix, BillboardJointRig};
 use crate::player::WorldCamera;
 use crate::rig_palette::{RigPalettes, RigSkin};
 
@@ -65,15 +72,14 @@ fn compose_rig_models(mut rigs: Query<&mut RigPose>, mut anchors: Query<&mut Tra
 }
 
 /// One rig's world chain + which bones sit in a replaced subtree. `root_g` is the rig's
-/// `joints_root` propagated world, `root_rot` the HOLDER's world rotation (the frame a bone-flag
-/// `0x04` joint snaps to — the entity pass read `BillboardJointRig::root`, which spawn sites fed
-/// the holder), `cam` the camera basis (`None` = no camera, replacements limited to `0x04`).
-/// The math mirrors `billboard_joint_palette` operation for operation — `mul_transform`, then
-/// decompose/replace/recompose — so the collapsed lane is bit-compatible with the entity lane.
+/// `joints_root` propagated world — the model's own root frame `[model+0xfc]`, which is both what
+/// the `flags & 0x7` arm rebuilds a parent matrix out of and, for a mounted rider, its seat anchor
+/// (`0x714389`). `cam` is the camera basis (`None` = no camera, so only the arm applies).
+/// The math mirrors `billboard_joint_palette` operation for operation — rewrite the parent matrix,
+/// compose the local, then face — so the collapsed lane is bit-compatible with the entity lane.
 fn rig_worlds(
     rig: &RigPose,
     root_g: GlobalTransform,
-    root_rot: Quat,
     cam: Option<(Vec3, Vec3, Vec3)>,
 ) -> (Vec<GlobalTransform>, Vec<bool>) {
     let n = rig.locals.len();
@@ -81,20 +87,26 @@ fn rig_worlds(
     let mut touched = vec![false; n];
     for i in 0..n {
         let parent = usize::try_from(rig.parents[i]).ok().filter(|&p| p < i);
-        let mut g = match parent {
+        let parent_world = match parent {
             Some(p) => worlds[p],
             None => root_g,
+        };
+        // `flags & 0x7` first: it changes the INPUT the billboard law is applied to, and the
+        // billboard switch below still runs (wow-re `billboard-bone-law.md` §9.1).
+        let mut g = match rig.arms[i] {
+            Some(arm) => {
+                touched[i] = true;
+                GlobalTransform::from(parent_arm_matrix(
+                    arm,
+                    parent_world.affine(),
+                    root_g.affine(),
+                    rig.binds[i],
+                ))
+            }
+            None => parent_world,
         }
         .mul_transform(rig.locals[i]);
-        if rig.ignore_rot[i] {
-            let (scale, _, translation) = g.to_scale_rotation_translation();
-            g = GlobalTransform::from(Transform {
-                translation,
-                rotation: root_rot,
-                scale,
-            });
-            touched[i] = true;
-        } else if let (Some(kind), Some((fwd, right, up))) = (rig.kinds[i], cam) {
+        if let (Some(kind), Some((fwd, right, up))) = (rig.kinds[i], cam) {
             let (scale, rot, translation) = g.to_scale_rotation_translation();
             g = GlobalTransform::from(Transform {
                 translation,
@@ -102,8 +114,8 @@ fn rig_worlds(
                 scale,
             });
             touched[i] = true;
-        } else if let Some(p) = parent {
-            touched[i] = touched[p];
+        } else if !touched[i] {
+            touched[i] = parent.is_some_and(|p| touched[p]);
         }
         worlds.push(g);
     }
@@ -167,40 +179,47 @@ pub(crate) fn finalize_rig_worlds(
     let mut cascade: Vec<Entity> = Vec::new();
     let mut finalize =
         |rig: &mut RigPose,
-         holder: Entity,
          skin: &RigSkin,
          globals: &mut Query<(&Transform, &mut GlobalTransform), Without<WorldCamera>>,
-         cascade: &mut Vec<Entity>| {
+         cascade: &mut Vec<Entity>,
+         root_moved: bool| {
             let Ok(root_g) = globals.get(rig.joints_root).map(|(_, g)| *g) else {
                 return;
             };
-            let root_rot = globals
-                .get(holder)
-                .map(|(_, g)| g.rotation())
-                .unwrap_or_default();
-            let (worlds, touched) = rig_worlds(rig, root_g, root_rot, cam_basis);
+            let (worlds, touched) = rig_worlds(rig, root_g, cam_basis);
             if let Some(ibp) = ibps.get(&skin.ibp) {
                 palettes.write_rig_worlds(skin, &worlds, ibp);
             }
-            if !rig.has_special {
+            if !rig.has_special && !root_moved {
                 return;
             }
             // Anchors in replaced subtrees: re-seat their globals and re-compose their rigid
             // children from the replaced frames — the entity pass's child walk, anchor-rooted.
+            //
+            // `root_moved` widens that to EVERY anchor. The touched-only rule assumes propagation
+            // already placed an untouched anchor correctly, and that assumption dies the moment
+            // this rig's own model frame is re-seated after propagation ran: a mounted rider's
+            // seat is patched here, so every one of its anchors is standing on the pre-patch
+            // frame. Its palette rows are rebuilt from `root_g` either way, which is why the BODY
+            // looked right while its attached items rode the stale seat — the mounted pauldron
+            // swinging on the gallop while the shoulder under it did not (decision 0945).
             let mut stack: Vec<(Entity, GlobalTransform)> = Vec::new();
             for &(bone, anchor) in &rig.anchors {
                 let b = bone as usize;
-                if !touched.get(b).copied().unwrap_or(false) {
+                if !root_moved && !touched.get(b).copied().unwrap_or(false) {
                     continue;
                 }
+                let Some(&world) = worlds.get(b) else {
+                    continue;
+                };
                 if let Ok((_, mut g)) = globals.get_mut(anchor) {
-                    *g = worlds[b];
+                    *g = world;
                 }
                 if let Ok(cs) = children.get(anchor) {
                     stack.extend(
                         cs.iter()
                             .filter(|c| !fx_roots.contains(c))
-                            .map(|c| (c, worlds[b])),
+                            .map(|c| (c, world)),
                     );
                 }
             }
@@ -223,7 +242,7 @@ pub(crate) fn finalize_rig_worlds(
             continue;
         };
         let rig = rig.into_inner();
-        finalize(rig, holder, skin, &mut globals, &mut cascade);
+        finalize(rig, skin, &mut globals, &mut cascade, false);
         rig.pose_dirty = false;
     }
     // The cascade: a patch walk above moved some rig's model frame after it (or before it) ran —
@@ -236,7 +255,7 @@ pub(crate) fn finalize_rig_worlds(
             }
             let rig = rig.into_inner();
             let mut ignore = Vec::new();
-            finalize(rig, holder, skin, &mut globals, &mut ignore);
+            finalize(rig, skin, &mut globals, &mut ignore, true);
             rig.pose_dirty = false;
         }
     }
@@ -286,8 +305,66 @@ mod tests {
             parent,
             local_translation: t,
             billboard: None,
-            ignore_parent_rotation: false,
+            parent_arm: None,
         }
+    }
+
+    /// **The mount seat, in the pass that decides it** — `compose`, pre-propagation, which is what
+    /// consumer anchors (the rider's seat, and every item hanging off the rider) are re-seated
+    /// from. The shape is `RidingHorse`'s: a spine bone that swings with the gallop, and the seat
+    /// bone under it carrying `flags = 0x6`.
+    ///
+    /// The seat must come out with the MODEL's orientation whatever the spine does, while still
+    /// being carried to the position the spine put it at — that is the byte law's pivot-preserving
+    /// tail (wow-re `billboard-bone-law.md` §9.1), and it is the whole reason a galloping horse
+    /// bobs its rider without rocking them. Asserted across a swept spine angle, because a single
+    /// sample cannot tell a discarded rotation from a lucky one.
+    ///
+    /// Pinning it HERE and not only in the world pass is the point of the regression: the arm was
+    /// applied post-propagation first, the anchors were seated from the un-armed matrix, and the
+    /// mounted pauldron swung 53° over the stride while the shoulder it hung off stood still.
+    #[test]
+    fn a_flags_0x6_seat_bone_discards_the_gallop_before_the_anchors_are_seated() {
+        let sk = skeleton(vec![
+            joint(-1, Vec3::ZERO),
+            joint(0, Vec3::Y), // the spine, which swings
+            ModelJoint {
+                parent: 1,
+                local_translation: Vec3::new(0.0, 0.5, 0.25),
+                billboard: None,
+                parent_arm: Some(benilla_formats::ParentArm {
+                    ignore_translate: false,
+                    basis: benilla_formats::ParentBasis::RootBasis,
+                }),
+            },
+        ]);
+        let mut rig = RigPose::new(Entity::PLACEHOLDER, &sk);
+        for step in 0..16 {
+            let swing = (step as f32 - 7.5) * 0.05; // ±21°, the horse's measured stride
+            rig.locals[1].rotation = Quat::from_rotation_x(swing);
+            rig.compose();
+            let (_, seat_rot, seat_pos) = rig.model[2].to_scale_rotation_translation();
+            assert!(
+                seat_rot.angle_between(Quat::IDENTITY) < 1e-4,
+                "the seat keeps the model's orientation at spine swing {swing}: got {seat_rot:?}"
+            );
+            // …and it still RIDES the spine: the pivot is where the animated parent put it.
+            let want = rig.model[1].transform_point3(Vec3::new(0.0, 0.5, 0.25));
+            assert!(
+                (seat_pos - want).length() < 1e-4,
+                "the seat travels with the gallop at swing {swing}: {seat_pos} vs {want}"
+            );
+        }
+        // The sweep must actually have moved the seat, or the assertions above are vacuous.
+        rig.locals[1].rotation = Quat::from_rotation_x(0.4);
+        rig.compose();
+        let far = rig.model[2].translation;
+        rig.locals[1].rotation = Quat::from_rotation_x(-0.4);
+        rig.compose();
+        assert!(
+            (Vec3::from(far) - Vec3::from(rig.model[2].translation)).length() > 0.1,
+            "the spine sweep really does carry the seat"
+        );
     }
 
     /// The model compose is the exact affine product entity propagation computed: a three-bone
@@ -322,7 +399,7 @@ mod tests {
 
     /// The world pass reproduces `billboard_joint_palette`'s replacements: a lock-Z billboard
     /// bone takes the camera basis (pivot/scale kept), its child chains onto the replaced frame,
-    /// and a bone-flag-0x04 helper resets to the holder's rotation while its pivot rides the
+    /// and a `flags & 0x4` helper takes the model root's basis while its pivot still rides the
     /// animated parent — the entity pass's three verified behaviours, computed from the arrays.
     #[test]
     fn world_pass_matches_the_entity_billboard_law() {
@@ -331,14 +408,17 @@ mod tests {
                 parent: -1,
                 local_translation: Vec3::new(5.0, 1.0, 0.0),
                 billboard: Some(BillboardKind::LockZ),
-                ignore_parent_rotation: false,
+                parent_arm: None,
             },
             joint(0, Vec3::Y),
             ModelJoint {
                 parent: 1,
                 local_translation: Vec3::Y,
                 billboard: None,
-                ignore_parent_rotation: true,
+                parent_arm: Some(benilla_formats::ParentArm {
+                    ignore_translate: false,
+                    basis: benilla_formats::ParentBasis::RootDirection,
+                }),
             },
         ]);
         let mut rig = RigPose::new(Entity::PLACEHOLDER, &sk);
@@ -352,7 +432,6 @@ mod tests {
         let (worlds, touched) = rig_worlds(
             &rig,
             GlobalTransform::from(Transform::from_rotation(root_rot)),
-            root_rot,
             Some(cam),
         );
         assert_eq!(touched, vec![true; 3], "the whole chain is replaced");
@@ -367,14 +446,14 @@ mod tests {
         let (s1, _, t1) = worlds[1].to_scale_rotation_translation();
         assert!((t1 - (t0 + r0 * (Vec3::Y * 2.0))).length() < 1e-4, "{t1}");
         assert!((s1 - Vec3::ONE).length() < 1e-5, "2 × 0.5 scale chain");
-        // Bone 2 (flag 0x04): pivot carried by the animated parent's frame, rotation snapped to
-        // the holder's.
+        // Bone 2 (flags & 0x4): pivot carried by the animated parent's frame, basis taken from
+        // the model root — the parent here is unit-scaled, so the ratio leg reproduces it exactly.
         let (_, r2, t2) = worlds[2].to_scale_rotation_translation();
         let expect_t = worlds[1].transform_point(Vec3::Y);
         assert!((t2 - expect_t).length() < 1e-4, "pivot rides the parent");
         assert!(
             r2.angle_between(root_rot) < 1e-3,
-            "rotation resets to the holder"
+            "basis comes from the model root, not the parent bone"
         );
     }
 
@@ -387,7 +466,7 @@ mod tests {
         rig.locals[0].rotation = Quat::from_rotation_z(0.4);
         rig.compose();
         let root = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 7.0));
-        let (worlds, touched) = rig_worlds(&rig, root, Quat::IDENTITY, None);
+        let (worlds, touched) = rig_worlds(&rig, root, None);
         assert_eq!(touched, vec![false; 2]);
         for (i, w) in worlds.iter().enumerate() {
             let expect = GlobalTransform::from(root.affine() * rig.model[i]);

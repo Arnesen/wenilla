@@ -74,6 +74,11 @@ pub struct SpellDisplay {
     pub dispel: u32,
     /// `Category` (column 2, [`COL_CATEGORY`]) — the shared-cooldown category; `0` = none.
     pub category: u32,
+    /// Whether [`Self::category`]'s `SpellCategory.dbc` row carries the flags-bit-`0x2`
+    /// "matches every query" wildcard (`GetCooldownInfo 0x6e13e0`'s category leg,
+    /// `gcd-power-gate.md` §2) — resolved at catalog load. Only wand Shoot's category 351 in
+    /// the 5875 data: its running swing cooldown sweeps EVERY button.
+    pub category_wildcard: bool,
     /// `RecoveryTime` ms (column 19) — the spell's own cooldown.
     pub recovery_ms: u32,
     /// `InterruptFlags` ([`COL_INTERRUPT_FLAGS`]) — what breaks this spell's cast. Ordinary
@@ -247,6 +252,7 @@ impl Default for SpellDisplay {
             spell_level: 0,
             dispel: 0,
             category: 0,
+            category_wildcard: false,
             recovery_ms: 0,
             interrupt_flags: 0,
             aura_interrupt_flags: 0,
@@ -434,6 +440,17 @@ impl SpellDisplay {
                 self.effect_1,
                 SPELL_EFFECT_TRADE_SKILL | SPELL_EFFECT_ATTACK
             )
+    }
+
+    /// The cooldown getter's HEAD exclusion (`GetCooldownInfo 0x6e13e0` @ `6e1439`/`6e1442`,
+    /// wow-re `gcd-power-gate.md` §2, §5-verified): `Effect[0] ∈ {0x4e ATTACK, 0x2f TRADE_SKILL}`
+    /// returns "no cooldown" unconditionally — the reason the Attack and profession buttons never
+    /// show a pie AND their presses can never be cooldown-refused.
+    pub fn cooldown_query_excluded(&self) -> bool {
+        matches!(
+            self.effect_1,
+            SPELL_EFFECT_TRADE_SKILL | SPELL_EFFECT_ATTACK
+        )
     }
 
     // The equipped-item requirement's NAME used to be decided here, by a

@@ -242,6 +242,7 @@ mod tests {
             upper_node: None,
             frequency: 0,
             replay: (0, 0),
+            poses_bones: true,
         }
     }
 

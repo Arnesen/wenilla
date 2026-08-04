@@ -375,8 +375,9 @@ pub(super) fn simulate_particles(
     // `AnimationPlayer` names the playing sequence + clip time, same resolution as the
     // material-alpha sampler (`doodad_anim::playing_seq`).
     hosts: Query<(&AnimationPlayer, &benilla_assets::ModelAnimations)>,
-    // `$WOW_PARTICLE_DEPTHDUMP`'s frame counter (see [`super::depthdump`]); inert without the env.
-    mut dump_count: Local<u32>,
+    // The lane's two debug instruments' plumbing, sharing one parameter (see [`super::dumps`]):
+    // `$WOW_PARTICLE_DEPTHDUMP` and `$WOW_EMIT_DUMP`. Both inert without their env.
+    mut dumps: super::dumps::Dumps,
 ) {
     let Ok((world_cam, cam_tf, frustum, camera, projection)) = cam.single() else {
         return;
@@ -403,7 +404,9 @@ pub(super) fn simulate_particles(
     );
     let camera_instance = gates.camera_claim.0.map(|c| c.room.instance);
     // `$WOW_PARTICLE_DEPTHDUMP` (B16): is this a dump frame? Decided once per run.
-    let dump_frame = super::depthdump::frame(time.elapsed_secs(), &mut dump_count);
+    let dump_frame = dumps.depth_frame(time.elapsed_secs());
+    // `$WOW_EMIT_DUMP`: is this a dump tick? Decided once per frame, for the whole walk.
+    let emit_dump = dumps.emit.due(time.elapsed_secs());
 
     for (entity, mut emitter, mut entity_tf, mut entity_global, fade, layers, light_override) in
         &mut emitters
@@ -653,6 +656,9 @@ pub(super) fn simulate_particles(
             None if owner.is_none() => *anchor_pos = placement.translation,
             None => {} // joint-owned, unanchored (placed doodads): the spawn placement stands
         }
+        // `$WOW_EMIT_DUMP`'s subject: the model this cloud belongs to, captured here because
+        // `anchor` is shadowed by the draw anchor further down.
+        let dump_owner = (*host).or(*anchor);
 
         // 0b. The EMITTER-MOTION terms (wow-re `part-emitter-motion.md`, byte-verified): both
         //     feed off the emitter origin's one-frame live world Δ. prevPos refreshes EVERY
@@ -1040,6 +1046,24 @@ pub(super) fn simulate_particles(
                     &quads.verts[start as usize..],
                 );
             }
+        }
+        // `$WOW_EMIT_DUMP`: what this emitter's front end decided this frame — the resolved
+        // sequence slot and what the ten tracks sampled at it. Placed here so `live` is the
+        // count AFTER this frame's births, i.e. what the draw below actually consumes.
+        if emit_dump {
+            dumps.emit.dump(
+                dump_owner,
+                &super::emitdump::Decision {
+                    def,
+                    seq: clock_seq,
+                    elapsed: elapsed_s,
+                    rate,
+                    emitting,
+                    live: particles.len(),
+                    now: &now,
+                    at: emitter_world,
+                },
+            );
         }
         quads.commit_quads(
             start,

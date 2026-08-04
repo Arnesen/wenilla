@@ -578,13 +578,16 @@ pub(super) fn feed_containers(
     mut pending: ResMut<PendingItemOps>,
     mut lock_cleared: ResMut<LockClearedByFailure>,
     mut names: ResMut<crate::names::NameCache>,
+    clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<FeedMemory>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    let now = std::time::Instant::now();
-    let ui_now = script.now();
+    // The frame's atomic clock pair (`crate::ui_script::UiClock`): the slot resolves read the
+    // cooldown store and convert triples through ONE coherent instant, so a running cooldown's
+    // pushed start is frame-stable (the resource's own doc).
+    let (now, ui_now) = (clock.anchor, clock.ui_now);
     let spell_catalog = spells.as_deref().map(|s| &s.catalog);
     let enchant_rows = enchants.as_deref();
     // Inventory refusals surface as the client's red error line (the cast path's exact shape):

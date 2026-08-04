@@ -94,6 +94,7 @@ fn feed_shapeshift_bar(
     reputations: Res<Reputations>,
     mut items: ResMut<Items>,
     commands: Res<NetCommands>,
+    clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<StanceMemory>,
 ) {
     let Some(mut script) = script else {
@@ -105,7 +106,9 @@ fn feed_shapeshift_bar(
     let store = self_q.iter().next();
     let form_byte = store.map(|s| s.0.unit_shapeshift_form()).unwrap_or(0);
     let now = Instant::now();
-    let ui_now = script.now();
+    // The frame's atomic clock pair for the `ui_triple` conversion (`crate::ui_script::UiClock`'s
+    // own doc: converting through a locally sampled `Instant::now()` wobbles the derived start).
+    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     // The usable walk's target leg (the Execute family) reads the CURRENT TARGET, like the
     // action feed's own ctx.
     let target_store = selection
@@ -148,7 +151,6 @@ fn feed_shapeshift_bar(
                         factions: factions.as_deref(),
                         reputations: &reputations,
                         cooldowns: &cooldowns,
-                        now,
                     };
                     usable::spell_usable(id, d, &spells, &ctx, &mut items, &commands).0
                 });
@@ -157,7 +159,9 @@ fn feed_shapeshift_bar(
             } else {
                 d.icon.clone()
             };
-            let cooldown = cooldowns.info(id, 0, Some(d), now).ui_triple(now, ui_now);
+            let cooldown = cooldowns
+                .info(id, 0, Some(d), now)
+                .ui_triple(anchor, ui_now);
             ShapeshiftFormView {
                 spell_id: id,
                 texture,

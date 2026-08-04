@@ -123,7 +123,7 @@ pub(super) fn update_model_particles(
                     // move one number. These instance materials are per-instance throwaways
                     // (their `tint` is already mutated every frame), so nothing else sees it.
                     //
-                    // BUCKETED, and transparent-pass only (decision 0937). On a material the rung
+                    // BUCKETED, and transparent-pass only (decision 0945). On a material the rung
                     // is also a *pipeline-key axis* (bevy folds `depth_bias as i32` into the key
                     // — 0837's law), and 32 integer rungs × every blend state is an open key
                     // space no warm pass can pre-compile: each first-seen combination was a

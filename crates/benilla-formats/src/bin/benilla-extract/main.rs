@@ -110,9 +110,12 @@ enum Command {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
-    /// Dump an M2's bone table: KeyBoneID, flags (billboard bits tagged), parent, pivot, and which
-    /// sequences key each bone (T/R/S key counts) — the bone-attach / billboard-geometry instrument
-    /// (decisions 0028/0122: which bone a rider actually rides, and whether it faces the camera).
+    /// Dump an M2's bone table: KeyBoneID, flags (billboard bits tagged), the `flags & 0x7`
+    /// parent-ignore bits spelled out (`ign` — which of the parent's Translate/Scale/Rotate the
+    /// bone refuses), parent, pivot, and which sequences key each bone (T/R/S key counts) — the
+    /// bone-attach / billboard-geometry instrument (decisions 0028/0122: which bone a rider
+    /// actually rides and whether it faces the camera; 0945: what it actually inherits from its
+    /// parent, which is how a saddle travels with the gallop without rotating with it).
     M2bones {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
@@ -132,6 +135,18 @@ enum Command {
     /// wow-re `m2-alpha-combine-cull.md`). Pair with `m2batch` (the batch -> track wiring) and
     /// `m2seq` (the bands).
     M2alpha {
+        /// Internal path to the `.m2` (forward or back slashes accepted).
+        internal_path: String,
+    },
+    /// Dump ONE M2's particle emitters in full — every authored field of every record, as the
+    /// runtime parses it: bone/position/shape/blend/head-tail, texture + atlas, the decoded file
+    /// flags, the rate/gate timing and the nine emission tracks (flagged `ANIM` with their keys
+    /// when they actually move), drag/spin/tail/twinkle, spline and geometry/recursion models,
+    /// and the over-life colour/size/flipbook ramps. Closes with a derived read per emitter —
+    /// steady-state live count, ballistic reach, size range — so "this flame is a bright blob,
+    /// not a spread-out fire" is answered from the asset before anything is blamed on the
+    /// renderer. The per-model counterpart to the corpus sweeps (`partcensus`, `partscan`).
+    M2part {
         /// Internal path to the `.m2` (forward or back slashes accepted).
         internal_path: String,
     },
@@ -261,6 +276,18 @@ enum Command {
     /// ticks. The population instrument for that silent class (decision 0760; found on
     /// `BlastedLandsLightningbolt01.m2`, the Blasted Lands strike that never fires).
     Partslotscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every `.m2` (optionally under a path prefix) and list the models whose animation is
+    /// authored **entirely outside the bone tracks**: sequences exist, per-sequence consumers exist
+    /// (particle emitters, ribbons, material alpha/colour, UV transforms), and not one sequence
+    /// keys a bone. A sequence clock that rides a bone-animation clip has nothing to ride on such a
+    /// model — no clip, no player, no "which sequence, how far in" — so every per-sequence consumer
+    /// degrades to file slot 0 at t = 0, for ever. The population instrument for that silent class
+    /// (decision 0941; found on the Molten Core rune + flame ring). `[GO]` marks a
+    /// `GameObjectDisplayInfo` model — the hosted-clock lane, where the freeze is total.
+    Seqclockscan {
         /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
@@ -591,6 +618,7 @@ fn main() -> Result<()> {
         Command::M2bones { internal_path } => m2dump::m2bones(&mut chain, &internal_path)?,
         Command::M2batch { internal_path } => m2dump::m2batch(&mut chain, &internal_path)?,
         Command::M2alpha { internal_path } => m2dump::m2alpha(&mut chain, &internal_path)?,
+        Command::M2part { internal_path } => m2dump::m2part(&mut chain, &internal_path)?,
         Command::Attachscan { prefix } => scan::attachscan(&mut chain, prefix.as_deref())?,
         Command::Ribbonscan => scan::ribbonscan(&mut chain)?,
         Command::Cellscan => scan::cellscan(&mut chain)?,
@@ -605,6 +633,7 @@ fn main() -> Result<()> {
         Command::Bonescan { prefix } => scan::bonescan(&mut chain, prefix.as_deref())?,
         Command::Partcensus { prefix } => scan::partcensus(&mut chain, prefix.as_deref())?,
         Command::Partslotscan { prefix } => scan::partslotscan(&mut chain, prefix.as_deref())?,
+        Command::Seqclockscan { prefix } => scan::seqclockscan(&mut chain, prefix.as_deref())?,
         Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
         Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,

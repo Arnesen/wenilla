@@ -63,6 +63,10 @@ struct Record {
     item_id: u32,
     recovery: Timer,
     category: u32,
+    /// Whether [`Self::category`]'s SpellCategory row carries the flags-bit-`0x2` wildcard —
+    /// the category leg then contributes to EVERY query (`0x6e13e0` @ `6e1563`; wand Shoot's
+    /// 351 is the only 5875 carrier). Resolved at catalog load, copied here at insert.
+    category_wildcard: bool,
     category_recovery: Timer,
     /// Parked until `SMSG_COOLDOWN_EVENT` (`SPELL_ATTR_COOLDOWN_ON_EVENT`): the recovery pairs
     /// hold their *durations* but their clocks haven't started.
@@ -89,15 +93,26 @@ pub(crate) struct CooldownInfo {
 
 impl CooldownInfo {
     /// The pushable UI triple `(start_ms on the GetTime clock, duration_ms, enabled)`, or `None`
-    /// when cold. `now`/`ui_now` are the same frame's readings of the two clocks (`Instant` vs
-    /// the VM's `GetTime`), so the subtraction maps the start across without either side knowing
-    /// the other's epoch. Rounded to whole ms so the value is frame-stable: a re-push of the same
-    /// running cooldown re-derives the same number, while a RE-ARM always derives a new one — the
-    /// property the old `(remaining, duration)` shape lacked (two arms of the same cooldown read
-    /// byte-identical and the seam kept the first, elapsed, anchor: the vanished-GCD-pie bug).
-    pub(crate) fn ui_triple(&self, now: Instant, ui_now: f64) -> Option<(i64, u32, bool)> {
+    /// when cold. `anchor`/`ui_now` are the frame's ATOMIC clock pair
+    /// ([`crate::ui_script::UiClock`]) — the `Instant` whose deltas the VM clock accumulates,
+    /// beside the value it accumulated to — so the subtraction maps the start across without
+    /// either side knowing the other's epoch, and derives the SAME whole-ms number every frame
+    /// for one arm (both legs advance in lockstep by construction). A RE-ARM always derives a
+    /// new one — the property the old `(remaining, duration)` shape lacked (two arms of the same
+    /// cooldown read byte-identical and the seam kept the first, elapsed, anchor: the
+    /// vanished-GCD-pie bug). Never convert through a locally sampled `Instant::now()`: that
+    /// re-measures the tick→caller scheduling gap every frame and wobbles the derived start by
+    /// the jitter (±12 ms observed live), turning a running cooldown into a per-frame "changed"
+    /// triple.
+    pub(crate) fn ui_triple(&self, anchor: Instant, ui_now: f64) -> Option<(i64, u32, bool)> {
         (self.remaining_ms > 0).then(|| {
-            let start = ui_now - now.saturating_duration_since(self.start).as_secs_f64();
+            // Signed both ways: a timer armed AFTER the anchor sample (mid-frame, before the
+            // next tick) projects forward, so its first-frame derivation already equals every
+            // later frame's.
+            let start = match self.start.checked_duration_since(anchor) {
+                Some(ahead) => ui_now + ahead.as_secs_f64(),
+                None => ui_now - anchor.duration_since(self.start).as_secs_f64(),
+            };
             #[allow(clippy::cast_possible_truncation)] // session-clock ms fit i64
             (
                 (start * 1000.0).round() as i64,
@@ -123,8 +138,16 @@ impl Cooldowns {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// The insert/refresh primitive (`AddCooldown 0x6e12c0`): nothing to track → no-op; an
-    /// existing `(spell, item)` record is refreshed in place, else a fresh one is appended.
+    /// The insert primitive (`AddCooldown 0x6e12c0`): nothing to track → no-op; else **append a
+    /// new record**. The client never matches-by-id here — its "reuse" scan is free-list node
+    /// recycling, an allocator detail (no `[node+8]==spellId` compare anywhere in `0x6e12c0`'s
+    /// body, wow-re `wave-cooldown.md`), where every other op in the family explicitly walks
+    /// "each node matching id". So one spell can hold SEVERAL records at once — and must: the
+    /// cast-send GCD arm (`StartGlobalCooldown`, a gcd-only node) and the GO self-insert
+    /// (`StartCooldown`, which passes `gcd=0,0`) are separate nodes. The find-and-replace this
+    /// used to do made the GO insert of any cooldown-carrying spell (Frost Nova) overwrite its
+    /// own running GCD node — the whole bar's pie flashed and died ~100 ms after the press,
+    /// while cooldown-less spells (Arcane Explosion) kept theirs (decision 0947).
     #[allow(clippy::too_many_arguments)] // the SPELLHISTORY node's own field list
     fn add(
         &mut self,
@@ -132,6 +155,7 @@ impl Cooldowns {
         item_id: u32,
         recovery: Timer,
         category: u32,
+        category_wildcard: bool,
         category_recovery: Timer,
         on_hold: bool,
         gcd_category: u32,
@@ -146,24 +170,17 @@ impl Cooldowns {
         {
             return;
         }
-        let node = Record {
+        self.records.push(Record {
             spell_id,
             item_id,
             recovery,
             category,
+            category_wildcard,
             category_recovery,
             on_hold,
             gcd_category,
             gcd,
-        };
-        match self
-            .records
-            .iter_mut()
-            .find(|r| r.spell_id == spell_id && r.item_id == item_id)
-        {
-            Some(existing) => *existing = node,
-            None => self.records.push(node),
-        }
+        });
         self.bump();
     }
 
@@ -205,6 +222,7 @@ impl Cooldowns {
                 duration: Duration::from_millis(u64::from(spell.recovery_ms)),
             },
             spell.category,
+            spell.category_wildcard,
             Timer {
                 start: now,
                 duration: Duration::from_millis(u64::from(
@@ -245,6 +263,10 @@ impl Cooldowns {
                 duration: Duration::from_millis(u64::from(recovery_ms)),
             },
             use_spell.category,
+            // The wildcard mark rides the CATEGORY; the wire's per-slot category resolves it
+            // through the spell only when the two agree (no 5875 item carries the one wildcard
+            // category, wand Shoot's 351 — a named corner, not a live one).
+            spell.is_some_and(|s| s.category == use_spell.category && s.category_wildcard),
             Timer {
                 start: now,
                 duration: Duration::from_millis(u64::from(category_ms)),
@@ -256,19 +278,32 @@ impl Cooldowns {
     }
 
     /// Arm the global cooldown at cast-send (`StartGlobalCooldown 0x6e2de0` ← the cast-send arm
-    /// `0x6e58fb`): the spell's `startRecoveryCategory`/`startRecoveryTime` pair; both zero →
-    /// nothing (Attack, Auto Shot, wand Shoot carry no GCD).
+    /// `0x6e58fb`, shared by all three commit wires — CAST_SPELL, USE_ITEM, PET_CAST — keyed on
+    /// the cast SPELL): arms iff `startRecoveryTime != 0` (the byte predicate `6e2e0f–6e2e3d`:
+    /// enter on either pair field nonzero, then bail on a zero post-mod time — so a
+    /// `{cat≠0, time=0}` spell arms nothing; Attack, Auto Shot and wand Shoot carry (0,0)).
+    /// `onHold` rides Attributes bit 25 exactly as the ref passes it (`([rec+0x18]>>0x19)&1`).
     pub(crate) fn start_gcd(&mut self, spell_id: u32, spell: &SpellDisplay, now: Instant) {
-        if spell.start_recovery_category == 0 && spell.start_recovery_ms == 0 {
+        if spell.start_recovery_ms == 0 {
             return;
+        }
+        if crate::dbg_trace::enabled() {
+            crate::dbg_trace::line(
+                "cd",
+                &format!(
+                    "arm-gcd spell={spell_id} gcdcat={} dur={}ms (cast-send)",
+                    spell.start_recovery_category, spell.start_recovery_ms
+                ),
+            );
         }
         self.add(
             spell_id,
             0,
             Timer::none(now),
             0,
-            Timer::none(now),
             false,
+            Timer::none(now),
+            spell.cooldown_on_event(),
             spell.start_recovery_category,
             Timer {
                 start: now,
@@ -283,11 +318,16 @@ impl Cooldowns {
         let mut touched = false;
         for r in &mut self.records {
             if r.spell_id == spell_id && !r.gcd.duration.is_zero() {
+                // `0x6e1630` zeroes BOTH fields (+0x28 startRecoveryCategory, +0x2c time).
+                r.gcd_category = 0;
                 r.gcd = Timer::none(now);
                 touched = true;
             }
         }
         if touched {
+            if crate::dbg_trace::enabled() {
+                crate::dbg_trace::line("cd", &format!("clear-gcd spell={spell_id} (cast-fail)"));
+            }
             self.prune(now);
             self.bump();
         }
@@ -364,6 +404,7 @@ impl Cooldowns {
                 duration: Duration::from_millis(u64::from(recovery_ms)),
             },
             category,
+            spell.is_some_and(|s| s.category == category && s.category_wildcard),
             Timer {
                 start: now,
                 duration: Duration::from_millis(u64::from(category_ms)),
@@ -393,6 +434,7 @@ impl Cooldowns {
                 duration: Duration::from_millis(30_000),
             },
             0,
+            false,
             Timer::none(now),
             false,
             0,
@@ -418,6 +460,9 @@ impl Cooldowns {
                 duration: Duration::from_millis(u64::from(cd.spell_cd_ms)),
             },
             u32::from(cd.category & 0x7FFF),
+            // No display in reach here; the one wildcard category (wand Shoot's 351) never
+            // arrives via the initial-cooldowns list on 1.12 data — a named, dead corner.
+            false,
             Timer {
                 start: now,
                 duration: Duration::from_millis(u64::from(cd.category_cd_ms)),
@@ -428,56 +473,59 @@ impl Cooldowns {
         );
     }
 
-    /// Whether the spell (or its category) is on a *tracked* cooldown — the client's
-    /// `IsSpellOnCooldown 0x6e1690`, the local not-ready refusal at cast-send. Faithfully
-    /// **excludes** the GCD fields (the byte law tests only `duration != 0 || onHold` on the
-    /// spell/category pairs): a pure-GCD lock does not read as "not ready".
-    pub(crate) fn is_on_cooldown(
-        &self,
-        spell_id: u32,
-        spell: Option<&SpellDisplay>,
-        now: Instant,
-    ) -> bool {
+    /// The client's `IsSpellOnCooldown 0x6e1690` — an **"has an on-hold (not-yet-started)
+    /// record"** predicate, NOT a general on-cooldown test (the corrected decode, wow-re
+    /// `gcd-power-gate.md` §3: both legs return 1 only when the matched node's onHold byte is
+    /// set; `+0x28`/`+0x2c` are never referenced and no time source is called). Its reference
+    /// consumers are all bit25/cooldown-on-event gates: the usable walk's grey-while-parked leg
+    /// (`0x6e3fb1`) — ours — and the cast-fail on-hold revert.
+    pub(crate) fn has_on_hold_record(&self, spell_id: u32, spell: Option<&SpellDisplay>) -> bool {
         let category = spell.map_or(0, |s| s.category);
         self.records.iter().any(|r| {
-            // The id match reads the spell timer + hold only; a record's CATEGORY timer is
-            // reachable solely through the category resolve below — the client's own shape
-            // (`GetCooldownInfo 0x6e13e0` surfaces the category pair only on the category
-            // compare at `0x6e155e`, and `SpellCategory[0]` is NULL). Concretely: Auto Shot's
-            // ranged-speed pad (decision 0378) sits on its category-0 record, invisible — a
-            // re-press is never locally refused, matching the ref.
-            (r.spell_id == spell_id && (!r.recovery.remaining(now).is_zero() || r.on_hold))
-                || (category != 0
-                    && r.category == category
-                    && !r.category_recovery.remaining(now).is_zero()
-                    && !r.on_hold)
+            r.on_hold
+                && ((r.spell_id == spell_id && r.item_id == 0)
+                    || (category != 0
+                        && r.category == category
+                        && !r.category_recovery.duration.is_zero()))
         })
     }
 
-    /// Whether a **GCD-carrying** spell is locked by a running global cooldown — its
-    /// `startRecoveryCategory` has remaining time on some record's GCD pair. The send seam's
-    /// second refusal leg (after [`Self::is_on_cooldown`], which byte-faithfully EXCLUDES the
-    /// GCD): a locked press refuses locally with "not ready" and never wires a cast — sending
-    /// instead draws the server's NOT_READY fail (vmangos `Spell.cpp:5387` enforces the GCD),
-    /// whose faithful revert [`Self::clear_gcd`] then wipes the RUNNING GCD — the spam-press
-    /// vanished-pie bug. GCD-free spells (`startRecoveryTime == 0` — Attack, Auto Shot, Heroic
-    /// Strike) are never locked: they queue/fire during the GCD, the vanilla feel. INTERIM: the
-    /// ref's exact refusal site for a GCD-locked press is unpinned in wow-re (`0x6e1690` skips
-    /// the GCD fields, yet the ref demonstrably refuses locally and never casts during the GCD);
-    /// the observable this reproduces is the reference's.
-    pub(crate) fn gcd_locked(&self, spell: &SpellDisplay, now: Instant) -> bool {
-        spell.start_recovery_ms > 0
-            && spell.start_recovery_category != 0
-            && self.records.iter().any(|r| {
-                r.gcd_category == spell.start_recovery_category && !r.gcd.remaining(now).is_zero()
-            })
+    /// The cast validator's FIRST rung (`0x6094f0` @ `0x609565` → `0x6e2ea0` → the getter): a
+    /// press is refused "not ready" iff [`Self::info`] reads ANY remaining — the spell's own
+    /// pair, a category match, or the GCD leg, one query (wow-re `gcd-power-gate.md` §1.3/§2,
+    /// the §5 that closed 0379's INTERIM). The GCD refusal predicate is therefore the GETTER's:
+    /// `pressed.startRecoveryCategory == node.startRecoveryCategory && node.time != 0` — the
+    /// pressed spell's own `startRecoveryTime` is never consulted (a `{cat≠0, time=0}` press —
+    /// the scroll spells — IS refused during the GCD), and Attack / profession presses can never
+    /// be refused (the getter's head exclusion). The item fork (`0x60952b`) is the CALLER's:
+    /// an item press queries `(use_spell, item_entry)` and refuses 0x28; a spell press queries
+    /// `(spell, 0)` and refuses 0x3c. Refusing locally is what keeps the server's NOT_READY fail
+    /// — whose faithful revert [`Self::clear_gcd`] wipes the RUNNING GCD — off the wire (the
+    /// 0379 spam-press vanished-pie loop).
+    pub(crate) fn not_ready(
+        &self,
+        spell_id: u32,
+        item_entry: u32,
+        spell: Option<&SpellDisplay>,
+        now: Instant,
+    ) -> bool {
+        self.info(spell_id, item_entry, spell, now).remaining_ms > 0
     }
 
-    /// The per-spell read (`GetCooldownInfo 0x6e13e0`): resolve `spell_id` (as cast from
-    /// `item_entry`, `0` for a plain spell) against every record — id (+item) match takes the
-    /// spell pair, category match the category pair, and a GCD-category match the GCD pair (how
-    /// one cast's GCD reaches every button sharing `startRecoveryCategory`). Longest remaining
-    /// wins; an on-hold winner reads `enabled == false` (the parked "cooldown hasn't begun").
+    /// The per-spell read (`GetCooldownInfo 0x6e13e0`, the complete §5 match law — wow-re
+    /// `gcd-power-gate.md` §2): resolve `spell_id` (as cast from `item_entry`, `0` for a plain
+    /// spell) against EVERY record, three legs each, **longest remaining wins**:
+    ///
+    /// - **head exclusion**: `Effect[0] ∈ {ATTACK, TRADE_SKILL}` reads cold unconditionally
+    ///   (`6e1439`/`6e1442`) — no pie and no refusal for the Attack/profession buttons, ever;
+    /// - **spell-id leg**: id+item match; a parked record reads full duration with
+    ///   `enabled == false` (the `CooldownFrame_SetTimer` law hides it);
+    /// - **category leg**: node-category equality — or ANY query when the node's category is a
+    ///   flags-bit-`0x2` wildcard row (wand Shoot's 351: the whole-bar swing sweep). A parked
+    ///   record contributes its full duration, disabled (ref: start=now while onHold);
+    /// - **GCD leg** (`6e15cc`): plain equality `node.gcd_category == queried
+    ///   startRecoveryCategory` with the NODE's time nonzero — the queried spell's own
+    ///   `startRecoveryTime` plays no role, and the leg ignores onHold and never disables.
     pub(crate) fn info(
         &self,
         spell_id: u32,
@@ -485,14 +533,17 @@ impl Cooldowns {
         spell: Option<&SpellDisplay>,
         now: Instant,
     ) -> CooldownInfo {
-        let category = spell.map_or(0, |s| s.category);
-        let start_recovery_category = spell.map_or(0, |s| s.start_recovery_category);
         let mut best = CooldownInfo {
             start: now,
             remaining_ms: 0,
             duration_ms: 0,
             enabled: true,
         };
+        if spell.is_some_and(|s| s.cooldown_query_excluded()) {
+            return best;
+        }
+        let category = spell.map_or(0, |s| s.category);
+        let start_recovery_category = spell.map_or(0, |s| s.start_recovery_category);
         let mut consider = |timer: &Timer, remaining: Duration, enabled: bool| {
             let remaining_ms = remaining.as_millis().min(u128::from(u32::MAX)) as u32;
             if remaining_ms > best.remaining_ms {
@@ -513,14 +564,18 @@ impl Cooldowns {
                     consider(&r.recovery, r.recovery.remaining(now), true);
                 }
             }
-            if category != 0 && r.category == category && !r.on_hold {
-                consider(
-                    &r.category_recovery,
-                    r.category_recovery.remaining(now),
-                    true,
-                );
+            if (r.category != 0 && r.category == category) || r.category_wildcard {
+                if r.on_hold {
+                    consider(&r.category_recovery, r.category_recovery.duration, false);
+                } else {
+                    consider(
+                        &r.category_recovery,
+                        r.category_recovery.remaining(now),
+                        true,
+                    );
+                }
             }
-            if start_recovery_category != 0 && r.gcd_category == start_recovery_category {
+            if r.gcd_category == start_recovery_category && !r.gcd.duration.is_zero() {
                 consider(&r.gcd, r.gcd.remaining(now), true);
             }
         }
@@ -580,8 +635,42 @@ mod tests {
         let ch = cds.info(100, 0, Some(&charge()), mid);
         assert_eq!(ch.remaining_ms, 0, "no startRecoveryCategory — no GCD read");
 
-        // …and the GCD is NOT a "not ready" lock (0x6e1690 skips the GCD fields).
-        assert!(!cds.is_on_cooldown(133, Some(&fireball()), mid));
+        // …and the press gate reads it — the ONE getter is the refusal (0948's §5 closed
+        // 0379's INTERIM: there is no separate GCD site); the corrected `0x6e1690` on-hold
+        // predicate stays false (no parked record).
+        assert!(cds.not_ready(133, 0, Some(&fireball()), mid));
+        assert!(!cds.has_on_hold_record(133, Some(&fireball())));
+    }
+
+    /// The director's Frost Nova report (decision 0947): a cooldown-carrying spell's GO
+    /// self-insert (`StartCooldown` passes `gcd=0,0`) lands on its OWN node and must never eat
+    /// the cast-send GCD node — the bar's pie flashed and died ~100 ms after every Frost Nova
+    /// press while cooldown-less spells (Arcane Explosion) kept theirs, because `add` used to
+    /// find-and-replace by `(spell, item)`.
+    #[test]
+    fn a_go_self_insert_never_wipes_the_running_gcd() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        // Frost-Nova-shaped: own 25 s recovery, category 35, the ordinary 133/1500 GCD pair.
+        let frost_nova = spell(35, 25_000, 0, (133, 1500), 0);
+        cds.start_gcd(122, &frost_nova, t0); // the cast-send arm
+        cds.start_spell(122, &frost_nova, 0, t0 + Duration::from_millis(100)); // the GO insert
+
+        let mid = t0 + Duration::from_millis(200);
+        // Every GCD-carrying sibling still reads the RUNNING GCD…
+        let fb = cds.info(133, 0, Some(&fireball()), mid);
+        assert_eq!(
+            (fb.remaining_ms, fb.duration_ms),
+            (1300, 1500),
+            "the GO self-insert must not eat the GCD node"
+        );
+        assert!(
+            cds.not_ready(133, 0, Some(&fireball()), mid),
+            "the local lock holds too"
+        );
+        // …and Frost Nova's own button reads its own cooldown (longest remaining wins).
+        let own = cds.info(122, 0, Some(&frost_nova), mid);
+        assert_eq!((own.remaining_ms, own.duration_ms), (24_900, 25_000));
     }
 
     #[test]
@@ -592,13 +681,12 @@ mod tests {
         cds.start_gcd(5384, &fd, t0);
         cds.start_spell(5384, &fd, 0, t0);
         let mid = t0 + Duration::from_millis(100);
-        assert!(cds.is_on_cooldown(5384, Some(&fd), mid));
-        assert!(cds.info(5384, 0, Some(&fd), mid).remaining_ms > 0);
+        assert!(cds.not_ready(5384, 0, Some(&fd), mid));
 
         // The 0x6e1a00 fail path: GCD cleared (0x6e1630) + the record force-removed (0x6e3050).
         cds.clear_gcd(5384, mid);
         cds.clear_spell(5384);
-        assert!(!cds.is_on_cooldown(5384, Some(&fd), mid));
+        assert!(!cds.not_ready(5384, 0, Some(&fd), mid));
         assert_eq!(cds.info(5384, 0, Some(&fd), mid).remaining_ms, 0);
     }
 
@@ -614,7 +702,7 @@ mod tests {
         let s = cds.info(999, 0, Some(&sibling), mid);
         assert_eq!((s.remaining_ms, s.duration_ms), (10_000, 15_000));
         assert!(
-            cds.is_on_cooldown(999, Some(&sibling), mid),
+            cds.not_ready(999, 0, Some(&sibling), mid),
             "category lock is a not-ready"
         );
         // …an unrelated spell reads nothing.
@@ -636,7 +724,11 @@ mod tests {
             (30_000, false),
             "an on-hold record never elapses on its own"
         );
-        assert!(cds.is_on_cooldown(5384, Some(&fd), t0 + Duration::from_secs(60)));
+        assert!(cds.not_ready(5384, 0, Some(&fd), t0 + Duration::from_secs(60)));
+        assert!(
+            cds.has_on_hold_record(5384, Some(&fd)),
+            "the corrected 0x6e1690: an on-hold record — the usable walk's grey-while-parked"
+        );
 
         // SMSG_COOLDOWN_EVENT starts the clocks NOW.
         let event_at = t0 + Duration::from_secs(60);
@@ -740,32 +832,112 @@ mod tests {
         );
     }
 
-    /// The spam-press vanished-pie bug, leg 2 (the send gate): a press during the running GCD
-    /// must be refused LOCALLY — if it were sent, the server's NOT_READY fail would `clear_gcd`
-    /// the running GCD and kill the sweep. GCD-free spells (Heroic Strike's 0 ms pair) are never
-    /// locked, and the lock lifts when the GCD elapses.
+    /// The conversion is signed both ways: a timer armed AFTER the frame's clock-pair sample
+    /// (mid-frame — the anchor predates the arm until the next tick) must project the SAME
+    /// start the next frame's pair re-derives, so frame one never pushes a value frame two
+    /// then "corrects" (a phantom re-arm at every cast).
     #[test]
-    fn a_running_gcd_locks_gcd_carrying_presses_locally() {
+    fn a_mid_frame_arm_derives_the_same_start_as_the_next_frames_pair() {
+        let anchor0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        // Armed 4 ms after this frame's anchor sample.
+        cds.start_gcd(133, &fireball(), anchor0 + Duration::from_millis(4));
+
+        // Frame 1 converts through the pre-arm pair; frame 2 through the next tick's pair
+        // (both legs advanced by the same 16 ms). One arm — one start, both frames.
+        let read1 = cds
+            .info(
+                133,
+                0,
+                Some(&fireball()),
+                anchor0 + Duration::from_millis(4),
+            )
+            .ui_triple(anchor0, 10.000);
+        let read2 = cds
+            .info(
+                133,
+                0,
+                Some(&fireball()),
+                anchor0 + Duration::from_millis(20),
+            )
+            .ui_triple(anchor0 + Duration::from_millis(16), 10.016);
+        assert_eq!(read1, Some((10_004, 1500, true)));
+        assert_eq!(read1, read2, "the projected start IS the settled start");
+    }
+
+    /// The GCD refusal predicate, corrected by the 0948 §5 (`gcd-power-gate.md` §2.1): a press
+    /// is refused iff its `startRecoveryCategory` EQUALS the armed node's (node time ≠ 0) — the
+    /// pressed spell's own `startRecoveryTime` is never consulted. So a `{133, 0}` press (the
+    /// scroll spells) IS refused during the GCD (the pre-§5 predicate passed it), a `{0, 0}`
+    /// press (Attack shape, Charge) flows, and the lock lifts at expiry.
+    #[test]
+    fn a_running_gcd_locks_presses_by_category_equality_alone() {
         let t0 = Instant::now();
         let mut cds = Cooldowns::default();
         assert!(
-            !cds.gcd_locked(&fireball(), t0),
+            !cds.not_ready(133, 0, Some(&fireball()), t0),
             "no GCD running — nothing locks"
         );
 
-        cds.start_gcd(772, &fireball(), t0); // the successful Rend arms the 133/1500 GCD
+        cds.start_gcd(772, &fireball(), t0); // the successful cast arms the 133/1500 GCD
         let mid = t0 + Duration::from_millis(200);
         assert!(
-            cds.gcd_locked(&fireball(), mid),
+            cds.not_ready(133, 0, Some(&fireball()), mid),
             "the spam press 200 ms later is locked — refused, never sent, the GCD lives"
         );
-        // A GCD-free spell (Heroic Strike shape: category 133, 0 ms) queues through freely.
-        let heroic = spell(0, 0, 0, (133, 0), 0x10000);
-        assert!(!cds.gcd_locked(&heroic, mid), "0 ms GCD pair never locks");
+        // A {133, 0} press — Scroll of Armor's shape — is REFUSED: the node's category matches
+        // and only the NODE's time matters (the §5's corrected divergence).
+        let scroll = spell(0, 0, 0, (133, 0), 0x10000);
+        assert!(
+            cds.not_ready(8091, 0, Some(&scroll), mid),
+            "a zero-GCD press in the shared category is locked on the reference"
+        );
         // Charge (no GCD pair at all) is untouched.
-        assert!(!cds.gcd_locked(&charge(), mid));
+        assert!(!cds.not_ready(100, 0, Some(&charge()), mid));
         // The lock lifts exactly when the GCD elapses.
-        assert!(!cds.gcd_locked(&fireball(), t0 + Duration::from_millis(1_501)));
+        assert!(!cds.not_ready(133, 0, Some(&fireball()), t0 + Duration::from_millis(1_501)));
+    }
+
+    /// The getter's HEAD exclusion (`6e1439`/`6e1442`): Attack / profession presses can never
+    /// be cooldown-refused and their buttons never read a pie — whatever is running.
+    #[test]
+    fn attack_and_tradeskill_reads_are_always_cold() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        cds.start_gcd(772, &fireball(), t0);
+        let mid = t0 + Duration::from_millis(200);
+        let attack = SpellDisplay {
+            effect_1: 78, // SPELL_EFFECT_ATTACK
+            start_recovery_category: 133,
+            ..Default::default()
+        };
+        assert_eq!(cds.info(6603, 0, Some(&attack), mid).remaining_ms, 0);
+        assert!(!cds.not_ready(6603, 0, Some(&attack), mid));
+    }
+
+    /// The category-wildcard leg (`6e1563`: a SpellCategory row with flags bit 0x2 matches EVERY
+    /// query — wand Shoot's 351, the only 5875 carrier): a running wildcard-category cooldown
+    /// sweeps and not-readies every button, the whole-bar wand-swing feel.
+    #[test]
+    fn a_wildcard_category_record_reaches_every_query() {
+        let t0 = Instant::now();
+        let mut cds = Cooldowns::default();
+        // Shoot-shaped: category 351 (wildcard), all-zero DBC recovery, the ranged pad supplies
+        // the category duration (decision 0378's insert shape).
+        let shoot = SpellDisplay {
+            category: 351,
+            category_wildcard: true,
+            attributes: 0x50012,
+            ..Default::default()
+        };
+        cds.start_spell(5019, &shoot, 1500, t0);
+        let mid = t0 + Duration::from_millis(500);
+        // Fireball (category 0, unrelated) reads the wand swing…
+        let fb = cds.info(133, 0, Some(&fireball()), mid);
+        assert_eq!((fb.remaining_ms, fb.duration_ms), (1000, 1500));
+        // …and is locally not-ready for its duration.
+        assert!(cds.not_ready(133, 0, Some(&fireball()), mid));
+        assert!(!cds.not_ready(133, 0, Some(&fireball()), t0 + Duration::from_millis(1_501)));
     }
 
     #[test]
@@ -799,9 +971,9 @@ mod tests {
         assert_eq!(info.duration_ms, 2200, "the sweep is the weapon speed");
         assert_eq!(info.remaining_ms, 1200);
         assert!(info.enabled, "running, not parked");
-        assert!(cds.is_on_cooldown(2764, Some(&throw), mid));
+        assert!(cds.not_ready(2764, 0, Some(&throw), mid));
         assert!(
-            !cds.is_on_cooldown(2764, Some(&throw), t0 + Duration::from_millis(2300)),
+            !cds.not_ready(2764, 0, Some(&throw), t0 + Duration::from_millis(2300)),
             "free again after the weapon speed elapses"
         );
     }
@@ -821,7 +993,7 @@ mod tests {
             "no sweep for a category-0 record"
         );
         assert!(
-            !cds.is_on_cooldown(75, Some(&auto_shot), mid),
+            !cds.not_ready(75, 0, Some(&auto_shot), mid),
             "no local refusal either"
         );
     }

@@ -73,7 +73,7 @@ pub(super) type BoothCamQuery<'w, 's> = Query<
 >;
 
 /// Spawn one tiny quad per reachable pipeline variant — the model lane, its shard-rung and
-/// far-side-of-water twins, and the sky/water lanes (decision 0937 widened 0837's model-only
+/// far-side-of-water twins, and the sky/water lanes (decision 0945 widened 0837's model-only
 /// scope) — parented to the world camera. Materials come from the PRODUCTION builders
 /// (`model_material` / `zfill_material` / `far_twin_of`) or the PRODUCTION live asset stores
 /// (celestial, stars, clouds, gradient dome, liquid — all populated at `Startup`), so the
@@ -239,7 +239,7 @@ pub(super) fn spawn_menagerie(
         }
     }
 
-    // The shard-rung rows (decision 0937). A 3-D model particle's instance material carries its
+    // The shard-rung rows (decision 0945). A 3-D model particle's instance material carries its
     // owner-last rung in `depth_bias`, which is ALSO a pipeline-key axis (0837's law) — so the
     // runtime stamps only the closed bucket set (`owner_last_rung_bucket`), and this table
     // compiles that set. Families are the corpus census's floor plus the depth-write axis
@@ -284,7 +284,7 @@ pub(super) fn spawn_menagerie(
         }
     }
 
-    // The far-side-of-water twins (decision 0937). `classify_water_side` swaps every transparent
+    // The far-side-of-water twins (decision 0945). `classify_water_side` swaps every transparent
     // model material for its `far_twin_of` — a DISTINCT pipeline key (the far marker bit + the
     // shifted bias integer) that the cache never dedups against the near one even though
     // `specialize` makes the descriptors byte-identical. Unwarmed, the first eye-and-model
@@ -327,7 +327,7 @@ pub(super) fn spawn_menagerie(
         }
     }
 
-    // The sky and water lanes (decision 0937 — 0837's scope was model-lane-only, and every hole
+    // The sky and water lanes (decision 0945 — 0837's scope was model-lane-only, and every hole
     // was a director-felt stall: the sun disc first drawn on stepping outdoors, the first water
     // in view, a spell's shards mid-cast). Every material that EXISTS in these Startup-populated
     // stores gets a rig with its production mesh layout — iterating the store can't drift from

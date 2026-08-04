@@ -242,6 +242,7 @@ pub(super) fn drain_action_uses(
                             start_quest: template.start_quest,
                             bag_index,
                             slot: slot0,
+                            entry: b.action,
                             spell_index,
                             use_spell: template.use_spell.map(|u| u.spell_id),
                             on_object: None,

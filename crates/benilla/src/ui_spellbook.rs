@@ -130,6 +130,7 @@ fn feed_spellbook(
     icons: Option<Res<ItemDisplays>>,
     commands: Res<NetCommands>,
     cooldowns: Res<crate::cooldowns::Cooldowns>,
+    clock: Res<crate::ui_script::UiClock>,
     mut memory: Local<FeedMemory>,
 ) {
     let Some(mut script) = script else {
@@ -189,12 +190,11 @@ fn feed_spellbook(
     // per arm, so a running cooldown never churns this diff). The XML's SPELL_UPDATE_COOLDOWN
     // handler re-reads these through `GetSpellCooldown` — the plugin's `.before(CooldownEvents)`
     // guarantees they're pushed before that event fires.
-    let now = std::time::Instant::now();
-    let ui_now = script.now();
+    let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     for slot in &mut fresh.slots {
         slot.cooldown = cooldowns
-            .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), now)
-            .ui_triple(now, ui_now);
+            .info(slot.spell_id, 0, spells.catalog.get(slot.spell_id), anchor)
+            .ui_triple(anchor, ui_now);
     }
     if fresh != memory.pushed {
         // Two event edges off one diff: the ref fires CURRENT_SPELL_CAST_CHANGED for a checked-

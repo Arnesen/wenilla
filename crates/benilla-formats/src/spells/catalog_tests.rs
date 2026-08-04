@@ -969,3 +969,47 @@ fn real_item_target_family_and_its_gate_columns() {
         );
     }
 }
+
+/// The 0948 §5's flagged data questions, pinned on the real 5875 data (`gcd-power-gate.md`
+/// §2.1): the SpellCategory flags-bit-0x2 wildcard set is EXACTLY {351} — wand Shoot's category
+/// (the whole-bar swing sweep the store's wildcard leg implements) — and the `{cat=0, time≠0}`
+/// GCD-source shape (which would arm a category-0 GCD node matching every category-0 press) has
+/// NO player-castable carrier: every such row is an NPC/internal spell. A data change here means
+/// the store's predicates need re-judging, loudly.
+#[test]
+fn gcd_wildcard_and_shape_corners_hold_on_the_real_data() {
+    let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_catalog(&mut chain).expect("catalog");
+
+    // The wildcard set: exactly wand Shoot's 351, resolved onto the display at load.
+    let shoot = cat.get(5019).expect("wand Shoot");
+    assert_eq!(shoot.category, 351);
+    assert!(
+        shoot.category_wildcard,
+        "Shoot's category row carries flags&2"
+    );
+    for &(id, name) in &[
+        (133u32, "Fireball"),
+        (100, "Charge"),
+        (6673, "Battle Shout"),
+    ] {
+        let d = cat.get(id).expect(name);
+        assert!(
+            !d.category_wildcard,
+            "{name}'s category must not read wildcard"
+        );
+    }
+
+    // Scroll of Armor's spell: the {cat≠0, time=0} shape the corrected refusal predicate now
+    // locks during a GCD (the pressed spell's own time is never consulted).
+    let scroll = cat.get(8091).expect("Scroll of Armor's spell");
+    assert_eq!(
+        (scroll.start_recovery_category, scroll.start_recovery_ms),
+        (133, 0)
+    );
+}

@@ -95,7 +95,7 @@ pub(super) fn drain_inventory_uses(
         let slot = (id - 1) as u8;
         // The doll's own slot ids ARE the wire slots (`wire_pos`'s EQUIPMENT_BAG law), so the
         // equipped instance resolves off the player's INV array directly.
-        let (guid, start_quest, spell_index, use_spell) = self_q
+        let (guid, start_quest, spell_index, use_spell, entry) = self_q
             .iter()
             .next()
             .and_then(|store| slot_guid(&store.0, EQUIPMENT_BAG, slot, &ladder.items))
@@ -109,9 +109,10 @@ pub(super) fn drain_inventory_uses(
                     t.start_quest,
                     t.use_spell_index().unwrap_or(0),
                     t.use_spell.map(|u| u.spell_id),
+                    Some(entry),
                 ))
             })
-            .unwrap_or((None, 0, 0, None));
+            .unwrap_or((None, 0, 0, None, None));
         debug!("ui_items: use equipped item, lua slot {id} (wire 255/{slot})");
         super::send_item_use(
             super::ItemUse {
@@ -119,6 +120,7 @@ pub(super) fn drain_inventory_uses(
                 start_quest,
                 bag_index: BAG_PLAYER_INVENTORY,
                 slot,
+                entry: entry.unwrap_or(0),
                 spell_index,
                 use_spell,
                 on_object: None,
@@ -322,6 +324,7 @@ pub(super) fn drain_container_uses(
                     start_quest: c.start_quest,
                     bag_index,
                     slot: wire_slot,
+                    entry: c.entry,
                     spell_index: c.spell_index,
                     use_spell: c.use_spell,
                     on_object: None,
@@ -403,6 +406,7 @@ pub(super) fn drain_container_uses(
                 start_quest: 0,
                 bag_index,
                 slot: wire_slot,
+                entry: clicked.map_or(0, |c| c.entry),
                 spell_index: clicked.map_or(0, |c| c.spell_index),
                 use_spell: clicked.and_then(|c| c.use_spell),
                 on_object: None,

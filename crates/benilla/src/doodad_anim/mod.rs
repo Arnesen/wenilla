@@ -110,6 +110,9 @@ pub(crate) fn classify<'a>(
     if skeleton.joints.is_empty() {
         return DoodadAnimTier::Static;
     }
+    // `first_seq` — 0130's content gate, and only that (decision 0936's split; the loader arm's
+    // *identity* answer is `idle_seq`/`idle_clip`, which the entity lane arms from). It stays the
+    // rig question here: a seed that holds bind pose renders identically to the static mesh.
     match anims.first_seq.and_then(|i| anims.clips.get(i)) {
         Some(clip) => DoodadAnimTier::FirstSeq(clip),
         None if !anims.global_bones.is_empty() => DoodadAnimTier::GlobalSeqOnly,
@@ -543,6 +546,7 @@ mod tests {
             upper_node: None,
             frequency: 0,
             replay: (0, 0),
+            poses_bones: true,
         }
     }
 
@@ -684,7 +688,7 @@ mod tests {
                     parent: -1,
                     local_translation: Vec3::ZERO,
                     billboard: None,
-                    ignore_parent_rotation: false,
+                    parent_arm: None,
                 })
                 .collect(),
             spine_bone: None,
@@ -724,6 +728,24 @@ mod tests {
         assert!(matches!(
             classify(&skeleton(3), Some(&a)),
             DoodadAnimTier::FirstSeq(c) if c.anim_id == 0
+        ));
+        // A CLOCK-ONLY model (decision 0941): every sequence now builds a clip, so a model whose
+        // bones never move — the Molten Core rune, the flame ring, 807 corpus models whose
+        // animation lives entirely in their emitter tracks — arrives here with clips and NO
+        // `first_seq` (the content gate declined it). It must still classify Static: its clock is
+        // armed by the entity lane off `idle_clip`, and rigging it could only reproduce the
+        // bind-pose mesh. This is the case that used to reach `first_seq: None` by never having
+        // built a clip at all.
+        let a = anims(vec![clip(0)], None, false);
+        assert!(matches!(
+            classify(&skeleton(3), Some(&a)),
+            DoodadAnimTier::Static
+        ));
+        // ...and one that also pulses on a global sequence takes the player-less tier, not a rig.
+        let a = anims(vec![clip(0)], None, true);
+        assert!(matches!(
+            classify(&skeleton(3), Some(&a)),
+            DoodadAnimTier::GlobalSeqOnly
         ));
     }
 

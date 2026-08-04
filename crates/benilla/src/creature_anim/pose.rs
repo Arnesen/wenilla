@@ -44,13 +44,19 @@ pub(crate) struct RigPose {
     pub(crate) locals: Vec<Transform>,
     /// Per-bone **animated** model-space affine (`parent_model × local`), the product transform
     /// propagation used to compute through the joint entities. Rebuilt by [`Self::compose`] for a
-    /// dirty rig; billboard/ignore-rot replacements happen in the world pass, never here.
+    /// dirty rig, WITH the `flags & 0x7` arm folded in — it is model-space-computable and the
+    /// anchors are seated from these. Only the camera-dependent billboard replacement waits for
+    /// the world pass.
     pub(crate) model: Vec<Affine3A>,
     pub(crate) parents: Vec<i16>,
     /// The bone's billboard arm (`0x08/0x10/0x20/0x40`), for the world pass's camera replacement.
     pub(crate) kinds: Vec<Option<benilla_formats::BillboardKind>>,
-    /// Bone flag `0x04`: rotation resets to the model root's frame (the HandArrow helpers).
-    pub(crate) ignore_rot: Vec<bool>,
+    /// Bone flags `0x1/0x2/0x4`: how the bone's effective PARENT matrix is rebuilt from the model
+    /// root before it composes (`crate::billboard::parent_arm_matrix`).
+    pub(crate) arms: Vec<Option<benilla_formats::ParentArm>>,
+    /// Each bone's BIND local translation — the pivot the arm preserves. `locals` carry the
+    /// ANIMATED translation, which the byte law rotates by the *new* basis; not interchangeable.
+    pub(crate) binds: Vec<Vec3>,
     /// Any bone billboards — the world pass re-faces this rig whenever it isn't parked.
     pub(crate) has_billboard: bool,
     /// Any bone billboards or resets — the world pass's override walk runs at all.
@@ -80,16 +86,17 @@ impl RigPose {
             locals,
             parents: skeleton.joints.iter().map(|j| j.parent).collect(),
             kinds: skeleton.joints.iter().map(|j| j.billboard).collect(),
-            ignore_rot: skeleton
+            arms: skeleton.joints.iter().map(|j| j.parent_arm).collect(),
+            binds: skeleton
                 .joints
                 .iter()
-                .map(|j| j.ignore_parent_rotation)
+                .map(|j| j.local_translation)
                 .collect(),
             has_billboard: skeleton.joints.iter().any(|j| j.billboard.is_some()),
             has_special: skeleton
                 .joints
                 .iter()
-                .any(|j| j.billboard.is_some() || j.ignore_parent_rotation),
+                .any(|j| j.billboard.is_some() || j.parent_arm.is_some()),
             anchors: Vec::new(),
             pose_dirty: true,
         };
@@ -101,13 +108,35 @@ impl RigPose {
     /// computed through the joint entities (`parent_global.mul_transform(local)`, model-rooted).
     /// M2 bones are parent-sorted (the format guarantees parent < child); a malformed child whose
     /// parent follows it composes from the model root, matching the old hierarchy's `unwrap_or(root)`.
+    ///
+    /// The **`flags & 0x7` arm runs here**, in model space, with the model root as the identity —
+    /// which is what it *is*, relative to this rig. That is not a shortcut around the world-space
+    /// form the world pass uses: a model frame is a similarity (uniform scale), so `root_world ×
+    /// arm(P_model, I)` and `arm(root_world × P_model, root_world)` agree axis for axis, including
+    /// the ratio leg's per-axis magnitudes (the common factor cancels).
+    ///
+    /// Doing it here rather than only in the world pass is load-bearing, not a tidy-up. `model` is
+    /// what the pre-propagation pass re-seats consumer anchors from, so an arm applied only
+    /// afterwards leaves ordinary propagation to carry every attached subtree on the UN-armed
+    /// frame — and the world pass's patch walk deliberately does not enter a nested rig. That is
+    /// how a mounted rider's pauldron ended up riding the horse's gallop while the shoulder it
+    /// hangs off did not (decision 0945).
     pub(crate) fn compose(&mut self) {
         for i in 0..self.locals.len() {
             let local = self.locals[i].compute_affine();
-            self.model[i] = match usize::try_from(self.parents[i]).ok().filter(|&p| p < i) {
-                Some(p) => self.model[p] * local,
-                None => local,
+            let parent = match usize::try_from(self.parents[i]).ok().filter(|&p| p < i) {
+                Some(p) => self.model[p],
+                None => Affine3A::IDENTITY,
             };
+            self.model[i] = match self.arms[i] {
+                Some(arm) => crate::billboard::parent_arm_matrix(
+                    arm,
+                    parent,
+                    Affine3A::IDENTITY,
+                    self.binds[i],
+                ),
+                None => parent,
+            } * local;
         }
     }
 }
@@ -451,7 +480,7 @@ mod tests {
                     parent: -1,
                     local_translation: Vec3::ZERO,
                     billboard: None,
-                    ignore_parent_rotation: false,
+                    parent_arm: None,
                 })
                 .collect(),
             spine_bone: None,

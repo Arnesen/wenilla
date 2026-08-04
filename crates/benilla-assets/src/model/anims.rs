@@ -87,6 +87,13 @@ pub struct AnimClip {
     /// variation — `(0, 0)` ⇒ `R = 1` ⇒ a re-roll every single loop. That is the whole mechanism
     /// behind the Blasted Lands lightning wandering instead of strobing from one fixed spot.
     pub replay: (u32, u32),
+    /// Whether this clip actually **poses bones** — some bone track produced a curve. `false` for a
+    /// sequence whose bones all hold bind pose: it still exists as a clip (playing it is how the
+    /// instance's sequence clock names a slot and advances a time, which the emitter tracks, the
+    /// material loops and the GameObject arm all read), but skinning to it can only ever reproduce
+    /// the static mesh. So a rig is spawned for a *posing* clip, never for a clock-only one —
+    /// decision 0941's split between the clock (free) and the rig (a palette slot, a skinned twin).
+    pub poses_bones: bool,
 }
 
 /// A model's animations as a playable bundle (decision 0019): one shared `AnimationGraph` holding every
@@ -217,6 +224,15 @@ impl ModelAnimations {
     /// `None` only for a model with no buildable clip at all (the `GlobalSeqOnly` tier), where there
     /// is no sequence to name.
     pub fn idle_seq(&self) -> Option<usize> {
+        self.idle_clip().map(|c| c.seq_index)
+    }
+
+    /// The loader-idle seed's **clip** — [`Self::idle_seq`]'s selection, before it is reduced to a
+    /// slot number. What a spawn site plays to put an instance on that sequence: since every
+    /// sequence builds a clip (decision 0941), a model whose bones never move still has one to arm,
+    /// and arming it is what gives its emitters/material loops a running clock instead of a frozen
+    /// slot-0 read. Distinct from [`Self::first_seq`], which stays the *rendering* question.
+    pub fn idle_clip(&self) -> Option<&AnimClip> {
         let idle_id = self
             .playable_animation_lookup
             .first()
@@ -225,7 +241,6 @@ impl ModelAnimations {
             .iter()
             .find(|c| c.anim_id == idle_id)
             .or_else(|| self.clips.first())
-            .map(|c| c.seq_index)
     }
 
     /// Pick a **variation** of `anim_id` for one play, given a fresh `roll` (the client's `_rand()`,
@@ -336,6 +351,7 @@ mod tests {
             upper_node: None,
             frequency: 0,
             replay: (0, 0),
+            poses_bones: true,
         }
     }
 

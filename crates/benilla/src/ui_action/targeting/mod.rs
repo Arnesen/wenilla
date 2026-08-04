@@ -15,10 +15,12 @@
 //! `world-click-targeting.md`, plus 0923's own read of the two pickup seams):
 //!
 //! - [`cursor`] — while targeting, the world classifier is pre-empted (the ref's dispatcher step 2
-//!   runs before any object resolve): **Cast** when the hovered ground point passes the range gate,
-//!   **UnableCast** otherwise (`0x4820f0`'s split, `CheckGroundPointInRange 0x6e6810` over
-//!   `GetMinMaxRange`). The other two seams take plain Cast — that range gate is a *location*
-//!   predicate. Also the ground reticle's radius ([`ground_cast_radius`]).
+//!   runs before any object resolve), and the verdict is **per-seam** (decision 0949): the pick
+//!   flags come from the word, so the word chooses the handler — terrain → `0x4820f0`'s
+//!   `CheckGroundPointInRange 0x6e6810`, a GameObject → `0x4828d0`'s `0x6e6460` (the word's
+//!   `& 0x4800`, the spell-vs-lock predicate `0x5f8260`, then the range test), and **no handler
+//!   at all → UnableCast**. That default is what greys an armed lockpick over open ground and
+//!   greys a poison everywhere in the world. Also the reticle's radius ([`ground_cast_radius`]).
 //! - [`world`] — the two legs of the world-click dispatcher `0x492ce0`: the **terrain** leg's
 //!   ground commit (`0x492580` → `BindLocation 0x6e60f0`) and the **object** leg's GameObject bind
 //!   (`0x4925d0` → `SetSelection 0x493540` @ `4935d5` → `BindTarget 0x6e5b40`'s GO arm). Which leg
@@ -56,7 +58,10 @@
 //! ([`crate::target::click::select_on_click`]'s gate transcribes the unreachable select).
 //! Right-click cancels on the DOWN edge ([`cancel_targeting_on_right_press`]); movement never
 //! cancels (`0x515090`'s explicit IsTargeting-skip). The ground reticle draws in [`crate::target`]'s
-//! `reticle` module (decision 0797) off [`ground_cast_radius`] + the cursor's range verdict.
+//! `reticle` module (decision 0797) off [`ground_cast_radius`] + the cursor's range verdict — for
+//! the **terrain seam alone**, through [`SpellTargeting::spell_for`] (decision 0943): it is a
+//! per-seam surface, and reading the seam-agnostic [`SpellTargeting::spell`] there is what put a
+//! green AoE circle under every armed lockpick and enchant.
 
 mod cursor;
 mod item;
@@ -138,8 +143,9 @@ impl SpellTargeting {
         self.0.is_some()
     }
 
-    /// `GetTargetingSpellId 0x6e48e0` — the spell awaiting its click, for the action bar's
-    /// press-again toggle.
+    /// `GetTargetingSpellId 0x6e48e0` — the spell awaiting its click, whatever its word wants.
+    /// For the whole-word consumers only: the bar's checked state, the press-again toggle, the
+    /// `CURRENT_SPELL_CAST_CHANGED` edge. A seam-specific one wants [`Self::spell_for`].
     pub(crate) fn spell(&self) -> Option<u32> {
         self.0.as_ref().map(|t| t.spell_id)
     }
@@ -147,6 +153,22 @@ impl SpellTargeting {
     /// Whether the standing word answers `wants`' mask test — `false` when nothing is targeting.
     pub(crate) fn wants(&self, wants: TargetingWants) -> bool {
         self.0.as_ref().is_some_and(|t| wants.matches(t.word))
+    }
+
+    /// The pending spell **when the standing word answers `wants`** — `IsTargeting` and the seam's
+    /// own mask test as one read, which is the pair every seam-specific consumer needs and
+    /// [`Self::spell`] deliberately is not.
+    ///
+    /// Any surface that draws or binds for *one* seam must ask through this or through
+    /// [`Self::pending_for`]; `spell()` is `GetTargetingSpellId 0x6e48e0` and answers for the word
+    /// as a whole (the bar's checked state, the re-press toggle, the
+    /// `CURRENT_SPELL_CAST_CHANGED` edge). Reading `spell()` where a seam was meant is what put an
+    /// AoE reticle under a lockpick (decision 0943).
+    pub(crate) fn spell_for(&self, wants: TargetingWants) -> Option<u32> {
+        self.0
+            .as_ref()
+            .filter(|t| wants.matches(t.word))
+            .map(|t| t.spell_id)
     }
 
     pub(crate) fn enter(&mut self, spell_id: u32, commit: super::cast_send::CastCommit, word: u16) {

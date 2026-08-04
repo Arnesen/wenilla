@@ -4,11 +4,12 @@
 //! the trade-skill window and the craft window all funnel here too. That is the point: the client's
 //! `TryCast 0x6e4b60` → commit `0x6e54f0` is *one* function with a long ladder of local gates and a
 //! post-send tail, and duplicating any part of it per caller is how the two paths drift. The ladder
-//! below is that function's order, gate for gate — profession intercept, auto-repeat toggle,
-//! cooldown, GCD, in-flight guard, mounted, moving, form, reagents/totems, target binding,
-//! range — followed by
-//! the commit's own tail (ranged stance, auto-repeat arm, the send, the auto-attack start, the GCD
-//! arm).
+//! below is that function's order, gate for gate (re-pinned end to end by the 0948 §5,
+//! `gcd-power-gate.md`) — profession intercept, auto-repeat toggle, targeting abort, in-flight,
+//! reagents/totems, target binding + range, then the validator `0x6094f0`'s opening rungs
+//! (not-ready/GCD, power), mounted, moving, form, the deferred targeting-cursor entry — followed
+//! by the commit's own tail (ranged stance, auto-repeat arm, the send, the auto-attack start, the
+//! GCD arm).
 //!
 //! A refusal here is **local and pre-commit**, exactly like the reference's: no packet, no GCD, no
 //! pending arm, no autorepeat key — just the red error line's reason code.
@@ -20,10 +21,12 @@
 //! computes a display flag and does *not* skip the IsCasting gate below it, and at `6e4f33`, where
 //! it is forwarded to the requirement validator `0x6094f0`. Every rung between entry and the
 //! commit is therefore the same code for a spell and for an item, which is why [`CastCommit`] is a
-//! *parameter* of this function and not a second path. Two rungs fork on it, and only two: the
-//! validator's first rung (`60952b`: item → the item cooldown query `0x6e2ed0` and error **0x28**
-//! "Item is not ready yet."; no item → `0x6e2ea0` and **0x3c** "Spell is not ready yet.") and the
-//! commit's opcode (`0x6e57d8 push 0xab` vs `push 0x12e`).
+//! *parameter* of this function and not a second path. Three rungs fork on it, and only three
+//! (`gcd-power-gate.md` §1): the validator's first rung (`60952b`: item → the item cooldown query
+//! `0x6e2ed0` on the (use-spell, ENTRY) pair and error **0x28** "Item is not ready yet."; no item
+//! → `0x6e2ea0` and **0x3c** "Spell is not ready yet."), the power gate (`0x60962c` — an item
+//! press's clear-query jump lands PAST it: items are never power-gated), and the commit's opcode
+//! (`0x6e57d8 push 0xab` vs `push 0x12e`).
 
 use std::time::Instant;
 
@@ -50,6 +53,9 @@ pub(crate) enum CastCommit {
     Item {
         bag_index: u8,
         slot: u8,
+        /// The item's template ENTRY — the not-ready rung's item-leg query key (the store's
+        /// `(use_spell, itemID)` match; decision 0948, closing the entry gap 0914 named).
+        entry: u32,
         spell_index: u8,
         /// The key-in-a-lock arm (decision 0769) — `CGItem::Use`'s own target argument, non-zero
         /// only for the lock chain. A caller-bound guid short-circuits the binder below, exactly
@@ -264,30 +270,6 @@ fn send_spell_cast(
         debug!("ui_action: cast {spell_id} supersedes the targeting cursor");
         ground.clear();
     }
-    // The local not-ready refusal (the client's `IsSpellOnCooldown 0x6e1690` gate in the cast
-    // path): a spell/category cooldown refuses at the source with the client's own reason 0x3c
-    // ("Spell is not ready yet.") — never sent, exactly like the real client. The GCD is
-    // faithfully NOT part of this test (0x6e1690 skips the GCD fields).
-    // …and the leg that forks on item-present, verbatim: the validator branches at `60952b` on
-    // its item argument — item → the item cooldown query `0x6e2ed0` and reason **0x28** "Item is
-    // not ready yet." (`609549`), no item → `0x6e2ea0` and **0x3c** (`609616`). (Ours keys one
-    // cooldown store by spell id for both; the ref's item query keys by the item ENTRY as well —
-    // a named gap, decision 0914.)
-    if cooldowns.is_on_cooldown(spell_id, def, now) {
-        debug!("ui_action: cast {spell_id} refused locally — on cooldown");
-        cast_errors.0.push((spell_id, commit.not_ready_reason()));
-        return;
-    }
-    // The GCD leg of the local not-ready ladder ([`Cooldowns::gcd_locked`], decision 0379): a
-    // GCD-carrying spell pressed while its startRecoveryCategory still runs refuses at the
-    // source — same reason 0x3c, NEVER sent. Sending would draw the server's NOT_READY fail
-    // (vmangos enforces the GCD), whose faithful revert clears the RUNNING GCD — the spam-press
-    // vanished-pie bug. GCD-free presses (Heroic Strike's queue, Attack, Shoot) pass.
-    if def.is_some_and(|d| cooldowns.gcd_locked(d, now)) {
-        debug!("ui_action: cast {spell_id} refused locally — the GCD is running");
-        cast_errors.0.push((spell_id, commit.not_ready_reason()));
-        return;
-    }
     // The cast classes at this seam. A ranged/auto-repeat shot (Auto Shot, wand Shoot, Throw) is
     // not a cast-bar cast — it runs the ranged-stance / `AutoRepeatArmed` path, outside the
     // in-flight guard. An on-next-swing spell (`Attributes & 0x404` — Heroic Strike, Cleave)
@@ -313,16 +295,155 @@ fn send_spell_cast(
         debug!("ui_action: cast {spell_id} suppressed — a cast is already in flight");
         return;
     }
+    // The pre-send totem/reagent possession check (`CheckReagentsAndTotems 0x6e4000`, TryCast's
+    // `0x6e4ded` — decision 0552): a missing tool (Mining Pick) or a short reagent refuses HERE
+    // with the client's own 0x78/0x5c red line and NEVER sends. The gate must be local: vmangos
+    // answers a sent pickless cast with the wrong code (`ITEM_GONE` "Item is gone"), so without
+    // it the real message can't appear. Position pinned by the 0948 §5: TryCast runs it BEFORE
+    // the validator (`0x6e4ded` precedes the `0x6e4f3b` call), so an on-cooldown press with
+    // missing reagents shows the reagent error, never "not ready".
+    if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, items, cast_errors) {
+        return;
+    }
+    // ArmCast (`0x6e5250`): resolve the wire target from the spell's targeting constraints —
+    // never the raw selection ([`cast_target`] module docs). A refusal is local and pre-commit,
+    // like the ref's residual flag_word: no send, no GCD, no pending arm, no autorepeat key.
+    // A caller-bound GameObject short-circuits the walk, exactly as TryCast's target resolve
+    // (`6e4ef4` → `0x612df0` over the guid pair it was PASSED) takes an explicit target: the key
+    // chain calls `CGItem::Use` with the lock's guid, the bag click with zero (decision 0769).
+    let mut pending_word = None;
+    let explicit_object = match commit {
+        CastCommit::Item { on_object, .. } => on_object,
+        CastCommit::Spell => None,
+    };
+    let target = match explicit_object {
+        Some(_) => None,
+        None => match cast_target::resolve_cast_target(
+            def,
+            ctx.selection_guid,
+            ctx.self_guid,
+            ctx.auto_self_cast,
+            &ctx.rel,
+        ) {
+            cast_target::CastWireTarget::SelfImplicit => None,
+            cast_target::CastWireTarget::Unit(guid) => Some(guid),
+            cast_target::CastWireTarget::Targeting(word) => {
+                // The cursor ENTRY is deferred below the validator rungs (decision 0948: the
+                // ref enters targeting at cast-arm `6e50c8`, AFTER the validator `0x6094f0` —
+                // an on-cooldown or unaffordable press refuses before the cursor ever comes
+                // up). The word parks here; nothing is sent, nothing armed either way. The
+                // COMMIT rides the word: the ref keeps the whole pending-cast block (the item
+                // guid at `0xceac48` included) across the cursor, so the click's `0x6e54f0`
+                // still emits USE_ITEM for a grenade / poison / key and CAST_SPELL for an
+                // enchant or opener. ONE arm, not one per seam (decisions 0792 / 0923 / 0939).
+                pending_word = Some(word);
+                None
+            }
+            cast_target::CastWireTarget::Refused(reason) => {
+                debug!(
+                    "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
+                );
+                cast_errors.0.push((spell_id, reason));
+                return;
+            }
+        },
+    };
+    // The local range gate (the client's TryCast runs `CanTargetUnit 0x6e4440` →
+    // `IsTargetInRange 0x6e47b0` BEFORE the commit `0x6e54f0`): an out-of-range / too-close
+    // press on a bound unit target refuses here — before the ranged-stance arm below, so a
+    // too-close Throw/Auto Shot never draws the bow and never stows the melee weapons (the
+    // sheath snap `0x6e5930` lives in the commit tail this refusal never reaches). The bound
+    // target is only ever the selection or ourselves; a self-bind (autoSelfCast) is distance 0
+    // with a min-0 range in practice, so only the selection leg is tested.
+    if let Some(d) = def {
+        if target.is_some() && target == ctx.selection_guid && target != ctx.self_guid {
+            let row = spells.and_then(|s| s.ranges.get(d.range_index));
+            let dist_sq = ctx
+                .range
+                .self_pos
+                .zip(ctx.range.target_pos)
+                .map(|(a, b)| a.distance_squared(b));
+            if let Some(reason) = state::cast_range_refusal(
+                d,
+                row,
+                ctx.range.self_reach,
+                ctx.range.target_reach,
+                dist_sq,
+            ) {
+                debug!("ui_action: cast {spell_id} refused locally — range ({reason:#x})");
+                cast_errors.0.push((spell_id, reason));
+                return;
+            }
+        }
+    }
+    // ── The validator `0x6094f0`'s opening rungs (wow-re `gcd-power-gate.md`, the §5 that
+    // closed 0379's INTERIM; decision 0948) — after IsCasting, reagents and the range test,
+    // exactly where the ref calls the validator. ──
+    //
+    // Rung 1 — not-ready: ONE getter query ([`crate::cooldowns::Cooldowns::not_ready`] =
+    // `GetCooldownInfo != 0`), forked by the commit at `0x60952b`: an item press queries the
+    // (use-spell, item ENTRY) pair and refuses **0x28** — and per the byte law is never
+    // power-gated; a spell press queries (spell, 0) and refuses **0x3c**. The GCD lock rides
+    // the same query (the getter's GCD leg — `node.startRecoveryCategory == pressed's`, the
+    // pressed spell's own time never consulted): refusing locally keeps the server's NOT_READY
+    // fail, whose faithful revert clears the RUNNING GCD, off the wire.
+    let queried_item = match commit {
+        CastCommit::Item { entry, .. } => entry,
+        CastCommit::Spell => 0,
+    };
+    if cooldowns.not_ready(spell_id, queried_item, def, now) {
+        debug!("ui_action: cast {spell_id} refused locally — not ready (the validator's rung 1)");
+        // The one packet a local refusal ships (`0x609576–0x60960f`, the SPELL leg only): a
+        // running autorepeat whose record carries AttributesEx3 0x400000 (wand Shoot alone in
+        // the 1.12 data) is stopped — CMSG_CANCEL_CAST naming it, then the local cancel. The
+        // wand-stop feel: a press mid-swing reads "not ready" AND stops the wanding.
+        if !commit.is_item() {
+            if let Some(cached) = auto_repeat.0 {
+                if spells
+                    .and_then(|s| s.catalog.get(cached))
+                    .is_some_and(|d| d.casting_cancels_autorepeat())
+                {
+                    debug!("ui_action: the not-ready refusal cancels the wand repeat {cached}");
+                    let _ = commands
+                        .0
+                        .send(ClientCommand::CancelCast { spell_id: cached });
+                    let self_e = self_player.single().ok().map(|(e, _)| e);
+                    crate::creature_anim::cancel_auto_repeat_local(
+                        self_e,
+                        auto_repeat,
+                        ecs,
+                        commands,
+                    );
+                }
+            }
+        }
+        cast_errors.0.push((spell_id, commit.not_ready_reason()));
+        return;
+    }
+    // Rung 2 — the power gate (`0x60962c`, SPELL presses only: the item fork's clear-query jump
+    // `je 0x6096b3` lands past it): raw `UNIT_FIELD_POWER[type]` — any negative PowerType reads
+    // HEALTH — signed-compared against the computed cost; reason **0x4d** ("Not enough
+    // mana/rage/…", the per-power errorId family). The gate must be local: vmangos ACCEPTS the
+    // doomed cast and its NO_POWER fail clears a running GCD — the phantom pie-blink on every
+    // rage-starved spam press (the 0946 campaign's live capture of the loop).
+    if !commit.is_item() {
+        if let (Some(d), Some(store)) = (def, ctx.rel.self_store) {
+            if !super::usable::can_afford(d, store) {
+                debug!("ui_action: cast {spell_id} refused locally — not enough power (0x4d)");
+                cast_errors.0.push((spell_id, 0x4d));
+                return;
+            }
+        }
+    }
     // The client-side mounted gate (decision 0481; wow-re `mounted-action-gate.md` §5:
     // TryCast's requirement validator `0x6094f0`, mounted block `0x609c6c` — a live
     // `UNIT_FIELD_MOUNTDISPLAYID` refuses a non-exempt cast with reason 0x39 "You are
     // mounted" BEFORE the cast-arm's target binding, which is why a targetless mounted click
     // never reads "You have no target"). Exemption: Attributes bit 24 (`0x01000000`,
     // castable-while-mounted). The gate must be LOCAL: vmangos silently dismounts a mounted
-    // caster instead of erroring, so without this check the message can never appear. Named
-    // micro-divergence: the ref range-tests a RESOLVED target (its step 6) before this gate;
-    // ours range-tests after binding, so the mounted∧out-of-range double fault shows "You are
-    // mounted" where the ref shows "Out of range." — unobservable outside that corner.
+    // caster instead of erroring, so without this check the message can never appear. (0948
+    // resolved 0481's named micro-divergence: the range gate now runs before this one, the
+    // ref's own order — mounted∧out-of-range reads "Out of range." on both.)
     if state::cast_mounted_refusal(
         ctx.rel
             .self_store
@@ -378,89 +499,12 @@ fn send_spell_cast(
             return;
         }
     }
-    // The pre-send totem/reagent possession check (`CheckReagentsAndTotems 0x6e4000`, TryCast's
-    // `0x6e4ded` — decision 0552): a missing tool (Mining Pick) or a short reagent refuses HERE
-    // with the client's own 0x78/0x5c red line and NEVER sends. The gate must be local: vmangos
-    // answers a sent pickless cast with the wrong code (`ITEM_GONE` "Item is gone"), so without
-    // it the real message can't appear. Placement after the mounted gate mirrors the ref only
-    // approximately (the `0x6094f0`-vs-`0x6e4ded` call order isn't pinned — double-fault
-    // corners only).
-    if reagent_totem_refusal(spell_id, def, ctx.rel.self_store, items, cast_errors) {
+    // The deferred targeting-cursor entry (the ref's cast-arm position `6e50c8`): every
+    // validator rung above has passed — NOW the cursor comes up and waits for its click.
+    if let Some(word) = pending_word {
+        debug!("ui_action: cast {spell_id} awaits its click — targeting cursor up ({word:#06x})");
+        ground.enter(spell_id, commit, word);
         return;
-    }
-    // ArmCast (`0x6e5250`): resolve the wire target from the spell's targeting constraints —
-    // never the raw selection ([`cast_target`] module docs). A refusal is local and pre-commit,
-    // like the ref's residual flag_word: no send, no GCD, no pending arm, no autorepeat key.
-    // A caller-bound GameObject short-circuits the walk, exactly as TryCast's target resolve
-    // (`6e4ef4` → `0x612df0` over the guid pair it was PASSED) takes an explicit target: the key
-    // chain calls `CGItem::Use` with the lock's guid, the bag click with zero (decision 0769).
-    let explicit_object = match commit {
-        CastCommit::Item { on_object, .. } => on_object,
-        CastCommit::Spell => None,
-    };
-    let target = match explicit_object {
-        Some(_) => None,
-        None => match cast_target::resolve_cast_target(
-            def,
-            ctx.selection_guid,
-            ctx.self_guid,
-            ctx.auto_self_cast,
-            &ctx.rel,
-        ) {
-            cast_target::CastWireTarget::SelfImplicit => None,
-            cast_target::CastWireTarget::Unit(guid) => Some(guid),
-            cast_target::CastWireTarget::Targeting(word) => {
-                // Enter the targeting-cursor mode with the standing word (decisions 0792 / 0923 /
-                // 0939) — nothing is sent, nothing armed: the ref's cursor entry (`6e50c8`) runs
-                // none of the commit tail; whichever click seam binds owes the GCD and the pending
-                // arm. The COMMIT rides along: the ref keeps the whole pending-cast block (the
-                // item guid at `0xceac48` included) across the cursor, so the click's `0x6e54f0`
-                // still emits USE_ITEM for a thrown grenade, a poison bottle or a key, and
-                // CAST_SPELL for a known enchant or opener.
-                //
-                // ONE arm, not one per seam, because the word is the state: a lock spell's word
-                // arms the bag click and the world click at the same time and only the click
-                // decides which it was.
-                debug!("ui_action: cast {spell_id} awaits its click — targeting cursor up ({word:#06x})");
-                ground.enter(spell_id, commit, word);
-                return;
-            }
-            cast_target::CastWireTarget::Refused(reason) => {
-                debug!(
-                    "ui_action: cast {spell_id} refused locally — unbindable target ({reason:#x})"
-                );
-                cast_errors.0.push((spell_id, reason));
-                return;
-            }
-        },
-    };
-    // The local range gate (the client's TryCast runs `CanTargetUnit 0x6e4440` →
-    // `IsTargetInRange 0x6e47b0` BEFORE the commit `0x6e54f0`): an out-of-range / too-close
-    // press on a bound unit target refuses here — before the ranged-stance arm below, so a
-    // too-close Throw/Auto Shot never draws the bow and never stows the melee weapons (the
-    // sheath snap `0x6e5930` lives in the commit tail this refusal never reaches). The bound
-    // target is only ever the selection or ourselves; a self-bind (autoSelfCast) is distance 0
-    // with a min-0 range in practice, so only the selection leg is tested.
-    if let Some(d) = def {
-        if target.is_some() && target == ctx.selection_guid && target != ctx.self_guid {
-            let row = spells.and_then(|s| s.ranges.get(d.range_index));
-            let dist_sq = ctx
-                .range
-                .self_pos
-                .zip(ctx.range.target_pos)
-                .map(|(a, b)| a.distance_squared(b));
-            if let Some(reason) = state::cast_range_refusal(
-                d,
-                row,
-                ctx.range.self_reach,
-                ctx.range.target_reach,
-                dist_sq,
-            ) {
-                debug!("ui_action: cast {spell_id} refused locally — range ({reason:#x})");
-                cast_errors.0.push((spell_id, reason));
-                return;
-            }
-        }
     }
     // The wand-only auto-repeat handoff (the client's `0x60959e` inside TryCast's `0x6094f0`
     // step, wow-re `nocked-ammo-cancel.md` §Q-B-5): a NEW cast cancels the running auto-repeat
@@ -507,6 +551,7 @@ fn send_spell_cast(
             slot,
             spell_index,
             on_object,
+            ..
         } => ClientCommand::UseItem {
             bag_index,
             slot,
@@ -584,6 +629,7 @@ mod tests {
     const HEARTH_COMMIT: CastCommit = CastCommit::Item {
         bag_index: 255,
         slot: 24,
+        entry: 6948,
         spell_index: 0,
         on_object: None,
     };
@@ -691,14 +737,18 @@ mod tests {
         assert!(rx.try_recv().is_err(), "an item on cooldown never sends");
         assert_eq!(world.resource::<CastErrors>().0, vec![(HEARTHSTONE, 0x28)]);
 
+        // The byte law's other half (0948, correcting this test's pre-§5 shape): the record is
+        // keyed (use-spell, item ENTRY), and a bare SPELL press queries (spell, 0) — the item
+        // record does NOT match it, so the press passes the rung and commits. (One store, two
+        // KEYS — no longer "one store keyed by spell id for both".)
         world.resource_mut::<CastErrors>().0.clear();
+        world.insert_resource(crate::ui_cast::PendingCast::default());
         send(&mut world, HEARTHSTONE, CastCommit::Spell);
-        assert!(rx.try_recv().is_err());
-        assert_eq!(
-            world.resource::<CastErrors>().0,
-            vec![(HEARTHSTONE, 0x3c)],
-            "the very same cooldown reads \"Spell is not ready yet.\" without an item"
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { .. })),
+            "the item-keyed record never not-readies a bare spell press"
         );
+        assert!(world.resource::<CastErrors>().0.is_empty());
     }
 
     /// The commit's own branch (`SendCast 0x6e54f0`): one ladder, one targets block, two opcodes.
@@ -740,6 +790,7 @@ mod tests {
             CastCommit::Item {
                 bag_index: 255,
                 slot: 81,
+                entry: 6948,
                 spell_index: 0,
                 on_object: Some(0xF110_000C_1F00_A3B2),
             },
@@ -752,6 +803,104 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// The validator's power gate (0948, `gcd-power-gate.md` §1.4): a SPELL press the caster
+    /// cannot afford refuses locally with 0x4d and never wires — the gate vmangos cannot supply
+    /// (it ACCEPTS the doomed cast, and its NO_POWER fail would clear a running GCD: the
+    /// phantom pie-blink on rage-starved spam). An ITEM press skips the gate entirely (the item
+    /// fork's clear-query jump lands past it).
+    #[test]
+    fn an_unaffordable_press_refuses_locally_and_items_skip_the_gate() {
+        use crate::net::ObjectStore;
+        use benilla_formats::SpellDisplay;
+        use benilla_protocol::ObjectFields;
+
+        let (mut world, rx) = world();
+        let mut displays = std::collections::HashMap::new();
+        displays.insert(
+            HEARTHSTONE,
+            SpellDisplay {
+                power_type: 0,
+                mana_cost: 500,
+                ..Default::default()
+            },
+        );
+        let mut spells = super::super::Spells::empty_for_tests();
+        spells.catalog = benilla_formats::SpellCatalog::from_displays(displays);
+        world.insert_resource(spells);
+        // A caster holding 100 mana (field 23 = UNIT_FIELD_POWER1). Leaked: the one-shot
+        // system closure must be 'static, and this is a test.
+        let store: &'static ObjectStore =
+            Box::leak(Box::new(ObjectStore(ObjectFields::from_pairs(&[
+                (22u16, 100u32),
+                (23, 100),
+            ]))));
+
+        let base = ctx();
+        let with_store = cast_target::CastContext {
+            rel: cast_target::TargetRelations {
+                self_store: Some(store),
+                ..base.rel
+            },
+            ..base
+        };
+        world
+            .run_system_once(move |mut ladder: CastLadder| {
+                ladder.send(HEARTHSTONE, &with_store, CastCommit::Spell);
+            })
+            .expect("one-shot");
+        assert!(rx.try_recv().is_err(), "an unaffordable press never sends");
+        assert_eq!(world.resource::<CastErrors>().0, vec![(HEARTHSTONE, 0x4d)]);
+
+        world.resource_mut::<CastErrors>().0.clear();
+        let base = ctx();
+        let with_store = cast_target::CastContext {
+            rel: cast_target::TargetRelations {
+                self_store: Some(store),
+                ..base.rel
+            },
+            ..base
+        };
+        world
+            .run_system_once(move |mut ladder: CastLadder| {
+                ladder.send(HEARTHSTONE, &with_store, HEARTH_COMMIT);
+            })
+            .expect("one-shot");
+        assert!(
+            matches!(rx.try_recv(), Ok(ClientCommand::UseItem { .. })),
+            "an item press is never power-gated"
+        );
+        assert!(world.resource::<CastErrors>().0.is_empty());
+    }
+
+    /// The rung ORDER (0948's C6): the in-flight refusal (`0x61`, TryCast's IsCasting) precedes
+    /// the validator's not-ready rung — an on-cooldown press made mid-cast reads "Another
+    /// action is in progress", never "not ready".
+    #[test]
+    fn in_flight_outranks_not_ready() {
+        let (mut world, rx) = world();
+        // Spell 100 on a long cooldown…
+        let use_spell = benilla_protocol::messages::ItemUseSpell {
+            spell_id: MOUNT,
+            cooldown_ms: 60_000,
+            category: 0,
+            category_cooldown_ms: 0,
+        };
+        world
+            .resource_mut::<crate::cooldowns::Cooldowns>()
+            .start_item(0, &use_spell, None, Instant::now());
+        // …and a DIFFERENT cast in flight.
+        send(&mut world, HEARTHSTONE, CastCommit::Spell);
+        assert!(matches!(rx.try_recv(), Ok(ClientCommand::CastSpell { .. })));
+
+        send(&mut world, MOUNT, CastCommit::Spell);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            world.resource::<CastErrors>().0,
+            vec![(MOUNT, 0x61)],
+            "mid-cast outranks the cooldown rung (the ref's IsCasting precedes the validator)"
+        );
     }
 
     /// The targeting cursor's ONE commit tail (decisions 0923 / 0939), all six cells of its

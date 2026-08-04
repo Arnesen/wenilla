@@ -88,6 +88,7 @@ pub(super) fn cast_result(
     queued_melee: &mut QueuedMeleeSpell,
     cooldowns: &mut Cooldowns,
     auto_repeat: &mut AutoRepeatActive,
+    spells: Option<&Spells>,
     net: &crate::net::NetCommands,
     seq: u64,
 ) {
@@ -107,7 +108,24 @@ pub(super) fn cast_result(
         // deselect/interrupt surfaces solely as this CAST_RESULT failure
         // (`HandleSetSelectionOpcode` → `Spell::cancel` → `SendCastResult(INTERRUPTED)`).
         let now = Instant::now();
-        cooldowns.clear_gcd(spell_id, now);
+        // Reason 0x17 DONT_REPORT exits the ref's handler at a bare epilogue BEFORE the GCD
+        // clear and the display (`6e1ce1`/`6e1cf7 → 0x6e224f` — 0948's C4): a silent server
+        // abort neither reopens the GCD nor prints. Our in-flight/bar bookkeeping below still
+        // runs (vmangos uses DONT_REPORT for real aborts whose guard must open).
+        let dont_report = reason == Some(0x17);
+        if !dont_report {
+            cooldowns.clear_gcd(spell_id, now);
+            // The handler tail's bit25 full revert (`6e73cc–6e73e6`): a non-0x3c failure of a
+            // cooldown-on-event spell force-removes its records — the parked insert a failed
+            // Feign Death / Stealth would otherwise leave behind forever.
+            if reason != Some(0x3c)
+                && spells
+                    .and_then(|s| s.catalog.get(spell_id))
+                    .is_some_and(|d| d.cooldown_on_event())
+            {
+                cooldowns.clear_spell(spell_id);
+            }
+        }
         let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
         if auto_repeat.0 == Some(spell_id) && reason != Some(0x17) {
             crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
@@ -130,7 +148,9 @@ pub(super) fn cast_result(
         // The red error line rides `CastErrors` independently of the bar — a pre-start failure
         // still shows "out of range"/"line of sight" even though no bar is (or should be) up.
         if let Some(reason) = reason {
-            cast_errors.0.push((spell_id, reason));
+            if !dont_report {
+                cast_errors.0.push((spell_id, reason));
+            }
         }
         // The cast bar's red "Failed" — only the showing cast's own failure turns it red.
         if fails_our_cast {
@@ -909,6 +929,7 @@ mod tests {
                             &mut queued_melee,
                             &mut cooldowns,
                             &mut auto_repeat,
+                            None,
                             &net,
                             1,
                         );

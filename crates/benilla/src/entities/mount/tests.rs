@@ -40,7 +40,7 @@ fn rig_at(frame: Entity, anchor: Entity) -> RigPose {
             parent: -1,
             local_translation: Vec3::ZERO,
             billboard: None,
-            ignore_parent_rotation: false,
+            parent_arm: None,
         }],
         ..Default::default()
     };

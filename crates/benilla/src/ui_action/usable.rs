@@ -19,8 +19,6 @@
 //! durability model), and the ghost state beyond plain death. CanAssist inside 10b is the
 //! reaction-rank stand-in the ring/`can_attack` share, pending the true `0x6066f0` walk.
 
-use std::time::Instant;
-
 use benilla_formats::{
     SpellDisplay, ATTR_CASTABLE_WHILE_DEAD, ATTR_NOT_IN_COMBAT, ATTR_ONLY_STEALTHED,
     SPELL_EFFECT_TRADE_SKILL,
@@ -49,7 +47,6 @@ pub(crate) struct UsableCtx<'a> {
     pub(crate) factions: Option<&'a Factions>,
     pub(crate) reputations: &'a Reputations,
     pub(crate) cooldowns: &'a Cooldowns,
-    pub(crate) now: Instant,
 }
 
 /// Leg 4's own test (`0x6e40e0`), shared with the spell tooltip's requirement line: does some
@@ -187,27 +184,44 @@ pub(crate) fn spell_usable(
             _ => {}
         }
     }
-    // Leg 11: ONLY a cooldown-on-event spell folds its cooldown into usable (B3) — Stealth
-    // greys while its effect runs; Fireball never greys mid-cooldown.
-    if d.cooldown_on_event() && ctx.cooldowns.is_on_cooldown(spell_id, Some(d), ctx.now) {
+    // Leg 11: ONLY a cooldown-on-event spell folds its cooldown into usable (B3) — and the
+    // predicate is the corrected `0x6e1690` (an on-hold-record test, wow-re `gcd-power-gate.md`
+    // §3): Stealth greys while its record is PARKED; once the event starts the clocks — and for
+    // every ordinary cooldown — the button never greys from here.
+    if d.cooldown_on_event() && ctx.cooldowns.has_on_hold_record(spell_id, Some(d)) {
         return (false, false);
     }
     // Leg 12 (`0x6e3fba`–`0x6e3feb`): the power gate — the SOLE notEnoughMana writer (B2).
-    // Percent costs scale from base mana (mana spells) / max power (the vmangos
-    // CalculatePowerCost basis).
-    let ty = d.power_type as u8;
-    let base = if d.mana_cost_pct == 0 {
-        0
-    } else if d.power_type == 0 {
-        ctx.store.0.unit_base_mana().unwrap_or(0)
-    } else {
-        ctx.store.0.unit_max_power(ty).unwrap_or(0)
-    };
-    let cost = d.mana_cost + base * d.mana_cost_pct / 100;
-    if ctx.store.0.unit_power(ty).unwrap_or(0) < cost {
+    if !can_afford(d, ctx.store) {
         return (false, true);
     }
     (true, false)
+}
+
+/// Whether the caster can afford `d`'s power cost — the shared availability-vs-cost compare
+/// behind BOTH the usable walk's leg 12 (`0x6e3fba`) and the press-path power gate
+/// (`0x6094f0` @ `0x60962c`, decision 0948): raw `UNIT_FIELD_POWER[type]` — ANY negative
+/// PowerType reads `UNIT_FIELD_HEALTH` instead (the ref's `jl` at `0x609631`; Bloodrage's −2) —
+/// signed-compared against the computed cost. Percent costs scale from base mana (mana spells)
+/// / max power (the vmangos CalculatePowerCost basis).
+pub(crate) fn can_afford(d: &SpellDisplay, store: &ObjectStore) -> bool {
+    let power_type = d.power_type as i32;
+    let avail = if power_type < 0 {
+        store.0.unit_health().unwrap_or(0)
+    } else {
+        store.0.unit_power(power_type as u8).unwrap_or(0)
+    };
+    let base = if d.mana_cost_pct == 0 {
+        0
+    } else if d.power_type == 0 {
+        store.0.unit_base_mana().unwrap_or(0)
+    } else if power_type < 0 {
+        store.0.unit_max_health().unwrap_or(0)
+    } else {
+        store.0.unit_max_power(power_type as u8).unwrap_or(0)
+    };
+    let cost = d.mana_cost + base * d.mana_cost_pct / 100;
+    avail >= cost
 }
 
 #[cfg(test)]
@@ -234,7 +248,6 @@ mod tests {
             factions: None,
             reputations,
             cooldowns,
-            now: Instant::now(),
         }
     }
 
@@ -388,7 +401,6 @@ mod tests {
                 factions: None,
                 reputations: &reputations,
                 cooldowns: &cooldowns,
-                now: Instant::now(),
             };
             assert_eq!(
                 spell_usable(5308, &execute, &spells, &ctx, &mut items, &commands),

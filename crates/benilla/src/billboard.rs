@@ -23,6 +23,7 @@
 
 use benilla_assets::BillboardInfo;
 use benilla_formats::{BillboardKind, BoneScaleAnim};
+use bevy::math::{Affine3A, Mat3A, Vec3A};
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
@@ -196,6 +197,75 @@ impl BillboardCard {
     }
 }
 
+/// A bone's rewritten **effective parent matrix** — the `flags & 0x7` arm the reference takes at
+/// `m2_animate` `0x71496d`–`0x714d0c`, before the billboard selector and before the bone's own TRS
+/// composes onto it (wow-re `billboard-bone-law.md` §9.1/§9.5, byte-verified). This is not an
+/// escape hatch from the billboard: it changes the input the billboard law is applied to, and the
+/// `&0x78` switch runs afterwards exactly as before.
+///
+/// - `parent` — the bone's ANIMATED parent world matrix (`palette[parent_bone]` before the rewrite).
+/// - `root` — the model's own root frame, `world_from_model` (`[model+0xfc]`): for a rigged host
+///   that is its `joints_root`, and for a mounted rider that is its seat anchor, which is exactly
+///   what the reference composes at `0x714389`.
+/// - `pivot` — the bone's BIND local translation (`pivot_i − pivot_parent`). Our joint chain is
+///   pivot-relative, so this plays the role of the byte law's model-space `piv` in the
+///   pivot-preserving tail `T' = pivotWorld − piv·newBasis`: the bone keeps the POSITION its
+///   animated parent carried it to and loses only the orientation. That is the whole reason a
+///   galloping mount still carries its rider up and down while never rocking them.
+///
+/// The reference is row-major with row vectors, so its "row K" is our column K — both name the
+/// image of model basis vector K, and the WoW→Bevy bake is a signed permutation of those axes, so
+/// the per-axis legs below pair the same axes the bytes do.
+pub(crate) fn parent_arm_matrix(
+    arm: benilla_formats::ParentArm,
+    parent: Affine3A,
+    root: Affine3A,
+    pivot: Vec3,
+) -> Affine3A {
+    use benilla_formats::ParentBasis;
+    // `0x714bdb`'s unit guard: a degenerate axis is left alone rather than exploding.
+    const UNIT_EPS: f32 = 1.0 / (1 << 22) as f32;
+    // `0x80c5c8`, the ratio leg's own constant — deliberately NOT the unit eps above.
+    const RATIO_EPS: f32 = 1e-5;
+    let (p, r) = (parent.matrix3, root.matrix3);
+    let per_axis = |f: &dyn Fn(usize) -> Vec3A| Mat3A::from_cols(f(0), f(1), f(2));
+    let matrix3 = match arm.basis {
+        ParentBasis::Keep => p,
+        // `flags & 6 == 2` — ignore parent scale: unit-length axes, directions kept.
+        ParentBasis::UnitNormalize => per_axis(&|k| {
+            let len = p.col(k).length();
+            if len > UNIT_EPS {
+                p.col(k) / len
+            } else {
+                p.col(k)
+            }
+        }),
+        // `flags & 6 == 4` — ignore parent rotation: the ROOT's direction at the PARENT's
+        // magnitude, per axis.
+        ParentBasis::RootDirection => per_axis(&|k| {
+            let rl2 = r.col(k).length_squared();
+            let ratio = if rl2 <= RATIO_EPS {
+                1.0
+            } else {
+                p.col(k).length() / rl2.sqrt()
+            };
+            r.col(k) * ratio
+        }),
+        // `flags & 6 == 6` — ignore parent rotation AND scale: the root basis outright.
+        ParentBasis::RootBasis => r,
+    };
+    Affine3A {
+        matrix3,
+        // `flags & 1` (`0x714c92`) takes the root's own origin; otherwise the pivot-preserving
+        // tail at `0x714caf`.
+        translation: if arm.ignore_translate {
+            root.translation
+        } else {
+            parent.transform_point3a(pivot.into()) - matrix3 * Vec3A::from(pivot)
+        },
+    }
+}
+
 /// The rebuilt orientation for a billboard of `kind` — the byte law (module doc), one function
 /// for both consumers: the CARD path (`kept_rot` = the placement/owner rotation) and the JOINT
 /// palette pass below (`kept_rot` = the joint's fully-composed pre-billboard world rotation, the
@@ -257,16 +327,20 @@ pub(crate) fn billboard_basis(
 /// lock-Z bone, which is exactly why they rendered glued to the character.
 #[derive(Component)]
 pub struct BillboardJointRig {
-    /// The host root entity — the frame an `ignore_parent_rotation` joint's rotation snaps back
-    /// to (bone flag `0x04` keeps the MODEL's orientation, not the parent bone's).
+    /// The host root entity — the model's own root frame `[model+0xfc]`, which the `flags & 0x7`
+    /// arm rebuilds a bone's parent matrix out of.
     root: Entity,
     joints: Vec<Entity>,
     parents: Vec<i16>,
     kinds: Vec<Option<BillboardKind>>,
-    /// Bone flag `0x04` per joint (the HandArrow/Bullet attach helpers): pivot rides the parent's
-    /// full matrix, rotation resets to the model root's — the nocked arrow lies flat along the
-    /// facing instead of twisting with the draw hand (wow-re `nocked-ammo-cancel.md` §E4).
-    ignore_rot: Vec<bool>,
+    /// Bone flags `0x1/0x2/0x4` per joint ([`parent_arm_matrix`]) — the HandArrow/Bullet attach
+    /// helpers (the nocked arrow lies flat along the facing instead of twisting with the draw
+    /// hand, wow-re `nocked-ammo-cancel.md` §E4) and every vanilla mount's rider seat.
+    arms: Vec<Option<benilla_formats::ParentArm>>,
+    /// Each bone's BIND local translation — the pivot the arm preserves. `locals` carry the
+    /// ANIMATED translation, which the byte law rotates by the *new* basis, so the two are not
+    /// interchangeable here.
+    binds: Vec<Vec3>,
 }
 
 impl BillboardJointRig {
@@ -276,9 +350,9 @@ impl BillboardJointRig {
         self.root
     }
 
-    /// Build for a spawned rig — `None` when the skeleton authors no billboard bone and no
-    /// ignore-parent-rotation bone (the common case: ordinary rigs cost nothing). `root` is the
-    /// host entity the joints hang under (the model-space frame).
+    /// Build for a spawned rig — `None` when the skeleton authors neither a billboard bone nor a
+    /// `flags & 0x7` bone (the common case: ordinary rigs cost nothing). `root` is the host entity
+    /// the joints hang under (the model-space frame).
     pub fn new(
         skeleton: &benilla_assets::ModelSkeleton,
         joints: &[Entity],
@@ -287,7 +361,7 @@ impl BillboardJointRig {
         if skeleton
             .joints
             .iter()
-            .all(|j| j.billboard.is_none() && !j.ignore_parent_rotation)
+            .all(|j| j.billboard.is_none() && j.parent_arm.is_none())
         {
             return None;
         }
@@ -296,10 +370,11 @@ impl BillboardJointRig {
             joints: joints.to_vec(),
             parents: skeleton.joints.iter().map(|j| j.parent).collect(),
             kinds: skeleton.joints.iter().map(|j| j.billboard).collect(),
-            ignore_rot: skeleton
+            arms: skeleton.joints.iter().map(|j| j.parent_arm).collect(),
+            binds: skeleton
                 .joints
                 .iter()
-                .map(|j| j.ignore_parent_rotation)
+                .map(|j| j.local_translation)
                 .collect(),
         })
     }
@@ -349,40 +424,48 @@ pub(crate) fn billboard_joint_palette(
         .iter()
         .filter(|r| !parked.get(r.root).unwrap_or(false))
     {
-        // The model-space frame an ignore-parent-rotation joint (bone flag 0x04) snaps back to:
-        // the host root's world rotation. Read before the joint loop (the root is never a joint).
-        let root_rot = joints
+        // The model's own root frame `[model+0xfc]` — what the `flags & 0x7` arm rebuilds a
+        // parent matrix out of. Read before the joint loop (the root is never a joint).
+        let root_affine = joints
             .get(rig.root)
-            .map(|(_, g)| g.rotation())
+            .map(|(_, g)| g.affine())
             .unwrap_or_default();
         let n = rig.joints.len();
         let mut replaced: Vec<Option<GlobalTransform>> = vec![None; n];
         for i in 0..n {
-            let parent_new = usize::try_from(rig.parents[i])
-                .ok()
-                .filter(|&p| p < i)
-                .and_then(|p| replaced[p]);
-            if parent_new.is_none() && rig.kinds[i].is_none() && !rig.ignore_rot[i] {
+            let pidx = usize::try_from(rig.parents[i]).ok().filter(|&p| p < i);
+            let parent_new = pidx.and_then(|p| replaced[p]);
+            let arm = rig.arms[i];
+            if parent_new.is_none() && rig.kinds[i].is_none() && arm.is_none() {
                 continue; // untouched subtree — the propagated pose stands
             }
+            // The arm needs the PARENT's matrix in hand; propagation only left us the child's, so
+            // an armed bone whose parent was untouched reads the parent's propagated frame here.
+            let parent_world = if arm.is_some() {
+                parent_new.or_else(|| {
+                    let e = pidx.map_or(rig.root, |p| rig.joints[p]);
+                    joints.get(e).ok().map(|(_, g)| *g)
+                })
+            } else {
+                parent_new
+            };
             let Ok((local, mut global)) = joints.get_mut(rig.joints[i]) else {
                 continue;
             };
-            let mut g = match parent_new {
-                Some(pg) => pg.mul_transform(*local),
-                None => *global,
+            let mut g = match (arm, parent_world) {
+                // `flags & 0x7`: rewrite the parent matrix, then compose this bone's own TRS onto
+                // it — and fall through to the billboard switch, which still runs (§9.1).
+                (Some(a), Some(pw)) => GlobalTransform::from(parent_arm_matrix(
+                    a,
+                    pw.affine(),
+                    root_affine,
+                    rig.binds[i],
+                ))
+                .mul_transform(*local),
+                (_, Some(pw)) => pw.mul_transform(*local),
+                (_, None) => *global,
             };
-            if rig.ignore_rot[i] {
-                // Bone flag 0x04: keep the parent-composed pivot (the hand carries the point),
-                // reset the rotation to the model root's frame — children (the nocked arrow)
-                // inherit the flat model-space orientation, not the hand twist.
-                let (scale, _, translation) = g.to_scale_rotation_translation();
-                g = GlobalTransform::from(Transform {
-                    translation,
-                    rotation: root_rot,
-                    scale,
-                });
-            } else if let Some(kind) = rig.kinds[i] {
+            if let Some(kind) = rig.kinds[i] {
                 let (scale, rot, translation) = g.to_scale_rotation_translation();
                 g = GlobalTransform::from(Transform {
                     translation,
@@ -951,13 +1034,13 @@ mod tests {
                         parent: -1,
                         local_translation: Vec3::ZERO,
                         billboard: Some(BillboardKind::LockZ),
-                        ignore_parent_rotation: false,
+                        parent_arm: None,
                     },
                     benilla_assets::ModelJoint {
                         parent: 0,
                         local_translation: Vec3::Y,
                         billboard: None,
-                        ignore_parent_rotation: false,
+                        parent_arm: None,
                     },
                 ],
                 spine_bone: None,
@@ -1010,6 +1093,87 @@ mod tests {
             (s1 - Vec3::ONE).length() < 1e-5,
             "the grow-in scale chain survives"
         );
+    }
+
+    /// The four `flags & 0x6` legs of [`parent_arm_matrix`], each against its byte definition
+    /// (wow-re `billboard-bone-law.md` §9.5), plus the pivot-preserving tail that is the whole
+    /// reason a galloping mount carries its rider without rocking them.
+    ///
+    /// The parent here is rotated 90° about X and scaled non-uniformly; the root is a plain 90°
+    /// yaw at scale 3. Each leg is asserted on the quantity it is defined by — axis LENGTHS for
+    /// the scale legs, axis DIRECTIONS for the rotation legs — so a leg that accidentally did the
+    /// other one's job cannot pass.
+    #[test]
+    fn the_parent_arm_legs_match_their_byte_definitions() {
+        use benilla_formats::{ParentArm, ParentBasis};
+        let pivot = Vec3::new(0.0, 2.0, 0.0);
+        let parent = Affine3A::from_scale_rotation_translation(
+            Vec3::new(1.0, 2.0, 4.0),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::new(7.0, 0.0, 0.0),
+        );
+        let root = Affine3A::from_scale_rotation_translation(
+            Vec3::splat(3.0),
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Vec3::new(0.0, 5.0, 0.0),
+        );
+        let arm = |basis| ParentArm {
+            ignore_translate: false,
+            basis,
+        };
+        let axis_len = |m: Affine3A, k: usize| m.matrix3.col(k).length();
+        let axis_dir = |m: Affine3A, k: usize| Vec3::from(m.matrix3.col(k).normalize());
+
+        // `flags & 6 == 0` — the basis is the parent's, untouched.
+        let keep = parent_arm_matrix(arm(ParentBasis::Keep), parent, root, pivot);
+        assert!(keep.matrix3.abs_diff_eq(parent.matrix3, 1e-5));
+
+        // `flags & 6 == 2` — unit axes, parent's directions.
+        let unit = parent_arm_matrix(arm(ParentBasis::UnitNormalize), parent, root, pivot);
+        for k in 0..3 {
+            assert!((axis_len(unit, k) - 1.0).abs() < 1e-5, "axis {k} unit");
+            assert!(
+                axis_dir(unit, k).dot(axis_dir(parent, k)) > 0.9999,
+                "axis {k} keeps the parent's direction"
+            );
+        }
+
+        // `flags & 6 == 4` — root's direction, parent's magnitude, per axis.
+        let ratio = parent_arm_matrix(arm(ParentBasis::RootDirection), parent, root, pivot);
+        for k in 0..3 {
+            assert!(
+                (axis_len(ratio, k) - axis_len(parent, k)).abs() < 1e-4,
+                "axis {k} keeps the parent's magnitude"
+            );
+            assert!(
+                axis_dir(ratio, k).dot(axis_dir(root, k)) > 0.9999,
+                "axis {k} takes the root's direction"
+            );
+        }
+
+        // `flags & 6 == 6` — the root basis outright, scale included.
+        let full = parent_arm_matrix(arm(ParentBasis::RootBasis), parent, root, pivot);
+        assert!(full.matrix3.abs_diff_eq(root.matrix3, 1e-5));
+
+        // The pivot-preserving tail: whichever leg ran, composing the bone's own bind translation
+        // onto the rewritten matrix lands it exactly where the ANIMATED parent carried it.
+        let want = parent.transform_point3a(pivot.into());
+        for m in [keep, unit, ratio, full] {
+            let landed = m.transform_point3a(pivot.into());
+            assert!((landed - want).length() < 1e-4, "pivot preserved: {landed}");
+        }
+
+        // `flags & 1` instead places the bone at the model root's own origin.
+        let moved = parent_arm_matrix(
+            ParentArm {
+                ignore_translate: true,
+                basis: ParentBasis::RootBasis,
+            },
+            parent,
+            root,
+            pivot,
+        );
+        assert!((Vec3::from(moved.translation) - Vec3::new(0.0, 5.0, 0.0)).length() < 1e-5);
     }
 
     /// The ignore-parent-rotation joint (bone flag 0x04 — the HandArrow/Bullet attach helpers,
@@ -1065,13 +1229,16 @@ mod tests {
                     parent: -1,
                     local_translation: Vec3::ZERO,
                     billboard: None,
-                    ignore_parent_rotation: false,
+                    parent_arm: None,
                 },
                 benilla_assets::ModelJoint {
                     parent: 0,
                     local_translation: Vec3::Y,
                     billboard: None,
-                    ignore_parent_rotation: true,
+                    parent_arm: Some(benilla_formats::ParentArm {
+                        ignore_translate: false,
+                        basis: benilla_formats::ParentBasis::RootDirection,
+                    }),
                 },
             ],
             spine_bone: None,
@@ -1153,7 +1320,10 @@ mod tests {
                     parent: -1,
                     local_translation: Vec3::ZERO,
                     billboard: None,
-                    ignore_parent_rotation: true,
+                    parent_arm: Some(benilla_formats::ParentArm {
+                        ignore_translate: false,
+                        basis: benilla_formats::ParentBasis::RootDirection,
+                    }),
                 }],
                 spine_bone: None,
                 head_bone: None,
@@ -1177,7 +1347,7 @@ mod tests {
                     parent: -1,
                     local_translation: Vec3::ZERO,
                     billboard: Some(BillboardKind::Spherical),
-                    ignore_parent_rotation: false,
+                    parent_arm: None,
                 }],
                 spine_bone: None,
                 head_bone: None,

@@ -23,12 +23,14 @@ pub struct SkeletonBone {
     /// The bone's billboard arm (flags `0x08/0x10/0x20/0x40`), `None` for an ordinary bone — the
     /// palette-level camera facing a rigged host applies per frame (children inherit it).
     pub billboard: Option<crate::BillboardKind>,
-    /// Bone flag `0x04` — the bone keeps the MODEL ROOT's orientation instead of inheriting its
-    /// parent's rotation (its pivot still rides the parent's full matrix). Carried by the unskinned
-    /// attach-helper bones (HandArrow/Bullet 126/127 — the nocked arrow lies flat along the facing
-    /// instead of twisting with the draw hand). The client's bone-palette build honors the flag;
-    /// the attach-child transform then inherits it (wow-re `nocked-ammo-cancel.md` §E4).
-    pub ignore_parent_rotation: bool,
+    /// Bone flags `0x1/0x2/0x4` — how this bone's effective **parent matrix** is rebuilt from the
+    /// model's own root matrix before it composes (`None` for the ordinary bone). See
+    /// [`crate::ParentArm`]: the byte-verified `ignore parent translate / scale / rotate` trio.
+    /// Carried by 862 bones across 456 shipped models — the unskinned attach helpers
+    /// (HandArrow/Bullet: the nocked arrow lies flat along the facing instead of twisting with the
+    /// draw hand, wow-re `nocked-ammo-cancel.md` §E4) and, load-bearingly, **every vanilla player
+    /// mount's rider seat**, which is why a galloping horse's spine never rocks its rider.
+    pub parent_arm: Option<crate::ParentArm>,
 }
 
 /// A model's bone hierarchy — the rest skeleton the skinned-entity path turns into a joint-entity
@@ -86,7 +88,7 @@ pub fn parse_m2_skeleton(bytes: &[u8]) -> Result<Skeleton> {
             pivot: [b.pivot.x, b.pivot.y, b.pivot.z],
             key_bone: b.key_bone,
             billboard: crate::BillboardKind::from_bone_flags(b.flags.bits()),
-            ignore_parent_rotation: b.flags.bits() & 0x4 != 0,
+            parent_arm: crate::ParentArm::from_bone_flags(b.flags.bits()),
         })
         .collect();
     Ok(Skeleton { bones })

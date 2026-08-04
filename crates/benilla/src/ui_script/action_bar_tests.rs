@@ -246,6 +246,61 @@ fn state_feedback_drives_cooldown_checked_and_usable_through_the_xml() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The pie paints OVER its button's art. The Cooldown child is born at button-level+1, and the
+/// draw key's LEVEL term outranks 0884's bucket-wide layer term — so the sweep quad must sort
+/// after the icon (BACKGROUND) and after the button's own special textures. A regression here is
+/// invisible to every store/feed instrument (the triple still pushes; only the pixels vanish
+/// under the icon), which is exactly why the order is pinned end-to-end through the real XML.
+#[test]
+fn the_cooldown_sweep_paints_over_the_buttons_icon_and_ring() {
+    use benilla_ui::script::ActionState;
+
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_action_bar(&s);
+    s.set_action(
+        1,
+        Some(ActionSlot {
+            texture: Some("Interface\\Icons\\Spell_Fire_FlameBolt".into()),
+            kind: 0x00,
+            action: 133,
+            count: 0,
+        }),
+    );
+    s.fire_event("PLAYER_ENTERING_WORLD", vec![]);
+    s.tick(10.0);
+    s.set_action_state(
+        1,
+        Some(ActionState {
+            usable: true,
+            cooldown: Some((6_000, 10_000, true)),
+            ..Default::default()
+        }),
+    );
+    s.fire_event("ACTIONBAR_UPDATE_COOLDOWN", vec![]);
+    s.resolve();
+
+    let quads = s.extract();
+    let pos = |pred: &dyn Fn(&QuadContent) -> bool| quads.iter().position(|q| pred(&q.content));
+    let icon = pos(&|c| {
+        matches!(c, QuadContent::Texture { path: Some(p), .. } if p.contains("Spell_Fire_FlameBolt"))
+    })
+    .expect("the icon texture quad");
+    let ring = pos(
+        &|c| matches!(c, QuadContent::Texture { path: Some(p), .. } if p.contains("UI-Quickslot2")),
+    )
+    .expect("the NormalTexture ring quad");
+    let sweep = pos(&|c| matches!(c, QuadContent::Cooldown { .. })).expect("the sweep quad");
+    assert!(
+        icon < sweep,
+        "the sweep (index {sweep}) must paint over the icon (index {icon})"
+    );
+    assert!(
+        ring < sweep,
+        "the sweep (index {sweep}) must paint over the button ring (index {ring})"
+    );
+}
+
 /// An action button is a TWO-button button (decision 0908; director's report B200: "I can't right
 /// click food on my bar to eat it or right click spells"). The ref's `ActionButton_OnLoad`
 /// registers `("LeftButtonUp", "RightButtonUp")` (ActionButton.lua:109) and its OnClick body reads

@@ -38,6 +38,7 @@ fn clip(anim_id: u16, node: u32, looping: bool) -> AnimClip {
         upper_node: None,
         frequency: 0,
         replay: (0, 0),
+        poses_bones: true,
     }
 }
 

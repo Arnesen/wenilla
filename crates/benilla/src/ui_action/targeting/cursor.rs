@@ -1,10 +1,13 @@
-//! What the player *sees* while a cast waits for its click — the classifier pre-empt `0x4820f0`
-//! (wow-re `cursor-system.md` §5) and the two numbers it computes: the ground point's range verdict
-//! (`CheckGroundPointInRange 0x6e6810`) and the reticle's radius (`GetCurrentCastRadius 0x6e6350`).
+//! What the player *sees* while a cast waits for its click — the two classifier pre-empts and the
+//! numbers they compute: the ground point's range verdict (`CheckGroundPointInRange 0x6e6810`,
+//! inside `0x4820f0` — wow-re `cursor-system.md` §5), the hovered object's validity
+//! (`0x6e6460`, inside `0x4828d0` — decision 0949), and the reticle's radius
+//! (`GetCurrentCastRadius 0x6e6350`).
 //!
-//! Both are *location* quantities, and that is the whole reason this is one small module rather
-//! than a branch inside each seam: only the terrain seam has a point to judge, so the item and
-//! GameObject seams take plain `Cast` and nothing here runs for them.
+//! One module rather than a branch inside each seam, because in the reference this is one
+//! decision made in one place: the **pick** picks the handler, the pick flags come from the word,
+//! and every path that is not a handler ends at UnableCast. See [`drive_targeting_cursor`] for the
+//! table.
 
 use bevy::prelude::*;
 
@@ -65,45 +68,152 @@ pub(crate) fn ground_cast_radius(spells: Option<&Spells>, spell_id: u32, level: 
     r.min(20.0)
 }
 
-/// While targeting, the world cursor is the classifier's pre-empt (`0x4820f0`, cursor-system
-/// §5): **Cast** over an in-range ground point, **UnableCast** out of range / too close / no
-/// ground hit at all (sky, mouselook). Runs right after [`crate::target`]'s classifier in the
-/// target chain and overwrites its verdict — the ref runs this branch before the object
-/// classifier ever executes, and the visible result is identical. Because it writes the *base*
-/// [`WorldCursor`], it also pre-empts every UI overlay downstream ([`crate::cursor`]'s
-/// repair/sell latches only arm while the base is Point) — which is the same total pre-emption
-/// the reference's step 2 has.
+/// While targeting, the world cursor is the classifier's pre-empt (cursor-system §5). Runs right
+/// after [`crate::target`]'s classifier in the target chain and overwrites its verdict. Because it
+/// writes the *base* [`WorldCursor`], it also pre-empts every UI overlay downstream
+/// ([`crate::cursor`]'s repair/sell latches only arm while the base is Point) — the same total
+/// pre-emption the reference's step 2 has.
 ///
-/// The **item** and **GameObject** seams take plain `Cast`, never the grayed twin: the range
-/// verdict below comes from `CheckGroundPointInRange 0x6e6810`, which is a *location* predicate
-/// (its one caller binary-wide is this classifier, over the ground point), and neither an
-/// item-targeting nor a lock word has a ground point to judge. Whether the reference grays either
-/// per hovered slot / object is unpinned — the honest read is that their validity gate runs at BIND
-/// time (`0x495d60`'s `0x0a` for an item; nothing at all for a GameObject, whose refusal is the
-/// server's), not at hover time. Named INTERIM, decisions 0923 / 0939.
+/// **The verdict is per-seam, and the default is grey** (decision 0949). The reference reaches a
+/// cursor through the pick, and while targeting the pick flags come from the word alone
+/// (`0x481050`'s targeting arm), so the *word* chooses which of three handlers runs — and the
+/// third one is the reason this function is not just a range check:
+///
+/// | pick state | handler | verdict |
+/// |---|---|---|
+/// | 1 — terrain | `0x4820f0` @ `48214b` | `CheckGroundPointInRange 0x6e6810` over the ground point |
+/// | 2 — object | `0x4828d0` @ `482910` → `0x6e6460` | the hovered object's own validity |
+/// | 0 — nothing hit | `0x481790`'s tail | **`CursorSetMode(0x16)` = UnableCast** |
+///
+/// That last row is the one that makes an armed lockpick read right: a word without `& 0x60` sets
+/// no PF bit `0x1`, so a terrain-only hit is suppressed to state 0 and the cursor is **grey
+/// everywhere except over a GameObject it can actually open**. An item-only word (a poison, an
+/// enchant — `0x0010`) yields PF `0` outright, the pick bails before building a ray
+/// (`0x4812c8`), and the world cursor is grey for the whole time it is armed — correct, because
+/// that word's click lives in the bag, not the world.
+///
+/// The object arm is `0x6e6460`'s GameObject leg (`6e66f3`: the picked object's typemask bit 5):
+/// `word & 0x4800` (`6e6702 testb $0x48, %ah`), then
+/// [`crate::target::lock::spell_opens_lock`] (`6e670f call 0x5f8260`), then — because the call
+/// site passes `dl = 1` — the same min²/max² range test the ground arm uses (`6e677c..6e6801`,
+/// through the very `GetMinMaxRange 0x6e3480` that `0x6e6810` calls, so the two arms carry the
+/// identical [`range_row`] simplification and no new residual).
+///
+/// `0x6e6460`'s other legs are unreachable from our targeting mode and deliberately not
+/// transcribed: the **unit** leg (`6e6519`) — a unit-target spell never enters targeting mode at
+/// all, it resolves to `CastWireTarget::Unit` — the world-CGItem leg (`6e66de`), and the corpse
+/// leg (`6e6719`). Named in decision 0949.
+///
+/// The cursor is still a **whole-word** surface in one respect — every seam shows the `Cast`
+/// *kind*, only `unable` differs — which is why it reads [`SpellTargeting::spell`]. The reticle is
+/// per-seam and reads [`SpellTargeting::spell_for`] (decision 0943).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_targeting_cursor(
     targeting: Res<SpellTargeting>,
     occlusion: Res<PickOcclusion>,
+    hovered: Res<crate::target::Hovered>,
+    hovered_object: Res<crate::target::HoveredObject>,
     spells: Option<Res<Spells>>,
     self_tf: Query<&Transform, With<SelfPlayer>>,
+    go_tf: Query<&Transform>,
+    stores: Query<(
+        &crate::net::ObjectStore,
+        Option<&crate::go_anim::GoAnim>,
+        &Transform,
+    )>,
+    // Read-only here: the ask-once template request is made at object stream-in
+    // (`net::apply::objects`), never by this hover path, so a cold cache is a one-frame transient
+    // and not a permanent grey.
+    lock_inputs: crate::target::lock::GoLockInputs,
     mut cursor: ResMut<WorldCursor>,
 ) {
     let Some(spell_id) = targeting.spell() else {
         return;
     };
-    let unable = targeting.wants(TargetingWants::Location)
-        && !match (occlusion.point, self_tf.single()) {
-            (Some(point), Ok(tf)) => ground_point_in_range(
-                range_row(spells.as_deref(), spell_id),
-                tf.translation,
-                point,
-            ),
+    let row = range_row(spells.as_deref(), spell_id);
+    let me = self_tf.single().ok().map(|tf| tf.translation);
+    // The pick's own arbitration decides which handler runs, and a GameObject hit is already
+    // occlusion-filtered — so "a GO is the nearest pick" is exactly the condition the click uses
+    // ([`super::world::commit_object_cast_on_click`]). Cursor and click ask one question.
+    let able = if targeting.wants(TargetingWants::GameObject)
+        && crate::target::go_is_nearest(&hovered, &hovered_object)
+    {
+        object_arm(
+            &hovered_object,
+            &stores,
+            &go_tf,
+            &lock_inputs,
+            spell_id,
+            row,
+            me,
+        )
+    } else if targeting.wants(TargetingWants::Location) {
+        // `0x4820f0` — the ground point's range verdict. No hit (sky, mouselook) is state 0 for
+        // this word too, and state 0 while targeting is already UnableCast.
+        match (occlusion.point, me) {
+            (Some(point), Some(me)) => ground_point_in_range(row, me, point),
             _ => false,
-        };
+        }
+    } else {
+        // Pick state 0 — nothing this word can bind is under the cursor.
+        false
+    };
     *cursor = WorldCursor {
         kind: CursorKind::Cast,
-        unable,
+        unable: !able,
     };
+}
+
+/// `0x6e6460`'s GameObject leg: the word's `& 0x4800`, the spell-vs-lock predicate `0x5f8260`, and
+/// the `dl = 1` range test. Split out only so the dispatch above reads like the reference's table.
+fn object_arm(
+    hovered_object: &crate::target::HoveredObject,
+    stores: &Query<(
+        &crate::net::ObjectStore,
+        Option<&crate::go_anim::GoAnim>,
+        &Transform,
+    )>,
+    go_tf: &Query<&Transform>,
+    lock_inputs: &crate::target::lock::GoLockInputs,
+    spell_id: u32,
+    row: Option<&SpellRange>,
+    me: Option<Vec3>,
+) -> bool {
+    let (Some(entity), Some(guid)) = (hovered_object.target, hovered_object.guid) else {
+        return false;
+    };
+    // `0x5f8260`'s two data lookups: the GO's template → its `Lock.dbc` row. A template still in
+    // flight is not yet openable — grey, not lit; the stream-in query makes that a rare frame.
+    let Some(tmpl) = lock_inputs.templates.get(guid) else {
+        return false;
+    };
+    let lock_id = tmpl.lock_id;
+    let Some(locks) = lock_inputs.locks.as_deref() else {
+        return false;
+    };
+    let Some(slots) = locks.0.slots(lock_id).filter(|_| lock_id != 0) else {
+        return false;
+    };
+    let Some(spells) = lock_inputs.spells.as_deref() else {
+        return false;
+    };
+    let Some(spell) = spells.catalog.get(spell_id) else {
+        return false;
+    };
+    let facts = crate::target::lock::go_facts(
+        stores
+            .get(entity)
+            .ok()
+            .map(|(s, anim, _)| (s, crate::go_anim::go_state(anim, s))),
+    );
+    if !crate::target::lock::spell_opens_lock(slots, spell, facts) {
+        return false;
+    }
+    // The `dl = 1` tail (`6e677c`): the caster↔target distance against the spell's own min/max.
+    match (me, go_tf.get(entity)) {
+        (Some(me), Ok(tf)) => ground_point_in_range(row, me, tf.translation),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +312,81 @@ mod tests {
         // Unknown spell / no data at all → 0 (default size).
         assert_eq!(ground_cast_radius(s, 9999, 60), 0.0);
         assert_eq!(ground_cast_radius(None, 10, 60), 0.0);
+    }
+
+    /// **The dispatch table** (decision 0949) — the reference's three pick states, and the fact
+    /// that only two of them are handlers. Before this, every seam took plain `Cast`, so an armed
+    /// poison or lockpick showed a lit cast cursor over open ground it could do nothing with.
+    ///
+    /// The load-bearing row is the last one: *state 0 is UnableCast*. A word that wants no
+    /// location sets no PF bit `0x1`, so bare ground can never be a handler for it.
+    #[test]
+    fn the_cursor_is_grey_wherever_the_word_has_no_handler() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let verdict = |word: u16, point: Option<Vec3>, go: Option<f32>| {
+            let mut world = World::new();
+            world.init_resource::<WorldCursor>();
+            world.init_resource::<SpellTargeting>();
+            world.init_resource::<crate::target::Hovered>();
+            world.init_resource::<crate::target::HoveredObject>();
+            world.init_resource::<crate::go_templates::GameObjectTemplates>();
+            world.init_resource::<crate::items::Items>();
+            world.insert_resource(PickOcclusion {
+                distance: 10.0,
+                point,
+            });
+            if let Some(distance) = go {
+                let chest = world.spawn(Transform::default()).id();
+                world.insert_resource(crate::target::HoveredObject {
+                    target: Some(chest),
+                    guid: Some(0x1234),
+                    distance,
+                });
+            }
+            world.spawn((SelfPlayer, Transform::default()));
+            world.resource_mut::<SpellTargeting>().enter(
+                2120,
+                crate::ui_action::CastCommit::Spell,
+                word,
+            );
+            world
+                .run_system_once(drive_targeting_cursor)
+                .expect("the targeting cursor drives");
+            let cursor = world.resource::<WorldCursor>();
+            assert_eq!(cursor.kind, CursorKind::Cast, "the KIND is always Cast");
+            !cursor.unable
+        };
+
+        // Pick state 1 — Blizzard's DEST word over a ground point. No `Spells` resource means no
+        // range row, and a rowless spell is permissive (the server still judges).
+        assert!(
+            verdict(0x0040, Some(Vec3::ZERO), None),
+            "ground point → Cast"
+        );
+        // …and over sky / mouselook there is no point: state 0.
+        assert!(!verdict(0x0040, None, None), "no ground hit → UnableCast");
+
+        // An **item-only** word (a poison, an enchant, `0x0010`): PF is 0, the pick bails at
+        // `0x4812c8` before it builds a ray, so the world cursor is grey the whole time it is
+        // armed — with or without ground under the mouse.
+        assert!(!verdict(0x0010, Some(Vec3::ZERO), None));
+        assert!(!verdict(0x0010, None, None));
+        // Even with a GameObject under the cursor: `& 0x4800` is 0, so the object arm is not its
+        // handler either.
+        assert!(!verdict(0x0010, Some(Vec3::ZERO), Some(3.0)));
+
+        // A **GameObject** word (Opening, `0x4800`) over bare ground — no bit `0x1`, state 0.
+        assert!(
+            !verdict(0x4800, Some(Vec3::ZERO), None),
+            "lockpick over dirt is grey"
+        );
+        // Over a GameObject whose template has not streamed in yet: the object arm bails, and a
+        // bail is grey rather than lit — the click is what the server judges, not the cursor.
+        assert!(!verdict(0x4800, Some(Vec3::ZERO), Some(3.0)));
+
+        // A lock word that ALSO carries DEST (`0x4840`) still has its terrain handler when no
+        // GameObject is the nearest pick — the seams are questions, not a partition (0939).
+        assert!(verdict(0x4840, Some(Vec3::ZERO), None));
     }
 }
