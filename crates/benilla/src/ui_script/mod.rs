@@ -135,7 +135,7 @@ impl Default for UiScaleCvar {
 
 /// The shipped default (the reference's slider spans 0.64..1.0; 1.0 read oversized to the
 /// director's eye — the taste call this dial exists for).
-const DEFAULT_UI_SCALE: f32 = 0.9;
+pub(crate) const DEFAULT_UI_SCALE: f32 = 0.9;
 
 /// The app's `uiScale`: `WOW_UI_SCALE=` if set (clamped to the plausible dial range), else
 /// [`DEFAULT_UI_SCALE`] — the env override makes taste iteration a relaunch, not a rebuild.
@@ -202,7 +202,9 @@ impl Plugin for UiScriptPlugin {
                 arbitrate_pointer_over_ui
                     .after(UiInput)
                     .before(WorldStage::Input),
-            );
+            )
+            // Runtime era-atlas misses surface as WARNs the frame they happen (decision 0950).
+            .add_systems(Update, warn_era_atlas_misses.after(UiInput));
 
         // `WOW_CAPTURE_UI=1` on a capture: override the "player" token with a synthetic snapshot so
         // the unit frames are populated in a server-less capture. Ordered after the real feed (so it
@@ -238,7 +240,7 @@ fn arbitrate_pointer_over_ui(
 }
 
 fn setup_script(world: &mut World) {
-    let script = match UiScript::new() {
+    let mut script = match UiScript::new() {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
@@ -247,6 +249,12 @@ fn setup_script(world: &mut World) {
     };
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
+    // The Era atlas table (decision 0950) — pushed BEFORE the XML loads so `atlas=` attributes
+    // resolve during materialization. A missing manifest already WARNed inside the loader; the
+    // windows then draw blank and every unresolved name is drained as a miss below.
+    if let Some(entries) = crate::assets::era::load_era_atlases() {
+        script.set_era_atlases(entries);
+    }
     // The unit frames are the default player UI — always loaded in a normal run. Captures stay
     // pristine (world-render baselines) unless WOW_CAPTURE_UI=1 opts the UI in.
     let capturing = world.contains_resource::<crate::capture::CaptureMode>();
@@ -255,7 +263,21 @@ fn setup_script(world: &mut World) {
         // assertion (`shipped_xml_tests`), not a second reporting channel.
         let _ = load_default_ui(&script);
     }
+    // Boot-time atlas misses (an `atlas=` or OnLoad `SetAtlas` the table couldn't serve) name
+    // themselves once, here; runtime misses drain per frame in `warn_era_atlas_misses`.
+    for name in script.take_era_atlas_misses() {
+        warn!("ui_script: unresolved era atlas '{name}' — stale extraction? run scripts/era-extract.py");
+    }
     world.insert_non_send_resource(script);
+}
+
+/// Per-frame drain of runtime `SetAtlas` misses (hover/selection swaps naming an atlas the boot
+/// table lacks) — warn-once per name, the boot drain's live twin. Free when nothing missed.
+fn warn_era_atlas_misses(script: Option<NonSendMut<UiScript>>) {
+    let Some(mut script) = script else { return };
+    for name in script.take_era_atlas_misses() {
+        warn!("ui_script: unresolved era atlas '{name}' — stale extraction? run scripts/era-extract.py");
+    }
 }
 
 /// Execute the real `Interface\FrameXML\GlobalStrings.lua` off the patch chain into the VM —
@@ -599,6 +621,11 @@ fn load_default_ui(script: &UiScript) -> Vec<String> {
         // alongside QuestFrame (same arc); the 'L' binding below calls its ToggleQuestLog().
         "QuestLogFrame.xml",
         "ChatFrame.xml",
+        // The options window (decision 0950): the era-skinned OptionsFrame the game menu's
+        // Options button opens. Needs only Fonts' objects and UiPanels' panel manager (both far
+        // above); sits right before GameMenuFrame so the menu — which reaches it by name at
+        // click time — stays the last, outermost layer.
+        "OptionsFrame.xml",
         // The game menu (decision 0674): the frame ESC opens, plus the CAMP/QUIT dialogs and their
         // event driver. LAST on purpose — it is the outermost layer of the shell, it depends on
         // everything it touches being loaded (UiPanels' popup engine + panel manager, MicroMenu's
@@ -902,6 +929,9 @@ mod escape_tests;
 
 #[cfg(test)]
 mod game_menu_tests;
+
+#[cfg(test)]
+mod options_tests;
 
 #[cfg(test)]
 mod delete_item_tests;

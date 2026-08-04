@@ -159,6 +159,47 @@ fn escape_is_consumed_by_a_focused_editbox_and_leaves_windows_open() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The options rung (decision 0950; the ref's own `elseif OptionsFrame:IsVisible()` at
+/// UIParent.lua l.1483-1484, BETWEEN the popup rung and the menu rung): ESC with the options
+/// window up closes it — hide, not cancel-click: benilla applies changes live — and eats the
+/// press, so the menu does NOT open on the same stroke. Only the NEXT press, with nothing left
+/// to eat, opens the menu (one eater per press, the 0449 law).
+#[test]
+fn escape_closes_the_options_window_before_opening_the_menu() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "OptionsFrame.xml");
+    load_xml(&s, "GameMenuFrame.xml");
+
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    assert!(s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap());
+    assert!(
+        !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
+        "the menu is down — the options rung is what must eat this press"
+    );
+
+    // Press 1: the options rung eats it — the window closes and the menu stays down.
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(
+        !s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap(),
+        "ESC closed the options window"
+    );
+    assert!(
+        !s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
+        "…and did NOT also open the menu — one eater per press"
+    );
+
+    // Press 2: nothing left to eat — the menu opens.
+    s.run("ToggleGameMenu()").unwrap();
+    assert!(
+        s.eval::<bool>("return GameMenuFrame:IsVisible()").unwrap(),
+        "the next press reaches the ladder's open-the-menu tail"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// ESC closes an open stack-split spinner (decision 0216 §6/slice 2, StackSplit.xml): this engine
 /// has no plain-frame keyboard capture (the real client's own `StackSplitFrame` OnKeyDown ESCAPE
 /// arm can't be driven), so the hook rides `ToggleGameMenu`'s shared chain instead — checked

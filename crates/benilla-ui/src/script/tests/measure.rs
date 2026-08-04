@@ -168,3 +168,105 @@ fn zero_width_fontstring_autosizes_to_its_line() {
     assert_eq!(v_left, 119.0);
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }
+
+/// The frame-scale seam (0219 §2's divergence, closed): a `SetScale`'d frame's quads carry its
+/// `effective_scale` out to the renderer — the rect is already scale-multiplied by layout, and
+/// the renderer needs the same factor for the GLYPH raster size — and the measure round-trip
+/// rides it too: the request names the scale (the host measures at the drawn size), the cache
+/// key holds it (a re-scale re-measures), all before any quad draws stale text.
+#[test]
+fn frame_scale_rides_the_quads_and_the_measure_key() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local w = CreateFrame("Frame", "Win")
+        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(400, 300)
+        w:SetScale(0.8)
+        local t = w:CreateFontString("ScaledLabel", "ARTWORK")
+        t:SetText("Options")
+        t:SetPoint("TOPLEFT", 10, -10)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    // The measure request carries the owner's effective scale.
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1);
+    let r = &reqs[0];
+    assert_eq!(r.scale, 0.8, "request names the drawn-size scale");
+    let old_key = r.key;
+    let (id, key) = (r.id, r.key);
+    s.set_measured_text(&[(id, 50.0, 16.0, key)]);
+    s.resolve();
+    assert!(s.fontstrings_needing_measure().is_empty(), "cache warm");
+    // Every quad of the scaled frame carries the scale — frame slot and region alike.
+    let quads = s.extract();
+    let label = quads
+        .iter()
+        .find(|q| matches!(&q.content, QuadContent::Text { text: Some(t), .. } if t == "Options"))
+        .expect("label quad");
+    assert_eq!(label.scale, 0.8);
+    // The label's rect is scale-multiplied by layout (width 50 × 0.8 = 40) — the quad's scale is
+    // for the glyph raster, not a second rect multiply.
+    let lr = label.rect.expect("label rect");
+    assert!((lr.width() - 40.0).abs() < 0.01, "width {}", lr.width());
+    // A re-scale invalidates the measure key: the same text re-measures at the new drawn size.
+    s.run(r#"Win:SetScale(1.25)"#).unwrap();
+    s.resolve();
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1, "SetScale re-measures");
+    assert_eq!(reqs[0].scale, 1.25);
+    assert_ne!(reqs[0].key, old_key, "key carries the scale");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The host's raster-environment invalidation ([`UiScript::invalidate_text_measures`]): a warm
+/// FontString measure cache re-requests after the call — same content, same key (the key hashes
+/// content, not the host's seam scale; the STALENESS is the host's to declare, which is the whole
+/// seam). This is the engine half of the fullscreen-truncation fix: measures answered under one
+/// seam scale kept satisfying fit tests run under another, and the ellipsis ate fitting text
+/// ("Contr...", director 2026-08-04; reproduced end-to-end by `WOW_RESIZE`).
+#[test]
+fn invalidate_text_measures_reopens_the_round_trip() {
+    let mut s = script();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        local w = CreateFrame("Frame", "Win")
+        w:SetPoint("TOPLEFT", 0, -100); w:SetSize(400, 300)
+        local t = w:CreateFontString("Label", "ARTWORK")
+        t:SetText("Keybindings")
+        t:SetPoint("TOPLEFT", 10, -10)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1);
+    let (id, key) = (reqs[0].id, reqs[0].key);
+    s.set_measured_text(&[(id, 74.0, 12.0, key)]);
+    s.resolve();
+    assert!(s.fontstrings_needing_measure().is_empty(), "cache warm");
+    assert_eq!(
+        s.eval::<f64>("return Label:GetStringWidth()").unwrap(),
+        74.0
+    );
+
+    s.invalidate_text_measures();
+    // The measured extent is gone (GetStringWidth back to its unmeasured 0)…
+    assert_eq!(
+        s.eval::<f64>("return Label:GetStringWidth()").unwrap(),
+        0.0,
+        "stale measure dropped, not served"
+    );
+    // …and the round-trip reopens with the SAME content key — the request is the host's cue to
+    // re-measure under its new environment; nothing about the region itself changed.
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1, "re-requests after invalidation");
+    assert_eq!(
+        reqs[0].key, key,
+        "content key unchanged — only the answer was stale"
+    );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

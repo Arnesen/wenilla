@@ -1,11 +1,12 @@
 //! The shipped `assets/ui/GameMenuFrame.xml` — the frame ESC opens (decision 0674).
 //!
-//! What these guard, in order: the ref geometry (195×246 and the eight-button ladder, because the
-//! whole point of shipping five dead buttons is that the frame keeps its exact silhouette); the
-//! disabled five; the three live buttons' wire intents and sounds; the ESC ladder's two new rungs
-//! (open when nothing is left to eat, close before everything else); the micro button's `clicked`
-//! toggle; the native-center rule that makes the menu take the screen (windows close on the way in,
-//! and nothing opens while it is up); and the camp/quit countdown dialogs end to end.
+//! What these guard, in order: the ladder geometry (the ERA menu shape — 200×288, eight rungs in
+//! three 20-gapped sections, the era layout engine's own numbers precomputed in the XML's header
+//! note); the four greyed pending entries; the live buttons' wire intents and sounds;
+//! the ESC ladder's two new rungs (open when nothing is left to eat, close before everything
+//! else); the micro button's `clicked` toggle; the native-center rule that makes the menu take
+//! the screen (windows close on the way in, and nothing opens while it is up); and the camp/quit
+//! countdown dialogs end to end. The Options button's own click path is options_tests'.
 
 use benilla_ui::script::{
     ContainerSlot, ContainerState, LootRow, LootState, SessionRequest, SoundRequest, UiScript,
@@ -44,25 +45,25 @@ fn harness() -> UiScript {
     harness_with(&[])
 }
 
-/// The eight buttons, top to bottom — the ref's own order (GameMenuFrame.xml l.48-186).
+/// The eight buttons, top to bottom — the ERA ladder (the director's call on the 0951 review;
+/// GameMenuFrame.xml's header SCOPE note quotes the era source).
 const LADDER: [&str; 8] = [
     "GameMenuButtonOptions",
-    "GameMenuButtonSoundOptions",
-    "GameMenuButtonUIOptions",
-    "GameMenuButtonKeybindings",
+    "GameMenuButtonAddOns",
+    "GameMenuButtonEditMode",
+    "GameMenuButtonSupport",
     "GameMenuButtonMacros",
     "GameMenuButtonLogout",
     "GameMenuButtonQuit",
     "GameMenuButtonContinue",
 ];
 
-/// The frame's geometry, quoted from the reference: 195×246 centered, each button 144×21, the first
-/// centered on the frame's TOP at −37, each next 1 px under the last, and Return to Game hung 16
-/// under Exit Game — the single gap that makes the last entry read as separate. Shipping the five
-/// unbacked buttons disabled (rather than cutting them) is exactly what keeps this true, so it is
-/// the first thing to break if someone "tidies" the ladder.
+/// The ladder geometry — the era layout engine's own numbers (MainMenuFrameTemplates: padding
+/// 32/28/28/28, spacing 0, AddSection gap 20): 200×288, each button 144×21 at x=28, tops at
+/// 32/73/94/115/136/177/198/239 — three sections split by the 20-unit gaps after Options, after
+/// Macros, and before Return to Game. First thing to break if the era shape is ever "tidied".
 #[test]
-fn the_menu_has_the_reference_frame_and_button_ladder() {
+fn the_menu_has_the_era_frame_and_button_ladder() {
     let mut s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
     s.resolve();
@@ -70,14 +71,12 @@ fn the_menu_has_the_reference_frame_and_button_ladder() {
     let (w, h) = s
         .eval::<(f64, f64)>("return GameMenuFrame:GetWidth(), GameMenuFrame:GetHeight()")
         .unwrap();
-    assert_eq!((w, h), (195.0, 246.0), "the ref frame size");
+    assert_eq!((w, h), (200.0, 288.0), "the era frame size");
 
     let top = s.eval::<f64>("return GameMenuFrame:GetTop()").unwrap();
-    // Button i's own top, measured down from the frame's: the first is centered at −37 (so its top
-    // is 37 − 21/2 = 26.5 below), then a 22 px stride (21 tall + the 1 px gap), with the last
-    // pushed a further 15 (its −16 anchor instead of −1).
-    let mut expected = top - 26.5;
-    for (i, name) in LADDER.iter().enumerate() {
+    let left = s.eval::<f64>("return GameMenuFrame:GetLeft()").unwrap();
+    const TOPS: [f64; 8] = [32.0, 73.0, 94.0, 115.0, 136.0, 177.0, 198.0, 239.0];
+    for (name, down) in LADDER.iter().zip(TOPS) {
         let (bw, bh, btop, bleft) = s
             .eval::<(f64, f64, f64, f64)>(&format!(
                 "return {name}:GetWidth(), {name}:GetHeight(), {name}:GetTop(), {name}:GetLeft()"
@@ -89,41 +88,64 @@ fn the_menu_has_the_reference_frame_and_button_ladder() {
             "{name} is a GameMenuButtonTemplate"
         );
         assert!(
-            (btop - expected).abs() < 0.001,
-            "{name} top: expected {expected}, got {btop}"
+            (btop - (top - down)).abs() < 0.001,
+            "{name} top: expected {} down {down}, got {}",
+            top - down,
+            btop
         );
-        // Every button is centered in the frame (the ladder is one column).
         assert!(
-            (bleft - (512.0 - 72.0)).abs() < 0.001,
-            "{name} is centered in the 1024-wide screen"
+            (bleft - (left + 28.0)).abs() < 0.001,
+            "{name} sits at the era 28-unit left padding"
         );
-        expected -= if i == 6 { 21.0 + 16.0 } else { 21.0 + 1.0 };
     }
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The five with nothing behind them are DISABLED — the director's call: the ladder keeps the ref's
-/// shape, and a button that does nothing looks like it. The three that work are enabled.
+/// The four entries with nothing behind them — AddOns, Edit Mode, Support, Macros — are DISABLED
+/// (the pending idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry).
+/// Everything else in the ladder is live.
 #[test]
-fn the_five_unbacked_buttons_are_disabled_and_the_three_live_ones_are_not() {
+fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     let s = harness();
     s.run("ShowUIPanel(GameMenuFrame)").unwrap();
 
-    for name in &LADDER[..5] {
+    for name in [
+        "GameMenuButtonAddOns",
+        "GameMenuButtonEditMode",
+        "GameMenuButtonSupport",
+        "GameMenuButtonMacros",
+    ] {
         assert!(
             !s.eval::<bool>(&format!("return {name}:IsEnabled()"))
                 .unwrap(),
             "{name} has no panel behind it and must read that way"
         );
     }
-    for name in &LADDER[5..] {
+    for name in [
+        "GameMenuButtonOptions",
+        "GameMenuButtonLogout",
+        "GameMenuButtonQuit",
+        "GameMenuButtonContinue",
+    ] {
         assert!(
             s.eval::<bool>(&format!("return {name}:IsEnabled()"))
                 .unwrap(),
             "{name} is live"
         );
     }
-    // The labels are the reference GlobalStrings, read back through the globals (not literals).
+    // The pending labels read the era strings (AddOns through the ADDONS global).
+    assert_eq!(
+        s.eval::<String>("return GameMenuButtonAddOns:GetText()")
+            .unwrap(),
+        "AddOns"
+    );
+    assert_eq!(
+        s.eval::<String>("return GameMenuButtonEditMode:GetText()")
+            .unwrap(),
+        "Edit Mode"
+    );
+    // Continue's label is the reference GlobalString, read back through the global; Options is
+    // the one literal (1.12 GlobalStrings has no GAMEOPTIONS_MENU — the XML says so).
     assert_eq!(
         s.eval::<String>("return GameMenuButtonContinue:GetText()")
             .unwrap(),
@@ -132,7 +154,7 @@ fn the_five_unbacked_buttons_are_disabled_and_the_three_live_ones_are_not() {
     assert_eq!(
         s.eval::<String>("return GameMenuButtonOptions:GetText()")
             .unwrap(),
-        "Video Options"
+        "Options"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
@@ -687,4 +709,24 @@ fn backpack() -> ContainerState {
         num_slots: 16,
         slots,
     }
+}
+
+/// The menu wears the shared era-window scale on show (`ERA_WINDOW_SCALE`, OptionsFrame.xml —
+/// the stand-in for the era client's UIParent px-per-unit): in the era the menu and the options
+/// window draw at the SAME density (the menu has no scale of its own; options' checkFit caps at
+/// 1), and ours drew the menu 28% larger relative to the options window until it rode the same
+/// knob ("esc menu scale too big" — director, 2026-08-04). Loaded WITH OptionsFrame.xml, the
+/// real load order; the bare-menu harness elsewhere exercises the `or 1` guard implicitly.
+#[test]
+fn the_menu_rides_the_shared_era_window_scale() {
+    let mut s = harness_with(&["OptionsFrame.xml"]);
+    s.run("ShowUIPanel(GameMenuFrame)").unwrap();
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+    let ran = s.eval::<f64>("return BENILLA_MENU_ONSHOW or -99").unwrap();
+    println!("handler ran probe: {ran}");
+    let k = s.eval::<f64>("return GameMenuFrame:GetScale()").unwrap();
+    let want = s.eval::<f64>("return ERA_WINDOW_SCALE").unwrap();
+    assert!((k - want).abs() < 1e-6, "menu scale {k} != knob {want}");
+    assert!((want - 0.78).abs() < 1e-6, "the knob itself moved: {want}");
 }

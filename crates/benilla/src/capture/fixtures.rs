@@ -919,6 +919,18 @@ pub(super) fn seed_ui_fixture(
             selection.target = Some(wolf);
             selection.guid = Some(WOLF_GUID);
         }
+        UiFixture::Options => {
+            let Some(script) = script else {
+                return;
+            };
+            // Static window, opened through the live panel path — nothing else to seed. What the
+            // capture pins: the era chrome (nine-slice seams, right-edge straddle), the tab
+            // plates, the search-box seat, the category list art with Controls selected (the
+            // OnShow default), and the window's fit scale.
+            if let Err(e) = script.run("ShowUIPanel(OptionsFrame)") {
+                warn!("capture: ui-options seed failed to open the window: {e}");
+            }
+        }
         UiFixture::SpellBook => {
             // The director's own report reproduced (decision 0228): a HUMAN WARRIOR (race 1,
             // class 1) who learned Fireball + Mind Flay via a GM command during testing. The book

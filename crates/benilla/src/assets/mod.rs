@@ -27,6 +27,9 @@ use benilla_formats::{open_chain, read_texture_mip_chain, read_texture_rgba, Cha
 mod images;
 pub(crate) use images::*;
 
+/// The Era atlas manifest side of decision 0950 (`era:` texture scheme + the UiScript table).
+pub(crate) mod era;
+
 /// Shared asset store: the **one** open patch chain plus dedup caches, used by every model/texture
 /// load (terrain layers, doodads, WMOs, creatures, GameObjects). Replaces the three independent
 /// chains we used to open. Deduping by path/material means each unique BLP is decoded + uploaded
@@ -178,6 +181,23 @@ impl WorldAssets {
         path: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
+        // `era:<relpath>` (decision 0950): a loose extracted file under
+        // `WoW-era/_extracted_ui/`, never the MPQ chain — the scheme string is its own cache key
+        // (verbatim, case-sensitive: the manifest writes it, authors copy it).
+        if let Some(rel) = path.strip_prefix("era:") {
+            if let Some(cached) = self.sprites.get(path) {
+                return cached.clone();
+            }
+            let loaded = std::fs::read(era::era_ui_root().join(rel))
+                .ok()
+                .and_then(|bytes| benilla_formats::blp_to_rgba(&bytes).ok())
+                .map(|(w, h, rgba)| images.add(sprite_image(w, h, rgba)));
+            if loaded.is_none() {
+                warn!("era: sprite '{path}' unreadable — stale extraction? run scripts/era-extract.py");
+            }
+            self.sprites.insert(path.to_string(), loaded.clone());
+            return loaded;
+        }
         // FrameXML/DBC texture references are canonically EXTENSIONLESS
         // (`Interface\Buttons\UI-Quickslot2`) — the real client appends `.blp` at resolve. Paths
         // that already carry an extension (`textures\moon.blp`) pass through unchanged.

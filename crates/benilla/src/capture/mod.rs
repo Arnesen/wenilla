@@ -358,11 +358,22 @@ struct CaptureCtx {
     /// The frozen clock is in force ([`CAPTURE_FRAME_DT`]) — always, except under a perf probe,
     /// whose entire measurement *is* the real frame cost.
     frozen_clock: bool,
+    /// `$WOW_RESIZE=WxH` already applied (once, at first settle) — see the `Building` arm.
+    resized: bool,
     /// Probe samples (frame ms).
     probe_samples: Vec<f32>,
     /// Process CPU seconds at the first sampled frame — the window baseline for the probe line's
     /// `cpu_ms`/`cpu_pct` (the load-robust metric, decision 0711; the scenario probe lacked it).
     probe_cpu_start: Option<f64>,
+}
+
+/// `$WOW_RESIZE=WxH` — resize the window to this (logical px) once the image first settles,
+/// then settle again before shooting. The mid-session resolution-change instrument (see the
+/// `Building` arm). `None` when unset or malformed.
+fn resize_request() -> Option<(u32, u32)> {
+    let v = std::env::var("WOW_RESIZE").ok()?;
+    let (w, h) = v.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
 }
 
 /// The present mode a perf probe uncaps to (also the live probe's — see `probes.rs`).
@@ -587,6 +598,7 @@ impl Plugin for CapturePlugin {
                 ui_seeded: false,
                 probe_frames,
                 frozen_clock,
+                resized: false,
                 probe_samples: Vec::new(),
                 probe_cpu_start: None,
             })
@@ -732,6 +744,20 @@ fn drive_capture(
             }
             if watch.stable < stable_frames() && !capped {
                 Phase::Building(n + 1)
+            } else if let Some((rw, rh)) = resize_request().filter(|_| !ctx.resized) {
+                // `$WOW_RESIZE=WxH` (logical px): a mid-session resolution change, applied only
+                // once the image has SETTLED at the boot size — the whole UI has been built and
+                // its text measured under the boot scale before the window changes, which is
+                // exactly the fullscreen-toggle flow a fresh boot at the target size can't
+                // exercise (stale text-metric caches were invisible to every same-size capture).
+                // The stability watch restarts and the shot photographs the post-resize frame.
+                ctx.resized = true;
+                if let Ok(mut w) = windows.single_mut() {
+                    w.resolution.set(rw as f32, rh as f32);
+                }
+                watch.stable = 0;
+                info!("capture: resized to {rw}x{rh}, re-settling");
+                Phase::Building(0)
             } else if fixture_age.is_some() {
                 if let Some(state) = fx_state.as_deref_mut() {
                     state.armed = true; // scene ready — the fixture spawns now, age clock clean

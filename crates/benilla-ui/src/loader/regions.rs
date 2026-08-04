@@ -198,7 +198,25 @@ impl Loader<'_> {
     ) {
         let color = children_named(region, "Color").next().map(color_of);
         if is_texture {
-            if let Some(file) = region.attr("file") {
+            if let Some(atlas) = region.attr("atlas") {
+                // `atlas="member"` (decision 0950): the Era dialect's texture reference — one
+                // SetAtlas resolves sheet + UV sub-rect (+ nominal size with `useAtlasSize`)
+                // through the app-pushed manifest table; `file=` remains the 1.12 MPQ path.
+                self.call_region(
+                    region_wrapper,
+                    "SetAtlas",
+                    (atlas.to_string(), region.attr_bool("useAtlasSize")),
+                    dbg,
+                );
+                if let Some(c) = color {
+                    self.call_region(
+                        region_wrapper,
+                        "SetVertexColor",
+                        (c[0], c[1], c[2], c[3]),
+                        dbg,
+                    );
+                }
+            } else if let Some(file) = region.attr("file") {
                 self.call_region(region_wrapper, "SetTexture", file.to_string(), dbg);
                 if let Some(c) = color {
                     // A texture with both a file and a <Color> is a tint (vertex color).

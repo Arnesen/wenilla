@@ -42,6 +42,7 @@ mod combat_text;
 mod cooldowns;
 mod creature_anim;
 mod cursor;
+mod cvars;
 mod dbg_trace;
 mod death;
 mod debug_panel;
@@ -64,6 +65,7 @@ mod items;
 mod lighting;
 mod liquid;
 mod loading_screen;
+mod local_state;
 mod login;
 mod map_proj;
 mod mesh_tag;
@@ -302,16 +304,29 @@ fn main() -> AppExit {
                     resolution: if capturing
                         && std::env::var("WOW_CAPTURE_UI").as_deref() == Ok("1")
                     {
-                        match std::env::var("WOW_CAPTURE").as_deref() {
-                            Ok("ui-actionbar") => UVec2::new(1300, 260),
-                            Ok("vplates") => UVec2::new(1024, 768),
-                            // The director's small-window shape: short enough that the action bar
-                            // strip overlaps the chat edit box rows — the overlap is the subject.
-                            Ok("ui-chatedit") => UVec2::new(566, 377),
-                            // The fullscreen map's chrome is a centered 1024×768 block; a hair of
-                            // margin shows the blackout doing its job.
-                            Ok("ui-worldmap") => UVec2::new(1100, 800),
-                            _ => UVec2::new(640, 700),
+                        // `$WOW_WIN` overrides here too — the resolution-A/B instrument for UI
+                        // scenarios (a scale-dependent text bug looks fine at the scenario's
+                        // default size and truncates at fullscreen heights).
+                        if let Some(win) = std::env::var("WOW_WIN").ok().and_then(|v| {
+                            let (w, h) = v.split_once('x')?;
+                            Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+                        }) {
+                            win
+                        } else {
+                            match std::env::var("WOW_CAPTURE").as_deref() {
+                                Ok("ui-actionbar") => UVec2::new(1300, 260),
+                                Ok("vplates") => UVec2::new(1024, 768),
+                                // The director's small-window shape: short enough that the action bar
+                                // strip overlaps the chat edit box rows — the overlap is the subject.
+                                Ok("ui-chatedit") => UVec2::new(566, 377),
+                                // The fullscreen map's chrome is a centered 1024×768 block; a hair of
+                                // margin shows the blackout doing its job.
+                                Ok("ui-worldmap") => UVec2::new(1100, 800),
+                                // The 920×724 era options window wants air on every side so the
+                                // straddling right-edge tile and the hung close X stay in frame.
+                                Ok("ui-options") => UVec2::new(1200, 900),
+                                _ => UVec2::new(640, 700),
+                            }
                         }
                         .into()
                     } else {
@@ -608,6 +623,9 @@ fn main() -> AppExit {
     // `SetPortraitTexture`-bound region (the modern high-res 2D model bake).
     .add_plugins(PortraitPlugin)
     .add_plugins((TextInputPlugin, UiScriptPlugin))
+    // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
+    // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
+    .add_plugins(cvars::CvarPlugin)
     // The unit snapshot + event feed (decision 0068 §3): pushes ECS game state into the VM as the
     // plain data the `Unit*` bindings read, and fires the matching WoW events.
     .add_plugins(UiUnitPlugin)

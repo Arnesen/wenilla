@@ -1,0 +1,665 @@
+<Ui>
+    <!--
+        The OPTIONS window (decision 0950) — slice A: the shell. Opened from the game menu's
+        Options button; the pages themselves (setting rows backed by real benilla knobs) come in
+        the next slice, so the page body ships EMPTY and Defaults ships disabled.
+
+        This window is the one deliberate era-1.15.9 skin in a 1.12 shell (0950): the 1.12
+        OptionsFrame family (four separate panels) collapses into the era SettingsPanel look —
+        one window, a category list, one page area. Ground truth is the era dump
+        (wow-ui-source-era @ 1.15.9.68940), transcribed via the session's reference spec:
+        · **Root** — Blizzard_SettingsPanel.xml `SettingsPanel`: 920x724, CENTER, strata HIGH,
+          hidden. Skin per `SettingsFrameTemplate` (Classic/Blizzard_SettingsPanelTemplates.xml):
+          FlatPanelBackgroundTemplate at TOPLEFT (7,-18) → BOTTOMRIGHT (-3,3), the
+          `ButtonFrameTemplateNoPortrait` nine-slice (Classic/NineSliceLayouts.lua l.132 — right
+          edge x=-8/x1=8), the `_UI-Frame-TitleTileBg` title band (256x17, TexCoords
+          .2890625/.421875, TOPLEFT (8,-3) → TOPRIGHT (0,-3)), title GameFontNormal TOP (0,-5).
+        · **Category list** — Blizzard_CategoryList.xml + .lua: rows/headers STRETCH to the
+          scroll target's width (199, no scroll bar); header 30 tall (label 14px white at
+          LEFT (20,-1), Options_CategoryHeader_<n> wash at TOPLEFT at atlas size, n cycling
+          per header); row 20 tall (label GameFontNormal TOPLEFT (36,+1); bg CENTER —
+          options_list_active selected / options_list_hover hover, at atlas size); 2 between
+          elements, 18-tall spacer between groups (so 22 row-to-header).
+        · **Page area** — Blizzard_SettingsList.xml: title 20px white TOPLEFT (7,-22), the
+          options_horizontaldivider at TOP (0,-50), Defaults 96x22 at TOPRIGHT (-36,-16).
+        · **Tabs** — SharedXML Shared/Tabs/MinimalTab.{xml,lua}: a bottom-anchored three-slice
+          of Options_Tab[_Active]_{Left,Middle,Right}, GameTab TOPLEFT (32,-27) h37, AddOnsTab
+          5 right of it; width text+40; selected = white small text at BOTTOM+6, unselected =
+          gold small at BOTTOM+4.
+        · **Search box** — SharedXML SearchBoxTemplate → InputBoxVisualTemplate
+          (SecureUIPanelTemplates.xml l.42-67): the common-search-border three-slice (8x20 caps,
+          left hung 5 outside, middle stretched, all centered on the 22 box), 10x10 magnifier at
+          LEFT (1,-1), 17x17 clear button at RIGHT (-3), TextInsets 16/20, instructions label
+          GameFontDisableSmall tinted 0.35 at TOPLEFT (16,0) → BOTTOMRIGHT (-20,0).
+        Atlas members resolve by name through WoW-era/_extracted_ui/manifest.json (the 0950
+        seam); era-only FILE textures ride the same extraction as `era:textures/<fdid>.blp`.
+
+        SCOPE / divergences (noted, not bugs):
+        - **horizTile/vertTile are unsupported**, so every repeating tile is STRETCHED for now:
+          the `_UI-Frame-TitleTile` top band (a 256x28 repeat), the title-bg band under it, the
+          `!UI-Frame-LeftTile`/`!UI-Frame-RightTile` columns and the `_UI-Frame-Bot` strip. At
+          this window's spans the stretch reads as a soft smear of the tile — the gap to close
+          when tiling lands.
+        - **FlatPanelBackgroundTemplate is ONE solid fill here.** The era template is four
+          textures (two rounded-corner atlas pieces + two fills) all tinted the engine-side
+          global PANEL_BACKGROUND_COLOR = (0.122, 0.118, 0.129, 0.8) — the constant is defined in
+          the client binary, not the Lua dump; value read off the GlobalColor db2 mirror
+          (warcraft.wiki.gg/wiki/ColorMixin). One flat quad loses only the 16px rounded bottom
+          corners. The "lighter inner panel" on top of it is not a second fill — it is the real
+          `Options_InnerFrame` atlas member, placed below.
+        - **Close X wears the 1.12 UI-Panel-MinimizeButton art at the era seat** — which IS the
+          era's own close button: 1.15's UIPanelCloseButtonNoScripts names the same four
+          Interface\Buttons\UI-Panel-MinimizeButton-* files (Classic SharedUIPanelTemplates.xml
+          l.172-180), TOPRIGHT (+4,+4), 32x32. No divergence here at all.
+        - **Tabs are STATIC MinimalTab plates** (slice B): Game wears the selected state
+          permanently, AddOns the unselected gold — the era swaps these in code
+          (MinimalTabMixin), and with nothing behind AddOns the selection can never change, so
+          the two states are authored rather than driven. The mixin port comes with the addon
+          list. Width is era's text+40 law via an OnUpdate measure poll; the era's
+          measure-at-the-medium-font quirk is deliberately dropped (~6 units of padding).
+        - **Search filters nothing yet** — the box takes text, shows/hides its "Search"
+          placeholder and clear-X; wiring it to the category/row filter comes with the pages
+          slice.
+        - **No scroll bars**: the static category tree (9 rows, 2 headers) fits its 199px column
+          outright, and the page body is empty. MinimalScrollBar arrives with the pages.
+        - Era rows this slice does not ship: the Accessibility group, and Languages/Network under
+          System — pages with no benilla knobs behind them yet (0950's "only rows backed by real
+          knobs" rule). Nameplates joined in slice B (real nameplate knobs exist to back its
+          page).
+        - **The window rides a scale knob** (slice B): fonts ride frame scale engine-wide now
+          (the 0219 §2 divergence closed), so ERA_WINDOW_SCALE × the era checkFit shrink
+          (UIPanelUpdateScaleForFit, transcribed in this file) sizes the whole window; 0.78 is
+          the director's-eye starting point, live-tunable. The knob is SHARED: it stands in for
+          the era client's UIParent scale (smaller than our 1.12 768-canvas on modern screens),
+          so every era-shaped window wears it — GameMenuFrame.xml reads it in its OnShow.
+    -->
+
+    <!-- The two era fonts this window needs beyond Fonts.xml's 1.12 set (the era
+         GameFontHighlightMedium / GameFontHighlightHuge — Blizzard_Fonts_Shared: FRIZQT 14 and
+         20, white). Named Options* rather than the era names on purpose: Fonts.xml is the
+         COMPLETE 1.12 set and stays that way; these are this window's own, defined with
+         MasterFont's exact shadow inlined (its only content — Fonts.xml l.62). -->
+    <Font name="OptionsFontHighlightMedium" font="Fonts\FRIZQT__.TTF" virtual="true">
+        <Shadow>
+            <Offset><AbsDimension x="1" y="-1"/></Offset>
+            <Color r="0" g="0" b="0"/>
+        </Shadow>
+        <FontHeight><AbsValue val="14"/></FontHeight>
+        <Color r="1.0" g="1.0" b="1.0"/>
+    </Font>
+    <Font name="OptionsFontHighlightHuge" font="Fonts\FRIZQT__.TTF" virtual="true">
+        <Shadow>
+            <Offset><AbsDimension x="1" y="-1"/></Offset>
+            <Color r="0" g="0" b="0"/>
+        </Shadow>
+        <FontHeight><AbsValue val="20"/></FontHeight>
+        <Color r="1.0" g="1.0" b="1.0"/>
+    </Font>
+
+    <Script><![CDATA[
+        -- The static category tree (era Game tab, Classic tocs), in list order. Keys are the row
+        -- name suffixes; the visible label doubles as the page title (the era does the same —
+        -- Settings.RegisterCategory names both from one string).
+        OPTIONS_CATEGORY_KEYS = {
+            "Controls", "Interface", "ActionBars", "Combat", "Social", "Keybindings", "Nameplates",
+            "Graphics", "Audio",
+        }
+
+        -- The era-window scale (shared, director-owned — the 0219 WORLDMAP_WINDOWED_SCALE
+        -- pattern): the era client's UIParent draws smaller against the screen than our 1.12
+        -- 768-canvas does on modern displays, and this knob is that mapping — every era-shaped
+        -- window wears it (this window here; GameMenuFrame in its OnShow — in the era both draw
+        -- at the SAME UIParent px-per-unit, the parity the director's eye checked). At 1.0 the
+        -- 724-tall window fills ~85% of the screen's height in our 768-virtual space, where the
+        -- reference at typical resolutions reads nearer two-thirds.
+        ERA_WINDOW_SCALE = 0.78
+
+        function OptionsFrame_UpdateScale()
+            -- The era panel is registered `checkFit = 1`: the panel manager also shrinks it to
+            -- fit a small screen (UIPanelUpdateScaleForFit: min over width/height ratios
+            -- against the panel + 20 units of air each way, capped at 1) — transcribed here.
+            local k = ERA_WINDOW_SCALE
+            local wFit = GetScreenWidth() / 940
+            local hFit = GetScreenHeight() / 744
+            if wFit < k then k = wFit end
+            if hFit < k then k = hFit end
+            OptionsFrame:SetScale(k)
+        end
+
+        -- The era tab width law (MinimalTab.lua l.7): label width + 40. Era measures at OnLoad;
+        -- our measure round-trip answers a frame late, so OnUpdate polls until the width is real
+        -- (the chat-header converge idiom), then latches. Deliberate divergence: the era
+        -- measures with the MEDIUM font it is about to swap away (an accident of its code
+        -- order, ~6 units of extra padding); we measure the small font the label actually
+        -- wears.
+        function OptionsTab_FitWidth(tab)
+            if tab.fitted then return end
+            local w = getglobal(tab:GetName() .. "Text"):GetStringWidth()
+            if w and w > 0 then
+                tab:SetWidth(w + 40)
+                tab.fitted = true
+            end
+        end
+
+        -- Each row's OnLoad: remember the key + title, paint the label. The whole row identity
+        -- lives here so adding a category is one XML row + one key in the table above.
+        function OptionsCategoryRow_OnLoad(row, key, label)
+            row.categoryKey = key
+            row.pageTitle = label
+            row:SetText(label)
+        end
+
+        -- The selection: exactly one row wears options_list_active + a white label; everyone
+        -- else drops back to bare + gold (the era CategoryList mixin's SetCategoryActive, cut to
+        -- our static list). Also writes the page title — the page BODY stays empty this slice.
+        function OptionsFrame_SelectCategory(key)
+            OptionsFrame.selectedCategory = key
+            for _, k in ipairs(OPTIONS_CATEGORY_KEYS) do
+                local row = getglobal("OptionsFrameCategoryListRow" .. k)
+                local bg = getglobal("OptionsFrameCategoryListRow" .. k .. "Bg")
+                if k == key then
+                    bg:SetAtlas("Options_List_Active", true)
+                    row:SetTextFontObject("GameFontHighlight")
+                    OptionsFrameContainerTitle:SetText(row.pageTitle)
+                else
+                    bg:SetTexture(nil)
+                    row:SetTextFontObject("GameFontNormal")
+                end
+            end
+        end
+    ]]></Script>
+
+    <!-- The red panel button (era UIPanelButtonTemplate seat, 96x22): GameMenuButtonTemplate's
+         four-state UI-Panel-Button art + white/white/grey label trio, copied at this window's
+         size (GameMenuFrame.xml l.145 is the shared original; templates don't cross files). -->
+    <Button name="OptionsRedButtonTemplate" virtual="true">
+        <Size><AbsDimension x="96" y="22"/></Size>
+        <ButtonText name="$parentText"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+        <NormalFont inherits="GameFontHighlight"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+    </Button>
+
+    <!-- One category row (era Blizzard_CategoryList.xml's category button): the template's
+         175 width is never rendered in the era either — the ScrollBox stretches every row to
+         the scroll target's width, 199 with no scroll bar (CategoryList.lua l.176-197 +
+         ScrollBoxViewUtil), and ours is the no-bar case. Gold label centered in the row (the
+         full-row box below); a
+         CENTER bg that is EMPTY until the hover/selected atlas lands on it (options_list_hover
+         / options_list_active at atlas size — 187x21, centered: 6 units in from either edge of
+         the 199 row, the alignment the first cut's 175-wide rows broke). Selection is
+         OptionsFrame_SelectCategory's; hover only ever paints a row that is NOT the selection. -->
+    <Button name="OptionsCategoryRowTemplate" virtual="true">
+        <Size><AbsDimension x="199" y="20"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentBg">
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <!-- The era label is a box spanning the WHOLE row — TOPLEFT (36,+1) AND BOTTOMRIGHT
+             (0,+1), era CategoryList.xml l.72-77 — so the default MIDDLE vertical justify
+             CENTERS the text in the 20-tall row (1 unit high of true center, the era's own
+             nudge). The first cut had only the TOPLEFT corner: the auto-sized label hung from
+             the row TOP, ~4 units high of center ("text not vertically centered" — director,
+             2026-08-04). justifyH LEFT is the era's own attribute; a full-row box without it
+             would center horizontally. -->
+        <ButtonText name="$parentText" justifyH="LEFT">
+            <Anchors>
+                <Anchor point="TOPLEFT"><Offset><AbsDimension x="36" y="1"/></Offset></Anchor>
+                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor>
+            </Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontNormal"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <Scripts>
+            <OnClick>OptionsFrame_SelectCategory(this.categoryKey)</OnClick>
+            <OnEnter>
+                if OptionsFrame.selectedCategory ~= this.categoryKey then
+                    getglobal(this:GetName() .. "Bg"):SetAtlas("Options_List_Hover", true)
+                end
+            </OnEnter>
+            <OnLeave>
+                if OptionsFrame.selectedCategory ~= this.categoryKey then
+                    getglobal(this:GetName() .. "Bg"):SetTexture(nil)
+                end
+            </OnLeave>
+        </Scripts>
+    </Button>
+
+    <!-- A category group header (era SettingsCategoryListHeaderTemplate, stretched to the 199
+         row width like the rows): a 14px white label at LEFT (20,-1) over the group's
+         BACKGROUND WASH — the Options_CategoryHeader_<n> atlas the era Init pins at the
+         header's TOPLEFT at atlas size (199x144: a header band whose gradient runs down over
+         the group's own rows; the rows' hover/selected plates draw above it, being later
+         siblings). The <n> cycles per header (CategoryList.lua l.378-384) — each instance's
+         OnLoad passes its own. -->
+    <Frame name="OptionsCategoryHeaderTemplate" virtual="true">
+        <Size><AbsDimension x="199" y="30"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentBg">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentLabel" inherits="OptionsFontHighlightMedium">
+                    <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="20" y="-1"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+    </Frame>
+
+    <Frame name="OptionsFrame" frameStrata="HIGH" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="920" y="724"/></Size>
+        <Anchors><Anchor point="CENTER"/></Anchors>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <!-- FlatPanelBackgroundTemplate as one fill (header SCOPE note: the era tints
+                     rounded-corner pieces with the binary-side PANEL_BACKGROUND_COLOR; this is
+                     that color at the template's exact insets). -->
+                <Texture name="$parentFlatBg">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-18"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="3"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="0.122" g="0.118" b="0.129" a="0.8"/>
+                </Texture>
+                <!-- The title band behind the top tile (era `_UI-Frame-TitleTileBg`, SharedXML
+                     Classic/SharedUIPanelTemplates.xml l.78: Interface\FrameGeneral\_UI-Frame —
+                     era-only, manifest fdid 374157 — 256x17 horizTile). STRETCHED (SCOPE note). -->
+                <Texture name="$parentTitleBg" file="era:textures/374157.blp">
+                    <Size><AbsDimension y="17"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="8" y="-3"/></Offset></Anchor>
+                        <Anchor point="TOPRIGHT"><Offset><AbsDimension x="0" y="-3"/></Offset></Anchor>
+                    </Anchors>
+                    <TexCoords left="0" right="1" top="0.2890625" bottom="0.421875"/>
+                </Texture>
+            </Layer>
+            <Layer level="BORDER">
+                <!-- The ButtonFrameTemplateNoPortrait nine-slice, unrolled (NineSliceLayouts.lua
+                     l.132 + NineSlice.lua's edge anchoring): corners at their corners at atlas
+                     size; each edge pinned between its two corners on the anchored axis, its
+                     other axis staying the atlas size. The three tile edges + the top band are
+                     STRETCHED (SCOPE note). -->
+                <Texture name="$parentTopLeftCorner" atlas="UI-Frame-TopLeftCornerNoPortrait" useAtlasSize="true">
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                </Texture>
+                <Texture name="$parentTopRightCorner" atlas="UI-Frame-TopCornerRight" useAtlasSize="true">
+                    <Anchors><Anchor point="TOPRIGHT"/></Anchors>
+                </Texture>
+                <Texture name="$parentBotLeftCorner" atlas="UI-Frame-BotCornerLeft" useAtlasSize="true">
+                    <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                </Texture>
+                <Texture name="$parentBotRightCorner" atlas="UI-Frame-BotCornerRight" useAtlasSize="true">
+                    <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                </Texture>
+                <Texture name="$parentTopEdge" atlas="_UI-Frame-TitleTile" useAtlasSize="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentTopLeftCorner" relativePoint="TOPRIGHT"/>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentTopRightCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentBotEdge" atlas="_UI-Frame-Bot" useAtlasSize="true">
+                    <Anchors>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentBotLeftCorner" relativePoint="BOTTOMRIGHT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentBotRightCorner" relativePoint="BOTTOMLEFT"/>
+                    </Anchors>
+                </Texture>
+                <Texture name="$parentLeftEdge" atlas="!UI-Frame-LeftTile" useAtlasSize="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT" relativeTo="$parentTopLeftCorner" relativePoint="BOTTOMLEFT"/>
+                        <Anchor point="BOTTOMLEFT" relativeTo="$parentBotLeftCorner" relativePoint="TOPLEFT"/>
+                    </Anchors>
+                </Texture>
+                <!-- The right edge. The era layout's odd x=-8 / x1=8 pair (NineSliceLayouts
+                     l.139) puts DIFFERENT x on the tile's two corner anchors — the reference
+                     engine draws the quad through its anchor points, so the era tile is a
+                     barely-visible lean (top 8 left, bottom 8 right; mean = flush at the frame
+                     edge, which is exactly how the live window reads — director's capture,
+                     2026-08-04). This engine's regions are axis-aligned rects, so we author the
+                     MEAN: both corners flush (x=0). The first cut gave the whole tile to the
+                     -8 anchor instead — the border floated 8 units into the panel with a dark
+                     gap at the true edge, the director's "right border looks off". -->
+                <Texture name="$parentRightEdge" atlas="!UI-Frame-RightTile" useAtlasSize="true">
+                    <Anchors>
+                        <Anchor point="TOPRIGHT" relativeTo="$parentTopRightCorner" relativePoint="BOTTOMRIGHT"/>
+                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentBotRightCorner" relativePoint="TOPRIGHT"/>
+                    </Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="ARTWORK">
+                <!-- The inner dark panel — the one big era piece, at its full atlas size. -->
+                <Texture name="$parentInnerFrame" atlas="Options_InnerFrame" useAtlasSize="true">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="17" y="-64"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentTitleText" inherits="GameFontNormal" text="Options">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-5"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- ── Tabs — the era MinimalTabTemplate plates (SharedXML Shared/Tabs/MinimalTab
+                 l.3-46 + the mixin), authored STATIC: Game is the only tab with anything
+                 behind it, so it wears the selected state permanently (Options_Tab_Active_*
+                 plates, white small text lifted to BOTTOM+6) and AddOns wears the unselected
+                 one (Options_Tab_* plates, gold small text at BOTTOM+4 — era's unselected
+                 look, per the director's capture; the button is still dead). The three-slice:
+                 Left/Right caps BOTTOM-anchored at atlas size (7x26 active / 7x23 not, so the
+                 selected plate stands 3 taller), Middle (a 1px column) stretched between. The
+                 era's width law is text + 40, measured at OnLoad with the MEDIUM font before
+                 the small font lands (MinimalTab.lua l.7-9, the quirk kept verbatim) — our
+                 measure round-trip answers a frame late, so OnUpdate polls until the width is
+                 real, the chat-header idiom. -->
+            <Button name="$parentGameTab">
+                <Size><AbsDimension x="72" y="37"/></Size>
+                <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="32" y="-27"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="$parentLeft" atlas="Options_Tab_Active_Left" useAtlasSize="true">
+                            <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="$parentRight" atlas="Options_Tab_Active_Right" useAtlasSize="true">
+                            <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="$parentMiddle" atlas="Options_Tab_Active_Middle" useAtlasSize="true">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="$parentLeft" relativePoint="TOPRIGHT"/>
+                                <Anchor point="TOPRIGHT" relativeTo="$parentRight" relativePoint="TOPLEFT"/>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <ButtonText name="$parentText" text="Game">
+                    <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="6"/></Offset></Anchor></Anchors>
+                </ButtonText>
+                <NormalFont inherits="GameFontHighlightSmall"/>
+                <HighlightFont inherits="GameFontHighlightSmall"/>
+                <DisabledFont inherits="GameFontHighlightSmall"/>
+                <Scripts>
+                    <OnUpdate>OptionsTab_FitWidth(this)</OnUpdate>
+                </Scripts>
+            </Button>
+            <Button name="$parentAddOnsTab">
+                <Size><AbsDimension x="87" y="37"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="$parentGameTab" relativePoint="TOPRIGHT"><Offset><AbsDimension x="5" y="0"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="$parentLeft" atlas="Options_Tab_Left" useAtlasSize="true">
+                            <Anchors><Anchor point="BOTTOMLEFT"/></Anchors>
+                        </Texture>
+                        <Texture name="$parentRight" atlas="Options_Tab_Right" useAtlasSize="true">
+                            <Anchors><Anchor point="BOTTOMRIGHT"/></Anchors>
+                        </Texture>
+                        <Texture name="$parentMiddle" atlas="Options_Tab_Middle" useAtlasSize="true">
+                            <Anchors>
+                                <Anchor point="TOPLEFT" relativeTo="$parentLeft" relativePoint="TOPRIGHT"/>
+                                <Anchor point="TOPRIGHT" relativeTo="$parentRight" relativePoint="TOPLEFT"/>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <ButtonText name="$parentText" text="AddOns">
+                    <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="0" y="4"/></Offset></Anchor></Anchors>
+                </ButtonText>
+                <NormalFont inherits="GameFontNormalSmall"/>
+                <HighlightFont inherits="GameFontNormalSmall"/>
+                <DisabledFont inherits="GameFontNormalSmall"/>
+                <!-- No addon list behind it: dead to clicks, but wearing the era's unselected
+                     GOLD (not disabled grey) — the director's capture is the call. -->
+                <Scripts>
+                    <OnLoad>self:Disable()</OnLoad>
+                    <OnUpdate>OptionsTab_FitWidth(this)</OnUpdate>
+                </Scripts>
+            </Button>
+
+            <!-- ── The category list (era CategoryList, static — it fits) ──────────────────── -->
+            <Frame name="$parentCategoryList">
+                <Size><AbsDimension x="199"/></Size>
+                <Anchors>
+                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="18" y="-76"/></Offset></Anchor>
+                    <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="18" y="46"/></Offset></Anchor>
+                </Anchors>
+                <!-- The era list rhythm (CreateScrollBoxListLinearView spacing=2 + the 18-tall
+                     SettingsCategoryListSpacerTemplate between groups): 2 between every
+                     element, 2+18+2 = 22 from a group's last row to the next header. -->
+                <Frames>
+                    <Frame name="$parentHeaderGameplay" inherits="OptionsCategoryHeaderTemplate">
+                        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                        <Scripts>
+                            <OnLoad>
+                                getglobal(self:GetName() .. "Label"):SetText("Gameplay")
+                                getglobal(self:GetName() .. "Bg"):SetAtlas("Options_CategoryHeader_1", true)
+                            </OnLoad>
+                        </Scripts>
+                    </Frame>
+                    <Button name="$parentRowControls" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentHeaderGameplay" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Controls", "Controls")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowInterface" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowControls" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Interface", "Interface")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowActionBars" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowInterface" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "ActionBars", "Action Bars")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowCombat" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowActionBars" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Combat", "Combat")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowSocial" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowCombat" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Social", "Social")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowKeybindings" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowSocial" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Keybindings", "Keybindings")</OnLoad></Scripts>
+                    </Button>
+                    <!-- Nameplates — the era Gameplay group's own last row (NAMEPLATE_OPTIONS_LABEL,
+                         order 15), backed by benilla's real nameplate knobs when the pages land. -->
+                    <Button name="$parentRowNameplates" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowKeybindings" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Nameplates", "Nameplates")</OnLoad></Scripts>
+                    </Button>
+                    <Frame name="$parentHeaderSystem" inherits="OptionsCategoryHeaderTemplate">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativeTo="$parentRowNameplates" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-22"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts>
+                            <OnLoad>
+                                getglobal(self:GetName() .. "Label"):SetText("System")
+                                getglobal(self:GetName() .. "Bg"):SetAtlas("Options_CategoryHeader_2", true)
+                            </OnLoad>
+                        </Scripts>
+                    </Frame>
+                    <Button name="$parentRowGraphics" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentHeaderSystem" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Graphics", "Graphics")</OnLoad></Scripts>
+                    </Button>
+                    <Button name="$parentRowAudio" inherits="OptionsCategoryRowTemplate">
+                        <Anchors><Anchor point="TOPLEFT" relativeTo="$parentRowGraphics" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>OptionsCategoryRow_OnLoad(self, "Audio", "Audio")</OnLoad></Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+
+            <!-- ── The page area (era SettingsList's header; the body is next slice's) ─────── -->
+            <Frame name="$parentContainer">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="$parentCategoryList" relativePoint="TOPRIGHT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor>
+                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-22" y="47"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="ARTWORK">
+                        <Texture name="$parentDivider" atlas="Options_HorizontalDivider" useAtlasSize="true">
+                            <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="-50"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <!-- The page title — OptionsFrame_SelectCategory writes it. -->
+                        <FontString name="$parentTitle" inherits="OptionsFontHighlightHuge">
+                            <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="7" y="-22"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- Disabled this slice: there are no setting rows yet, so there is nothing
+                         to default. Goes live with the pages (delete the Disable, wire the
+                         per-page reset). -->
+                    <Button name="$parentDefaults" inherits="OptionsRedButtonTemplate" text="Defaults">
+                        <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-36" y="-16"/></Offset></Anchor></Anchors>
+                        <Scripts><OnLoad>self:Disable()</OnLoad></Scripts>
+                    </Button>
+                    <!-- The page body — EMPTY this slice; the setting rows (Blizzard_SettingControls'
+                         280x26 label/control rows, backed by real benilla knobs) land here next. -->
+                    <Frame name="$parentBody">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-50"/></Offset></Anchor>
+                            <Anchor point="BOTTOMRIGHT"/>
+                        </Anchors>
+                    </Frame>
+                </Frames>
+            </Frame>
+
+            <!-- ── The search box (era SearchBoxTemplate → InputBoxVisualTemplate,
+                 SecureUIPanelTemplates.xml l.42-67; filters NOTHING yet — SCOPE note): a 20-tall
+                 THREE-slice of common-search-border atlases, vertically centered on the 22 box —
+                 left cap 8x20 hung 5 outside, right cap 8x20 flush, middle stretched between —
+                 plus the 10x10 magnifier at LEFT (1,-1) and a 17x17 clear button at RIGHT (-3)
+                 that appears with text (ClearButtonMixin, cut to our placeholder machinery).
+                 The first cut transcribed the LEGACY nine-piece Common-Input-Border instead —
+                 its ink drew ~27 units tall against the reference's 18 and rode 4 units high:
+                 the director's "search bar is too high" (capture-measured, 2026-08-04). -->
+            <EditBox name="$parentSearchBox" autoFocus="false" letters="64">
+                <Size><AbsDimension x="350" y="22"/></Size>
+                <Anchors>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="$parentContainer" relativePoint="TOPRIGHT"><Offset><AbsDimension x="4" y="20"/></Offset></Anchor>
+                </Anchors>
+                <Layers>
+                    <Layer level="BACKGROUND">
+                        <Texture name="$parentBorderLeft" atlas="common-search-border-left">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="$parentBorderRight" atlas="common-search-border-right">
+                            <Size><AbsDimension x="8" y="20"/></Size>
+                            <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+                        </Texture>
+                        <Texture name="$parentBorderMiddle" atlas="common-search-border-middle">
+                            <Size><AbsDimension y="20"/></Size>
+                            <Anchors>
+                                <Anchor point="LEFT" relativeTo="$parentBorderLeft" relativePoint="RIGHT"/>
+                                <Anchor point="RIGHT" relativeTo="$parentBorderRight" relativePoint="LEFT"/>
+                            </Anchors>
+                        </Texture>
+                    </Layer>
+                    <Layer level="ARTWORK">
+                        <!-- The "Search" placeholder (era instructions label: GameFontDisableSmall
+                             tinted 0.35). OnTextChanged below toggles it on first text. -->
+                        <FontString name="$parentInstructions" inherits="GameFontDisableSmall" justifyH="LEFT" text="Search">
+                            <Anchors>
+                                <Anchor point="TOPLEFT"><Offset><AbsDimension x="16" y="0"/></Offset></Anchor>
+                                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-20" y="0"/></Offset></Anchor>
+                            </Anchors>
+                            <Color r="0.35" g="0.35" b="0.35"/>
+                        </FontString>
+                    </Layer>
+                    <Layer level="OVERLAY">
+                        <Texture name="$parentSearchIcon" atlas="common-search-magnifyingglass">
+                            <Size><AbsDimension x="10" y="10"/></Size>
+                            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="1" y="-1"/></Offset></Anchor></Anchors>
+                        </Texture>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <!-- The clear X (era ClearButtonMixin: shown while text exists, half-alpha
+                         icon, click wipes). Shown/hidden by the box's OnTextChanged below. -->
+                    <Button name="$parentClearButton" hidden="true">
+                        <Size><AbsDimension x="17" y="17"/></Size>
+                        <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="$parentIcon" atlas="common-search-clearbutton" alpha="0.5">
+                                    <Size><AbsDimension x="10" y="10"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="3" y="-3"/></Offset></Anchor></Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <Scripts>
+                            <OnClick>
+                                OptionsFrameSearchBox:SetText("")
+                                OptionsFrameSearchBox:ClearFocus()
+                            </OnClick>
+                        </Scripts>
+                    </Button>
+                </Frames>
+                <TextInsets><AbsInset left="16" right="20" top="0" bottom="0"/></TextInsets>
+                <Scripts>
+                    <!-- Placeholder + clear-button toggle only — no filtering behind it yet
+                         (SCOPE note). -->
+                    <OnTextChanged>
+                        if this:GetText() == "" then
+                            OptionsFrameSearchBoxInstructions:Show()
+                            OptionsFrameSearchBoxClearButton:Hide()
+                        else
+                            OptionsFrameSearchBoxInstructions:Hide()
+                            OptionsFrameSearchBoxClearButton:Show()
+                        end
+                    </OnTextChanged>
+                    <OnEscapePressed>this:ClearFocus()</OnEscapePressed>
+                </Scripts>
+                <FontString inherits="GameFontHighlightSmall"/>
+            </EditBox>
+
+            <!-- ── Close, both spellings ───────────────────────────────────────────────────── -->
+            <!-- The X — hung past the top-right corner like the era's ClosePanelButton, on the
+                 1.12 minimize-ball art (header SCOPE note; the LootFrame close idiom). -->
+            <Button name="$parentClosePanelButton">
+                <Size><AbsDimension x="32" y="32"/></Size>
+                <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="4" y="4"/></Offset></Anchor></Anchors>
+                <NormalTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Down"/>
+                <HighlightTexture file="Interface\Buttons\UI-Panel-MinimizeButton-Highlight" alphaMode="ADD"/>
+                <Scripts>
+                    <OnClick>
+                        PlaySound("igMainMenuClose")
+                        HideUIPanel(OptionsFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <!-- The red Close (era SettingsPanel.CloseButton; Apply is deliberately absent — we
+                 apply live, there is never a pending change to hold). -->
+            <Button name="$parentCloseButton" inherits="OptionsRedButtonTemplate" text="Close">
+                <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-16" y="16"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        PlaySound("igMainMenuClose")
+                        HideUIPanel(OptionsFrame)
+                    </OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <!-- Controls is the default page; a re-opened window keeps its last selection (the
+                 era remembers too — Settings.OpenToCategory's default seat). The scale re-fits
+                 on every show — the era panel manager re-runs checkFit the same way. -->
+            <OnShow>
+                OptionsFrame_UpdateScale()
+                OptionsFrame_SelectCategory(this.selectedCategory or "Controls")
+            </OnShow>
+        </Scripts>
+    </Frame>
+</Ui>

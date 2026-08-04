@@ -88,6 +88,11 @@ pub(super) enum UiFixture {
     /// capture checks the header (left-flush, Say-white), the typed text past the live insets,
     /// and the three-piece input border.
     ChatEdit,
+    /// The era-styled Options window (decisions 0950/0951), opened through the live panel path —
+    /// the look-pass instrument for the whole options arc: chrome nine-slice seams, tab plates,
+    /// search-box seat, category list art, the window scale. Static (no server state touched),
+    /// so its pixels move only when the window or the atlas seam does.
+    Options,
     /// A **floating overhead name with the river surface behind it** — the world-text-vs-liquid
     /// draw-order instrument. A named unit stands 25 yd out in the Elwynn river (the `water-noon`
     /// camera), so its name projects onto the water *beyond* it: the exact geometry of the
@@ -810,6 +815,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::ChatEdit),
+    },
+    // The era Options window over the ground scene. Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options`.
+    Scenario {
+        name: "ui-options",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::Options),
     },
     // An overhead NAME with the river surface behind it — the world-text-vs-liquid draw-order
     // instrument (see [`UiFixture::NameWater`]). Same camera as `water-noon`, plus a named unit

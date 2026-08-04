@@ -24,10 +24,11 @@ impl UiScript {
         // it is clipped by (nested ScrollFrames intersect).
         let scroll_sources = scroll_clip_sources(&model);
         for (target, zkey) in list {
-            let (rect, alpha, content, clip) = match target {
+            let (rect, alpha, content, clip, scale) = match target {
                 ZTarget::Frame(fh) => {
                     let frame = model.arena.frame(fh);
                     let alpha = frame.map(|f| f.effective_alpha).unwrap_or(1.0);
+                    let scale = frame.map(|f| f.effective_scale).unwrap_or(1.0);
                     let clip = effective_clip(&model, &scroll_sources, fh);
                     // A Minimap widget's own slot carries its zoom out to the app renderer (the
                     // tile/mask/arrow draw — decision 0203); every other frame slot is bare.
@@ -50,7 +51,13 @@ impl UiScript {
                         }
                         _ => QuadContent::Frame,
                     };
-                    (model.resolved.get(&fh).copied(), alpha, content, clip)
+                    (
+                        model.resolved.get(&fh).copied(),
+                        alpha,
+                        content,
+                        clip,
+                        scale,
+                    )
                 }
                 ZTarget::Region(rh) => {
                     let region = model.arena.region(rh);
@@ -210,7 +217,10 @@ impl UiScript {
                             rotation: data.rotation,
                         }
                     };
-                    (rect, alpha, content, clip)
+                    // A region draws at its owner's scale — same single hop as alpha (a region
+                    // has no scale of its own; `propagation.md`'s product lives on frames).
+                    let scale = owner_frame.map(|f| f.effective_scale).unwrap_or(1.0);
+                    (rect, alpha, content, clip, scale)
                 }
             };
             out.push(ExtractedQuad {
@@ -220,6 +230,7 @@ impl UiScript {
                 alpha,
                 content,
                 clip,
+                scale,
             });
             // A ScrollingMessageFrame emits, on top of its own (empty) frame slot, one Text quad per
             // visible ring line — stacked bottom-up (newest at the frame's bottom edge), each carrying
@@ -233,13 +244,14 @@ impl UiScript {
                 // stay behind them. At the bare slot the chat window's hover box painted over its
                 // own messages. Both clip like the frame's own slot (the frame IS the clipped owner
                 // when it's a scroll child).
-                Self::emit_backdrop(&model, fh, fr, zkey.raw(), alpha, clip, &mut out);
+                let paint = super::layout::FramePaint { alpha, scale };
+                Self::emit_backdrop(&model, fh, fr, zkey.raw(), paint, clip, &mut out);
                 Self::emit_message_lines(
                     &model,
                     fh,
                     fr,
                     zkey.content(order::DrawLayer::Artwork).raw(),
-                    alpha,
+                    paint,
                     clip,
                     &mut out,
                 );

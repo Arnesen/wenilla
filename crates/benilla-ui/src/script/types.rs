@@ -287,6 +287,25 @@ pub struct ExtractedQuad {
     /// frame is a ScrollFrame's scroll child, or any descendant of one — nested ScrollFrames
     /// intersect (see [`UiScript::extract`](super::UiScript::extract)'s `effective_clip`). `None` = unclipped, the common case.
     pub clip: Option<Rect>,
+    /// The owning frame's `effective_scale` (`propagation.md`: `parentScale · ownScale`). The
+    /// `rect` above already carries it — the layout solver multiplies every placement by the
+    /// owner's scale — but glyph METRICS don't live in the rect: the renderer must rasterize a
+    /// `Text` quad's font at `font_height × scale` (and scale the shadow offset with it) or a
+    /// `SetScale`'d window draws scaled boxes full of unscaled text, the exact divergence
+    /// decision 0219 §2 recorded. 1.0 for the unscaled common case.
+    pub scale: f32,
+}
+
+/// One Era atlas member (decision 0950): the resolved paint `SetAtlas`/`atlas=` apply. The app
+/// builds these from `WoW-era/_extracted_ui/manifest.json` — `file` is an app-resolvable texture
+/// path (the `era:` scheme), `uv` the normalized `[left, right, top, bottom]` sub-rect
+/// ([`TexCoords::Rect`] order), `size` the member's nominal draw size in UI units (what
+/// `useAtlasSize` applies).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EraAtlasEntry {
+    pub file: String,
+    pub uv: [f32; 4],
+    pub size: [f32; 2],
 }
 
 /// The visual state of a region leaf (`Texture`/`FontString`), stored beside the arena because
@@ -315,6 +334,10 @@ pub(crate) struct RegionData {
     pub(crate) alpha: Option<f32>,
     /// A texture path (`SetTexture("Interface\\...")`).
     pub(crate) texture: Option<String>,
+    /// The Era atlas member this texture was last set from (`SetAtlas`, decision 0950) — what
+    /// `GetAtlas` reports. Bookkeeping only: `texture`/`tex_coords`/`size` carry the resolved
+    /// paint; any later `SetTexture` clears it (an ordinary region again).
+    pub(crate) atlas: Option<String>,
     /// A color: a solid fill (`SetTexture(r,g,b,a)`) or a vertex tint (`SetVertexColor`).
     pub(crate) color: Option<[f32; 4]>,
     /// This region is a **portrait**: draw its texture masked to the inscribed circle (set by
@@ -406,7 +429,10 @@ impl RegionData {
     /// insets on it). The layout solver's own read (layout.rs) deliberately does NOT key-check:
     /// it keeps the last-known box until the fresh measure lands, so lines never collapse for the
     /// round-trip frame.
-    pub(crate) fn measure_key(&self) -> u64 {
+    /// `scale` is the owner frame's `effective_scale`: it's in the key because the host measures
+    /// at the drawn raster size ([`MeasureRequest::scale`]), so a `SetScale` under a cached
+    /// measure must invalidate it exactly like a font-size change.
+    pub(crate) fn measure_key(&self, scale: f32) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.text.clone().unwrap_or_default().hash(&mut hasher);
@@ -418,6 +444,7 @@ impl RegionData {
         // Outline is in the key because it changes measured WIDTH under the client's step law
         // (an outlined font steps +1px more per glyph — GlyphStepBase 0x5ca2b0).
         (self.outline as u8).hash(&mut hasher);
+        scale.to_bits().hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -437,6 +464,12 @@ pub struct EditBoxAdvanceRequest {
     /// The resolved glyph outline — the per-glyph step bias (+1px, GlyphStepBase 0x5ca2b0)
     /// changes every advance.
     pub outline: Outline,
+    /// The box frame's `effective_scale`. The host measures at the drawn raster size
+    /// (`height × scale × seam`) but divides the answer by the SEAM ALONE, so the advances come
+    /// back in screen UI units — the space the engine's ÷seam mouse feed and the box's resolved
+    /// (scale-multiplied) rect both live in. Contrast [`MeasureRequest::scale`], whose answer is
+    /// frame-local.
+    pub scale: f32,
     /// The DISPLAY string (mask-aware) the table indexes.
     pub text: String,
     /// `Some(width)` for a multiline box: also answer the wrapped-row starts + row pitch at this
@@ -499,6 +532,12 @@ pub struct MeasureRequest {
     /// The resolved glyph outline — it biases the client's per-glyph step (+1px, GlyphStepBase
     /// 0x5ca2b0), so the measured width depends on it.
     pub outline: Outline,
+    /// The owner frame's `effective_scale`. The host must measure at the DRAWN raster size —
+    /// `font_height × scale × its own screen seam` — and divide the px answer back by the full
+    /// product: glyph advances step to whole pixels (the step law), so a measure taken at the
+    /// unscaled size is not `scale ×` the drawn one, and an auto-sized FontString in a scaled
+    /// frame would mis-fit its own text (spurious wrap → spurious "..." ellipsis).
+    pub scale: f32,
     pub text: String,
     /// Cache key — pass back verbatim.
     pub key: u64,
@@ -520,10 +559,14 @@ pub struct LineMeasureRequest {
     pub index: u32,
     pub font: Option<String>,
     pub height: Option<f32>,
-    /// The frame's resolved inner width — the wrap constraint.
+    /// The frame's resolved inner width — the wrap constraint. Already scale-multiplied (it is
+    /// the resolved rect's width), unlike `height`, which is the font's local size.
     pub wrap_width: f32,
     /// The resolved glyph outline (step-law width bias, as on [`MeasureRequest`]).
     pub outline: Outline,
+    /// The frame's `effective_scale` — the host wraps at the drawn raster size
+    /// (`height × scale × seam`), as on [`MeasureRequest::scale`].
+    pub scale: f32,
     pub text: String,
     /// Cache key — pass back verbatim.
     pub key: u64,

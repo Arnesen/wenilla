@@ -26,6 +26,13 @@ impl UiScript {
         let font = d.and_then(|d| d.font_path.clone());
         let height = d.and_then(|d| d.font_height);
         let outline = d.map(|d| d.outline).unwrap_or_default();
+        // The box's effective_scale rides the request ([`types::EditBoxAdvanceRequest::scale`]):
+        // the host measures at the drawn raster size so the advances land on the drawn glyphs.
+        let scale = model
+            .arena
+            .frame(h)
+            .map(|f| f.effective_scale)
+            .unwrap_or(1.0);
         // A multiline box also needs its wrap rows — at the text region's resolved width, the
         // same width the draw wraps at. Folded into the cache key: a resize re-wraps.
         let wrap_width = multi_line
@@ -44,6 +51,7 @@ impl UiScript {
         height.map(f32::to_bits).hash(&mut hasher);
         (outline as u8).hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
+        scale.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         let id = model.frame_id(h);
         let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state)
@@ -64,6 +72,7 @@ impl UiScript {
             font,
             height,
             outline,
+            scale,
             text: display,
             wrap_width,
             key,

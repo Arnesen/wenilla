@@ -50,7 +50,10 @@ mod cursor;
 mod death;
 mod editbox;
 pub(crate) use editbox::adopt_text_region;
+mod cvars;
 mod duel;
+#[cfg(test)]
+mod era_atlas_tests;
 mod event;
 mod extract;
 mod follow;
@@ -143,9 +146,9 @@ pub use trainer::{
     TrainerState,
 };
 pub use types::{
-    EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,
-    JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent, ScriptValue,
-    TexCoords,
+    EditAction, EditBoxTextUi, EditOutcome, EditUnit, EraAtlasEntry, ExtractedQuad, FontObject,
+    FontShadow, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent,
+    ScriptValue, TexCoords,
 };
 pub(crate) use types::{MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
@@ -266,6 +269,7 @@ impl UiScript {
         pvp::install(&lua)?;
         death::install(&lua)?;
         aura::install(&lua)?;
+        cvars::install(&lua)?;
         sound::install(&lua)?;
         pointer::install(&lua)?;
         action::install(&lua)?;
@@ -326,6 +330,27 @@ impl UiScript {
             model.screen = new;
             model.touch_layout();
         }
+    }
+
+    /// Replace the Era atlas table (decision 0950) — pushed once at boot, before the XML loads.
+    /// Keys are stored lowercased (the DB2 dump's own convention); `SetAtlas`/`atlas=` match
+    /// case-insensitively. The app builds the entries from `WoW-era/_extracted_ui/manifest.json`;
+    /// the script side only stores resolved paint, never touching disk.
+    pub fn set_era_atlases(&mut self, entries: impl IntoIterator<Item = (String, EraAtlasEntry)>) {
+        let mut model = self.model_mut();
+        model.era_atlas = entries
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+    }
+
+    /// Drain the atlas names `SetAtlas` failed to resolve (each reported once, sorted) — the app
+    /// logs them as WARNs pointing at `scripts/era-extract.py`: a stale extraction must name
+    /// itself, never silently draw blank.
+    pub fn take_era_atlas_misses(&mut self) -> Vec<String> {
+        let mut misses: Vec<String> = self.model_mut().era_atlas_missing.drain().collect();
+        misses.sort();
+        misses
     }
 
     /// Push the modifier-key state (shift, ctrl, alt) behind `IsShiftKeyDown`/`IsControlKeyDown`/
@@ -495,6 +520,43 @@ impl UiScript {
             // Measured extents are the auto-size axes' inputs — the layout gate's read set.
             model.touch_layout();
         }
+    }
+
+    /// Drop every cached host text metric — FontString measures, message-line row counts, editbox
+    /// advance tables. The host calls this when its **raster environment** changes (a window
+    /// resize / fullscreen toggle / uiScale move — anything that shifts the px-per-unit seam its
+    /// answers were taken under): glyph advances step to whole pixels at the drawn raster size,
+    /// so a metric measured under one environment does not rescale to another — the font-size
+    /// snap alone moves a string's unit width by several percent, which is exactly enough for a
+    /// boot-size measure to fail the post-resize ellipsis fit test and truncate text that fits
+    /// (the director's fullscreen "Contr..." rows). The environment is the host's to watch — the
+    /// engine deliberately never sees the seam scale — so staleness is the host's to declare; the
+    /// round-trips re-answer on the frames that follow (the same one-frame convergence every
+    /// measure already has).
+    pub fn invalidate_text_measures(&mut self) {
+        let mut model = self.model_mut();
+        for d in model.region_data.values_mut() {
+            d.measured = None;
+        }
+        // The frame-side caches key on content hashes; a bumped stored key can never equal the
+        // recomputed one, so the next needing-measure sweep re-requests without this method
+        // having to know what the keys hash.
+        for (_, frame) in model.arena.iter_frames_mut() {
+            match &mut frame.kind_state {
+                KindState::ScrollingMessage(smf) => {
+                    for line in &mut smf.lines {
+                        line.rows_key = line.rows_key.wrapping_add(1);
+                    }
+                }
+                KindState::EditBox(eb) => {
+                    eb.advances_key = eb.advances_key.wrapping_add(1);
+                }
+                _ => {}
+            }
+        }
+        // Measured extents are auto-size inputs — the layout gate's read set, same as
+        // [`Self::set_measured_text`]'s.
+        model.touch_layout();
     }
 
     /// Feed the number font's per-digit advance widths (logical px, `'0'..='9'` in order) as the

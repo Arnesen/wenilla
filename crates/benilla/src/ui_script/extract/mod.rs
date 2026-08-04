@@ -66,9 +66,13 @@ pub(super) fn drive_script(
     // This frame's `<Minimap>` widget slot, parked for `minimap::emit_minimap` (the UiQuadAppend
     // producer that fills the hole with tile/arrow quads — decision 0203 phase 1).
     mut minimap_widget: ResMut<crate::minimap::MinimapWidget>,
-    // Whether the digit-advance feed has run (once, on the first frame the atlas exists — the
-    // atlas itself bakes once and never re-scales, see `load_fonts_and_build_atlas`).
+    // Whether the digit-advance feed has run (once per raster environment: on the first frame
+    // the atlas exists, and again after every seam-scale change — `last_seam` below re-arms it).
     mut digits_fed: Local<bool>,
+    // The seam scale the engine's text-metric caches were answered under. When `s` moves (window
+    // resize / fullscreen toggle / uiScale change), every cached measure is stale — see the
+    // invalidation below.
+    mut last_seam: Local<f32>,
     // The uiScale dial folded into the seam scale (decision 0584).
     ui_scale: Res<super::UiScaleCvar>,
     // ── The extract gate's memory (decision 0740): last frame's conversion inputs ─────────────
@@ -96,6 +100,20 @@ pub(super) fn drive_script(
     // way in (input.rs), and measures ÷s on the way back. At a 768-tall window with the dial at
     // 1 the whole pipeline is bit-identical to the pre-virtual behavior.
     let s = super::seam_scale(h, ui_scale.0);
+    // The raster environment moved (resize / fullscreen / uiScale): every text metric the engine
+    // caches — FontString measures, chat row counts, editbox advance tables, the digit feed — was
+    // answered under the OLD `s`, and integer-stepped advances measured at one raster size do not
+    // rescale to another (the font-size snap alone shifts a string's unit width by several
+    // percent — enough that a boot-size measure fails the fullscreen fit test and the ellipsis
+    // eats fitting text: the director's "Contr..." rows, reproduced by `WOW_RESIZE`). Declare the
+    // staleness at the seam and let every round-trip re-answer under the new `s`.
+    if *last_seam != s {
+        if *last_seam != 0.0 {
+            script.invalidate_text_measures();
+            *digits_fed = false;
+        }
+        *last_seam = s;
+    }
     // Phase spans (visible under `bevy/trace_chrome`): this system is the biggest flat CPU cost
     // on an idle frame, and the ledger can only rank what has a name — tick (Lua OnUpdate),
     // resolve (layout), measure (the text round-trips), extract (tree walk + rasterize), diff.
@@ -214,11 +232,13 @@ pub(super) fn drive_script(
                     let n = crate::ui_text::measure_wrapped_rows(
                         atlas,
                         &r.text,
+                        // wrap_width is the RESOLVED frame width (scale already in it) — ×s only;
+                        // the font height is frame-local — ×s × the frame's scale, the drawn size.
                         r.wrap_width * s,
                         crate::ui_text::FontSpec {
                             path: r.font.as_deref(),
                             // The band's own drawn px (one-to-one regime; inert ≤ 32).
-                            height: crate::ui_text::drawn_px(r.height, None, s),
+                            height: crate::ui_text::drawn_px(r.height, None, s * r.scale),
                             outline: r.outline, // step-law width bias, as in the measures above
                             paint_halo: true,   // measure never paints; irrelevant here
                             alpha_gradient: None,
@@ -261,7 +281,11 @@ pub(super) fn drive_script(
         if let Some(req) = script.editbox_advances_request() {
             let spec = crate::ui_text::FontSpec {
                 path: req.font.as_deref(),
-                height: crate::ui_text::drawn_px(req.height, None, s),
+                // Measured at the DRAWN raster size (seam × the box frame's scale) but divided
+                // back by the seam alone: the advances return in screen UI units, the space the
+                // engine's ÷s mouse feed and the box's scale-multiplied rect live in (the
+                // request's `scale` doc).
+                height: crate::ui_text::drawn_px(req.height, None, s * req.scale),
                 outline: req.outline,
                 paint_halo: true,     // measure never paints
                 alpha_gradient: None, // alpha never changes metrics
@@ -549,6 +573,7 @@ pub(super) fn drive_script(
                         ebox: text_ui.as_ref(),
                         screen_h: h,
                         scale: s,
+                        font_scale: eq.scale,
                         caret_pinned: capture.is_some(),
                     },
                     &mut out,
@@ -652,16 +677,21 @@ fn measure_fontstrings(
     let measures: Vec<(u32, f32, f32, u64)> = requests
         .iter()
         .map(|r| {
+            // The full raster scale: seam × the owner frame's effective_scale. Measure at the
+            // exact drawn size and divide the whole product back out, so the frame-LOCAL answer
+            // times the layout's scale lands on the drawn glyphs to the pixel (integer-stepped
+            // advances don't commute with scaling — the request's `scale` doc).
+            let rs = s * r.scale;
             let (w, h) = crate::ui_text::measure_text(
                 atlas,
                 &r.text,
-                r.wrap_width.map(|w| w * s),
+                r.wrap_width.map(|w| w * rs),
                 crate::ui_text::FontSpec {
                     path: r.font.as_deref(),
-                    // The render pass's exact drawn px (two regimes × the virtual scale) —
+                    // The render pass's exact drawn px (two regimes × the full scale) —
                     // measure == render, and Lua's GetStringWidth/Height echo the DRAWN size
-                    // (0x772890); results divide back to UI units below.
-                    height: crate::ui_text::drawn_px(r.height, r.text_height, s),
+                    // (0x772890); results divide back to frame-local UI units below.
+                    height: crate::ui_text::drawn_px(r.height, r.text_height, rs),
                     // The TRUE outline: THICK biases the client's step law (+1px per glyph —
                     // GlyphStepBase 0x5ca2b0, THICK-only per outline-bake-tint.md) and any outline
                     // adds the +2r line pitch, so measure must see it.
@@ -670,7 +700,7 @@ fn measure_fontstrings(
                     alpha_gradient: None, // alpha never changes metrics
                 },
             );
-            (r.id, w / s, h / s, r.key)
+            (r.id, w / rs, h / rs, r.key)
         })
         .collect();
     script.set_measured_text(&measures);

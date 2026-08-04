@@ -50,6 +50,12 @@ crossbeam-channel = "0.5"
 benilla-assets = { path = "../benilla-assets" }
 benilla-formats = { path = "../benilla-formats" }
 benilla-protocol = { path = "../benilla-protocol" }
+# The Era atlas manifest (decision 0950): `WoW-era/_extracted_ui/manifest.json`, written offline by
+# scripts/era-extract.py and read once at boot. Both already in the tree (benilla-assets carries
+# serde; serde_json rides Bevy transitively) — declared so the call site is an honest dependency.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
 # ECS-native physics: collider storage + broadphase BVH + shape-casts, with a thin custom kinematic
 # character controller on top (decision 0009). Pinned 0.6: it targets Bevy 0.18 (verified single,
 # unified bevy 0.18.1 in the tree); 0.7.0 jumps to Bevy 0.19 and would duplicate bevy. avian wraps

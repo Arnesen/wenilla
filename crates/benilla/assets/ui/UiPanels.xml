@@ -89,6 +89,13 @@
         -- every non-center panel (`CanOpenPanels` below). That is the rule behind "you can't open
         -- anything with the ESC menu up". whileDead: dying is exactly when you want to log out.
         UIPanelWindows["GameMenuFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- The options window (decision 0950, OptionsFrame.xml) — the ref's own registration
+        -- verbatim (`UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0,
+        -- whileDead = 1 }`, UIParent.lua l.16): the second native-center row. Same MODE as the
+        -- menu above — it takes the screen, and dying is exactly when you might want to retune
+        -- the client. (The ref's l.17-18 register SoundOptionsFrame/UIOptionsFrame the same way;
+        -- those panels are this one window's category rows now, so the rows have no frames.)
+        UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
         -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)
         -- and the first **full** row. It was a plain toplevel until now, showing itself with a bare
         -- `WorldMapFrame:Show()` and so bypassing this manager entirely: with the game menu up it
@@ -495,8 +502,9 @@
         --    cancels the cast and ONLY the cast; the target drops on a later press once nothing
         --    else claims it; and only a press with NOTHING left to eat opens the menu.
         --
-        -- Absent branches, and why: no OptionsFrame (nothing to cancel — GameMenuFrame.xml's five
-        -- disabled buttons are exactly that gap). ONE benilla ADDITION, ahead of everything: a held cursor item is
+        -- Every reference branch is present now (the OptionsFrame rung landed with decision
+        -- 0950 — ours hides rather than cancel-clicks; its own comment below says why). ONE
+        -- benilla ADDITION, ahead of everything: a held cursor item is
         -- dropped (ClearCursor). The cursor-item model (decision 0068 T2) has no real-client ESC
         -- handling to mirror — vanilla leaves the item on the cursor — so this is a deliberate
         -- benilla convenience (ESC as the universal "get me out" key). Guarded so it stays inert
@@ -509,8 +517,13 @@
             -- abort the whole chain there (the `CloseMenus and` guard two rungs down, same reason).
             local menu = getglobal("GameMenuFrame")
 
-            -- The micro button's toggle (l.1466-1480).
+            -- The micro button's toggle (l.1466-1480). Its own first move is the ref's too
+            -- (l.1467-1469): an open options window is put away before the menu toggles.
             if clicked then
+                local options = getglobal("OptionsFrame")
+                if options and options:IsVisible() then
+                    HideUIPanel(options)
+                end
                 if menu and menu:IsVisible() then
                     PlaySound("igMainMenuQuit")
                     HideUIPanel(menu)
@@ -532,11 +545,21 @@
             if StaticPopup_EscapePressed() then
                 return
             end
-            -- The menu itself closes next (l.1485-1487) — before every close/cancel rung below, so
-            -- ESC with the menu up only puts the menu away. (The OptionsFrame rung the reference
-            -- checks between these two has no benilla frame; GameMenuFrame.xml's disabled buttons
-            -- ARE that gap.) Note the sound: closing by ESC plays igMainMenuQuit, the same kit the
-            -- Exit Game button uses — the reference's choice, not a copy/paste slip here.
+            -- The options window next (l.1483-1484, live since decision 0950 — this rung sat
+            -- unfilled while GameMenuFrame.xml's disabled buttons were the gap). The ref
+            -- cancel-clicks (`OptionsFrameCancel:Click()`); ours hides: benilla applies changes
+            -- live, there is no pending-change model for a Cancel to roll back, so putting the
+            -- window away IS the whole gesture. Looked up like the menu above (a headless panel
+            -- test loads this file without OptionsFrame.xml behind it).
+            local options = getglobal("OptionsFrame")
+            if options and options:IsVisible() then
+                HideUIPanel(options)
+                return
+            end
+            -- The menu itself closes next (l.1485-1487) — before every close/cancel rung below,
+            -- so ESC with the menu up only puts the menu away. Note the sound: closing by ESC
+            -- plays igMainMenuQuit, the same kit the Exit Game button uses — the reference's
+            -- choice, not a copy/paste slip here.
             if menu and menu:IsVisible() then
                 PlaySound("igMainMenuQuit")
                 HideUIPanel(menu)

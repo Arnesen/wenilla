@@ -37,28 +37,47 @@
         and `GameMenuFrame` are Era API surface an addon addresses by name.
 
         SCOPE / divergences (noted, not bugs):
-        - **Five buttons ship DISABLED**: Video/Sound/Interface Options, Key Bindings, Macros have no
-          panel behind them and won't for a long time. The director's call (this session) is that they
-          stay in the ladder — the frame keeps the ref's exact 195x246 and its exact silhouette — wearing
-          the template's own `-Disabled` art and grey label rather than being cut or left as clickable
-          no-ops. Each goes live by deleting one `self:Disable()` and writing the ref OnClick that is
-          already quoted beside it. (MicroMenu.xml made the opposite call for its dead icons, and says
-          why: three grey icons mid-row read as a broken bar. A menu of labels with some greyed is the
-          ordinary idiom — it reads as "not yet", which is the truth.)
+        - **The ladder is the ERA menu's** (director's call on the 0951 review — supersedes 0951
+          §3's five-button collapse): the Era client's own ESC menu shape, greyed where benilla
+          has nothing behind the entry yet. Geometry quoted from the era dump @ 1.15.9 (Gethe
+          wow-ui-source, classic_era, the 0950 pin):
+          · Blizzard_SharedXML/Classic/Frame/MainMenuFrameTemplates.xml l.18-33 — the menu is a
+            VerticalLayoutFrame, buttonTemplate MainMenuFrameButtonTemplate, padding
+            top/bottom/left/right = 32/28/28/28, spacing 0; l.11-16 — the button is a 144x21
+            UIPanelButtonTemplate with the white/white/grey label trio (the SAME art + trio the
+            1.12 GameMenuButtonTemplate carries — no era-only art in this menu at all).
+          · Shared/Frame/MainMenuFrameTemplates.lua l.61-71 — AddSection() puts a 20-unit gap
+            (the next button's topPadding) between groups; AddCloseButton uses the same 20.
+          · Shared/GameMenuFrame.lua l.62-162 — the Era ladder: Options · [gap] · AddOns, Edit
+            Mode, Support, Macros · [gap] · Logout, Exit Game · [gap] · Return to Game. (Store /
+            Rewards / What's New / Ratings are structurally off in Era — store disabled, no
+            account store, IsStandard() false, koKR only.)
+          · The layout math those constants produce, precomputed here (this engine has no layout
+            frames): width 28+144+28 = 200; button tops 32/73/94/115/136/177/198/239; height
+            239+21+28 = 288. Anchored as a TOPLEFT chain so the gaps read in the XML.
+          · The header — Classic/Dialog/DialogTemplates.xml l.11-43 (ClassicDialogHeaderTemplate):
+            the same 256x64 UI-DialogBox-Header art, text = MAINMENU_BUTTON, swapped to
+            GameFontNormalMed1 (13px) by MainMenuFrameMixin:OnLoad. Both header idioms (1.12's
+            TOP+12 texture / era's 39-tall frame with the art centered) seat the art within half
+            a unit of each other; the 1.12 transcription is kept, the font and string are era's.
+        - **AddOns / Edit Mode / Support / Macros ship DISABLED** — nothing behind them yet
+          (`GameMenuButton_Pending`): the template's own `-Disabled` art + grey label, exactly
+          how the era menu greys a dead entry (SetEnabled(false) → DisabledFont). Each goes live
+          by deleting one `GameMenuButton_Pending` call and writing its OnClick.
+        - The Options label stays a literal "Options": 1.12 GlobalStrings has no era
+          GAMEMENU_OPTIONS (checked; its OPTIONS_MENU is "Options Menu", a different string).
         - The ref frame is `toplevel="true" movable="true" parent="UIParent"`. Dropped: this engine has
           no cross-file `parent=` attachment (SkillFrame.xml's header comment), no frame-level raise,
           and `movable` is inert in the ref too (GameMenuFrame defines no drag scripts, so it never
           actually moves). `frameStrata="DIALOG"` is what puts it over the world UI, and that is kept.
-        - No `OptionsFrameCancel` rung in ToggleGameMenu (UiPanels.xml) — no OptionsFrame exists.
     -->
     <Script><![CDATA[
         -- The reference GlobalStrings (patch-2.MPQ Interface\FrameXML\GlobalStrings.lua), quoted
         -- verbatim. `X = X or "..."` so a later real strings table wins, the MicroMenu.xml idiom.
         MAIN_MENU = MAIN_MENU or "Main Menu"
-        VIDEOOPTIONS_MENU = VIDEOOPTIONS_MENU or "Video Options"
-        SOUNDOPTIONS_MENU = SOUNDOPTIONS_MENU or "Sound Options"
-        UIOPTIONS_MENU = UIOPTIONS_MENU or "Interface Options"
-        KEY_BINDINGS = KEY_BINDINGS or "Key Bindings"
+        ADDONS = ADDONS or "AddOns"
+        HUD_EDIT_MODE_MENU = HUD_EDIT_MODE_MENU or "Edit Mode"
+        GAMEMENU_SUPPORT = GAMEMENU_SUPPORT or "Support"
         MACROS = MACROS or "Macros"
         LOGOUT = LOGOUT or "Logout"
         EXIT_GAME = EXIT_GAME or "Exit Game"
@@ -68,9 +87,9 @@
         QUIT_NOW = QUIT_NOW or "Exit now"
         CANCEL = CANCEL or "Cancel"
 
-        -- One label setter for the five that have nothing behind them yet: set the ref's text, then
-        -- disable (grey label + the template's -Disabled art). The whole divergence lives here, so
-        -- making one live is deleting its name from the call and writing its ref OnClick.
+        -- One label setter for a button with nothing behind it yet (only Macros, since 0950 made
+        -- Options live): set the ref's text, then disable (grey label + the template's -Disabled
+        -- art). Making it live is deleting the call and writing its ref OnClick.
         function GameMenuButton_Pending(button, text)
             button:SetText(text)
             button:Disable()
@@ -138,10 +157,20 @@
         end
     ]]></Script>
 
-    <!-- ref GameMenuButtonTemplate (UIPanelTemplates.xml l.403-410) = UIPanelButtonTemplate at
-         144x21 with a white/white/grey label trio. UIPanelButtonTemplate itself is not transcribed
-         as a shared virtual (no other benilla file inherits it — each open-codes the same four-state
-         art, e.g. QuestFrame.xml l.753); its textures are inlined here with the ref TexCoords. -->
+    <!-- The era header text size (Classic/Dialog/DialogTemplates.xml + the OnLoad font swap):
+         GameFontNormalMed1 = SystemFont_Med2 = FRIZQT 13, gold, the MasterFont shadow. Era's
+         name, declared here beside its one consumer (the 0951 residue convention: Fonts.xml
+         stays the complete 1.12 set). -->
+    <Font name="GameFontNormalMed1" inherits="GameFontNormal" virtual="true">
+        <FontHeight><AbsValue val="13"/></FontHeight>
+    </Font>
+
+    <!-- Era MainMenuFrameButtonTemplate (Classic/Frame/MainMenuFrameTemplates.xml l.11-16) =
+         UIPanelButtonTemplate at 144x21 with a white/white/grey label trio — byte-for-byte the
+         1.12 GameMenuButtonTemplate (UIPanelTemplates.xml l.403-410): same art, same trio, same
+         size. UIPanelButtonTemplate itself is not transcribed as a shared virtual (no other
+         benilla file inherits it — each open-codes the same four-state art, e.g. QuestFrame.xml
+         l.753); its textures are inlined here with the ref TexCoords. -->
     <Button name="GameMenuButtonTemplate" virtual="true">
         <Size><AbsDimension x="144" y="21"/></Size>
         <ButtonText name="$parentText"/>
@@ -155,7 +184,9 @@
     </Button>
 
     <Frame name="GameMenuFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
-        <Size><AbsDimension x="195" y="246"/></Size>
+        <!-- The era layout engine's own numbers (header SCOPE note): 28+144+28 wide, 32-top /
+             28-bottom padding around eight 21-unit rungs with three 20-unit section gaps. -->
+        <Size><AbsDimension x="200" y="288"/></Size>
         <Anchors><Anchor point="CENTER"/></Anchors>
         <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
             <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
@@ -168,7 +199,10 @@
                     <Size><AbsDimension x="256" y="64"/></Size>
                     <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="12"/></Offset></Anchor></Anchors>
                 </Texture>
-                <FontString name="GameMenuFrameTitle" inherits="GameFontNormal">
+                <!-- Era swaps the header text to 13px (MainMenuFrameMixin:OnLoad →
+                     SetHeaderFont(GameFontNormalMed1)); the seat is the 1.12 one (within half a
+                     unit of era's — header SCOPE note). -->
+                <FontString name="GameMenuFrameTitle" inherits="GameFontNormalMed1">
                     <Anchors>
                         <Anchor point="TOP" relativeTo="GameMenuFrameHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
                     </Anchors>
@@ -176,40 +210,58 @@
             </Layer>
         </Layers>
         <Frames>
-            <!-- The five with no panel behind them (header SCOPE note). Each keeps the ref's own
-                 OnClick quoted above it, so going live is deleting the _Pending call and pasting it:
-                     PlaySound("igMainMenuOption"); ShowUIPanel(OptionsFrame) -->
+            <!-- The era ladder (header SCOPE note): Options · gap · AddOns, Edit Mode, Support,
+                 Macros · gap · Logout, Exit Game · gap · Return to Game. A TOPLEFT chain at the
+                 era layout engine's numbers — x 28, first top -32, 0 between group members, -20
+                 at each section break. Live entries wire the era OnClick intent; pending ones
+                 grey out through GameMenuButton_Pending until something exists behind them. -->
+
+            <!-- Options — live: the era GameMenuFrame.lua l.88 entry (ShowUIPanel(SettingsPanel)
+                 there, OptionsFrame here) plus an explicit HideUIPanel first. The ref leans on
+                 the center-replacement rule for the swap (ShowUIPanel l.697-702: native-center
+                 frames replace each other); hiding the menu explicitly says the same thing
+                 without relying on the eviction path. -->
             <Button name="GameMenuButtonOptions" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="CENTER" relativePoint="TOP"><Offset><AbsDimension x="0" y="-37"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="28" y="-32"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, VIDEOOPTIONS_MENU)</OnLoad></Scripts>
+                <Scripts>
+                    <OnLoad>self:SetText("Options")</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOption")
+                        HideUIPanel(GameMenuFrame)
+                        ShowUIPanel(OptionsFrame)
+                    </OnClick>
+                </Scripts>
             </Button>
-            <!-- ref: PlaySound("igMainMenuOption"); ShowUIPanel(SoundOptionsFrame) -->
-            <Button name="GameMenuButtonSoundOptions" inherits="GameMenuButtonTemplate">
+
+            <!-- The middle section, all pending (header SCOPE note).
+                 AddOns:    the era addon-list dialog — nothing to list yet.
+                 Edit Mode: the era HUD editor — no edit mode exists.
+                 Support:   opens the external help site in era — no browser seam.
+                 Macros:    ref OnClick when live: PlaySound("igMainMenuOption");
+                            HideUIPanel(GameMenuFrame); ShowMacroFrame() -->
+            <Button name="GameMenuButtonAddOns" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonOptions" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, SOUNDOPTIONS_MENU)</OnLoad></Scripts>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, ADDONS)</OnLoad></Scripts>
             </Button>
-            <!-- ref: PlaySound("igMainMenuOption"); ShowUIPanel(UIOptionsFrame) -->
-            <Button name="GameMenuButtonUIOptions" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonEditMode" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonSoundOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonAddOns" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, UIOPTIONS_MENU)</OnLoad></Scripts>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, HUD_EDIT_MODE_MENU)</OnLoad></Scripts>
             </Button>
-            <!-- ref: PlaySound("igMainMenuOption"); KeyBindingFrame_LoadUI(); ShowUIPanel(KeyBindingFrame) -->
-            <Button name="GameMenuButtonKeybindings" inherits="GameMenuButtonTemplate">
+            <Button name="GameMenuButtonSupport" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonUIOptions" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonEditMode" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, KEY_BINDINGS)</OnLoad></Scripts>
+                <Scripts><OnLoad>GameMenuButton_Pending(self, GAMEMENU_SUPPORT)</OnLoad></Scripts>
             </Button>
-            <!-- ref: PlaySound("igMainMenuOption"); HideUIPanel(GameMenuFrame); ShowMacroFrame() -->
             <Button name="GameMenuButtonMacros" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonKeybindings" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts><OnLoad>GameMenuButton_Pending(self, MACROS)</OnLoad></Scripts>
             </Button>
@@ -220,7 +272,7 @@
                  re-read that state. -->
             <Button name="GameMenuButtonLogout" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonMacros" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnLoad>self:SetText(LOGOUT)</OnLoad>
@@ -240,7 +292,7 @@
             </Button>
             <Button name="GameMenuButtonQuit" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonLogout" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnLoad>self:SetText(EXIT_GAME)</OnLoad>
@@ -260,7 +312,7 @@
             </Button>
             <Button name="GameMenuButtonContinue" inherits="GameMenuButtonTemplate">
                 <Anchors>
-                    <Anchor point="TOP" relativeTo="GameMenuButtonQuit" relativePoint="BOTTOM"><Offset><AbsDimension x="0" y="-16"/></Offset></Anchor>
+                    <Anchor point="TOPLEFT" relativeTo="GameMenuButtonQuit" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-20"/></Offset></Anchor>
                 </Anchors>
                 <Scripts>
                     <OnLoad>self:SetText(RETURN_TO_GAME)</OnLoad>
@@ -280,6 +332,16 @@
         <Scripts>
             <OnLoad>GameMenuFrameTitle:SetText(MAIN_MENU)</OnLoad>
             <OnShow>
+                -- The shared era-window scale first (ERA_WINDOW_SCALE, OptionsFrame.xml — loaded
+                -- before this file): the era menu has no scale of its own (GameMenuFrame.xml +
+                -- MainMenuFrameTemplates, grepped clean), it draws at UIParent's px-per-unit —
+                -- the SAME density as the era options window, whose checkFit caps at 1. The knob
+                -- is our stand-in for that UIParent scale; without it the menu drew 28% larger
+                -- relative to the options window than the era pair ("esc menu scale too big" —
+                -- director, 2026-08-04). `or 1` guards a load-order regression only. NOTE: this
+                -- lives INSIDE the existing OnShow — a second Scripts/OnShow block on the same
+                -- frame would silently REPLACE this one (SetScript semantics: last wins).
+                this:SetScale(ERA_WINDOW_SCALE or 1)
                 if UpdateMicroButtons then UpdateMicroButtons() end
                 if Disable_BagButtons then Disable_BagButtons() end
             </OnShow>

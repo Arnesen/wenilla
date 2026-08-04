@@ -44,6 +44,13 @@ pub(super) struct TextHost<'a> {
     /// this converts the remaining unit-space inputs — font heights, shadow offsets, the
     /// engine's editbox caret/selection x-offsets — into the same px space.
     pub scale: f32,
+    /// The owning frame's `effective_scale` ([`benilla_ui::script::ExtractedQuad::scale`]): the
+    /// rect already carries it; the FONT metrics — glyph raster size and shadow offset, both
+    /// frame-local — multiply by it here (the real client's text rides `SetScale`; 0219 §2's
+    /// divergence, closed). NOT applied to the editbox caret/selection/advance x-offsets: those
+    /// arrive in screen UI units (the advance measure already rode the scale — see
+    /// [`benilla_ui::script::EditBoxAdvanceRequest`]'s `scale` doc).
+    pub font_scale: f32,
     /// Captures pin the caret blink ON (deterministic pixels); live, the engine's phase decides.
     pub caret_pinned: bool,
 }
@@ -62,10 +69,15 @@ pub(super) fn emit(
     let base_color = style.color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
     let spec = crate::ui_text::FontSpec {
         path: style.font.as_deref(),
-        // The drawn px under the two size regimes × the 768-virtual scale (`drawn_px`, decision
-        // 0582): one-to-one text unit-caps at 32 then scales; a SetTextHeight override scales
-        // uncapped. The shadow twin below inherits the spec (`..spec`).
-        height: crate::ui_text::drawn_px(style.font_height, style.text_height, host.scale),
+        // The drawn px under the two size regimes × the 768-virtual scale × the owner's frame
+        // scale (`drawn_px`, decision 0582): one-to-one text unit-caps at 32 (a frame-LOCAL cap,
+        // like the seam scale it precedes) then scales; a SetTextHeight override scales uncapped.
+        // The shadow twin below inherits the spec (`..spec`).
+        height: crate::ui_text::drawn_px(
+            style.font_height,
+            style.text_height,
+            host.scale * host.font_scale,
+        ),
         outline: style.outline,
         paint_halo: true,
         alpha_gradient: style.alpha_gradient,
@@ -87,8 +99,8 @@ pub(super) fn emit(
     // below has to admit the ink it puts under the fill.
     let shadow_delta = style.shadow.map(|sh| {
         (
-            shadow_offset_px(sh.offset[0] * host.scale),
-            shadow_offset_px(-sh.offset[1] * host.scale),
+            shadow_offset_px(sh.offset[0] * host.scale * host.font_scale),
+            shadow_offset_px(-sh.offset[1] * host.scale * host.font_scale),
         )
     });
     // A message-frame ring line's scissor follows the seat, at the bottom edge only.

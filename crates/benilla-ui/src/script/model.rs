@@ -6,8 +6,8 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, inspect,
     item_text, loot, loot_roll, mail, merchant, party, quest, quest_log, session, skills, slider,
-    social, spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, FontObject,
-    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    social, spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, EraAtlasEntry,
+    FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -71,6 +71,13 @@ pub(crate) struct Model {
     pub(crate) chat_tab: bool,
     /// Region visuals (texture path/color/text) + region layout (anchors/size/justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
+    /// The Era atlas table (decision 0950): lowercased member name → resolved paint. Pushed once
+    /// by [`super::UiScript::set_era_atlases`] before the XML loads; read by `SetAtlas` and the
+    /// loader's `atlas=` attribute.
+    pub(crate) era_atlas: HashMap<String, EraAtlasEntry>,
+    /// Atlas names `SetAtlas` could not resolve — warn-once, drained by
+    /// [`super::UiScript::take_era_atlas_misses`] for app-side WARNs.
+    pub(crate) era_atlas_missing: HashSet<String>,
     /// Per-frame installed [`Backdrop`] (the tooltip/dialog/panel plate — `<Backdrop>` or
     /// `SetBackdrop`). Absent ⇒ the frame draws no plate. Stored beside the arena like `region_data`
     /// (the arena models structure, not paint). The client's `frame+0x1ac` pointer.
@@ -198,6 +205,15 @@ pub(crate) struct Model {
     /// Sounds queued by the Lua `PlaySound`/`PlaySoundFile` bindings since the app's last
     /// [`UiScript::take_sounds`] drain — the outbound Lua→app intent seam ([`sound`]).
     pub(crate) sound_queue: Vec<SoundRequest>,
+
+    /// The CVar table (decision 0954, [`super::cvars`]): lowercase name → slot. Host-registered
+    /// only; Lua reads/writes through `GetCVar`/`SetCVar`/`GetCVarDefault`.
+    pub(crate) cvars: HashMap<String, super::cvars::CvarSlot>,
+    /// `(registered name, new value)` per Lua `SetCVar` since the app's last
+    /// [`super::UiScript::take_cvar_changes`] drain — the knob-sync + config-dirty cue.
+    pub(crate) cvar_changes: Vec<(String, String)>,
+    /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
+    pub(crate) cvars_warned: HashSet<String>,
 
     /// The action-slot snapshot (keyed by Lua action id 1..120) + the stance page offset the app
     /// pushes, and the `UseAction` intents it drains — the action seam ([`action`]).
@@ -686,6 +702,8 @@ impl Model {
             link_spans: HashMap::new(),
             chat_tab: false,
             region_data: HashMap::new(),
+            era_atlas: HashMap::new(),
+            era_atlas_missing: HashSet::new(),
             backdrops: HashMap::new(),
             font_objects: HashMap::new(),
             region_resolved: HashMap::new(),
@@ -722,6 +740,9 @@ impl Model {
             session_requests: Vec::new(),
             pvp_toggles: 0,
             sound_queue: Vec::new(),
+            cvars: HashMap::new(),
+            cvar_changes: Vec::new(),
+            cvars_warned: HashSet::new(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
             bonus_bar_offset: 0,

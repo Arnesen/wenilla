@@ -10,6 +10,16 @@ use super::{
     Outline, QuadContent, UiScript, SCREEN,
 };
 
+/// The paint a frame slot's derived quads inherit — its `effective_alpha` and `effective_scale`
+/// travelling together (backdrop pieces and message-frame ring lines are emitted BY the frame,
+/// so they wear the frame's own factors exactly like [`ExtractedQuad::alpha`]/`scale` on the
+/// slot itself).
+#[derive(Clone, Copy)]
+pub(super) struct FramePaint {
+    pub(super) alpha: f32,
+    pub(super) scale: f32,
+}
+
 /// A 128-bit rolling fingerprint of everything [`UiScript::resolve_layout`] *reads*, so a resolve
 /// whose inputs are byte-identical to the last one can be skipped outright.
 ///
@@ -598,6 +608,14 @@ impl UiScript {
             if !is_fs {
                 continue;
             }
+            // The owner's effective_scale: the host measures at the drawn raster size
+            // ([`MeasureRequest::scale`]), and the key carries it so a SetScale re-measures.
+            let scale = model
+                .arena
+                .region(rh)
+                .and_then(|r| model.arena.frame(r.owner))
+                .map(|f| f.effective_scale)
+                .unwrap_or(1.0);
             let d = model.region_data.get(&rh).expect("live region data");
             let text = d.text.clone().unwrap_or_default();
             let wrap_width = d.size.map(|s| s.0).filter(|w| *w > 0.0);
@@ -607,7 +625,7 @@ impl UiScript {
             let outline = d.outline;
             // The shared key recipe ([`RegionData::measure_key`]) — the metric reads
             // (region.rs) check the stored measure against the same hash.
-            let key = d.measure_key();
+            let key = d.measure_key(scale);
             if d.measured.map(|m| m.key) == Some(key) {
                 continue;
             }
@@ -619,6 +637,7 @@ impl UiScript {
                 text_height,
                 wrap_width,
                 outline,
+                scale,
                 text,
                 key,
             });
@@ -650,6 +669,11 @@ impl UiScript {
             if wrap_width <= 1.0 {
                 continue; // unresolved/degenerate width — nothing meaningful to wrap against
             }
+            let scale = model
+                .arena
+                .frame(fh)
+                .map(|f| f.effective_scale)
+                .unwrap_or(1.0);
             let (font, height, _, outline) = Self::message_frame_font(&model, fh);
             let frame_id = model.frame_id(fh);
             let Some(frame) = model.arena.frame(fh) else {
@@ -665,6 +689,7 @@ impl UiScript {
                 height.map(f32::to_bits).hash(&mut hasher);
                 wrap_width.to_bits().hash(&mut hasher);
                 (outline as u8).hash(&mut hasher);
+                scale.to_bits().hash(&mut hasher);
                 let key = hasher.finish();
                 if line.rows_key == key {
                     continue;
@@ -676,6 +701,7 @@ impl UiScript {
                     height,
                     wrap_width,
                     outline,
+                    scale,
                     text: line.text.clone(),
                     key,
                 });
@@ -710,13 +736,13 @@ impl UiScript {
     /// frame has none). Pieces carry the frame slot's `z` — behind the frame's regions (which sort
     /// after it) and, among themselves, bg-then-border in paint order (the stable z-sort keeps the
     /// emission order). Each piece's rect is its screen bounding box; the app resolves the texture
-    /// from the piece path and multiplies the tint by `frame_alpha`.
+    /// from the piece path and multiplies the tint by the [`FramePaint`]'s alpha.
     pub(super) fn emit_backdrop(
         model: &Model,
         fh: FrameHandle,
         fr: Rect,
         z: u64,
-        frame_alpha: f32,
+        paint: FramePaint,
         clip: Option<Rect>,
         out: &mut Vec<ExtractedQuad>,
     ) {
@@ -751,7 +777,7 @@ impl UiScript {
                 target: ZTarget::Frame(fh),
                 z,
                 rect: Some(Rect::new(bottom, left, top, right)),
-                alpha: frame_alpha,
+                alpha: paint.alpha,
                 content: QuadContent::Backdrop {
                     path,
                     color,
@@ -759,6 +785,7 @@ impl UiScript {
                     tile: piece.tile,
                 },
                 clip,
+                scale: paint.scale,
             });
         }
     }
@@ -782,7 +809,7 @@ impl UiScript {
         fh: FrameHandle,
         fr: Rect,
         z: u64,
-        frame_alpha: f32,
+        paint: FramePaint,
         clip: Option<Rect>,
         out: &mut Vec<ExtractedQuad>,
     ) {
@@ -796,7 +823,10 @@ impl UiScript {
             return;
         }
         let (font, font_height, font_shadow, outline) = Self::message_frame_font(model, fh);
-        let pitch = font_height.unwrap_or(14.0);
+        // The band grid lives in the frame's RESOLVED (scale-multiplied) rect, so the row pitch
+        // rides the frame scale exactly like the glyphs it must coincide with (the font height
+        // itself is frame-local).
+        let pitch = font_height.unwrap_or(14.0) * paint.scale;
         if pitch <= 0.0 || fr.top <= fr.bottom {
             return;
         }
@@ -825,7 +855,7 @@ impl UiScript {
                 target: ZTarget::Frame(fh),
                 z,
                 rect: Some(band),
-                alpha: frame_alpha,
+                alpha: paint.alpha,
                 clip: line_clip,
                 content: QuadContent::Text {
                     text: Some(line.text.clone()),
@@ -850,6 +880,7 @@ impl UiScript {
                     outline,
                     alpha_gradient: None,
                 },
+                scale: paint.scale,
             });
         }
     }
