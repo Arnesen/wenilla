@@ -1,0 +1,93 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <!--
+        The two enchant-apply confirms (decision 0928): registry entries on the shared StaticPopup
+        engine (UiPanels.xml) plus their UIParent event arms, transcribed from the patch-chain
+        FrameXML (mpqx extraction, decision 0246) — StaticPopup.lua l.1240-1251 (BIND_ENCHANT) and
+        l.1252-1263 (REPLACE_ENCHANT), UIParent.lua l.110-111 (the registrations), l.437-442 (the
+        show arms) and l.449-453 (the CURRENT_SPELL_CAST_CHANGED hide). Strings verbatim from
+        GlobalStrings.lua l.415 / l.3324.
+
+        They are NOT the Craft window's, which is why they live in their own file and load with the
+        shared dialogs rather than with CraftFrame.xml: the gate that raises them (`0x495d60`) is
+        the generic item-target bind, so a rogue applying a poison and a shaman imbuing a mace
+        reach them without any profession window open at all.
+
+        Both are pure client-side gating. There is no CMSG_REPLACE_ENCHANT in 5875 (wow-re's
+        tradeskill node: no CDataStore put/Send anywhere in `0x48d2e0`/`0x48d300`/`0x495d60`
+        /`0x6e5b40` outside the shared SendCast) — the popups withhold the *same* cast and their
+        Yes re-issues it. `BindEnchant()` re-enters the gate with its confirmed flag set, so a Yes
+        here can raise the replace popup next; `ReplaceEnchant()` skips the gate entirely.
+
+        The third sibling, TRADE_REPLACE_ENCHANT (event 404, fired at `0x496230` with a third
+        numeric arg), belongs to the trade-window enchant path — a different wire shape
+        (TARGET_FLAG_TRADE_ITEM + the slot sentinel) we do not build yet, so it is not here.
+    -->
+    <Script><![CDATA[
+        -- ── Strings (GlobalStrings.lua, verbatim) ───────────────────────────────────────────────
+        local BIND_ENCHANT = "Enchanting this item will bind it to you."     -- l.415
+        local REPLACE_ENCHANT = "Do you want to replace \"%s\" with \"%s\"?" -- l.3324
+        local OKAY = "Okay"
+        local CANCEL = "Cancel"
+        local YES = "Yes"
+        local NO = "No"
+
+        -- ── The bind confirm — StaticPopup.lua l.1240-1251, verbatim ───────────────────────────
+        -- No OnCancel: declining sends nothing and needs no teardown, because the gate returned
+        -- before BindTarget and the targeting word is still standing. The cursor simply stays up.
+        StaticPopupDialogs["BIND_ENCHANT"] = {
+            text = BIND_ENCHANT,
+            button1 = OKAY,
+            button2 = CANCEL,
+            OnAccept = function()
+                BindEnchant()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            showAlert = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ── The replace confirm — StaticPopup.lua l.1252-1263, verbatim ────────────────────────
+        -- arg1 = the enchant already on the item, arg2 = the one about to replace it, in that
+        -- order (the fire site pushes old then new: `0x703f50(0x193, "%s%s", old, new)`).
+        StaticPopupDialogs["REPLACE_ENCHANT"] = {
+            text = REPLACE_ENCHANT,
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                ReplaceEnchant()
+            end,
+            timeout = 0,
+            exclusive = 1,
+            showAlert = 1,
+            hideOnEscape = 1,
+        }
+
+        -- ── The UIParent event arms (UIParent.lua l.437-453, verbatim) ─────────────────────────
+        function BenillaEnchantConfirmDriver_OnEvent()
+            if event == "BIND_ENCHANT" then
+                StaticPopup_Show("BIND_ENCHANT")
+            elseif event == "REPLACE_ENCHANT" then
+                StaticPopup_Show("REPLACE_ENCHANT", arg1, arg2)
+            elseif event == "CURRENT_SPELL_CAST_CHANGED" then
+                -- The pending cast the popups are asking about is gone (cancelled, replaced, or
+                -- committed), so the question is moot. This is the ref's ONLY teardown for them.
+                StaticPopup_Hide("BIND_ENCHANT")
+                StaticPopup_Hide("REPLACE_ENCHANT")
+            end
+        end
+    ]]></Script>
+
+    <Frame name="BenillaEnchantConfirmDriver" hidden="true">
+        <Size><AbsDimension x="1" y="1"/></Size>
+        <Anchors><Anchor point="TOPLEFT"/></Anchors>
+        <Scripts>
+            <OnLoad>
+                self:RegisterEvent("BIND_ENCHANT")
+                self:RegisterEvent("REPLACE_ENCHANT")
+                self:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+            </OnLoad>
+            <OnEvent>BenillaEnchantConfirmDriver_OnEvent()</OnEvent>
+        </Scripts>
+    </Frame>
+</Ui>

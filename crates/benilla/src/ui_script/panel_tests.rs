@@ -53,14 +53,15 @@ fn shipped_gossip_frame_drives_end_to_end() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
-    // The window + the 8-row shared pool (quest rows and option rows both draw from it, decision
-    // 0088 §3) + the close button + the GOODBYE button. The re-skinned greeting and the NPC-name
-    // banner are FontString layers on the window (the real GossipGreetingText ref l.241 /
-    // GossipFrameNpcNameText ref l.170) — not their own frames.
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+                                         // The window + its scroll frame (bar + child) + the 32-row shared pool (quest rows and option
+                                         // rows both draw from it, decision 0088 §3 — the reference's own NUMGOSSIPBUTTONS) + the close
+                                         // button + the GOODBYE button. The greeting and the NPC-name banner are FontString layers (the
+                                         // real GossipGreetingText ref l.241 / GossipFrameNpcNameText ref l.170) — not their own frames.
     assert_eq!(
         load_xml(&s, "GossipFrame.xml"),
-        11,
-        "window + 8 shared rows + close + goodbye"
+        40,
+        "window + scroll + bar (+2 arrows) + child + 32 rows + close + goodbye"
     );
 
     // Hidden by default: no gossip icon on screen.
@@ -233,6 +234,7 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
 
     s.set_gossip(Some(GossipMenu {
@@ -332,6 +334,115 @@ fn shipped_gossip_frame_renders_quest_rows_above_options() {
     );
 }
 
+/// A gossip option whose label WRAPS gets a row as tall as its wrapped text (the reference's
+/// `GossipResize` — `SetHeight(GetTextHeight() + 2)`, ref-GossipFrame.lua l.130-132), so the static
+/// row chain (each row on the previous row's BOTTOMLEFT) still stacks them clear of one another.
+/// Without the resize every row stayed the template's 16 px while its label drew 2-3 wrapped lines,
+/// and the labels printed on top of each other — the director's screenshot of a four-option
+/// judgement menu, every option overlapping the next.
+///
+/// The engine-only harness has no font atlas, so the measure round-trip is answered with a
+/// deterministic 6 px/char × 14 px/line fake (the app answers from the real atlas in-game). The
+/// assertions pin the LAW — row height = its label's measured height + 2, and consecutive rows share
+/// an edge — not any glyph metric.
+#[test]
+fn shipped_gossip_rows_grow_to_their_wrapped_labels() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+    load_xml(&s, "GossipFrame.xml");
+
+    // Three long options — the shape of a real judgement/roleplay menu, every one of them wrapping
+    // at the row label's 275 px width.
+    let long = |t: &str| GossipOptionView {
+        label: t.into(),
+        icon_type: "gossip".into(),
+        coded: false,
+    };
+    s.set_gossip(Some(GossipMenu {
+        greeting: Some("Make your choice!".into()),
+        quests: Vec::new(),
+        options: vec![
+            long(
+                "I slay the man on the spot as my liege would expect me to, as he has broken the \
+                  law of the land and it is my sworn duty to enforce it.",
+            ),
+            long(
+                "I turn over the man to my liege for punishment, as the man has stolen, and I am \
+                  not the arbiter of his fate.",
+            ),
+            long(
+                "I allow the man to take enough corn to feed his family for a couple of days, \
+                  encouraging him to leave the land.",
+            ),
+        ],
+    }));
+    s.fire_event("GOSSIP_SHOW", vec![]);
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The host's job: measure every FontString the frame asks about. 6 px/char, wrapped at the
+    // request's own wrap width, 14 px per resulting line.
+    let answer_measures = |s: &mut UiScript| {
+        let answers: Vec<(u32, f32, f32, u64)> = s
+            .fontstrings_needing_measure()
+            .into_iter()
+            .map(|r| {
+                let ink = r.text.chars().count() as f32 * 6.0;
+                match r.wrap_width {
+                    Some(w) => {
+                        let lines = (ink / w).ceil().max(1.0);
+                        (r.id, ink.min(w), lines * 14.0, r.key)
+                    }
+                    None => (r.id, ink, 14.0, r.key),
+                }
+            })
+            .collect();
+        s.set_measured_text(&answers);
+    };
+    // Frame 1: the labels are measured (their heights land for the NEXT tick — the round-trip is a
+    // frame late, exactly as the tab-fit and quest-panel resizes already live with).
+    answer_measures(&mut s);
+    s.resolve();
+    // Frame 2: the frame's own settle pass reads those measures and sizes each row.
+    s.tick(0.016);
+    answer_measures(&mut s);
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let row = |i: u32| -> (f32, f32, f32) {
+        s.eval::<(f32, f32, f32)>(&format!(
+            "return BenillaGossipRow{i}:GetTop(), BenillaGossipRow{i}:GetBottom(), \
+             BenillaGossipRow{i}Label:GetStringHeight()"
+        ))
+        .unwrap()
+    };
+    let (t1, b1, h1) = row(1);
+    let (t2, b2, h2) = row(2);
+    let (t3, b3, h3) = row(3);
+    // Every label wrapped (the fake measure gives ≥ 2 lines of 14) …
+    for (i, h) in [(1, h1), (2, h2), (3, h3)] {
+        assert!(h >= 28.0, "row {i}'s label wraps: measured height {h}");
+    }
+    // … and each row is exactly its label + the reference's 2 px.
+    for (i, (top, bottom, h)) in [(1, (t1, b1, h1)), (2, (t2, b2, h2)), (3, (t3, b3, h3))] {
+        assert!(
+            (top - bottom - (h + 2.0)).abs() < 0.5,
+            "row {i} height is its wrapped label + 2: got {}, label {h}",
+            top - bottom
+        );
+    }
+    // The chain stacks them edge to edge — no row overprints the next (rects are y-up).
+    assert!(
+        (t2 - b1).abs() < 0.5,
+        "row 2 starts where row 1 ends: row1 bottom {b1}, row2 top {t2}"
+    );
+    assert!(
+        (t3 - b2).abs() < 0.5,
+        "row 3 starts where row 2 ends: row2 bottom {b2}, row3 top {t3}"
+    );
+}
+
 /// Pin §4's headline scenario, and §2's whole justification: with both windows loaded, opening
 /// gossip then merchant closes gossip purely through panel replacement (both register
 /// pushable=0, so the second `ShowUIPanel` replaces the left occupant — UIParent.lua l.729-732) —
@@ -345,6 +456,7 @@ fn gossip_show_hide_plays_open_and_close_kits() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -380,6 +492,7 @@ fn shipped_panel_slot_replaces_gossip_with_merchant() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -461,6 +574,7 @@ fn displacing_an_npc_window_ends_the_displaced_session() {
     let mut s = UiScript::new().unwrap();
     s.set_screen_size(1024.0, 768.0);
     load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "GossipFrame.xml");
     load_xml(&s, "GameTooltip.xml"); // app load order: tooltip before merchant
     load_xml(&s, "MerchantFrame.xml");
@@ -599,6 +713,7 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
         load_xml(&s, "GameTooltip.xml");
         load_xml(&s, "MerchantFrame.xml");
         load_xml(&s, "BankFrame.xml");
+        load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
         load_xml(&s, "GossipFrame.xml");
 
         // The gossip menu is open on the banker (its bank option showing).
@@ -651,4 +766,146 @@ fn gossip_bank_option_hands_the_left_slot_to_the_bank() {
     };
     order_first(true);
     order_first(false);
+}
+
+/// A menu too tall for the parchment SCROLLS instead of spilling out of the window — the reference's
+/// own answer (`GossipGreetingScrollFrame`, ref-GossipFrame.xml l.223-436), which benilla had omitted
+/// on the grounds that "our short greeting needs no scrolling". Once the rows grew to their wrapped
+/// text, a menu of long options ran straight off the bottom of the window and over the world (the
+/// director's second screenshot).
+///
+/// Pins the whole mechanism: the content is measured into the scroll child, the range is the overflow,
+/// the bar appears only when there IS overflow, every row is CLIPPED to the frame's rect, and
+/// scrolling moves the content up under that clip. Same deterministic measure fake as the row test.
+#[test]
+fn an_overflowing_gossip_menu_scrolls_instead_of_spilling() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "ScrollTemplates.xml");
+    load_xml(&s, "GossipFrame.xml");
+
+    // Eight wrapping options: ~4 lines each, far past the 334 px scroll frame.
+    let long = |n: usize| GossipOptionView {
+        label: format!(
+            "Option {n}: I slay the man on the spot as my liege would expect me to, as he has \
+             broken the law of the land and it is my sworn duty to enforce it, whatever the cost."
+        ),
+        icon_type: "gossip".into(),
+        coded: false,
+    };
+    s.set_gossip(Some(GossipMenu {
+        greeting: Some("Make your choice!".into()),
+        quests: Vec::new(),
+        options: (1..=8).map(long).collect(),
+    }));
+    s.fire_event("GOSSIP_SHOW", vec![]);
+
+    let answer_measures = |s: &mut UiScript| {
+        let answers: Vec<(u32, f32, f32, u64)> = s
+            .fontstrings_needing_measure()
+            .into_iter()
+            .map(|r| {
+                let ink = r.text.chars().count() as f32 * 6.0;
+                match r.wrap_width {
+                    Some(w) => (r.id, ink.min(w), (ink / w).ceil().max(1.0) * 14.0, r.key),
+                    None => (r.id, ink, 14.0, r.key),
+                }
+            })
+            .collect();
+        s.set_measured_text(&answers);
+    };
+    // Settle: measures land, rows fit, the child is sized to them, the bar re-ranges.
+    for _ in 0..3 {
+        answer_measures(&mut s);
+        s.resolve();
+        s.tick(0.016);
+    }
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    // The child grew past the 334 px frame, so there is a range to scroll …
+    let (child_h, range): (f32, f32) = s
+        .eval(
+            "return BenillaGossipGreetingScrollChild:GetHeight(), \
+             BenillaGossipGreetingScroll:GetVerticalScrollRange()",
+        )
+        .unwrap();
+    assert!(
+        child_h > 334.0 && range > 0.0,
+        "content overflows the 334px frame: child {child_h}, range {range}"
+    );
+    // … and the bar is up for it (it stays hidden when everything fits — the fit case is covered by
+    // `shipped_gossip_frame_drives_end_to_end`'s two-option menu).
+    assert!(
+        s.eval::<bool>("return BenillaGossipGreetingScrollBar:IsVisible()")
+            .unwrap(),
+        "the scrollbar shows once the menu overflows"
+    );
+
+    // Every row is CLIPPED to the scroll frame — the mechanism that replaces "spilling out of the
+    // window". The engine clips by carrying a clip rect on the quad (decision 0112 §4/§5, applied in
+    // `ui_pass`), not by shrinking its rect, so the check is on the clip each row's text quad rides
+    // out with: it must be the scroll frame's own rect, and rows past the bottom must be entirely
+    // outside it (nothing of them survives the clip).
+    let (frame_top, frame_bottom): (f32, f32) = s
+        .eval(
+            "return BenillaGossipGreetingScroll:GetTop(), BenillaGossipGreetingScroll:GetBottom()",
+        )
+        .unwrap();
+    let painted_rows =
+        |s: &mut UiScript| -> Vec<(benilla_ui::layout::Rect, benilla_ui::layout::Rect)> {
+            s.extract()
+                .into_iter()
+                .filter_map(|q| match &q.content {
+                    QuadContent::Text { text: Some(t), .. } if t.starts_with("Option ") => {
+                        Some((q.rect?, q.clip?))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+    let rows = painted_rows(&mut s);
+    assert_eq!(rows.len(), 8, "all eight option labels extract");
+    for (rect, clip) in &rows {
+        assert!(
+            (clip.top - frame_top).abs() < 0.5 && (clip.bottom - frame_bottom).abs() < 0.5,
+            "row clipped to the scroll frame [{frame_bottom}, {frame_top}], got {clip:?}"
+        );
+        let _ = rect;
+    }
+    // And the menu really is longer than the window: at least one row sits entirely below the
+    // frame's bottom edge (drawn nowhere, because the clip discards it) rather than over the world.
+    assert!(
+        rows.iter().any(|(rect, _)| rect.top < frame_bottom),
+        "the menu overflows: some row is entirely below the frame"
+    );
+
+    // Scrolling pans the content up under that clip by exactly the scroll amount. Rects are y-up
+    // (`ExtractedQuad::rect`), so "up" means row 1's top EDGE VALUE grows as it slides off the top.
+    let first_top =
+        |s: &mut UiScript| -> f32 { s.eval::<f32>("return BenillaGossipRow1:GetTop()").unwrap() };
+    let before = first_top(&mut s);
+    s.run("BenillaScroll_Step(BenillaGossipGreetingScroll, 100)")
+        .unwrap();
+    s.resolve();
+    let after = first_top(&mut s);
+    assert!(
+        (after - before - 100.0).abs() < 0.5,
+        "scrolling 100px lifts the content 100px: {before} → {after}"
+    );
+    // The bar followed the scroll (SyncBar off OnVerticalScroll), and the rows are still clipped.
+    assert_eq!(
+        s.eval::<f32>("return BenillaGossipGreetingScrollBar:GetValue()")
+            .unwrap(),
+        100.0,
+        "the bar seats at the scroll offset"
+    );
+    for (_, clip) in painted_rows(&mut s) {
+        assert!(
+            (clip.top - frame_top).abs() < 0.5 && (clip.bottom - frame_bottom).abs() < 0.5,
+            "a scrolled row still clips to the frame, got {clip:?}"
+        );
+    }
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

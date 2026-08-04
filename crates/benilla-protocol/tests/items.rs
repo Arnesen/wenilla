@@ -23,10 +23,15 @@ fn item_query_wire() {
     );
 
     // The KEY-IN-A-LOCK form (decision 0769): the same three bytes, then a SpellCastTargets with
-    // mask TARGET_FLAG_GAMEOBJECT|TARGET_FLAG_LOCKED (0x0800|0x4000 = 0x4800) and the object's
-    // PACKED guid. This is the packet the real client sends for a key (wow-re cursor-system.md
-    // §8.4: sender 0x6e54f0's item arm -> 0x6e57d8 push 0xab) and the only one vmangos will open a
-    // KEY-slot lock for (Spell::CanOpenLock requires m_CastItem, Spell.cpp:7892).
+    // mask TARGET_FLAG_GAMEOBJECT (0x0800) and the object's PACKED guid. This is the packet the
+    // real client sends for a key (wow-re cursor-system.md §8.4: sender 0x6e54f0's item arm ->
+    // 0x6e57d8 push 0xab) and the only one vmangos will open a KEY-slot lock for
+    // (Spell::CanOpenLock requires m_CastItem, Spell.cpp:7892).
+    //
+    // `TARGET_FLAG_LOCKED` (0x4000) is deliberately NOT here (decision 0939, correcting 0769): it
+    // is a bit of the *targeting word* `0xcecac0` that `BindTarget 0x6e5b40`'s GameObject arm reads
+    // and clears (`6e5f60`/`6e5f70`) while writing only `0x800` to the outgoing mask (`6e5f69`).
+    // A whole-image census of writes to `0xceac5c` finds no `0x4000` anywhere.
     //
     // Keyring slot 1 = bag 255 + player-array slot 81 (0x51). The guid 0xF110000C1F00A3B2 has two
     // zero bytes (indices 2 and 5), so it packs to mask 0xDB + the other six, low byte first.
@@ -37,14 +42,14 @@ fn item_query_wire() {
             0,
             messages::UseItemTarget::Object(0xF110_000C_1F00_A3B2)
         ),
-        hx("ff51000048dbb2a31f0c10f1"),
+        hx("ff51000008dbb2a31f0c10f1"),
     );
 
     // The packed form really does drop zero bytes: guid 1 is mask 0x01 + a single byte, and the
     // spellSlot ordinal rides in the third byte.
     assert_eq!(
         messages::use_item(255, 81, 2, messages::UseItemTarget::Object(1)),
-        hx("ff510200480101")
+        hx("ff510200080101")
     );
 
     // The UNIT form (decision 0914): an item whose spell binds a unit the way a spell's does — a

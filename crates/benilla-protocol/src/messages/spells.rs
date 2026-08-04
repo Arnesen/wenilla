@@ -321,21 +321,24 @@ pub fn cast_spell(spell_id: u32, target: Option<u64>) -> Vec<u8> {
     body
 }
 
-/// `TARGET_FLAG_LOCKED` — set alongside `GAMEOBJECT` when the client casts an OPEN_LOCK spell at a
-/// lockable object (decision 0239). It carries **no** wire data of its own (VERIFIED vmangos
-/// `SpellCastTargets` read/write — `LOCKED` is in no read branch); the real client sends the bit, so
-/// benilla mirrors it.
-const TARGET_FLAG_LOCKED: u16 = 0x4000;
-
 /// Body of `CMSG_CAST_SPELL` aimed at a **GameObject** (decision 0239): the OPEN_LOCK cast a
-/// right-click on a locked chest / mining vein / herb node sends instead of `CMSG_GAMEOBJ_USE`.
-/// `spell_id`, then the target mask `GAMEOBJECT | LOCKED` (0x4800), then the GameObject's **packed**
-/// guid — the only field the mask reads (the GameObject branch reads one packed guid; `LOCKED` adds
-/// nothing). Distinct from [`cast_spell`]'s unit/self target shape (flag `0x2` + packed guid).
+/// right-click on a locked chest / mining vein / herb node sends instead of `CMSG_GAMEOBJ_USE`, and
+/// the targeting cursor's world commit (decision 0939). `spell_id`, then the target mask
+/// `GAMEOBJECT (0x0800)` **alone**, then the GameObject's **packed** guid — the one field that mask
+/// reads. Distinct from [`cast_spell`]'s unit/self target shape (flag `0x2` + packed guid).
+///
+/// **`TARGET_FLAG_LOCKED (0x4000)` is not in this mask** (decision 0939, correcting 0239/0769). The
+/// bit lives in the *targeting* word `0xcecac0`: the implicit-target switch ORs it there
+/// (`6e44e1: orl $0x4000, %ebx` — `%ebx` is the word that switch is accumulating, not the outgoing
+/// mask), and `BindTarget 0x6e5b40`'s GameObject arm then **consumes** it — `6e5f60 testb $0x48, %ch`
+/// on the word, `6e5f69 orb $0x8, 0xceac5d` (⇒ `0x0800`) into the wire mask, `6e5f70` clearing the
+/// word's own `0x4800`. A whole-image census of every write to the 16-bit mask at `0xceac5c` (one
+/// `movw` restore plus eleven `orb` sites) contains no `0x4000` anywhere: the real client never puts
+/// `LOCKED` on the wire, in this packet or any other.
 pub fn cast_spell_gameobject(spell_id: u32, go_guid: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(16);
     body.extend_from_slice(&spell_id.to_le_bytes());
-    body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
+    body.extend_from_slice(&TARGET_FLAG_GAMEOBJECT.to_le_bytes());
     crate::wire::write_packed_guid(go_guid, &mut body).expect("vec write");
     body
 }
@@ -384,15 +387,16 @@ mod tests {
 
     #[test]
     fn cast_spell_gameobject_body_golden() {
-        // spell_id (LE) + target mask GAMEOBJECT|LOCKED = 0x4800 (LE `00 48`) + packed guid 0x1234
-        // (mask 0x03, bytes 34 12). VERIFIED vmangos `SpellCastTargets`: LOCKED reads no bytes; the
-        // GameObject branch reads one packed guid.
+        // spell_id (LE) + target mask GAMEOBJECT = 0x0800 (LE `00 08`) + packed guid 0x1234
+        // (mask 0x03, bytes 34 12). The `0x4000` LOCKED bit is deliberately absent: it is a
+        // *targeting-word* bit that `BindTarget 0x6e5b40` consumes, never a wire bit (decision
+        // 0939 — the whole-image census of writes to `0xceac5c` has no `0x4000`).
         assert_eq!(
             cast_spell_gameobject(1, 0x1234),
-            [0x01, 0x00, 0x00, 0x00, 0x00, 0x48, 0x03, 0x34, 0x12],
+            [0x01, 0x00, 0x00, 0x00, 0x00, 0x08, 0x03, 0x34, 0x12],
             "CMSG_CAST_SPELL (GameObject/OPEN_LOCK) body"
         );
-        // The unit-target twin still carries flag 0x2, not 0x4800 — the two shapes stay distinct.
+        // The unit-target twin still carries flag 0x2, not 0x800 — the two shapes stay distinct.
         assert_eq!(cast_spell(1, None), [0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 

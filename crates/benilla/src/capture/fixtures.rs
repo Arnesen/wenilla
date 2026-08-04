@@ -209,21 +209,50 @@ pub(super) fn seed_ui_fixture(
             );
             gossip.npc = Some(NPC_GUID);
             gossip.text_id = 1;
+            // The greeting of the live menu the overflow was reported on: long enough that the
+            // wrapped options below it run past the parchment, so this capture stands on the
+            // scrolling path rather than beside it.
             gossip.greeting = Some(
-                "Hey, citizen!  You look like a stout one.  We guards are spread a little thin \
-                 out here, and I could use your help..."
+                "A man has been caught stealing corn from the fields of a noble, a lord known \
+                 for his harsh taxes throughout the land.$B$BMake your choice!"
                     .into(),
             );
             // Quest rows ride above the options (decision 0088) — an available quest (its own
             // AvailableQuestIcon dot) so the capture covers the quest-row icon/text seating, not
             // just the option rows.
             gossip.quests = vec![(783, 0, "Eagan Peltskinner".into())];
+            // One short option AND four that WRAP — the live shape both gossip bugs came in as
+            // (the director's screenshots), and a menu deliberately TALLER than the parchment so
+            // the capture covers the whole chain: the per-row auto-height
+            // (`BenillaGossipRow_Resize`), the scroll frame that contains the overflow, and the
+            // scrollbar that appears with it. A fixture of one-line labels showed none of this —
+            // every row fit the template's 16 px and nothing ever overflowed.
+            let judgement = [
+                "I slay the man on the spot as my liege would expect me to, as he has broken the \
+                 law of the land and it is my sworn duty to enforce it.",
+                "I turn over the man to my liege for punishment, as he has stolen, and I am not \
+                 the arbiter of his fate.",
+                "I confiscate the corn he has stolen, warn him that stealing is a path towards \
+                 doom and destruction, but I let him go to return to his family.",
+                "I allow the man to take enough corn to feed his family for a couple of days, \
+                 encouraging him to leave the land.",
+            ];
             gossip.options = vec![benilla_protocol::messages::GossipOption {
                 index: 0,
                 icon: 1,
                 coded: false,
                 message: "Let me browse your goods.".into(),
             }];
+            gossip
+                .options
+                .extend(judgement.iter().enumerate().map(|(i, message)| {
+                    benilla_protocol::messages::GossipOption {
+                        index: i as u32 + 1,
+                        icon: 0,
+                        coded: false,
+                        message: (*message).into(),
+                    }
+                }));
         }
         UiFixture::Bank => {
             // The banker (a pure banker — the Ironforge vault's own name) + the vault fed the REAL

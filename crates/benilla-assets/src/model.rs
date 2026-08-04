@@ -254,6 +254,10 @@ pub struct ModelJoint {
     /// skinned to them — inherit the camera facing (the frost-armor sheets skin to the scale-in
     /// CHILD of a lock-Z bone). Rigged hosts feed this to the billboard joint pass; the per-batch
     /// card split only covers geometry skinned to the billboard bone itself.
+    ///
+    /// **`None` for a WELDED billboard bone**, even though the M2 authors the flag — see
+    /// [`build_skeleton`]. A bone whose geometry is stitched into the surrounding mesh cannot be
+    /// re-oriented without dragging that mesh with it, so no palette lane faces it (decision 0935).
     pub billboard: Option<benilla_formats::BillboardKind>,
     /// Bone flag `0x04` (see [`benilla_formats::SkeletonBone::ignore_parent_rotation`]): the bone
     /// keeps the MODEL ROOT's orientation — its pivot rides the parent's full matrix, its rotation
@@ -289,7 +293,23 @@ pub struct ModelSkeleton {
 ///   transform (the two pivot translations cancel before scale acts).
 ///
 /// Pivots map WoW→Bevy via [`wow_to_bevy`] (a pure rotation), so the whole skeleton lives in mesh space.
-pub(crate) fn build_skeleton(skel: &Skeleton) -> (ModelSkeleton, Vec<Mat4>) {
+///
+/// ## The welded-billboard gate (decision 0935)
+///
+/// `welded_billboards` is [`benilla_formats::non_separable_billboard_bones`] for the same model:
+/// billboard bones whose geometry is stitched into the surrounding mesh — partial-weight seam
+/// vertices, or triangles straddling the bone and a static neighbour. **Their arm is dropped
+/// here**, so no palette lane camera-faces them, and the whole model draws in its authored pose.
+///
+/// This is the same predicate the per-batch card split already uses to refuse a welded bone
+/// (`RenderSubmesh::welded_billboard`, 0839), applied one level up. Reading it from that one
+/// function is the point: the card lane's "is this separable" and the palette lane's can never
+/// disagree, which is exactly how the left pauldron ended up camera-faced by one lane while the
+/// other left it alone.
+pub(crate) fn build_skeleton(
+    skel: &Skeleton,
+    welded_billboards: &[u16],
+) -> (ModelSkeleton, Vec<Mat4>) {
     let pivots = skeleton_pivots(skel);
     let joints = skel
         .bones
@@ -303,7 +323,9 @@ pub(crate) fn build_skeleton(skel: &Skeleton) -> (ModelSkeleton, Vec<Mat4>) {
             ModelJoint {
                 parent: b.parent,
                 local_translation: pivots[i] - parent_pivot,
-                billboard: b.billboard,
+                billboard: b
+                    .billboard
+                    .filter(|_| !welded_billboards.contains(&(i as u16))),
                 ignore_parent_rotation: b.ignore_parent_rotation,
             }
         })
@@ -832,5 +854,88 @@ mod tests {
         let r = wow_to_bevy_quat();
         let id = r * Quat::IDENTITY * r.inverse();
         assert!(id.dot(Quat::IDENTITY).abs() > 0.9999, "got {id:?}");
+    }
+
+    /// **A welded billboard bone reaches the palette lanes with no arm** (decision 0935).
+    ///
+    /// The shape is the Field Marshal pauldron's: a plain root plus two spherical-billboard spikes,
+    /// both non-separable because their seam rings are stitched into the body. Bone 1 stands for
+    /// them; bone 2 is a separable card bone on the same model, and must keep its arm — the gate is
+    /// per bone, not per model, or every glow card on a model that also carries one welded spike
+    /// would freeze with it.
+    ///
+    /// `ModelJoint::billboard` is the single field both lanes read (`BillboardJointRig::new` and
+    /// `RigPose`), so clearing it here is the whole gate.
+    #[test]
+    fn a_welded_billboard_bone_loses_its_arm_and_a_separable_one_keeps_it() {
+        let bone = |billboard| benilla_formats::SkeletonBone {
+            parent: -1,
+            pivot: [0.0, 0.0, 0.0],
+            key_bone: -1,
+            billboard,
+            ignore_parent_rotation: false,
+        };
+        let skel = Skeleton {
+            bones: vec![
+                bone(None),
+                bone(Some(benilla_formats::BillboardKind::Spherical)),
+                bone(Some(benilla_formats::BillboardKind::Spherical)),
+            ],
+        };
+        let (built, _) = build_skeleton(&skel, &[1]);
+        assert!(built.joints[0].billboard.is_none(), "a plain bone is plain");
+        assert!(
+            built.joints[1].billboard.is_none(),
+            "the welded spike is never camera-faced — facing it drags the mesh it is stitched to"
+        );
+        assert_eq!(
+            built.joints[2].billboard,
+            Some(benilla_formats::BillboardKind::Spherical),
+            "a separable card bone on the same model still faces the camera"
+        );
+        // The empty list is the overwhelmingly common case (no welded bones): nothing is dropped.
+        let (ungated, _) = build_skeleton(&skel, &[]);
+        assert!(
+            ungated.joints[1].billboard.is_some() && ungated.joints[2].billboard.is_some(),
+            "with nothing welded, every authored arm survives"
+        );
+    }
+
+    /// The same gate on the **real shipped asset** — the director's own pauldron.
+    ///
+    /// `LShoulder_Plate_PVPAlliance_A_01.m2` authors 3 bones: a plain root and two spherical
+    /// billboard spikes whose 8-vertex 50/50 seam rings stitch them to the body. Measured live, the
+    /// arm displaced those spikes **18° standing on foot and 54° (44°–68°) mounted at a run**, while
+    /// the right pauldron — `RShoulder_…`, 1 bone, no billboard — sat at a flat 0°. That L/R split
+    /// is the whole of the director's report, and it comes from the artwork, not the skeleton (both
+    /// shoulder *bones* measured within 1.5° of each other).
+    ///
+    /// The synthetic test above pins the wiring; this pins that the wiring fires on the file that
+    /// actually caused the bug. Skips when the client isn't installed (the repo ships no assets).
+    #[test]
+    fn the_field_marshal_pauldron_reaches_the_palette_with_no_arm() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let path = "Item\\ObjectComponents\\Shoulder\\LShoulder_Plate_PVPAlliance_A_01.m2";
+        let bytes = chain.read_file(path).expect("read the pauldron");
+        let raw = benilla_formats::parse_m2_skeleton(&bytes).expect("parse its skeleton");
+        // The asset really does author two spherical arms — otherwise this test would pass on a
+        // build that had simply stopped parsing bone flags.
+        assert_eq!(
+            raw.bones.iter().filter(|b| b.billboard.is_some()).count(),
+            2,
+            "the M2 authors two billboard bones"
+        );
+        let welded = benilla_formats::non_separable_billboard_bones(&bytes);
+        assert_eq!(welded, vec![1, 2], "both of them are welded to the body");
+        let (built, _) = build_skeleton(&raw, &welded);
+        assert!(
+            built.joints.iter().all(|j| j.billboard.is_none()),
+            "no palette lane may camera-face this model — it draws in its authored pose"
+        );
     }
 }

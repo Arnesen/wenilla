@@ -90,18 +90,42 @@ impl ItemVisualCatalog {
     }
 }
 
-/// `SpellItemEnchantment.dbc`'s two consumer columns, from one load of the one table: the
-/// **visual** (field 22) an enchant glows with, and the **name** (field 13, the enUS slot of the
-/// 1.12 localized-string block) the item tooltip prints for it. Two lanes read this table — the
-/// weapon-glow chain (decision 0805) and the tooltip's enchant line (decision 0915) — and one
-/// adapter serves both: two loaders over one DBC is how a schema drifts.
+/// `SpellItemEnchantment.dbc`'s consumer columns, from one load of the one table: the **visual**
+/// (field 22) an enchant glows with, the **name** (field 13, the enUS slot of the 1.12
+/// localized-string block) the item tooltip prints for it, and its **`Flags`** (field 23 —
+/// [`EnchantCatalog::binds_the_item`] and [`EnchantCatalog::tooltip_hides_name`]). Three lanes
+/// read this table — the weapon-glow chain (decision 0805), the tooltip's enchant line (decision
+/// 0915) and the item-bind confirms (decision 0928) — and one adapter serves all three: two
+/// loaders over one DBC is how a schema drifts.
 ///
-/// Sparse on both axes: 102 of the 1460 rows carry a visual, and a row without a name simply has
+/// Sparse on every axis: 102 of the 1460 rows carry a visual, and a row without a name simply has
 /// none. The rest of the table (effects, points, args) belongs to whoever needs it, not here.
 pub struct EnchantCatalog {
     visuals: HashMap<u32, i32>,
     names: HashMap<u32, String>,
+    /// `Flags` (field 23) for **every** row the table carries, `0` included — so this map's key
+    /// set is also the reference's `enchantTable[id] != 0` ([`EnchantCatalog::has_row`]).
+    flags: HashMap<u32, u32>,
 }
+
+/// `Flags & 0x1` — applying this enchant **binds the item to you**. Only two sites in the whole
+/// binary read this bit, and both ask that one question: the enchant-apply gate `0x495d60` @
+/// `495ea3` (`testb $0x1, 0x5c(%eax)` — the sole gate on the "Enchanting this item will bind it to
+/// you." confirm, event 402) and `0x5da2c0` @ `5da313`, which walks an item's seven live enchant
+/// slots asking whether it already carries one (and so has already been asked). 86 of the 1460
+/// shipped rows: the shaman weapon imbues, every rogue poison, Firestone, and the Zul'Gurub /
+/// Ahn'Qiraj head-and-leg enchants. The permanent profession enchants are NOT among them, and
+/// neither are sharpening stones, weightstones, oils or scopes.
+const FLAG_BINDS_THE_ITEM: u32 = 0x1;
+
+/// `Flags & 0x2` — **suppress the tooltip line** for this enchant. The two item-tooltip enchant-line
+/// printers both open with it and return outright when it is set (`6290e4` and `62923e`, each
+/// `testb $0x2, 0x5c(...)` → `jne` straight to the function's `retl`), *before* they read the name
+/// at `+0x34`. 12 shipped rows, and they are one coherent family: the totem-granted weapon imbues
+/// (Flametongue Totem 1-4, Windfury Totem 1-3) plus the warlock Firestone 1-4 and Orb of Fire —
+/// buffs whose source is already visible elsewhere on screen. The *replace* confirm reads the name
+/// with no such gate (`4960d0`), so a suppressed enchant still names itself in that popup.
+const FLAG_TOOLTIP_HIDES_NAME: u32 = 0x2;
 
 impl EnchantCatalog {
     /// The ItemVisuals id an enchant glows with, or `None` for an enchant with no visual. The
@@ -117,9 +141,49 @@ impl EnchantCatalog {
         self.names.get(&enchant_id).map(String::as_str)
     }
 
-    /// Build from explicit maps — tests and synthetic fixtures.
-    pub fn from_rows(visuals: HashMap<u32, i32>, names: HashMap<u32, String>) -> Self {
-        EnchantCatalog { visuals, names }
+    /// [`FLAG_BINDS_THE_ITEM`] — whether applying this enchant binds the item to you, the whole
+    /// predicate behind the reference's bind confirm (decision 0928). `false` for an unknown id,
+    /// which is also the reference's answer: it looks the row up first and skips on a miss.
+    ///
+    /// `+0x5c` is field 23, and the field-13 name column chain-locks it: the replace confirm reads
+    /// its two names at `4960d0`/`4960d4` as `0x34(%row,%locale,4)`, and `0x34/4 == 13` is exactly
+    /// [`Self::name`]'s column — so the eight localized name slots run 13..20, `NameFlags` is 21,
+    /// `ItemVisual` 22 (the glow lane's, and `5d9be1: movl 0x58(%eax)` confirms it), and `Flags`
+    /// 23. vmangos's own `SpellItemEnchantmentEntry` agrees field-for-field.
+    pub fn binds_the_item(&self, enchant_id: u32) -> bool {
+        self.flag(enchant_id, FLAG_BINDS_THE_ITEM)
+    }
+
+    /// [`FLAG_TOOLTIP_HIDES_NAME`] — whether the item tooltip must print NO line for this enchant.
+    /// The enchant-line lane gates on it (`crate::items::enchant_lines` in the app).
+    pub fn tooltip_hides_name(&self, enchant_id: u32) -> bool {
+        self.flag(enchant_id, FLAG_TOOLTIP_HIDES_NAME)
+    }
+
+    fn flag(&self, enchant_id: u32, bit: u32) -> bool {
+        self.flags.get(&enchant_id).is_some_and(|f| f & bit != 0)
+    }
+
+    /// Whether the id names a real row at all — the reference's `testl %eax,%eax` after every one
+    /// of its `enchantTable[id]` loads. Both confirms need it: an id that names nothing raises no
+    /// popup and blocks no bind.
+    pub fn has_row(&self, enchant_id: u32) -> bool {
+        self.flags.contains_key(&enchant_id)
+    }
+
+    /// Build from explicit maps — tests and synthetic fixtures. `flags` is field 23 per row and
+    /// doubles as the row census, so a fixture that only sets `names`/`visuals` must list its ids
+    /// there too for [`Self::has_row`] to see them.
+    pub fn from_rows(
+        visuals: HashMap<u32, i32>,
+        names: HashMap<u32, String>,
+        flags: HashMap<u32, u32>,
+    ) -> Self {
+        EnchantCatalog {
+            visuals,
+            names,
+            flags,
+        }
     }
 
     /// Iterate `(enchant id, ItemVisuals id)` for the rows that carry one (order unspecified) —
@@ -229,8 +293,11 @@ pub fn load_enchant_catalog(chain: &mut Chain) -> Result<EnchantCatalog> {
     )?;
     let mut visuals = HashMap::new();
     let mut names = HashMap::new();
+    let mut flags = HashMap::with_capacity(rs.records().len());
     for r in rs.records() {
         let Some(id) = u32_at(r, 0) else { continue };
+        // Every row lands here, `Flags == 0` included — the map's key set IS the row census.
+        flags.insert(id, u32_at(r, 23).unwrap_or(0));
         let visual = u32_at(r, 22).unwrap_or(0) as i32;
         if visual != 0 {
             visuals.insert(id, visual);
@@ -240,7 +307,11 @@ pub fn load_enchant_catalog(chain: &mut Chain) -> Result<EnchantCatalog> {
             names.insert(id, name);
         }
     }
-    Ok(EnchantCatalog { visuals, names })
+    Ok(EnchantCatalog {
+        visuals,
+        names,
+        flags,
+    })
 }
 
 #[cfg(test)]
@@ -428,5 +499,71 @@ mod tests {
             enchants.name_count() > enchants.visual_count(),
             "far more enchants print a name than carry a glow"
         );
+    }
+
+    /// The `Flags` column (field 23) as it actually ships — the two bits the reference reads, and
+    /// the shape of each one's set. Written the way the mapping was *settled*: the name column at
+    /// field 13 is chain-locked by the binary reading it as `0x34(%row,%locale,4)`, `ItemVisual`
+    /// at 22 by `5d9be1: movl 0x58(%eax)`, so `Flags` is 23 (`+0x5c`) — which is exactly what the
+    /// two `testb $0x1,0x5c` / `testb $0x2,0x5c` sites read.
+    ///
+    /// A column slip fails this hard, because both sets are *characterized*, not just counted: bit
+    /// 0's members are weapon imbues / poisons / raid enchants and bit 1's are exactly the twelve
+    /// totem-and-Firestone rows. This also pins the negative that surprised us and is worth not
+    /// re-learning: the permanent profession enchants (Agility +15, Crusader, Fiery Weapon) and
+    /// every consumable-applied enchant (stones, oils, scopes) have `Flags == 0`, so the bind
+    /// confirm does NOT fire for them.
+    #[test]
+    fn real_enchant_flags_column() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let e = load_enchant_catalog(&mut chain).expect("load SpellItemEnchantment");
+
+        // Bit 0 — the bind confirm's gate. 86 rows: the shaman imbues, the rogue poisons, the
+        // warlock Firestone, and the ZG/AQ head-and-leg enchants.
+        for (id, name) in [
+            (1u32, "Rockbiter 3"),
+            (7, "Deadly Poison"),
+            (283, "Windfury 1"),
+            (2488, "+5 All Resistances"),
+            (2606, "+30 Attack Power"),
+        ] {
+            assert!(e.binds_the_item(id), "{id} ({name}) must carry Flags & 1");
+        }
+        // The negative half — the one that makes this bit counter-intuitive.
+        for (id, name) in [
+            (2564u32, "Agility +15"),
+            (1900, "Crusader"),
+            (803, "Fiery Weapon"),
+            (40, "Sharpened +2"),
+            (2627, "Wizard Oil"),
+            (33, "Scope (+3 Damage)"),
+        ] {
+            assert!(
+                !e.binds_the_item(id),
+                "{id} ({name}) must NOT carry Flags & 1"
+            );
+        }
+
+        // Bit 1 — the tooltip's name suppression. Exactly twelve rows, all one family.
+        let hidden: std::collections::BTreeSet<u32> =
+            (0..3000).filter(|&id| e.tooltip_hides_name(id)).collect();
+        assert_eq!(
+            hidden,
+            [124, 285, 303, 543, 563, 564, 1683, 1783, 1803, 1823, 1824, 1825]
+                .into_iter()
+                .collect(),
+            "the totem-granted imbues (Flametongue/Windfury Totem), Orb of Fire and Firestone 1-4"
+        );
+        // Suppression is about the tooltip LINE, not the row: the names are still there, and the
+        // replace confirm reads them ungated (`4960d0`).
+        assert_eq!(e.name(124), Some("Flametongue Totem 1"));
+
+        // The row census the confirms gate on — present for a real id, absent past the table.
+        assert!(e.has_row(2564) && e.has_row(1) && !e.has_row(999_999));
     }
 }

@@ -101,7 +101,7 @@ pub(crate) struct CastLadder<'w, 's> {
     pub(crate) ground: ResMut<'w, super::targeting::SpellTargeting>,
 }
 
-/// What a targeting-cursor click bound — the two things `BindLocation 0x6e60f0` /
+/// What a targeting-cursor click bound — the three things `BindLocation 0x6e60f0` /
 /// `BindTarget 0x6e5b40` can fill into a standing flag_word once the ladder has already run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TargetedBind {
@@ -109,17 +109,19 @@ pub(crate) enum TargetedBind {
     Dest([f32; 3]),
     /// The bag / paper-doll click's item guid (decision 0923).
     Item(u64),
+    /// The world click's GameObject guid (decision 0939) — a chest, a door, a vein, a herb.
+    Object(u64),
 }
 
 impl CastLadder<'_, '_> {
-    /// **The targeting cursor's commit tail**, shared by both halves. The ladder itself already
+    /// **The targeting cursor's commit tail**, shared by all three seams. The ladder itself already
     /// ran when the cursor went up — the click owes only what `SendCast 0x6e54f0`'s tail owes:
     /// the packet (same block, two opcodes, [`CastCommit`] picking which), the pending arm, and
     /// the GCD. Then the word clears.
     ///
-    /// One function because there is one tail: the ground click and the item click differ in
-    /// exactly one field of one packet, and a tail written twice is a tail that drifts (the
-    /// lesson decision 0914 wrote up one layer above this).
+    /// One function because there is one tail: the three clicks differ in exactly one field of one
+    /// packet, and a tail written three times is a tail that drifts (the lesson decision 0914 wrote
+    /// up one layer above this).
     pub(crate) fn commit_targeted(
         &mut self,
         spell_id: u32,
@@ -135,6 +137,12 @@ impl CastLadder<'_, '_> {
                     spell_id,
                     item_guid,
                 },
+                // The same packet the right-click OPEN_LOCK path sends (decision 0239) — one
+                // builder, because `BindTarget`'s GameObject arm is the one that fills the block
+                // on both routes.
+                TargetedBind::Object(go_guid) => {
+                    ClientCommand::CastSpellGameObject { spell_id, go_guid }
+                }
             },
             CastCommit::Item {
                 bag_index,
@@ -148,6 +156,7 @@ impl CastLadder<'_, '_> {
                 target: match bound {
                     TargetedBind::Dest(dest) => UseItemTarget::Dest(dest),
                     TargetedBind::Item(guid) => UseItemTarget::Item(guid),
+                    TargetedBind::Object(guid) => UseItemTarget::Object(guid),
                 },
             },
         };
@@ -400,25 +409,20 @@ fn send_spell_cast(
         ) {
             cast_target::CastWireTarget::SelfImplicit => None,
             cast_target::CastWireTarget::Unit(guid) => Some(guid),
-            cast_target::CastWireTarget::GroundTargeting => {
-                // Enter the targeting-cursor mode's location half (decision 0792) — nothing is
-                // sent, nothing armed: the ref's cursor entry (`6e50c8`) runs none of the commit
-                // tail; the world click's commit owes the GCD and the pending arm. The COMMIT
-                // rides along: the ref keeps the whole pending-cast block (the item guid at
-                // `0xceac48` included) across the cursor, so the world click's `0x6e54f0` still
-                // emits USE_ITEM for a thrown grenade or a stick of dynamite.
-                debug!("ui_action: cast {spell_id} awaits its ground click — targeting cursor up");
-                ground.enter(spell_id, commit, super::targeting::TargetingWants::Location);
-                return;
-            }
-            cast_target::CastWireTarget::ItemTargeting => {
-                // The same cursor's item half (decision 0923) — the bag / paper-doll click seam
-                // binds, and its `0x495d60` owes the commit tail. A poison, a sharpening stone,
-                // an enchanting scroll, a Craft-window enchant: same entry, same word, same
-                // pending-cast block carried across the cursor, so the click still emits
-                // USE_ITEM for an item's own ON_USE and CAST_SPELL for a known enchant.
-                debug!("ui_action: cast {spell_id} awaits its item click — targeting cursor up");
-                ground.enter(spell_id, commit, super::targeting::TargetingWants::Item);
+            cast_target::CastWireTarget::Targeting(word) => {
+                // Enter the targeting-cursor mode with the standing word (decisions 0792 / 0923 /
+                // 0939) — nothing is sent, nothing armed: the ref's cursor entry (`6e50c8`) runs
+                // none of the commit tail; whichever click seam binds owes the GCD and the pending
+                // arm. The COMMIT rides along: the ref keeps the whole pending-cast block (the
+                // item guid at `0xceac48` included) across the cursor, so the click's `0x6e54f0`
+                // still emits USE_ITEM for a thrown grenade, a poison bottle or a key, and
+                // CAST_SPELL for a known enchant or opener.
+                //
+                // ONE arm, not one per seam, because the word is the state: a lock spell's word
+                // arms the bag click and the world click at the same time and only the click
+                // decides which it was.
+                debug!("ui_action: cast {spell_id} awaits its click — targeting cursor up ({word:#06x})");
+                ground.enter(spell_id, commit, word);
                 return;
             }
             cast_target::CastWireTarget::Refused(reason) => {
@@ -750,27 +754,25 @@ mod tests {
         ));
     }
 
-    /// The targeting cursor's ONE commit tail (decision 0923), all four cells of its
-    /// commit × bind grid. Both halves of the cursor share it precisely so this table can't grow
-    /// a fifth, divergent copy: a thrown grenade and a poison bottle are the same `CMSG_USE_ITEM`
-    /// with a different bit set, and a Flamestrike and a Craft-window enchant are the same
-    /// pending-cast block under two `CMSG_CAST_SPELL` builders. Every cell also arms the pending
-    /// guard and clears the word — asserted once, since the tail is one function.
+    /// The targeting cursor's ONE commit tail (decisions 0923 / 0939), all six cells of its
+    /// commit × bind grid. All three seams share it precisely so this table can't grow a seventh,
+    /// divergent copy: a thrown grenade, a poison bottle and a key are the same `CMSG_USE_ITEM`
+    /// with a different bit set, and a Flamestrike, a Craft-window enchant and a lockpick are the
+    /// same pending-cast block under three `CMSG_CAST_SPELL` builders. Every cell also arms the
+    /// pending guard and clears the word — asserted once, since the tail is one function.
     #[test]
-    fn the_targeting_commit_tail_covers_both_halves() {
+    fn the_targeting_commit_tail_covers_every_seam() {
         use benilla_protocol::messages::UseItemTarget;
         const DEST: [f32; 3] = [1.0, 2.0, 3.0];
         const ITEM: u64 = 0xF150_0000_0000_ABCD;
+        const GO: u64 = 0xF110_000C_1F00_A3B2;
         let (mut world, rx) = world();
         let commit = |world: &mut World, commit: CastCommit, bound: TargetedBind| {
             world.insert_resource(crate::ui_cast::PendingCast::default());
             world
                 .resource_mut::<super::super::targeting::SpellTargeting>()
-                .enter(
-                    HEARTHSTONE,
-                    commit,
-                    super::super::targeting::TargetingWants::Item,
-                );
+                // The lock word — the one that answers both the bag and the world seam.
+                .enter(HEARTHSTONE, commit, 0x4800);
             world
                 .run_system_once(move |mut ladder: CastLadder| {
                     ladder.commit_targeted(HEARTHSTONE, commit, bound);
@@ -823,6 +825,25 @@ mod tests {
                 bag_index: 255,
                 slot: 24,
                 target: UseItemTarget::Item(ITEM),
+                ..
+            })
+        ));
+
+        // The world seam (decision 0939): the same two opcodes, the GameObject block. The spell
+        // arm is byte-identical to the right-click OPEN_LOCK send — one builder, deliberately.
+        commit(&mut world, CastCommit::Spell, TargetedBind::Object(GO));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::CastSpellGameObject { go_guid: GO, .. })
+        ));
+
+        commit(&mut world, HEARTH_COMMIT, TargetedBind::Object(GO));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::UseItem {
+                bag_index: 255,
+                slot: 24,
+                target: UseItemTarget::Object(GO),
                 ..
             })
         ));

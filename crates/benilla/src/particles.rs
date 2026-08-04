@@ -554,10 +554,18 @@ pub fn spawn_emitter(
     if def.params.peak_lifespan() <= 0.0 || def.timing.peak_rate() <= 0.0 {
         return None; // emits nothing
     }
+    // The starting slot is the model's **loader-idle** sequence, never "unknown" (decision 0936).
+    // The reference arms that sequence on every M2 instance at load, so an emitter always has a
+    // sequence to sample; leaving it `None` handed the slot resolution to `EmitTiming::idx`'s
+    // `unwrap_or(0)` degrade, which is the idle slot only by accident. On the Spawn/Stand/Despawn
+    // GameObjects slot 0 is the *Spawn* flourish, so a content-gated instance (nothing armed, so
+    // `playing_seq` never overrides this seed) sat at that slot's opening frame for ever — the
+    // Stormwind battlefield banner firing its spawn sparkle-tails on a loop.
+    let idle = Some(emitter.idle_seq);
     let (host, seq) = match clock {
-        EmitClock::Pinned => (None, None),
-        EmitClock::Effect(s) => (None, s),
-        EmitClock::Host(h) => (Some(h), None),
+        EmitClock::Pinned => (None, idle),
+        EmitClock::Effect(s) => (None, s.or(idle)),
+        EmitClock::Host(h) => (Some(h), idle),
     };
     // The owner's reach is model-local; the rung is a view-space distance, so it takes the
     // placement scale with it (a scaled-up creature's batches spread proportionally).
@@ -800,6 +808,64 @@ pub(crate) mod tests {
     /// The minimal def, exposed for sibling-module tests (the sim's child-drive test).
     pub(crate) fn plain_def() -> ParticleEmitterDef {
         super::emit::tests::def(ParticleShape::Plane)
+    }
+
+    /// A spawnable emitter whose owner model's loader-idle sequence is file slot `idle_seq`.
+    fn model_emitter(idle_seq: usize) -> ModelEmitter {
+        ModelEmitter {
+            def: plain_def(),
+            texture: Some(Handle::default()),
+            bone_pivot: [0.0; 3],
+            billboard: None,
+            recursion: None,
+            geometry: None,
+            owner_reach: 0.0,
+            water_bound: (Vec3::ZERO, 0.0),
+            idle_seq,
+        }
+    }
+
+    /// Spawn one emitter through [`spawn_emitter`] and report the sequence slot it was seeded with.
+    fn seeded_slot(emitter: ModelEmitter, clock: EmitClock) -> Option<usize> {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let e = app
+            .world_mut()
+            .run_system_once(move |mut c: Commands| {
+                spawn_emitter(&mut c, &emitter, Transform::IDENTITY, default(), clock)
+            })
+            .unwrap()?;
+        app.world().get::<ParticleEmitter>(e).unwrap().seq
+    }
+
+    /// **The emitter's opening slot is its model's loader-idle sequence, not file slot 0.**
+    ///
+    /// A Spawn/Stand/Despawn GameObject (`DuelingFlag`-shaped — the battlefield banners, the
+    /// goobers, `ArenaFlag`) keeps its idle in slot 1; slot 0 is the Spawn flourish. Seeding `None`
+    /// handed the resolution to `EmitTiming::idx`'s `unwrap_or(0)` degrade, so a rig-less instance —
+    /// one whose constant-pose idle made the render gate skip the arm, so nothing ever overrode the
+    /// seed — sampled the Spawn gate at its opening frame for ever. That is the Stormwind
+    /// battlefield banner firing its spawn sparkle-tails on a permanent loop.
+    ///
+    /// Every clock takes the seed: `Host` because its player may arm nothing, `Pinned` because there
+    /// is no rig to ask at all, `Effect(None)` because an unarmed effect rig rests on the same idle.
+    #[test]
+    fn an_emitter_opens_on_its_models_idle_slot_not_slot_zero() {
+        let host = Entity::from_raw_u32(1).unwrap();
+        for clock in [
+            EmitClock::Pinned,
+            EmitClock::Effect(None),
+            EmitClock::Host(host),
+        ] {
+            assert_eq!(seeded_slot(model_emitter(1), clock), Some(1));
+        }
+        // An effect rig that DID arm a slot still names it — the seed is a default, not an override.
+        assert_eq!(
+            seeded_slot(model_emitter(1), EmitClock::Effect(Some(2))),
+            Some(2)
+        );
+        // The ordinary model, whose idle IS slot 0, is unchanged.
+        assert_eq!(seeded_slot(model_emitter(0), EmitClock::Pinned), Some(0));
     }
 
     /// Camera at the origin looking down −Z (Bevy's convention), and an owner sphere `depth` yd

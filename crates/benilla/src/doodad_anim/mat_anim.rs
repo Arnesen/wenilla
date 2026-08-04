@@ -156,6 +156,14 @@ impl MatAnim {
 /// base clips are live and the heavier one wins; the reference instead blends the two sampled
 /// scalars by λ (wow-re `eval.md` FN 0x71af20's blend leg), a sub-blend-time difference on tracks
 /// the corpus authors as 0/1 steps — recorded, not modelled.
+///
+/// A player with **nothing armed** is not "no sequence" — the reference arms the loader-idle clip on
+/// every M2 instance at load, so the answer is that sequence at its opening frame
+/// ([`ModelAnimations::idle_seq`], decision 0936). benilla's rig tier skips the arm whenever looping
+/// the idle would render identically to the static mesh, and that skip used to leak out of the mesh
+/// question into this one: both callers read the returned `None` as "keep the pinned slot", which
+/// starts life at file slot 0. On a Spawn/Stand/Despawn GameObject slot 0 is the Spawn flourish, so
+/// the batch read a sequence the instance was never playing.
 pub(crate) fn playing_seq(
     player: &AnimationPlayer,
     anims: &ModelAnimations,
@@ -168,6 +176,7 @@ pub(crate) fn playing_seq(
         })
         .max_by(|a, b| a.2.total_cmp(&b.2))
         .map(|(seq, t, _)| (seq, t))
+        .or_else(|| anims.idle_seq().map(|seq| (seq, 0.0)))
 }
 
 /// Sample every instance's material-alpha loops: a hosted instance on its host's playing sequence

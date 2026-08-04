@@ -244,6 +244,7 @@ impl Plugin for UiActionPlugin {
             .init_resource::<AutoRepeatActive>()
             .init_resource::<cast_target::AutoSelfCast>()
             .init_resource::<targeting::SpellTargeting>()
+            .init_resource::<targeting::EnchantConfirmItem>()
             .add_systems(Startup, load_spells.after(AssetSet::Open))
             .add_systems(
                 Update,

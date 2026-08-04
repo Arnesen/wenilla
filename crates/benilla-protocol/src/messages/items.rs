@@ -564,11 +564,6 @@ pub const SLOT_BAG_FIRST: u8 = 19;
 /// `TARGET_FLAG_GAMEOBJECT` — the cast-target bit that carries a GO guid (vmangos
 /// `SpellDefines.h`; its `SpellCastTargets::read` is the only bit here that consumes bytes).
 const TARGET_FLAG_GAMEOBJECT: u16 = 0x0800;
-/// `TARGET_FLAG_LOCKED` — "this cast is opening a lock". Consumes **no** bytes on the read side
-/// (vmangos `SpellCastTargets::read` tests only `TARGET_FLAG_GAMEOBJECT` for the GO guid), but the
-/// real client ORs it into every OPEN_LOCK cast's mask (`0x6e44d9`/`0x6e44e1`, wow-re
-/// `cursor-system.md` §8.4), so the mask we write is the mask it writes.
-const TARGET_FLAG_LOCKED: u16 = 0x4000;
 
 /// `TARGET_FLAG_UNIT` — a bound unit target: the same bit, and the same packed guid, a
 /// `CMSG_CAST_SPELL` writes. In the real client ONE block builder serves both opcodes, so one bit
@@ -597,11 +592,13 @@ pub enum UseItemTarget {
     /// `TARGET_FLAG_UNIT` + the packed guid — an item whose spell binds a unit exactly as a
     /// spell's does: a bandage, a soulstone, an offensive trinket.
     Unit(u64),
-    /// `TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED` + the packed guid — the **key-in-a-lock**
-    /// case (decision 0769): opening a locked door or chest with a key is not a spell cast, it is
-    /// *using the key at the object*. It matters that this is USE_ITEM and not a bare cast:
-    /// `Spell::CanOpenLock` honours a `Lock.dbc` KEY slot **only** when `m_CastItem` is set
-    /// (`Spell.cpp:7892`), which only this packet supplies.
+    /// `TARGET_FLAG_GAMEOBJECT` + the packed guid — the **key-in-a-lock** case (decision 0769):
+    /// opening a locked door or chest with a key is not a spell cast, it is *using the key at the
+    /// object*. It matters that this is USE_ITEM and not a bare cast: `Spell::CanOpenLock` honours
+    /// a `Lock.dbc` KEY slot **only** when `m_CastItem` is set (`Spell.cpp:7892`), which only this
+    /// packet supplies. The mask is `0x0800` alone — `TARGET_FLAG_LOCKED` is a *targeting-word*
+    /// bit that `BindTarget 0x6e5b40` consumes and never writes to the wire (decision 0939,
+    /// correcting 0769; see [`super::spells::cast_spell_gameobject`] for the census).
     Object(u64),
     /// `TARGET_FLAG_DEST_LOCATION` + three `f32` WoW coords — the targeting-cursor commit for a
     /// **thrown** item: dynamite, grenades, bombs, the Goblin Mortar (46 of the 1.12 on-use item
@@ -635,7 +632,7 @@ pub fn use_item(bag_index: u8, slot: u8, spell_slot: u8, target: UseItemTarget) 
             guid
         }
         UseItemTarget::Object(guid) => {
-            body.extend_from_slice(&(TARGET_FLAG_GAMEOBJECT | TARGET_FLAG_LOCKED).to_le_bytes());
+            body.extend_from_slice(&TARGET_FLAG_GAMEOBJECT.to_le_bytes());
             guid
         }
         UseItemTarget::Item(guid) => {

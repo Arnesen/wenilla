@@ -117,14 +117,28 @@ pub(super) fn update_model_particles(
                     // The owner-last draw-order rung, stamped on after the fact: a 3-D model
                     // particle is one of its owner's emitters exactly like the quad cloud beside
                     // it, and the reference draws them in one bracket after that model's batches
-                    // — so both must sit on the SAME rung or the cloud paints over the shards
                     // (`ParticleEmitter::owner_rung`). It goes here rather than through
                     // `model_material`, which is the shared M2-batch recipe: every batch in the
                     // world would have to carry a particle-only argument and a cache-key field to
                     // move one number. These instance materials are per-instance throwaways
                     // (their `tint` is already mutated every frame), so nothing else sees it.
+                    //
+                    // BUCKETED, and transparent-pass only (decision 0937). On a material the rung
+                    // is also a *pipeline-key axis* (bevy folds `depth_bias as i32` into the key
+                    // — 0837's law), and 32 integer rungs × every blend state is an open key
+                    // space no warm pass can pre-compile: each first-seen combination was a
+                    // synchronous render-thread pipeline compile mid-spell-cast.
+                    // `owner_last_rung_bucket` snaps UP (0721's blessed direction) to the closed
+                    // set `pipe_warm`'s menagerie compiles behind the loading cover; the bucket
+                    // is ≥ the exact rung, so a shard never sorts under its sibling quad cloud
+                    // (which keeps the exact value — its rung is queue-side, never a material).
+                    // Opaque/mask shard batches take no rung at all: sort bias is a
+                    // transparent-pass concept, and on an opaque material it would only mint an
+                    // unwarmable pipeline variant.
                     if let Some(m) = materials.get_mut(&material) {
-                        m.base.depth_bias = rung;
+                        if m.base.alpha_mode == AlphaMode::Blend {
+                            m.base.depth_bias = benilla_formats::owner_last_rung_bucket(rung);
+                        }
                     }
                     let entity = commands
                         .spawn((

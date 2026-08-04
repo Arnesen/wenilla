@@ -109,7 +109,9 @@ pub use char_stats::{
 };
 pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
 pub use craft::{CraftReagent, CraftRecipe, CraftState};
-pub use cursor::{CursorAction, CursorItem, CursorPayload, CursorSpell, WorldPick, EQUIPMENT_BAG};
+pub use cursor::{
+    CursorAction, CursorItem, CursorPayload, CursorSpell, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+};
 pub use death::{DeathAction, DeathUiState};
 pub use duel::DuelRequest;
 pub use follow::FollowRequest;

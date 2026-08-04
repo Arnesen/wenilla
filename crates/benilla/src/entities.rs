@@ -179,6 +179,18 @@ pub(crate) struct CubeAssets {
     npc_mat: Handle<StandardMaterial>,
 }
 
+impl CubeAssets {
+    /// The pipeline-warm rig parts ([`crate::pipe_warm`], decision 0938): the production cube
+    /// mesh + both materials, so the fallback-cube pipeline compiles behind the cover instead of
+    /// on the first model-less spawn in view.
+    pub(crate) fn warm_parts(&self) -> (Handle<Mesh>, [Handle<StandardMaterial>; 2]) {
+        (
+            self.mesh.clone(),
+            [self.player_mat.clone(), self.npc_mat.clone()],
+        )
+    }
+}
+
 /// Creature rendering: the display→model catalog + a per-display [`DisplayModel`] cache. Optional — if
 /// the DBCs fail to load, NPCs stay cubes.
 #[derive(Resource)]

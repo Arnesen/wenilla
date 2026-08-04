@@ -20,14 +20,17 @@
 //!   is unmodeled here (INTERIM): we refuse locally with the client's own error strings instead —
 //!   `0x09` "You have no target." / `0x0A` "Invalid target" — and never ship an unbindable cast.
 //!
-//! **Both halves of the targeting cursor are modeled.** The *location* half (decision 0792):
-//! switch enum 16 and the bare DEST word (`Targets = 0x40`) resolve to
-//! [`CastWireTarget::GroundTargeting`], which [`super::targeting`] turns into the Cast/UnableCast
-//! cursor + the world-click commit. The *item* half (decision 0923): the bare ITEM word
-//! (`Targets = 0x10`) resolves to [`CastWireTarget::ItemTargeting`], the same module's bag /
-//! paper-doll click commit. Still deferred, refused-not-guessed: the pure SOURCE word (0x20 —
-//! NPC-cast data only), the LOCKED word (`0x4000`, whose lock machinery the world-click OPEN_LOCK
-//! path owns), gameobject bit 11, STRING bit 13, and the *unit* hand-cursor mode (the
+//! **All three seams of the targeting cursor are modeled** — and the cursor carries the *word*
+//! ([`CastWireTarget::Targeting`]), not a verdict about it, because the reference's three "wants"
+//! predicates are three independent mask tests on the one word `0xcecac0` and **more than one can
+//! be true at once**: `TargetingWantsLocation 0x6e6320` (`& 0x60`) → the terrain click (decision
+//! 0792); `TargetingWantsItem 0x6e6330` (`& 0x4010`) → the bag / paper-doll click (0923/0928);
+//! `TargetingWantsGameObject 0x6e62d0` (`ch & 0x48`, i.e. `& 0x4800`) → the world click on a
+//! GameObject (decision 0939). A LOCKED spell — Opening, Pick Lock, Mining, Herb Gathering —
+//! satisfies the last **two**, and the click decides which leg it was, exactly as `BindTarget
+//! 0x6e5b40` decides: by the clicked object's typemask (`6e5f17` item bit 1, `6e5f52` GameObject
+//! bit 5), each arm then re-testing the word. Still deferred, refused-not-guessed: the pure SOURCE
+//! word (0x20 — NPC-cast data only), STRING bit 13, and the *unit* hand-cursor mode (the
 //! residual-unit-word machine behind the autoSelfCast stand-in above).
 
 use benilla_formats::SpellDisplay;
@@ -67,9 +70,24 @@ pub(crate) const ERR_INVALID_TARGET: u8 = 0x0A;
 const TF_DEST_LOCATION: u16 = 0x0040;
 /// The item bit — the *other* half of the targeting cursor (decision 0923). Its predicate twin is
 /// `TargetingWantsItem 0x6e6330` (`flag_word & 0x4010`), which the bag and paper-doll click seams
-/// consult before binding the clicked item ([`super::targeting`]). Only the bare bit resolves here:
-/// see [`resolve_cast_target`] for why `0x4000` stays refused.
+/// consult before binding the clicked item ([`super::targeting`]).
 const TF_ITEM: u16 = 0x0010;
+/// `TARGET_FLAG_LOCKED` — the **shared** bit: it is in `TargetingWantsItem`'s `0x4010` *and* in
+/// `TargetingWantsGameObject`'s `0x4800`, which is precisely how one armed lock spell serves both
+/// legs (decisions 0928 / 0939). Mining, Herb Gathering, Opening, Pick Lock, Disarm Trap: one
+/// spell, two clicks that can end it — a lockbox in your bag, or a lockable GameObject in the
+/// world. Neither leg is a new wire shape; `BindTarget 0x6e5b40` picks its arm by the clicked
+/// object's typemask and then **hardcodes** the outgoing bit — item arm `6e5f1e: testl $0x4010,
+/// 0xcecac0` → `6e5f2e: orb $0x10, 0xceac5c` (ITEM); GameObject arm `6e5f60: testb $0x48, %ch` →
+/// `6e5f69: orb $0x8, 0xceac5d` (GAMEOBJECT). `LOCKED` itself is never written to the wire mask
+/// by either (decision 0939's census). vmangos agrees from the other side: `Spell::CheckCast`
+/// accepts a LOCKED spell whose mask carries `TARGET_FLAG_ITEM | TARGET_FLAG_GAMEOBJECT`
+/// (`Spell.cpp:6755`).
+const TF_LOCKED: u16 = 0x4000;
+/// `TARGET_FLAG_GAMEOBJECT` — the other bit of `TargetingWantsGameObject 0x6e62d0`'s `0x4800`, and
+/// the one implicit arm 23 ORs in ([`cast_target_mask`]). A word carrying it arms the world click's
+/// GameObject leg (decision 0939).
+const TF_GAMEOBJECT: u16 = 0x0800;
 
 /// What the wire's target block should carry for this cast.
 #[derive(Debug, PartialEq, Eq)]
@@ -79,13 +97,14 @@ pub(crate) enum CastWireTarget {
     /// A bound unit — mask `TARGET_FLAG_UNIT (0x2)` + this guid (possibly the player's own,
     /// via the autoSelfCast fallback).
     Unit(u64),
-    /// A ground-targeted cast (decision 0792) — no send yet: enter the targeting-cursor mode's
-    /// location half ([`super::targeting`]); the world click commits mask `0x40` + the point.
-    GroundTargeting,
-    /// An **item**-targeted cast (decision 0923) — no send yet either: the same cursor mode's item
-    /// half; the next bag or paper-doll click commits mask `0x10` + the clicked item's packed guid.
-    /// Poisons, sharpening/weightstones, weapon oils, scopes, every enchant, Disenchant.
-    ItemTargeting,
+    /// The cast awaits a click — no send yet: enter the targeting-cursor mode with **this standing
+    /// flag_word** ([`super::targeting`]), which is the reference's own state (`0xcecac0` != 0 *is*
+    /// `IsTargeting 0x6e48a0`). Each click seam then asks the word its own question, so one word
+    /// can serve more than one seam: terrain (`& 0x60` → mask `0x40` + the point), bag / paper doll
+    /// (`& 0x4010` → mask `0x10` + the item guid), world GameObject (`& 0x4800` → mask `0x800` +
+    /// the GO guid). Blizzard and Flamestrike arm the first; poisons, oils and enchants the second;
+    /// Opening and Pick Lock arm the second **and** the third at once.
+    Targeting(u16),
     /// Nothing bindable — do NOT send; surface this client error instead.
     Refused(u8),
 }
@@ -310,7 +329,11 @@ pub(crate) fn resolve_cast_target(
     // after the word==0 immediate-commit above, whose order the ref fixes (`6e5338` precedes the
     // bl test).
     if def.implicit_target_a1 == 16 {
-        return CastWireTarget::GroundTargeting;
+        // The ref's arm-16 defer is a cursor-mode flag (`bl`), not a word bit — but our seams read
+        // only the word, so the DEST bit is what says "the terrain click owns this one". The two
+        // agree on shipped data (arm-16 rows carry `Targets & 0x40` anyway); the OR is what keeps
+        // them agreeing if one ever doesn't.
+        return CastWireTarget::Targeting(word | TF_DEST_LOCATION);
     }
     // Bits outside the unit family (item/gameobject/location/string) have no candidate here.
     // The DEST-location word (Blizzard's bare `Targets = 0x40`, default switch arm) is the
@@ -321,24 +344,22 @@ pub(crate) fn resolve_cast_target(
     // is NPC-cast data (Aura of Fear kin), unreachable from a player's book, and keeps the
     // refusal with the item/GO/string machines.
     if word & !UNIT_BITS != 0 {
-        if word == TF_DEST_LOCATION {
-            return CastWireTarget::GroundTargeting;
-        }
-        // The item half of the same cursor (decision 0923). The reference never decides this at
-        // arm time — it lets the bind walk fail, leaves the word standing, and asks
-        // `TargetingWantsItem 0x6e6330` (`word & 0x4010`) at *click* time. Forking here is
-        // byte-equivalent on shipped data because the two item bits are never mixed with a unit
-        // bit: a whole-`Spell.dbc` sweep finds every `Targets & 0x4010` row is exactly `0x10`
-        // (363 rows — enchants, poisons, stones, oils, scopes, Disenchant) or exactly `0x4000`
-        // (103 rows — the OPEN_LOCK family), and that pin is a test
-        // (`benilla_formats::spells::catalog_tests::real_item_target_family_and_its_gate_columns`).
+        // Hand the whole word to the cursor when any seam can serve it — written as the
+        // reference's own three predicates rather than as equalities on bare words. The reference
+        // never decides this at arm time at all: it lets the bind walk fail, leaves the word
+        // standing, and asks at *click* time. Forking here is byte-equivalent for a structural
+        // reason, not a data one — **no unit candidate can ever clear any of these bits**
+        // ([`clear_satisfied_bits`] only clears the unit family), so a word carrying one always
+        // survives the walk and always ends in cursor mode.
         //
-        // Only the bare `0x10` resolves. `0x4000` is `TARGET_FLAG_LOCKED`, whose spells are the
-        // Mining/Herb Gathering/Opening/Pick Lock family: implicit arm 23 also sets the GAMEOBJECT
-        // bit, and their *item* leg (a lockbox in your bag) needs the lock machinery the world
-        // click already owns — the GO gap decision 0914 named. It stays refused, deliberately.
-        if word == TF_ITEM {
-            return CastWireTarget::ItemTargeting;
+        // Which is exactly why the word travels instead of a verdict about it. The LOCKED family's
+        // word is not bare: 100 of its 103 rows carry implicit arm 23, whose overlay ORs in
+        // `TF_GAMEOBJECT`, and one carries arm 25 (`TF_UNIT`). An equality test refused every one
+        // of them (0928's live probe: a Dull Iron Key drew "Invalid target" instead of the
+        // cursor) — and a single-verdict enum then had to *choose* item-or-world for a word the
+        // reference lets satisfy both. Both bits ride along; the click picks the leg.
+        if word == TF_DEST_LOCATION || word & (TF_ITEM | TF_LOCKED | TF_GAMEOBJECT) != 0 {
+            return CastWireTarget::Targeting(word);
         }
         return CastWireTarget::Refused(ERR_INVALID_TARGET);
     }
@@ -475,12 +496,12 @@ mod tests {
         let flamestrike = spell(0x40, 16);
         assert_eq!(
             resolve_cast_target(Some(&flamestrike), Some(42), Some(1), true, &rel_none()),
-            CastWireTarget::GroundTargeting
+            CastWireTarget::Targeting(TF_DEST_LOCATION)
         );
         let blizzard = spell(0x40, 28);
         assert_eq!(
             resolve_cast_target(Some(&blizzard), None, Some(1), true, &rel_none()),
-            CastWireTarget::GroundTargeting
+            CastWireTarget::Targeting(TF_DEST_LOCATION)
         );
         let self_commit_with_ground_arm = spell(0, 16);
         assert_eq!(
@@ -496,11 +517,13 @@ mod tests {
         );
     }
 
-    /// The still-deferred non-unit masks (source-location, LOCKED, string, the 0x60 pair) refuse
-    /// instead of shipping a guess — the machines named in the module docs.
+    /// The still-deferred non-unit masks (source-location, string, the 0x60 pair) refuse instead
+    /// of shipping a guess — the machines named in the module docs. `0x60` is the *pair*: the
+    /// reference binds source then dest across two clicks (`BindLocation 0x6e60f0`'s bit-5 arm
+    /// takes priority and only the second click sends), and our terrain seam binds dest only.
     #[test]
     fn non_unit_masks_refuse() {
-        for targets in [0x20u32, 0x4000, 0x2000, 0x60] {
+        for targets in [0x20u32, 0x2000, 0x60] {
             let s = spell(targets, 0);
             assert_eq!(
                 resolve_cast_target(Some(&s), Some(42), Some(1), true, &rel_none()),
@@ -510,22 +533,49 @@ mod tests {
         }
     }
 
-    /// The bare ITEM word enters the cursor's item half (decision 0923) — and it does so whether
-    /// or not a unit is selected, because there is no unit leg to try: the word carries no unit
-    /// bit (pinned across the whole shipped table by the formats-side family test). Its LOCKED
-    /// sibling `0x4000` stays refused above; the word==0 immediate commit still precedes both.
+    /// The seam predicates are MASKS — `word & 0x4010` for the bag click, `word & 0x4800` for the
+    /// world click — so every word carrying one of their bits raises the cursor, not just the bare
+    /// ones. That distinction is the whole of the LOCKED family: 100 of its 103 rows carry implicit
+    /// arm 23, whose overlay ORs the GAMEOBJECT bit into the word (`0x4800`), and one carries arm
+    /// 25 (`0x4002`). An equality test refused all of them, which is what a live key-on-lockbox
+    /// probe caught (0928).
+    ///
+    /// And the **word travels**: the resolver hands the cursor the whole thing rather than a
+    /// verdict, so a `0x4800` word can answer the bag click *and* the world click. Deciding here
+    /// would have to pick one, and the reference picks neither until the click lands.
+    ///
+    /// A selected unit changes nothing in any case: none of these is a bit a unit candidate can
+    /// clear, so the walk can never discharge the word. The word==0 immediate commit still precedes
+    /// all of it.
     #[test]
-    fn the_item_word_enters_the_cursors_item_half() {
-        let poison = spell(0x10, 0);
-        assert_eq!(
-            resolve_cast_target(Some(&poison), Some(42), Some(1), true, &rel_none()),
-            CastWireTarget::ItemTargeting
-        );
-        assert_eq!(
-            resolve_cast_target(Some(&poison), None, Some(1), false, &rel_none()),
-            CastWireTarget::ItemTargeting,
-            "no selection and no autoSelfCast change nothing — the item bit is the whole word"
-        );
+    fn the_seam_predicates_are_masks_and_the_word_travels() {
+        // Raw `Targets`, then the shapes `cast_target_mask`'s implicit overlay actually produces on
+        // the shipped LOCKED rows (arm 23 → `|0x800`, arm 25 → `|TF_UNIT`), then the bare
+        // GAMEOBJECT word arm 23 puts on a spell whose `Targets` carries nothing else.
+        for (targets, implicit) in [
+            (0x10u32, 0),
+            (0x4000, 0),
+            (0x4000, 23),
+            (0x4000, 25),
+            (0x0, 23),
+        ] {
+            let s = spell(targets, implicit);
+            let word = cast_target_mask(&s);
+            assert_eq!(
+                resolve_cast_target(Some(&s), Some(42), Some(1), true, &rel_none()),
+                CastWireTarget::Targeting(word),
+                "Targets {targets:#x} + implicit arm {implicit} must raise the cursor with its word"
+            );
+            assert_eq!(
+                resolve_cast_target(Some(&s), None, Some(1), false, &rel_none()),
+                CastWireTarget::Targeting(word),
+                "no selection and no autoSelfCast change nothing — no unit clears these bits"
+            );
+        }
+        // The shipped lock word: one cursor, and it carries both seams' bits at once.
+        let opening = cast_target_mask(&spell(0x4000, 23));
+        assert_eq!(opening & (TF_ITEM | TF_LOCKED), TF_LOCKED);
+        assert_eq!(opening & (TF_GAMEOBJECT | TF_LOCKED), opening);
     }
 
     fn rel_none() -> TargetRelations<'static> {

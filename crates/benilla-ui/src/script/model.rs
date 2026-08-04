@@ -312,6 +312,9 @@ pub(crate) struct Model {
     /// reports as [`super::EQUIPMENT_BAG`] + its 1-based inventory slot, so both seams speak the
     /// one bag space the drain already resolves.
     pub(crate) item_picks: Vec<(i64, u32)>,
+    /// `BindEnchant()`/`ReplaceEnchant()` — the two enchant-confirm popups' answers to a pick the
+    /// app already parked, drained by it (decision 0928; [`cursor::EnchantConfirm`]).
+    pub(crate) enchant_confirms: Vec<cursor::EnchantConfirm>,
     /// `(bag, slot, count)` triples queued by `DeleteCursorItem` (`count == 0` = the whole
     /// stack) — the popup-confirmed destroy (decision 0216 §3), drained by the app into
     /// `CMSG_DESTROYITEM`.
@@ -746,6 +749,7 @@ impl Model {
             container_repairs: Vec::new(),
             item_pick_armed: false,
             item_picks: Vec::new(),
+            enchant_confirms: Vec::new(),
             container_destroys: Vec::new(),
             ui_cursor: None,
             container_autoequips: Vec::new(),

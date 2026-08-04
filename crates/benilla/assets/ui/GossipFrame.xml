@@ -30,11 +30,11 @@
         needs to call the right one of `SelectGossipQuest`/`SelectGossipOption` (ref's three intents
         collapse to two on our seam — see gossip.rs's doc comment). Per-row icon: active → the real
         `Interface\GossipFrame\ActiveQuestIcon` (ref l.99), available → `Interface\GossipFrame\
-        AvailableQuestIcon` (ref l.75) — both verified present in the MPQ list. We skip the ref's
-        per-row `GossipResize` auto-height (ref l.130-132, `SetHeight(GetTextHeight()+2)`) and its
-        "too many quests" message() (ref l.67-69/91-93/115-117): no word-wrap engine to measure against
-        yet (same gap the greeting text already lives with), and the shared 8-row cap below silently
-        drops the overflow exactly like the option rows already did before this change.
+        AvailableQuestIcon` (ref l.75) — both verified present in the MPQ list. We DO run the ref's
+        per-row `GossipResize` auto-height (ref l.130-132, `SetHeight(GetTextHeight()+2)`) — see
+        `BenillaGossipRow_Resize` below — but skip its "too many quests" message()
+        (ref l.67-69/91-93/115-117): the shared 8-row cap below silently drops the overflow exactly
+        like the option rows always did.
 
         ENGINE-SLICE CAVEAT (this branch predates the dressing arc's engine slice — named `<Font>`
         objects are not implemented here yet, loader.rs "named Font objects are not implemented in v1").
@@ -51,10 +51,10 @@
         it lands. The GOODBYE button rides bottom-right (ref GossipFrameGreetingGoodbyeButton, l.206-222),
         wired to the same close path as the close button.
 
-        Real-window features we OMIT (no feed, or no scroll/wrap engine yet):
-        the scroll frame itself (ref l.223-436 — our short greeting needs no scrolling),
-        and the BotLeftPatch material art. We keep the real geometry of everything we DO ship — including
-        the quest-row section now (see below).
+        The scroll frame IS here now (ref l.223-436): the greeting + the 32-row pool ride a real
+        `<ScrollFrame>`, so a menu taller than the parchment scrolls instead of spilling out of the
+        window. See the ScrollFrame's own comment below. Nothing of the real window is knowingly
+        omitted any more except the BotLeftPatch material art.
 
         UIPanel slot system (decision 0084 §2): carries NO hardcoded <Anchors> — ShowUIPanel/SetLeftFrame
         SetPoints it to the left slot (TOPLEFT UIParent, 0, -104) on open; every show goes through
@@ -62,9 +62,20 @@
     -->
     <Script><![CDATA[
         -- The shared row pool's cap (decision 0088 §3): quest rows fill from slot 1, option rows fill
-        -- after them, both drawing from the SAME BenillaGossipRow1..8 buttons (ref's single
-        -- GossipTitleButton pool, l.24-29/63-128) — mirrors the option-only cap this already was.
-        BENILLA_GOSSIP_MAX = 8
+        -- after them, both drawing from the SAME BenillaGossipRow1..32 buttons (ref's single
+        -- GossipTitleButton pool, l.24-29/63-128). This IS the reference's number
+        -- (`NUMGOSSIPBUTTONS = 32`, ref-GossipFrame.lua l.1); benilla ran a cap of 8 only because an
+        -- overflowing menu had nowhere to go — with the scroll frame below, it does.
+        BENILLA_GOSSIP_MAX = 32
+
+        -- Every widget that can be the LOWEST visible thing in the scroll child, for the content
+        -- measure (BenillaScroll_ResizeChild, ScrollTemplates.xml). Built once at load, like the
+        -- quest window's per-panel lists.
+        BENILLA_GOSSIP_SCROLL_WIDGETS = (function()
+            local t = { "BenillaGossipGreetingText" }
+            for i = 1, BENILLA_GOSSIP_MAX do table.insert(t, "BenillaGossipRow" .. i) end
+            return t
+        end)()
 
         -- The Era icon-type string → the real Blizzard gossip-icon texture (resolves from the MPQ at
         -- render). Unmapped types fall back to the chat bubble (the app already defaults unknowns to
@@ -87,6 +98,49 @@
         function BenillaGossipRow_OnLoad(button)
             button.icon = getglobal(button:GetName() .. "Icon")
             button.label = getglobal(button:GetName() .. "Label")
+        end
+
+        -- The ref's GossipResize (ref l.130-132: `SetHeight(GetTextHeight() + 2)`) — a row is as
+        -- tall as its OWN wrapped label. Load-bearing, not cosmetic: the rows hang off each other
+        -- in one static chain (each on the previous row's BOTTOMLEFT), so a row left at the
+        -- template's 16px while its label draws three wrapped lines puts the next row's text
+        -- straight through this one's — every long option overprinting its neighbour (the
+        -- director's judgement-menu screenshot). The reference's own LEFT-anchored label is only
+        -- correct BECAUSE of this resize: centring the text on a row sized to the text is the same
+        -- as top-aligning it.
+        --
+        -- Deviation from the ref, the same one the tab-fit carries (UiPanels.xml
+        -- `BenillaTabButton_OnUpdate`): the client's GetTextHeight is a synchronous font-engine
+        -- call, ours is the measure round-trip's answer and lands a frame late — 0 until the host
+        -- has measured THIS text. A zero keeps the current height (never collapses the row) and
+        -- the frame's OnUpdate below re-runs the fit until it settles.
+        function BenillaGossipRow_Resize(button)
+            local h = button.label:GetStringHeight()
+            if h <= 0 or button.benillaFitHeight == h then return end
+            button.benillaFitHeight = h
+            button:SetHeight(h + 2)
+        end
+
+        -- Size the scroll child to the rows actually on it, so the bar ranges over the real content
+        -- (the ref grows its child with the 15px GossipSpacerFrame under the last row instead —
+        -- ref-GossipFrame.lua l.39-44; the shared kit's BENILLA_SCROLL_PAD is that breathing room).
+        function BenillaGossipFrame_SizeScrollChild()
+            BenillaScroll_ResizeChild("BenillaGossipGreetingScroll", BENILLA_GOSSIP_SCROLL_WIDGETS)
+        end
+
+        -- The convergence driver (the tab-fit / quest-panel idiom): while the menu is up, re-fit
+        -- every visible row until its measure lands, after which the guard above makes this a
+        -- no-op compare per row per frame. OnUpdate only fires on effectively-visible frames, so
+        -- a closed gossip window costs nothing. The rows fit FIRST and the child is measured after,
+        -- so the scroll range sees their settled heights in the same pass.
+        function BenillaGossipFrame_OnUpdate()
+            for i = 1, BENILLA_GOSSIP_MAX do
+                local button = getglobal("BenillaGossipRow" .. i)
+                if button:IsShown() then
+                    BenillaGossipRow_Resize(button)
+                end
+            end
+            BenillaGossipFrame_SizeScrollChild()
         end
 
         -- One shared row serves either a quest or an option depending on what
@@ -117,6 +171,7 @@
                     button.kind = "quest"
                     button.itemIndex = i
                     button.label:SetText(title)
+                    BenillaGossipRow_Resize(button)
                     button.icon:SetTexture(active and BENILLA_GOSSIP_QUEST_ICON_ACTIVE or BENILLA_GOSSIP_QUEST_ICON_AVAILABLE)
                     button:Enable()
                     button:Show()
@@ -129,6 +184,9 @@
                     button.kind = "option"
                     button.itemIndex = optIndex
                     button.label:SetText(label)
+                    -- A label whose measure is already cached (a revisit to this NPC) fits on this
+                    -- very repaint; a fresh string fits on the next OnUpdate tick.
+                    BenillaGossipRow_Resize(button)
                     button.icon:SetTexture(BENILLA_GOSSIP_ICONS[otype] or BENILLA_GOSSIP_ICONS.gossip)
                     -- Coded (password) options are greyed and unselectable in v1 (decision 0081).
                     if IsGossipOptionCoded(optIndex) then
@@ -141,6 +199,10 @@
                     button:Hide()
                 end
             end
+            -- The ref's GossipFrameUpdate tail (ref-GossipFrame.lua l.46-48): a repaint always lands
+            -- back at the TOP of the menu, then re-ranges the bar off the new content.
+            getglobal("BenillaGossipGreetingScroll"):SetVerticalScroll(0)
+            BenillaGossipFrame_SizeScrollChild()
         end
 
         function BenillaGossipFrame_OnLoad(frame)
@@ -265,66 +327,107 @@
                         <Anchor point="TOP" relativePoint="TOP"><Offset><AbsDimension x="0" y="-23"/></Offset></Anchor>
                     </Anchors>
                 </FontString>
-                <!-- Greeting body: the real GossipGreetingText (ref l.241-252) — QuestFont, LEFT, its
-                     width pinned to the real 270 so word-wrap engages once that engine lands (line
-                     breaks today come from the wire's $B macro → \n). Positioned at the real scroll
-                     frame's text origin: window TOPLEFT +(23,-81) (scroll frame, ref l.230) then
-                     +(10,-10) inside the scroll child (ref l.248) = (33,-91). -->
-                <FontString name="BenillaGossipGreetingText" inherits="QuestFont" justifyH="LEFT">
-                    <Size><AbsDimension x="270" y="0"/></Size>
-                    <Anchors>
-                        <Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="33" y="-91"/></Offset></Anchor>
-                    </Anchors>
-                </FontString>
             </Layer>
         </Layers>
         <Frames>
-            <!-- The shared row pool: the real GossipTitleButtonTemplate stack (ref l.256-309), now
-                 serving quest rows AND option rows off the SAME 8 buttons (decision 0088 §3 — the
-                 ref's own shape, ref l.24-29/63-128: quest rows fill first, options after). Row 1
-                 anchors to the GREETING FONTSTRING's BOTTOMLEFT +(-10,-20) — the real anchor verbatim
-                 (ref l.258-261): the greeting's height is its measured wrapped text (the engine's
-                 measure round-trip), so a 3-line greeting pushes the rows down exactly as the real
-                 client does (the fixed-offset bridge used before overprinted multi-line greetings —
-                 caught by the ui-gossip capture fixture). The rest stack on the prior row's BOTTOMLEFT
-                 (ref l.267 — no gap; the real 16px rows touch) — since it's one static anchor chain
-                 over one shared pool, however many quest rows BenillaGossipFrame_Update shows this
-                 repaint, the option rows that follow land right below them with no runtime
-                 repositioning (decision 0088 §2 flags runtime SetPoint as NOT propagating to
-                 dependents on this engine; a static XML chain has no such issue — verified by the
-                 layout assertions in the engine test below). -->
-            <Button name="BenillaGossipRow1" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-20"/></Offset></Anchor></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow2" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow1" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow3" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow2" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow4" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow3" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow5" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow4" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow6" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow5" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow7" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow6" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
-            <Button name="BenillaGossipRow8" inherits="BenillaGossipRowTemplate">
-                <Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow7" relativePoint="BOTTOMLEFT"/></Anchors>
-                <Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts>
-            </Button>
+            <!--
+                The greeting + row list live inside a REAL ScrollFrame — the reference's own structure
+                (ref-GossipFrame.xml l.223-436, extracted via mpqx this session), which benilla omitted
+                on the grounds that "our short greeting needs no scrolling". A gossip menu of wrapped
+                roleplay options is exactly the case that breaks: once each row grew to its text
+                (BenillaGossipRow_Resize), four long options ran off the parchment and out of the
+                window (the director's second screenshot). The ref's answer is this scroll frame, and
+                it is now ours: 300x334 at the window's TOPLEFT +(23,-81) (ref l.223-233) over a child
+                the same size (ref l.235-239), the greeting at the child's +(10,-10) (ref l.241-252),
+                and the row chain hanging off the greeting exactly as before (ref l.256-269).
+
+                Content taller than the frame is CLIPPED to it and panned (engine mechanism, decision
+                0112) instead of overflowing; BenillaGossipFrame_SizeScrollChild sizes the child to the
+                measured content each repaint, which re-ranges the bar through OnScrollRangeChanged.
+                The ref grows its child with a 15px GossipSpacerFrame under the last row (ref l.421-432,
+                re-anchored per update by GossipFrame.lua l.39-44); ours is the shared kit's
+                BENILLA_SCROLL_PAD, the same breathing room by a plainer mechanism.
+            -->
+            <ScrollFrame name="BenillaGossipGreetingScroll">
+                <Size><AbsDimension x="300" y="334"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="23" y="-81"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>self:SetScrollChild(getglobal(self:GetName() .. "Child"))</OnLoad>
+                    <OnMouseWheel>BenillaScroll_OnMouseWheel(this, arg1)</OnMouseWheel>
+                    <OnVerticalScroll>BenillaScroll_SyncBar(this)</OnVerticalScroll>
+                    <OnScrollRangeChanged>BenillaScroll_SyncBar(this)</OnScrollRangeChanged>
+                </Scripts>
+                <Frames>
+                    <!-- The scrollbar rides the ScrollFrame as a child, the ref's UIPanelScrollFrameTemplate
+                         shape (ref-UIPanelTemplates.xml l.166-181: $parentScrollBar, TOPLEFT->TOPRIGHT
+                         +(6,-16) / BOTTOMLEFT->BOTTOMRIGHT +(6,16)) — so the bar's PARENT is the frame it
+                         scrolls, with no name derivation. It wears the shared Slider bar (drag + arrows,
+                         decision 0250); only OnValueChanged is overridden, off the faux kit's row-offset
+                         handler onto the real-scroll one. Hidden until the content overflows (SyncBar). -->
+                    <Slider name="$parentBar" inherits="BenillaScrollBarTemplate" hidden="true">
+                        <Anchors>
+                            <Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="6" y="-16"/></Offset></Anchor>
+                            <Anchor point="BOTTOMLEFT" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="6" y="16"/></Offset></Anchor>
+                        </Anchors>
+                        <Scripts><OnValueChanged>BenillaScrollBar_OnValueChanged(self, arg1)</OnValueChanged></Scripts>
+                    </Slider>
+                    <Frame name="$parentChild">
+                        <Size><AbsDimension x="300" y="334"/></Size>
+                        <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <!-- Greeting body: the real GossipGreetingText (ref l.241-252) — QuestFont,
+                                     LEFT, 270 wide so the engine wraps it, at the child's +(10,-10). -->
+                                <FontString name="BenillaGossipGreetingText" inherits="QuestFont" justifyH="LEFT">
+                                    <Size><AbsDimension x="270" y="0"/></Size>
+                                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"><Offset><AbsDimension x="10" y="-10"/></Offset></Anchor></Anchors>
+                                </FontString>
+                            </Layer>
+                        </Layers>
+                        <Frames>
+                            <!-- The shared row pool, now the reference's full NUMGOSSIPBUTTONS = 32
+                                 (ref-GossipFrame.lua l.1; ours capped at 8 only because an overflowing
+                                 menu had nowhere to go). Quest rows fill it first, option rows after
+                                 (decision 0088 sec.3). Row 1 hangs off the GREETING's BOTTOMLEFT +(-10,-20),
+                                 the rest off the previous row's BOTTOMLEFT (ref l.256-269) — one static
+                                 chain, so rows re-flow off each other's measured heights with no runtime
+                                 repositioning. -->
+                            <Button name="BenillaGossipRow1" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipGreetingText" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="-10" y="-20"/></Offset></Anchor></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow2" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow1" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow3" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow2" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow4" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow3" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow5" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow4" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow6" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow5" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow7" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow6" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow8" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow7" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow9" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow8" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow10" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow9" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow11" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow10" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow12" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow11" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow13" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow12" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow14" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow13" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow15" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow14" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow16" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow15" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow17" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow16" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow18" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow17" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow19" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow18" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow20" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow19" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow21" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow20" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow22" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow21" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow23" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow22" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow24" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow23" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow25" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow24" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow26" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow25" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow27" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow26" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow28" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow27" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow29" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow28" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow30" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow29" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow31" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow30" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                            <Button name="BenillaGossipRow32" inherits="BenillaGossipRowTemplate"><Anchors><Anchor point="TOPLEFT" relativeTo="BenillaGossipRow31" relativePoint="BOTTOMLEFT"/></Anchors><Scripts><OnLoad>BenillaGossipRow_OnLoad(self)</OnLoad></Scripts></Button>
+                        </Frames>
+                    </Frame>
+                </Frames>
+            </ScrollFrame>
             <!-- Close: the real GossipFrameCloseButton position (CENTER on the window's TOPRIGHT,
                  -42,-31; ref l.179-187), on the minimize-button art our close already used (the real
                  UIPanelCloseButton art rides the tooltip/dialog arc). -->
@@ -386,6 +489,10 @@
         <Scripts>
             <OnLoad>BenillaGossipFrame_OnLoad(self)</OnLoad>
             <OnEvent>BenillaGossipFrame_OnEvent(self)</OnEvent>
+            <!-- The row auto-height's settle pass (see BenillaGossipRow_Resize): our text measure
+                 is a frame late, so the fit re-runs here until every visible row's label measure
+                 lands. Fires only while the window is effectively visible. -->
+            <OnUpdate>BenillaGossipFrame_OnUpdate()</OnUpdate>
             <!-- OnShow/OnHide, quoted from the real GossipFrame.xml frame Scripts (l.445/454): the
                  kits igQuestListOpen/Close, and — load-bearing — CloseGossip() on hide (the real
                  GossipFrame_OnHide). CloseGossip ends the gossip session whenever the frame hides,

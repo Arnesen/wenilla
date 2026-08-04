@@ -198,6 +198,36 @@ impl ModelAnimations {
             .or_else(|| self.clips.first())
     }
 
+    /// The **FILE sequence slot** the loader-idle seed arms — [`Self::first_seq`]'s selection taken
+    /// *without* its bind-pose content gate, and expressed as the slot the per-sequence bakes are
+    /// keyed on rather than as a `clips` index.
+    ///
+    /// The two fields answer different questions and must not be conflated (decision 0936). The
+    /// reference arms this sequence on **every** M2 instance the moment it goes LIVE (`0x70ebd0`'s
+    /// tail — no instance in the client ever exists with nothing armed), so "which sequence is this
+    /// model playing" always has an answer. `first_seq` answers the narrower *rendering* question
+    /// "is it worth building a skin + `AnimationPlayer` for it", and says `None` when looping the
+    /// idle would render identically to the static mesh. That skip is sound for the mesh — and
+    /// silently wrong for every consumer keyed on the sequence *identity*, which then degraded to
+    /// file slot 0 (`EmitTiming::idx`/`EmitParams::sample`/`AlphaAnim::seq` all resolve `None` that
+    /// way). Slot 0 is only accidentally the idle one: on the Spawn/Stand/Despawn GameObjects
+    /// (`DuelingFlag`-shaped — the battlefield banners, the goobers, `ArenaFlag`) it is the **Spawn**
+    /// flourish, whose emitters then pour for ever at its opening frame.
+    ///
+    /// `None` only for a model with no buildable clip at all (the `GlobalSeqOnly` tier), where there
+    /// is no sequence to name.
+    pub fn idle_seq(&self) -> Option<usize> {
+        let idle_id = self
+            .playable_animation_lookup
+            .first()
+            .map_or(0, |p| p.resolved_id);
+        self.clips
+            .iter()
+            .find(|c| c.anim_id == idle_id)
+            .or_else(|| self.clips.first())
+            .map(|c| c.seq_index)
+    }
+
     /// Pick a **variation** of `anim_id` for one play, given a fresh `roll` (the client's `_rand()`,
     /// `0..0x7fff`): the byte-verified weighted walk (wow-re `anim-id-resolution.md`, op4 with
     /// variationIdx −1) — `roll < frequency` picks the current node, else `roll -= frequency` and
@@ -504,6 +534,58 @@ mod tests {
             Some(158)
         );
         assert_eq!(anims.preferred_clip(Some(42)).map(|c| c.anim_id), Some(0));
+    }
+
+    // ── idle_seq: the loader-idle FILE slot, split from the render content gate ──────────────
+
+    /// `test_anims` in file order, with each clip's `seq_index` set to its slot — the axis the
+    /// per-sequence bakes (`EmitTiming`/`EmitParams`/`AlphaAnim`) are keyed on.
+    fn slotted(ids: &[u16], table: Vec<PlayableAnim>) -> ModelAnimations {
+        let mut a = test_anims(ids, table);
+        for (i, c) in a.clips.iter_mut().enumerate() {
+            c.seq_index = i;
+        }
+        a
+    }
+
+    /// The Spawn/Stand/Despawn GameObject shape — `DuelingFlag`, the battlefield banners,
+    /// `ArenaFlag`, the goobers. The idle slot is **1**, not 0: slot 0 is the Spawn flourish, whose
+    /// emitters pour at its opening frame for ever if a consumer degrades to it.
+    #[test]
+    fn idle_seq_is_the_stand_slot_not_file_slot_zero() {
+        let anims = slotted(&[145, 0, 157], Vec::new());
+        assert_eq!(anims.idle_seq(), Some(1));
+    }
+
+    /// It is `first_seq`'s selection **without** the bind-pose content gate: the field stays `None`
+    /// (looping a constant-pose idle renders identically to the static mesh, so the rig tier skips
+    /// the arm) while the slot is still known. Conflating the two is the whole defect.
+    #[test]
+    fn idle_seq_answers_even_when_the_content_gate_skipped_the_arm() {
+        let anims = slotted(&[145, 0, 157], Vec::new());
+        assert_eq!(anims.first_seq, None, "the render gate declined to arm");
+        assert_eq!(
+            anims.idle_seq(),
+            Some(1),
+            "the sequence identity is still known"
+        );
+    }
+
+    /// The idle id is resolved through the model's own `playableAnimationLookup` — the same
+    /// `0x711bf0(reqId = 0)` chain `first_seq` takes (0637). 268 models corpus-wide remap requested
+    /// id 0 (`Cripple_State_Base` → 158 Hold), and slot 0 is not their idle either.
+    #[test]
+    fn idle_seq_resolves_id_zero_through_the_playable_lookup() {
+        let anims = slotted(&[159, 158], vec![playable(158, 0)]);
+        assert_eq!(anims.idle_seq(), Some(1));
+    }
+
+    /// No sequence for the resolved idle id ⇒ the first record's own slot, the guarded
+    /// `*(dword*)&sequences[0]` fallback — and `None` only when there is no clip at all to name.
+    #[test]
+    fn idle_seq_falls_back_to_the_first_record_then_to_none() {
+        assert_eq!(slotted(&[158, 159], Vec::new()).idle_seq(), Some(0));
+        assert_eq!(slotted(&[], Vec::new()).idle_seq(), None);
     }
 
     /// The variation pick is the client's weighted walk (wow-re `anim-id-resolution.md`, op4 with

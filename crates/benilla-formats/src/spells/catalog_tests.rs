@@ -889,6 +889,39 @@ fn real_item_target_family_and_its_gate_columns() {
     );
     assert_eq!(locked_only, 103, "Targets == 0x4000 — the OPEN_LOCK family");
 
+    // The OPEN_LOCK family's **implicit arm**, which is what turns its bare `0x4000` into the word
+    // both click seams read (decision 0939). The app's `cast_target_mask` ORs `0x800` for arm 23
+    // and `TF_UNIT` for arm 25, so this census is the data behind "a lock word is `0x4000` or
+    // `0x4800`, and either way `& 0x4010` and `& 0x4800` are *both* nonzero" — the overlap that
+    // lets one armed cursor answer the bag click and the world click. Pick Lock 1804 is one of the
+    // 100 (live-probed: it arms `0x4000` and both seams take it). If this distribution moves, the
+    // seam that stops being reachable fails here first.
+    let mut arms = std::collections::BTreeMap::<u32, usize>::new();
+    for (_, d) in cat.iter().filter(|(_, d)| d.targets == 0x4000) {
+        *arms.entry(d.implicit_target_a1).or_default() += 1;
+    }
+    assert_eq!(
+        arms.values().sum::<usize>(),
+        103,
+        "every OPEN_LOCK row is counted"
+    );
+    assert_eq!(
+        arms.get(&25),
+        Some(&1),
+        "one row arms 25 (its overlay is TF_UNIT, not the GameObject bit)"
+    );
+    assert!(
+        arms.get(&23).copied().unwrap_or(0) >= 100,
+        "the family is overwhelmingly arm 23, whose overlay is TARGET_FLAG_GAMEOBJECT: {arms:?}"
+    );
+    // And no row in the whole file reaches the GameObject seam by `Targets` alone — bit 11 is
+    // something the implicit arm puts on the word, never a column value.
+    assert_eq!(
+        cat.iter().filter(|(_, d)| d.targets & 0x800 != 0).count(),
+        0,
+        "TARGET_FLAG_GAMEOBJECT never appears in the Targets column"
+    );
+
     // Bracer enchant: armor (4), any subclass, InventoryType WRIST(9) only.
     let bracer = cat.get(7418).unwrap();
     assert_eq!(bracer.targets, 0x10);

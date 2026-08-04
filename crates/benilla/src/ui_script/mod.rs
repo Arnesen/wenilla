@@ -404,6 +404,10 @@ fn load_default_ui(script: &UiScript) -> Vec<String> {
         // The two duel dialogs + their event driver (decision 0633): registry entries on the same
         // StaticPopup engine, and DUEL_OUTOFBOUNDS leans on its per-tick countdown branch.
         "DuelFrame.xml",
+        // The two enchant-apply confirms + their event driver (decision 0928): the same StaticPopup
+        // registry again. Not CraftFrame's — the gate that raises them is the generic item-target
+        // bind, reached by a poison or a sharpening stone with no profession window open.
+        "EnchantConfirm.xml",
         // The shared CooldownFrame_SetTimer (the ref's Cooldown.lua file split) — before its
         // consumers (ActionBar's buttons, the multibars, the stance bar, BagFrame's slots).
         "Cooldown.xml",
@@ -880,6 +884,9 @@ mod death_tests;
 
 #[cfg(test)]
 mod duel_tests;
+
+#[cfg(test)]
+mod enchant_confirm_tests;
 
 #[cfg(test)]
 mod friends_tests;

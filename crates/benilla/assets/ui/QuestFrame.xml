@@ -121,7 +121,6 @@
         BENILLA_QUEST_SCROLL_STEP = 20
         BENILLA_QUEST_SCROLL_TRACK_H = 302 -- 334-tall scroll, minus the two 16px arrows
         BENILLA_QUEST_SCROLL_THUMB_H = 16
-        BENILLA_QUEST_CHILD_PAD = 20 -- parchment breathing room under the last element
 
         function BenillaQuestScroll_Step(sf, delta)
             sf:SetVerticalScroll(sf:GetVerticalScroll() + delta) -- engine clamps to [0, range]
@@ -153,43 +152,13 @@
                 "TOPLEFT", getglobal(n .. "BarTrack"), "TOPLEFT", 0, -(value / range * travel))
         end
 
-        -- A widget's resolved bottom edge for the resize sum — nil when it isn't contributing
-        -- (hidden frame / blank FontString / not yet resolved this frame).
-        local function BenillaQuest_WidgetBottom(w)
-            if not w then return nil end
-            if w.IsShown then
-                if not w:IsShown() then return nil end
-            elseif w.GetText then
-                local t = w:GetText()
-                if not t or t == "" then return nil end
-            end
-            return w:GetBottom()
-        end
-
-        -- Size a panel's scroll child to its MEASURED content (the resolved bottom of the lowest
-        -- visible widget + padding) instead of a fixed budget — a fixed 700 left a huge dead
-        -- scrollable span under short quests (the director's jank report). Frame-late like the
-        -- log's resize (rects resolve after Lua runs), so the panel OnUpdate below re-runs this
-        -- until it stops changing — the log's own convergence pattern.
+        -- Size the ACTIVE panel's scroll child to its measured content — the shared real-scroll
+        -- kit's `BenillaScroll_ResizeChild` (ScrollTemplates.xml), which owns the widget-bottom sum,
+        -- the change-guard, and the UpdateScrollChildRect. Only the bar sync stays here: this window
+        -- wears the minimal no-drag bar, not the kit's Slider (see the scrollbar markup below).
         function BenillaQuestPanel_Resize(scrollName, widgets)
-            local sf = getglobal(scrollName)
-            local child = getglobal(scrollName .. "Child")
-            local top = child:GetTop()
-            if not top then return end
-            local bottom = nil
-            for i = 1, table.getn(widgets) do
-                local b = BenillaQuest_WidgetBottom(getglobal(widgets[i]))
-                if b and (not bottom or b < bottom) then bottom = b end
-            end
-            local height = 1
-            if bottom then height = (top - bottom) + BENILLA_QUEST_CHILD_PAD end
-            if height < 1 then height = 1 end
-            -- Only a real change re-sizes (SetHeight/UpdateScrollChildRect invalidate layout —
-            -- an every-frame write would fight the resolver).
-            if math.abs(child:GetHeight() - height) >= 1 then
-                child:SetHeight(height)
-                sf:UpdateScrollChildRect()
-                BenillaQuestScroll_SyncBar(sf)
+            if BenillaScroll_ResizeChild(scrollName, widgets) then
+                BenillaQuestScroll_SyncBar(getglobal(scrollName))
             end
         end
 
@@ -233,9 +202,19 @@
 
         -- The convergence driver: while the window shows, keep re-measuring the ACTIVE panel
         -- (cheap — the resize itself no-ops once the sum stabilizes; the log's own OnUpdate idiom).
+        -- The greeting panel's title rows fit FIRST, so the panel sum below already sees their
+        -- final bottoms in this same pass.
         function BenillaQuestFrame_OnUpdate()
             local frame = getglobal("BenillaQuestFrame")
             if not frame:IsVisible() or not frame.panel then return end
+            if frame.panel == "greeting" then
+                for i = 1, BENILLA_QUEST_MAX_TITLES do
+                    local button = getglobal("BenillaQuestTitleButton" .. i)
+                    if button:IsShown() then
+                        BenillaQuestTitleButton_Resize(button)
+                    end
+                end
+            end
             local scroll = BENILLA_QUEST_PANEL_SCROLLS[frame.panel]
             if scroll then
                 BenillaQuestPanel_Resize(scroll, BENILLA_QUEST_PANEL_WIDGETS[scroll])
@@ -246,6 +225,20 @@
         function BenillaQuestTitleButton_OnClick(button)
             if button.isActive then SelectActiveQuest(button.titleIndex) else SelectAvailableQuest(button.titleIndex) end
             PlaySound("igQuestListSelect") -- ref QuestTitleButton_OnClick, QuestFrame.lua:303
+        end
+
+        -- A title row is as tall as its own wrapped title, +2 (ref QuestFrameGreetingPanel_OnShow's
+        -- `SetHeight(GetTextHeight() + 2)`, QuestFrame.lua:243/272 — the same law GossipFrame.xml's
+        -- `BenillaGossipRow_Resize` runs on the gossip rows). Titles wrap at the ButtonText's 275 px,
+        -- and the rows hang off each other, so a row left at the template's 16px while its title
+        -- draws two lines prints the next title through it. Our GetStringHeight lands a frame after
+        -- the SetText (the measure round-trip), hence the guard + the OnUpdate settle above.
+        function BenillaQuestTitleButton_Resize(button)
+            local text = button:GetFontString()
+            local h = text and text:GetStringHeight() or 0
+            if h <= 0 or button.benillaFitHeight == h then return end
+            button.benillaFitHeight = h
+            button:SetHeight(h + 2)
         end
 
         function BenillaQuestGreetingPanel_OnShow()
@@ -272,6 +265,7 @@
                     button.isActive = true
                     button.titleIndex = i
                     button:SetText(GetActiveTitle(i))
+                    BenillaQuestTitleButton_Resize(button)
                     button:Show()
                     if i == 1 then
                         button:SetPoint("TOPLEFT", activeHeader, "BOTTOMLEFT", -10, -5)
@@ -303,6 +297,7 @@
                     button.isActive = false
                     button.titleIndex = i - numActive
                     button:SetText(GetAvailableTitle(i - numActive))
+                    BenillaQuestTitleButton_Resize(button)
                     button:Show()
                     if i == numActive + 1 then
                         button:SetPoint("TOPLEFT", availableHeader, "BOTTOMLEFT", -10, -5)

@@ -488,3 +488,41 @@ fn wheel_scroll_is_silent_but_the_arrows_click() {
         "the arrow button clicks (UChatScrollButton)"
     );
 }
+
+/// The scrollbar ARROWS move the list the way they point — the direction half the sound test
+/// above never checked. They were inverted in the shared kit (ScrollTemplates.xml): at the top the
+/// up arrow correctly greys out, but the *enabled* down arrow called `Step(bar, -1)`, decrementing
+/// a value already clamped at its minimum — so both arrows were dead in every faux-scroll window
+/// (the wheel and the thumb drag masked it, and the sound test passed because OnClick still fired).
+#[test]
+fn the_scrollbar_arrows_step_the_list_the_way_they_point() {
+    let mut s = trainer_script();
+    s.set_money(50);
+    s.set_trainer(Some(long_menu())); // 16 rows > 11 visible → the bar shows
+    s.fire_event("TRAINER_SHOW", vec![ScriptValue::Str("Sana".into())]);
+    let offset = |s: &mut UiScript| {
+        s.eval::<i64>("return BenillaTrainerListScrollFrame.offset or -1")
+            .unwrap()
+    };
+    let click = |s: &mut UiScript, which: &str| {
+        s.run(&format!(
+            "BenillaTrainerListScrollFrameScrollBarScroll{which}Button:Click()"
+        ))
+        .unwrap();
+    };
+    assert_eq!(offset(&mut s), 0, "opens at the top");
+    click(&mut s, "Down");
+    assert_eq!(
+        offset(&mut s),
+        1,
+        "the down arrow advances the list one row"
+    );
+    click(&mut s, "Down");
+    assert_eq!(offset(&mut s), 2);
+    click(&mut s, "Up");
+    assert_eq!(offset(&mut s), 1, "the up arrow walks it back");
+    click(&mut s, "Up");
+    click(&mut s, "Up");
+    assert_eq!(offset(&mut s), 0, "and stops at the top, never past it");
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}

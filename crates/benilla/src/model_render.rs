@@ -32,9 +32,19 @@ pub const VANILLA_ALPHA_KEY_REF: f32 = 224.0 / 255.0;
 /// `m2-blend-promotion-zfill.md` §4/§6; MOBA file order for WMO). This epsilon reproduces that
 /// order through bevy's sort. Sized well under [`benilla_formats::owner_last_rung`]'s 1-yd floor
 /// (an effect still draws after every batch of its owner) and far over f32 noise on a ~500 yd
-/// sort distance (~4e-5). Not a pipeline axis: `depth_bias` participates in sorting only
-/// (`WowModelKey` deliberately excludes it — decision 0837).
+/// sort distance (~4e-5).
+///
+/// It IS a pipeline-key axis when it reaches 1.0: the base `StandardMaterialKey` packs
+/// `depth_bias as i32` (only the extension `WowModelKey` excludes it — 0837's comment
+/// overclaimed), so the product is capped at [`BATCH_ORDER_SORT_CAP`] and applied to
+/// transparent-pass materials only (`model_material`).
 pub(crate) const BATCH_ORDER_SORT_EPS: f32 = 1e-3;
+
+/// The eps product's ceiling: strictly under 1.0 so no batch index can mint a pipeline key
+/// (`as i32` == 0 for the whole band), and strictly under `FAR_KEY_PULL` so a capped batch's
+/// far-side twin still truncates onto the far band's single key integer. Batches past index
+/// 899 tie here — see the cap rationale at the one application site.
+pub(crate) const BATCH_ORDER_SORT_CAP: f32 = 0.9;
 
 /// Material-dedup key: same texture + blend + sidedness + kind + fade-variant → one shared material.
 #[derive(PartialEq, Eq, Hash)]
@@ -241,7 +251,24 @@ pub(crate) fn model_material(
     let cull_mode = if two_sided { None } else { Some(Face::Back) };
     // The authored batch order as a transparent sort bias ([`BATCH_ORDER_SORT_EPS`]): one model's
     // coplanar batches draw in file order instead of re-flipping a sort tie every frame.
-    let depth_bias = f32::from(batch_order) * BATCH_ORDER_SORT_EPS;
+    //
+    // TRANSPARENT-PASS ONLY, and CAPPED below 1.0 (decision 0938's tail — the Stormwind evening
+    // log). The bias is also the base `StandardMaterialKey`'s `depth_bias as i32` axis, which
+    // 0837's original comment believed excluded (only the EXTENSION key excludes it) — invisible
+    // while every product truncated to 0, until a city-scale WMO's root-scoped batch index
+    // (`assemble.rs`, u16 — Stormwind roots run past 2000) pushed the product to 1.0+ and each
+    // integer became a live-compiled pipeline. Opaque/mask batches take no bias at all: their
+    // pass never sorts by it, and the coplanar-stack job belongs to the vertex-stage depth nudge
+    // (0837's `sun_scale.y`), so a nonzero value was only a key leak. Transparent batches keep
+    // total order through index 899 and tie at the cap beyond it — safe, because the eps is
+    // load-bearing only for SAME-CENTRE stacks (M2 item overlays, always low-index); WMO batches
+    // sort by their own distinct mesh centres. The cap stays under `FAR_KEY_PULL` so a far twin
+    // of a capped batch still lands on the far band's one key integer.
+    let depth_bias = if matches!(alpha_mode, AlphaMode::Blend) {
+        (f32::from(batch_order) * BATCH_ORDER_SORT_EPS).min(BATCH_ORDER_SORT_CAP)
+    } else {
+        0.0
+    };
     let base = match texture {
         Some(image) => StandardMaterial {
             base_color_texture: Some(image),
@@ -517,17 +544,30 @@ pub(crate) const FAR_SIDE_MARKER: u16 = 1 << 11;
 /// over it, plus the [`FAR_SIDE_MARKER`] pipeline bit that keeps the rung sort-only. Pure, so the
 /// twin's shape is testable without an `Assets` store; the identity holds for every variant the
 /// swap can meet (steady blend, fade twin, zfill twin — their own marker bits ride along).
-fn far_twin_of(near: &WowModelMaterial) -> WowModelMaterial {
+/// `pub(crate)`: the pipeline warm pass ([`crate::pipe_warm`]) builds its far-side warm variants
+/// through this same builder, so the twin's key encoding can never drift from the swap's.
+pub(crate) fn far_twin_of(near: &WowModelMaterial) -> WowModelMaterial {
     let mut far = near.clone();
     far.base.depth_bias = far_sort_bias(far.base.depth_bias);
     far.extension.clutter_fade.z = far_markers(far.extension.clutter_fade.z);
     far
 }
 
+/// Fractional pull on every far-side sort slot, so the whole batch-eps band shares ONE pipeline
+/// key. Bevy folds `depth_bias as i32` into the material's pipeline key (0837's law): unpulled,
+/// a batch-order-0 twin lands exactly on `FAR_SIDE_BIAS` while its eps-nudged siblings land a
+/// fraction above — truncating to TWO key integers, i.e. two live pipeline compiles where the
+/// descriptors are identical (`specialize` zeroes the raster constant for far twins either way).
+/// Pulled by just under 1, every `near ∈ [0, 0.99]` twin truncates to the same integer. Sort-side
+/// it is a uniform shift of the whole band, so nothing reorders (the effect lane's far draws sit
+/// `rung ≥ 1` above, and the margin only grows).
+const FAR_KEY_PULL: f32 = 0.99;
+
 /// The twin's sort slot: one water rung under wherever the source sat (a zfill twin keeps its −8
-/// under the far batches it primes; a colour batch keeps its batch eps).
+/// under the far batches it primes; a colour batch keeps its batch eps), less [`FAR_KEY_PULL`]
+/// so the eps band collapses onto one pipeline-key integer.
 fn far_sort_bias(near: f32) -> f32 {
-    near + crate::sky_order::FAR_SIDE_BIAS
+    near + crate::sky_order::FAR_SIDE_BIAS - FAR_KEY_PULL
 }
 
 /// The twin's `clutter_fade.z` marker word: [`FAR_SIDE_MARKER`] added, every other pipeline
@@ -928,8 +968,11 @@ mod tests {
     /// (effects interleaving into their owner's batches).
     #[test]
     fn batch_order_sort_eps_sits_between_f32_noise_and_the_effect_rung() {
-        // 512 batches is comfortably past any shipped model's batch table.
-        let deepest = super::BATCH_ORDER_SORT_EPS * 512.0;
+        // The CAPPED product is the deepest any batch can bias — "512 is past any shipped
+        // model" was this test's original premise, and Stormwind's root batch tables disproved
+        // it (indices past 2000; the 0938-tail live compiles at biases 1 and 2).
+        let deepest =
+            (super::BATCH_ORDER_SORT_EPS * f32::from(u16::MAX)).min(super::BATCH_ORDER_SORT_CAP);
         assert!(
             deepest < benilla_formats::owner_last_rung(0.0),
             "a model's last batch must still sort before its own effects' rung"
@@ -939,9 +982,19 @@ mod tests {
             super::BATCH_ORDER_SORT_EPS > 8.0 * far_noise,
             "one order step must dominate f32 noise on a far sort distance"
         );
-        // And bevy's pipeline key truncates it to 0 — the bias may never mint pipelines (0837):
-        // sub-1.0 biases all cast to the same i32 constant.
+        // Bevy's pipeline key truncates the WHOLE band to 0 — no batch index may mint a
+        // pipeline (0837, re-learned in 0938's tail): the cap holds for any u16.
         assert_eq!(deepest as i32, 0);
+        const {
+            assert!(super::BATCH_ORDER_SORT_CAP < 1.0);
+            // A capped batch's far twin still truncates onto the far band's ONE key integer.
+            assert!(super::BATCH_ORDER_SORT_CAP < super::FAR_KEY_PULL);
+        }
+        assert_eq!(
+            super::far_sort_bias(super::BATCH_ORDER_SORT_CAP) as i32,
+            super::far_sort_bias(0.0) as i32,
+            "the far band stays one pipeline key across the whole capped eps range"
+        );
     }
 
     /// The far-side twin is its source shifted exactly one water rung with the marker bit added —
@@ -953,13 +1006,29 @@ mod tests {
     fn far_twin_keeps_the_source_identity_one_rung_down() {
         assert_eq!(
             super::far_sort_bias(super::ZFILL_SORT_BIAS),
-            crate::sky_order::FAR_SIDE_BIAS + super::ZFILL_SORT_BIAS,
-            "one rung down from wherever the source sat"
+            crate::sky_order::FAR_SIDE_BIAS + super::ZFILL_SORT_BIAS - super::FAR_KEY_PULL,
+            "one rung down from wherever the source sat (less the key-collapse pull)"
         );
         assert!(
             super::far_sort_bias(super::ZFILL_SORT_BIAS)
                 < super::far_sort_bias(super::BATCH_ORDER_SORT_EPS * 512.0),
             "a far zfill twin still primes before its model's far colour batches"
+        );
+        // The pull's whole point: the entire batch-eps band truncates to ONE pipeline-key
+        // integer (0837's law — `depth_bias as i32` is a key axis), and the zfill twin keeps
+        // its own single key one bracket down.
+        assert_eq!(
+            super::far_sort_bias(0.0) as i32,
+            super::far_sort_bias(super::BATCH_ORDER_SORT_EPS * 512.0) as i32,
+            "batch-order far twins may never mint a second pipeline"
+        );
+        const {
+            assert!(super::FAR_KEY_PULL > super::BATCH_ORDER_SORT_EPS * 512.0);
+        }
+        assert_eq!(
+            super::far_sort_bias(super::ZFILL_SORT_BIAS) as i32,
+            crate::sky_order::FAR_SIDE_BIAS as i32 + super::ZFILL_SORT_BIAS as i32,
+            "the zfill far key stays put — the pull is sub-integer"
         );
         let src = super::ZFILL_MARKER | super::TWIN_CUTOUT_MARKER | (3 << 4);
         let z = super::far_markers(f32::from(src)) as u16;

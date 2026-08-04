@@ -349,7 +349,11 @@ mod tests {
             .collect();
         (
             ItemGlows::new(ItemVisualCatalog::from_visuals(visuals)),
-            EnchantCatalog::from_rows(enchant_rows.iter().copied().collect(), HashMap::new()),
+            EnchantCatalog::from_rows(
+                enchant_rows.iter().copied().collect(),
+                HashMap::new(),
+                Default::default(),
+            ),
         )
     }
 

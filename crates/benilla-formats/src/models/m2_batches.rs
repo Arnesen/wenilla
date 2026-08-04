@@ -802,9 +802,60 @@ pub fn owner_last_rung(reach_world: f32) -> f32 {
     (reach_world.max(0.0).floor() + 1.0).min(MAX_RUNG)
 }
 
+/// The FINITE set of rung values a mesh-shard **material** may carry — the quantization of
+/// [`owner_last_rung`] for the one lane where the rung rides `StandardMaterial::depth_bias` and
+/// is therefore a *pipeline-key axis* (bevy folds `depth_bias as i32` into the key; benilla
+/// decision 0837). The quad-particle lane applies its rung at queue time and keeps the exact
+/// value; the 3-D-shard lane materializes it, and 32 integer rungs × every reachable blend state
+/// is an open key space no warm pass can pre-compile — each first-seen combination was a
+/// synchronous render-thread pipeline compile mid-spell-cast. A closed bucket set is compilable
+/// behind the loading cover by construction (`benilla::pipe_warm` iterates exactly this array).
+///
+/// Bucket choice: rounding UP is the blessed error direction (decision 0721 — over-biasing only
+/// costs ordering against other models' transparents inside the delta), and the buckets are
+/// spaced so the common case stays tight: spell-kit owners are small (rung ≤ 4 — the corpus
+/// census `benilla-extract shardcensus` is the ground truth), so most shards take the first
+/// bucket and at worst a few yards of over-bias; the tail rides the coarser rungs.
+pub const OWNER_RUNG_BUCKETS: [f32; 3] = [4.0, 12.0, 32.0];
+
+/// Snap an [`owner_last_rung`] value UP to its material bucket (see [`OWNER_RUNG_BUCKETS`]).
+/// Total for any input: values past the last bucket (impossible — `owner_last_rung` caps at the
+/// same 32) still return it, so the key space stays closed no matter what.
+pub fn owner_last_rung_bucket(rung: f32) -> f32 {
+    for b in OWNER_RUNG_BUCKETS {
+        if rung <= b {
+            return b;
+        }
+    }
+    OWNER_RUNG_BUCKETS[OWNER_RUNG_BUCKETS.len() - 1]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bucket law: total, never under the exact rung (a shard may never sort under its
+    /// sibling quad cloud, which keeps the exact value), monotonic, always a member of the
+    /// closed set — and the set's ceiling is [`owner_last_rung`]'s own cap, so no reachable
+    /// rung escapes the warmed key space.
+    #[test]
+    fn owner_rung_buckets_cover_every_reachable_rung() {
+        let max = OWNER_RUNG_BUCKETS[OWNER_RUNG_BUCKETS.len() - 1];
+        assert_eq!(owner_last_rung(f32::MAX), max, "one shared ceiling");
+        let mut prev = 0.0f32;
+        for r in 1..=32 {
+            let b = owner_last_rung_bucket(r as f32);
+            assert!(b >= r as f32, "bucket({r}) sorts under the exact rung");
+            assert!(b >= prev, "bucket must be monotonic");
+            assert!(
+                OWNER_RUNG_BUCKETS.contains(&b),
+                "bucket({r}) not in the set"
+            );
+            prev = b;
+        }
+        // The set itself is sorted ascending — the snap-up scan relies on it.
+        assert!(OWNER_RUNG_BUCKETS.windows(2).all(|w| w[0] < w[1]));
+    }
 
     /// The repo root's `WoW/Data` (gitignored; the real-data test skips when absent).
     fn vanilla_data_dir() -> std::path::PathBuf {

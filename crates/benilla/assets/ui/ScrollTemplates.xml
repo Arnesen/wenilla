@@ -1,6 +1,14 @@
 <Ui>
     <!--
-        benilla's reusable **faux-scroll** kit (decisions 0247/0250/0251): a draggable scroll bar over
+        benilla's reusable scroll kits — TWO of them, sharing one scrollbar and one pair of arrow
+        helpers. The **faux-scroll** kit (this header) re-binds a fixed set of rows to a moving data
+        offset; the **real-scroll** kit (second half of the script block) pans and CLIPS a
+        variable-height child through the engine's `<ScrollFrame>` (decision 0112) — the one a gossip
+        menu of wrapped options needs, since its content height isn't known until it is laid out.
+        Only their OnValueChanged differs, and an instance overrides the template's (the loader
+        SetScripts every `<Scripts>` block in order, so the instance's handler wins).
+
+        The faux kit (decisions 0247/0250/0251): a draggable scroll bar over
         the `Slider` primitive (0250) plus the fixed-row "faux scroll" Lua layer — the reference's
         `FauxScrollFrame`, which never really scrolls a child: it re-binds a fixed set of row buttons to
         a moving data offset. First customer: the class trainer's skill-line list (TrainerFrame.xml).
@@ -31,7 +39,7 @@
         -- design: the ref plays UChatScrollButton only on the arrow *buttons'* OnClick, never on the
         -- wheel (ScrollFrameTemplate_OnMouseWheel is soundless). Both the wheel and the arrows call
         -- this, so the click lives on the arrow OnClick, keeping wheel-scroll silent.
-        function BenillaFauxScrollBar_Step(scrollBar, dir)
+        function BenillaScrollBar_Step(scrollBar, dir)
             local step = scrollBar:GetValueStep()
             if step <= 0 then step = 1 end
             scrollBar:SetValue(scrollBar:GetValue() + dir * step)
@@ -39,7 +47,7 @@
 
         -- Grey the up arrow at the top and the down arrow at the bottom (ref
         -- ScrollFrame_OnScrollRangeChanged's arrow handling), from the slider's own value/range.
-        function BenillaFauxScrollBar_UpdateArrows(scrollBar)
+        function BenillaScrollBar_UpdateArrows(scrollBar)
             local minV, maxV = scrollBar:GetMinMaxValues()
             local val = scrollBar:GetValue()
             local up = getglobal(scrollBar:GetName() .. "ScrollUpButton")
@@ -62,7 +70,7 @@
                 frame.offset = newOffset
                 if frame.updateFunc then frame.updateFunc() end
             end
-            BenillaFauxScrollBar_UpdateArrows(scrollBar)
+            BenillaScrollBar_UpdateArrows(scrollBar)
         end
 
         -- OnLoad: a fresh faux frame is at the top with an empty range (ref ScrollFrame_OnLoad).
@@ -100,7 +108,7 @@
             scrollBar:SetValueStep(itemHeight)
             scrollBar:SetMinMaxValues(0, maxOffset * itemHeight)
             scrollBar:SetValue(frame.offset * itemHeight)
-            BenillaFauxScrollBar_UpdateArrows(scrollBar)
+            BenillaScrollBar_UpdateArrows(scrollBar)
 
             if numItems > numToDisplay then
                 scrollBar:Show()
@@ -114,7 +122,94 @@
         -- lives on the window, not a child — TrainerFrame.xml's own note).
         function BenillaFauxScrollFrame_OnMouseWheel(frame, delta)
             local scrollBar = getglobal(frame:GetName() .. "ScrollBar")
-            BenillaFauxScrollBar_Step(scrollBar, -delta)
+            BenillaScrollBar_Step(scrollBar, -delta)
+        end
+
+        -- ══════════════════════════ The REAL-scroll kit ══════════════════════════════════════════
+        --
+        -- The other half of the file: a true `<ScrollFrame>` (engine mechanism, decision 0112) that
+        -- pans and CLIPS a variable-height child, as against the faux kit above (fixed rows re-bound
+        -- to a data offset). Windows whose content height is unknown until it is laid out — a gossip
+        -- menu of wrapped options, a quest's body text — need this one; a uniform list wants the faux.
+        --
+        -- SHAPE, from the reference `UIPanelScrollFrameTemplate` (Interface\FrameXML\
+        -- UIPanelTemplates.xml l.166-211, extracted via mpqx): the scrollbar is a SLIDER that rides
+        -- its ScrollFrame as a child, so `bar:GetParent()` IS the frame it scrolls — no name
+        -- derivation, and `$parentBar` gives SyncBar its handle. The ref's OnVerticalScroll drives
+        -- the bar's value and greys the two arrows at the ends; ours does the same through the
+        -- shared arrow helper above.
+        BENILLA_SCROLL_STEP = 20   -- px per arrow click / wheel notch
+        BENILLA_SCROLL_PAD = 20    -- breathing room under the last element in the child
+
+        -- The bar moved (drag, arrow, or SyncBar): pan the frame it rides. The loop this could form
+        -- (bar → scroll → OnVerticalScroll → SyncBar → bar) dead-ends in one hop — SyncBar writes the
+        -- value the bar already holds, and the Slider's SetValue change-gate (decision 0250) drops it.
+        function BenillaScrollBar_OnValueChanged(bar, value)
+            bar:GetParent():SetVerticalScroll(value)
+            BenillaScrollBar_UpdateArrows(bar)
+        end
+
+        -- Reconcile a ScrollFrame's bar to its live range (ref ScrollFrame_OnScrollRangeChanged):
+        -- the bar spans [0, range] in pixels, seats at the current scroll, and hides entirely when
+        -- the content fits. Wired to both OnScrollRangeChanged and OnVerticalScroll by the owner.
+        function BenillaScroll_SyncBar(sf)
+            local bar = getglobal(sf:GetName() .. "Bar")
+            if not bar then return end
+            local range = sf:GetVerticalScrollRange()
+            bar:SetValueStep(BENILLA_SCROLL_STEP)
+            bar:SetMinMaxValues(0, range)
+            bar:SetValue(sf:GetVerticalScroll())
+            BenillaScrollBar_UpdateArrows(bar)
+            if range > 0 then bar:Show() else bar:Hide() end
+        end
+
+        -- Pan by `delta` px; the engine clamps to [0, range].
+        function BenillaScroll_Step(sf, delta)
+            sf:SetVerticalScroll(sf:GetVerticalScroll() + delta)
+            BenillaScroll_SyncBar(sf)
+        end
+
+        -- WoW wheel convention: +1 per notch up, -1 down — up lifts the content.
+        function BenillaScroll_OnMouseWheel(sf, delta)
+            BenillaScroll_Step(sf, -delta * BENILLA_SCROLL_STEP)
+        end
+
+        -- A widget's resolved bottom edge for the content sum — nil when it isn't contributing
+        -- (hidden frame / blank FontString / not yet resolved this frame).
+        function BenillaScroll_WidgetBottom(w)
+            if not w then return nil end
+            if w.IsShown then
+                if not w:IsShown() then return nil end
+            elseif w.GetText then
+                local t = w:GetText()
+                if not t or t == "" then return nil end
+            end
+            return w:GetBottom()
+        end
+
+        -- Size a scroll child to its MEASURED content — the resolved bottom of the lowest visible
+        -- widget, plus padding — instead of a fixed budget, and tell the frame (which fires
+        -- OnScrollRangeChanged → the owner's SyncBar). Frame-late by nature: rects resolve after Lua
+        -- runs, so owners re-run this from an OnUpdate until it stops changing. Returns true when it
+        -- actually resized (only a real change writes: SetHeight invalidates layout, and an
+        -- every-frame write would fight the resolver).
+        function BenillaScroll_ResizeChild(scrollName, widgets)
+            local sf = getglobal(scrollName)
+            local child = getglobal(scrollName .. "Child")
+            local top = child:GetTop()
+            if not top then return false end
+            local bottom = nil
+            for i = 1, table.getn(widgets) do
+                local b = BenillaScroll_WidgetBottom(getglobal(widgets[i]))
+                if b and (not bottom or b < bottom) then bottom = b end
+            end
+            local height = 1
+            if bottom then height = (top - bottom) + BENILLA_SCROLL_PAD end
+            if height < 1 then height = 1 end
+            if math.abs(child:GetHeight() - height) < 1 then return false end
+            child:SetHeight(height)
+            sf:UpdateScrollChildRect()
+            return true
         end
     ]]></Script>
 
@@ -135,7 +230,7 @@
                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollUpButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                <Scripts><OnClick>BenillaFauxScrollBar_Step(this:GetParent(), 1); PlaySound("UChatScrollButton")</OnClick></Scripts>
+                <Scripts><OnClick>BenillaScrollBar_Step(this:GetParent(), -1); PlaySound("UChatScrollButton")</OnClick></Scripts>
             </Button>
             <Button name="$parentScrollDownButton">
                 <Size><AbsDimension x="16" y="16"/></Size>
@@ -144,7 +239,7 @@
                 <PushedTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Down"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></PushedTexture>
                 <DisabledTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Disabled"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></DisabledTexture>
                 <HighlightTexture file="Interface\Buttons\UI-ScrollBar-ScrollDownButton-Highlight" alphaMode="ADD"><TexCoords left="0.25" right="0.75" top="0.25" bottom="0.75"/></HighlightTexture>
-                <Scripts><OnClick>BenillaFauxScrollBar_Step(this:GetParent(), -1); PlaySound("UChatScrollButton")</OnClick></Scripts>
+                <Scripts><OnClick>BenillaScrollBar_Step(this:GetParent(), 1); PlaySound("UChatScrollButton")</OnClick></Scripts>
             </Button>
         </Frames>
         <Scripts>

@@ -38,6 +38,7 @@ fn questgiver_show_hide_plays_open_and_close_kits() {
     // The BenillaMoney_* purse helpers the quest reward/progress panels repaint through live in
     // MerchantFrame.xml (the same documented cross-window dep the bag tests load).
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     // Hidden at load: no open sound (never transitions on startup).
@@ -95,6 +96,7 @@ fn panel_events_show_exactly_one_child_panel_and_hide_the_others() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     let panels = [
@@ -167,6 +169,7 @@ fn detail_panel_reward_grid_follows_the_refs_two_per_row_layout() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     let choice = |name: &str, quality: u32| benilla_ui::script::QuestItemView {
@@ -250,6 +253,7 @@ fn reward_panel_choice_click_selects_and_completes_with_zero_based_index() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     let choice = |name: &str| benilla_ui::script::QuestItemView {
@@ -310,6 +314,7 @@ fn greeting_goodbye_button_closes_the_window() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     s.set_quest(Some(QuestState {
@@ -346,6 +351,7 @@ fn detail_panel_action_buttons_resolve_to_real_onscreen_rects() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
     s.set_quest(Some(QuestState {
         panel: QuestPanel::Detail,
@@ -453,6 +459,7 @@ fn write_on_still_fades_when_instant_text_is_off() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
     s.eval::<()>(r#"QUEST_FADING_DISABLE = "0""#).unwrap();
     s.set_quest(Some(QuestState {
@@ -512,6 +519,7 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
     load_xml(&s, "Fonts.xml");
     load_xml(&s, "UiPanels.xml");
     load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
     load_xml(&s, "QuestFrame.xml");
 
     s.set_quest(Some(QuestState {
@@ -559,5 +567,82 @@ fn npc_name_reaches_the_title_bar_on_open_and_on_refresh() {
             .unwrap(),
         "Marshal McBride",
         "the QUEST_ITEM_UPDATE refresh also carries the name"
+    );
+}
+
+/// The gossip window's twin law, on the greeting panel's quest-title rows: a title long enough to
+/// WRAP at the row label's 275 px must grow its row, or the static/Lua-chained rows below print
+/// through it (the shape of the gossip overlap the director reported). Same deterministic
+/// 6 px/char × 14 px/line measure fake as the gossip row test.
+#[test]
+fn greeting_panel_title_rows_grow_to_their_wrapped_titles() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(1024.0, 768.0);
+    load_xml(&s, "Fonts.xml");
+    load_xml(&s, "UiPanels.xml");
+    load_xml(&s, "MerchantFrame.xml");
+    load_xml(&s, "ScrollTemplates.xml"); // the shared scroll kit the window rides
+    load_xml(&s, "QuestFrame.xml");
+
+    s.set_quest(Some(QuestState {
+        panel: QuestPanel::Greeting,
+        greeting: "What can I do for you?".into(),
+        active_titles: vec![
+            "Deliver Thomas' Report to Marshal Dughan in Goldshire before the Defias move again"
+                .into(),
+            "Investigate the Echo Ridge Mine and report back to Marshal McBride at once".into(),
+        ],
+        ..QuestState::default()
+    }));
+    s.fire_event(
+        "QUEST_GREETING",
+        vec![ScriptValue::Str("Deputy Willem".into())],
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let answer_measures = |s: &mut UiScript| {
+        let answers: Vec<(u32, f32, f32, u64)> = s
+            .fontstrings_needing_measure()
+            .into_iter()
+            .map(|r| {
+                let ink = r.text.chars().count() as f32 * 6.0;
+                match r.wrap_width {
+                    Some(w) => (r.id, ink.min(w), (ink / w).ceil().max(1.0) * 14.0, r.key),
+                    None => (r.id, ink, 14.0, r.key),
+                }
+            })
+            .collect();
+        s.set_measured_text(&answers);
+    };
+    answer_measures(&mut s);
+    s.resolve();
+    s.tick(0.016);
+    answer_measures(&mut s);
+    s.resolve();
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+
+    let row = |i: u32| -> (f32, f32, f32) {
+        s.eval::<(f32, f32, f32)>(&format!(
+            "local b = getglobal('BenillaQuestTitleButton{i}')\n\
+             return b:GetTop(), b:GetBottom(), b:GetFontString():GetStringHeight()"
+        ))
+        .unwrap()
+    };
+    let (t1, b1, h1) = row(1);
+    let (t2, b2, h2) = row(2);
+    assert!(h1 >= 28.0 && h2 >= 28.0, "both titles wrap: {h1}, {h2}");
+    assert!(
+        (t1 - b1 - (h1 + 2.0)).abs() < 0.5,
+        "row 1 is its wrapped title + 2: got {}, title {h1}",
+        t1 - b1
+    );
+    assert!(
+        (t2 - b2 - (h2 + 2.0)).abs() < 0.5,
+        "row 2 is its wrapped title + 2: got {}, title {h2}",
+        t2 - b2
+    );
+    assert!(
+        t2 <= b1 + 0.5,
+        "row 2 starts at/below row 1's bottom: row1 bottom {b1}, row2 top {t2}"
     );
 }

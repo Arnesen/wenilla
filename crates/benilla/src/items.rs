@@ -81,6 +81,14 @@ pub(crate) fn enchant_lines(
     let lines: Vec<benilla_ui::script::EnchantView> = slots
         .into_iter()
         .filter(|&(_, id, _, _)| id != 0)
+        // `SpellItemEnchantment.Flags & 0x2` — the row prints NO line at all. Both of the
+        // reference's enchant-line printers open with it and return before they ever read the
+        // name (`6290e4` / `62923e`, each `testb $0x2, 0x5c(...)` → `jne <retl>`). Twelve shipped
+        // rows, one family: the totem-granted weapon imbues, Firestone, Orb of Fire — buffs whose
+        // source already shows elsewhere on screen, so the weapon does not repeat them. Found and
+        // closed while transcribing the *other* bit of that column (decision 0928); 0915 read the
+        // name column alone and printed all twelve.
+        .filter(|&(_, id, _, _)| !enchants.0.tooltip_hides_name(id.unsigned_abs()))
         .filter_map(|(slot, id, charges, remaining_ms)| {
             let name = enchants.0.name(id.unsigned_abs())?.to_string();
             Some(benilla_ui::script::EnchantView {
@@ -495,6 +503,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            Default::default(),
         ));
         let named = |v: Vec<benilla_ui::script::EnchantView>| -> Vec<String> {
             v.into_iter().map(|e| e.name).collect()

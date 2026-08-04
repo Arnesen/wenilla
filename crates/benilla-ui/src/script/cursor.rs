@@ -363,6 +363,27 @@ impl super::UiScript {
     pub fn take_item_picks(&mut self) -> Vec<(i64, u32)> {
         std::mem::take(&mut self.model_mut().item_picks)
     }
+
+    /// Drain the enchant-confirm popups' answers since the last call (decision 0928). Both are
+    /// answers to the *same* pick the app parked, which is why they share one queue.
+    pub fn take_enchant_confirms(&mut self) -> Vec<EnchantConfirm> {
+        std::mem::take(&mut self.model_mut().enchant_confirms)
+    }
+}
+
+/// A Yes on one of the enchant-apply confirms — the two Lua globals `StaticPopup.lua` calls from
+/// `BIND_ENCHANT`'s and `REPLACE_ENCHANT`'s `OnAccept` (decision 0928). Plain intents; the app
+/// holds the item guid they answer for (the reference's `0xb4e3c0/0xb4e3c4`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnchantConfirm {
+    /// `BindEnchant()` — `0x48d2e0`, which re-invokes the enchant-apply gate `0x495d60` over the
+    /// parked guid with its "already confirmed" parameter set. So this is NOT a send: the gate
+    /// runs again and may raise the *replace* popup next.
+    Bind,
+    /// `ReplaceEnchant()` — `0x48d300`, which re-resolves the parked guid and calls the ordinary
+    /// target binder `0x6e5b40` **directly**, skipping the gate. There is no
+    /// `CMSG_REPLACE_ENCHANT` in 5875: the popup is pure client-side gating over the same cast.
+    Replace,
 }
 
 // The paper-doll globals (`PickupInventoryItem` &c.) install from [`doll`]; the action-bar
@@ -371,6 +392,23 @@ impl super::UiScript {
 
 pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     let g = lua.globals();
+
+    // BindEnchant() / ReplaceEnchant() — the two enchant-confirm popups' OnAccept (StaticPopup.lua
+    // `BIND_ENCHANT` l.1240 and `REPLACE_ENCHANT` l.1252). Both queue an intent the app answers
+    // over its parked item guid; neither sends anything from here.
+    for (name, answer) in [
+        ("BindEnchant", EnchantConfirm::Bind),
+        ("ReplaceEnchant", EnchantConfirm::Replace),
+    ] {
+        g.set(
+            name,
+            lua.create_function(move |lua, ()| {
+                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+                model.enchant_confirms.push(answer);
+                Ok(())
+            })?,
+        )?;
+    }
 
     // GetCursorInfo() → per arm: Item ("item", itemID, itemLink); Spell ("spell", book_slot,
     // book_type, spell_id) — the Era shape; Action ("action", src_slot). Empty ⇒ all nils. A

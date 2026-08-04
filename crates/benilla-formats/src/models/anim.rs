@@ -376,6 +376,40 @@ pub struct ModelAnimation {
     pub events: Vec<AnimEvent>,
 }
 
+impl ModelAnimation {
+    /// Does this sequence leave **every** bone at bind pose for its whole band — one key per
+    /// channel, and that key the identity (zero translation, unit-w rotation, unit scale)?
+    ///
+    /// The **render** content gate (decision 0130, consumed by `benilla_assets`' loader as
+    /// `ModelAnimations::first_seq`): looping such a sequence draws exactly the static mesh, so the
+    /// placed-doodad tier skips building a skin + `AnimationPlayer` for it — the ~90 % of placed
+    /// doodads `doodadscan` measured. It lives here, beside the parse, so the `benilla-extract`
+    /// census of what that gate costs the corpus (`idleslotscan`) asks the renderer's own question
+    /// instead of a hand-copied twin that can drift from it.
+    ///
+    /// It answers a question about **pixels only**, and is never a reason to treat the sequence as
+    /// absent: a consumer keyed on the sequence *identity* — the per-sequence emission, parameter
+    /// and material-alpha bakes — still needs the slot the instance is playing, and the reference
+    /// always has one armed (decision 0936, `ModelAnimations::idle_seq`).
+    pub fn is_rest_pose(&self) -> bool {
+        const EPS: f32 = 1e-4;
+        !self.bones.iter().any(|b| {
+            b.translation.len() > 1
+                || b.rotation.len() > 1
+                || b.scale.len() > 1
+                || b.translation
+                    .iter()
+                    .any(|(_, v)| v.iter().any(|c| c.abs() > EPS))
+                || b.rotation
+                    .iter()
+                    .any(|(_, q)| (q[3].abs() - 1.0).abs() > EPS)
+                || b.scale
+                    .iter()
+                    .any(|(_, s)| s.iter().any(|c| (c - 1.0).abs() > EPS))
+        })
+    }
+}
+
 /// One bone-channel `M2Track`, read **once per model** rather than once per sequence: the v256 track
 /// (0x1c) is `interp_type`@0, `global_seq`@2, then three `M2Array`s — interpolation_ranges@0x04,
 /// **timestamps@0x0c**, **values@0x14** (each `{count u32, offset u32}`). Every sequence carves its

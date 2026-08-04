@@ -293,6 +293,29 @@ enum Command {
         /// Internal-path prefix filter (e.g. `creature`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the **3-D model particles**:
+    /// emitters carrying a geometry-model reference, whose shard instances render the GEOMETRY
+    /// model's own submeshes stamped with the OWNER model's owner-last draw-order rung. Per
+    /// (owner, geometry) pair: the owner's rung and reach plus the geometry's material family
+    /// tuples (blend, two_sided, additive, no_depth_write, no_depth_test) — the exact keys the
+    /// shard materials are built from. The ground truth sizing the pipeline-warm menagerie's
+    /// shard rows: rung histogram, family-tuple set split by transparent-pass membership, and
+    /// the unresolvable-path bound.
+    Shardcensus {
+        /// Internal-path prefix filter (e.g. `spells`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
+    /// Sweep every `.m2` (optionally under a path prefix) and list the models where the
+    /// **loader-idle sequence is not file slot 0** while benilla's render content gate leaves it
+    /// unarmed — so every per-sequence bake (emission rate/gate, the nine parameter channels,
+    /// material alpha) degrades to slot 0, a sequence the instance is not playing. On the
+    /// `DuelingFlag`-shaped GameObjects (Spawn/Stand/Despawn) slot 0 is the **Spawn flourish**:
+    /// the population instrument for decision 0936, found on the Stormwind battlefield banner
+    /// pouring its spawn sparkle-tails for ever.
+    Idleslotscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` (optionally under a path prefix) and list the models whose PARTICLE
     /// emitters carry any of the given file-flag bits (`M2ParticleEmitter+0x04`) — the
     /// population instrument for particle-flag mechanisms (which content actually authors
@@ -585,6 +608,8 @@ fn main() -> Result<()> {
         Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
         Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,
+        Command::Shardcensus { prefix } => scan::shardcensus(&mut chain, prefix.as_deref())?,
+        Command::Idleslotscan { prefix } => scan::idleslotscan(&mut chain, prefix.as_deref())?,
         Command::Partscan { mask, prefix } => {
             let mask = parse_u32_maybe_hex(&mask)
                 .with_context(|| format!("parsing flag mask '{mask}'"))?;

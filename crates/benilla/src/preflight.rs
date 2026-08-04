@@ -15,7 +15,9 @@
 //!    FactionTemplate.dbc row 35 (VERIFIED from the extracted DBC): faction 31 "Friendly", own group
 //!    mask 0, enemy mask 0 — it is hostile to nothing and nothing is hostile to it. Any hostility,
 //!    reaction-colour, nameplate, aggro, threat, damage or drowning measurement taken with GM on is
-//!    simply wrong, quietly. It is now **off** by default: [`crate::probe_shield`] keeps the body
+//!    simply wrong, quietly. It also silently suspends the **indoor dismount**: the outdoor-only
+//!    aura sweep is `!IsGameMaster()`-gated, so a GM rides into the Goldshire inn and stays mounted
+//!    (decision 0934). It is now **off** by default: [`crate::probe_shield`] keeps the body
 //!    alive without poisoning any of that (decision 0677), and this banner reports which it is.
 //! 3. **Movement is server-blocked** — rooted, stunned, confused, fleeing, or mid-taxi-flight. The
 //!    controller ignores input and the honest report is "the mover is broken".
@@ -276,7 +278,9 @@ fn findings(
              (\"Friendly\", enemy mask 0) and freezes the mirror timers, so NOTHING is hostile, \
              nothing aggros, fall/environmental damage is skipped and breath/fatigue never tick. \
              Any hostility, reaction-colour, nameplate, threat, aggro, damage or drowning reading \
-             taken now is wrong. {}",
+             taken now is wrong. It ALSO suspends the INDOOR DISMOUNT: \
+             `CheckAreaExploreAndOutdoor` drops outdoor-only auras only `if (… && \
+             !IsGameMaster())`, so a GM rides into a building and stays mounted (decision 0934). {}",
             match shield {
                 // GM mode is the DEFAULT (0679) — it is what stops a parked body being mobbed, and
                 // the shield is what makes dropping it safe. So this warning is expected on most
@@ -284,6 +288,15 @@ fn findings(
                 ShieldReport::Arming | ShieldReport::Armed =>
                     "This is the default. Re-run with WOW_GM=off for those readings — safe, \
                      because the probe shield (decision 0677) keeps the body alive without it.",
+                // Not a probe body — the director's own account, or a bystander. `WOW_GM` would be
+                // inert here (the shield only ever commands `probe<N>`, 0677), and saying otherwise
+                // sends the reader after a switch that does nothing. The state is also PERSISTED:
+                // vmangos saves it in `characters.extra_flags` bit 0 and `GM.LoginState = 2`
+                // restores it, so it stays on across logins until somebody turns it off.
+                ShieldReport::NotOurs =>
+                    "WOW_GM does not reach this body — the shield only ever commands probe accounts \
+                     (0677) — so the way out is typing `.gm off` yourself. It persists across \
+                     logins (vmangos GM.LoginState = 2), which is why it is on now.",
                 _ =>
                     "Re-run with WOW_GM=off for those readings. Note the probe shield is NOT up on \
                      this run, so an unshielded body with GM mode off can be killed.",
@@ -484,13 +497,39 @@ mod tests {
             ShieldReport::Armed,
             ShieldReport::Arming,
             ShieldReport::Disabled,
-            ShieldReport::NotOurs,
+            ShieldReport::Unconfirmed,
         ] {
             let out = findings(&gm, report);
             let line = out.iter().find(|l| l.contains("GM MODE IS ON")).unwrap();
             assert!(line.contains("WOW_GM=off"), "{report:?}: {line}");
             assert!(!line.contains("put it back on"), "{report:?}: {line}");
         }
+        // …but the way out has to be one that WORKS on this body. `WOW_GM` only ever commands a
+        // probe account (0677), so on anyone else's — the director's own, which is exactly who
+        // rides into an inn and asks why they are still mounted — the switch is `.gm off`, typed.
+        let not_ours = findings(&gm, ShieldReport::NotOurs);
+        let line = not_ours
+            .iter()
+            .find(|l| l.contains("GM MODE IS ON"))
+            .unwrap();
+        assert!(
+            line.contains(".gm off") && !line.contains("WOW_GM=off"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_gm_warning_names_the_indoor_dismount() {
+        // The consequence that cost a session (decision 0934): the outdoor-only aura sweep is
+        // `!IsGameMaster()`-gated server-side, so a GM never dismounts riding into a building — and
+        // the client, whose mount lane is nothing but the MOUNTDISPLAYID watcher, has no say in it.
+        let gm = player(&[
+            (HEALTH, 60),
+            (MAXHEALTH, 60),
+            (PLAYER_FLAGS, PLAYER_FLAGS_GM),
+        ]);
+        let line = findings(&gm, ShieldReport::Armed).remove(0);
+        assert!(line.contains("INDOOR DISMOUNT"), "{line}");
     }
 
     #[test]

@@ -177,6 +177,15 @@ pub struct ModelEmitter {
     /// **Bevy model space** (the same frame the instance transform maps), radius model-local
     /// yards. `(ZERO, 0)` when the header carries no bounds — the sign test at the anchor.
     pub water_bound: (Vec3, f32),
+    /// The OWNER model's **loader-idle file sequence slot**
+    /// ([`crate::ModelAnimations::idle_seq`]) — the sequence every M2 instance is playing when no
+    /// rig has armed anything, and therefore the slot this emitter's per-sequence rate/gate/param
+    /// bakes sample against by default (decision 0936). Baked onto the emitter, not asked of the
+    /// spawn site, because the lanes that need it most are exactly the ones with no rig to ask:
+    /// a content-gated GameObject (`spawn_emitter`'s `EmitClock::Host` whose player armed nothing)
+    /// and an unrigged placed doodad (`EmitClock::Pinned`). `0` for a model with no sequences —
+    /// the same degrade as before, now stated once instead of falling out of an `unwrap_or`.
+    pub idle_seq: usize,
 }
 
 /// Whether looping `anim` would look like anything other than the **static mesh** — the doodad
@@ -193,22 +202,13 @@ pub struct ModelEmitter {
 /// ≠ 0 (the M2 translation track is a delta on the pivot offset), rotation ≠ identity, scale ≠ 1.
 /// Genuinely rest-posed idles — the ~90% of placed doodads decision 0130 measured — still take the
 /// static path, so that optimization survives intact.
+///
+/// The predicate itself is `ModelAnimation::is_rest_pose`, beside the parse, so
+/// `benilla-extract idleslotscan`'s corpus census of this gate's reach can't drift from the gate
+/// (decision 0936). What it decides is **whether to build a rig**, and nothing else — the sequence
+/// the instance is playing is [`ModelAnimations::idle_seq`], which has an answer either way.
 fn idle_pose_differs(anim: &benilla_formats::ModelAnimation) -> bool {
-    const EPS: f32 = 1e-4;
-    anim.bones.iter().any(|b| {
-        b.translation.len() > 1
-            || b.rotation.len() > 1
-            || b.scale.len() > 1
-            || b.translation
-                .iter()
-                .any(|(_, v)| v.iter().any(|c| c.abs() > EPS))
-            || b.rotation
-                .iter()
-                .any(|(_, q)| (q[3].abs() - 1.0).abs() > EPS)
-            || b.scale
-                .iter()
-                .any(|(_, s)| s.iter().any(|c| (c - 1.0).abs() > EPS))
-    })
+    !anim.is_rest_pose()
 }
 
 /// A model reference inside an M2 record (`.mdx`/`.mdl`, mixed case, backslashes) → its
@@ -355,7 +355,7 @@ impl AssetLoader for M2ModelLoader {
         // Particle emitters: resolve each emitter's texture to an `mpq://` image dependency (same
         // lowercase normalisation as submesh albedos), and bake its host bone's pivot so the spawn
         // site can ride a live joint (see [`ModelEmitter::bone_pivot`]). Absent on most models.
-        let emitters = parse_m2_particle_emitters(&bytes)
+        let mut emitters: Vec<ModelEmitter> = parse_m2_particle_emitters(&bytes)
             .unwrap_or_default()
             .into_iter()
             .map(|def| {
@@ -393,6 +393,7 @@ impl AssetLoader for M2ModelLoader {
                     geometry,
                     owner_reach,
                     water_bound,
+                    idle_seq: 0, // stamped below, once the sequences are built
                 }
             })
             .collect();
@@ -435,7 +436,11 @@ impl AssetLoader for M2ModelLoader {
                 def,
             })
             .collect();
-        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw);
+        // The welded-billboard gate (decision 0935): a billboard bone whose geometry is stitched
+        // into the surrounding mesh keeps its authored pose, because facing it drags the mesh.
+        // Same predicate the per-batch card split already refuses on, so the two lanes agree.
+        let welded_billboards = benilla_formats::non_separable_billboard_bones(&bytes);
+        let (skeleton, inverse_bindposes) = build_skeleton(&skeleton_raw, &welded_billboards);
         let inverse_bindposes = ctx.add_labeled_asset(
             "inverse_bindposes".to_string(),
             SkinnedMeshInverseBindposes::from(inverse_bindposes),
@@ -656,6 +661,16 @@ impl AssetLoader for M2ModelLoader {
                 }
             })
         };
+
+        // Stamp every emitter with the model's loader-idle slot (decision 0936) — the sequence a
+        // rig-less instance is playing, and so the slot its rate/gate/param bakes sample by
+        // default. Done here rather than in the map above because the selection needs the built
+        // clips (their `seq_index` + the `playableAnimationLookup` resolve), and only `None` when
+        // the model builds no clip at all — nothing to name, so the historical slot 0 stands.
+        let idle_seq = animations.as_ref().and_then(ModelAnimations::idle_seq);
+        for e in &mut emitters {
+            e.idle_seq = idle_seq.unwrap_or(0);
+        }
 
         // The authored portrait camera (raw WoW model space → Bevy, same pure rotation the meshes
         // bake through, so eye/target land in exactly the submeshes' frame) — and the camera

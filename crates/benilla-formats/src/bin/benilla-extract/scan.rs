@@ -2720,6 +2720,172 @@ pub fn fxordercensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Sweep every `.m2` (optionally under a path prefix) and census the corpus's **3-D model
+/// particles**: the emitters whose record carries a geometry-model reference (`+0x18` — a shard
+/// instance renders that GEOMETRY model's own submeshes, not a billboard quad). Per OWNER model:
+/// the owner-last draw-order rung its shards are stamped with at runtime
+/// (`owner_last_rung(m2_owner_reach(owner submeshes))`); per referenced GEOMETRY model: the
+/// material family tuples its render submeshes author — (blend, two_sided, additive,
+/// no_depth_write, no_depth_test), the exact key the shard's material is built from.
+///
+/// This is the **ground truth for the pipeline-warm menagerie's shard rows**: warming a pipeline
+/// per (rung × family) cell is only worth its table if the corpus's cells are enumerable, and this
+/// census is what enumerates them — the rung histogram sizes the rung axis, the family-tuple set
+/// (split by transparent-pass membership, the renderer's own test) sizes the material axis, and
+/// the unresolved-path count bounds what the table can never cover.
+pub fn shardcensus(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+
+    // A submesh's material family: the tuple the shard material is keyed by, rendered compactly
+    // (`Blend+2s+add`), plus its transparent-pass membership — the renderer's own test, where
+    // `additive` forces the pass whatever the authored blend says (`model_material`).
+    let fam = |s: &benilla_formats::RenderSubmesh| {
+        let transparent = s.additive
+            || matches!(
+                s.blend,
+                benilla_formats::ModelBlend::Blend
+                    | benilla_formats::ModelBlend::Mod
+                    | benilla_formats::ModelBlend::Mod2x
+            );
+        let label = format!(
+            "{:?}{}{}{}{}",
+            s.blend,
+            if s.two_sided { "+2s" } else { "" },
+            if s.additive { "+add" } else { "" },
+            if s.no_depth_write { "+ndw" } else { "" },
+            if s.no_depth_test { "+ndt" } else { "" },
+        );
+        (label, transparent)
+    };
+
+    // Each distinct geometry model is read, parsed, and tallied exactly once; the cache keeps its
+    // (family, transparent) list per submesh for the per-pair lines. `None` = unresolvable.
+    let mut geo_cache: BTreeMap<String, Option<Vec<(String, bool)>>> = BTreeMap::new();
+    let mut fam_transparent: BTreeMap<String, u32> = BTreeMap::new();
+    let mut fam_opaque: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rungs: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut parse_failures: Vec<(String, String)> = Vec::new();
+    let (mut scanned, mut owners) = (0u32, 0u32);
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        if benilla_formats::parse_m2_particle_emitters(&bytes).is_err() {
+            continue;
+        }
+        // Distinct geometry references, normalized the way the chain resolves model paths
+        // (lowercase, `\` separators, `.mdx`/`.mdl` → `.m2` — `model_key` mirrors the crate's own
+        // `model_path`).
+        let geos: BTreeSet<String> = record_extras(&bytes)
+            .iter()
+            .filter_map(|e| e.geometry_model.as_deref())
+            .map(|p| model_key(&p.replace('/', "\\")))
+            .collect();
+        if geos.is_empty() {
+            continue;
+        }
+        owners += 1;
+        // The rung the owner's shards are stamped with: the renderer's own bound and rung, at
+        // placement scale 1 (a scaled placement multiplies the reach).
+        let dir = name.rsplit_once('\\').map_or("", |(d, _)| d);
+        let owner_subs =
+            benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]).unwrap_or_default();
+        let reach = benilla_formats::m2_owner_reach(&owner_subs);
+        let rung = benilla_formats::owner_last_rung(reach);
+        *rungs.entry(rung as u32).or_default() += 1;
+        for geo in geos {
+            if !geo_cache.contains_key(&geo) {
+                let parsed = match chain.read_file(&geo) {
+                    Ok(gb) => {
+                        let gdir = geo.rsplit_once('\\').map_or("", |(d, _)| d);
+                        match benilla_formats::parse_m2_render_submeshes(&gb, gdir, &[]) {
+                            Ok(gsubs) => {
+                                let fams: Vec<(String, bool)> = gsubs.iter().map(&fam).collect();
+                                for (label, transparent) in &fams {
+                                    let tally = if *transparent {
+                                        &mut fam_transparent
+                                    } else {
+                                        &mut fam_opaque
+                                    };
+                                    *tally.entry(label.clone()).or_default() += 1;
+                                }
+                                Some(fams)
+                            }
+                            Err(e) => {
+                                parse_failures.push((geo.clone(), e.to_string()));
+                                None
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        unresolved.push(geo.clone());
+                        None
+                    }
+                };
+                geo_cache.insert(geo.clone(), parsed);
+            }
+            let fams = match &geo_cache[&geo] {
+                Some(fams) if fams.is_empty() => "(no submeshes)".to_string(),
+                Some(fams) => fams
+                    .iter()
+                    .map(|(l, _)| l.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => "UNRESOLVED".to_string(),
+            };
+            println!("rung {rung:>2.0}  reach {reach:>8.2}  {name} -> {geo}  [{fams}]");
+        }
+    }
+
+    eprintln!(
+        "{scanned} models scanned\n  \
+         {owners} own a geometry-model (3-D shard) emitter\n  \
+         {} distinct geometry models referenced\n  \
+         {} geometry paths unresolvable in the chain",
+        geo_cache.len(),
+        unresolved.len()
+    );
+    eprintln!("  owner rung histogram (placement scale 1):");
+    for (rung, n) in &rungs {
+        eprintln!("    rung {rung:>2}  {n:>5}");
+    }
+    eprintln!("  geometry family tuples — TRANSPARENT pass (submeshes across distinct models):");
+    for (label, n) in &fam_transparent {
+        eprintln!("    {label:<24} {n:>5}");
+    }
+    eprintln!("  geometry family tuples — opaque/mask pass:");
+    for (label, n) in &fam_opaque {
+        eprintln!("    {label:<24} {n:>5}");
+    }
+    if !unresolved.is_empty() {
+        eprintln!("  unresolvable geometry paths:");
+        for p in &unresolved {
+            eprintln!("    {p}");
+        }
+    }
+    if !parse_failures.is_empty() {
+        eprintln!("  geometry parse failures:");
+        for (p, e) in &parse_failures {
+            eprintln!("    {p}: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// The terrain MCSH shadow bit at a world position + an ASCII texel neighborhood (`#` shadowed,
 /// `.` lit, `?` off-tile/no-chunk). One MCSH texel is `TILE_SIZE/1024` ≈ 0.52 yd; the grid spans
 /// ±8 texels so a doodad base sitting one texel from a shadow edge — the 2.5-vs-0.5 intensity
@@ -3250,5 +3416,111 @@ pub fn fxlifescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
     for (dir, n) in &by_dir {
         println!("  {dir:<16} {n:>5}");
     }
+    Ok(())
+}
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the models where the **loader-idle
+/// sequence is not file slot 0** while benilla's render content gate declines to arm it — so every
+/// per-sequence bake (`EmitTiming`/`EmitParams`/`AlphaAnim`) degrades to slot 0, a sequence the
+/// instance is not playing (decision 0936, found on the Stormwind battlefield banner).
+///
+/// The reference arms the loader-idle sequence on **every** M2 instance at load (`0x70ebd0`'s tail,
+/// wow-re `gameobject-anim-arm.md` §1), so "which sequence is this playing" always has an answer.
+/// benilla skips the arm when looping the idle would render identically to the static mesh — sound
+/// for the *mesh*, and silently wrong for anything keyed on the sequence *identity*. The two only
+/// disagree visibly when the idle is not slot 0, which is the `DuelingFlag` shape:
+/// `Spawn(145) / Stand(0) / Despawn(157)`, where slot 0 is the **Spawn flourish**.
+///
+/// Reports, per model: the emitters whose enabled/rate gate at t = 0 differs between slot 0 and the
+/// idle slot (`FX`), and the batches whose combined material-alpha factor differs (`ALPHA`).
+pub fn idleslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let pfx = prefix.map(|p| p.to_ascii_lowercase().replace('/', "\\"));
+    let names: Vec<String> = chain
+        .list()
+        .context("listing chain contents")?
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| {
+            let l = n.to_ascii_lowercase();
+            l.ends_with(".m2") && pfx.as_deref().is_none_or(|p| l.starts_with(p))
+        })
+        .collect();
+    let (mut scanned, mut unarmed, mut window) = (0u32, 0u32, 0u32);
+    let (mut fx_models, mut alpha_models) = (0u32, 0u32);
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let anims = benilla_formats::parse_m2_animations(&bytes);
+        if anims.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        let idle_id = benilla_formats::parse_m2_playable_animation_lookup(&bytes)
+            .unwrap_or_default()
+            .first()
+            .map_or(0, |p| p.resolved_id);
+        // benilla's render content gate (`benilla_assets`' `idle_pose_differs`): a bind-pose idle
+        // is not armed at all, so nothing ever overrides the per-sequence bakes' opening slot.
+        if anims
+            .iter()
+            .any(|a| a.anim_id == idle_id && !a.is_rest_pose())
+        {
+            continue;
+        }
+        unarmed += 1;
+        let idle = anims
+            .iter()
+            .find(|a| a.anim_id == idle_id)
+            .map_or(0, |a| a.seq_index);
+        if idle == 0 {
+            continue; // degrading to slot 0 happens to BE the idle slot — no divergence
+        }
+        window += 1;
+        let mut lines = Vec::new();
+        let defs = benilla_formats::parse_m2_particle_emitters(&bytes).unwrap_or_default();
+        let mut fx = 0u32;
+        for (i, d) in defs.iter().enumerate() {
+            let on = |s: usize| {
+                d.timing.emitting(Some(s), 0.0, 0.0) && d.timing.rate(Some(s), 0.0, 0.0) > 0.0
+            };
+            if on(0) != on(idle) {
+                fx += 1;
+                lines.push(format!(
+                    "    FX    emitter {i:>2}: slot 0 {:>3}, idle slot {idle} {:>3}  tex {}",
+                    if on(0) { "ON" } else { "off" },
+                    if on(idle) { "ON" } else { "off" },
+                    d.texture.as_deref().unwrap_or("NONE"),
+                ));
+            }
+        }
+        let dir = name.rsplit_once('\\').map_or("", |(d, _)| d);
+        let subs = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]).unwrap_or_default();
+        let mut alpha = 0u32;
+        for (i, s) in subs.iter().enumerate() {
+            let Some(a) = &s.alpha_anim else { continue };
+            let (f0, fi) = (a.sample(Some(0), 0.0, 0.0), a.sample(Some(idle), 0.0, 0.0));
+            if (f0 - fi).abs() > 1e-3 {
+                alpha += 1;
+                lines.push(format!(
+                    "    ALPHA batch   {i:>2}: slot 0 {f0:.2}, idle slot {idle} {fi:.2}"
+                ));
+            }
+        }
+        if !lines.is_empty() {
+            fx_models += u32::from(fx > 0);
+            alpha_models += u32::from(alpha > 0);
+            println!("{name}  (idle slot {idle} of {} sequences)", anims.len());
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    eprintln!(
+        "{scanned} models with sequences, {unarmed} whose idle the content gate leaves unarmed, \
+         {window} of those with idle slot != 0 (the divergence window): \
+         {fx_models} model(s) whose EMITTERS gate differently, \
+         {alpha_models} whose MATERIAL ALPHA differs"
+    );
     Ok(())
 }

@@ -212,8 +212,12 @@ impl Plugin for TargetPlugin {
                     click::world_right_click_payload,
                     click::select_on_click,
                     // AFTER the gated select (which holds while the mode is active): the commit
-                    // may clear the mode, and the selection gate must have read it first.
+                    // may clear the mode, and the selection gate must have read it first. The two
+                    // world legs are siblings, not a fallback chain — the pending spell's word
+                    // decides which of them a click can even feed (decision 0939), so their order
+                    // relative to each other never matters.
                     crate::ui_action::targeting::commit_ground_cast_on_click,
+                    crate::ui_action::targeting::commit_object_cast_on_click,
                     click::act_on_right_click,
                     click::clear_target_requests,
                     click::target_unit_requests,

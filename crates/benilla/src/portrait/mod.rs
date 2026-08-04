@@ -1315,15 +1315,22 @@ fn sync_body_booth(
 /// skips its whole pass (clear + model + FFXGlow chain); its target keeps the last render — exactly
 /// right for a still (the 0105 bake, frozen at Stand).
 /// With `WOW_PORTRAIT_TEST` set the gate stands down (the eyeball harness wants live cameras).
+/// The pipeline warm pass is demand too (decision 0938): its menagerie duplicates rigs onto a
+/// booth layer so the booths' `Msaa::Off` pipeline twins compile behind the entry cover — which
+/// only works if the booth cameras render during the warm window.
 fn gate_booth_cameras(
     mut booths: ResMut<Booths>,
     preview: Res<GluePreview>,
     images: Res<Assets<Image>>,
+    warm: Res<crate::pipe_warm::WarmPass>,
     time: Res<Time<bevy::time::Real>>,
     mut cams: Query<(&BoothCam, &mut Camera)>,
     mut env_cache: Local<Option<bool>>,
 ) {
     let test = test_mode(&mut env_cache);
+    // `satisfied()` is false exactly while the covered warm window runs (the loading screen
+    // holds on it), so this term costs nothing outside that window.
+    let warming = !warm.satisfied();
     for (BoothCam(token), mut cam) in &mut cams {
         let Some(booth) = booths.0.get_mut(token.as_str()) else {
             continue;
@@ -1335,8 +1342,12 @@ fn gate_booth_cameras(
             booth.wake = booth.wake.max(1);
         }
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some();
-        let active =
-            test || live_scene || booth.live || booth.wake > 0 || !booth.pending.is_empty();
+        let active = test
+            || warming
+            || live_scene
+            || booth.live
+            || booth.wake > 0
+            || !booth.pending.is_empty();
         // `WOW_BOOTH_LOG=1`: the gate's timeline — every activity flip and every armed frame,
         // wall-stamped (the first-login black-pane hunt).
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1441,6 +1452,7 @@ mod tests {
                     geometry: None,
                     owner_reach: 0.0,
                     water_bound: (Vec3::ZERO, 0.0),
+                    idle_seq: 0,
                 })
                 .collect(),
         }

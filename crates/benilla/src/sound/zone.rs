@@ -22,6 +22,22 @@
 //! entry, throttled by its per-entry minute delay;
 //! higher `Priority` wins when nested areas compete (we resolve one row).
 //!
+//! **The music slot holds exactly one stream**, and every start goes through
+//! [`start_music_stream`], which fades the outgoing one out as it opens the incoming. Dropping a
+//! kira handle does *not* stop its sound (that is precisely what the fade-stop rides on), so a
+//! start that merely overwrote the handle would leave the old track playing forever, unreapable
+//! and deaf to the volume slider.
+//!
+//! **Server-pushed music** (`SMSG_PLAY_MUSIC`) is a SoundEntries kit for that same slot, and the
+//! server **re-pushes the same id on a timer** to keep an event track looping: the Darkmoon Faire's
+//! emitter sends it every **5 s** (vmangos `go_darkmoon_faire_music`, commented as a sniffed retail
+//! value). So a push for the kit already playing is a **no-op** ([`slot_holds`]) — the client's own
+//! already-playing early-out (`0x4602e0` @`0x460342`: `cmp [0xb06cbc],eax; je` → desired == playing
+//! → return); when the track *does* end, the next push restarts it, which is what makes the loop.
+//! Any other push takes the slot the way a zone-music change does (outgoing 4.0 s fade, incoming at
+//! full) — inferred from the slot's one transition idiom, as the `SMSG_PLAY_MUSIC` handler itself
+//! is not pinned in wow-re.
+//!
 //! **Ambience transport** (`0x460b00`, the separate ambience updater; §5 B16). An area / interior /
 //! day↔night / ghost ambience-id change is a **5.0 s crossfade**: the old bed fades out over 5.0 s
 //! then stops (`0x7a5a10(0x40a00000 = 5.0f)`) while the new bed starts at volume 0 and fades in over
@@ -132,8 +148,11 @@ fn fade_in_gain(fade: &mut Option<FadeIn>, now: f64) -> f32 {
 pub(super) struct ZoneAudio {
     /// The `ZoneMusic` row currently scheduled (0 = none).
     zone_music: u32,
-    /// The playing music stream (a zone track or an intro).
+    /// The playing music stream (a zone track, an intro, or a server-pushed event track).
     music: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
+    /// The SoundEntries kit on the music slot (0 = never started one) — the "what is playing" a
+    /// repeat `SMSG_PLAY_MUSIC` is compared against ([`slot_holds`]).
+    music_kit: u32,
     /// The playing track's kit base volume (multiplied under the category slider + fade).
     music_kit_vol: f32,
     /// When the next zone track starts (Time::elapsed_secs_f64; None = a track is playing or
@@ -167,6 +186,7 @@ impl Default for ZoneAudio {
         Self {
             zone_music: 0,
             music: None,
+            music_kit: 0,
             music_kit_vol: 1.0,
             next_track_at: None,
             have_played_music: false,
@@ -458,9 +478,19 @@ fn next_track_time(
     })
 }
 
-/// Open a music kit as a stream on the music slot (a zone track or an intro). The stream starts at
-/// **full** kit × category volume for every start — the client has no music fade-in (§5 B16);
-/// the slot's only fade is the outgoing 4.0 s fade-stop. Returns whether a stream actually started.
+/// Whether the music slot is *already* running `kit_id` — the client's already-playing early-out
+/// (`0x4602e0` @`0x460342`: `cmp [0xb06cbc],eax; je` → desired == playing → return), which is what
+/// makes the server's every-5-s re-push of an event track a no-op instead of a restart. A handle
+/// the end-of-track reap hasn't collected yet (`Stopped`) does **not** hold the slot: the track is
+/// over, and a push is exactly what should start it again.
+fn slot_holds(music_kit: u32, kit_id: u32, slot: Option<kira::sound::PlaybackState>) -> bool {
+    music_kit == kit_id && slot.is_some_and(|s| s != kira::sound::PlaybackState::Stopped)
+}
+
+/// Open a music kit as a stream on the music slot (a zone track, an intro, or a server-pushed
+/// track), replacing whatever is on it. The stream starts at **full** kit × category volume for
+/// every start — the client has no music fade-in (§5 B16); the slot's only fade is the outgoing
+/// 4.0 s fade-stop. Returns whether a stream actually started.
 fn start_music_stream(
     zone: &mut ZoneAudio,
     out: &mut SoundOutput,
@@ -490,7 +520,14 @@ fn start_music_stream(
     match mixer_ref.play_stream(data.volume(mixer::amp_to_db(start_amp))) {
         Ok(h) => {
             info!("zone music: {path}");
-            zone.music = Some(h);
+            // One stream per slot: hand the outgoing track the 4.0 s music fade as the incoming
+            // takes over (the same overlap `0x4602e0` arms on a zone-music change). It cannot just
+            // be dropped — a dropped kira handle keeps playing, so an overwritten stream would
+            // stay in the mix at full volume until its file ran out.
+            if let Some(mut outgoing) = zone.music.replace(h) {
+                outgoing.stop(mixer::fade(MUSIC_FADE_OUT_MS));
+            }
+            zone.music_kit = kit_id;
             zone.music_kit_vol = kit_vol;
             zone.have_played_music = true;
             true
@@ -590,6 +627,17 @@ fn server_sounds(
     for m in msgs.read() {
         match m.kind {
             ServerSoundKind::Music => {
+                // A push for the track already on the slot is a NO-OP (module docs): the server
+                // re-pushes an event track on a timer to loop it — the Darkmoon Faire emitter
+                // every 5 s — so restarting on each push stacked a fresh full-volume copy of the
+                // faire theme onto the mix every 5 s, a dozen at a time.
+                if slot_holds(
+                    zone.music_kit,
+                    m.sound_id,
+                    zone.music.as_ref().map(|h| h.state()),
+                ) {
+                    continue;
+                }
                 start_music_stream(&mut zone, &mut out, &mut kits, &assets, &config, m.sound_id);
             }
             ServerSoundKind::Sound2d | ServerSoundKind::ObjectSound => {
@@ -634,6 +682,7 @@ fn leave_world(mut zone: NonSendMut<ZoneAudio>) {
         h.stop(mixer::fade(WORLD_TEARDOWN_FADE_MS));
     }
     zone.zone_music = 0;
+    zone.music_kit = 0;
     zone.music_kit_vol = 1.0;
     zone.next_track_at = None;
     zone.ambience_kit = 0;
@@ -662,4 +711,24 @@ pub(super) fn plugin(app: &mut App) {
             OnExit(crate::char_select::ClientState::InWorld),
             leave_world,
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slot_holds;
+    use kira::sound::PlaybackState;
+
+    /// The repeat-push guard. The server keeps an event track looping by re-pushing its id every
+    /// few seconds (the Darkmoon Faire emitter: `SMSG_PLAY_MUSIC` 8440 every 5 s), so a push for
+    /// the track *currently playing* must do nothing — without this the faire stacked a new
+    /// full-volume copy of its theme into the mix every 5 s. Once the track ends (or never
+    /// started), the same id must start it again: that repeat is what loops the music.
+    #[test]
+    fn repeat_music_push_only_no_ops_while_the_track_plays() {
+        assert!(slot_holds(8440, 8440, Some(PlaybackState::Playing)));
+        assert!(!slot_holds(8440, 8440, Some(PlaybackState::Stopped)));
+        assert!(!slot_holds(8440, 8440, None));
+        // A different track always takes the slot (an intro, a scripted track, a zone change).
+        assert!(!slot_holds(8440, 4123, Some(PlaybackState::Playing)));
+    }
 }
