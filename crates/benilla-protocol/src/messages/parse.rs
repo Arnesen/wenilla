@@ -410,6 +410,9 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         }
         opcode::SMSG_SPELL_START => ServerPacket::SpellStart(spells::read_spell_start(&mut r)?),
         opcode::SMSG_SPELL_GO => ServerPacket::SpellGo(spells::read_spell_go(&mut r)?),
+        opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS => {
+            ServerPacket::SpellChainTargets(spells::read_spell_chain_targets(&mut r)?)
+        }
         opcode::SMSG_SPELL_FAILED_OTHER => {
             let (caster, spell_id) = spells::read_spell_failed_other(&mut r)?;
             ServerPacket::SpellFailedOther { caster, spell_id }

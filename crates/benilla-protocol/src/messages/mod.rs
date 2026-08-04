@@ -154,7 +154,7 @@ pub use social::{
 pub use spellbook::SpellCooldown;
 pub use spells::{
     cancel_aura, cast_spell, cast_spell_at_dest, cast_spell_gameobject, cast_spell_item,
-    CastOutcome, SpellCastTargets, SpellGo, SpellStart,
+    CastOutcome, SpellCastTargets, SpellChainTargets, SpellGo, SpellStart,
 };
 pub use taxi::{
     activate_taxi, activate_taxi_express, taxi_node_status_query, taxi_query_available_nodes,

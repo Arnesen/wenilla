@@ -93,6 +93,18 @@ pub(super) enum UiFixture {
     /// search-box seat, category list art, the window scale. Static (no server state touched),
     /// so its pixels move only when the window or the atlas seam does.
     Options,
+    /// The Options window ON THE AUDIO PAGE (decision 0957) — the setting-row look instrument:
+    /// checkbox art at its era seats, the minimal_sliderbar three-slice + thumb + steppers,
+    /// child-row indent/small-font, the percent readouts, Defaults armed. Rows read the CVar
+    /// registration defaults (hermetic capture = no config file), so the pixels move only with
+    /// the window, the atlas seam, or a registered default.
+    OptionsAudio,
+    /// The Options window ON THE GRAPHICS PAGE (decision 0959) — the two 1.12 Video Options
+    /// sliders on the era row seats: uiScale at its 0.64..1.0 panel range with the percent
+    /// readout, farclip at 177..777 with the raw-yards readout. Rows read the CVar registration
+    /// defaults (hermetic capture = no config file), so the pixels move only with the window,
+    /// the atlas seam, or a registered default.
+    OptionsGraphics,
     /// A **floating overhead name with the river surface behind it** — the world-text-vs-liquid
     /// draw-order instrument. A named unit stands 25 yd out in the Elwynn river (the `water-noon`
     /// camera), so its name projects onto the water *beyond* it: the exact geometry of the
@@ -825,6 +837,26 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::Options),
+    },
+    // The same window on the AUDIO page (0957). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-audio`.
+    Scenario {
+        name: "ui-options-audio",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::OptionsAudio),
+    },
+    // The same window on the GRAPHICS page (0959). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-graphics`.
+    Scenario {
+        name: "ui-options-graphics",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::OptionsGraphics),
     },
     // An overhead NAME with the river surface behind it — the world-text-vs-liquid draw-order
     // instrument (see [`UiFixture::NameWater`]). Same camera as `water-noon`, plus a named unit

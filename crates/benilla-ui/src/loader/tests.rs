@@ -1000,4 +1000,85 @@ mod region_template_tests {
         );
         assert_eq!(s.eval::<String>("return Label:GetText()").unwrap(), "hello");
     }
+
+    /// `atlas=` on a Button/CheckButton state texture and on a Slider `<ThumbTexture>` — the Era
+    /// dialect (0950) extended to the widget texture paths (0957): the slot is created empty and
+    /// resolved through SetAtlas, so the region answers GetAtlas and (with `useAtlasSize`) wears
+    /// the member's nominal size. The byte-verified 1.12 loader tables know only file=/<Color>.
+    #[test]
+    fn state_textures_and_the_thumb_take_the_atlas_attr() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        s.set_era_atlases([
+            (
+                "checkbox-minimal".to_string(),
+                crate::script::EraAtlasEntry {
+                    file: "era:textures/4614134.blp".to_string(),
+                    uv: [1.0 / 64.0, 31.0 / 64.0, 1.0 / 64.0, 30.0 / 64.0],
+                    size: [30.0, 29.0],
+                },
+            ),
+            (
+                "checkmark-minimal".to_string(),
+                crate::script::EraAtlasEntry {
+                    file: "era:textures/4614134.blp".to_string(),
+                    uv: [1.0 / 64.0, 31.0 / 64.0, 32.0 / 64.0, 61.0 / 64.0],
+                    size: [30.0, 29.0],
+                },
+            ),
+            (
+                "minimal_sliderbar_button".to_string(),
+                crate::script::EraAtlasEntry {
+                    file: "era:textures/4567914.blp".to_string(),
+                    uv: [1.0 / 128.0, 21.0 / 128.0, 20.0 / 128.0, 39.0 / 128.0],
+                    size: [20.0, 19.0],
+                },
+            ),
+        ]);
+        let doc = parse(
+            r#"<Ui>
+                <CheckButton name="Box">
+                    <Size><AbsDimension x="30" y="29"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                    <NormalTexture atlas="checkbox-minimal"/>
+                    <CheckedTexture atlas="checkmark-minimal"/>
+                </CheckButton>
+                <Slider name="Bar" orientation="HORIZONTAL" minValue="0" maxValue="1">
+                    <Size><AbsDimension x="200" y="19"/></Size>
+                    <Anchors><Anchor point="TOPLEFT" relativePoint="TOPLEFT"/></Anchors>
+                    <ThumbTexture atlas="minimal_sliderbar_button" useAtlasSize="true"/>
+                </Slider>
+            </Ui>"#,
+        )
+        .expect("valid FrameXML");
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+        assert_eq!(
+            s.eval::<String>("return Box:GetNormalTexture():GetAtlas()")
+                .unwrap(),
+            "checkbox-minimal"
+        );
+        assert_eq!(
+            s.eval::<String>("return Box:GetCheckedTexture():GetAtlas()")
+                .unwrap(),
+            "checkmark-minimal"
+        );
+        assert_eq!(
+            s.eval::<String>("return Bar:GetThumbTexture():GetAtlas()")
+                .unwrap(),
+            "minimal_sliderbar_button"
+        );
+        // useAtlasSize rode along — the thumb wears the member's nominal 20×19 (what the
+        // engine's thumb-travel math reads).
+        assert_eq!(
+            s.eval::<f64>("return Bar:GetThumbTexture():GetWidth()")
+                .unwrap(),
+            20.0
+        );
+        assert_eq!(
+            s.eval::<f64>("return Bar:GetThumbTexture():GetHeight()")
+                .unwrap(),
+            19.0
+        );
+    }
 }

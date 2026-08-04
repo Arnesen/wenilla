@@ -4,7 +4,7 @@
 use std::io::Cursor;
 
 use anyhow::Result;
-use benilla_wmo::{parse_wmo, ParsedWmo, WmoLiquid};
+use benilla_wmo::{parse_wmo, Color, ParsedWmo, WmoGroup, WmoLiquid};
 
 use super::{find_wmo_chunk, WmoRoot};
 use crate::liquid::{LiquidKind, LiquidMesh};
@@ -318,15 +318,217 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
     })
 }
 
+/// Where the bright-doorway fade stops: a vertex `≥ 6.6667` yd from every exterior-neighbour portal
+/// keeps its authored bake (`[0x811110]`, VERIFIED off `.rdata`).
+const DOORWAY_FADE_REACH: f32 = 6.666_666_5;
+
+/// The per-yard fade slope: `t = 1 − 0.15·dist` (`[0x7ffd6c]`, VERIFIED).
+const DOORWAY_FADE_SLOPE: f64 = 0.15;
+
+/// The plane epsilon inside the distance kernel (`0x6c4240`): a vertex within `1/6` yd of a portal's
+/// plane reports distance **0** — the "standing in the doorway" case, which whitens outright.
+const PORTAL_PLANE_EPS: f32 = 1.0 / 6.0;
+
+/// The reference's float→fixed magic bias: the f32 sum's BIT pattern is shifted `>> 14`, never
+/// numerically converted, so the byte falls out of the mantissa's low byte (`[0x8029cc]`).
+const FIXED_BIAS: f64 = 512.0;
+
+/// Distance from a model-space point to one portal polygon, the reference's kernel (`0x6c4240`):
+/// **0** when the point projects *through the opening* — inside the polygon and within
+/// [`PORTAL_PLANE_EPS`] of its plane — otherwise the minimum distance to the polygon's edge segments.
+///
+/// The containment half is what keeps a doorway's plane from reaching across a room. A portal plane is
+/// infinite; several of these openings are not doorways at all but whole ceilings (Dire Maul's sunken
+/// courtyard joins its sky through a 283×154 yd quad), so "on the plane" alone would whiten geometry
+/// tens of yards from any opening. Points on the plane but *outside* the outline fall through to the
+/// edge distance, which is the reference's own fallback and is never smaller than the truth.
+fn portal_distance(p: [f32; 3], poly: &[[f32; 3]], plane: [f32; 4]) -> f32 {
+    let n = [plane[0], plane[1], plane[2]];
+    let pd = n[0] * p[0] + n[1] * p[1] + n[2] * p[2] + plane[3];
+    let mut best = f32::MAX;
+    let mut inside = pd * pd < PORTAL_PLANE_EPS * PORTAL_PLANE_EPS;
+    let proj = [p[0] - n[0] * pd, p[1] - n[1] * pd, p[2] - n[2] * pd];
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        let e = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        // Outward edge test about the plane normal: a projection left of every edge is inside.
+        let out = [
+            e[1] * n[2] - e[2] * n[1],
+            e[2] * n[0] - e[0] * n[2],
+            e[0] * n[1] - e[1] * n[0],
+        ];
+        let w = [proj[0] - a[0], proj[1] - a[1], proj[2] - a[2]];
+        if out[0] * w[0] + out[1] * w[1] + out[2] * w[2] > 0.0 {
+            inside = false;
+        }
+        let wp = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        let len2 = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+        let t = if len2 > 0.0 {
+            ((wp[0] * e[0] + wp[1] * e[1] + wp[2] * e[2]) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let d = [wp[0] - e[0] * t, wp[1] - e[1] * t, wp[2] - e[2] * t];
+        best = best.min((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+    }
+    if inside {
+        0.0
+    } else {
+        best
+    }
+}
+
+/// One byte through the reference's fixed-point white-lerp: `((255 − ch)·t + ch + 512)` as f32, whose
+/// **bit pattern** shifted `>> 14` is the new byte (`0x6c43d0`, byte-verified against `WoW.exe`).
+fn white_lerp_byte(ch: u8, t: f64) -> u8 {
+    let chf = f64::from(ch);
+    let s = ((255.0 - chf) * t + chf + FIXED_BIAS) as f32;
+    ((s.to_bits() >> 14) & 0xff) as u8
+}
+
+/// **FixColorVertexAlpha** (`0x6c43d0`, wow-re `wmo-group-lighting.md §4`) — the bright-doorway portal
+/// fade, run once per group *before* it is ever drawn, in place over its MOCV buffer.
+///
+/// This is not a nicety: a WMO's short transition corridors are authored with **no usable bake at
+/// all** — Dire Maul's five entrance passages floor their walkway at MOCV `(10,10,40,α=0)`, a near-black
+/// navy — because the runtime fade is what lights them. Skip it and the interior TRANS law renders
+/// exactly what the file says: `tex × (10,10,40)` at lit-factor 1, a black floor between lit walls
+/// (the director's Dire Maul entrance report). The floor's four corners sit *on* the doorway portal
+/// polygons, so the fade takes them to white and the quad interpolates lit end to end.
+///
+/// The mechanism:
+/// 1. **Distance**: per vertex, the minimum [`portal_distance`] over this group's portal refs whose
+///    **neighbour group is exterior** (`MOGI.flags & 0x48 != 0`). Portals to interior neighbours
+///    whiten nothing — the fade is specific to interior↔exterior openings, observed live. A group
+///    with no such portal is untouched.
+/// 2. **Branches**: `dist == 0` ⇒ the slot goes white-opaque outright; `dist < 6.6667` **and** the
+///    authored alpha is 0 ⇒ RGB white-lerped by `t = 1 − 0.15·dist` with alpha `t·255`; else untouched.
+///
+/// **The MOPY pre-pass (`0x6c41e0`) is deliberately NOT run**, on live evidence over the static read.
+/// §4 records it as forcing `alpha = 0xFF` on every triangle with `MOPY.flags & 1 == 0` — but it is
+/// gated (`DAT_00ca8064 == 0`), and the reference's own D3D capture of the abbey
+/// (`trace-forensics-abbey-interior-d3d.md` §2) shows the uploaded MOCV pool **byte-exact against the
+/// file except for the whitened set** — 678/678 and 496/506 vertices identical, alphas included. A
+/// pre-pass that had run would have rewritten hundreds of alphas in that same buffer (372 of g003's
+/// 506 by this reader's count). It costs nothing here either way: the pre-pass can only *suppress* the
+/// partial-lerp branch, never the `dist == 0` whitening the dark corridors depend on.
+///
+/// A group without MOCV, or without an exterior-neighbour portal, is left exactly as authored.
+fn fix_color_vertex_alpha(
+    colors: &mut [Color],
+    group: &WmoGroup,
+    root: &WmoRoot,
+    header_refs: (u16, u16),
+) {
+    let portals = root.portals();
+    let infos = root.group_infos();
+    let (start, count) = (header_refs.0 as usize, header_refs.1 as usize);
+    // The doorway set: portals of THIS group whose far side is an exterior (daylit) group.
+    let doors: Vec<(Vec<[f32; 3]>, [f32; 4])> = portals
+        .refs
+        .get(start..start + count)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|r| infos.get(r.group as usize).is_some_and(|g| !g.interior))
+        .filter_map(|r| portals.infos.get(r.portal as usize))
+        .map(|info| {
+            let v = (0..info.count as usize)
+                .filter_map(|k| {
+                    portals
+                        .vertices
+                        .get(info.start_vertex as usize + k)
+                        .copied()
+                })
+                .collect();
+            (v, info.plane)
+        })
+        .filter(|(v, _): &(Vec<[f32; 3]>, _)| v.len() >= 3)
+        .collect();
+    if doors.is_empty() {
+        return;
+    }
+    for (i, c) in colors.iter_mut().enumerate() {
+        let Some(p) = group.vertex_positions.get(i) else {
+            continue;
+        };
+        let p = [p.x, p.y, p.z];
+        let dist = doors
+            .iter()
+            .map(|(poly, plane)| portal_distance(p, poly, *plane))
+            .fold(f32::MAX, f32::min);
+        if dist == 0.0 {
+            *c = Color {
+                b: 0xff,
+                g: 0xff,
+                r: 0xff,
+                a: 0xff,
+            };
+        } else if dist < DOORWAY_FADE_REACH && c.a == 0 {
+            let t = 1.0 - f64::from(dist) * DOORWAY_FADE_SLOPE;
+            c.b = white_lerp_byte(c.b, t);
+            c.g = white_lerp_byte(c.g, t);
+            c.r = white_lerp_byte(c.r, t);
+            c.a = ((((t * 255.0) + FIXED_BIAS) as f32).to_bits() >> 14 & 0xff) as u8;
+        }
+    }
+}
+
+/// The group's MOCV **as the renderer uploads it** — the authored buffer with the bright-doorway fade
+/// already applied (see [`fix_color_vertex_alpha`]), BGRA bytes parallel to the group's vertices.
+/// `None` when the bytes aren't a group or carry no MOCV parallel to their positions.
+///
+/// The seam the `wmo_mocv` instrument reads: a batch that censuses black in the file and white here
+/// is a transition corridor the fade lights; black in both is a genuinely dark room.
+pub fn wmo_group_fixed_colors(group_bytes: &[u8], root: &WmoRoot) -> Option<Vec<[u8; 4]>> {
+    let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
+        return None;
+    };
+    let colors = fixed_colors(&group, group_bytes, root)?;
+    Some(colors.iter().map(|c| [c.b, c.g, c.r, c.a]).collect())
+}
+
+/// The group's MOCV **exactly as authored**, BGRA bytes parallel to its vertices — the before to
+/// [`wmo_group_fixed_colors`]'s after. `None` when the bytes aren't a group or carry no MOCV parallel
+/// to their positions.
+pub fn wmo_group_raw_colors(group_bytes: &[u8]) -> Option<Vec<[u8; 4]>> {
+    let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
+        return None;
+    };
+    (group.vertex_colors.len() == group.vertex_positions.len()).then(|| {
+        group
+            .vertex_colors
+            .iter()
+            .map(|c| [c.b, c.g, c.r, c.a])
+            .collect()
+    })
+}
+
+/// Shared body of [`wmo_group_fixed_colors`] and the submesh build: clone the authored MOCV and run
+/// the fade over it. `None` when the group carries no MOCV parallel to its positions.
+fn fixed_colors(group: &WmoGroup, group_bytes: &[u8], root: &WmoRoot) -> Option<Vec<Color>> {
+    if group.vertex_colors.len() != group.vertex_positions.len() {
+        return None;
+    }
+    let mut colors = group.vertex_colors.clone();
+    let refs =
+        wmo_group_header(group_bytes).map_or((0, 0), |h| (h.portal_ref_start, h.portal_ref_count));
+    fix_color_vertex_alpha(&mut colors, group, root, refs);
+    Some(colors)
+}
+
 /// Build the render submeshes for one WMO **group** (its bytes), resolving textures/materials against
 /// `root`. Empty if the bytes aren't a parseable group. The bytes-in entry point for the Bevy
 /// `AssetLoader`; [`super::load_wmo`] is the chain-reading wrapper.
 pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<RenderSubmesh>> {
-    let ParsedWmo::Root(root) = &root.parsed else {
-        anyhow::bail!("WmoRoot is not a root");
-    };
     let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
         return Ok(Vec::new());
+    };
+    // The bright-doorway fade runs ONCE per group, over the group's own MOCV buffer, before any draw
+    // reads it (`0x6b3f90` gates it on the group's `+0xbc` done-byte). We load a group once, so the
+    // once-gate is the load itself: fix the colours here and every batch below sees the fixed buffer.
+    let colors = fixed_colors(&group, group_bytes, root).unwrap_or_default();
+    let ParsedWmo::Root(root) = &root.parsed else {
+        anyhow::bail!("WmoRoot is not a root");
     };
     // The MOGP batch-section counts (`+0x28/+0x2a/+0x2c`, after the byte-verified portal-ref span):
     // MOBA batches are laid out TRANS, then INT, then EXT — the class decides an interior group's
@@ -344,7 +546,7 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
     {
         // WMO groups carry MONR normals + MOCV colours (parallel to positions); fall back when absent.
         let has_normals = group.vertex_normals.len() == group.vertex_positions.len();
-        let has_colors = group.vertex_colors.len() == group.vertex_positions.len();
+        let has_colors = colors.len() == group.vertex_positions.len();
         // Interior iff neither the EXTERIOR (0x8) nor exterior-lit (0x40) bit is set — the same
         // `groupFlags & 0x48 == 0` test the real client branches on (RenderSubmesh::interior).
         let interior = (group.flags & 0x48) == 0;
@@ -360,19 +562,16 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
                 .map_or([0.0, 0.0], |t| [t.u, t.v]);
             // MOCV is BGRA; RGB is the per-vertex shade multiplier, and the REAL alpha rides along —
             // on an interior TRANS batch it is the lit↔bake lerp factor (the FixColorVertexAlpha
-            // product); every other batch class forces it opaque below (alpha encodes blend/unused
-            // there — the exterior alpha→0xFF fixup). Absent → white.
-            let c = group
-                .vertex_colors
-                .get(g as usize)
-                .map_or([1.0, 1.0, 1.0, 1.0], |c| {
-                    [
-                        c.r as f32 / 255.0,
-                        c.g as f32 / 255.0,
-                        c.b as f32 / 255.0,
-                        c.a as f32 / 255.0,
-                    ]
-                });
+            // product, applied above); every other batch class forces it opaque below (alpha encodes
+            // blend/unused there — the exterior alpha→0xFF fixup). Absent → white.
+            let c = colors.get(g as usize).map_or([1.0, 1.0, 1.0, 1.0], |c| {
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    c.a as f32 / 255.0,
+                ]
+            });
             ([p.x, p.y, p.z], n, uv, c)
         };
         for (bi, batch) in group.render_batches.iter().enumerate() {

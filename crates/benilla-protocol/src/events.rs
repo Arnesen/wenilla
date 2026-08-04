@@ -530,6 +530,19 @@ pub enum SessionEvent {
         /// the same way).
         item_caster: Option<u64>,
     },
+    /// The hop list for a caster's **beam** (`SMSG_SPELL_UPDATE_CHAIN_TARGETS`, decision 0955):
+    /// the units a chain/beam visual runs through, caster → t1 → t2 → …. The client's own array
+    /// (`unit+0xd44`) is filled from this and from nothing else, and is consumed once by the next
+    /// chain `CharProc` — so this is an edge, not a state.
+    ///
+    /// vmangos sends it only for **channeled** spells. The cast-stage chains get their hops from
+    /// [`Self::SpellGo`]'s hit list instead — which is the reference's own second producer
+    /// (`0x6e800d` inside its SPELL_GO handler fills the same array), not a divergence.
+    SpellChainTargets {
+        caster: u64,
+        spell_id: u32,
+        targets: Vec<u64>,
+    },
     /// An observed cast was interrupted/cancelled (`SMSG_SPELL_FAILED_OTHER`) — ends the caster's
     /// `Casting` state seam the same as a [`Self::SpellGo`].
     SpellFailedOther { caster: u64, spell_id: u32 },

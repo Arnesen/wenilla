@@ -912,3 +912,84 @@ fn combat_log_wire_golden() {
         other => panic!("level up event, got {other:?}"),
     }
 }
+
+/// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` — the beam's hop list (decision 0955). Byte-exact against
+/// vmangos `Spell::SendChannelStart` (`Spell.cpp:4970-4997`), which writes an `ObjectGuid` (raw
+/// `u64`, never packed), then `u32 spellId`, then a `u32` count, then that many raw guids. The
+/// client's handler `0x6e9820` decodes exactly that shape.
+///
+/// This is the packet the whole beam system hangs off: it is the **only** producer of the client's
+/// chain-target array (`unit+0xd44`), so a decode slip here reads as "the beams came back wrong"
+/// rather than as a parse error.
+#[test]
+fn spell_chain_targets_wire() {
+    use benilla_protocol::messages::SpellChainTargets;
+
+    const CASTER: u64 = 0x0000_01f1_3045_2ac9;
+
+    // Drain Life (689) channelled from a creature onto one target — the common case, count 1.
+    let body = hx(concat!(
+        "c92a4530f1010000", // caster guid, RAW u64 (not packed)
+        "b1020000",         // spellId 689 (Drain Life)
+        "01000000",         // count 1 — a u32, not the u8 the GO lists use
+        "aa00000000000000", // target guid 0xAA, raw
+    ));
+    let packet =
+        messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).unwrap();
+    match &packet {
+        ServerPacket::SpellChainTargets(c) => assert_eq!(
+            c,
+            &SpellChainTargets {
+                caster: CASTER,
+                spell_id: 689,
+                targets: vec![0xAA],
+            }
+        ),
+        other => panic!("chain targets, got {}", other.name()),
+    }
+    match decode(packet).pop().unwrap() {
+        SessionEvent::SpellChainTargets {
+            caster,
+            spell_id,
+            targets,
+        } => assert_eq!((caster, spell_id, targets), (CASTER, 689, vec![0xAA])),
+        other => panic!("chain targets event, got {other:?}"),
+    }
+
+    // A three-hop chain, hop order preserved: the beam runs caster -> t1 -> t2 -> t3.
+    let body = hx(concat!(
+        "0100000000000000",
+        "a5010000", // spellId 421 (Chain Lightning)
+        "03000000",
+        "aa00000000000000",
+        "bb00000000000000",
+        "cc00000000000000",
+    ));
+    match messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).unwrap()
+    {
+        ServerPacket::SpellChainTargets(c) => {
+            assert_eq!(c.targets, vec![0xAA, 0xBB, 0xCC], "wire order is hop order");
+        }
+        other => panic!("chain targets, got {}", other.name()),
+    }
+
+    // An empty list is legal on the wire (the server only *sends* when it has hits, but the shape
+    // is a count) and must decode rather than error.
+    let body = hx(concat!("0100000000000000", "a5010000", "00000000"));
+    match messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).unwrap()
+    {
+        ServerPacket::SpellChainTargets(c) => assert!(c.targets.is_empty()),
+        other => panic!("chain targets, got {}", other.name()),
+    }
+
+    // A truncated body is an error, not a silent short list — the count says 2, one guid follows.
+    let body = hx(concat!(
+        "0100000000000000",
+        "a5010000",
+        "02000000",
+        "aa00000000000000",
+    ));
+    assert!(
+        messages::parse_server(messages::opcode::SMSG_SPELL_UPDATE_CHAIN_TARGETS, &body).is_err()
+    );
+}

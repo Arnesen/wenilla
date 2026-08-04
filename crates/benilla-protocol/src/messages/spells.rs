@@ -434,3 +434,50 @@ mod tests {
         );
     }
 }
+
+/// One decoded `SMSG_SPELL_UPDATE_CHAIN_TARGETS` — the **beam's hop list** (decision 0955).
+///
+/// VERIFIED on both sides. Server: vmangos `Spell::SendChannelStart` (`Spell.cpp:4970-4997`) —
+/// `ObjectGuid caster` (raw `u64`) · `u32 spellId` · `u32 count` · that many raw `u64` target
+/// guids. Client: the handler `0x6e9820` decodes exactly that shape (`GetGuid` · `GetInt32` ·
+/// `GetInt32` · `count × GetGuid`) and hands it to the array filler `0x605780`, which writes the
+/// growable array at `unit+0xd44`. The chain `CharProc` (`0x60da79`) then consumes it once and
+/// zeroes the count (`0x60db72`).
+///
+/// **This packet is NOT the only producer** (wow-re `chain-beam-law.md`, which refuted that
+/// reading at the bytes): `0x605780` has exactly two callers — this handler's `0x605767`, and
+/// **`0x6e800d`, inside `HandleSpellGo` `0x6e7a70`**. The client fills the same hop array from
+/// `SMSG_SPELL_GO`'s own hit list, which is what makes a chain spell draw on its very first cast.
+/// That matters here because vmangos only ever *sends* this packet from `SendChannelStart`, gated
+/// on `SPELL_ATTR_EX_IS_CHANNELED` — so on this server the channel beams (Drain Life, Mind Flay,
+/// Health Funnel, Corruption…) arrive by packet and the cast-stage chains (Chain Lightning, Chain
+/// Heal, Chain Burn) arrive by the GO path. Both are the reference's own mechanism; benilla's
+/// GO-derived hops are **not** a divergence (decision 0955).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpellChainTargets {
+    pub caster: u64,
+    pub spell_id: u32,
+    /// The hop list in wire order. The client's filler (`0x605780`) walks it dropping any entry
+    /// equal to the caster's own guid, so that filter belongs to the consumer, not to this decode.
+    pub targets: Vec<u64>,
+}
+
+/// Read `SMSG_SPELL_UPDATE_CHAIN_TARGETS`. Guids are **raw** `u64` on both ends of the list — the
+/// server writes `ObjectGuid` and the client reads `GetGuid` (0x4190b0), never the packed form.
+pub(super) fn read_spell_chain_targets(r: &mut impl Read) -> io::Result<SpellChainTargets> {
+    let caster = read_u64_le(r)?;
+    let spell_id = read_u32_le(r)?;
+    let count = read_u32_le(r)?;
+    // The count is server-written and unbounded on the wire; read defensively rather than
+    // pre-allocating from it (the `with_capacity` idiom the rest of this module uses is safe only
+    // where a `u8` bounds the count).
+    let mut targets = Vec::new();
+    for _ in 0..count {
+        targets.push(read_u64_le(r)?);
+    }
+    Ok(SpellChainTargets {
+        caster,
+        spell_id,
+        targets,
+    })
+}

@@ -125,13 +125,18 @@ const INSPECT_LAYER: usize = PAPERDOLL_LAYER + 1;
 /// glue scene's 28 emitters addressed the INSPECT camera, which is off at the glue screens, and the
 /// login screen's braziers simulated forever without ever being drawn (decision 0775).
 pub(super) const GLUE_LAYER: usize = INSPECT_LAYER + 1;
+/// The pipe_warm **twin booth**'s render layer — the next one past the glue booth's (same ladder
+/// rule as [`GLUE_LAYER`]). This camera exists only while the warm pass runs
+/// ([`spawn_warm_booth`]); nothing but menagerie rigs ever rides its layer.
+pub(crate) const WARM_BOOTH_LAYER: usize = GLUE_LAYER + 1;
 
 // The ladder must stay collision-free: a booth camera's layer is its identity for both rendering
 // and the emitter→camera match, and the failure above was silent in both.
 const _: () = assert!(
     PAPERDOLL_LAYER != INSPECT_LAYER
         && INSPECT_LAYER != GLUE_LAYER
-        && PAPERDOLL_LAYER != GLUE_LAYER,
+        && PAPERDOLL_LAYER != GLUE_LAYER
+        && WARM_BOOTH_LAYER > GLUE_LAYER,
     "booth render layers must be distinct — see GLUE_LAYER"
 );
 const _: () = assert!(
@@ -578,6 +583,60 @@ fn new_target_image(size: u32) -> Image {
     image
 }
 
+/// The booth **view shape** — the components that set a booth camera's *pipeline key space*:
+/// HDR float intermediate + `Tonemapping::None` (the world camera's exact shape — the measured
+/// whys sit on the portrait-slot spawn below) at `Msaa::Off`. Defined ONCE and spawned by every
+/// booth camera — the portrait slots, the two body panes, the glue booth, and pipe_warm's twin
+/// booth — because the warm pass compiles the samples=1 twin of every model pipeline against
+/// exactly this shape behind the loading cover (decisions 0938/0958): a booth camera whose shape
+/// drifts from the warm booth's is a live pipeline stall on its first bake.
+fn booth_view_shape() -> impl Bundle {
+    (
+        Camera3d::default(),
+        bevy::render::view::Hdr,
+        Tonemapping::None,
+        Msaa::Off,
+    )
+}
+
+/// The pipe_warm **twin booth** (decision 0958). The real booths spawn with a
+/// `PerspectiveProjection` placeholder and render the menagerie's twins under bevy_pbr's
+/// PERSPECTIVE view key — but nearly every real bake installs
+/// `Projection::custom(WowPortraitProjection)` ([`frame`]'s authored path; [`body_frame`]
+/// always), which is the NONSTANDARD view key: a distinct pipeline per variant, so the whole
+/// samples=1 twin space compiled AGAIN, live, on the first target/paperdoll bake after entry.
+/// This camera is that missing key space: the booth view shape exactly, with the custom
+/// projection class real bakes use. pipe_warm spawns it beside the menagerie and despawns it at
+/// drain. A REAL booth's projection is deliberately never stamped for warming — a bake completing
+/// during the warm window would keep a misframed image. (The placeholder-Perspective class stays
+/// warmed through a real booth: [`frame`]'s camera-less fallback still bakes with it.)
+pub(crate) fn spawn_warm_booth(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+) -> (Entity, RenderLayers) {
+    let layer = RenderLayers::layer(WARM_BOOTH_LAYER);
+    let image = images.add(new_target_image(PORTRAIT_SIZE));
+    let cam = commands
+        .spawn((
+            booth_view_shape(),
+            Camera {
+                order: -100 + WARM_BOOTH_LAYER as isize,
+                clear_color: ClearColorConfig::Custom(Color::srgb(0.055, 0.045, 0.04)),
+                ..default()
+            },
+            RenderTarget::Image(image.into()),
+            crate::ffx_glow::FfxGlow::WORLD,
+            Projection::custom(framing::WowPortraitProjection {
+                fov: framing::BODY_FOV,
+                near: 0.02,
+                far: 100.0,
+            }),
+            layer.clone(),
+        ))
+        .id();
+    (cam, layer)
+}
+
 /// Startup: stand up one booth per slot — its image (registered in [`PortraitImages`]), a model-root
 /// entity, and a camera rendering only that slot's layer into the image (transparent, no bloom/MSAA,
 /// rendered before the world camera via a negative order).
@@ -637,7 +696,9 @@ fn setup_booths(
             .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
             .id();
         commands.spawn((
-            Camera3d::default(),
+            // The shared booth view shape — HDR intermediate, no tonemap, no MSAA (its doc has
+            // the whys); per-slot here: the order, the backdrop, the glow node, the projection.
+            booth_view_shape(),
             Camera {
                 // Render the booths first (negative order), so the freshly baked image is ready when
                 // the world + UI cameras run. One order per slot to keep them distinct.
@@ -649,19 +710,11 @@ fn setup_booths(
             },
             // The render target is its own component in Bevy 0.18 (Camera `#[require]`s it).
             RenderTarget::Image(image.clone().into()),
-            // HDR float intermediate + Tonemapping::None — the world camera's exact pipeline shape.
-            // Measured without it: the LDR path stored the shader's linear output RAW in the sRGB
-            // target (one net extra decode when the UI sampled it — the bake read x^2.4 dark, pixel-
-            // verified against the clear color, which round-tripped fine). The HDR path encodes once
-            // at the final blit, like the main view.
-            bevy::render::view::Hdr,
-            Tonemapping::None,
             // The gamma lane (0161): booth materials emit gamma bytes like the world's, so the
             // booth needs the same final node — the FFXGlow combine owns the frame's ONE decode.
             // This also keeps the bake at exact world parity (same glow, same transform chain);
             // without it the portrait reads one encode too bright.
             crate::ffx_glow::FfxGlow::WORLD,
-            Msaa::Off,
             Projection::from(PerspectiveProjection {
                 fov: PORTRAIT_FOV,
                 near: 0.02,
@@ -707,7 +760,7 @@ fn setup_booths(
             .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
             .id();
         commands.spawn((
-            Camera3d::default(),
+            booth_view_shape(),
             Camera {
                 order: -100 + (SLOTS.len() + i) as isize,
                 // A near-black backdrop like the portraits (the pipeline is proven opaque; the pane
@@ -717,13 +770,10 @@ fn setup_booths(
                 ..default()
             },
             RenderTarget::Image(image.clone().into()),
-            bevy::render::view::Hdr,
-            Tonemapping::None,
             // Decode, but NO glow: these two stand in for 1.12 `<PlayerModel>` widgets, which the
             // reference paints in the UI strata — after the WorldFrame's own FFX apply — so they
             // never carry the scene glow (decision 0638; [`crate::ffx_glow::FfxGlow::UI_PANE`]).
             crate::ffx_glow::FfxGlow::UI_PANE,
-            Msaa::Off,
             // Placeholder — `sync_body_booth` overwrites transform + projection from the unit's
             // bounds on the first bake. A plain perspective is harmless while the model is loading.
             Projection::from(PerspectiveProjection {

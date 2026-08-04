@@ -12,9 +12,9 @@ use super::{
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object,
     PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
     QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody,
-    SpeedKind, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo, SpellHealLog,
-    SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended, TrainerSpell,
-    TransportPose, VendorItem, WhoResults, XpGain,
+    SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo,
+    SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended,
+    TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -413,6 +413,7 @@ pub enum ServerPacket {
     /// The server schedules impact itself off `Spell.dbc` Speed — nothing about missile travel
     /// rides this packet (layout in [`super::spells::read_spell_go`]).
     SpellGo(SpellGo),
+    SpellChainTargets(SpellChainTargets),
     /// `SMSG_SPELL_FAILED_OTHER` — an observed cast was interrupted/cancelled (vmangos
     /// `Spell::SendInterrupted`); our own cast's failure is [`Self::CastResult`] instead.
     SpellFailedOther {
@@ -1099,6 +1100,7 @@ impl ServerPacket {
             ServerPacket::AiReaction { .. } => "SMSG_AI_REACTION".into(),
             ServerPacket::SpellStart(_) => "SMSG_SPELL_START".into(),
             ServerPacket::SpellGo(_) => "SMSG_SPELL_GO".into(),
+            ServerPacket::SpellChainTargets(_) => "SMSG_SPELL_UPDATE_CHAIN_TARGETS".into(),
             ServerPacket::SpellFailedOther { .. } => "SMSG_SPELL_FAILED_OTHER".into(),
             ServerPacket::SpellDelayed { .. } => "SMSG_SPELL_DELAYED".into(),
             ServerPacket::CancelAutoRepeat => "SMSG_CANCEL_AUTO_REPEAT".into(),

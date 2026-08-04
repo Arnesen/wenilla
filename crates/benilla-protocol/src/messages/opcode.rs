@@ -144,6 +144,12 @@ pub const SMSG_PLAY_SPELL_VISUAL: u16 = 0x01F3; // 499
 pub const SMSG_CANCEL_AUTO_REPEAT: u16 = 0x029C; // 668
 pub const SMSG_SPELL_FAILED_OTHER: u16 = 0x02A6; // 678
 
+/// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` (VERIFIED vmangos `Opcodes_1_12_1.h`: 816) — the **only**
+/// source of the client's chain-target list, and so the only way a beam gets more than one hop.
+/// The client's handler is `0x6e9820`; it fills the growable array at `unit+0xd44`, which the
+/// chain `CharProc` consumes once and zeroes (decision 0955). Body in [`super::spells`].
+pub const SMSG_SPELL_UPDATE_CHAIN_TARGETS: u16 = 0x0330; // 816
+
 // The cooldown wire (VERIFIED vmangos `Opcodes_1_12_1.h`: 308/176/309/478/481; the client
 // handlers are byte-verified in wow-re `wave-handlers.md` — 0x6e9460/0x6e95d0/0x6e9670/0x6e9730;
 // decision 0137 phase 4). Bodies in [`super::spells`].

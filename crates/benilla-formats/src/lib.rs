@@ -133,8 +133,9 @@ mod talents;
 pub use talents::{load_talent_catalog, Talent, TalentCatalog, TalentTabInfo, MAX_TALENT_RANK};
 mod spell_visual;
 pub use spell_visual::{
-    char_proc_type, load_spell_visual_catalog, CharProc, SpellVisualCatalog, VisualKit,
-    VisualStages, KIT_CHAR_PROCS, KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
+    char_proc_small_int, char_proc_type, load_spell_visual_catalog, ChainEffect, ChainProc,
+    CharProc, SpellVisualCatalog, VisualKit, VisualStages, CHAIN_MAX_BEAMS, KIT_CHAR_PROCS,
+    KIT_SLOT_TAGS, MISSILE_ATTACH_TABLE, WORLD_EFFECT_TAG,
 };
 mod emit_timing;
 pub use emit_timing::{EmitParams, EmitTiming, ParamsNow};
@@ -160,14 +161,15 @@ pub use models::{
     parse_m2_lights, parse_m2_playable_animation_lookup, parse_m2_portrait_camera,
     parse_m2_render_submeshes, parse_m2_skeleton, parse_m2_string_anchors, parse_wmo_fogs,
     parse_wmo_lights, parse_wmo_portals, parse_wmo_root, wmo_group_doodad_refs,
-    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
-    wmo_group_submeshes, wmo_root_id, AlphaAnim, AlphaSeq, AnimEvent, Billboard, BillboardKind,
-    BoneKeys, BoneScaleAnim, CharSkinSlot, CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy,
-    FootprintTris, GlobalSeqBone, GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment,
-    M2Bounds, M2Light, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm, ParentBasis,
-    PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, Skeleton, SkeletonBone, StringAnchors,
-    UvAnim, WmoBatchClass, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight,
-    WmoPortalInfo, WmoPortalRef, WmoPortals, WmoRoot, OWNER_RUNG_BUCKETS,
+    wmo_group_fixed_colors, wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs,
+    wmo_group_liquid_mesh, wmo_group_raw_colors, wmo_group_submeshes, wmo_root_id, AlphaAnim,
+    AlphaSeq, AnimEvent, Billboard, BillboardKind, BoneKeys, BoneScaleAnim, CharSkinSlot,
+    CollisionMesh, EmitterBoneLink, EventMarker, FogPolicy, FootprintTris, GlobalSeqBone,
+    GlobalSeqChannel, GroundQuad, M2AnimSummary, M2Attachment, M2Bounds, M2Light, M2PortraitCamera,
+    ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim,
+    ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
+    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
+    WmoPortals, WmoRoot, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

@@ -72,6 +72,7 @@ pub struct Uv {
 }
 
 /// A MOCV vertex colour (stored BGRA on disk).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color {
     pub b: u8,
     pub g: u8,

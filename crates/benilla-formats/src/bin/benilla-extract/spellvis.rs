@@ -39,6 +39,30 @@ pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
                     );
                     // The kit's CharProcs (fields 15-34): what it does to the BODY.
                     crate::charprocs::print_kit_procs(&visuals, kit_id, "           ");
+                    // The kit's BEAM, if it draws one (decision 0955): the chain CharProc's
+                    // decoded `SpellChainEffects` row. `benilla-extract … chaincensus` is the
+                    // whole-table view.
+                    if let Some(c) = kit.chain_proc() {
+                        match visuals.chain_effect(c.effect_id) {
+                            Some(e) => println!(
+                                "           beam   chain {} x{} flag={} -> {} (segLen {} halfWidth {} noise {} scroll {}s life {}ms, delay {}ms dead)",
+                                c.effect_id,
+                                c.beams,
+                                u8::from(c.flag),
+                                e.texture,
+                                e.avg_seg_len,
+                                e.half_width,
+                                e.noise_scale,
+                                e.scroll_period_s,
+                                e.seg_duration_ms,
+                                e.seg_delay_ms,
+                            ),
+                            None => println!(
+                                "           beam   chain {} (NO SUCH SpellChainEffects ROW)",
+                                c.effect_id
+                            ),
+                        }
+                    }
                     // The kit's attach-point emitter slots (phase 3): tag + effect model.
                     for (tag, effect) in kit.effects() {
                         println!(

@@ -692,6 +692,35 @@ pub(super) fn aura_duration(
     durations.set(slot, remaining_ms, now_secs);
 }
 
+/// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` → the hop list a **beam** visual runs through (0955).
+///
+/// The reference parks it on the caster (the growable array at `unit+0xd44`: capacity `+0xd44`,
+/// count `+0xd48`, data `+0xd4c`, alloc quantum `+0xd50`), **dropping any entry equal to the
+/// caster's own guid** while it fills, and the next chain `CharProc` consumes it once —
+/// `0x60db72` zeroes the count on every path. This packet is one of **two** producers: the
+/// reference fills the same array from `SMSG_SPELL_GO`'s hit list as well (`0x6e800d` inside its
+/// GO handler), which is how a non-channeled chain spell draws at all.
+///
+/// The beam renderer is the next slice, so this arm resolves and reports the hops rather than
+/// parking them — a packet that arrives and is visible in the trace, with no half-built state
+/// hanging off a unit waiting for a consumer.
+pub(super) fn spell_chain_targets(
+    caster: u64,
+    spell_id: u32,
+    targets: Vec<u64>,
+    index: &GuidIndex,
+) {
+    let known = targets
+        .iter()
+        .filter(|&&g| g != caster)
+        .filter(|g| index.0.contains_key(g))
+        .count();
+    debug!(
+        "net: chain targets for spell {spell_id} by {caster:#x} — {} hop(s), {known} streamed",
+        targets.len()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

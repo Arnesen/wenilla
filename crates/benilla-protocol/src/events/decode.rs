@@ -158,6 +158,11 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
             ammo_display_id: s.ammo_display_id,
             item_caster: (s.item_or_caster != s.caster).then_some(s.item_or_caster),
         }],
+        ServerPacket::SpellChainTargets(c) => vec![SessionEvent::SpellChainTargets {
+            caster: c.caster,
+            spell_id: c.spell_id,
+            targets: c.targets,
+        }],
         ServerPacket::SpellDelayed { caster, delay_ms } => {
             vec![SessionEvent::SpellDelayed { caster, delay_ms }]
         }

@@ -386,7 +386,9 @@ pub(super) fn spawn_glue_booth(
         .spawn((Transform::IDENTITY, Visibility::Visible, layer.clone()))
         .id();
     commands.spawn((
-        Camera3d::default(),
+        // The shared booth view shape (HDR, no tonemap, no MSAA) — its doc in [`super`] says why
+        // every booth camera must spawn through it.
+        super::booth_view_shape(),
         Camera {
             order: -100 + GLUE_LAYER as isize,
             // Transparent (unlike the portrait/paper-doll booths' backdrop): the create screen
@@ -396,10 +398,7 @@ pub(super) fn spawn_glue_booth(
             ..default()
         },
         bevy::camera::RenderTarget::Image(image.clone().into()),
-        bevy::render::view::Hdr,
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
         crate::ffx_glow::FfxGlow::WORLD,
-        Msaa::Off,
         // Placeholder — `sync_glue_booth` overwrites transform + projection from the model's bounds
         // on the first bake (the same `body_frame` law as the paper doll).
         Projection::from(bevy::camera::PerspectiveProjection {

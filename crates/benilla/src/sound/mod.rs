@@ -51,7 +51,11 @@ pub(crate) use zone::ExplorationSounds;
 /// **`AmbienceVolume` 0.6** — a fresh 1.12 install is NOT uniform full volume.
 #[derive(Resource)]
 pub(crate) struct SoundConfig {
-    /// Master enable — mirrors the client's `-nosound` gate as a live toggle.
+    /// Master enable — 1.12's `MasterSoundEffects` CVar, the Sound options "Enable All Sound"
+    /// checkbox (SoundOptionsFrame.lua index 1; registrar default "1", B10). In the binary its
+    /// callback sets the engine-wide pause flag (`0x457500` → `0x7a6570` → `DAT_0087cf00`);
+    /// benilla zeroes every category through [`Self::category_amp`] instead — channels keep
+    /// running silently (the `muted` posture), same audible truth.
     pub enabled: bool,
     /// Quick mute — toggled by the dev chord + `M` (its plane is per-OS: decisions 0585, 0867).
     /// Zeroes the **main track only**: selection and channel life go on untouched, so unmute is
@@ -66,6 +70,14 @@ pub(crate) struct SoundConfig {
     pub sfx: f32,
     pub music: f32,
     pub ambience: f32,
+    /// The per-category enable checkboxes — 1.12's own `EnableMusic` / `EnableAmbience` CVars
+    /// (registrar defaults "1", wow-re B10; 1.12 has NO SFX-only toggle — `MasterSoundEffects`
+    /// above is the master). Gated in [`Self::category_amp`], so a disable silences the category
+    /// everywhere at once. Divergence, disclosed: the reference's `EnableMusic` callback
+    /// stops/re-selects the music stream (`0x457490` → `0x45b050`/`0x45aeb0`) — benilla keeps
+    /// the stream alive at zero, so re-enabling resumes mid-track where the reference re-picks.
+    pub music_enabled: bool,
+    pub ambience_enabled: bool,
 }
 
 impl SoundConfig {
@@ -76,8 +88,9 @@ impl SoundConfig {
         }
         match cat {
             kit::SoundCategory::Sfx => self.sfx,
-            kit::SoundCategory::Music => self.music,
-            kit::SoundCategory::Ambience => self.ambience,
+            kit::SoundCategory::Music if self.music_enabled => self.music,
+            kit::SoundCategory::Ambience if self.ambience_enabled => self.ambience,
+            _ => 0.0,
         }
     }
 }
@@ -91,6 +104,8 @@ impl Default for SoundConfig {
             sfx: 1.0,
             music: 0.4,
             ambience: 0.6,
+            music_enabled: true,
+            ambience_enabled: true,
         }
     }
 }

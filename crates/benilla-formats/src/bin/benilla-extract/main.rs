@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use benilla_formats::open_chain;
 use clap::{Parser, Subcommand};
 
+mod chaincensus;
 mod charprocs;
 mod m2dump;
 mod scan;
@@ -66,6 +67,12 @@ enum Command {
         /// The `Spell.dbc` id (e.g. 133 = Fireball).
         spell_id: u32,
     },
+    /// Census the **beam/chain** system (decision 0955): the 18-row `SpellChainEffects` table,
+    /// then every `SpellVisualKit` that draws a beam — the row it names, its beam count and
+    /// flag, and the spells that reach it through which lifecycle stage. The scope instrument
+    /// for B161 ("Chain Lightning has no chain effect"), and the check that the `CharParamZero`
+    /// small-int decode is the real mechanism: every live slot must land on a real row.
+    Chaincensus,
     /// Census the `SpellVisualKit` **CharProc** columns (a kit's effect on the BODY — its alpha,
     /// its tint): which proc types the shipped table carries, which lifecycle stage reaches each
     /// from a live spell, and every state-stage (aura-lifetime) proc in full. The scope instrument
@@ -700,6 +707,7 @@ fn main() -> Result<()> {
         } => scan::doodadscan(&mut chain, &map, center_x, center_y, tile_radius)?,
         Command::Shadeat { map, x, y } => scan::shadeat(&mut chain, &map, x, y)?,
         Command::Spellvis { spell_id } => spellvis::run(&mut chain, spell_id)?,
+        Command::Chaincensus => chaincensus::run(&mut chain)?,
         Command::Charprocs => charprocs::run(&mut chain)?,
     }
 

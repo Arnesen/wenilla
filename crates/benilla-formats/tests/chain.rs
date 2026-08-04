@@ -354,6 +354,52 @@ fn terrain_chunks_carry_unit_upward_mcnr_normals() {
     );
 }
 
+/// Every terrain triangle must wind **CCW seen from above** in WoW space — the invariant that lets
+/// the renderer draw terrain single-sided (backface-culled), which is what the real 1.12.1 client
+/// does: its terrain-chunk pass never touches `EGxRs 0x14`, so it inherits the device baseline
+/// `CULL_FACE = 1`, and the ground is see-through from underneath. Flip a fan's winding and the
+/// world would vanish when viewed from *above* instead — a catastrophic, silent regression that no
+/// other test here would catch, since winding changes nothing about positions, seams, or heights.
+///
+/// The check is exact rather than statistical: terrain is a heightfield on a fixed XY lattice, so
+/// the sign of a triangle's geometric normal Z is the sign of its XY-projected signed area, which
+/// is independent of the authored heights. Every fan should give the same positive value.
+#[test]
+fn terrain_fans_wind_ccw_seen_from_above() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+
+    let mut chain = open_chain(&data).expect("open vanilla patch chain");
+    let (tx, ty) = benilla_formats::find_tile_near(&mut chain, "Azeroth", -8840.56, 489.7)
+        .expect("find an Elwynn tile");
+    let tile =
+        benilla_formats::load_tile_mesh(&mut chain, "Azeroth", tx, ty).expect("mesh the tile");
+
+    let (mut tris, mut min_nz) = (0usize, f32::MAX);
+    for chunk in &tile.chunks {
+        for t in chunk.indices.chunks_exact(3) {
+            let (a, b, c) = (
+                chunk.positions[t[0] as usize],
+                chunk.positions[t[1] as usize],
+                chunk.positions[t[2] as usize],
+            );
+            // Z of (b−a)×(c−a): positive ⇔ CCW viewed down the +Z (up) axis.
+            let nz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            min_nz = min_nz.min(nz);
+            tris += 1;
+        }
+    }
+    assert!(tris > 1000, "expected a meshed tile, got {tris} triangles");
+    assert!(
+        min_nz > 0.0,
+        "every terrain triangle must face up (CCW from above in WoW space); \
+         worst geometric-normal Z was {min_nz} over {tris} triangles"
+    );
+}
+
 #[test]
 fn terrain_is_watertight_at_chunk_seams() {
     let data = vanilla_data_dir();

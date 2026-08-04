@@ -931,6 +931,33 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-options seed failed to open the window: {e}");
             }
         }
+        UiFixture::OptionsAudio => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // The Audio page (0957): register the real CVar set first — the hermetic capture has
+            // no CvarPlugin file load to race, and the rows must read real values, not the
+            // nil-tolerant zeros — then open and select through the live paths.
+            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            if let Err(e) =
+                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowAudio:Click()")
+            {
+                warn!("capture: ui-options-audio seed failed: {e}");
+            }
+        }
+        UiFixture::OptionsGraphics => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // The Graphics page (0959), same posture as the Audio fixture: real CVar set, live
+            // open-and-select paths.
+            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            if let Err(e) =
+                script.run("ShowUIPanel(OptionsFrame); OptionsFrameCategoryListRowGraphics:Click()")
+            {
+                warn!("capture: ui-options-graphics seed failed: {e}");
+            }
+        }
         UiFixture::SpellBook => {
             // The director's own report reproduced (decision 0228): a HUMAN WARRIOR (race 1,
             // class 1) who learned Fireball + Mind Flay via a GM command during testing. The book

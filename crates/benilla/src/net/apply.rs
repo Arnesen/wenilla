@@ -48,7 +48,8 @@ use quests::{
 use spells::{
     action_buttons, aura_duration, cancel_auto_repeat, cast_result, channel_start, channel_update,
     clear_cooldown, cooldown_cheat, cooldown_event, item_cooldown, learned_spell, spell_book,
-    spell_cooldowns, spell_delayed, spell_failed_other, spell_go, spell_start, superceded_spell,
+    spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go, spell_start,
+    superceded_spell,
 };
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
@@ -1004,6 +1005,11 @@ pub(super) fn apply_net_updates(
                 ),
                 play_seq.next(),
             ),
+            SessionEvent::SpellChainTargets {
+                caster,
+                spell_id,
+                targets,
+            } => spell_chain_targets(caster, spell_id, targets, &index),
             SessionEvent::SpellFailedOther { caster, spell_id } => spell_failed_other(
                 caster,
                 spell_id,

@@ -63,11 +63,13 @@ const SHARD_MODELS: [&str; 7] = [
 /// kit column is shared, the consumers are not.
 const PROC_TYPE_SHARD_EMITTER: i32 = 9;
 
-/// The exact small-int decode the client applies to `CharParamZero` (`bits(p0 + 512.0) >> 14 &
-/// 0xff`) — clamped into [`SHARD_MODELS`] because the client itself has **no bounds check**
-/// (`mov cl,al` — data ≥ 7 reads past the table; wow-re trap #2).
+/// The exact small-int decode the client applies to `CharParamZero`
+/// ([`benilla_formats::char_proc_small_int`] — the one idiom every integer-in-a-float-column proc
+/// uses, the chain proc included; decision 0955 lifted it into the format crate) — clamped into
+/// [`SHARD_MODELS`] because the client itself has **no bounds check** (`mov cl,al` — data ≥ 7
+/// reads past the table; wow-re trap #2).
 fn shard_model_index(param0: f32) -> usize {
-    let idx = ((param0 + 512.0).to_bits() >> 14 & 0xff) as usize;
+    let idx = benilla_formats::char_proc_small_int(param0) as usize;
     idx.min(SHARD_MODELS.len() - 1)
 }
 

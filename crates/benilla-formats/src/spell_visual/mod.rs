@@ -1,5 +1,6 @@
-//! `SpellVisual.dbc` + `SpellVisualKit.dbc` — the per-lifecycle-stage kit chain a cast plays
-//! (decision 0099 phase 2's data plane; schemas pinned by decision 0107).
+//! `SpellVisual.dbc` + `SpellVisualKit.dbc` + `SpellVisualEffectName.dbc` +
+//! `SpellChainEffects.dbc` — the per-lifecycle-stage kit chain a cast plays
+//! (decision 0099 phase 2's data plane; schemas pinned by decision 0107, the chain table by 0955).
 //!
 //! Layout — VERIFIED against build 5875 (WDBC header dump of the extracted files, 2026-07-04;
 //! wow-re `system/dbc/scratch/spellvisual-schema.md` @ commit `ff91e7eb`, corroborated by vmangos
@@ -58,6 +59,9 @@
 //!   column every consumer reads — fields 3/4 are dead-by-absence, wow-re
 //!   `spellvisual-schema.md`; the emitter *scale* comes from kit CharProc params × the quality
 //!   tier, never from this table).
+//! - **SpellChainEffects**: 18 records × 8 fields × 32 B — the **beam/arc** geometry a kit's chain
+//!   `CharProc` draws (Chain Lightning's lightning, Drain Life's rope, C'Thun's eye beam). Its own
+//!   module: [`chain_effects`], decision 0955.
 //!
 //! **The none-sentinel, found empirically here (not pinned in the wow-re note):** on the real
 //! table, "no value" for both field 2 (anim) and field 13 (sound) is written as **either `0` or
@@ -83,6 +87,10 @@ use benilla_dbc::{FieldType, Schema, SchemaField};
 
 use crate::dbc::{f32_at, i32_at, parse, str_at, u32_at};
 use crate::Chain;
+
+pub mod chain_effects;
+
+pub use chain_effects::{ChainEffect, ChainProc, CHAIN_MAX_BEAMS};
 
 const SPELL_VISUAL: &str = "DBFilesClient\\SpellVisual.dbc";
 const SPELL_VISUAL_KIT: &str = "DBFilesClient\\SpellVisualKit.dbc";
@@ -138,6 +146,43 @@ pub struct CharProc {
     pub params: [f32; 4],
 }
 
+impl CharProc {
+    /// Param `i` through the client's **small-int decode** — see [`char_proc_small_int`]. The
+    /// procs that want an integer out of a float column all use this one idiom.
+    pub fn small_int(&self, i: usize) -> u32 {
+        char_proc_small_int(self.params[i])
+    }
+
+    /// This slot decoded as a chain/beam proc, or `None` when it is not one — either the type key
+    /// is not a chain key, or it is but `CharParamZero` decodes to `0`, which names no
+    /// `SpellChainEffects` row and is how the shipped table writes an unused slot (`chain`'s
+    /// module docs; the client's own null-row test at `0x6ecc2e` is the same no-op).
+    pub fn as_chain(&self) -> Option<ChainProc> {
+        if !char_proc_type::is_chain(self.ty) {
+            return None;
+        }
+        let effect_id = self.small_int(0);
+        (effect_id != 0).then(|| ChainProc {
+            effect_id,
+            beams: self.small_int(1).min(CHAIN_MAX_BEAMS),
+            flag: self.small_int(2) != 0,
+            ty: self.ty,
+        })
+    }
+}
+
+/// The client's decode of a small integer stored in a `CharProc` **float** param column:
+/// `bits(param + 512.0f) >> 14 & 0xff`. Adding 512 forces the exponent, parking the integer part
+/// in known mantissa bits; the shift and mask lift it back out. Byte-pinned at `0x5d55c0` (the
+/// dynobject shard index, wow-re `dynobject-visual-machine.md`) and used identically by the chain
+/// proc for all three of its integer params (`0x60db19`–`0x60db6d`, decision 0955).
+///
+/// The client applies **no bounds check** of its own — `mov cl,al` takes the byte and indexes with
+/// it — so callers clamp or bounds-test as the consumer requires.
+pub fn char_proc_small_int(param: f32) -> u32 {
+    (param + 512.0).to_bits() >> 14 & 0xff
+}
+
 /// The `CharProc` type keys benilla models, by name. The full key space is the dispatcher's 9 cases
 /// (`0x60d7c0`); these are the ones a live 5875 **state** kit uses — every other key is either
 /// cast-stage-only or unused by the shipped table (see `charprocs` in `benilla-extract`).
@@ -170,6 +215,24 @@ pub mod char_proc_type {
     /// ships `8947848.0` = `0x888888`, which reads like a packed grey that landed in the rate
     /// column; it is passed through, not special-cased.
     pub const ANIM_RATE: i32 = 11;
+
+    /// **Chain / beam visual**, the key the shipped table uses on **channel**-stage kits — Drain
+    /// Life's rope, Mind Flay's mana beam, Health Funnel, C'Thun's eye beam. Both this and
+    /// [`CHAIN_CAST`] land on the same dispatcher case (`0x60da79`); the name records the data's
+    /// convention, and behaviour keys off [`ChainProc::flag`](crate::ChainProc::flag). See the
+    /// `chain_effects` module docs for the whole mechanism (decision 0955).
+    pub const CHAIN_CHANNEL: i32 = 0;
+    /// **Chain / beam visual**, the key the shipped table uses on **cast**-stage kits — Chain
+    /// Lightning, Chain Heal, Chain Burn, Shrink Ray, the elemental Weakness debuffs. See
+    /// [`CHAIN_CHANNEL`].
+    pub const CHAIN_CAST: i32 = 12;
+
+    /// Whether this type key reaches the beam case. **Both** chain keys do, and the dispatcher's
+    /// translation table (`0x60dc20`) draws no distinction between them — so every consumer asks
+    /// this rather than comparing against one constant.
+    pub fn is_chain(ty: i32) -> bool {
+        ty == CHAIN_CHANNEL || ty == CHAIN_CAST
+    }
 }
 
 /// One `SpellVisual.dbc` row: the five lifecycle-stage `SpellVisualKit` ids a cast may fire
@@ -267,6 +330,13 @@ impl VisualKit {
         self.char_procs().find(|p| p.ty == ty).map(|p| p.params[0])
     }
 
+    /// This kit's chain/beam proc — the **first** slot that decodes to one, matching the client's
+    /// dispatcher walk (it runs every slot in order; no shipped kit carries two). `None` when the
+    /// kit draws no beam. See [`chain_effects`] for the mechanism (decision 0955).
+    pub fn chain_proc(&self) -> Option<ChainProc> {
+        self.char_procs().find_map(|p| p.as_chain())
+    }
+
     /// The populated emitter slots as `(M2 attachment id, SpellVisualEffectName id)` pairs, in
     /// kit-field order — the client fires **all** populated slots at **every** stage (stage sets
     /// lifetime policy only, wow-re `spell-visual-apply.md` §1.3) — then [`Self::world_effect`]
@@ -297,6 +367,9 @@ pub struct SpellVisualCatalog {
     /// (id 21 → `Spells\LevelUp\LevelUp.mdl`, the ding) and "HARDCODED Mount Poof"
     /// (id 1185 → `Spells\DruidMorph_Impact_Base.mdx`, the mount-up cloud — decision 0927).
     hardcoded: HashMap<String, String>,
+    /// `SpellChainEffects` id → the beam's geometry/animation row ([`chain_effects`], decision 0955).
+    /// Reached only through a kit's [`VisualKit::chain_proc`].
+    chain_effects: HashMap<u32, ChainEffect>,
 }
 
 impl SpellVisualCatalog {
@@ -319,7 +392,16 @@ impl SpellVisualCatalog {
             kits,
             effect_paths,
             hardcoded: HashMap::new(),
+            chain_effects: HashMap::new(),
         }
+    }
+
+    /// Seed one `SpellChainEffects` row, for fixtures exercising the beam chain. The live path is
+    /// [`load_spell_visual_catalog`].
+    #[must_use]
+    pub fn with_chain_effect(mut self, id: u32, effect: ChainEffect) -> Self {
+        self.chain_effects.insert(id, effect);
+        self
     }
 
     /// Seed one `"HARDCODED …"` name → model path, for fixtures exercising the engine-spawned
@@ -389,6 +471,18 @@ impl SpellVisualCatalog {
     pub fn loot_art_path(&self) -> Option<&str> {
         self.hardcoded_effect("HARDCODED Loot Art")
     }
+
+    /// A `SpellChainEffects` row by its id — the beam a kit's [`VisualKit::chain_proc`] names.
+    /// `None` for an id with no row, which is exactly the client's own null-row no-op and is how
+    /// the shipped table's padding slots resolve ([`chain_effects`]).
+    pub fn chain_effect(&self, id: u32) -> Option<&ChainEffect> {
+        self.chain_effects.get(&id)
+    }
+
+    /// The number of `SpellChainEffects` rows loaded (18 on the shipped table).
+    pub fn chain_effect_len(&self) -> usize {
+        self.chain_effects.len()
+    }
 }
 
 fn n_u32_schema(name: &str, fields: usize) -> Schema {
@@ -439,14 +533,20 @@ const CHAR_PROC_PARAM_FIELD: usize = CHAR_PROC_TYPE_FIELD + KIT_CHAR_PROCS;
 
 /// One kit's `CharProc` slot `i`, transposed out of the five parallel arrays.
 ///
-/// **The empty-slot sentinel, read off the real table:** the type column uses **both** `-1` and `0`
-/// for "no proc" — the same dual none-encoding this table already shows on its anim/sound FKs
-/// (module docs). Every filled slot in 5875 carries a positive key, and the dispatcher's translation
-/// table (`0x60dc20`) sends everything it doesn't name to the no-op case, so folding `<= 0` to
-/// `None` here is behaviour-identical and keeps consumers from switching on a sentinel.
+/// **The empty-slot sentinel is `-1`, and `0` is a REAL key** (corrected by decision 0955). This
+/// used to fold `<= 0` to `None`, on the premise that "the dispatcher's translation table sends
+/// everything it doesn't name to the no-op case". The table names `0`: reading `0x60dc20`
+/// byte-for-byte, type **0 routes to case 0 (`0x60da79`) — the chain/beam case**, the same case
+/// type 12 reaches. Folding it away silently discarded **34 of the 48 live beams** in the shipped
+/// table, which is the whole of B161 ("Chain Lightning has no chain effect") and every missing
+/// drain/channel beam with it.
+///
+/// A type-`0` slot that is genuinely padding still costs nothing: its `CharParamZero` decodes to
+/// `0`, which names no `SpellChainEffects` row, and both the client (`0x6ecc2e`'s null-row test)
+/// and [`CharProc::as_chain`] no-op it. 20 of the 54 shipped type-0 slots are that case.
 fn char_proc_slot(r: &benilla_dbc::Record, i: usize) -> Option<CharProc> {
     let ty = i32_at(r, CHAR_PROC_TYPE_FIELD + i)?;
-    if ty <= 0 {
+    if ty < 0 {
         return None;
     }
     let mut params = [0.0; 4];
@@ -547,497 +647,16 @@ pub fn load_spell_visual_catalog(chain: &mut Chain) -> Result<SpellVisualCatalog
         }
     }
 
+    let chain_effects = chain_effects::load(chain).context("reading SpellChainEffects.dbc")?;
+
     Ok(SpellVisualCatalog {
         visuals,
         kits,
         effect_paths,
         hardcoded,
+        chain_effects,
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A minimal synthetic WDBC (20-byte header + fixed-width u32 records, no strings — both
-    /// tables are all-`u32`) — the same shape `benilla-dbc`'s own tests build (`items.rs`
-    /// reproduces it too), so this adapter is testable without a real client install.
-    fn build_wdbc(record_count: u32, field_count: u32, records: &[u8]) -> Vec<u8> {
-        let record_size = field_count * 4;
-        assert_eq!(records.len(), (record_count * record_size) as usize);
-        let mut b = Vec::new();
-        b.extend_from_slice(b"WDBC");
-        b.extend_from_slice(&record_count.to_le_bytes());
-        b.extend_from_slice(&field_count.to_le_bytes());
-        b.extend_from_slice(&record_size.to_le_bytes());
-        b.extend_from_slice(&0u32.to_le_bytes()); // empty string block
-        b.extend_from_slice(records);
-        b
-    }
-
-    fn u32le(v: u32) -> [u8; 4] {
-        v.to_le_bytes()
-    }
-
-    /// One `SpellVisual` row: id, the five stage kits, then the missile block — field 7 (model
-    /// effect id) and field 9 (dest-attach ordinal) live, the rest zeroed to fill 16 fields.
-    #[allow(clippy::too_many_arguments)]
-    fn spell_visual_row(
-        id: u32,
-        precast: u32,
-        cast: u32,
-        impact: u32,
-        state: u32,
-        channel: u32,
-        missile_model: u32,
-        missile_attach: u32,
-    ) -> Vec<u8> {
-        let mut rec = Vec::new();
-        for v in [id, precast, cast, impact, state, channel] {
-            rec.extend(u32le(v));
-        }
-        for f in 6..SPELL_VISUAL_FIELDS {
-            rec.extend(u32le(match f {
-                7 => missile_model,
-                9 => missile_attach,
-                _ => 0,
-            }));
-        }
-        rec
-    }
-
-    /// One `SpellVisualKit` row: id, an unpinned field 1, anim (field 2), nine zeroed emitter
-    /// slots (3..11), the world-effect slot (field 12), sound (field 13), then zeroed trailing
-    /// columns to fill 35 fields.
-    fn spell_visual_kit_row(id: u32, anim: u32, sound: u32, world: u32) -> Vec<u8> {
-        let mut rec = Vec::new();
-        rec.extend(u32le(id));
-        rec.extend(u32le(0)); // field 1, unpinned
-        rec.extend(u32le(anim)); // field 2
-        for _ in 3..12 {
-            rec.extend(u32le(0)); // fields 3..11 (9 emitter slots)
-        }
-        rec.extend(u32le(world)); // field 12
-        rec.extend(u32le(sound)); // field 13
-        for _ in 14..SPELL_VISUAL_KIT_FIELDS {
-            rec.extend(u32le(0));
-        }
-        rec
-    }
-
-    #[test]
-    fn header_shape_matches_the_pinned_layout() {
-        // A single-row file of each still has to satisfy the pinned field/record-size shape —
-        // exercises the schema's own field-count check against a header lying about it would be
-        // a separate (missing) test; this one just guards our row builders stay in lock-step with
-        // SPELL_VISUAL_FIELDS/SPELL_VISUAL_KIT_FIELDS.
-        let sv = spell_visual_row(1, 0, 0, 0, 0, 0, 0, 0);
-        assert_eq!(sv.len(), SPELL_VISUAL_FIELDS * 4, "64B record");
-        let svk = spell_visual_kit_row(1, 0, 0, 0);
-        assert_eq!(svk.len(), SPELL_VISUAL_KIT_FIELDS * 4, "140B record");
-    }
-
-    #[test]
-    fn parses_stage_kits_and_zero_means_no_kit_at_that_stage() {
-        let mut records = Vec::new();
-        records.extend(spell_visual_row(67, 30, 38, 286, 0, 0, 365, 1)); // Fireball's visual row
-        records.extend(spell_visual_row(1, 0, 0, 0, 0, 0, 0, 0)); // an all-silent row
-        let bytes = build_wdbc(2, SPELL_VISUAL_FIELDS as u32, &records);
-        let rs = parse(
-            &bytes,
-            n_u32_schema("SpellVisual", SPELL_VISUAL_FIELDS),
-            "t",
-        )
-        .unwrap();
-
-        let mut visuals = HashMap::new();
-        for r in rs.records() {
-            let id = u32_at(r, 0).unwrap();
-            let g = |i: usize| u32_at(r, i).unwrap_or(0);
-            visuals.insert(
-                id,
-                VisualStages {
-                    precast: g(1),
-                    cast: g(2),
-                    impact: g(3),
-                    state: g(4),
-                    channel: g(5),
-                    missile_model: g(7),
-                    missile_attach: g(9),
-                    missile_sound: u32_at(r, 10).and_then(some_unless_none),
-                    strike_sound: u32_at(r, 14).and_then(some_unless_none),
-                    missile_gate: g(6),
-                    area_gate: g(11),
-                    area_effect: g(12),
-                    area_kit: g(13),
-                },
-            );
-        }
-        assert_eq!(
-            visuals[&67],
-            VisualStages {
-                precast: 30,
-                cast: 38,
-                impact: 286,
-                state: 0,
-                channel: 0,
-                missile_model: 365,
-                missile_attach: 1,
-                missile_sound: None,
-                strike_sound: None,
-                // The synthetic row builder writes 0 into field 6 and the dest-anchored block
-                // (the REAL Fireball row's missile_gate = 1 is pinned in the real-data test).
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            visuals[&1],
-            VisualStages::default(),
-            "an all-zero row is all-silent"
-        );
-    }
-
-    #[test]
-    fn kit_anim_and_sound_fold_both_none_sentinels_to_none() {
-        let mut records = Vec::new();
-        records.extend(spell_visual_kit_row(38, 53, 1484, 0)); // Fireball's cast kit
-        records.extend(spell_visual_kit_row(1, 0, 0, 0)); // plain-zero "none"
-        records.extend(spell_visual_kit_row(2, u32::MAX, u32::MAX, u32::MAX)); // the -1 "none" form
-        let bytes = build_wdbc(3, SPELL_VISUAL_KIT_FIELDS as u32, &records);
-        let rs = parse(
-            &bytes,
-            n_u32_schema("SpellVisualKit", SPELL_VISUAL_KIT_FIELDS),
-            "t",
-        )
-        .unwrap();
-
-        let mut kits = HashMap::new();
-        for r in rs.records() {
-            let id = u32_at(r, 0).unwrap();
-            let anim_id = u32_at(r, 2).and_then(some_unless_none).map(|a| a as u16);
-            let sound = u32_at(r, 13).and_then(some_unless_none);
-            kits.insert(
-                id,
-                VisualKit {
-                    anim_id,
-                    sound,
-                    ..Default::default()
-                },
-            );
-        }
-        assert_eq!(
-            kits[&38],
-            VisualKit {
-                anim_id: Some(53),
-                sound: Some(1484),
-                ..Default::default()
-            }
-        );
-        assert_eq!(kits[&1], VisualKit::default(), "plain 0 = none");
-        assert_eq!(kits[&2], VisualKit::default(), "0xFFFFFFFF = none too");
-    }
-
-    /// The emitter-slot surface: kit-field order maps to [`KIT_SLOT_TAGS`], both none-sentinels
-    /// fold out, and `effects()` yields only the populated pairs.
-    #[test]
-    fn kit_effect_slots_pair_with_their_attach_tags() {
-        let kit = VisualKit {
-            // Fireball's precast shape: LeftHand (slot index 3) + RightHand (slot index 4).
-            effect_slots: [
-                None,
-                None,
-                None,
-                Some(287),
-                Some(287),
-                None,
-                None,
-                None,
-                None,
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            kit.effects().collect::<Vec<_>>(),
-            vec![(0x15, 287), (0x16, 287)],
-            "LeftHand then RightHand, kit-field order"
-        );
-        assert_eq!(VisualKit::default().effects().count(), 0);
-    }
-
-    /// The tenth slot (field 12, decision 0848) rides `effects()` after the nine, at the interim
-    /// Base anchor — one iterator, so every kit consumer (the aura-state watcher, kit pushes,
-    /// cast/impact plays) picks it up without knowing it exists.
-    #[test]
-    fn kit_world_effect_joins_effects_at_base() {
-        let kit = VisualKit {
-            // Frost Nova's state-kit shape: Head sparkle (slot 0) + the feet ice in field 12.
-            effect_slots: [Some(54), None, None, None, None, None, None, None, None],
-            world_effect: Some(284),
-            ..Default::default()
-        };
-        assert_eq!(
-            kit.effects().collect::<Vec<_>>(),
-            vec![(0x14, 54), (WORLD_EFFECT_TAG, 284)],
-            "the nine first, then the world-plant slot"
-        );
-    }
-
-    /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent) — this
-    /// crate's established gate (`anim_data.rs`, `spell_catalog.rs`, …).
-    fn vanilla_data_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
-    }
-
-    /// End-to-end on the real build-5875 tables: the byte-verified header shape (2165×16/64B ·
-    /// 1772×35/140B) and the full Fireball chain (module doc's "Verified chain") — a schema drift
-    /// or column slip fails loudly. Skips without client data.
-    #[test]
-    fn real_spell_visual_chain_resolves_fireball() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
-        let mut chain = crate::open_chain(&data).expect("open chain");
-        let cat = load_spell_visual_catalog(&mut chain).expect("load SpellVisual/SpellVisualKit");
-        assert_eq!(cat.len(), 2165, "all 5875 SpellVisual rows load");
-        assert_eq!(cat.kit_len(), 1772, "all 5875 SpellVisualKit rows load");
-
-        // Fireball (spell 133) → visual 67 (spells.rs's column-115 pin).
-        let stages = cat.stages(67).expect("Fireball's SpellVisual row");
-        assert_eq!(
-            *stages,
-            VisualStages {
-                precast: 30,
-                cast: 38,
-                impact: 286,
-                state: 0,
-                channel: 0,
-                missile_model: 365,
-                missile_attach: 1,
-                // Field 10: the fireball's in-flight loop (SoundEntries 3011 → FireMissileLoop.wav).
-                missile_sound: Some(3011),
-                strike_sound: None,
-                // Field 6 set = a missile owns the arrival: the GO dest one-shot gate is closed
-                // (0797); the dest-anchored columns are empty on a projectile nuke.
-                missile_gate: 1,
-                area_gate: 0,
-                area_effect: 0,
-                area_kit: 0,
-            }
-        );
-        // The gathering/work strike sounds (decision 0562): Mining's visual 93 carries the pick
-        // clang in field 14 (SoundEntries 1143 "Mining Impact" = MiningHitA-E), Herb's 91 the
-        // search rustle (1142) - the $TRD anim event's operands.
-        assert_eq!(
-            cat.stages(93).and_then(|s| s.strike_sound),
-            Some(1143),
-            "Mining's visual carries the field-14 strike clang"
-        );
-        assert_eq!(
-            cat.stages(91).and_then(|s| s.strike_sound),
-            Some(1142),
-            "Herb Gathering's visual carries the field-14 rustle"
-        );
-
-        // A basic thrown attack borrows the equipped weapon's substitute visual (98 — the thrown
-        // dagger's ItemDisplayInfo col 10): no missile MODEL (it flies the weapon itself) but a
-        // flight loop in field 10 (SoundEntries 3318 → WeaponLoop.wav) — the whoosh the projectile
-        // carries while it travels.
-        let thrown = cat
-            .stages(98)
-            .expect("the thrown-weapon substitute SpellVisual");
-        assert_eq!(
-            thrown.missile_model, 0,
-            "a thrown weapon flies its own model, not an effect"
-        );
-        assert_eq!(
-            thrown.missile_sound,
-            Some(3318),
-            "the thrown weapon's flight loop"
-        );
-        // The missile chain (phase 4): field 7 → the projectile's own model, field 9 → the
-        // chest attach the missile homes to (ordinal 1 → 0x22).
-        assert_eq!(
-            cat.effect_path(stages.missile_model),
-            Some("Spells\\Fireball_Missile_Low.mdx"),
-            "the flying fireball's model"
-        );
-        assert_eq!(
-            MISSILE_ATTACH_TABLE[stages.missile_attach as usize], 0x22,
-            "Fireball homes onto the target's chest"
-        );
-
-        // The engine-spawned hardcoded set resolves by the client's own baked names — the ding
-        // (row 21, byte-verified `0x61f5b0`/`0x8618e0`, decision 0304's §5 fold-back).
-        assert_eq!(
-            cat.hardcoded_effect("HARDCODED Unit Level Up"),
-            Some("Spells\\LevelUp\\LevelUp.mdl"),
-            "the level-up pillar resolves by name"
-        );
-        assert!(
-            cat.hardcoded_effect("HARDCODED Loot Art").is_some(),
-            "the sibling hardcoded rows ride the same map"
-        );
-
-        let cast_kit = cat.kit(stages.cast).expect("cast kit");
-        assert_eq!(
-            cast_kit.anim_id,
-            Some(53),
-            "AnimationData id 53 = SpellCastDirected"
-        );
-        assert_eq!(cast_kit.sound, Some(1484));
-
-        let impact_kit = cat.kit(stages.impact).expect("impact kit");
-        assert_eq!(
-            impact_kit.anim_id,
-            Some(9),
-            "AnimationData id 9 = CombatWound, the target's hit reaction"
-        );
-        assert_eq!(impact_kit.sound, Some(1507));
-
-        // The precast kit's emitter slots (phase 3): effect 287 on both hands, and its
-        // SpellVisualEffectName path — the glowing-hands chain end to end.
-        let precast_kit = cat.kit(stages.precast).expect("precast kit");
-        assert_eq!(
-            precast_kit.effects().collect::<Vec<_>>(),
-            vec![(0x15, 287), (0x16, 287)],
-            "Fire_Precast_Hand on LeftHand + RightHand"
-        );
-        assert_eq!(
-            cat.effect_path(287),
-            Some("Spells\\Fire_Precast_Hand.mdx"),
-            "SpellVisualEffectName field 2 = the effect model path"
-        );
-
-        // The tenth slot (field 12, decision 0848) on the real table — the root/snare state
-        // family the nine slots miss. Frost Nova (spell 122 → visual 17): state kit 285's feet
-        // ice; Net (spell 6533 → visual 683): state kit 744's net wrap, a kit with NO ordinary
-        // slots at all.
-        let frost_nova_state = cat
-            .kit(cat.stages(17).expect("Frost Nova's visual").state)
-            .expect("Frost Nova's state kit");
-        assert_eq!(frost_nova_state.world_effect, Some(284));
-        assert_eq!(
-            cat.effect_path(284),
-            Some("Spells\\Frost_Nova_state.mdx"),
-            "the frozen-feet model rides field 12"
-        );
-        let net_state = cat
-            .kit(cat.stages(683).expect("Net's visual").state)
-            .expect("Net's state kit");
-        assert_eq!(
-            net_state.effects().collect::<Vec<_>>(),
-            vec![(WORLD_EFFECT_TAG, 594)],
-            "the net wrap is the kit's ONLY effect — invisible without field 12"
-        );
-        assert_eq!(cat.effect_path(594), Some("Spells\\Net_State.mdx"));
-        // The impact kit's chest burst — the phase-4 arrival hand-off will play this.
-        assert_eq!(
-            cat.kit(stages.impact)
-                .unwrap()
-                .effects()
-                .collect::<Vec<_>>(),
-            vec![(0x22, 321)],
-            "MoltenBlast_Impact_Chest on the Chest attach"
-        );
-    }
-
-    /// The real 5875 `SpellVisualEffectName`: the boot-time HARDCODED name matcher's one consumed
-    /// row — `"HARDCODED Loot Art"` is id 14 → `Particles\LootFX.mdl` (values pre-checked against
-    /// the raw DBC bytes), and the `.m2` it names ships in the chain, so the lootable-corpse
-    /// sparkle can actually load (wow-re `loot-corpse-effect.md`). Skips without client data.
-    #[test]
-    fn real_effect_name_table_resolves_the_loot_art_row() {
-        let data = vanilla_data_dir();
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
-        let mut chain = crate::open_chain(&data).expect("open chain");
-        let cat = load_spell_visual_catalog(&mut chain).expect("load the visual catalog");
-        assert_eq!(cat.loot_art_path(), Some("Particles\\LootFX.mdl"));
-        // The model the row names ships in the chain (consumers rewrite .mdl → .m2 to load it).
-        assert!(
-            chain.read_file("Particles\\LootFX.m2").is_ok(),
-            "LootFX.m2 must ship in the chain"
-        );
-    }
-}
-
-#[cfg(test)]
-mod ground_fx_data_tests {
-    use super::*;
-
-    /// The dest-anchored chain on the REAL data — 0797's mandatory per-spell data check (the
-    /// wow-re read pinned the GATE; whether each spell passes it is a table fact). Skips
-    /// without client data. Every value here corroborates the live vmangos wire capture:
-    /// Blizzard's dynobj RADIUS was 8.0 (row 14), Flamestrike's 5.0 (row 8).
-    #[test]
-    fn ground_aoe_chain_reads_the_dest_anchored_block() {
-        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
-        if !data.is_dir() {
-            eprintln!("skipping: vanilla client not present at {}", data.display());
-            return;
-        }
-        let mut chain = crate::open_chain(&data).expect("open chain");
-        let catalog = crate::load_spell_catalog(&mut chain).expect("spells");
-        let visuals = load_spell_visual_catalog(&mut chain).expect("visuals");
-        let radii = crate::load_spell_radii(&mut chain).expect("radii");
-
-        // Blizzard 10 → visual 259: both visuals — its own model AND a type-9 shard emitter
-        // whose table index decodes to 0 (the same model), rate 5/s, sound 7.
-        let d = catalog.get(10).unwrap();
-        assert_eq!((d.visual, d.effect_radius_index), (259, [14, 0, 0]));
-        assert_eq!(
-            radii.get(14).map(|r| r.radius),
-            Some(8.0),
-            "the wire radius"
-        );
-        let v = visuals.stages(259).unwrap();
-        assert_eq!(
-            (v.missile_gate, v.area_gate, v.area_effect, v.area_kit),
-            (0, 1, 398, 609)
-        );
-        assert_eq!(
-            visuals.effect_path(398),
-            Some("Spells\\Blizzard_Impact_Base.mdx")
-        );
-        let k = visuals.kit(609).unwrap();
-        assert_eq!(k.sound, Some(7));
-        let proc = k.char_procs().find(|p| p.ty == 9).unwrap();
-        assert_eq!((proc.params[0], proc.params[1]), (0.0, 5.0));
-
-        // Flamestrike 2120 → visual 33: its own model + sound, NO type-9 proc (a burning
-        // patch has no falling shards) — the emitter half is data-absent, not code-gated.
-        let d = catalog.get(2120).unwrap();
-        assert_eq!((d.visual, d.effect_radius_index), (33, [8, 8, 0]));
-        assert_eq!(radii.get(8).map(|r| r.radius), Some(5.0), "the wire radius");
-        let v = visuals.stages(33).unwrap();
-        assert_eq!(
-            (v.missile_gate, v.area_gate, v.area_effect, v.area_kit),
-            (0, 1, 420, 695)
-        );
-        assert_eq!(
-            visuals.effect_path(420),
-            Some("Spells\\Flamestrike_Impact_Base.mdx")
-        );
-        let k = visuals.kit(695).unwrap();
-        assert_eq!(k.sound, Some(3077));
-        assert!(k.char_procs().all(|p| p.ty != 9));
-
-        // Rain of Fire 5740 → visual 329: shard-table index 1 (its own model again), rate 5/s.
-        let v = visuals.stages(catalog.get(5740).unwrap().visual).unwrap();
-        assert_eq!((v.missile_gate, v.area_gate, v.area_effect), (0, 1, 448));
-        let proc = visuals
-            .kit(v.area_kit)
-            .unwrap()
-            .char_procs()
-            .find(|p| p.ty == 9)
-            .unwrap();
-        assert_eq!((proc.params[0], proc.params[1]), (1.0, 5.0));
-
-        // All three pass the GO dest one-shot gate (field 6 == 0 ∧ field 12 ≠ 0) — the burst
-        // fires for each; Fireball (missile_gate 1, pinned in the loader test above) does not.
-    }
-}
+mod tests;

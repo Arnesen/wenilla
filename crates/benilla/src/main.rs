@@ -324,7 +324,9 @@ fn main() -> AppExit {
                                 Ok("ui-worldmap") => UVec2::new(1100, 800),
                                 // The 920×724 era options window wants air on every side so the
                                 // straddling right-edge tile and the hung close X stay in frame.
-                                Ok("ui-options") => UVec2::new(1200, 900),
+                                Ok("ui-options")
+                                | Ok("ui-options-audio")
+                                | Ok("ui-options-graphics") => UVec2::new(1200, 900),
                                 _ => UVec2::new(640, 700),
                             }
                         }

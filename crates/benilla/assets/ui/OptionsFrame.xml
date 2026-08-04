@@ -1,8 +1,10 @@
 <Ui>
     <!--
-        The OPTIONS window (decision 0950) — slice A: the shell. Opened from the game menu's
-        Options button; the pages themselves (setting rows backed by real benilla knobs) come in
-        the next slice, so the page body ships EMPTY and Defaults ships disabled.
+        The OPTIONS window (decision 0950) — the shell (slice A) and the real PAGES: Audio
+        (0957), Graphics (0959). Opened from the game menu's Options button. Setting rows ride
+        the CVar store (0954): rows read GetCVar on show, write SetCVar on interaction, and
+        Defaults resets the visible page's CVars to their registered defaults. Pages without
+        rows are still empty and keep Defaults disabled.
 
         This window is the one deliberate era-1.15.9 skin in a 1.12 shell (0950): the 1.12
         OptionsFrame family (four separate panels) collapses into the era SettingsPanel look —
@@ -61,7 +63,18 @@
           placeholder and clear-X; wiring it to the category/row filter comes with the pages
           slice.
         - **No scroll bars**: the static category tree (9 rows, 2 headers) fits its 199px column
-          outright, and the page body is empty. MinimalScrollBar arrives with the pages.
+          outright, and the deepest page (Audio, 7 rows) fits its area. MinimalScrollBar arrives
+          when a page outgrows the space.
+        - **Setting-page cuts (0957 Audio, 0959 Graphics)**: setting-row tooltips (the era
+          OPTION_TOOLTIP_* hovers) are not wired; Defaults resets the VISIBLE page only (the
+          era confirm dialog is not modeled); track clicks do nothing (thumb drag + steppers
+          only — the engine slider's scrollbar-faithful posture); era rows with no 1.12 CVar +
+          benilla knob behind them (output device, Dialog volume, loop music, channels, cache;
+          the whole era Graphics dropdown zoo) don't ship. A slider shows the 1.12 panel's
+          range even where the benilla knob's clamp is wider (farclip's dev headroom to 1200,
+          uiScale's 0.5..1.5): a config value outside the page range displays clamped — thumb
+          and readout agree on the nearest expressible value, the engine keeps running the
+          config's truth, and nothing writes back until the player actually moves the row.
         - Era rows this slice does not ship: the Accessibility group, and Languages/Network under
           System — pages with no benilla knobs behind them yet (0950's "only rows backed by real
           knobs" rule). Nameplates joined in slice B (real nameplate knobs exist to back its
@@ -151,7 +164,9 @@
 
         -- The selection: exactly one row wears options_list_active + a white label; everyone
         -- else drops back to bare + gold (the era CategoryList mixin's SetCategoryActive, cut to
-        -- our static list). Also writes the page title — the page BODY stays empty this slice.
+        -- our static list). Also writes the page title and swaps the page BODY: a category with
+        -- rows (OPTIONS_PAGE_ROWS) shows its body refreshed from the CVars and Defaults goes
+        -- live with it; every other page is still empty, Defaults disabled.
         function OptionsFrame_SelectCategory(key)
             OptionsFrame.selectedCategory = key
             for _, k in ipairs(OPTIONS_CATEGORY_KEYS) do
@@ -166,6 +181,184 @@
                     row:SetTextFontObject("GameFontNormal")
                 end
             end
+            for k in pairs(OPTIONS_PAGE_ROWS) do
+                local body = getglobal("OptionsFrameContainerBody" .. k)
+                if k == key then body:Show() else body:Hide() end
+            end
+            if OPTIONS_PAGE_ROWS[key] then
+                OptionsPage_Refresh(key)
+                OptionsFrameContainerDefaults:Enable()
+            else
+                OptionsFrameContainerDefaults:Disable()
+            end
+        end
+
+        -- ── The setting pages: 1.12 rows in the era Settings grammar ────────────────────────
+        -- One machinery, every page (Audio 0957, the first). Semantics (rows, CVars, labels,
+        -- dependencies, the click-sound quirk) are the 1.12 client's own panels, quoted
+        -- verbatim (SoundOptionsFrame.lua / OptionsFrame.lua + GlobalStrings.lua); geometry is
+        -- the era settings list (Blizzard_SettingControls.xml/.lua + Blizzard_SettingsList.lua
+        -- @1.15.9 — 26-tall rows on a 9 spacing, label LEFT+37 → CENTER-85, control at
+        -- CENTER-80, child rows +15 indent in the small font). Era rows with no 1.12 CVar +
+        -- benilla knob behind them (Enable Sound=Sound_EnableAllSound, Dialog, output device,
+        -- channels…) do not ship — the 0950 honest-tree rule applied to settings.
+        OPTIONS_PAGE_ROWS = {
+            Audio = {
+                "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
+                "RowEnableMusic", "RowEnableAmbience",
+            },
+            Graphics = { "RowUiScale", "RowFarclip" },
+        }
+
+        function OptionsRow_OnLoad(row, cvar, label, child)
+            row.cvar = cvar
+            local l = getglobal(row:GetName() .. "Label")
+            l:SetText(label)
+            if child then
+                -- era child rows: +15 label indent and the small font
+                -- (SettingControls.lua l.319-322); the control itself does not indent.
+                l:SetFontObject("GameFontNormalSmall")
+                l:ClearAllPoints()
+                l:SetPoint("LEFT", row:GetName(), "LEFT", 52, 0)
+                l:SetPoint("RIGHT", row:GetName(), "CENTER", -85, 0)
+            end
+        end
+
+        -- A slider row's own range and readout, when the template's 0..1 / 5% / percent (the
+        -- volume shape) isn't it — called after OptionsRow_OnLoad in the row's OnLoad. The
+        -- refreshing guard: SetMinMaxValues re-clamps the held value and fires OnValueChanged,
+        -- and that clamp is wiring, not a player gesture — without the guard every load would
+        -- SetCVar the template's 0 clamped into the new range.
+        function OptionsSliderRow_Setup(row, min, max, step, fmt)
+            local slider = getglobal(row:GetName() .. "ControlSlider")
+            row.fmt = fmt
+            row.refreshing = 1
+            slider:SetMinMaxValues(min, max)
+            slider:SetValueStep(step)
+            row.refreshing = nil
+        end
+
+        -- The right-hand readout text (era MinimalSlider's RIGHT label seat): rounded percent
+        -- (era FormatPercentage, Audio.lua l.406-411) unless the row asked for the raw number.
+        function OptionsRow_FormatValue(row, value)
+            if row.fmt == "raw" then
+                return string.format("%d", math.floor(value + 0.5))
+            end
+            return string.format("%d%%", math.floor(value * 100 + 0.5))
+        end
+
+        -- The era row-wide hover wash (HoverBackgroundTemplate, white a=0.1): the row and every
+        -- control on it show the SAME texture, so crossing from label to slider doesn't blink.
+        function OptionsRow_Hover(row, on)
+            local hover = getglobal(row:GetName() .. "Hover")
+            if on then hover:Show() else hover:Hide() end
+        end
+
+        function OptionsCheckbox_OnClick(box)
+            local row = box:GetParent()
+            -- The 1.12 panel's click sounds, quirk kept: the just-CHECKED box plays the
+            -- CheckBoxOff kit and vice versa (SoundOptionsFrame.lua's OnClick, verbatim).
+            if box:GetChecked() then
+                PlaySound("igMainMenuOptionCheckBoxOff")
+                SetCVar(row.cvar, 1)
+            else
+                PlaySound("igMainMenuOptionCheckBoxOn")
+                SetCVar(row.cvar, 0)
+            end
+            OptionsPage_UpdateDependencies(OptionsFrame.selectedCategory)
+        end
+
+        function OptionsSlider_OnValueChanged(slider, value)
+            local control = slider:GetParent()
+            local row = control:GetParent()
+            if not row.refreshing then
+                -- era obeyStepOnDrag (MinimalSlider.xml l.5-7): user moves snap to the step
+                -- grid — anchored at the range MINIMUM, the reference slider's own anchor
+                -- (farclip's 1.12 grid is 177+n*60, not the multiples of 60). A refresh
+                -- writes the stored value raw (era SetValue does not snap), so an off-grid
+                -- config value still lands where it said.
+                local step = slider:GetValueStep()
+                if step and step > 0 then
+                    local minv = slider:GetMinMaxValues()
+                    local snapped = minv + math.floor((value - minv) / step + 0.5) * step
+                    if math.abs(snapped - value) > 0.00001 then
+                        slider:SetValue(snapped) -- re-enters once with the snapped value
+                        return
+                    end
+                    value = snapped -- the clean grid number, not the f32-rounded echo
+                end
+            end
+            getglobal(control:GetName() .. "Value"):SetText(OptionsRow_FormatValue(row, value))
+            if row.cvar and not row.refreshing then
+                -- Two decimals cover every page's grid (the 5% volumes, uiScale's 0.01, whole
+                -- yards); trailing zeros stripped so a value at the registered default
+                -- compares equal to it as a STRING and stays out of the config file ("0.40"
+                -- would read as moved-off-"0.4").
+                local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
+                SetCVar(row.cvar, str)
+            end
+        end
+
+        function OptionsStepper_OnClick(btn, dir)
+            local slider = getglobal(btn:GetParent():GetName() .. "Slider")
+            -- era steppers: one step per click, the checkbox-on kit (MinimalSlider.lua l.53-57).
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            slider:SetValue(slider:GetValue() + dir * slider:GetValueStep())
+        end
+
+        function OptionsPage_Refresh(key)
+            local base = "OptionsFrameContainerBody" .. key
+            for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
+                local row = getglobal(base .. rkey)
+                local box = getglobal(base .. rkey .. "Check")
+                if box then
+                    -- SetChecked takes the CVar string exactly like the 1.12 panel: the numeric
+                    -- read means "0" unchecks (button-check-and-state-texture.md).
+                    box:SetChecked(GetCVar(row.cvar))
+                else
+                    local slider = getglobal(base .. rkey .. "ControlSlider")
+                    row.refreshing = 1
+                    slider:SetValue(tonumber(GetCVar(row.cvar) or "0") or 0)
+                    row.refreshing = nil
+                    -- SetValue fires only on a CHANGE — write the readout unconditionally,
+                    -- from the slider's OWN value: in range that IS the CVar (SetValue stores
+                    -- raw), out of range the thumb and the number at least agree on the
+                    -- nearest expressible value.
+                    getglobal(base .. rkey .. "ControlValue"):SetText(
+                        OptionsRow_FormatValue(row, slider:GetValue()))
+                end
+            end
+            OptionsPage_UpdateDependencies(key)
+        end
+
+        -- Per-page dependency rules. Audio's is the 1.12 rule, verbatim: Enable All Sound off
+        -- greys Enable Ambience — and only it, of our rows
+        -- (SoundOptionsFrame_UpdateDependencies disables buttons 2 and 4, Ambience and Error
+        -- Speech; Enable Music stays live, the panel's own quirk).
+        function OptionsPage_UpdateDependencies(key)
+            if key ~= "Audio" then return end
+            local on = GetCVar("MasterSoundEffects") ~= "0"
+            local box = OptionsFrameContainerBodyAudioRowEnableAmbienceCheck
+            local label = OptionsFrameContainerBodyAudioRowEnableAmbienceLabel
+            if on then
+                box:Enable()
+                label:SetFontObject("GameFontNormal")
+            else
+                box:Disable()
+                label:SetFontObject("GameFontDisable")
+            end
+        end
+
+        -- Defaults, live on any page with rows: every row's CVar back to its registered
+        -- default (era resets per-setting the same way; the era all-pages confirm dialog is
+        -- not modeled — Defaults resets the VISIBLE page).
+        function OptionsPage_Defaults(key)
+            local base = "OptionsFrameContainerBody" .. key
+            for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
+                local row = getglobal(base .. rkey)
+                SetCVar(row.cvar, GetCVarDefault(row.cvar))
+            end
+            OptionsPage_Refresh(key)
         end
     ]]></Script>
 
@@ -254,6 +447,157 @@
                 </FontString>
             </Layer>
         </Layers>
+    </Frame>
+
+    <!-- One SETTING row, checkbox flavor (era SettingsCheckboxControlTemplate over
+         SettingsListElementTemplate, Blizzard_SettingControls.xml l.50-112): 26 tall, stretched
+         to the page width by its instance anchors; label GameFontNormal in a LEFT(37) →
+         CENTER(-85) box (the era mixin's runtime anchors, SettingControls.lua l.322-323); the
+         30x29 box at LEFT = row CENTER-80 (l.473). The checkbox art is the era minimal set at
+         its state seats (SettingControls.xml l.92-95): checkbox-minimal normal AND pushed (no
+         distinct pressed art), checkmark-minimal checked, checkmark-minimal-disabled
+         disabled+checked; no HighlightTexture — hover feedback is the row-wide Hover wash
+         (HoverBackgroundTemplate: white a=0.1, hung 10 left / 5 right of the row). -->
+    <Frame name="OptionsCheckboxRowTemplate" virtual="true" enableMouse="true">
+        <Size><AbsDimension y="26"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentHover" hidden="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="1" g="1" b="1" a="0.1"/>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentLabel" inherits="GameFontNormal" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="LEFT"><Offset><AbsDimension x="37" y="0"/></Offset></Anchor>
+                        <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-85" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <CheckButton name="$parentCheck">
+                <Size><AbsDimension x="30" y="29"/></Size>
+                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="0"/></Offset></Anchor></Anchors>
+                <NormalTexture atlas="checkbox-minimal"/>
+                <PushedTexture atlas="checkbox-minimal"/>
+                <CheckedTexture atlas="checkmark-minimal"/>
+                <DisabledCheckedTexture atlas="checkmark-minimal-disabled"/>
+                <Scripts>
+                    <OnClick>OptionsCheckbox_OnClick(this)</OnClick>
+                    <OnEnter>OptionsRow_Hover(this:GetParent(), 1)</OnEnter>
+                    <OnLeave>OptionsRow_Hover(this:GetParent(), nil)</OnLeave>
+                </Scripts>
+            </CheckButton>
+        </Frames>
+        <Scripts>
+            <OnEnter>OptionsRow_Hover(this, 1)</OnEnter>
+            <OnLeave>OptionsRow_Hover(this, nil)</OnLeave>
+        </Scripts>
+    </Frame>
+
+    <!-- One SETTING row, slider flavor (era SettingsSliderControlTemplate →
+         MinimalSliderWithSteppersTemplate, SettingControls.lua l.550-552 + MinimalSlider.xml):
+         the same 26-tall row and label box; the 250x40 control at LEFT = row CENTER(-80,+3)
+         (its 40 height overrides the row symmetrically). Inside: the Slider inset 19 each side
+         (hit area the full height, the way era's is), wearing the minimal_sliderbar three-slice
+         at atlas size on the LEFT/RIGHT points (17-tall track centered) with the middle
+         stretched between the caps, and the 20x19 button thumb. Steppers hang 4 outside the
+         slider: 11x19 left, 9x18 right (the era's own asymmetry, MinimalSlider.xml l.43-64).
+         The readout is era's RIGHT label seat — 25 right of the slider edge = 6 right of the
+         control (MinimalSlider.xml l.73-77), rounded-percent formatted. -->
+    <Frame name="OptionsSliderRowTemplate" virtual="true" enableMouse="true">
+        <Size><AbsDimension y="26"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentHover" hidden="true">
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="-10" y="0"/></Offset></Anchor>
+                        <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="1" g="1" b="1" a="0.1"/>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentLabel" inherits="GameFontNormal" justifyH="LEFT">
+                    <Anchors>
+                        <Anchor point="LEFT"><Offset><AbsDimension x="37" y="0"/></Offset></Anchor>
+                        <Anchor point="RIGHT" relativePoint="CENTER"><Offset><AbsDimension x="-85" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Frame name="$parentControl">
+                <Size><AbsDimension x="250" y="40"/></Size>
+                <Anchors><Anchor point="LEFT" relativePoint="CENTER"><Offset><AbsDimension x="-80" y="3"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString name="$parentValue" inherits="GameFontNormal">
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="6" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <Frames>
+                    <Slider name="$parentSlider" orientation="HORIZONTAL" minValue="0" maxValue="1" valueStep="0.05">
+                        <Anchors>
+                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="19" y="0"/></Offset></Anchor>
+                            <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-19" y="0"/></Offset></Anchor>
+                        </Anchors>
+                        <Layers>
+                            <Layer level="ARTWORK">
+                                <Texture name="$parentTrackLeft" atlas="minimal_sliderbar_left" useAtlasSize="true">
+                                    <Anchors><Anchor point="LEFT"/></Anchors>
+                                </Texture>
+                                <Texture name="$parentTrackRight" atlas="minimal_sliderbar_right" useAtlasSize="true">
+                                    <Anchors><Anchor point="RIGHT"/></Anchors>
+                                </Texture>
+                                <Texture name="$parentTrackMiddle" atlas="_minimal_sliderbar_middle">
+                                    <Anchors>
+                                        <Anchor point="TOPLEFT" relativeTo="$parentTrackLeft" relativePoint="TOPRIGHT"/>
+                                        <Anchor point="BOTTOMRIGHT" relativeTo="$parentTrackRight" relativePoint="BOTTOMLEFT"/>
+                                    </Anchors>
+                                </Texture>
+                            </Layer>
+                        </Layers>
+                        <ThumbTexture atlas="minimal_sliderbar_button" useAtlasSize="true"/>
+                        <Scripts>
+                            <OnValueChanged>OptionsSlider_OnValueChanged(this, arg1)</OnValueChanged>
+                            <OnEnter>OptionsRow_Hover(this:GetParent():GetParent(), 1)</OnEnter>
+                            <OnLeave>OptionsRow_Hover(this:GetParent():GetParent(), nil)</OnLeave>
+                        </Scripts>
+                    </Slider>
+                    <Button name="$parentBack">
+                        <Size><AbsDimension x="11" y="19"/></Size>
+                        <Anchors><Anchor point="RIGHT" relativeTo="$parentSlider" relativePoint="LEFT"><Offset><AbsDimension x="-4" y="0"/></Offset></Anchor></Anchors>
+                        <NormalTexture atlas="minimal_sliderbar_button_left"/>
+                        <Scripts>
+                            <OnClick>OptionsStepper_OnClick(this, -1)</OnClick>
+                            <OnEnter>OptionsRow_Hover(this:GetParent():GetParent(), 1)</OnEnter>
+                            <OnLeave>OptionsRow_Hover(this:GetParent():GetParent(), nil)</OnLeave>
+                        </Scripts>
+                    </Button>
+                    <Button name="$parentForward">
+                        <Size><AbsDimension x="9" y="18"/></Size>
+                        <Anchors><Anchor point="LEFT" relativeTo="$parentSlider" relativePoint="RIGHT"><Offset><AbsDimension x="4" y="0"/></Offset></Anchor></Anchors>
+                        <NormalTexture atlas="minimal_sliderbar_button_right"/>
+                        <Scripts>
+                            <OnClick>OptionsStepper_OnClick(this, 1)</OnClick>
+                            <OnEnter>OptionsRow_Hover(this:GetParent():GetParent(), 1)</OnEnter>
+                            <OnLeave>OptionsRow_Hover(this:GetParent():GetParent(), nil)</OnLeave>
+                        </Scripts>
+                    </Button>
+                </Frames>
+            </Frame>
+        </Frames>
+        <Scripts>
+            <OnEnter>OptionsRow_Hover(this, 1)</OnEnter>
+            <OnLeave>OptionsRow_Hover(this, nil)</OnLeave>
+        </Scripts>
     </Frame>
 
     <Frame name="OptionsFrame" frameStrata="HIGH" enableMouse="true" hidden="true">
@@ -516,20 +860,130 @@
                     </Layer>
                 </Layers>
                 <Frames>
-                    <!-- Disabled this slice: there are no setting rows yet, so there is nothing
-                         to default. Goes live with the pages (delete the Disable, wire the
-                         per-page reset). -->
+                    <!-- Live on any page with rows (OPTIONS_PAGE_ROWS);
+                         OptionsFrame_SelectCategory enables/disables it with the page swap. -->
                     <Button name="$parentDefaults" inherits="OptionsRedButtonTemplate" text="Defaults">
                         <Anchors><Anchor point="TOPRIGHT"><Offset><AbsDimension x="-36" y="-16"/></Offset></Anchor></Anchors>
-                        <Scripts><OnLoad>self:Disable()</OnLoad></Scripts>
+                        <Scripts>
+                            <OnLoad>self:Disable()</OnLoad>
+                            <OnClick>OptionsPage_Defaults(OptionsFrame.selectedCategory)</OnClick>
+                        </Scripts>
                     </Button>
-                    <!-- The page body — EMPTY this slice; the setting rows (Blizzard_SettingControls'
-                         280x26 label/control rows, backed by real benilla knobs) land here next. -->
+                    <!-- The page body: one child frame per category with rows, shown by
+                         OptionsFrame_SelectCategory (Audio 0957, Graphics 0959). -->
                     <Frame name="$parentBody">
                         <Anchors>
                             <Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="-50"/></Offset></Anchor>
                             <Anchor point="BOTTOMRIGHT"/>
                         </Anchors>
+                        <Frames>
+                            <!-- The Audio page. Row seats transcribe the era settings list
+                                 (Blizzard_SettingsList.lua l.43-47 + .xml: scroll box hung
+                                 -15/-20 off the header block with padLeft 25 / padRight 0 and
+                                 verticalPad 10 → first row at (10,-12); spacing 9 → 35 pitch).
+                                 Row ORDER is the era Audio page's grammar (volume block first,
+                                 then the enables) over the 1.12 row set: the three category
+                                 volumes ride as CHILDREN of Master Volume exactly like era's,
+                                 in the 1.12 panel's own slider order (Sound, Music, Ambience —
+                                 SoundOptionsFrame.lua's index order). -->
+                            <Frame name="$parentAudio" hidden="true">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                                <Frames>
+                                    <Frame name="$parentRowEnableAll" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowMaster" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableAll" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterVolume", "Master Volume")</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowSound" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowMaster" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowMaster" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "SoundVolume", "Sound Volume", 1)</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowMusic" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowSound" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowSound" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "MusicVolume", "Music Volume", 1)</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowAmbience" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "AmbienceVolume", "Ambience Volume", 1)</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowEnableMusic" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowEnableAmbience" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")</OnLoad></Scripts>
+                                    </Frame>
+                                </Frames>
+                            </Frame>
+                            <!-- The Graphics page (0959): the two 1.12 Video Options sliders
+                                 with benilla knobs behind them, on the same era row seats.
+                                 Ranges/steps/labels are the 1.12 OptionsFrameSliders table
+                                 verbatim (OptionsFrame.lua l.24-26): uiscale 0.64..1.0 step
+                                 0.01 (UI_SCALE "UI Scale", percent readout — era's own
+                                 FormatPercentageRounded on its uiscale row), farclip 177..777
+                                 step 60 = (max-min)/10 (FARCLIP "Terrain Distance", raw-yards
+                                 readout — era's law when a slider has no formatter). 1.12's
+                                 useUiScale gate has no benilla knob (our scale always applies;
+                                 off ≡ 1.0) so the checkbox doesn't ship; era's Graphics page
+                                 never registers View Distance at all — Terrain Distance is
+                                 the 1.12 surface, kept. -->
+                            <Frame name="$parentGraphics" hidden="true">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                                <Frames>
+                                    <Frame name="$parentRowUiScale" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "uiScale", "UI Scale")
+                                            OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
+                                        </OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowFarclip" inherits="OptionsSliderRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "farclip", "Terrain Distance")
+                                            OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                        </OnLoad></Scripts>
+                                    </Frame>
+                                </Frames>
+                            </Frame>
+                        </Frames>
                     </Frame>
                 </Frames>
             </Frame>

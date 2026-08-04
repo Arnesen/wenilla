@@ -19,6 +19,10 @@
 //!   model-only scope) — parented to the world camera, spawned when the entry cover rises; the
 //!   loading screen's clear condition holds on [`WarmPass::satisfied`] until the pipeline cache
 //!   drains (10 s backstop, 0737's rule), then the menagerie despawns. Captures skip it.
+//!   Booth twins ride a real booth's layer (samples=1, 0938) AND the pass's own twin booth
+//!   ([`crate::portrait::spawn_warm_booth`] — the custom-projection view key real bakes install;
+//!   decision 0958), and [`warm_effect_lane`] pushes the `wow_effect` lane's whole key cross
+//!   through the production stream each warm frame (the ring's first-target stall, 0958).
 //! - [`PipeWatch`] — an `Arc` shared by the main and render worlds: how many pipelines the cache
 //!   has ever queued, how many have settled (Ok/Err), and whether a cover currently hides the
 //!   frame (loading screen up, or not in world — the glue scene is its own cover, 0540).
@@ -42,6 +46,9 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use crate::char_select::ClientState;
 use crate::loading_screen::LoadingScreen;
 use crate::model_render::MaterialCache;
+use crate::particles::buffer::{
+    begin_effect_frame, EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex,
+};
 use crate::terrain::WowModelMaterial;
 
 mod menagerie;
@@ -75,6 +82,14 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         Update,
         run_warm_pass.before(crate::schedule::WorldStage::Present),
+    );
+    // The effect-lane warm writer rides the production stream, which is cleared at the top of
+    // PostUpdate's effect set — so it writes after the clear, like every family writer. The
+    // HUD-quad warm rides the UI append lane the same way (cleared at the top of its own set).
+    app.add_systems(PostUpdate, warm_effect_lane.after(begin_effect_frame));
+    app.add_systems(
+        Update,
+        warm_ui_quad_lane.in_set(crate::ui_pass::UiQuadAppend),
     );
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -219,6 +234,12 @@ fn describe(desc: &PipelineDescriptor) -> String {
 #[derive(Component)]
 struct WarmRig;
 
+/// Marker on the menagerie's twin booth camera ([`crate::portrait::spawn_warm_booth`] — the
+/// custom-projection view key space, decision 0958), so [`warm_effect_lane`] can address its
+/// view. It also carries [`WarmRig`], which despawns it with the rest of the pass.
+#[derive(Component)]
+struct WarmBoothCam;
+
 /// Main-world warm-pass state. The loading screen folds [`Self::satisfied`] into its clear
 /// condition, so the cover holds while menagerie pipelines are still compiling.
 #[derive(Resource, Default)]
@@ -228,6 +249,9 @@ pub(crate) struct WarmPass {
     spawned_at: Option<f32>,
     /// This cover's warm work is done (drained, timed out, or not applicable).
     done: bool,
+    /// The 1×1 stand-in texture [`warm_effect_lane`]'s draws bind while the pass runs (a strong
+    /// handle so the asset lives exactly as long as the pass; `None` = the lane isn't warming).
+    effect_tex: Option<Handle<Image>>,
 }
 
 impl WarmPass {
@@ -268,6 +292,7 @@ fn run_warm_pass(
         // despawns. `done` stays true so the gate never blocks an uncovered frame.
         warm.done = true;
         warm.spawned_at = None;
+        warm.effect_tex = None;
         for e in &rigs {
             commands.entity(e).despawn();
         }
@@ -289,10 +314,20 @@ fn run_warm_pass(
             return;
         };
         warm.spawned_at = Some(now);
+        // The twin booth (0958): the custom-projection view key space real bakes use — the real
+        // booths warm the placeholder-Perspective class, this camera the NONSTANDARD one. It is
+        // a WarmRig, so every despawn path below cleans it up with the rigs.
+        let warm_booth = crate::portrait::spawn_warm_booth(&mut commands, &mut lanes.images);
+        commands
+            .entity(warm_booth.0)
+            .insert((WarmRig, WarmBoothCam));
+        // The effect lane's stand-in texture — held for the life of the pass.
+        warm.effect_tex = Some(lanes.images.add(Image::default()));
         let count = spawn_menagerie(
             &mut commands,
             cam,
             booth.iter().next(),
+            &warm_booth,
             &mut meshes,
             &mut materials,
             &mut lanes,
@@ -321,15 +356,98 @@ fn run_warm_pass(
         .saturating_sub(watch.0.settled.load(Ordering::Relaxed));
     if now - spawned >= WARM_SETTLE_SECS && pending == 0 {
         warm.done = true;
+        warm.effect_tex = None;
         for e in &rigs {
             commands.entity(e).despawn();
         }
         info!("pipeline warm: drained in {:.2}s", now - spawned);
     } else if now - spawned >= WARM_TIMEOUT_SECS {
         warm.done = true;
+        warm.effect_tex = None;
         for e in &rigs {
             commands.entity(e).despawn();
         }
         warn!("pipeline warm: TIMED OUT with {pending} pipelines pending — cover released");
+    }
+}
+
+/// The **effect-lane** warm writer (decision 0958 — the 07:45 log's [831], the selection ring's
+/// first-target stall). `wow_effect` is a custom `SpecializedRenderPipeline` lane, not a
+/// `MaterialPlugin` one, so no menagerie *entity* can reach it: its pipelines exist only when a
+/// draw record sits in the shared stream at queue time. So while the pass runs, this pushes one
+/// degenerate draw per reachable [`EffectPipelineKey`] — the full blend × raster-bias cross
+/// ({Add, Alpha, Opaque, Multiply, Mod2x} × {0, ground-decal, blob-shadow}; the key's own doc
+/// pins the closed bias set) — through the PRODUCTION stream (`EffectQuads` → extract → queue →
+/// specialize), once per view class: the world camera (samples=N) and the twin booth (samples=1).
+/// The queue path specializes per matching view regardless of coverage, so a 4-vertex sliver at
+/// the origin compiles the whole space behind the cover; the stand-in texture keeps the prepare
+/// half exercised too. Per-frame like the gizmo line: the stream clears every frame.
+///
+/// [`EffectPipelineKey`]: crate::particles::render::EffectPipelineKey
+/// The HUD-substrate warm (0958's sweep, residual): `UiQuadMaterial` is exactly ONE pipeline,
+/// and on a normal entry it compiles covered because the HUD's first quad batch lands under the
+/// cover — but nothing structural holds that timing (a slow Interface load would land it after
+/// the lift). One invisible overlay quad per warm frame pins the compile inside the cover
+/// window; the append lane clears itself every frame, so nothing lingers.
+fn warm_ui_quad_lane(warm: Res<WarmPass>, mut quads: ResMut<crate::ui_pass::UiQuads>) {
+    if warm.spawned_at.is_none() || warm.done {
+        return;
+    }
+    quads.overlays.push(crate::ui_pass::UiQuad {
+        rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+        color: [0.0, 0.0, 0.0, 0.0],
+        ..default()
+    });
+}
+
+fn warm_effect_lane(
+    warm: Res<WarmPass>,
+    mut quads: ResMut<EffectQuads>,
+    world_cam: Query<Entity, With<crate::player::WorldCamera>>,
+    warm_booth: Query<Entity, With<WarmBoothCam>>,
+) {
+    if warm.spawned_at.is_none() || warm.done {
+        return;
+    }
+    let Some(tex) = warm.effect_tex.as_ref() else {
+        return;
+    };
+    for cam in world_cam.iter().chain(warm_booth.iter()) {
+        for blend in [
+            EffectBlend::Add,
+            EffectBlend::Alpha,
+            EffectBlend::Opaque,
+            EffectBlend::Multiply,
+            EffectBlend::Mod2x,
+        ] {
+            for raster_bias in [
+                0,
+                crate::ground_fx::GROUND_FX_DEPTH_BIAS as i32,
+                crate::blob_shadow::SHADOW_RASTER_BIAS,
+            ] {
+                let start = quads.begin();
+                for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                    quads.verts.push(EffectVertex {
+                        pos: [u * 0.01, v * 0.01, 0.0],
+                        uv: [u, v],
+                        color: [1.0, 1.0, 1.0, 1.0],
+                    });
+                }
+                quads.commit_quads(
+                    start,
+                    EffectDrawSpec {
+                        cam,
+                        texture: tex.id(),
+                        blend,
+                        fog: EffectFog::Off,
+                        anchor: Vec3::ZERO,
+                        bias: 0.0,
+                        raster_bias,
+                        main_entity: cam,
+                        light: None,
+                    },
+                );
+            }
+        }
     }
 }

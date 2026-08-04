@@ -39,6 +39,13 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     ("SoundVolume", "1"),
     ("MusicVolume", "0.4"),
     ("AmbienceVolume", "0.6"),
+    // The three 1.12 sound enables (registrar defaults all "1", wow-re B10):
+    // `MasterSoundEffects` is the MASTER "Enable All Sound" checkbox (SoundOptionsFrame.lua
+    // index 1 — its callback sets the engine-wide pause flag), NOT an SFX-only toggle; 1.12
+    // has no `EnableSound`/`EnableSFX` at all.
+    ("MasterSoundEffects", "1"),
+    ("EnableMusic", "1"),
+    ("EnableAmbience", "1"),
     ("uiScale", "0.9"),
     ("farclip", "777"),
 ];
@@ -100,6 +107,10 @@ fn apply_to_knobs(
         "soundvolume" => sound.sfx = v.clamp(0.0, 1.0),
         "musicvolume" => sound.music = v.clamp(0.0, 1.0),
         "ambiencevolume" => sound.ambience = v.clamp(0.0, 1.0),
+        // The enables are 0/1 flags; the client's own parse is int + `!= 0`.
+        "mastersoundeffects" => sound.enabled = v != 0.0,
+        "enablemusic" => sound.music_enabled = v != 0.0,
+        "enableambience" => sound.ambience_enabled = v != 0.0,
         "uiscale" => scale.0 = v.clamp(0.5, 1.5),
         "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
         _ => return false,
@@ -180,11 +191,15 @@ fn sync_cvars(
     };
     if !persist.registered {
         script.register_cvars(REGISTERED.iter().copied());
-        let session: [(&str, String); 6] = [
+        let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+        let session: [(&str, String); 9] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
             ("AmbienceVolume", sound.ambience.to_string()),
+            ("MasterSoundEffects", flag(sound.enabled)),
+            ("EnableMusic", flag(sound.music_enabled)),
+            ("EnableAmbience", flag(sound.ambience_enabled)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
         ];
@@ -291,6 +306,9 @@ mod tests {
         assert_eq!(d["SoundVolume"], sound.sfx);
         assert_eq!(d["MusicVolume"], sound.music);
         assert_eq!(d["AmbienceVolume"], sound.ambience);
+        assert_eq!(d["MasterSoundEffects"] != 0.0, sound.enabled);
+        assert_eq!(d["EnableMusic"] != 0.0, sound.music_enabled);
+        assert_eq!(d["EnableAmbience"] != 0.0, sound.ambience_enabled);
         assert_eq!(d["uiScale"], DEFAULT_UI_SCALE);
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 777 literal (view.rs doc: "Default 777").
@@ -323,6 +341,23 @@ mod tests {
             "farclip", "50", &mut sound, &mut scale, &mut view
         ));
         assert_eq!(view.farclip, *FARCLIP_RANGE.start());
+        // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
+        assert!(apply_to_knobs(
+            "EnableMusic",
+            "0",
+            &mut sound,
+            &mut scale,
+            &mut view
+        ));
+        assert!(!sound.music_enabled);
+        assert!(apply_to_knobs(
+            "mastersoundeffects",
+            "1",
+            &mut sound,
+            &mut scale,
+            &mut view
+        ));
+        assert!(sound.enabled);
         // A bad value is consumed (known key) and the resource keeps its truth.
         assert!(apply_to_knobs(
             "uiScale", "banana", &mut sound, &mut scale, &mut view
