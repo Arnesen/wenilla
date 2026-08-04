@@ -1009,7 +1009,7 @@ pub(super) fn apply_net_updates(
                 caster,
                 spell_id,
                 targets,
-            } => spell_chain_targets(caster, spell_id, targets, &index),
+            } => spell_chain_targets(caster, spell_id, targets, &mut commands, &index),
             SessionEvent::SpellFailedOther { caster, spell_id } => spell_failed_other(
                 caster,
                 spell_id,

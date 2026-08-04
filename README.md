@@ -1,5 +1,4 @@
 <div align="center">
-  <img src="banner.jpg" alt="">
   <h1>benilla</h1>
   <p><b>A from-scratch World of Warcraft 1.12.1 client in Rust and <a href="https://bevy.org">Bevy</a></b></p>
   <p>

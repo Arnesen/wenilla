@@ -43,6 +43,7 @@ fn app() -> App {
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
@@ -202,6 +203,7 @@ fn precast_kit_sound_rings_once_at_start() {
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([(
@@ -575,6 +577,7 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
         .add_message::<SpellKitFx>()
         .add_message::<MissileSpawn>()
         .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
         .add_message::<SheathRequest>();
     app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
         HashMap::from([
@@ -821,4 +824,124 @@ fn the_mount_poof_puffs_on_the_build_leg_only() {
     app.world_mut().entity_mut(unit).insert(store(2405));
     app.update();
     assert_eq!(puffs(&mut app), vec![(BASE_ATTACH, POOF.to_string())]);
+}
+
+/// **The link that makes the beam exist at all** (decision 0955 slice 2): a kit carrying a chain
+/// `CharProc` emits a [`ChainProcPlay`] when it plays — from BOTH of the reference's dispatcher
+/// call sites, `PlaySpellVisualKit`'s tail (the cast release) and the channel poll (`0x612b18`,
+/// which is the only way a channelled beam is ever reached). A kit without one emits nothing.
+///
+/// This is the test that fails if the whole lane silently does nothing: the geometry, the hop
+/// array and the wire can all be right while no kit ever asks for a beam.
+#[test]
+fn a_kit_with_a_chain_char_proc_asks_for_a_beam_from_both_dispatcher_sites() {
+    use benilla_formats::{char_proc_type, CharProc};
+
+    const BEAM_SPELL: u32 = 421; // Chain Lightning
+    const BEAM_VISUAL: u32 = 36;
+    const BEAM_CAST_KIT: u32 = 321;
+    const BEAM_CHANNEL_KIT: u32 = 402;
+
+    let mut app = app();
+    // Overlay the beam chain onto the fixture catalog: a cast kit with the real type-12 slot and a
+    // channel kit with the real type-0 one. Params are the shipped shape — chain id 1, one strand,
+    // and the flag that splits cast (0) from channel (1).
+    let mut visuals = HashMap::from([(
+        BEAM_VISUAL,
+        VisualStages {
+            cast: BEAM_CAST_KIT,
+            channel: BEAM_CHANNEL_KIT,
+            ..Default::default()
+        },
+    )]);
+    let mut kits = HashMap::new();
+    for (kit, ty, flag) in [
+        (BEAM_CAST_KIT, char_proc_type::CHAIN_CAST, 0.0),
+        (BEAM_CHANNEL_KIT, char_proc_type::CHAIN_CHANNEL, 1.0),
+    ] {
+        kits.insert(
+            kit,
+            VisualKit {
+                char_proc_slots: [
+                    Some(CharProc {
+                        ty,
+                        params: [1.0, 1.0, flag, 0.0],
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+        );
+    }
+    // …plus a beam-less kit, so "emits nothing" is a real control and not an empty catalog.
+    kits.insert(PRECAST_KIT, VisualKit::default());
+    visuals.insert(
+        VISUAL,
+        VisualStages {
+            cast: PRECAST_KIT,
+            ..Default::default()
+        },
+    );
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(visuals, kits)));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([
+            (
+                BEAM_SPELL,
+                SpellDisplay {
+                    visual: BEAM_VISUAL,
+                    ..Default::default()
+                },
+            ),
+            (
+                SPELL,
+                SpellDisplay {
+                    visual: VISUAL,
+                    ..Default::default()
+                },
+            ),
+        ])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+
+    let plays = |app: &mut App| -> Vec<(Entity, u32, bool)> {
+        app.world_mut()
+            .resource_mut::<Messages<super::ChainProcPlay>>()
+            .drain()
+            .map(|p| (p.entity, p.spell_id, p.proc.flag))
+            .collect()
+    };
+
+    // Site 1 — the cast release (`0x60f35c`).
+    let unit = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .write_message(cast_event(unit, BEAM_SPELL, CastEventKind::Go));
+    app.update();
+    assert_eq!(
+        plays(&mut app),
+        vec![(unit, BEAM_SPELL, false)],
+        "the cast kit's type-12 proc asks for a one-shot beam"
+    );
+
+    // The control: a spell whose cast kit carries no chain proc asks for nothing.
+    app.world_mut()
+        .write_message(cast_event(unit, SPELL, CastEventKind::Go));
+    app.update();
+    assert!(plays(&mut app).is_empty(), "a beam-less kit stays silent");
+
+    // Site 2 — the channel poll (`0x612b18`). The rising edge of `UNIT_CHANNEL_SPELL` is what
+    // reaches Drain Life's kit; nothing else ever plays it.
+    let channeller = app
+        .world_mut()
+        .spawn(crate::net::ObjectStore(
+            benilla_protocol::ObjectFields::from_pairs(&[(144, BEAM_SPELL)]),
+        ))
+        .id();
+    app.update();
+    assert_eq!(
+        plays(&mut app),
+        vec![(channeller, BEAM_SPELL, true)],
+        "the channel kit's type-0 proc asks for a persistent beam"
+    );
 }

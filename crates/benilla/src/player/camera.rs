@@ -47,6 +47,15 @@ const CAM_ZOOM_STEP: f32 = 1.0;
 const CAM_MOVE_SPEED: f32 = 8.33;
 /// Mouse-look sensitivity, radians of camera rotation per pixel of mouse motion.
 const LOOK_SENSITIVITY: f32 = 0.003;
+
+/// The mouse-look player knobs (decision 0961): `mouseInvertPitch` is 1.12's own Interface
+/// Options checkbox (UIOptionsFrame.lua index 1, CVar-backed), settable from the Options
+/// window's Controls page through the CVar store (0954). Inverted, moving the mouse up pitches
+/// the camera down — the delta.y term flips sign at the one apply site, both drag styles alike.
+#[derive(Resource, Default)]
+pub(crate) struct LookConfig {
+    pub(crate) invert_pitch: bool,
+}
 /// Camera pitch clamp (radians) — **VERIFIED ±89.00°** (`WoW.exe` `0x8089d8`/`0x8089dc` =
 /// 1.5533430576 rad; the pitch integrate `FUN_00510120`, wow-re `follow-camera`). A single uniform
 /// clamp at every zoom level — the reference has **no** distinct first-person look-down limit.
@@ -223,6 +232,7 @@ pub(super) fn run_look_session(
     world_right_press: &mut MessageWriter<WorldRightPress>,
     left_click: &mut Option<f32>,
     right_click: &mut Option<f32>,
+    invert_pitch: bool,
 ) {
     // The right button's DOWN edge, before any click-vs-drag classification — the reference's
     // WorldFrame OnMouseDown fires at the press whether it becomes a click or a turn. It belongs
@@ -334,8 +344,9 @@ pub(super) fn run_look_session(
     if let Some(active) = rig.look {
         let delta = mouse_motion.delta;
         cam.yaw -= delta.x * LOOK_SENSITIVITY;
-        cam.pitch =
-            (cam.pitch - delta.y * LOOK_SENSITIVITY).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
+        // `mouseInvertPitch` flips only the pitch axis (the 1.12 checkbox's whole meaning).
+        let dy = if invert_pitch { -delta.y } else { delta.y };
+        cam.pitch = (cam.pitch - dy * LOOK_SENSITIVITY).clamp(-CAM_PITCH_LIMIT, CAM_PITCH_LIMIT);
         if active == LookButton::Right || both_buttons {
             *face_yaw = cam.yaw;
         }

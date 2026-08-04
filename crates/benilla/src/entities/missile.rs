@@ -156,8 +156,9 @@ pub(super) struct Missile {
 }
 
 /// A unit's attach-point world position through the given tag cascade, else its base translation.
-/// `None` only when the unit itself is gone.
-fn attach_world_pos(
+/// `None` only when the unit itself is gone. Shared with the chain-beam lane, whose non-caster
+/// endpoints anchor through the very same table and cascade (`0x6ec780`; decision 0955).
+pub(super) fn attach_world_pos(
     unit: Entity,
     tags: impl IntoIterator<Item = u16>,
     units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,

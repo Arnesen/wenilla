@@ -631,7 +631,7 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
             // cloth as the SAME faces twice with reversed winding (one copy per side — B38's tent
             // awning, `wmo_doubled`), each meant to be culled from its wrong side. Drawing them
             // two-sided rasterises both copies into an ulp-level depth tie, and the per-pixel
-            // winner is floating-point noise — the B38 flicker/latch (decision 0677).
+            // winner is floating-point noise — the B38 flicker/latch (decision 0680).
             // WMO has no skeleton, so the per-vertex skin (`_globals`) is unused.
             let (mut submesh, _globals) = remap_submesh(
                 global_indices.into_iter(),

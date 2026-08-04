@@ -27,7 +27,10 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
+use crate::player::camera::LookConfig;
 use crate::sound::SoundConfig;
+use crate::target::ClickConfig;
+use crate::ui_loot::LootConfig;
 use crate::ui_script::UiScaleCvar;
 use crate::view::{ViewDistance, FARCLIP_RANGE};
 use benilla_ui::script::UiScript;
@@ -48,6 +51,14 @@ pub(crate) const REGISTERED: &[(&str, &str)] = &[
     ("EnableAmbience", "1"),
     ("uiScale", "0.9"),
     ("farclip", "777"),
+    // The Controls-page trio (0961). `deselectOnClick`/`mouseInvertPitch` are 1.12's own
+    // Interface Options CVars (UIOptionsFrame.lua indices 45/1); their defaults are the
+    // reference behaviors benilla already shipped (empty-world click clears the target; no
+    // pitch invert). `autoLootDefault` is era's — no 1.12 CVar exists, vanilla only had the
+    // shift gesture — default off, like era's engine registrar.
+    ("deselectOnClick", "1"),
+    ("mouseInvertPitch", "0"),
+    ("autoLootDefault", "0"),
 ];
 
 /// `config.toml`'s shape: a `[cvars]` table of `Name = "value"` strings (CVars are strings in
@@ -89,30 +100,38 @@ impl Plugin for CvarPlugin {
     }
 }
 
+/// The knob resources one CVar write can land on, bundled so [`apply_to_knobs`] and its two
+/// callers grow together (a new knob is one field + one arm).
+struct Knobs<'a> {
+    sound: &'a mut SoundConfig,
+    scale: &'a mut UiScaleCvar,
+    view: &'a mut ViewDistance,
+    look: &'a mut LookConfig,
+    click: &'a mut ClickConfig,
+    loot: &'a mut LootConfig,
+}
+
 /// Apply one CVar to its knob resource (parse + the knob's own clamp). `false` = not a knob this
 /// build knows (the caller decides whether that warns or rides through).
-fn apply_to_knobs(
-    name: &str,
-    value: &str,
-    sound: &mut SoundConfig,
-    scale: &mut UiScaleCvar,
-    view: &mut ViewDistance,
-) -> bool {
+fn apply_to_knobs(name: &str, value: &str, knobs: &mut Knobs) -> bool {
     let Ok(v) = value.parse::<f32>() else {
         warn!("cvar {name}: unparseable value '{value}' ignored");
         return true; // known key, bad value — consumed, resource keeps its truth
     };
     match name.to_ascii_lowercase().as_str() {
-        "mastervolume" => sound.master = v.clamp(0.0, 1.0),
-        "soundvolume" => sound.sfx = v.clamp(0.0, 1.0),
-        "musicvolume" => sound.music = v.clamp(0.0, 1.0),
-        "ambiencevolume" => sound.ambience = v.clamp(0.0, 1.0),
+        "mastervolume" => knobs.sound.master = v.clamp(0.0, 1.0),
+        "soundvolume" => knobs.sound.sfx = v.clamp(0.0, 1.0),
+        "musicvolume" => knobs.sound.music = v.clamp(0.0, 1.0),
+        "ambiencevolume" => knobs.sound.ambience = v.clamp(0.0, 1.0),
         // The enables are 0/1 flags; the client's own parse is int + `!= 0`.
-        "mastersoundeffects" => sound.enabled = v != 0.0,
-        "enablemusic" => sound.music_enabled = v != 0.0,
-        "enableambience" => sound.ambience_enabled = v != 0.0,
-        "uiscale" => scale.0 = v.clamp(0.5, 1.5),
-        "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        "mastersoundeffects" => knobs.sound.enabled = v != 0.0,
+        "enablemusic" => knobs.sound.music_enabled = v != 0.0,
+        "enableambience" => knobs.sound.ambience_enabled = v != 0.0,
+        "uiscale" => knobs.scale.0 = v.clamp(0.5, 1.5),
+        "farclip" => knobs.view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
+        "deselectonclick" => knobs.click.deselect_on_click = v != 0.0,
+        "mouseinvertpitch" => knobs.look.invert_pitch = v != 0.0,
+        "autolootdefault" => knobs.loot.auto_loot = v != 0.0,
         _ => return false,
     }
     true
@@ -127,7 +146,18 @@ fn load_config(
     mut sound: ResMut<SoundConfig>,
     mut scale: ResMut<UiScaleCvar>,
     mut view: ResMut<ViewDistance>,
+    mut look: ResMut<LookConfig>,
+    mut click: ResMut<ClickConfig>,
+    mut loot: ResMut<LootConfig>,
 ) {
+    let mut knobs = Knobs {
+        sound: &mut sound,
+        scale: &mut scale,
+        view: &mut view,
+        look: &mut look,
+        click: &mut click,
+        loot: &mut loot,
+    };
     if std::env::var_os("WOW_UI_SCALE").is_some() {
         persist.env_overridden.insert("uiscale".into());
     }
@@ -171,7 +201,7 @@ fn load_config(
             info!("config: {name} overridden by env for this session (file value kept)");
             continue;
         }
-        apply_to_knobs(name, value, &mut sound, &mut scale, &mut view);
+        apply_to_knobs(name, value, &mut knobs);
     }
     persist.file = cfg.cvars;
 }
@@ -179,12 +209,16 @@ fn load_config(
 /// Per frame: seed the VM's table once it exists (registered set + the RESOLVED session values,
 /// so `GetCVar` reflects env overrides and the loaded config alike), then drain Lua `SetCVar`
 /// changes into the knob resources and mark the config dirty.
+#[allow(clippy::too_many_arguments)] // one knob resource per registered CVar family
 fn sync_cvars(
     script: Option<NonSendMut<UiScript>>,
     mut persist: ResMut<CvarPersist>,
     mut sound: ResMut<SoundConfig>,
     mut scale: ResMut<UiScaleCvar>,
     mut view: ResMut<ViewDistance>,
+    mut look: ResMut<LookConfig>,
+    mut click: ResMut<ClickConfig>,
+    mut loot: ResMut<LootConfig>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -192,7 +226,7 @@ fn sync_cvars(
     if !persist.registered {
         script.register_cvars(REGISTERED.iter().copied());
         let flag = |b: bool| if b { "1" } else { "0" }.to_string();
-        let session: [(&str, String); 9] = [
+        let session: [(&str, String); 12] = [
             ("MasterVolume", sound.master.to_string()),
             ("SoundVolume", sound.sfx.to_string()),
             ("MusicVolume", sound.music.to_string()),
@@ -202,14 +236,25 @@ fn sync_cvars(
             ("EnableAmbience", flag(sound.ambience_enabled)),
             ("uiScale", scale.0.to_string()),
             ("farclip", view.farclip.to_string()),
+            ("deselectOnClick", flag(click.deselect_on_click)),
+            ("mouseInvertPitch", flag(look.invert_pitch)),
+            ("autoLootDefault", flag(loot.auto_loot)),
         ];
         for (name, value) in session {
             script.set_cvar_host(name, &value);
         }
         persist.registered = true;
     }
+    let mut knobs = Knobs {
+        sound: &mut sound,
+        scale: &mut scale,
+        view: &mut view,
+        look: &mut look,
+        click: &mut click,
+        loot: &mut loot,
+    };
     for (name, value) in script.take_cvar_changes() {
-        if apply_to_knobs(&name, &value, &mut sound, &mut scale, &mut view) {
+        if apply_to_knobs(&name, &value, &mut knobs) {
             persist.dirty = true;
             persist.last_change = Some(Instant::now());
         }
@@ -313,6 +358,16 @@ mod tests {
         // ViewDistance::default() reads $WOW_FARCLIP; the registered default mirrors the
         // env-less 777 literal (view.rs doc: "Default 777").
         assert_eq!(d["farclip"], 777.0);
+        // The Controls trio (0961) welds to its knob Defaults the same way.
+        assert_eq!(
+            d["deselectOnClick"] != 0.0,
+            ClickConfig::default().deselect_on_click
+        );
+        assert_eq!(
+            d["mouseInvertPitch"] != 0.0,
+            LookConfig::default().invert_pitch
+        );
+        assert_eq!(d["autoLootDefault"] != 0.0, LootConfig::default().auto_loot);
     }
 
     #[test]
@@ -320,52 +375,40 @@ mod tests {
         let mut sound = SoundConfig::default();
         let mut scale = UiScaleCvar(0.9);
         let mut view = ViewDistance { farclip: 777.0 };
-        assert!(apply_to_knobs(
-            "MusicVolume",
-            "0.7",
-            &mut sound,
-            &mut scale,
-            &mut view
-        ));
-        assert_eq!(sound.music, 0.7);
+        let mut look = LookConfig::default();
+        let mut click = ClickConfig::default();
+        let mut loot = LootConfig::default();
+        let mut knobs = Knobs {
+            sound: &mut sound,
+            scale: &mut scale,
+            view: &mut view,
+            look: &mut look,
+            click: &mut click,
+            loot: &mut loot,
+        };
+        assert!(apply_to_knobs("MusicVolume", "0.7", &mut knobs));
+        assert_eq!(knobs.sound.music, 0.7);
         // Clamps are the knob's own: volume to [0,1], farclip to FARCLIP_RANGE.
-        assert!(apply_to_knobs(
-            "mastervolume",
-            "7",
-            &mut sound,
-            &mut scale,
-            &mut view
-        ));
-        assert_eq!(sound.master, 1.0);
-        assert!(apply_to_knobs(
-            "farclip", "50", &mut sound, &mut scale, &mut view
-        ));
-        assert_eq!(view.farclip, *FARCLIP_RANGE.start());
+        assert!(apply_to_knobs("mastervolume", "7", &mut knobs));
+        assert_eq!(knobs.sound.master, 1.0);
+        assert!(apply_to_knobs("farclip", "50", &mut knobs));
+        assert_eq!(knobs.view.farclip, *FARCLIP_RANGE.start());
         // Enable flags: any nonzero is on, zero is off (the client's int-parse + != 0).
-        assert!(apply_to_knobs(
-            "EnableMusic",
-            "0",
-            &mut sound,
-            &mut scale,
-            &mut view
-        ));
-        assert!(!sound.music_enabled);
-        assert!(apply_to_knobs(
-            "mastersoundeffects",
-            "1",
-            &mut sound,
-            &mut scale,
-            &mut view
-        ));
-        assert!(sound.enabled);
+        assert!(apply_to_knobs("EnableMusic", "0", &mut knobs));
+        assert!(!knobs.sound.music_enabled);
+        assert!(apply_to_knobs("mastersoundeffects", "1", &mut knobs));
+        assert!(knobs.sound.enabled);
+        // The Controls trio lands on its knobs (case-insensitive like everything else).
+        assert!(apply_to_knobs("deselectonclick", "0", &mut knobs));
+        assert!(!knobs.click.deselect_on_click);
+        assert!(apply_to_knobs("MouseInvertPitch", "1", &mut knobs));
+        assert!(knobs.look.invert_pitch);
+        assert!(apply_to_knobs("autoLootDefault", "1", &mut knobs));
+        assert!(knobs.loot.auto_loot);
         // A bad value is consumed (known key) and the resource keeps its truth.
-        assert!(apply_to_knobs(
-            "uiScale", "banana", &mut sound, &mut scale, &mut view
-        ));
-        assert_eq!(scale.0, 0.9);
-        assert!(!apply_to_knobs(
-            "bogus", "1", &mut sound, &mut scale, &mut view
-        ));
+        assert!(apply_to_knobs("uiScale", "banana", &mut knobs));
+        assert_eq!(knobs.scale.0, 0.9);
+        assert!(!apply_to_knobs("bogus", "1", &mut knobs));
     }
 
     #[test]
@@ -417,6 +460,9 @@ mod tests {
             .insert_resource(SoundConfig::default())
             .insert_resource(UiScaleCvar(DEFAULT_UI_SCALE))
             .insert_resource(ViewDistance { farclip: 777.0 })
+            .init_resource::<LookConfig>()
+            .init_resource::<ClickConfig>()
+            .init_resource::<LootConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
 

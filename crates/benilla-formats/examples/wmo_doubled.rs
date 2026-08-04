@@ -12,9 +12,11 @@
 //! Doubled-with-opposite-winding is not a defect — it is how 1.12 authors visible-from-both-sides
 //! cloth when the material is single-sided: the real client backface-culls each copy from the wrong
 //! side, so exactly one covers any pixel. It *becomes* a defect the moment the renderer draws WMO
-//! batches two-sided (ours does, `group.rs` "keep two-sided for now"): both copies then rasterize at
-//! depths equal to the ulp, and the winner per pixel is floating-point noise — latched while the
-//! camera is bit-still, flickering while anything creeps. So each doubled pair is printed with its
+//! batches two-sided — ours did until `3af8854f` honoured MOMT `0x04` (B38, decision 0680): both
+//! copies then rasterize at depths equal to the ulp, and the winner per pixel is floating-point
+//! noise — latched while the camera is bit-still, flickering while anything creeps. That is the
+//! defect this tool was built to name, and it is now closed; it stays as the census. Each pair
+//! prints with its
 //! batches' MOMT flags: `0x04` (UNCULLED) set means the file *asked* for two-sided and the double
 //! draw is authored intent; clear means the renderer's shortcut is manufacturing a z-tie the file
 //! never contained.

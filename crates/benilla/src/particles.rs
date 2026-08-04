@@ -798,7 +798,10 @@ impl Plugin for ParticlePlugin {
                     // the palette replacement — decision 0813), so that card's transform has to be
                     // this frame's before births read it.
                     .after(crate::billboard::face_billboards),
-            );
+            )
+            // The write-order tripwire's re-arm, once the frame's stream has been extracted
+            // (see `buffer::EffectQuads::cleared_this_frame`).
+            .add_systems(Last, buffer::clear_effect_frame_flag);
     }
 }
 

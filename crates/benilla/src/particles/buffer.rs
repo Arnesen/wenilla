@@ -218,10 +218,36 @@ pub struct EffectDraw {
 /// The frame's shared stream. Cleared at the top of `PostUpdate`'s effect set
 /// ([`begin_effect_frame`]), filled by the family systems, copied to the render world in
 /// `ExtractSchedule`.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct EffectQuads {
     pub verts: Vec<EffectVertex>,
     pub draws: Vec<EffectDraw>,
+    /// Has [`begin_effect_frame`] run yet **this** frame? A writer that commits while this is
+    /// `false` ran BEFORE the clear, so everything it pushed is about to be erased — a silent,
+    /// total loss of that lane's frame, with its arithmetic entirely correct.
+    ///
+    /// This is the shape of B161: the chain beam declared its pose dependencies but not
+    /// `.after(begin_effect_frame)`, the clear carried one extra `.after` the beam did not, and
+    /// the beam became runnable first. Nothing warned; the lane simply never drew. The ordering
+    /// is unenforceable by the type system (any writer can forget an edge), so the protocol is
+    /// asserted here instead — [`Self::commit`] refuses a pre-clear write in debug builds, and
+    /// [`clear_effect_frame_flag`] arms it again in `Last`.
+    cleared_this_frame: bool,
+}
+
+impl Default for EffectQuads {
+    fn default() -> Self {
+        Self {
+            verts: Vec::new(),
+            draws: Vec::new(),
+            // Armed, not tripped: a fixture that commits into a bare stream (most of the family's
+            // unit tests) is testing geometry, not schedule order, and has no clear to run. The
+            // `Last` re-arm is what makes the flag mean anything, and it only exists in an app
+            // carrying `ParticlePlugin` — where the very first frame's clear precedes any writer
+            // regardless, and a mis-ordered writer trips on frame two and every frame after.
+            cleared_this_frame: true,
+        }
+    }
 }
 
 /// Everything about one draw except its vertex range — the argument bundle `commit_quads` /
@@ -262,6 +288,12 @@ impl EffectQuads {
     }
 
     fn commit(&mut self, start: u32, topology: EffectTopology, spec: EffectDrawSpec) {
+        debug_assert!(
+            self.cleared_this_frame,
+            "effect-stream write before `begin_effect_frame`: this draw is about to be erased. \
+             The producing system needs `.after(crate::particles::buffer::begin_effect_frame)` \
+             (see `EffectQuads::cleared_this_frame` — this is B161's failure mode)."
+        );
         let end = self.verts.len() as u32;
         if end > start {
             self.draws.push(EffectDraw {
@@ -286,6 +318,13 @@ impl EffectQuads {
 pub fn begin_effect_frame(mut quads: ResMut<EffectQuads>) {
     quads.verts.clear();
     quads.draws.clear();
+    quads.cleared_this_frame = true;
+}
+
+/// Disarm the write-order tripwire for the next frame — `Last`, after the render world has
+/// extracted this frame's stream. See [`EffectQuads::cleared_this_frame`].
+pub fn clear_effect_frame_flag(mut quads: ResMut<EffectQuads>) {
+    quads.cleared_this_frame = false;
 }
 
 #[cfg(test)]
@@ -339,5 +378,104 @@ mod tests {
             EffectBlend::from_model(ModelBlend::Mod2x, false),
             EffectBlend::Mod2x
         );
+    }
+
+    /// **B161, as an executable record.** The chain beam shipped with correct arithmetic and no
+    /// `.after(begin_effect_frame)` edge, and drew nothing at all — for weeks, silently.
+    ///
+    /// The mechanism is not "the writers race": it is that the clear carries one dependency the
+    /// writer does not (`face_billboards`), so the writer becomes *runnable first* and the clear
+    /// lands on top of it. This pair pins both halves — the failure mode, and the edge that fixes
+    /// it. The graph below is the real registration shape of `ParticlePlugin` (the clear) and
+    /// `EntitiesPlugin` (the beam sim), transcribed.
+    mod write_order {
+        use super::*;
+
+        #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+        struct Place;
+
+        fn joint_palette() {}
+        fn finalize_rigs() {}
+        fn face_billboards() {}
+
+        fn writer(mut quads: ResMut<EffectQuads>) {
+            let start = quads.begin();
+            for _ in 0..4 {
+                quads.verts.push(EffectVertex {
+                    pos: [0.0; 3],
+                    uv: [0.0; 2],
+                    color: [1.0; 4],
+                });
+            }
+            quads.commit_quads(
+                start,
+                EffectDrawSpec {
+                    cam: Entity::PLACEHOLDER,
+                    texture: AssetId::default(),
+                    blend: EffectBlend::Add,
+                    fog: EffectFog::Off,
+                    anchor: Vec3::ZERO,
+                    bias: 0.0,
+                    raster_bias: 0,
+                    main_entity: Entity::PLACEHOLDER,
+                    light: None,
+                },
+            );
+        }
+
+        /// `edged`: whether the writer declares the load-bearing `.after(begin_effect_frame)`.
+        fn run(edged: bool) -> App {
+            let mut app = App::new();
+            app.init_resource::<EffectQuads>();
+            app.add_systems(
+                PostUpdate,
+                (joint_palette, finalize_rigs, face_billboards)
+                    .chain()
+                    .in_set(Place),
+            );
+            let w = writer
+                .in_set(Place)
+                .after(joint_palette)
+                .after(finalize_rigs);
+            app.add_systems(
+                PostUpdate,
+                if edged {
+                    w.after(begin_effect_frame)
+                } else {
+                    w
+                },
+            );
+            app.add_systems(
+                PostUpdate,
+                begin_effect_frame
+                    .in_set(Place)
+                    .after(joint_palette)
+                    .after(finalize_rigs)
+                    // The extra dependency the beam sim lacked — the whole mechanism.
+                    .after(face_billboards),
+            );
+            app.add_systems(Last, clear_effect_frame_flag);
+            // Two frames: the first arms the tripwire (a bare stream defaults to armed, and the
+            // `Last` re-arm has not run yet), the second is any ordinary frame.
+            app.update();
+            app.update();
+            app
+        }
+
+        /// With the edge, the writer's draw survives the frame and reaches extract.
+        #[test]
+        fn the_edge_keeps_the_draw() {
+            let app = run(true);
+            let quads = app.world().resource::<EffectQuads>();
+            assert_eq!(quads.draws.len(), 1, "the draw must survive to extract");
+            assert_eq!(quads.verts.len(), 4);
+        }
+
+        /// Without it, the write precedes the clear — the tripwire that now names the bug.
+        #[test]
+        #[should_panic(expected = "effect-stream write before `begin_effect_frame`")]
+        fn without_the_edge_the_tripwire_names_it() {
+            let _ = run(false);
+        }
     }
 }

@@ -159,6 +159,21 @@ pub(crate) enum SpellKitFx {
     },
 }
 
+/// A kit whose `CharProc` slots name a **beam** just played on `entity` — the client's CharProc
+/// dispatcher reaching its chain case (`0x60da79`, decision 0955). Written here for every kit play
+/// that carries one (the dispatcher runs at `PlaySpellVisualKit`'s tail, `0x60f35c`, and again from
+/// the channel poll, `0x612b18`); consumed by `crate::entities::chain_beam`, which owns the target
+/// selection against the caster's hop array, the beam's lifetime, and its geometry.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct ChainProcPlay {
+    /// The unit the kit played on — the beam's caster end, and the owner of the hop array.
+    pub(crate) entity: Entity,
+    /// The kit's spell (`0` for a bare kit push, which the client's own `spellId != 0` guard at
+    /// `0x6ecbd0` refuses to build a beam for).
+    pub(crate) spell_id: u32,
+    pub(crate) proc: benilla_formats::ChainProc,
+}
+
 /// Launch a projectile from `caster` at each target (decision 0099 phase 4) — one missile per
 /// target, the client's per-target spawn on the Speed>0 GO branch (`0x6e8a50 → 0x60a3d0`).
 /// Written here (the DBC columns resolve in this module, like every kit edge); consumed by
@@ -347,11 +362,13 @@ pub(crate) struct KitPush {
 
 /// The writer set one discrete kit play fans out to — bundled so [`play_kit`] threads through the
 /// router's arms as one argument (each writer keeps its own system-param lifetime).
-struct KitOut<'a, 'w1, 'w2, 'w3, 'w4> {
+struct KitOut<'a, 'w1, 'w2, 'w3, 'w4, 'w5> {
     oneshots: &'a mut MessageWriter<'w1, EmoteAnim>,
     wounds: &'a mut MessageWriter<'w2, WoundAnim>,
     sounds: &'a mut MessageWriter<'w3, SpellKitSound>,
     fx: &'a mut MessageWriter<'w4, SpellKitFx>,
+    /// The kit's beam, if its `CharProc` slots name one — the dispatcher's chain case (0955).
+    chain: &'a mut MessageWriter<'w5, ChainProcPlay>,
 }
 
 /// One kit played as a **discrete event** on a unit — the client's `PlaySpellVisualKit`
@@ -411,6 +428,17 @@ fn play_kit(
     }
     if let Some(kit_sound) = kit.sound.filter(|_| play.sound) {
         out.sounds.write(SpellKitSound::Play { entity, kit_sound });
+    }
+    // The CharProc dispatcher's beam case — run for EVERY kit play, at every stage, exactly as
+    // `PlaySpellVisualKit`'s tail runs it (`0x60f35c`). It is not gated by `play.effects`: the
+    // beam is not one of the kit's attach-point effect models, and a kit whose caster carries no
+    // hop array simply draws nothing (`0x60db01`'s `count == 0` exit).
+    if let Some(proc) = kit.chain_proc() {
+        out.chain.write(ChainProcPlay {
+            entity,
+            spell_id,
+            proc,
+        });
     }
     if !play.effects {
         return;
@@ -495,12 +523,13 @@ pub(super) fn route_cast_visuals(
     mut sounds: MessageWriter<SpellKitSound>,
     mut fx: MessageWriter<SpellKitFx>,
     mut sheaths: MessageWriter<super::SheathRequest>,
-    // One tuple param (the 16-SystemParam ceiling): the missile spawns + the dest one-shot
-    // orders (0797) — the GO's two launch-side spawn lanes, resolved here where the catalogs
-    // live, spawned by `crate::entities`.
+    // One tuple param (the 16-SystemParam ceiling): the missile spawns, the dest one-shot orders
+    // (0797) and the beam plays (0955) — the spawn lanes resolved here where the catalogs live,
+    // built by `crate::entities`.
     mut spawns: (
         MessageWriter<MissileSpawn>,
         MessageWriter<crate::entities::dest_fx::GroundBurst>,
+        MessageWriter<ChainProcPlay>,
     ),
     visuals: Option<Res<SpellVisuals>>,
     spells: Option<Res<crate::ui_action::Spells>>,
@@ -512,11 +541,15 @@ pub(super) fn route_cast_visuals(
     let (Some(visuals), Some(spells)) = (visuals.as_deref(), spells.as_deref()) else {
         return; // no client data — no spell visuals (every DBC resource degrades this way)
     };
+    // Disjoint field borrows: the beam writer rides `out` for the whole body while the missile and
+    // burst writers stay free for the GO loop below.
+    let (missiles, bursts, chains) = (&mut spawns.0, &mut spawns.1, &mut spawns.2);
     let mut out = KitOut {
         oneshots: &mut oneshots,
         wounds: &mut wounds,
         sounds: &mut sounds,
         fx: &mut fx,
+        chain: chains,
     };
 
     // The `holds` query is one command-flush stale: an instant cast's START and GO drain from
@@ -770,7 +803,7 @@ pub(super) fn route_cast_visuals(
             if let Some(stages) = visuals.0.stages(display.visual) {
                 if stages.missile_gate == 0 && stages.area_effect != 0 {
                     if let Some(path) = visuals.0.effect_path(stages.area_effect) {
-                        spawns.1.write(crate::entities::dest_fx::GroundBurst {
+                        bursts.write(crate::entities::dest_fx::GroundBurst {
                             path: path.to_string(),
                             pos: dest,
                         });
@@ -829,7 +862,7 @@ pub(super) fn route_cast_visuals(
                 let awaits_release =
                     resolve_kit(spells, &visuals.0, go.spell_id, |s| s.cast, || wv)
                         .is_some_and(|k| k.anim_id.is_some());
-                spawns.0.write(MissileSpawn {
+                missiles.write(MissileSpawn {
                     caster: go.caster,
                     spell_id: go.spell_id,
                     path,
@@ -884,6 +917,17 @@ pub(super) fn route_cast_visuals(
                 }
                 if let Some(kit_sound) = kit.sound {
                     out.sounds.write(SpellKitSound::Play { entity, kit_sound });
+                }
+                // The CharProc dispatcher's SECOND caller (`0x612b18`, inside this very poll
+                // `0x612a30`) — which is how a channelled beam exists at all: Drain Life's kit
+                // is never reached by `PlaySpellVisualKit`, only from here. Emitted on the
+                // channel's rising edge; the beam then lives until the field clears (0955).
+                if let Some(proc) = kit.chain_proc() {
+                    out.chain.write(ChainProcPlay {
+                        entity,
+                        spell_id: cur,
+                        proc,
+                    });
                 }
                 // The channel kit's effect models — persistent while the field holds (the
                 // client's stage-2 lifetime, and so the stage-2 Birth → Hold → Decay lifecycle:

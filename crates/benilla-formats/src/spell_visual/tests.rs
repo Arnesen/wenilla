@@ -500,8 +500,9 @@ fn char_proc_small_int_recovers_the_integer() {
 }
 
 /// `SpellChainEffects.dbc` as it actually ships: 18 rows, the gaps at 14/16, and the two rows the
-/// director's report turns on — id 1 (Chain Lightning's `Lightning`, the only row with a non-zero
-/// segment delay) and id 8 (Drain Life's `SoulBeam`, one of the four negative-texcoord drains).
+/// director's report turns on — id 1 (Chain Lightning's `Lightning`, the one row whose hops
+/// stagger by 300 ms rather than 200) and id 8 (Drain Life's `SoulBeam`, one of the four
+/// negative-period drains).
 #[test]
 fn real_chain_effects_table() {
     let data = vanilla_data_dir();
@@ -526,14 +527,14 @@ fn real_chain_effects_table() {
     assert_eq!(lightning.half_width, 0.5);
     assert_eq!(lightning.noise_scale, 0.04);
     assert_eq!(lightning.scroll_period_s, 1.0);
-    assert_eq!(lightning.seg_duration_ms, 1000);
+    assert_eq!(lightning.bolt_life_ms, 1000);
     assert_eq!(
-        lightning.seg_delay_ms, 300,
+        lightning.bolt_stagger_ms, 300,
         "id 1 is the one row at 300 ms — every other live row is 200"
     );
 
     assert_eq!(
-        cat.chain_effect(4).expect("chain effect 4").seg_delay_ms,
+        cat.chain_effect(4).expect("chain effect 4").bolt_stagger_ms,
         200,
         "…and 200 is the table's norm"
     );
@@ -645,6 +646,37 @@ fn real_chain_procs_resolve_to_their_beams() {
         (68, 48, 20),
         "68 chain CharProc slots ship: 48 live beams, 20 zero-param padding"
     );
+}
+
+/// **Every live beam's texture actually exists on the patch chain.** The renderer (decision 0964)
+/// loads these by path, and a path that resolves to nothing draws an invisible beam — a failure no
+/// geometry test can see and no gate can catch. Cheapest possible guard against "the whole lane is
+/// right and the screen is empty".
+#[test]
+fn real_chain_effect_textures_resolve_on_the_patch_chain() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
+    // Only the rows a shipped kit can actually reach: an unreachable row's texture is nobody's
+    // problem (id 15 is degenerate anyway).
+    let mut reached: Vec<u32> = cat
+        .kit_ids()
+        .filter_map(|id| Some(cat.kit(id)?.chain_proc()?.effect_id))
+        .collect();
+    reached.sort_unstable();
+    reached.dedup();
+    assert!(!reached.is_empty(), "some kit must reach a beam");
+    for id in reached {
+        let path = &cat.chain_effect(id).expect("its row").texture;
+        assert!(
+            chain.read_file(path).is_ok(),
+            "chain effect {id} names {path}, which does not exist on the patch chain"
+        );
+    }
 }
 
 /// The padding case, isolated: a type-0 slot whose `CharParamZero` is `0` is not a beam — the

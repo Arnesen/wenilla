@@ -926,14 +926,16 @@ fn release_placement(
 /// The terrain base material (the `TerrainExtension` does the real work).
 ///
 /// **Single-sided, backface-culled** — the ground is see-through from underneath, exactly as the
-/// real client renders it (B193: testers see through 1.12.1's terrain from below, the way a WMO
-/// exterior reads from inside a cave; we drew it solid). The reference never sets `EGxRs 0x14`
-/// (`GL_CULL_FACE`) in its terrain-chunk pass `0x684510`/`0x6beb50`, so terrain inherits the device
-/// baseline `0x14 = 1` written by `0x593bf0` — culling ON. Only the passes that *want* two-sided
-/// geometry clear it inside their own `Push`/`PopRenderState` bracket: the four liquid passes, and
-/// the WDL low-detail tile render `0x6bd780` (cull 0 at `0x6bd79d`) — which is why `wdl.rs` stays
-/// `cull_mode: None` while this one culls. `double_sided: true` here was a Bevy default that no
-/// decision ever stood behind.
+/// real client renders it (decision 0960; B193: testers see through 1.12.1's terrain from below, the
+/// way a WMO exterior reads from inside a cave; we drew it solid). The reference never sets
+/// `EGxRs 0x14` (`GL_CULL_FACE`) in its terrain-chunk pass `0x684510`/`0x6beb50`, so terrain inherits
+/// the device baseline `0x14 = 1` written by `0x593bf0` — culling ON, and wow-re's census of all 39
+/// `0x14` setters proves none leaks in unbracketed ahead of the terrain drain. Only the passes that
+/// *want* two sides clear it inside their own `Push`/`PopRenderState` bracket: the four liquid
+/// passes, and the WDL mesh `0x6bd780` (cull 0 at `0x6bd79d`) — which is why `wdl.rs` stays
+/// `cull_mode: None` while this one culls. Measured, not only derived: in the reference's own
+/// apitrace all 103 MCNK-format draws run cull-enabled and all 20 WDL draws cull-disabled.
+/// `double_sided: true` here was a Bevy default that no decision ever stood behind.
 ///
 /// Rests on the winding: `terrain_fans_wind_ccw_seen_from_above` (benilla-formats) pins every MCNK
 /// fan CCW-from-above in WoW space, and `transform_is_a_proper_rotation` pins the WoW→Bevy map at

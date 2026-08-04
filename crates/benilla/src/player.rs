@@ -30,7 +30,7 @@ use crate::schedule::WorldStage;
 use crate::ui_script::PointerOverUi;
 
 mod arc;
-mod camera;
+pub(crate) mod camera;
 mod follow;
 
 mod gait;
@@ -131,6 +131,7 @@ impl Plugin for PlayerPlugin {
             app.insert_resource(cam);
         }
         follow::plugin(app);
+        app.init_resource::<camera::LookConfig>();
         app.add_systems(Startup, setup::setup_player.after(AssetSet::Open))
             // The world camera renders only when the world can be seen (decision 0540): in world,
             // or under the opaque loading screen (whose covered render is what compiles the
@@ -265,7 +266,11 @@ fn control(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     // Nested into one param to stay within Bevy's 16-element system-param tuple limit.
-    mouse: (Res<AccumulatedMouseMotion>, Res<AccumulatedMouseScroll>),
+    mouse: (
+        Res<AccumulatedMouseMotion>,
+        Res<AccumulatedMouseScroll>,
+        Res<camera::LookConfig>,
+    ),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
     // (WorldStage::Net), + the sheath-setter queue (the Z toggle's request — decision 0080).
@@ -373,6 +378,7 @@ fn control(
     };
     let (mut window, mut cursor_opts) = window.into_inner();
     let (mouse_motion, mouse_scroll) = (&mouse.0, &mouse.1);
+    let invert_pitch = mouse.2.invert_pitch;
     let (move_speed, capsule, cam_probe, pointer_over_ui, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
@@ -453,6 +459,7 @@ fn control(
         &mut world_clicks.2,
         left_click,
         right_click,
+        invert_pitch,
     );
     // A stun freezes the BODY, not the view. The look session has already moved `cam.yaw` (and, on
     // a right-drag, coupled `face_yaw = cam.yaw`); putting the aim back leaves the camera orbiting

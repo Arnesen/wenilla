@@ -162,12 +162,32 @@ pub(crate) struct SelectionRadius(pub(crate) f32);
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TargetUpdate;
 
+/// The click-behavior player knob (decision 0961): `deselectOnClick` is 1.12's own CVar behind
+/// the "Sticky Targeting" Interface Options checkbox (inverted there AND in era — checked means
+/// the CVar at 0). Default true = the reference default: an empty-world click clears the
+/// target, which is exactly the behavior [`click::select_on_click`] shipped with (0571/0574's
+/// terrain/nothing legs); the knob only makes its gate player-settable through the CVar store
+/// (0954).
+#[derive(Resource)]
+pub(crate) struct ClickConfig {
+    pub(crate) deselect_on_click: bool,
+}
+
+impl Default for ClickConfig {
+    fn default() -> Self {
+        Self {
+            deselect_on_click: true,
+        }
+    }
+}
+
 /// Targeting: click-to-select + the ground selection ring.
 pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
+            .init_resource::<ClickConfig>()
             .init_resource::<Hovered>()
             .init_resource::<HoveredObject>()
             .init_resource::<PickOcclusion>()

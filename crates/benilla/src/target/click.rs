@@ -62,6 +62,7 @@ pub(super) fn select_on_click(
     occlusion: Res<PickOcclusion>,
     mut greeting: MessageWriter<crate::sound::NpcGreetingRequest>,
     ground: Res<crate::ui_action::SpellTargeting>,
+    click_cfg: Res<ClickConfig>,
 ) {
     // Drain the frame's clicks; act only if there was one and the inspector isn't holding left-click.
     let clicked = clicks.read().last().is_some();
@@ -108,8 +109,10 @@ pub(super) fn select_on_click(
         // press is consumed for the drop/dismiss (input.rs's `would_drop`), so a payload
         // normally never reaches this arm at all — the gate still holds the nothing-leg law
         // for the residual GameObject-hover case (`Object` pick, unit arm empty).
+        // `deselectOnClick` (0961) gates the whole arm: "Sticky Targeting" checked = the CVar
+        // at 0 = an empty-world click keeps the target (1.12's own inverted checkbox).
         _ => {
-            if !payload_held.0 || occlusion.distance.is_finite() {
+            if click_cfg.deselect_on_click && (!payload_held.0 || occlusion.distance.is_finite()) {
                 clear(&mut selection, &net, engaged);
             }
         }
@@ -644,10 +647,12 @@ fn interact_command(
         }
         // Repair and Cast are UI-overlay modes only; Inspect and the data-named GameObject
         // cursors (Mail/Mine/GatherHerbs/PickLock) belong to the GO branch, which routes above
-        // and never reaches this NPC-service dispatch — a unit never classifies to any of these.
+        // and never reaches this NPC-service dispatch — a unit never classifies to any of
+        // these. LootAll is loot-only (the corpse route above), never a service.
         CursorKind::Point
         | CursorKind::Attack
         | CursorKind::Skin
+        | CursorKind::LootAll
         | CursorKind::Repair
         | CursorKind::Inspect
         | CursorKind::Mail

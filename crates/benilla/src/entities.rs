@@ -108,6 +108,13 @@ pub(crate) mod dest_fx;
 use dest_fx::{
     arm_ground_effects, attach_ground_fx_models, spawn_ground_bursts, tick_shard_emitters,
 };
+
+/// Spell **chain beams** (decision 0955): the polyline of hops a kit's chain `CharProc` draws —
+/// Chain Lightning's arcs, Drain Life's rope of soul, C'Thun's eye beam. Its geometry rides the
+/// shared effect-quad stream beside the ribbon trails.
+mod chain_beam;
+pub(crate) use chain_beam::ChainHops;
+use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // The container feed reads the icon column off the same catalog resource (one DBC parse).
 pub(crate) use attach::spawn_joints;
 pub(crate) use equipment::ItemDisplays;
@@ -512,6 +519,33 @@ impl Plugin for EntitiesPlugin {
                 PostUpdate,
                 crate::ground_fx::update_ground_fx_decals
                     .in_set(crate::billboard::BillboardPlace)
+                    .after(crate::particles::buffer::begin_effect_frame),
+            )
+            // The chain-beam spawner (0955): in the visuals set, so the cast router — which is
+            // `.before(EntityVisualsSet)` — has already emitted this frame's beam plays, and the
+            // net stage's Commands (the hop arrays) have already been applied.
+            .add_systems(
+                Update,
+                spawn_chain_beams
+                    .in_set(EntityVisualsSet)
+                    .after(WorldStage::Net),
+            )
+            // …and its per-frame geometry, beside the ribbon trails and for the same reason: a
+            // beam's endpoints are attachment joints, so it must sample the pose the billboard
+            // palette and the rig finalizer just wrote.
+            //
+            // `.after(begin_effect_frame)` is the load-bearing one, and its omission is what made
+            // the whole beam invisible on first ship (B161): the clear carries an extra
+            // `.after(face_billboards)` the beam sim does not, so without this edge the sim
+            // becomes runnable a step EARLIER and its vertices are wiped before extract — every
+            // frame, silently, with the arithmetic perfect. Every writer into the shared stream
+            // declares this; the tripwire in `commit` now refuses a write that precedes the clear.
+            .add_systems(
+                PostUpdate,
+                simulate_chain_beams
+                    .in_set(crate::billboard::BillboardPlace)
+                    .after(crate::billboard::billboard_joint_palette)
+                    .after(crate::creature_anim::finalize_rig_worlds)
                     .after(crate::particles::buffer::begin_effect_frame),
             )
             // Terrain conform (decisions 0482/0486, the byte law of wow-re `terrain-tilt.md`):

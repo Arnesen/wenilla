@@ -276,6 +276,18 @@ impl LootState {
 #[derive(Resource, Default)]
 pub(crate) struct LootErrors(pub Vec<u8>);
 
+/// The loot player knob (decision 0961): `autoLootDefault` — era's Controls-page checkbox (no
+/// 1.12 CVar exists; vanilla only had the shift-click), settable from the Options window
+/// through the CVar store (0954). The reference implements auto-loot ENGINE-side (era's own
+/// Lua never reads this CVar outside its settings page), and so do we: [`feed_loot`] picks
+/// every row itself at the open edge. A held SHIFT inverts the setting — era's
+/// `AUTOLOOTTOGGLE` modified click, default SHIFT (Bindings_Vanilla.xml l.1467), the same
+/// gesture that WAS vanilla's whole auto-loot.
+#[derive(Resource, Default)]
+pub(crate) struct LootConfig {
+    pub(crate) auto_loot: bool,
+}
+
 /// The client-local **loot-target latch** — the mirror of the real client's `[player+0x1d28]`
 /// guid (wow-re `loot-anim-leg.md`, the 2026-07-18 §5, decision 0515): set the instant
 /// `CMSG_LOOT` goes out (`0x5df253`, the same site that client-predicts the kneel before any
@@ -305,6 +317,7 @@ impl Plugin for UiLootPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LootState>()
             .init_resource::<LootErrors>()
+            .init_resource::<LootConfig>()
             .init_resource::<LootLatch>()
             .add_systems(
                 Update,
@@ -541,6 +554,9 @@ fn feed_loot(
     mut errors: ResMut<LootErrors>,
     mut chat: ResMut<crate::ui_chat::ChatLog>,
     mut last: Local<Option<LootSnapshot>>,
+    cfg: Res<LootConfig>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut pickup: MessageWriter<crate::sound::LootPickupSound>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -569,7 +585,34 @@ fn feed_loot(
     }
     script.set_loot(fresh.clone());
     match (&*last, &fresh) {
-        (None, Some(_)) => script.fire_event("LOOT_OPENED", vec![]),
+        (None, Some(snap)) => {
+            script.fire_event("LOOT_OPENED", vec![]);
+            // era's engine-side auto-loot ([`LootConfig`]): the knob decides, a held SHIFT
+            // inverts it, and the client "clicks" every row itself at the open edge — the
+            // same autostore/coin sends a hand pick makes, pickup sounds included. A refusal
+            // (inventory full) keeps its row and the window simply stays; emptying it fires
+            // the existing last-row auto-release.
+            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            if cfg.auto_loot != shift {
+                for index in 1..=snap.rows.len() as u32 {
+                    match loot.action_at(index) {
+                        Some(LootAction::Money) => {
+                            let _ = commands.0.send(ClientCommand::LootMoney);
+                        }
+                        Some(LootAction::Item {
+                            wire_slot,
+                            display_id,
+                        }) => {
+                            let _ = commands
+                                .0
+                                .send(ClientCommand::AutostoreLootItem { slot: wire_slot });
+                            pickup.write(crate::sound::LootPickupSound { display_id });
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
         // A content change while open (async name landed, a row removed, coin cleared) → repaint,
         // keeping the current page (LOOT_UPDATE, the merchant's MERCHANT_UPDATE twin — this replaces
         // Blizzard's per-button LOOT_SLOT_CLEARED optimization with a full re-snapshot, exactly as

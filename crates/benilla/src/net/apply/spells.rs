@@ -444,6 +444,14 @@ pub(super) fn spell_go(
         if casting.get(e).is_ok_and(|c| c.spell_id == spell_id) {
             commands.entity(e).remove::<Casting>();
         }
+        // The GO's own chain-hop fill (`0x6e800d`, inside `HandleSpellGo`) — the **second**
+        // producer of `unit+0xd44`, and the one that makes a non-channelled chain spell draw at
+        // all. It must precede the CastEvent below: the router plays the cast kit off that event,
+        // and the kit's chain proc consumes this array the same frame. Named approximation: the
+        // reference gates this leg on `0x6e4870`'s return, a predicate the §5 could not settle —
+        // we fill unconditionally, which is harmless because consumption still needs a chain proc
+        // and because every producer clears before it fills.
+        fill_chain_hops(caster, e, &hits, commands, index);
         cast_events.write(CastEvent {
             entity: e,
             spell_id,
@@ -692,33 +700,54 @@ pub(super) fn aura_duration(
     durations.set(slot, remaining_ms, now_secs);
 }
 
+/// The caster's chain-target hop array, filled from a wire target list — the reference's
+/// `0x605780` (decision 0955): it **clears before it fills** and **skips any entry equal to the
+/// unit's own guid** (`0x6057bf`/`0x6057c9`). Targets not streamed to us drop out here: an endpoint
+/// we cannot place has nothing to draw to, which is what the reference's own hidden-hop path
+/// amounts to.
+///
+/// Both producers land here — this is the shared body, not a helper: `0x605780` has exactly two
+/// callers image-wide, `SMSG_SPELL_UPDATE_CHAIN_TARGETS`'s handler and `HandleSpellGo`.
+fn fill_chain_hops(
+    caster: u64,
+    caster_entity: Entity,
+    targets: &[u64],
+    commands: &mut Commands,
+    index: &GuidIndex,
+) {
+    let hops: Vec<Entity> = targets
+        .iter()
+        .filter(|&&g| g != caster)
+        .filter_map(|g| index.0.get(g).copied())
+        .collect();
+    commands
+        .entity(caster_entity)
+        .try_insert(crate::entities::ChainHops(hops));
+}
+
 /// `SMSG_SPELL_UPDATE_CHAIN_TARGETS` → the hop list a **beam** visual runs through (0955).
 ///
 /// The reference parks it on the caster (the growable array at `unit+0xd44`: capacity `+0xd44`,
-/// count `+0xd48`, data `+0xd4c`, alloc quantum `+0xd50`), **dropping any entry equal to the
-/// caster's own guid** while it fills, and the next chain `CharProc` consumes it once —
-/// `0x60db72` zeroes the count on every path. This packet is one of **two** producers: the
-/// reference fills the same array from `SMSG_SPELL_GO`'s hit list as well (`0x6e800d` inside its
-/// GO handler), which is how a non-channeled chain spell draws at all.
-///
-/// The beam renderer is the next slice, so this arm resolves and reports the hops rather than
-/// parking them — a packet that arrives and is visible in the trace, with no half-built state
-/// hanging off a unit waiting for a consumer.
+/// count `+0xd48`, data `+0xd4c`, alloc quantum `+0xd50`), and the next chain `CharProc` consumes
+/// it once — `0x60db72` zeroes the count on every path. This packet is one of **two** producers:
+/// the reference fills the same array from `SMSG_SPELL_GO`'s hit list as well (`0x6e800d` inside
+/// its GO handler), which is how a non-channeled chain spell draws at all. vmangos sends this one
+/// only for channelled spells (`Spell::SendChannelStart`), so on this server it is the drains'
+/// and Mind Flay's producer, and the GO leg is every other chain spell's.
 pub(super) fn spell_chain_targets(
     caster: u64,
     spell_id: u32,
     targets: Vec<u64>,
+    commands: &mut Commands,
     index: &GuidIndex,
 ) {
-    let known = targets
-        .iter()
-        .filter(|&&g| g != caster)
-        .filter(|g| index.0.contains_key(g))
-        .count();
     debug!(
-        "net: chain targets for spell {spell_id} by {caster:#x} — {} hop(s), {known} streamed",
+        "net: chain targets for spell {spell_id} by {caster:#x} — {} hop(s)",
         targets.len()
     );
+    if let Some(&e) = index.0.get(&caster) {
+        fill_chain_hops(caster, e, &targets, commands, index);
+    }
 }
 
 #[cfg(test)]
@@ -886,6 +915,122 @@ mod tests {
             "the in-flight cast's own GO finishes the bar"
         );
         assert!(matches!(feed[0], CastBarEdge::Stop), "…with a STOP");
+    }
+
+    /// **Both** producers of the caster's chain-hop array (decision 0955): `SMSG_SPELL_GO`'s own
+    /// hit list — the leg that makes a non-channelled chain spell draw at all — and the 816 packet.
+    /// Each drops the caster's own guid and each clears before it fills; unstreamed targets fall
+    /// out as they resolve. Without this the beam lane is inert no matter how right its geometry is.
+    #[test]
+    fn both_wire_producers_fill_the_casters_chain_hop_array() {
+        use crate::combat_text::CombatTextSpawn;
+        use crate::creature_anim::Casting;
+        use crate::entities::ChainHops;
+        use crate::go_anim::GoLidOpen;
+        use crate::net::Guid;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.add_message::<CastEvent>()
+            .add_message::<SpellGoTargets>()
+            .add_message::<CombatTextSpawn>()
+            .add_message::<GoLidOpen>()
+            .init_resource::<GuidIndex>()
+            .init_resource::<SelfGuid>()
+            .init_resource::<CastBarFeed>()
+            .init_resource::<PendingCast>()
+            .init_resource::<QueuedMeleeSpell>()
+            .init_resource::<Cooldowns>()
+            .init_resource::<crate::items::Items>();
+
+        // A caster and two streamed victims; guid 40 is never streamed to us.
+        let mut spawn = |guid: u64| {
+            let e = app
+                .world_mut()
+                .spawn((Guid(guid), ObjectStore::default()))
+                .id();
+            app.world_mut()
+                .resource_mut::<GuidIndex>()
+                .0
+                .insert(guid, e);
+            e
+        };
+        let (caster, t1, t2) = (spawn(10), spawn(20), spawn(30));
+
+        let hops = |app: &App| {
+            app.world()
+                .entity(caster)
+                .get::<ChainHops>()
+                .map(|h| h.0.clone())
+        };
+
+        // Leg 1 — `HandleSpellGo`'s own fill (`0x6e800d`). The hit list carries the caster itself
+        // (vmangos includes a self-hit on plenty of spells) and an unstreamed target; both drop.
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      index: Res<GuidIndex>,
+                      casting: Query<&Casting>,
+                      mut cast_events: MessageWriter<CastEvent>,
+                      mut go_targets: MessageWriter<SpellGoTargets>,
+                      self_guid: Res<SelfGuid>,
+                      stores: Query<&mut ObjectStore>,
+                      mut cast_bar: ResMut<CastBarFeed>,
+                      mut pending: ResMut<PendingCast>,
+                      mut queued_melee: ResMut<QueuedMeleeSpell>,
+                      mut text: MessageWriter<CombatTextSpawn>,
+                      mut go_lid: MessageWriter<GoLidOpen>,
+                      mut cooldowns: ResMut<Cooldowns>,
+                      mut items: ResMut<crate::items::Items>| {
+                    let net_commands = crate::net::NetCommands(tx.clone());
+                    spell_go(
+                        10,
+                        421, // Chain Lightning
+                        0,
+                        vec![10, 20, 40, 30],
+                        vec![],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &mut commands,
+                        &index,
+                        &casting,
+                        &mut cast_events,
+                        &mut go_targets,
+                        &self_guid,
+                        &stores,
+                        &mut cast_bar,
+                        &mut pending,
+                        &mut queued_melee,
+                        &mut text,
+                        &mut go_lid,
+                        (&mut cooldowns, None, &mut items, &net_commands),
+                        1,
+                    );
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            hops(&app),
+            Some(vec![t1, t2]),
+            "the GO fills the array in wire order, minus the caster and the unstreamed target"
+        );
+
+        // Leg 2 — the 816 packet, which is what vmangos sends for a CHANNELLED chain. It clears
+        // before it fills, so the GO's list above must not survive underneath it.
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands, index: Res<GuidIndex>| {
+                spell_chain_targets(10, 689, vec![30, 10], &mut commands, &index);
+            })
+            .unwrap();
+        assert_eq!(
+            hops(&app),
+            Some(vec![t2]),
+            "clear-before-fill, caster dropped"
+        );
     }
 
     /// The director's stuck-shooting-idle report: click off the target during Auto Shot and the

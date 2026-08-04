@@ -1,10 +1,12 @@
 <Ui>
     <!--
         The OPTIONS window (decision 0950) — the shell (slice A) and the real PAGES: Audio
-        (0957), Graphics (0959). Opened from the game menu's Options button. Setting rows ride
-        the CVar store (0954): rows read GetCVar on show, write SetCVar on interaction, and
-        Defaults resets the visible page's CVars to their registered defaults. Pages without
-        rows are still empty and keep Defaults disabled.
+        (0957), Graphics (0959), Controls (0961). Opened from the game menu's Options button.
+        Setting rows ride the CVar store (0954): rows read GetCVar on show, write SetCVar on
+        interaction, and Defaults resets the visible page's CVars to their registered defaults.
+        Pages without rows are still empty and keep Defaults disabled. One row defers — uiScale
+        stages a pending value and commits through the era Apply button (0961), because a live
+        write would rescale the very slider being dragged.
 
         This window is the one deliberate era-1.15.9 skin in a 1.12 shell (0950): the 1.12
         OptionsFrame family (four separate panels) collapses into the era SettingsPanel look —
@@ -71,10 +73,15 @@
           only — the engine slider's scrollbar-faithful posture); era rows with no 1.12 CVar +
           benilla knob behind them (output device, Dialog volume, loop music, channels, cache;
           the whole era Graphics dropdown zoo) don't ship. A slider shows the 1.12 panel's
-          range even where the benilla knob's clamp is wider (farclip's dev headroom to 1200,
-          uiScale's 0.5..1.5): a config value outside the page range displays clamped — thumb
-          and readout agree on the nearest expressible value, the engine keeps running the
-          config's truth, and nothing writes back until the player actually moves the row.
+          range even where the benilla knob's clamp is wider (uiScale's env clamp is 0.5..1.5):
+          a config value outside the page range displays clamped — thumb and readout agree on
+          the nearest expressible value, the engine keeps running the config's truth, and
+          nothing writes back until the player actually moves the row.
+        - **Apply-flow cuts (0961)**: the era's close-with-pending 3-button confirm dialog
+          (GAME_SETTINGS_CONFIRM_DISCARD) is not modeled — hiding the window silently discards
+          pending edits (the era's own hide path wipes without committing too); the 8-second
+          "keep these settings?" revert timer (CommitFlag.Revertable) is not modeled either —
+          Apply commits outright.
         - Era rows this slice does not ship: the Accessibility group, and Languages/Network under
           System — pages with no benilla knobs behind them yet (0950's "only rows backed by real
           knobs" rule). Nameplates joined in slice B (real nameplate knobs exist to back its
@@ -203,11 +210,12 @@
         -- benilla knob behind them (Enable Sound=Sound_EnableAllSound, Dialog, output device,
         -- channels…) do not ship — the 0950 honest-tree rule applied to settings.
         OPTIONS_PAGE_ROWS = {
+            Controls = { "RowStickyTarget", "RowAutoLoot", "RowInvertMouse" },
             Audio = {
                 "RowEnableAll", "RowMaster", "RowSound", "RowMusic", "RowAmbience",
                 "RowEnableMusic", "RowEnableAmbience",
             },
-            Graphics = { "RowUiScale", "RowFarclip" },
+            Graphics = { "RowUiScale" },
         }
 
         function OptionsRow_OnLoad(row, cvar, label, child)
@@ -256,13 +264,26 @@
 
         function OptionsCheckbox_OnClick(box)
             local row = box:GetParent()
-            -- The 1.12 panel's click sounds, quirk kept: the just-CHECKED box plays the
-            -- CheckBoxOff kit and vice versa (SoundOptionsFrame.lua's OnClick, verbatim).
-            if box:GetChecked() then
+            local checked = box:GetChecked()
+            -- Click kits: the 1.12 panels disagree with EACH OTHER — the interface panel's
+            -- PlayClickSound maps checked→CheckBoxOn (OptionsFrame.lua l.509), while the sound
+            -- panel's own OnClick maps checked→CheckBoxOff (SoundOptionsFrame.lua, the 0957
+            -- quirk) — so each page keeps its own panel's mapping (soundQuirk on Audio rows).
+            local kitOn = checked
+            if row.soundQuirk then kitOn = not kitOn end
+            if kitOn then
+                PlaySound("igMainMenuOptionCheckBoxOn")
+            else
                 PlaySound("igMainMenuOptionCheckBoxOff")
+            end
+            -- The write: checked = 1 — unless the row is value-INVERTED (Sticky Targeting:
+            -- 1.12 checks it when deselectOnClick is "0", era wraps the same CVar in
+            -- NegateBoolean; both references agree).
+            local on = checked
+            if row.invert then on = not on end
+            if on then
                 SetCVar(row.cvar, 1)
             else
-                PlaySound("igMainMenuOptionCheckBoxOn")
                 SetCVar(row.cvar, 0)
             end
             OptionsPage_UpdateDependencies(OptionsFrame.selectedCategory)
@@ -295,7 +316,22 @@
                 -- compares equal to it as a STRING and stays out of the config file ("0.40"
                 -- would read as moved-off-"0.4").
                 local str = string.gsub(string.format("%.2f", value), "%.?0+$", "")
-                SetCVar(row.cvar, str)
+                if row.deferred then
+                    -- era CommitFlag.Apply, transcribed (Blizzard_Setting.lua's staged
+                    -- SetValue half): the control shows the new value, the ENGINE keeps the
+                    -- old one, and the CVar moves only when Apply commits — dragging a
+                    -- slider that rescales itself mid-drag is exactly what this flag
+                    -- exists to prevent. Dragging back onto the committed value clears the
+                    -- pending (era's IsModified: a pending EQUAL to current isn't one).
+                    if str == GetCVar(row.cvar) then
+                        row.pending = nil
+                    else
+                        row.pending = str
+                    end
+                    OptionsApply_Update()
+                else
+                    SetCVar(row.cvar, str)
+                end
             end
         end
 
@@ -313,12 +349,22 @@
                 local box = getglobal(base .. rkey .. "Check")
                 if box then
                     -- SetChecked takes the CVar string exactly like the 1.12 panel: the numeric
-                    -- read means "0" unchecks (button-check-and-state-texture.md).
-                    box:SetChecked(GetCVar(row.cvar))
+                    -- read means "0" unchecks (button-check-and-state-texture.md). A
+                    -- value-inverted row checks on "0" instead — UIOptionsFrame.lua's own
+                    -- GAMEFIELD_DESELECT arm (`checked = 1` when the CVar reads "0").
+                    if row.invert then
+                        local checked
+                        if GetCVar(row.cvar) == "0" then checked = 1 end
+                        box:SetChecked(checked)
+                    else
+                        box:SetChecked(GetCVar(row.cvar))
+                    end
                 else
                     local slider = getglobal(base .. rkey .. "ControlSlider")
                     row.refreshing = 1
-                    slider:SetValue(tonumber(GetCVar(row.cvar) or "0") or 0)
+                    -- Pending first (era GetValue returns the pendingValue while one is
+                    -- staged): coming back to a page with an un-applied edit shows the edit.
+                    slider:SetValue(tonumber(row.pending or GetCVar(row.cvar) or "0") or 0)
                     row.refreshing = nil
                     -- SetValue fires only on a CHANGE — write the readout unconditionally,
                     -- from the slider's OWN value: in range that IS the CVar (SetValue stores
@@ -329,6 +375,7 @@
                 end
             end
             OptionsPage_UpdateDependencies(key)
+            OptionsApply_Update()
         end
 
         -- Per-page dependency rules. Audio's is the 1.12 rule, verbatim: Enable All Sound off
@@ -351,14 +398,69 @@
 
         -- Defaults, live on any page with rows: every row's CVar back to its registered
         -- default (era resets per-setting the same way; the era all-pages confirm dialog is
-        -- not modeled — Defaults resets the VISIBLE page).
+        -- not modeled — Defaults resets the VISIBLE page). A pending edit dies with it — the
+        -- default write supersedes what Apply would have committed.
         function OptionsPage_Defaults(key)
             local base = "OptionsFrameContainerBody" .. key
             for _, rkey in ipairs(OPTIONS_PAGE_ROWS[key]) do
                 local row = getglobal(base .. rkey)
+                row.pending = nil
                 SetCVar(row.cvar, GetCVarDefault(row.cvar))
             end
             OptionsPage_Refresh(key)
+        end
+
+        -- ── The Apply flow (0961): era CommitFlag.Apply, cut to our rows ────────────────────
+        -- Pending edits are PANEL-wide like era's modified table: they survive a category
+        -- switch (the row redisplays its pending on return) and commit together; only hiding
+        -- the window discards them (era wipes on hide too — its close-time 3-button confirm
+        -- dialog and the 8-second revert timer are not modeled, SCOPE note).
+
+        -- The era Apply gate (HasUnappliedSettings + SetApplyButtonEnabled): the button is
+        -- enabled AND shown together — it EXISTS only while something is pending.
+        function OptionsApply_Update()
+            local pending
+            for key, rows in pairs(OPTIONS_PAGE_ROWS) do
+                local base = "OptionsFrameContainerBody" .. key
+                for _, rkey in ipairs(rows) do
+                    if getglobal(base .. rkey).pending then pending = 1 end
+                end
+            end
+            if pending then
+                OptionsFrameApplyButton:Enable()
+                OptionsFrameApplyButton:Show()
+            else
+                OptionsFrameApplyButton:Disable()
+                OptionsFrameApplyButton:Hide()
+            end
+        end
+
+        -- Commit (era SettingsPanelMixin:CommitSettings, cut to our rows): every pending
+        -- value everywhere becomes a real SetCVar, and the button goes away.
+        function OptionsPage_Apply()
+            for key, rows in pairs(OPTIONS_PAGE_ROWS) do
+                local base = "OptionsFrameContainerBody" .. key
+                for _, rkey in ipairs(rows) do
+                    local row = getglobal(base .. rkey)
+                    if row.pending then
+                        SetCVar(row.cvar, row.pending)
+                        row.pending = nil
+                    end
+                end
+            end
+            OptionsApply_Update()
+        end
+
+        -- Hide = discard (era's WipeModifiedTable-on-hide; the confirm dialog is cut): the
+        -- next open re-reads the committed CVars, so the sliders land back on the truth.
+        function OptionsPage_DiscardPending()
+            for key, rows in pairs(OPTIONS_PAGE_ROWS) do
+                local base = "OptionsFrameContainerBody" .. key
+                for _, rkey in ipairs(rows) do
+                    getglobal(base .. rkey).pending = nil
+                end
+            end
+            OptionsApply_Update()
         end
     ]]></Script>
 
@@ -877,6 +979,48 @@
                             <Anchor point="BOTTOMRIGHT"/>
                         </Anchors>
                         <Frames>
+                            <!-- The Controls page (0961): the gameplay checkboxes with benilla
+                                 knobs behind them, in the era Controls page's own row order
+                                 (Controls.lua @1.15.9: Sticky Targeting #1, Auto Loot #6,
+                                 Invert Mouse #12 — its Mouse section header is cut while one
+                                 row survives under it). Sticky Targeting is value-INVERTED in
+                                 BOTH references (1.12 UIOptionsFrame checks it on
+                                 deselectOnClick=="0"; era wraps the CVar in NegateBoolean);
+                                 labels are 1.12 GlobalStrings where the row exists there
+                                 (GAMEFIELD_DESELECT_TEXT, INVERT_MOUSE), era's for Auto Loot
+                                 (no 1.12 row exists). -->
+                            <Frame name="$parentControls" hidden="true">
+                                <Anchors>
+                                    <Anchor point="TOPLEFT"/>
+                                    <Anchor point="BOTTOMRIGHT"/>
+                                </Anchors>
+                                <Frames>
+                                    <Frame name="$parentRowStickyTarget" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "deselectOnClick", "Sticky Targeting")
+                                            self.invert = 1
+                                        </OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowAutoLoot" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowStickyTarget" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "autoLootDefault", "Auto Loot")</OnLoad></Scripts>
+                                    </Frame>
+                                    <Frame name="$parentRowInvertMouse" inherits="OptionsCheckboxRowTemplate">
+                                        <Anchors>
+                                            <Anchor point="TOPLEFT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowAutoLoot" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                        </Anchors>
+                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "mouseInvertPitch", "Invert Mouse")</OnLoad></Scripts>
+                                    </Frame>
+                                </Frames>
+                            </Frame>
                             <!-- The Audio page. Row seats transcribe the era settings list
                                  (Blizzard_SettingsList.lua l.43-47 + .xml: scroll box hung
                                  -15/-20 off the header block with padLeft 25 / padRight 0 and
@@ -897,7 +1041,10 @@
                                             <Anchor point="TOPLEFT"><Offset><AbsDimension x="10" y="-12"/></Offset></Anchor>
                                             <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-20" y="-12"/></Offset></Anchor>
                                         </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")</OnLoad></Scripts>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "MasterSoundEffects", "Enable All Sound")
+                                            self.soundQuirk = 1
+                                        </OnLoad></Scripts>
                                     </Frame>
                                     <Frame name="$parentRowMaster" inherits="OptionsSliderRowTemplate">
                                         <Anchors>
@@ -932,29 +1079,32 @@
                                             <Anchor point="TOPLEFT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             <Anchor point="TOPRIGHT" relativeTo="$parentRowAmbience" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                         </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")</OnLoad></Scripts>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "EnableMusic", "Enable Music")
+                                            self.soundQuirk = 1
+                                        </OnLoad></Scripts>
                                     </Frame>
                                     <Frame name="$parentRowEnableAmbience" inherits="OptionsCheckboxRowTemplate">
                                         <Anchors>
                                             <Anchor point="TOPLEFT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             <Anchor point="TOPRIGHT" relativeTo="$parentRowEnableMusic" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                         </Anchors>
-                                        <Scripts><OnLoad>OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")</OnLoad></Scripts>
+                                        <Scripts><OnLoad>
+                                            OptionsRow_OnLoad(self, "EnableAmbience", "Enable Ambience")
+                                            self.soundQuirk = 1
+                                        </OnLoad></Scripts>
                                     </Frame>
                                 </Frames>
                             </Frame>
-                            <!-- The Graphics page (0959): the two 1.12 Video Options sliders
-                                 with benilla knobs behind them, on the same era row seats.
-                                 Ranges/steps/labels are the 1.12 OptionsFrameSliders table
-                                 verbatim (OptionsFrame.lua l.24-26): uiscale 0.64..1.0 step
-                                 0.01 (UI_SCALE "UI Scale", percent readout — era's own
-                                 FormatPercentageRounded on its uiscale row), farclip 177..777
-                                 step 60 = (max-min)/10 (FARCLIP "Terrain Distance", raw-yards
-                                 readout — era's law when a slider has no formatter). 1.12's
-                                 useUiScale gate has no benilla knob (our scale always applies;
-                                 off ≡ 1.0) so the checkbox doesn't ship; era's Graphics page
-                                 never registers View Distance at all — Terrain Distance is
-                                 the 1.12 surface, kept. -->
+                            <!-- The Graphics page (0959; farclip row retired 0961 — the
+                                 director's call: the page holds UI Scale alone for now, the
+                                 farclip CVar/knob/env/debug-panel plumbing all stay). Range/
+                                 step/label are the 1.12 OptionsFrameSliders table verbatim
+                                 (OptionsFrame.lua l.25): uiscale 0.64..1.0 step 0.01 (UI_SCALE
+                                 "UI Scale", percent readout — era's own
+                                 FormatPercentageRounded on its uiscale row). 1.12's useUiScale
+                                 gate has no benilla knob (our scale always applies; off ≡ 1.0)
+                                 so the checkbox doesn't ship. -->
                             <Frame name="$parentGraphics" hidden="true">
                                 <Anchors>
                                     <Anchor point="TOPLEFT"/>
@@ -969,16 +1119,11 @@
                                         <Scripts><OnLoad>
                                             OptionsRow_OnLoad(self, "uiScale", "UI Scale")
                                             OptionsSliderRow_Setup(self, 0.64, 1.0, 0.01)
-                                        </OnLoad></Scripts>
-                                    </Frame>
-                                    <Frame name="$parentRowFarclip" inherits="OptionsSliderRowTemplate">
-                                        <Anchors>
-                                            <Anchor point="TOPLEFT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                            <Anchor point="TOPRIGHT" relativeTo="$parentRowUiScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
-                                        </Anchors>
-                                        <Scripts><OnLoad>
-                                            OptionsRow_OnLoad(self, "farclip", "Terrain Distance")
-                                            OptionsSliderRow_Setup(self, 177, 777, 60, "raw")
+                                            -- era registers its uiscale row CommitFlag.Apply
+                                            -- (Graphics.lua l.684): the one row whose live
+                                            -- write would rescale the very slider mid-drag —
+                                            -- it stages and commits through the Apply button.
+                                            self.deferred = 1
                                         </OnLoad></Scripts>
                                     </Frame>
                                 </Frames>
@@ -1094,8 +1239,7 @@
                     </OnClick>
                 </Scripts>
             </Button>
-            <!-- The red Close (era SettingsPanel.CloseButton; Apply is deliberately absent — we
-                 apply live, there is never a pending change to hold). -->
+            <!-- The red Close (era SettingsPanel.CloseButton). -->
             <Button name="$parentCloseButton" inherits="OptionsRedButtonTemplate" text="Close">
                 <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-16" y="16"/></Offset></Anchor></Anchors>
                 <Scripts>
@@ -1103,6 +1247,17 @@
                         PlaySound("igMainMenuClose")
                         HideUIPanel(OptionsFrame)
                     </OnClick>
+                </Scripts>
+            </Button>
+            <!-- The era Apply (SettingsPanel.ApplyButton: 96x22, RIGHT of Close's LEFT at -2,
+                 Blizzard_SettingsPanel.xml l.52-57): exists only while a deferred row holds a
+                 pending value — era enables and SHOWS it together (SetApplyButtonEnabled) —
+                 and commits every pending edit on click. -->
+            <Button name="$parentApplyButton" inherits="OptionsRedButtonTemplate" text="Apply" hidden="true">
+                <Anchors><Anchor point="RIGHT" relativeTo="$parentCloseButton" relativePoint="LEFT"><Offset><AbsDimension x="-2" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>self:Disable()</OnLoad>
+                    <OnClick>OptionsPage_Apply()</OnClick>
                 </Scripts>
             </Button>
         </Frames>
@@ -1114,6 +1269,9 @@
                 OptionsFrame_UpdateScale()
                 OptionsFrame_SelectCategory(this.selectedCategory or "Controls")
             </OnShow>
+            <!-- Hiding discards pending edits (the era wipes its modified table on hide; its
+                 close-time confirm dialog is cut — SCOPE note). -->
+            <OnHide>OptionsPage_DiscardPending()</OnHide>
         </Scripts>
     </Frame>
 </Ui>

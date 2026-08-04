@@ -72,8 +72,8 @@ pub fn run(chain: &mut Chain) -> Result<()> {
         "halfWid",
         "noise",
         "scrollS",
-        "segDur",
-        "segDly",
+        "hopLife",
+        "hopStag",
     );
     for id in 0..=255 {
         let Some(c) = visuals.chain_effect(id) else {
@@ -85,8 +85,8 @@ pub fn run(chain: &mut Chain) -> Result<()> {
             c.half_width,
             c.noise_scale,
             c.scroll_period_s,
-            c.seg_duration_ms,
-            c.seg_delay_ms,
+            c.bolt_life_ms,
+            c.bolt_stagger_ms,
             c.texture,
         );
     }

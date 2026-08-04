@@ -16,9 +16,11 @@
 //! - [`WarmPass`] + `spawn_menagerie` — the warm pass: one tiny rig per reachable pipeline
 //!   variant — the model lane with its shard-rung and far-side twins, and the sky/water lanes
 //!   (celestial, stars, clouds, gradient dome, WMO skybox, liquid; decision 0945 widened 0837's
-//!   model-only scope) — parented to the world camera, spawned when the entry cover rises; the
+//!   model-only scope) — parented to the world camera, spawned a few frames AFTER the entry
+//!   cover rises (so the cover is on the glass before the burst, not racing it — 0962); the
 //!   loading screen's clear condition holds on [`WarmPass::satisfied`] until the pipeline cache
-//!   drains (10 s backstop, 0737's rule), then the menagerie despawns. Captures skip it.
+//!   drains (10 s backstop, 0737's rule), then the menagerie despawns (roots only — recursion
+//!   takes the twin booth's children, 0962). Captures skip it.
 //!   Booth twins ride a real booth's layer (samples=1, 0938) AND the pass's own twin booth
 //!   ([`crate::portrait::spawn_warm_booth`] — the custom-projection view key real bakes install;
 //!   decision 0958), and [`warm_effect_lane`] pushes the `wow_effect` lane's whole key cross
@@ -252,6 +254,8 @@ pub(crate) struct WarmPass {
     /// The 1×1 stand-in texture [`warm_effect_lane`]'s draws bind while the pass runs (a strong
     /// handle so the asset lives exactly as long as the pass; `None` = the lane isn't warming).
     effect_tex: Option<Handle<Image>>,
+    /// Consecutive covered+in-world frames seen while idle (see [`WARM_COVER_PRESENT_FRAMES`]).
+    covered_frames: u32,
 }
 
 impl WarmPass {
@@ -267,6 +271,13 @@ const WARM_SETTLE_SECS: f32 = 0.25;
 /// 0737's rule: never hold a cover unbounded. A timeout fires the tripwire-adjacent warn and
 /// releases; the remaining compiles land live (the pre-0837 world, once, with a named cause).
 const WARM_TIMEOUT_SECS: f32 = 10.0;
+/// Covered frames the pass waits before spawning the menagerie, so the compile burst lands
+/// behind a cover that is ON THE GLASS. On world entry the raise frame still renders the glue
+/// (the state flips a frame later), so the FIRST covered+in-world frame is also the first frame
+/// the cover can draw — spawning then puts the whole synchronous burst in that same frame's
+/// render, and what stays on screen for the burst is the previous present: the frozen character
+/// screen (the director's report). Two extra frames ≈ 33 ms of cover; the burst is seconds cold.
+const WARM_COVER_PRESENT_FRAMES: u32 = 3;
 
 #[allow(clippy::too_many_arguments)] // a Bevy system: each param is one resource, the app's convention
 fn run_warm_pass(
@@ -277,7 +288,7 @@ fn run_warm_pass(
     state: Res<State<ClientState>>,
     time: Res<Time>,
     camera: Query<Entity, With<crate::player::WorldCamera>>,
-    rigs: Query<Entity, With<WarmRig>>,
+    rigs: Query<(Entity, Option<&ChildOf>), With<WarmRig>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<WowModelMaterial>>,
     mut lanes: WarmLanes,
@@ -293,9 +304,8 @@ fn run_warm_pass(
         warm.done = true;
         warm.spawned_at = None;
         warm.effect_tex = None;
-        for e in &rigs {
-            commands.entity(e).despawn();
-        }
+        warm.covered_frames = 0;
+        despawn_rigs(&mut commands, &rigs);
         return;
     }
     // Captures boot straight in-world, deterministic by construction — no menagerie in a shot.
@@ -307,12 +317,18 @@ fn run_warm_pass(
     let Some(spawned) = warm.spawned_at else {
         // The cover just rose (or the world just became live under one): raise the gate and
         // spawn the menagerie once the camera + shared light exist (both are entry-frame-early;
-        // until they do, the gate holds the cover, which is exactly right).
+        // until they do, the gate holds the cover, which is exactly right) — and once the cover
+        // has had [`WARM_COVER_PRESENT_FRAMES`] frames to reach the glass, so the burst is
+        // actually hidden (the char-screen freeze, 0962).
         warm.done = false;
         let Ok(cam) = camera.single() else { return };
         let Some(light) = shared_light.as_ref() else {
             return;
         };
+        warm.covered_frames += 1;
+        if warm.covered_frames < WARM_COVER_PRESENT_FRAMES {
+            return;
+        }
         warm.spawned_at = Some(now);
         // The twin booth (0958): the custom-projection view key space real bakes use — the real
         // booths warm the placeholder-Perspective class, this camera the NONSTANDARD one. It is
@@ -357,17 +373,27 @@ fn run_warm_pass(
     if now - spawned >= WARM_SETTLE_SECS && pending == 0 {
         warm.done = true;
         warm.effect_tex = None;
-        for e in &rigs {
-            commands.entity(e).despawn();
-        }
+        despawn_rigs(&mut commands, &rigs);
         info!("pipeline warm: drained in {:.2}s", now - spawned);
     } else if now - spawned >= WARM_TIMEOUT_SECS {
         warm.done = true;
         warm.effect_tex = None;
-        for e in &rigs {
-            commands.entity(e).despawn();
-        }
+        despawn_rigs(&mut commands, &rigs);
         warn!("pipeline warm: TIMED OUT with {pending} pipelines pending — cover released");
+    }
+}
+
+/// Tear the pass down by despawning only its ROOT entities. `despawn` is recursive, and the twin
+/// booth's rigs are *children* of the twin booth camera — itself a `WarmRig` — so despawning
+/// every query row queues the children twice (once explicitly, once via the parent's recursion):
+/// a warn per child on the teardown frame (0962). Children of a live camera (the world camera,
+/// a real booth) still get their explicit despawn.
+fn despawn_rigs(commands: &mut Commands, rigs: &Query<(Entity, Option<&ChildOf>), With<WarmRig>>) {
+    for (e, child_of) in rigs {
+        if child_of.is_some_and(|c| rigs.contains(c.parent())) {
+            continue;
+        }
+        commands.entity(e).despawn();
     }
 }
 

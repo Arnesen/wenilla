@@ -106,6 +106,9 @@ const CURSOR_STEMS: &[&str] = &[
     "UnableSpeak",
     "Pickup",
     "UnablePickup",
+    // The loot leg's triple pouch (0965): effective auto-loot on (0961's setting XOR shift).
+    "LootAll",
+    "UnableLootAll",
     "Interact",
     "UnableInteract",
     "Buy",

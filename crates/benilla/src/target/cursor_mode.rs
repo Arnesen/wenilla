@@ -9,8 +9,9 @@
 //!   banker/auctioneer → **Buy**; REPAIR (0x4000) is *never consulted* — a repair-only unit falls
 //!   through to the attack/clear leg (real repairers all carry VENDOR too).
 //! - otherwise **loot / skin / attack** keyed on state: dead + `UNIT_DYNFLAG_LOOTABLE` →
-//!   **Pickup** — the loot leg's base mode is `mode = 8 + (keyDown(0) ? 8 : 0)` (`0x48252c`), i.e.
-//!   Pickup(8), becoming LootAll(16) only while the auto-loot modifier key is *held*; dead +
+//!   **Pickup or LootAll** — the loot leg's mode is `8 + (keyDown(0) ? 8 : 0)` (`0x48252c`):
+//!   the triple-pouch LootAll(16) while the auto-loot modifier is held, generalized since 0961's
+//!   auto-loot to the EFFECTIVE state (`autoLootDefault` XOR shift — [`loot_cursor`]); dead +
 //!   `UNIT_FLAG_SKINNABLE` → Skin; alive and attackable → Attack.
 //! - **`Unable*` (grayed) by a different gate per mode** (byte-verified): NPC services gray beyond
 //!   **5.5556 yd** (`0x482320`); attack beyond a fixed **10.45 yd** (`0x4826a7`); skin outside the
@@ -23,10 +24,10 @@
 //! *Interim*: the reference's interactability predicate (`CGUnit::CanInteract 0x606880`) isn't
 //! fully derived; we approximate it as "has service flags and isn't attack-worthy (reaction ≥
 //! neutral)". Attackability approximates the PvP/attack matrix as "reaction rank ≤ neutral" —
-//! the same approximation the ring's player branch documents. The auto-loot modifier-key split
-//! (Pickup vs LootAll, `0x41f8f0`) waits on auto-loot existing at all — until then the base Pickup
-//! is the only mode the loot leg can honestly show. (The questgiver bit's own quest-status gate,
-//! `0x5df490`, used to be listed here as unmodelled; it is modelled now — [`questgiver_has_quest`].)
+//! the same approximation the ring's player branch documents. (The questgiver bit's own
+//! quest-status gate, `0x5df490`, and the auto-loot Pickup/LootAll split, `0x41f8f0`, both used
+//! to be listed here as unmodelled; both are modelled now — [`questgiver_has_quest`],
+//! [`loot_cursor`].)
 
 use bevy::prelude::*;
 
@@ -44,9 +45,13 @@ pub(crate) enum CursorKind {
     Point,
     Attack,
     Speak,
-    /// Pickup(8) — the vendor's pouch AND the loot leg's base mode (LootAll(16) is this same leg
-    /// with the auto-loot modifier held — deferred until auto-loot exists).
+    /// Pickup(8) — the vendor's pouch AND the loot leg's base mode.
     Pickup,
+    /// LootAll(16) — the loot leg's triple pouch while the EFFECTIVE auto-loot is on
+    /// (`autoLootDefault` XOR the held shift, 0961's own rule — in 1.12 the held key alone was
+    /// the whole mechanism, `8 + (keyDown(0) ? 8 : 0)` @ `0x48252c`). Loot only: the vendor
+    /// pouch never triples.
+    LootAll,
     /// Interact(5) — the generic gear. A GameObject base type's cursor when it carries no
     /// data-named cursor (a door, button, chest, keyed/keyless lock, fishing, …); also the
     /// innkeeper service.
@@ -91,6 +96,7 @@ impl CursorKind {
             CursorKind::Attack => "Attack",
             CursorKind::Speak => "Speak",
             CursorKind::Pickup => "Pickup",
+            CursorKind::LootAll => "LootAll",
             CursorKind::Interact => "Interact",
             CursorKind::Buy => "Buy",
             CursorKind::Inspect => "Inspect",
@@ -450,6 +456,18 @@ fn service_cursor(service: u32, quest_status: Option<u32>) -> Option<CursorKind>
     }
 }
 
+/// The loot leg's mode split (`8 + (keyDown(0) ? 8 : 0)` @ `0x48252c`): the single pouch, or
+/// the triple LootAll while the EFFECTIVE auto-loot is on — the 0961 rule (`autoLootDefault`
+/// XOR the held modifier) so the cursor always announces what the click will actually do. In
+/// 1.12 the held key alone *was* the effective state (no CVar existed).
+fn loot_cursor(auto_loot: bool, shift_held: bool) -> CursorKind {
+    if auto_loot != shift_held {
+        CursorKind::LootAll
+    } else {
+        CursorKind::Pickup
+    }
+}
+
 /// Resolve this frame's [`WorldCursor`] from the hovered unit — the reference's classifier order:
 /// interactable-NPC service ladder, else loot/skin/attack by state, each grayed by its own range
 /// gate. No hover (or anything unresolvable) → Point.
@@ -479,6 +497,9 @@ pub(super) fn classify_cursor(
     // The QUESTGIVER leg's gate reads the per-guid `SMSG_QUESTGIVER_STATUS` store — see
     // [`questgiver_has_quest`].
     quest: Res<crate::ui_quest::QuestGiver>,
+    // The loot leg's Pickup/LootAll split (0965): the auto-loot knob (0961) + the live shift.
+    loot_cfg: Res<crate::ui_loot::LootConfig>,
+    keys: Res<ButtonInput<KeyCode>>,
 ) {
     // A **highlightable** GameObject shows its **data-driven** cursor (wow-re cursor-system §4): a
     // mailbox's Mail, a plaque's Inspect, a vein's Mine / herb's GatherHerbs / picked lock's PickLock
@@ -553,11 +574,12 @@ pub(super) fn classify_cursor(
         let dead = store.0.unit_is_dead();
         if dead {
             if store.0.unit_lootable() {
-                // The loot base mode is Pickup(8) — `8 + (keyDown(0) ? 8 : 0)` @ `0x48252c`;
-                // LootAll waits on auto-loot. Gray by the byte-verified gate (inline in
-                // `CanLootNow 0x5ec110`): the same melee interact reach as skin — ~5 yd vs a
-                // normal mob (director-measured, confirmed).
-                return Some((CursorKind::Pickup, !in_melee));
+                // The loot mode split `8 + (keyDown(0) ? 8 : 0)` @ `0x48252c`, over 0961's
+                // effective auto-loot ([`loot_cursor`]). Gray by the byte-verified gate
+                // (inline in `CanLootNow 0x5ec110`): the same melee interact reach as skin —
+                // ~5 yd vs a normal mob (director-measured, confirmed).
+                let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+                return Some((loot_cursor(loot_cfg.auto_loot, shift), !in_melee));
             }
             // The skin leg's SECOND precondition, byte-verified: the flag alone is not enough —
             // the reference also requires the learn-time latch `[0xb700e4 + 4×isPlayerTarget]` to
@@ -609,6 +631,23 @@ pub(super) fn classify_cursor(
 mod tests {
     use super::*;
     use benilla_protocol::messages::dialog_status;
+
+    /// The loot pouch follows the EFFECTIVE auto-loot (0961: setting XOR shift) — the cursor
+    /// and the click can never disagree about what a pick will do.
+    #[test]
+    fn the_loot_pouch_triples_with_the_effective_auto_loot() {
+        assert_eq!(loot_cursor(false, false), CursorKind::Pickup);
+        assert_eq!(loot_cursor(true, false), CursorKind::LootAll);
+        // Shift inverts BOTH ways (era's AUTOLOOTTOGGLE; vanilla's whole mechanism).
+        assert_eq!(loot_cursor(false, true), CursorKind::LootAll);
+        assert_eq!(loot_cursor(true, true), CursorKind::Pickup);
+        // The grayed twin rides the same stem.
+        let far = WorldCursor {
+            kind: CursorKind::LootAll,
+            unable: true,
+        };
+        assert_eq!(far.stem(), "UnableLootAll");
+    }
 
     #[test]
     fn stems_name_the_shipped_blps() {

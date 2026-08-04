@@ -148,16 +148,19 @@ fn clicking_a_row_moves_the_selection_and_the_page_title() {
 }
 
 /// Both close spellings — the red Close and the corner X — hide the window on the shared
-/// igMainMenuClose kit, and the Defaults button (nothing to default this slice) reads disabled.
+/// igMainMenuClose kit; a page WITHOUT rows keeps Defaults disabled (Controls has rows since
+/// 0961, so the rowless check moved to Interface).
 #[test]
 fn both_close_buttons_hide_the_window_and_defaults_is_disabled() {
     let mut s = harness();
 
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
+        .unwrap();
     assert!(
         !s.eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
             .unwrap(),
-        "Defaults is dead until the pages slice brings rows to default"
+        "Defaults is dead on a page with no rows"
     );
     let _ = s.take_sounds();
     s.run("OptionsFrameCloseButton:Click()").unwrap();
@@ -279,7 +282,7 @@ fn the_audio_page_reads_the_cvar_table_on_select() {
         .unwrap());
 
     // Off to a ROWLESS page: body hidden, Defaults disabled again.
-    s.run("OptionsFrameCategoryListRowControls:Click()")
+    s.run("OptionsFrameCategoryListRowInterface:Click()")
         .unwrap();
     assert!(!s
         .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
@@ -411,14 +414,13 @@ fn defaults_resets_the_audio_page_to_registered_defaults() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Selecting Graphics shows ITS page body (0959) with both 1.12 sliders reading the table:
-/// uiScale on the 0.64..1.0 panel range with the percent readout, farclip on 177..777 with the
-/// raw-yards readout. The swap works both ways — Audio's body takes over when clicked.
+/// Selecting Graphics shows ITS page body (0959; one row since the farclip retirement, 0961)
+/// with the uiScale slider reading the table on the 0.64..1.0 panel range with the percent
+/// readout. The swap works both ways — Audio's body takes over when clicked.
 #[test]
 fn the_graphics_page_reads_the_cvar_table_on_select() {
     let mut s = audio_harness();
     s.set_cvar_host("uiScale", "0.8");
-    s.set_cvar_host("farclip", "297");
     let s = harness_on(s);
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
@@ -442,23 +444,11 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
         .unwrap(),
         "80%"
     );
-    assert!(s
-        .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
-        )
-        .unwrap());
+    // The label is the 1.12 GlobalStrings' own.
     assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
-        )
-        .unwrap(),
-        "297"
-    );
-    // The labels are the 1.12 GlobalStrings' own.
-    assert_eq!(
-        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowFarclipLabel:GetText()")
+        s.eval::<String>("return OptionsFrameContainerBodyGraphicsRowUiScaleLabel:GetText()")
             .unwrap(),
-        "Terrain Distance"
+        "UI Scale"
     );
 
     // The swap, the other way: Audio in, Graphics out.
@@ -472,11 +462,12 @@ fn the_graphics_page_reads_the_cvar_table_on_select() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The Graphics sliders snap to the 1.12 panel grids and write clean short strings: farclip's
-/// grid is 177+n*60 — ANCHORED AT THE MINIMUM, so 300 lands on 297, not the multiple-of-60
-/// 300 — and uiscale's is the 0.01 percent grid. Selecting the page queues nothing.
+/// The uiScale row DEFERS (0961, era CommitFlag.Apply transcribed): moves snap to the 1.12
+/// 0.01 grid and update the readout, but the CVar does not move — the Apply button appears
+/// instead, commits the pending value on click, and disappears. Dragging back onto the
+/// committed value clears the pending without a commit (era's IsModified).
 #[test]
-fn the_graphics_sliders_snap_to_the_1_12_grids_and_write_clean_strings() {
+fn the_ui_scale_slider_defers_to_the_apply_button() {
     let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
@@ -485,40 +476,14 @@ fn the_graphics_sliders_snap_to_the_1_12_grids_and_write_clean_strings() {
         s.take_cvar_changes().is_empty(),
         "reading the table on select must not write it back"
     );
-
-    // farclip: a drag to 300 snaps DOWN the min-anchored grid to 297.
-    s.run("OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:SetValue(300)")
-        .unwrap();
-    assert!(s
-        .eval::<bool>(
-            "return math.abs(OptionsFrameContainerBodyGraphicsRowFarclipControlSlider:GetValue() - 297) < 0.001"
-        )
-        .unwrap());
-    assert_eq!(
-        s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
-        )
-        .unwrap(),
-        "297"
-    );
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("farclip".to_string(), "297".to_string())]
+    assert!(
+        !s.eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+            .unwrap(),
+        "no pending edit, no Apply button"
     );
 
-    // The stepper walks one 60-yard step up the same grid, on the era kit.
-    let _ = s.take_sounds();
-    s.run("OptionsFrameContainerBodyGraphicsRowFarclipControlForward:Click()")
-        .unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("farclip".to_string(), "357".to_string())]
-    );
-    assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
-
-    // uiScale: off-grid 0.787 snaps to 0.79, percent readout, two-decimal clean string.
+    // Off-grid 0.787 snaps to 0.79 and the readout follows — but NOTHING queues; the Apply
+    // button exists now (era shows and enables it together).
     s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.787)")
         .unwrap();
     assert_eq!(
@@ -528,37 +493,88 @@ fn the_graphics_sliders_snap_to_the_1_12_grids_and_write_clean_strings() {
         .unwrap(),
         "79%"
     );
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "a deferred row must not write the CVar on the move"
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return OptionsFrameApplyButton:IsEnabled()")
+        .unwrap());
+
+    // The stepper still moves the slider (and plays its kit) — still nothing queues.
+    let _ = s.take_sounds();
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlForward:Click()")
+        .unwrap();
+    assert!(s.take_cvar_changes().is_empty());
+    assert!(s
+        .take_sounds()
+        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
+
+    // Apply commits the LAST pending value, once, and the button goes away.
+    s.run("OptionsFrameApplyButton:Click()").unwrap();
     assert_eq!(
         s.take_cvar_changes(),
-        vec![("uiScale".to_string(), "0.79".to_string())]
+        vec![("uiScale".to_string(), "0.8".to_string())]
+    );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+
+    // A move away arms Apply; dragging back onto the committed value disarms it.
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.79)")
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
+        .unwrap();
+    assert!(!s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "arming and disarming never touched the CVar"
     );
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Defaults on the Graphics page: both CVars back to their registered defaults (uiScale 0.9,
-/// farclip 777), rows following, and ONLY the moved values queue.
+/// Pending edits are PANEL-wide like era's modified table: they survive a category switch
+/// (the row redisplays the pending value on return, era's GetValue-returns-pending) and die
+/// only when the window hides — the reopened window reads the committed truth.
 #[test]
-fn defaults_resets_the_graphics_page_to_registered_defaults() {
-    let mut s = audio_harness();
-    s.set_cvar_host("uiScale", "0.8");
-    s.set_cvar_host("farclip", "297");
-    let mut s = harness_on(s);
+fn a_pending_ui_scale_survives_the_page_switch_and_dies_on_hide() {
+    let mut s = harness_on(audio_harness());
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
     s.run("OptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
+        .unwrap();
     let _ = s.take_cvar_changes();
 
-    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
-    let changes = s.take_cvar_changes();
-    assert!(
-        changes.contains(&("uiScale".to_string(), "0.9".to_string())),
-        "{changes:?}"
+    // Off to Audio: the Apply button stays (the pending edit is not page-scoped)…
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    // …and back: the slider shows the PENDING value, not the committed one.
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>(
+            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
+        )
+        .unwrap(),
+        "70%"
     );
-    assert!(
-        changes.contains(&("farclip".to_string(), "777".to_string())),
-        "{changes:?}"
-    );
-    assert_eq!(changes.len(), 2, "only the moved values queue: {changes:?}");
+
+    // Hide discards (the era confirm dialog is cut): the reopened window reads the truth.
+    s.run("HideUIPanel(OptionsFrame)").unwrap();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
     assert_eq!(
         s.eval::<String>(
             "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
@@ -566,12 +582,164 @@ fn defaults_resets_the_graphics_page_to_registered_defaults() {
         .unwrap(),
         "90%"
     );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "the whole pending lifecycle never wrote the CVar"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Defaults on the Graphics page: uiScale back to its registered default (0.9), the row
+/// following, ONLY the moved value queuing — and a pending edit dies with it (the default
+/// write supersedes what Apply would have committed).
+#[test]
+fn defaults_resets_the_graphics_page_to_registered_defaults() {
+    let mut s = audio_harness();
+    s.set_cvar_host("uiScale", "0.8");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    // Stage a pending edit too — Defaults must kill it, not commit it.
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.7)")
+        .unwrap();
+    let _ = s.take_cvar_changes();
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    let changes = s.take_cvar_changes();
+    assert_eq!(
+        changes,
+        vec![("uiScale".to_string(), "0.9".to_string())],
+        "only the default write queues — never the dead pending"
+    );
     assert_eq!(
         s.eval::<String>(
-            "return OptionsFrameContainerBodyGraphicsRowFarclipControlValue:GetText()"
+            "return OptionsFrameContainerBodyGraphicsRowUiScaleControlValue:GetText()"
         )
         .unwrap(),
-        "777"
+        "90%"
     );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameApplyButton:IsVisible()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Controls is the DEFAULT page and has rows since 0961: opening the window lands on it with
+/// Defaults armed, and the rows read the table — Sticky Targeting INVERTED (checked when
+/// `deselectOnClick` is "0", the 1.12 interface panel's own arm), the plain flags direct.
+#[test]
+fn the_controls_page_reads_flags_with_the_sticky_inversion() {
+    let mut s = audio_harness();
+    s.set_cvar_host("deselectOnClick", "0");
+    s.set_cvar_host("autoLootDefault", "1");
+    let s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyControls:IsVisible()")
+        .unwrap());
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsEnabled()")
+        .unwrap());
+    assert!(
+        s.eval::<bool>("return OptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()")
+            .unwrap(),
+        "deselectOnClick '0' reads as Sticky Targeting CHECKED"
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()")
+        .unwrap());
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyControlsRowInvertMouseCheck:GetChecked()")
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerBodyControlsRowStickyTargetLabel:GetText()")
+            .unwrap(),
+        "Sticky Targeting"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The Controls checkboxes write their flags on the INTERFACE panel's kit mapping (checked →
+/// CheckBoxOn — OptionsFrame.lua's PlayClickSound, NOT the Audio page's inverted quirk), and
+/// Sticky Targeting writes the CVar inverted both ways.
+#[test]
+fn the_controls_checkboxes_write_flags_with_the_interface_panel_kit() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    assert!(
+        s.take_cvar_changes().is_empty(),
+        "reading the table on open must not write it back"
+    );
+    let _ = s.take_sounds();
+
+    // Invert Mouse on: flag "1", and the just-CHECKED box plays CheckBoxOn (normal mapping).
+    s.run("OptionsFrameContainerBodyControlsRowInvertMouseCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("mouseInvertPitch".to_string(), "1".to_string())]
+    );
+    assert!(s
+        .take_sounds()
+        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
+
+    // Sticky Targeting on: the write INVERTS — checking it writes deselectOnClick "0".
+    s.run("OptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("deselectOnClick".to_string(), "0".to_string())]
+    );
+
+    // …and off again: back to "1", the just-UNchecked box on the CheckBoxOff kit.
+    s.run("OptionsFrameContainerBodyControlsRowStickyTargetCheck:Click()")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("deselectOnClick".to_string(), "1".to_string())]
+    );
+    assert!(s
+        .take_sounds()
+        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOff".into())));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Defaults on the Controls page: the moved flags come back (deselectOnClick "1",
+/// autoLootDefault "0"), the rows follow, and only the moved values queue.
+#[test]
+fn defaults_resets_the_controls_page_to_registered_defaults() {
+    let mut s = audio_harness();
+    s.set_cvar_host("deselectOnClick", "0");
+    s.set_cvar_host("autoLootDefault", "1");
+    let mut s = harness_on(s);
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    let _ = s.take_cvar_changes();
+
+    s.run("OptionsFrameContainerDefaults:Click()").unwrap();
+    let changes = s.take_cvar_changes();
+    assert!(
+        changes.contains(&("deselectOnClick".to_string(), "1".to_string())),
+        "{changes:?}"
+    );
+    assert!(
+        changes.contains(&("autoLootDefault".to_string(), "0".to_string())),
+        "{changes:?}"
+    );
+    assert_eq!(changes.len(), 2, "only the moved values queue: {changes:?}");
+    assert!(
+        !s.eval::<bool>(
+            "return OptionsFrameContainerBodyControlsRowStickyTargetCheck:GetChecked()"
+        )
+        .unwrap(),
+        "deselectOnClick back at '1' reads as Sticky Targeting unchecked"
+    );
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyControlsRowAutoLootCheck:GetChecked()")
+        .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }

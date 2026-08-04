@@ -37,7 +37,6 @@ use bevy_egui::{
 use benilla_formats::ModelBlend;
 
 use crate::lighting::{ClockSource, GameClock, WowLighting};
-use crate::particles::ParticleTuning;
 use crate::view::ViewDistance;
 
 /// The debug state — resource-only, faithful defaults (decision 0026: the always-present config
@@ -347,7 +346,6 @@ fn debug_panel_ui(
     anim_hosts: Query<&crate::doodad_anim::DoodadAnimHost>,
     mat_anims: Query<&crate::doodad_anim::MatAnim>,
     uv_mats: Res<crate::doodad_anim::UvAnimMaterials>,
-    mut particles: ResMut<ParticleTuning>,
     mut sound_cfg: ResMut<crate::sound::SoundConfig>,
     mut cull_probe: ResMut<crate::wmo_portal::WmoCullProbe>,
     net_status: Res<crate::net::NetStatus>,
@@ -413,7 +411,7 @@ fn debug_panel_ui(
                         .show(ui, |ui| world_section(ui, &mut world));
 
                     egui::CollapsingHeader::new("Models")
-                        .default_open(true)
+                        .default_open(false)
                         .show(ui, |ui| {
                             ui.strong("Layer (blend mode)");
                             for i in 0..BLEND_LABELS.len() {
@@ -483,7 +481,7 @@ fn debug_panel_ui(
                         });
 
                     egui::CollapsingHeader::new("Lighting")
-                        .default_open(true)
+                        .default_open(false)
                         .show(ui, |ui| {
                             // Time of day — drives the DBC-sampled colors + the sun's day-arc.
                             ui.strong(format!(
@@ -599,21 +597,6 @@ fn debug_panel_ui(
 
                     // The object inspector is its own dev-chord `I` surface (see `interact.rs`), not a
                     // section here — identifying a thing shouldn't need the whole panel open.
-                    egui::CollapsingHeader::new("Particles")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            // The reference's own particleDensity CVar range — a real game
-                            // setting (spawn rate only), not a tuning knob. No distance cull
-                            // exists in the reference (wow-re part-distance-density.md).
-                            // (The intensity/size/tint A/B sliders retired once the colour-space
-                            // lane closed — 0150/0152; faithful 1.0 is the only path, the same
-                            // way the glow-card knobs died with 0159.)
-                            ui.add(
-                                egui::Slider::new(&mut particles.density, 0.25..=1.0)
-                                    .text("particleDensity (CVar)"),
-                            );
-                        });
-
                     egui::CollapsingHeader::new("Sound")
                         .default_open(false)
                         .show(ui, |ui| {

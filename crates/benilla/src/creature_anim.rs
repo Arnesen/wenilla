@@ -511,8 +511,8 @@ use spell_visual::{
 #[cfg(test)]
 pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
 pub(crate) use spell_visual::{
-    held_strike_sound, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx, SpellKitSound,
-    SpellVisuals,
+    held_strike_sound, ChainProcPlay, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx,
+    SpellKitSound, SpellVisuals,
 };
 
 /// The per-unit animation state machine.
@@ -804,6 +804,8 @@ impl Plugin for CreatureAnimPlugin {
             .add_message::<SpellKitSound>()
             .add_message::<SpellKitFx>()
             .add_message::<MissileSpawn>()
+            // The kit's beam edge (0955) — `crate::entities` owns what it becomes.
+            .add_message::<ChainProcPlay>()
             .add_message::<KitPush>()
             // The aura CharProc edges the slot watcher emits alongside its effect-model ones —
             // drained by `crate::aura_visual`, which owns the body's alpha/tint for an aura's life.

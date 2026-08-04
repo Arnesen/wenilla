@@ -73,25 +73,26 @@
 //! | 2 | `Width` | **HALF**-width — the visible ribbon is `2 × field2` yards |
 //! | 3 | `NoiseScale` | jitter amplitude as a **fraction of beam length** (`len × field3`), **re-rolled every frame** (`0x7b0950` dirties the geometry per frame), with a `0.75/0.25` advection blend against the previous roll |
 //! | 4 | ~~`TexCoordScale`~~ **`ScrollPeriod`** | **not a scale at all** — the scroll **period in seconds**: `phase = fmod(phase + dt, field4)` (`0x7af9d7`), `u = -(phase / field4)` (`0x7b055f`). A **negative** value reverses the scroll direction, magnitude unchanged — which is why the four *drain* rows ship `-0.5`: the texture flows back toward the caster |
-//! | 5 | `SegDuration` (ms) | the beam's life: expiry = `now + segmentCount × field5`, and **only for a one-shot** (see the flag below). The client also stores a seconds-scaled copy (`× 0.001f`, the constant at `0x801360`) which it then **never reads** |
-//! | 6 | `SegDelay` (ms) | **never reaches the renderer** — read from the row, dead thereafter |
+//! | 5 | ~~`SegDuration`~~ **`BoltLife`** (ms) | how long ONE HOP burns — `Bolt[i].end = Bolt[i].start + field5` (`0x6ec9eb`) — and the whole object's expiry, `now + boltCount × field5` (`0x6ecd30`). Per **hop**, not per subdivision segment. The client also stores a seconds-scaled copy (`× 0.001f`, the constant at `0x801360`) which it then **never reads** |
+//! | 6 | ~~`SegDelay`~~ **`BoltStagger`** (ms) | the delay between HOPS lighting up — `Bolt[i].start = t0 + i × field6` (`0x6ec9da`), its one consumer. It never reaches the *renderer*, which is what makes it look dead from the geometry side; it is what makes a 3-hop Chain Lightning arc **outward** rather than appearing all at once |
 //! | 7 | `Texture` | the beam's texture |
 //!
 //! The beam is **never tinted**: its colour word is always `0xFFFFFFFF`. Render state, settled
 //! against wow-re's own verified `EGxRs` map: **additive `SRC_ALPHA/ONE`, two-sided, depth-write
 //! OFF, fog off, emissive white, alpha-test `GEQUAL 1/255`**.
 //!
-//! **Geometry:** a chain is one polyline — `count+1` points, `count` segments — running **caster →
-//! t1 → t2 → t3**, never a fan and never one beam per target (the client's own `Bolt` records name
-//! `idxA = i`, `idxB = i+1`). The endpoints are **re-resolved from the live units every frame**
-//! (`0x6ec460`), so a beam tracks a moving caster and a moving target. The caster's end anchors at
-//! its `$CSL` attachment or, failing that, `0.75 × modelHeight × modelScale` (`0x6ec6f0`); every
-//! other endpoint anchors at an M2 attachment resolved from the spell's own `SpellVisual` field 9
-//! — the **same dest-attachment ordinal the missile uses** ([`MISSILE_ATTACH_TABLE`]) — with
-//! attachment 34 as the fallback.
+//! **Geometry:** a chain is one polyline of `count+1` **nodes** and `count` **hops** running
+//! **caster → t1 → t2 → t3**, never a fan and never one beam per target (the client's own `Bolt`
+//! records name `idxA = i`, `idxB = i+1`). Each hop is then subdivided on its own by field 1. The
+//! endpoints are **re-resolved from the live units every frame** (`0x6ec460`), so a beam tracks a
+//! moving caster and a moving target. The caster's end anchors at its `$CSL` attachment or,
+//! failing that, `0.75 × modelHeight × modelScale` (`0x6ec6f0`); every other endpoint anchors at
+//! an M2 attachment resolved from the spell's own `SpellVisual` field 9 — the **same
+//! dest-attachment ordinal the missile uses** ([`MISSILE_ATTACH_TABLE`]) — with attachment 34 as
+//! the fallback.
 //!
 //! **Lifetime** is the flag's, and only the flag's: a beam is dead when `flag == 0 && now >=
-//! expiry`. So a **cast** beam (flag 0) self-terminates after `segmentCount × SegDuration`, and a
+//! expiry`. So a **cast** beam (flag 0) self-terminates after `hopCount × BoltLife`, and a
 //! **channel** beam (flag 1) never expires by time at all — it ends only when the owning kit node
 //! is swept (`LightningObject::Stop 0x6ece10`, one caller image-wide).
 //!
@@ -138,13 +139,15 @@ pub struct ChainEffect {
     /// advancing by `dt` modulo this). **Negative reverses the direction**, magnitude unchanged —
     /// the four drain rows ship `-0.5`, flowing the texture back toward the caster.
     pub scroll_period_s: f32,
-    /// Field 5 — milliseconds. The beam's life: expiry = `now + segments × this`, which binds
-    /// **only a one-shot (cast) beam** — a channel beam ignores it and lives until swept.
-    pub seg_duration_ms: u32,
-    /// Field 6 — milliseconds. `200` on most rows, `300` on id 1, `0` on the three rows no kit
-    /// reaches — and **dead**: the §5 traced it no further than the row. Kept because it is a
-    /// column, read by nothing.
-    pub seg_delay_ms: u32,
+    /// Field 5 — milliseconds. How long **one hop** burns (`Bolt.end = Bolt.start + this`), and
+    /// through it the whole beam's expiry, `now + hops × this`. Binds **only a one-shot (cast)
+    /// beam** — a channel beam ignores it and lives until swept.
+    pub bolt_life_ms: u32,
+    /// Field 6 — milliseconds. The **stagger between hops**: hop `i` lights at `t0 + i × this`
+    /// (`0x6ec9da`, its one consumer), so a 3-hop cast arcs outward instead of appearing whole.
+    /// `200` on most rows, `300` on id 1, `0` on the three rows no kit reaches. Irrelevant to a
+    /// single-hop beam, and to a channel beam (whose per-hop window is bypassed entirely).
+    pub bolt_stagger_ms: u32,
     /// Field 7 — the beam's texture, as the DBC stores it (`Textures\SpellChainEffects\*.blp`).
     pub texture: String,
 }
@@ -176,8 +179,8 @@ fn chain_effects_schema() -> Schema {
     add("HalfWidth", FieldType::Float32);
     add("NoiseScale", FieldType::Float32);
     add("ScrollPeriod", FieldType::Float32);
-    add("SegDuration", FieldType::UInt32);
-    add("SegDelay", FieldType::UInt32);
+    add("BoltLife", FieldType::UInt32);
+    add("BoltStagger", FieldType::UInt32);
     add("Texture", FieldType::String);
     debug_assert_eq!(s.fields.len(), SPELL_CHAIN_EFFECTS_FIELDS);
     s
@@ -201,8 +204,8 @@ pub(super) fn load(chain: &mut Chain) -> Result<HashMap<u32, ChainEffect>> {
                 half_width: f32_at(r, 2).unwrap_or(0.0),
                 noise_scale: f32_at(r, 3).unwrap_or(0.0),
                 scroll_period_s: f32_at(r, 4).unwrap_or(0.0),
-                seg_duration_ms: u32_at(r, 5).unwrap_or(0),
-                seg_delay_ms: u32_at(r, 6).unwrap_or(0),
+                bolt_life_ms: u32_at(r, 5).unwrap_or(0),
+                bolt_stagger_ms: u32_at(r, 6).unwrap_or(0),
                 texture: str_at(&set, r, 7).unwrap_or_default(),
             },
         );

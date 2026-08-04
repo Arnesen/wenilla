@@ -45,7 +45,7 @@ pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
                     if let Some(c) = kit.chain_proc() {
                         match visuals.chain_effect(c.effect_id) {
                             Some(e) => println!(
-                                "           beam   chain {} x{} flag={} -> {} (segLen {} halfWidth {} noise {} scroll {}s life {}ms, delay {}ms dead)",
+                                "           beam   chain {} x{} flag={} -> {} (segLen {} halfWidth {} noise {} scroll {}s hopLife {}ms hopStagger {}ms)",
                                 c.effect_id,
                                 c.beams,
                                 u8::from(c.flag),
@@ -54,8 +54,8 @@ pub fn run(chain: &mut Chain, spell_id: u32) -> Result<()> {
                                 e.half_width,
                                 e.noise_scale,
                                 e.scroll_period_s,
-                                e.seg_duration_ms,
-                                e.seg_delay_ms,
+                                e.bolt_life_ms,
+                                e.bolt_stagger_ms,
                             ),
                             None => println!(
                                 "           beam   chain {} (NO SUCH SpellChainEffects ROW)",
