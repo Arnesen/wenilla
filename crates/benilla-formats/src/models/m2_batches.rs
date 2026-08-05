@@ -458,6 +458,13 @@ pub fn parse_m2_render_submeshes(
         // M2 render flag 0x04 = "Two-sided (no backface culling)" (wowdev.wiki M2 § Render flags).
         // Unset ⇒ the real client backface-culls this batch (visible from one side only).
         let two_sided = material.is_some_and(|m| m.flags.bits() & 0x04 != 0);
+        // **Where this batch's texture coordinates come from** — the two-hop
+        // `texCoordSet(+0x12) → texture_unit_lookup(0x9c)`, gated exactly as the reference gates it
+        // at `0x70b8bd` (`<= 2` = a vertex UV channel, higher = a GENERATED environment
+        // coordinate). Stage 0 only: we bind one texture per batch, and the reference tests the
+        // stage's own slot. An env batch authors no usable UVs at all, so the renderer must derive
+        // them — see `RenderSubmesh::env_map`.
+        let env_map = model.stage_is_env_mapped(batch, 0);
         // M2 render flag 0x01 = "Unlit" — lighting disabled, so the batch shows at full texture
         // brightness regardless of sun/ambient: lamp glass, window panes, glow cards. Reuses the same
         // fullbright `emissive` path as WMO self-illuminated glass. Verified: the lantern/wagon glass
@@ -647,6 +654,7 @@ pub fn parse_m2_render_submeshes(
                         && !separable.get(b).copied().unwrap_or(false)
                 })
             });
+            sub.env_map = env_map; // texture_unit_lookup > 2 → the runtime generates this stage's UVs
             sub.additive = additive; // M2 blend mode 3/4 → additive (glow cards)
             sub.no_depth_write = no_depth_write; // M2 render flag 0x10
             sub.no_depth_test = no_depth_test; // M2 render flag 0x08

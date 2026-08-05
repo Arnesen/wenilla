@@ -78,6 +78,9 @@ struct ExtractedDraw {
     blend: EffectBlend,
     topology: EffectTopology,
     fog: EffectFog,
+    /// The scene-light gate — a pipeline-key axis, so the merge walk's `RunKey` separates lit
+    /// from unlit runs through the pipeline id alone.
+    lit: bool,
     anchor: Vec3,
     bias: f32,
     raster_bias: i32,
@@ -184,6 +187,11 @@ pub struct EffectPipelineKey {
     /// keeps absolute verts and runs the mesh path's `clip_from_world`, so its depth ties
     /// against the drawn ground within the bias.
     raster_bias: i32,
+    /// Does the fragment multiply by the scene's matte light? The reference decides this per
+    /// emitter through a synthesized `M2Material` (`EffectDrawSpec::lit`), and it is a shader
+    /// def rather than a uniform bit so the 95% unlit majority keeps the identical instruction
+    /// stream it has today.
+    lit: bool,
 }
 
 impl SpecializedRenderPipeline for EffectPipeline {
@@ -250,6 +258,11 @@ impl SpecializedRenderPipeline for EffectPipeline {
         // draws' cam-relative rebase on the same predicate (decision 0781).
         if key.raster_bias != 0 {
             shader_defs.push("DECAL_WORLD_CLIP".into());
+        }
+        // The scene's matte light on this draw's RGB (the emitter's synthesized-material
+        // `GL_LIGHTING`; `EffectDrawSpec::lit` carries the byte law).
+        if key.lit {
+            shader_defs.push("EFFECT_LIT".into());
         }
         // `$WOW_PARTICLE_FLAT` — the fragment-input A/B (B16): solid magenta, no inputs.
         if std::env::var_os("WOW_PARTICLE_FLAT").is_some() {
@@ -338,6 +351,7 @@ fn extract_effects(
         blend: d.blend,
         topology: d.topology,
         fog: d.fog,
+        lit: d.lit,
         anchor: d.anchor,
         bias: d.bias,
         raster_bias: d.raster_bias,
@@ -380,6 +394,7 @@ fn queue_effects(
                     hdr: view.hdr,
                     blend: draw.blend,
                     raster_bias: draw.raster_bias,
+                    lit: draw.lit,
                 },
             );
             phase.add(Transparent3d {

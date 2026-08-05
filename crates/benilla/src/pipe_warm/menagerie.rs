@@ -143,6 +143,9 @@ pub(super) fn spawn_menagerie(
                         no_depth_write,
                         no_depth_test,
                         FogPolicy::Scene,
+                        // Not a `WowModelKey` axis (it swaps a sampled UV, not pipeline state), so
+                        // warming one side warms both.
+                        false,
                         ShadeSel::Lit,
                         0,
                         None,
@@ -178,6 +181,9 @@ pub(super) fn spawn_menagerie(
                         no_depth_write,
                         no_depth_test,
                         FogPolicy::Scene,
+                        // Not a `WowModelKey` axis (it swaps a sampled UV, not pipeline state), so
+                        // warming one side warms both.
+                        false,
                         ShadeSel::Lit,
                         0,
                         None,
@@ -222,6 +228,9 @@ pub(super) fn spawn_menagerie(
                 false,
                 false,
                 FogPolicy::Scene,
+                // Not a `WowModelKey` axis (it swaps a sampled UV, not pipeline state), so
+                // warming one side warms both.
+                false,
                 ShadeSel::Lit,
                 0,
                 None,
@@ -266,6 +275,9 @@ pub(super) fn spawn_menagerie(
                         no_depth_write,
                         false,
                         FogPolicy::Scene,
+                        // Not a `WowModelKey` axis (it swaps a sampled UV, not pipeline state), so
+                        // warming one side warms both.
+                        false,
                         ShadeSel::Lit,
                         0,
                         None,
@@ -661,6 +673,7 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         no_depth_write: false,
         no_depth_test: false,
         fog_policy: FogPolicy::Scene,
+        env_map: false,
         billboard: None,
         welded_billboard: false,
         alpha_anim: None,

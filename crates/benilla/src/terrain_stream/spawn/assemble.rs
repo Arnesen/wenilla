@@ -186,6 +186,7 @@ pub(crate) fn spawn_model_entities(
             sub.no_depth_write,
             sub.no_depth_test,
             sub.fog_policy,
+            sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
             shade,
             batch_order,
             sub.uv_anim.as_ref(),
@@ -226,6 +227,7 @@ pub(crate) fn spawn_model_entities(
                 sub.no_depth_write,
                 sub.no_depth_test,
                 sub.fog_policy,
+                sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                 shade,
                 batch_order,
                 sub.uv_anim.as_ref(),

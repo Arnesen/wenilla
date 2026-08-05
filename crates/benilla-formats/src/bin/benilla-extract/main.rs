@@ -308,6 +308,18 @@ enum Command {
         /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
         prefix: Option<String>,
     },
+    /// Sweep every `.m2` (optionally under a path prefix) and census the batches whose texture
+    /// coordinates are **GENERATED, not authored** — the sphere-map environment stages
+    /// (`texture_unit_lookup[texCoordSet] > 2`, the reference's gate at `0x70b8bd`). Such a batch
+    /// carries no usable UVs *by design* (the artist collapses the mesh onto one point because the
+    /// runtime supplies the coordinates), so a renderer that reads the vertex UV paints the whole
+    /// surface in **one texel** of a reflection sheet — silently, with no missing geometry to
+    /// notice. `DEGENERATE` marks exactly that population; the rest carry unused leftover UVs and
+    /// misdraw as a static smear instead. The instrument behind the Deeprun Tram glass tube.
+    Envmapscan {
+        /// Internal-path prefix filter (e.g. `world`), case-insensitive; all models if omitted.
+        prefix: Option<String>,
+    },
     /// Sweep every `.m2` and report which sampler ADDRESS MODES the corpus asks of each texture
     /// path, and how many paths are asked for more than one — the design check behind decision
     /// 0763 (the mode lives on the sampler, which rides the `Image`, which is keyed by path).
@@ -480,6 +492,19 @@ enum Command {
         /// Case-insensitive substring of the prop's model path (e.g. `lightray`); all if omitted.
         filter: Option<String>,
     },
+    /// Sweep every WMO **root** (optionally under a path prefix) and list the placed MODD props
+    /// the INTERIOR lighting lane commits as **literal black**. That lane's entire base light is
+    /// the MODD entry's own baked colour (ambient `cap96`, diffuse `floor112` — `0x694e90` →
+    /// `0x6a77e0`), and the floor leg is a hue-preserving scale by `112/max`, so a colour of
+    /// exactly `#000000` has nothing to raise and both words come out zero: the prop is lit by
+    /// nothing but its owning group's MOLR fixtures, and a group with none in range draws a pure
+    /// black silhouette. The `ALSO-EXT` column is the divergence half — a prop an EXTERIOR group's
+    /// MODR *also* names is one the reference reaches through that group too, while our
+    /// single-instance first-referrer-wins ownership pins it to the interior lane from every angle.
+    Darkpropscan {
+        /// Internal-path prefix to limit the sweep (e.g. `world\wmo\azeroth`); all if omitted.
+        prefix: Option<String>,
+    },
     /// List individual doodad (MDDF) and WMO (MODF) placements around a world position whose
     /// model path contains a substring — position, Euler rotation (deg), scale, uniqueId. The
     /// "point at a thing in the world, tell me exactly how it's placed" instrument: an
@@ -642,6 +667,7 @@ fn main() -> Result<()> {
         Command::Partslotscan { prefix } => scan::partslotscan(&mut chain, prefix.as_deref())?,
         Command::Seqclockscan { prefix } => scan::seqclockscan(&mut chain, prefix.as_deref())?,
         Command::Uvwrapscan { prefix } => scan::uvwrapscan(&mut chain, prefix.as_deref())?,
+        Command::Envmapscan { prefix } => scan::envmapscan(&mut chain, prefix.as_deref())?,
         Command::Texmodescan { prefix } => scan::texmodescan(&mut chain, prefix.as_deref())?,
         Command::Fxordercensus { prefix } => scan::fxordercensus(&mut chain, prefix.as_deref())?,
         Command::Shardcensus { prefix } => scan::shardcensus(&mut chain, prefix.as_deref())?,
@@ -692,6 +718,7 @@ fn main() -> Result<()> {
             internal_path,
             filter,
         } => scan::wmodoodads(&mut chain, &internal_path, filter.as_deref())?,
+        Command::Darkpropscan { prefix } => scan::darkpropscan(&mut chain, prefix.as_deref())?,
         Command::Placescan {
             map,
             center_x,

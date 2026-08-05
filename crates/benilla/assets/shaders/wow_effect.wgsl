@@ -75,6 +75,10 @@ struct VertexOutput {
     // View-space depth (+ in front of the camera) — the fog/farclip planar eye-Z (exact on
     // the cam-relative path, where the view transform is pure rotation).
     @location(2) view_z: f32,
+    // World-space offset from the eye — what `EFFECT_LIT` builds its camera-facing normal from.
+    // Already exactly `v.position` on the free-floating path (0733 §2's rebase); the decal path
+    // carries absolute verts, so it subtracts the eye back out.
+    @location(3) world_offset: vec3<f32>,
 };
 
 @vertex
@@ -91,6 +95,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     out.clip_position = view.clip_from_world * vec4<f32>(v.position, 1.0);
     // Fog/farclip eye-Z via the full affine transform (yards-scale — rounding is irrelevant).
     out.view_z = -(view.view_from_world * vec4<f32>(v.position, 1.0)).z;
+    out.world_offset = v.position - view.world_position;
 #else
     // Free-floating families: cam-relative verts (0733 §2). view_from_world = [R | −R·cam];
     // for a cam-relative point the translation column is exactly the subtraction prepare
@@ -102,6 +107,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     ) * v.position;
     out.clip_position = view.clip_from_view * vec4<f32>(view_pos, 1.0);
     out.view_z = -view_pos.z;
+    out.world_offset = v.position;
 #endif
     out.uv = v.uv;
     out.color = v.color;
@@ -127,6 +133,36 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // reference multiplies.
     let c = textureSample(effect_texture, effect_sampler, in.uv) * in.color;
     var rgb = c.rgb;
+#ifdef EFFECT_LIT
+    // SCENE LIGHTING (EGxRs id 0x0e), for the emitters that ask for it. A particle emitter owns
+    // no material: the reference synthesizes an `M2Material` from the emitter's file record every
+    // draw (`0x70d8b0`) and runs the SAME batch state producer as an ordinary mesh submesh, so
+    // `GL_LIGHTING` lands on a particle quad exactly as on geometry — enabled iff the emitter
+    // CLEARS file flag 0x1 and its blend mode is not Mod/Mod2x (wow-re `part-scene-multipliers.md`
+    // §1, byte-verified at `0x70baf0` @`0x70bb00`; the gate itself is `EffectDrawSpec::lit`).
+    //
+    // File bit 0x1 is the UNLIT flag — the inverse of the wowdev-wiki lore — so the fire and spell
+    // corpus (which sets it) stays bright at night, while the environment sheets that clear it
+    // take the world's light: waterfall spray, chimney smoke, blown dust, snow. Rendering those
+    // unlit is a full-white cutout against shaded terrain (the Zul'Gurub waterfall foam).
+    //
+    // The term is the fixed-function matte `wow_model.wgsl` applies to a mesh —
+    // `clamp(ambient + diffuse·max(N·L, 0))` — against the CAMERA-FACING normal the reference's
+    // quad writer uploads for these emitters. On the cam-relative path a vertex position IS its
+    // offset from the eye in world axes, so the direction back to the camera is its negation;
+    // the degenerate at-the-eye case falls back to the sun-facing normal (full light), which is
+    // the limit the billboard approaches anyway.
+    let to_eye = -in.world_offset;
+    let len2 = dot(to_eye, to_eye);
+    let L = -normalize(wow_light.light_sun.xyz);
+    let N = select(L, to_eye * inverseSqrt(len2), len2 > 1e-12);
+    let lit = clamp(
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * max(dot(N, L), 0.0),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    rgb = rgb * lit;
+#endif
     // The scene day-night fog — byte-verified ON the particle path (wow-re
     // part-scene-multipliers.md): the reference runs the SAME per-vertex linear fog as world
     // geometry — same start/end, same day-night colour, applied in gamma space BEFORE blend,

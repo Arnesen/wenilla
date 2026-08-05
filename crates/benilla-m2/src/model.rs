@@ -244,6 +244,13 @@ pub struct M2Model {
     /// The transparency lookup table (header `0xa4`, u16): `weight_combo_index` indexes this to reach
     /// [`Self::transparency_tracks`] (verified two-hop, wow-re `m2-alpha-combine-cull`).
     pub transparency_lookup: Vec<u16>,
+    /// The **texture-unit lookup** table (header `0x9c`, u16): `texture_coord_combo_index` (texUnit
+    /// `+0x12`) indexes this to decide where a stage's texture coordinates come from. A value
+    /// `< 3` names one of the vertex UV channels; **`>= 3` (real art: `0xffff`) is a *generated*
+    /// environment coordinate** — the model authors no usable UVs for that stage and the runtime
+    /// derives them from the view-space reflection vector. See
+    /// [`M2Model::stage_is_env_mapped`].
+    pub texture_unit_lookup: Vec<u16>,
     /// The texture-transform records (see [`M2TextureTransform`]), selected via
     /// `texture_transform_combo_index → texture_transform_lookup → here`.
     pub texture_transforms: Vec<M2TextureTransform>,
@@ -295,6 +302,27 @@ pub struct M2Model {
 }
 
 impl M2Model {
+    /// **Are this batch's stage-`stage` texture coordinates GENERATED (environment-mapped) rather
+    /// than read from the vertex UVs?**
+    ///
+    /// The reference's gate, at `0x70b8bd` (`cmp word[ [MD20+0xa0][texCoordSet + stage] ], 0x2; jbe`
+    /// — wow-re `m2-texanim-uv` §2, models.md §936/§944): a [`Self::texture_unit_lookup`] entry
+    /// `<= 2` names a vertex UV channel, anything higher (real art authors `0xffff`) is a
+    /// **generated environment coordinate**. Such a stage can never be `textureTransform`-driven,
+    /// and the shipped vertex program writes it as the sphere-map remap of the view-space
+    /// reflection vector — `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5`, the `(0.5,0,0,0.5 /
+    /// 0,0.5,0,0.5)` matrix wow-re byte-derived at `0x70b8d0`.
+    ///
+    /// **An out-of-range index reads as env-mapped**, matching the reference: `0x70b8bd` indexes
+    /// the table unguarded and falls through to the same `else` branch that writes the env remap.
+    /// That is also the only safe direction — a model whose art relies on generated coordinates
+    /// authors *no usable UVs at all* (`GnomeSubwayGlass.m2`: all 330 vertices at exactly
+    /// `(0,0)`), so mistaking env for UV paints the whole mesh in a single corner texel.
+    pub fn stage_is_env_mapped(&self, batch: &crate::SkinBatch, stage: u16) -> bool {
+        let idx = batch.texture_coord_combo_index as usize + stage as usize;
+        self.texture_unit_lookup.get(idx).is_none_or(|&v| v > 2)
+    }
+
     /// **Does this model author `AnimationData.dbc` id `anim_id`?** — the reference's `0x711960`,
     /// byte-for-byte: a bounds-checked read of [`Self::animation_lookup`] (`0x710310` returns the
     /// `0xffff` sentinel for an out-of-range index) compared against `0xffff`.

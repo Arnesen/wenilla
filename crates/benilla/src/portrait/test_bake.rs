@@ -137,6 +137,7 @@ fn bake_test(
                     s.no_depth_write,
                     s.no_depth_test,
                     s.fog_policy,
+                    s.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                     crate::model_render::ShadeSel::Lit, // booth look: never ground-shaded
                     0,
                     None,                // static UVs

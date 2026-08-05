@@ -104,6 +104,7 @@ pub(super) fn update_model_particles(
                         sub.no_depth_write,
                         sub.no_depth_test,
                         sub.fog_policy,
+                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                         // The same LIT lane as every entity M2 (the §9 chain).
                         ShadeSel::Lit,
                         0,

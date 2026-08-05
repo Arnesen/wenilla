@@ -139,8 +139,11 @@ pub struct WmoModel {
     pub doodad_base: Vec<DoodadBase>,
     /// Per-MODD **instantiating group** (the first group whose MODR refs name it), parallel to
     /// [`Self::doodads`]; `None` for a MODD no group references. The reference creates a doodad
-    /// once, on the first visible-group walk that reaches it, and that create is what freezes its
-    /// lighting lane — so this is the LIGHTING key ([`Self::doodad_base`]), not the cull key.
+    /// once, on the first visible-group walk that reaches it, and that create is what fills its
+    /// baked colour words — so this names the MOLR set the interior fold gates on
+    /// ([`Self::doodad_base`]). It is **not** the interior/exterior class: every referrer writes the
+    /// lane of the same def and exterior is absorbing, so the class reads [`Self::doodad_groups`]
+    /// (see [`resolve_doodad_bases`]).
     pub doodad_owner: Vec<Option<u16>>,
     /// Per-MODD **referencing groups** — every group whose MODR names it, parallel to
     /// [`Self::doodads`]; empty for a MODD no group references.
@@ -373,8 +376,9 @@ pub fn floor168(c: [u8; 3]) -> [f32; 3] {
 
 /// Invert MODR: MODD index → its **instantiating** group. First referencing group wins — the
 /// reference creates a doodad once, on the first visible-group walk that names it, and that create
-/// is what freezes its lighting lane. `None` = referenced by no group at all (the reference never
-/// instantiates such a MODD). This is the LIGHTING key only; the *cull* key is [`modr_refs`].
+/// is what fills its baked colour words. `None` = referenced by no group at all (the reference never
+/// instantiates such a MODD). This picks the interior lane's **MOLR light set**; the interior/exterior
+/// *class* is the whole referrer set's ([`resolve_doodad_bases`]), and the *cull* key is [`modr_refs`].
 fn modr_owners(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Option<u16>> {
     let mut owner: Vec<Option<u16>> = vec![None; doodad_count];
     for (gi, refs) in group_doodad_refs.iter().enumerate() {
@@ -409,33 +413,51 @@ fn modr_refs(doodad_count: usize, group_doodad_refs: &[Vec<u16>]) -> Vec<Arc<[u1
     refs.into_iter().map(Arc::from).collect()
 }
 
-/// Resolve every MODD placement's lighting base once, at load. Ownership and interior class follow
-/// the faithful create path: a doodad belongs to the group(s) whose **MODR** references it (the
-/// instantiate loop is per-group over MODR — never a spatial test), the owning group's
-/// interior/exterior class (`MOGI flags & 0x48`) picks the lane, and the owning group's **MOLR**
-/// list is its complete point-light candidate set. A MODD referenced by no group is never
-/// instantiated by the reference at all — Exterior here (the harmless default if our spawner shows
-/// it anyway).
+/// Resolve every MODD placement's lighting base once, at load. Ownership follows the faithful
+/// create path: a doodad belongs to the group(s) whose **MODR** references it (the instantiate loop
+/// is per-group over MODR — never a spatial test), and the interior lane's point-light candidate
+/// set is its owning group's **MOLR** list. A MODD referenced by no group is never instantiated by
+/// the reference at all — Exterior here (the harmless default if our spawner shows it anyway).
 ///
-/// `owner` is [`modr_owners`]' inversion, shared with the portal-cull key ([`WmoModel::doodad_owner`])
-/// so the lighting lane and the cull can never disagree about which group a prop belongs to.
+/// **EXTERIOR WINS.** The class is *not* the first referrer's: the reference caches one
+/// `CMapDoodadDef` per (MODD index, **placement instance**) — `0x694e90` matches on
+/// `[def+0xb4] == modd` *and* `[def+0xc8] == [placement+0x7c]+1` — so every group of a placed
+/// building writes the lane of the *same* def, and the classify at `0x695aa0` makes exterior
+/// absorbing: an interior group refuses to mark a def already flagged exterior
+/// (`695ba0 test al,0x4; 695ba2 jne` → the exterior leg), while an exterior group **clears** the
+/// interior bit and sets its own (`695bbd and ecx,0xfffd; 695bc3 or ecx,0x4`). So a prop any
+/// exterior group names is sky-lit from the first frame that group is walked, and never goes back.
+/// Taking the first referrer instead pinned Booty Bay's entrance arch — named by g22 (interior) and
+/// g42 (exterior) — to the interior lane, whose whole base is the MODD colour: `#000000` there, i.e.
+/// a pure black silhouette at the town gate (decision 0969; `benilla-extract darkpropscan` is the
+/// corpus census).
+///
+/// `owner` is [`modr_owners`]' inversion and `refs` is [`modr_refs`]' — the latter shared with the
+/// portal-cull key ([`WmoModel::doodad_groups`]), so the lane and the cull read the same relation.
 fn resolve_doodad_bases(
     doodads: &[WmoDoodad],
     groups: &[WmoGroupInfo],
     owner: &[Option<u16>],
+    refs: &[Arc<[u16]>],
     group_light_refs: &[Vec<u16>],
 ) -> Vec<DoodadBase> {
+    let interior_group = |gi: &u16| -> bool {
+        groups
+            .get(*gi as usize)
+            .is_some_and(|g: &WmoGroupInfo| g.interior)
+    };
     doodads
         .iter()
-        .zip(owner)
-        .map(|(d, owner)| {
-            let Some(gi) = owner else {
+        .enumerate()
+        .map(|(di, d)| {
+            let Some(gi) = owner.get(di).copied().flatten() else {
                 return DoodadBase::Exterior;
             };
-            let interior = groups
-                .get(*gi as usize)
-                .is_some_and(|g: &WmoGroupInfo| g.interior);
-            if !interior {
+            // Exterior is absorbing across the whole referrer set — not just the first referrer.
+            let all_interior = refs
+                .get(di)
+                .is_some_and(|gs| !gs.is_empty() && gs.iter().all(interior_group));
+            if !all_interior {
                 return DoodadBase::Exterior;
             }
             let rgb = [d.color[0], d.color[1], d.color[2]];
@@ -443,7 +465,7 @@ fn resolve_doodad_bases(
                 ambient: cap96(rgb),
                 diffuse: floor112(rgb),
                 light_refs: group_light_refs
-                    .get(*gi as usize)
+                    .get(gi as usize)
                     .cloned()
                     .unwrap_or_default(),
             })
@@ -624,6 +646,7 @@ impl AssetLoader for WmoModelLoader {
                     sidn: sub.sidn, // MOMT SIDN (0x10) — the authored night-glow colour
                     window: sub.window, // MOMT WINDOW (0x20) — the interior midpoint light
                     additive: sub.additive, // always false for WMO (additive WMO batches deferred)
+                    env_map: false, // M2-only (the WMO env/specular overlay is a separate path)
                     no_depth_write: false, // WMO uses the standard opaque/transparent depth state
                     no_depth_test: false,
                     fog_policy: sub.fog_policy, // always Scene for WMO (remap_submesh's default)
@@ -640,14 +663,16 @@ impl AssetLoader for WmoModelLoader {
         }
         // Resolve every MODD placement's base once — placements, colours, MODR ownership, and MOLR
         // light lists are all fixed in the root/groups, so nothing here is ever re-derived. Both
-        // MODR inversions come off the same refs: the first-owner one freezes the lighting lane at
-        // create, the full-set one is the per-visible-group cull key.
+        // MODR inversions come off the same refs: the first-owner one names the MOLR set the
+        // interior fold gates on, the full-set one is both the per-visible-group cull key and the
+        // exterior-wins lane test.
         let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
         let doodad_groups = modr_refs(root.doodads().len(), &group_doodad_refs);
         let doodad_base = resolve_doodad_bases(
             root.doodads(),
             root.group_infos(),
             &doodad_owner,
+            &doodad_groups,
             &group_light_refs,
         );
 
@@ -742,7 +767,14 @@ mod doodad_base_tests {
         let raised = as_bytes(floor112([56, 28, 14]));
         assert_eq!(raised[0], 112); // max channel lands on the 112 value
         assert_eq!(raised, [112, 56, 28]); // pure scale — hue/saturation preserved
-        assert_eq!(as_bytes(floor112([0, 0, 0])), [0, 0, 0]); // black stays black (no divide)
+                                           // Black stays black — and that IS the reference, not just our divide-by-zero guard. The
+                                           // raise re-emits through HSV, and `RGBtoHSV(0,0,0)` gives S=0/H=−1 (`7bbcb5`/`7bbccd`) so
+                                           // `HSVtoRGB` would return the grey `(V,V,V)` (`7bbd76`) — but the caller SCALES the value
+                                           // rather than setting it (`6a78a5 fild thresh · 6a78ab fidiv max · 6a78b1 fmul V`), and
+                                           // `V·thresh/max` is 0 when V is. `6a780e cmp dl,1 / 6a7813 mov bl,1` forces max to 1 only
+                                           // to keep that `fidiv` finite. So a zero-colour interior prop commits black in the real
+                                           // client too, and the black Booty Bay arch was a LANE bug, never this (decision 0969).
+        assert_eq!(as_bytes(floor112([0, 0, 0])), [0, 0, 0]);
     }
 
     #[test]
@@ -773,10 +805,11 @@ mod doodad_base_tests {
         let modr = vec![vec![0u16], vec![1u16]];
         let molr = vec![vec![7u16, 9u16], vec![3u16]];
         let owner = modr_owners(doodads.len(), &modr);
+        let refs = modr_refs(doodads.len(), &modr);
         // The same inversion the portal cull keys props on (decision 0689): owned props name their
         // group, the unreferenced one names none — so it is the one prop the cull can't hide.
         assert_eq!(owner, vec![Some(0), Some(1), None]);
-        let bases = resolve_doodad_bases(&doodads, &groups, &owner, &molr);
+        let bases = resolve_doodad_bases(&doodads, &groups, &owner, &refs, &molr);
         match &bases[0] {
             DoodadBase::Interior(b) => {
                 assert_eq!(b.light_refs, vec![7, 9]);
@@ -789,6 +822,118 @@ mod doodad_base_tests {
         assert_eq!(bases[2], DoodadBase::Exterior);
     }
 
+    /// EXTERIOR WINS over every interior referrer, whatever the MODR order — the reference's def is
+    /// per (MODD, placement) and its classify makes the exterior bit absorbing (`0x695aa0`:
+    /// `695ba2 jne` refuses to re-mark interior, `695bbd/695bc3` clears interior and sets exterior).
+    /// Booty Bay's entrance arch is the live case: g22 (interior) names it FIRST and g42 (exterior)
+    /// second, its MODD colour is `#000000`, and first-referrer-wins therefore drew it as a pure
+    /// black silhouette at the town gate (decision 0969).
+    #[test]
+    fn one_exterior_referrer_makes_the_whole_prop_exterior() {
+        let doodads = vec![
+            prop([0, 0, 0, 255]), // g0 (interior) names it first, g1 (exterior) also names it
+            prop([0, 0, 0, 255]), // interior groups only
+        ];
+        let groups = [grp(true), grp(false), grp(true)];
+        // g0 names both props, g1 (exterior) names only prop 0, g2 (interior) names only prop 1.
+        let modr = vec![vec![0u16, 1u16], vec![0u16], vec![1u16]];
+        let molr = vec![vec![7u16], Vec::new(), vec![4u16]];
+        let owner = modr_owners(doodads.len(), &modr);
+        let refs = modr_refs(doodads.len(), &modr);
+        assert_eq!(
+            owner,
+            vec![Some(0), Some(0)],
+            "g0 is the first referrer of both"
+        );
+        let bases = resolve_doodad_bases(&doodads, &groups, &owner, &refs, &molr);
+        assert_eq!(
+            bases[0],
+            DoodadBase::Exterior,
+            "the exterior referrer wins even though an interior group names it first"
+        );
+        match &bases[1] {
+            // Interior-only: the lane still applies, and a zero MODD colour still commits black —
+            // the reference's own arithmetic (`0x6a77e0` forces max=1 only to dodge the divide, so
+            // the HSV raise re-emits value 0·112/1 = 0). Only its MOLR fixtures can light it.
+            DoodadBase::Interior(b) => {
+                assert_eq!(b.ambient, [0.0; 3]);
+                assert_eq!(b.diffuse, [0.0; 3]);
+                assert_eq!(b.light_refs, vec![7]);
+            }
+            other => panic!("interior-only prop must keep the MODD-colour lane, got {other:?}"),
+        }
+    }
+
+    /// GOLDEN, on the shipped asset that produced the report: Booty Bay's entrance arch
+    /// (`BootyBay.wmo` MODD[3], `BootyBayEntrance_02`, MODF uid 118213 at world
+    /// (-14258.29, 330.26, 44.00)) resolves **Exterior**. Its MODR referrers are g22 (interior,
+    /// first) and g42 (exterior), and its MODD colour is `#000000` — so first-referrer-wins put it
+    /// on the interior lane with an all-zero base and drew it as a pure black silhouette over the
+    /// town gate. This reads the real root + group files through the same inversions the loader
+    /// calls, so it fails the moment the lane law regresses (decision 0969).
+    #[test]
+    fn booty_bays_entrance_arch_is_sky_lit_not_a_black_silhouette() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let stem = "World\\wmo\\Azeroth\\Buildings\\Stranglethorn_BootyBay\\BootyBay";
+        let chain = benilla_formats::Chain::open(&data).expect("open vanilla patch chain");
+        let bytes = chain
+            .read(&format!("{stem}.wmo"))
+            .expect("read BootyBay.wmo");
+        let root = parse_wmo_root(&bytes).expect("parse BootyBay.wmo");
+        let refs: Vec<Vec<u16>> = (0..root.group_count())
+            .map(|gi| {
+                chain
+                    .read(&format!("{stem}_{gi:03}.wmo"))
+                    .map(|g| wmo_group_doodad_refs(&g))
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let arch = 3usize;
+        assert!(
+            root.doodads()[arch]
+                .model
+                .to_ascii_lowercase()
+                .contains("bootybayentrance_02"),
+            "MODD[3] should be the entrance arch, got {}",
+            root.doodads()[arch].model
+        );
+        assert_eq!(
+            root.doodads()[arch].color,
+            [0, 0, 0, 255],
+            "the arch's baked MODD colour is unlit black — that is what made the lane load-bearing"
+        );
+        let owner = modr_owners(root.doodads().len(), &refs);
+        let groups = modr_refs(root.doodads().len(), &refs);
+        assert_eq!(
+            owner[arch],
+            Some(22),
+            "an INTERIOR group still names the arch first"
+        );
+        assert!(
+            groups[arch]
+                .iter()
+                .any(|&g| !root.group_infos()[g as usize].interior),
+            "…and an EXTERIOR group also names it — the case exterior-wins decides"
+        );
+        let bases = resolve_doodad_bases(
+            root.doodads(),
+            root.group_infos(),
+            &owner,
+            &groups,
+            &vec![Vec::new(); root.group_count() as usize],
+        );
+        assert_eq!(
+            bases[arch],
+            DoodadBase::Exterior,
+            "the entrance arch must take the sky-lit lane, not the all-zero MODD-colour base"
+        );
+    }
+
     /// A group with NO MOLR chunk gives its doodads an EMPTY light set — the abbey's group 3 case:
     /// the director's stand receives zero point light, its own flame included (machine-zero in the
     /// reference decode).
@@ -798,6 +943,7 @@ mod doodad_base_tests {
             &[prop([120, 110, 150, 255])],
             &[grp(true)],
             &[Some(0)],
+            &[Arc::from(vec![0u16])],
             &[Vec::new()],
         );
         match &bases[0] {
@@ -807,11 +953,11 @@ mod doodad_base_tests {
     }
 
     /// A MODD named by several groups resolves to its **first** referencing group, and the mapping is
-    /// dense over the doodad list — the LIGHTING lane keys off this (the create that freezes the base
-    /// runs once, on the first visible-group walk to reach it). Out-of-range MODR entries (a
-    /// malformed group) are ignored rather than panicking.
+    /// dense over the doodad list — the interior fold's MOLR set keys off this (the create that fills
+    /// the baked words runs once, on the first visible-group walk to reach it). Out-of-range MODR
+    /// entries (a malformed group) are ignored rather than panicking.
     #[test]
-    fn a_shared_modd_is_lit_by_its_first_referencing_group() {
+    fn a_shared_modd_takes_its_first_referencing_groups_molr() {
         // g0 names doodad 2; g1 names 0 and 2; g2 names 1 — plus a ref past the end of the list.
         let modr = vec![vec![2u16], vec![0u16, 2u16], vec![1u16, 99u16]];
         assert_eq!(

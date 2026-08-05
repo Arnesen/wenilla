@@ -324,6 +324,10 @@ pub struct ParticleEmitterDef {
     pub bone: u16,
     pub shape: ParticleShape,
     pub blend: ParticleBlend,
+    /// Does the scene's light multiply this emitter's quads? See [`lit_of`] for the byte law — it
+    /// needs the RAW blend field, which [`ParticleBlend`] collapses (5/6 fold to `Alpha`), so the
+    /// verdict is baked here at parse rather than re-derived downstream.
+    pub lit: bool,
     /// **Geometry model** (file+0x18 count / +0x1c offset, an `M2Array<char>` path — wow-re
     /// `part-model-particles.md`): when it names a resolvable `.m2`, this emitter spawns tiny
     /// 3-D MODEL instances instead of billboard quads (Whirlwind's blades, Cone of Cold's
@@ -611,6 +615,36 @@ fn blend_of(v: u8) -> ParticleBlend {
     }
 }
 
+/// `DAT_00811fa8` — the reference's per-blend-mode lighting table, indexed by the emitter's RAW
+/// blend field (file+0x28): the multiply/modulate modes light nothing, every other mode does
+/// (wow-re `part-scene-multipliers.md` §1, VERIFIED at `0x70bb0a`).
+const LIGHTING_BY_BLEND: [bool; 7] = [true, true, true, true, true, false, false];
+
+/// Does the reference draw this emitter's quads **LIT** by the scene?
+///
+/// A particle emitter has no material of its own: the reference *synthesizes* an `M2Material` from
+/// the file record every draw (`0x70d8b0`) and runs it through the SAME batch state producer as an
+/// ordinary mesh submesh, so `GL_LIGHTING` (EGxRs id `0x0e`) is decided exactly as it is for a
+/// mesh. Byte-verified at `0x70baf0` @`0x70bb00` (wow-re `part-scene-multipliers.md` §1):
+///
+/// ```text
+/// lit  ⇔  (file+0x04 bit 0x1 CLEAR)  AND  DAT_00811fa8[file+0x28] ≠ 0
+/// ```
+///
+/// **File bit `0x1` is the UNLIT flag** — the *inverse* of the wowdev-wiki lore ("0x1 = affected by
+/// lighting"), and matching the M2 render-flag `0x01 = unlit` convention everywhere else in the
+/// format. That polarity is the whole point: the fire/spell corpus authors `0x1` and stays bright at
+/// night, while the ambient environment sheets that CLEAR it — waterfall spray, chimney smoke,
+/// blown dust and snow — are shaded by the world's own light like the geometry they sit against.
+/// Rendering those unlit puts a full-white foam sheet in a shaded jungle (the Zul'Gurub waterfall).
+fn lit_of(flags: u32, blend_byte: u8) -> bool {
+    flags & 0x1 == 0
+        && LIGHTING_BY_BLEND
+            .get(usize::from(blend_byte))
+            .copied()
+            .unwrap_or(true)
+}
+
 fn shape_of(v: u16) -> ParticleShape {
     match v {
         2 => ParticleShape::Sphere,
@@ -773,6 +807,7 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
             geometry_model,
             recursion_model,
             blend: blend_of(bytes[e + 0x28]),
+            lit: lit_of(le_u32(bytes, e + 0x04), bytes[e + 0x28]),
             texture,
             tile_rows: tiles.0,
             tile_cols: tiles.1,
@@ -823,6 +858,58 @@ pub fn parse_m2_particle_emitters(bytes: &[u8]) -> Result<Vec<ParticleEmitterDef
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **File bit 0x1 is UNLIT, not "lit"** — the polarity this whole mechanism turns on, and the
+    /// one the community table gets backwards (wowdev: "0x1 = affected by lighting"; the binary
+    /// forces `GL_LIGHTING` OFF on that bit, wow-re `part-scene-multipliers.md` §1 @`0x70bb00`).
+    /// Inverting it would light exactly the wrong 95% of the corpus: every fire and spell effect
+    /// would go dim at night while the environment sheets stayed full-white cutouts — a change
+    /// that "works" on any single model you happen to check first.
+    #[test]
+    fn bit_one_is_the_unlit_flag_and_mod_blends_never_light() {
+        // The Zul'Gurub / Elwynn waterfall: bit 0x1 CLEAR, blend 2 (alpha) ⇒ the scene lights it.
+        assert!(
+            lit_of(0x0002, 2),
+            "an emitter that CLEARS 0x1 takes the light"
+        );
+        // The Orgrimmar bonfire's flame (0x29) and smoke (0x21): both SET 0x1 ⇒ both unlit, which
+        // is what keeps a campfire bright at night.
+        assert!(!lit_of(0x0029, 4), "0x1 set: unlit, whatever the blend");
+        assert!(!lit_of(0x0021, 2));
+        // `DAT_00811fa8` = {1,1,1,1,1,0,0}: the multiply modes light nothing even with 0x1 clear —
+        // a lit modulate would darken twice, once through the light and once through the blend.
+        for blend in 0u8..=4 {
+            assert!(lit_of(0x0000, blend), "blend {blend} lights");
+        }
+        assert!(!lit_of(0x0000, 5), "Mod never lights");
+        assert!(!lit_of(0x0000, 6), "Mod2x never lights");
+        // A blend byte past the table is not a panic and not a silent "unlit" — the reference
+        // indexes a 7-entry table it never overruns, and every such value already folds to
+        // `Opaque`, which lights.
+        assert!(lit_of(0x0000, 7));
+    }
+
+    /// The real corpus, at the emitter the director reported: the waterfall's ONE emitter clears
+    /// bit 0x1 and blends alpha, so it must come back LIT — the asset-side half of the foam fix.
+    #[test]
+    fn the_waterfall_emitter_is_lit() {
+        let data = vanilla_data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file(
+                "World\\Azeroth\\Elwynn\\PassiveDoodads\\Waterfall\\ElwynnTallWaterfall01.m2",
+            )
+            .expect("read ElwynnTallWaterfall01.m2");
+        let defs = parse_m2_particle_emitters(&bytes).expect("parse emitters");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].flags, 0x0002, "authored flag word");
+        assert_eq!(defs[0].blend, ParticleBlend::Alpha);
+        assert!(defs[0].lit, "the spray sheet is shaded by the world");
+    }
 
     /// The repo root's `WoW/Data` (gitignored; the real-data tests skip when absent).
     fn vanilla_data_dir() -> std::path::PathBuf {

@@ -99,12 +99,24 @@ pub(super) fn promote_lazy_rig(
     };
     let slot = rig.slot;
     if let Some(ibp) = ibps.get(&lazy.ibp) {
+        // Rig-relative like every other seed (decision 0974) — these joint worlds came off Bevy
+        // propagation, so the rebase only carries the convention here; it cannot un-spend the
+        // precision propagation already spent. The sweep rewrites the rows the same frame anyway.
+        let origin = crate::rig_palette::rebase_origin(
+            worlds
+                .get(root)
+                .map(|g| g.translation())
+                .unwrap_or_default(),
+        );
         let joint_worlds: Vec<GlobalTransform> = lazy
             .joints
             .iter()
-            .map(|&j| worlds.get(j).copied().unwrap_or_default())
+            .map(|&j| {
+                let g = worlds.get(j).copied().unwrap_or_default();
+                crate::rig_palette::rebase_global(g, origin)
+            })
             .collect();
-        palettes.write_rig_worlds(&rig, &joint_worlds, ibp);
+        palettes.write_rig_worlds(&rig, &joint_worlds, ibp, origin);
     }
     // Queued, liveness-checked at APPLY time: the slot's only free path is the component's
     // `on_replace` hook, so a plain `insert` racing this frame's tile-unload despawn would drop

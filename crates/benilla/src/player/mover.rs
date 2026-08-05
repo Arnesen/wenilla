@@ -2,8 +2,10 @@
 //! `control` system ([`super`] keeps the input/camera/wire glue and the knob table this reads).
 //! One call per frame: [`step`].
 //!
-//! Thin kinematic controller (decision 0009) over avian's `MoveAndSlide` — kept simple and robust
-//! on the triangulated heightmap:
+//! Thin kinematic controller (decision 0009) over the **one-sided** mirror of avian's
+//! `MoveAndSlide` (`crate::collision::one_sided`, decision 0970: a face only blocks motion its
+//! authored winding opposes, the reference's `0x632700` law) — kept simple and robust on the
+//! triangulated heightmap:
 //!   - probe down to classify the ground (walkable iff its normal is within ~50° of up);
 //!   - "grounded" = on walkable ground AND not rising, so a jump cleanly leaves the ground (and
 //!     isn't re-grounded the next frame — the bug that ate most jumps). While airborne the probe
@@ -82,7 +84,7 @@ pub(super) fn step(
     // camera-only ones); the camera sweep uses its own filter (see `crate::collision`).
     let filter = player_query_filter();
     let cast = |from: Vec3, disp: Vec3| {
-        ms.cast_move(capsule, from, Quat::IDENTITY, disp, SKIN_WIDTH, &filter)
+        crate::collision::one_sided::cast_move(ms, capsule, from, disp, SKIN_WIDTH, &filter)
     };
     let probe_down = |c: Vec3, dist: f32| cast(c, Vec3::NEG_Y * dist);
 
@@ -365,7 +367,7 @@ pub(crate) fn grounded_step(
     surface_offset: f32,
 ) -> GroundedStep {
     let cast = |from: Vec3, disp: Vec3| {
-        ms.cast_move(capsule, from, Quat::IDENTITY, disp, SKIN_WIDTH, filter)
+        crate::collision::one_sided::cast_move(ms, capsule, from, disp, SKIN_WIDTH, filter)
     };
     let speed = horiz_vel.length();
     // The step-up (decision 0209): ATOMIC — a steep face in the way triggers rise →
@@ -390,10 +392,10 @@ pub(crate) fn grounded_step(
             snap: None,
         };
     }
-    let out = ms.move_and_slide(
+    let out = crate::collision::one_sided::move_and_slide(
+        ms,
         capsule,
         center,
-        Quat::IDENTITY,
         horiz_vel,
         dt,
         &MoveAndSlideConfig::default(),
@@ -473,10 +475,10 @@ pub(crate) fn airborne_step(
     velocity: Vec3,
     dt: std::time::Duration,
 ) -> Vec3 {
-    ms.move_and_slide(
+    crate::collision::one_sided::move_and_slide(
+        ms,
         capsule,
         center,
-        Quat::IDENTITY,
         velocity,
         dt,
         &MoveAndSlideConfig::default(),

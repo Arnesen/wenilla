@@ -277,13 +277,21 @@ fn fire_pick(
             // An untagged batch — an equipped item's part or its billboard card — has no world
             // identity of its own; it is named by its blend + material + texture, which is what
             // separates "the pauldron's plate" from "the pauldron's camera-facing trim".
+            // `detail` is the inspector's second line — the kind-specific facts the model path can't
+            // carry (a WMO prop's lighting lane, an emitter count). Printed here because this probe
+            // IS the inspector without a cursor, and a prop that draws wrong usually differs from a
+            // right one only in that line (decision 0969: the black Booty Bay arch).
             let (kind, id, label) = obj.map_or_else(
                 || ("<worn>".to_string(), String::new(), String::new()),
                 |o| {
                     (
                         format!("{:?}", o.kind),
                         format!("#{}", o.id),
-                        o.label.clone(),
+                        if o.detail.is_empty() {
+                            o.label.clone()
+                        } else {
+                            format!("{}  [{}]", o.label, o.detail)
+                        },
                     )
                 },
             );

@@ -415,6 +415,9 @@ fn push_precip(
         texture: texture.id(),
         blend,
         fog,
+        // Rain/snow ride the reference's own weather render state (its verified Mod2x /
+        // forced-grey-fog trio), not the M2 batch state producer — no GL_LIGHTING on them.
+        lit: false,
         anchor: cam_pos,
         bias: 0.0,
         raster_bias: 0,

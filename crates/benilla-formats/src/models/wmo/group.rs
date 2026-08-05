@@ -160,6 +160,10 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
 /// Find a sub-chunk of a group file's **MOGP** super-chunk by on-disk (reversed) magic. The MOGP
 /// payload is the 0x44-byte group header followed by ordinary `[magic][size][data]` sub-chunks
 /// (MOPY/MOVT/…/MODR/MOLR); this walks them.
+///
+/// Clamps the last sub-chunk to the payload end for the same reason [`find_wmo_chunk`] does — and it
+/// is the same file: once MOGP itself is clamped to EOF, the sub-chunk that ran to the old declared
+/// end is now the short one, so a break here would just move `Undercity_144`'s loss one level down.
 fn find_mogp_subchunk<'a>(group_bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a [u8]> {
     let mogp = find_wmo_chunk(group_bytes, b"PGOM")?;
     let mut off = 0x44usize; // past the fixed group header
@@ -167,10 +171,7 @@ fn find_mogp_subchunk<'a>(group_bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a 
         let size = u32::from_le_bytes([mogp[off + 4], mogp[off + 5], mogp[off + 6], mogp[off + 7]])
             as usize;
         let data_start = off + 8;
-        let data_end = data_start.checked_add(size)?;
-        if data_end > mogp.len() {
-            break;
-        }
+        let data_end = data_start.saturating_add(size).min(mogp.len());
         if &mogp[off..off + 4] == magic {
             return Some(&mogp[data_start..data_end]);
         }
@@ -494,22 +495,38 @@ pub fn wmo_group_raw_colors(group_bytes: &[u8]) -> Option<Vec<[u8; 4]>> {
     let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
         return None;
     };
-    (group.vertex_colors.len() == group.vertex_positions.len()).then(|| {
-        group
-            .vertex_colors
-            .iter()
-            .map(|c| [c.b, c.g, c.r, c.a])
-            .collect()
-    })
+    let colors = parallel_colors(&group)?;
+    Some(colors.iter().map(|c| [c.b, c.g, c.r, c.a]).collect())
+}
+
+/// The group's MOCV as a buffer **parallel to its positions**, or `None` if it has no usable bake.
+///
+/// The length test cannot be plain equality. A WMO's last chunk is allowed to run past EOF and clamp
+/// (decision 0972), and when the clamped chunk is MOCV the buffer comes back a whole *record* short:
+/// `Undercity_144.wmo` holds 1159 of its declared 1160 colour bytes, so `chunks_exact(4)` yields 289
+/// colours for 290 vertices. Demanding equality threw away **289 good colours over one missing byte**
+/// and fell the whole group back to untinted white — a corridor lit `tex × 1.0` inside a city whose
+/// every other interior surface is multiplied by a dark bake (decision 0977).
+///
+/// So a shortfall inside one record's worth is padded from the last complete colour; anything larger
+/// is a genuinely broken bake and still reads `None`, because padding hundreds of vertices from one
+/// sample would invent lighting rather than recover it.
+fn parallel_colors(group: &WmoGroup) -> Option<Vec<Color>> {
+    let (have, want) = (group.vertex_colors.len(), group.vertex_positions.len());
+    if have == want {
+        return Some(group.vertex_colors.clone());
+    }
+    // `want - have == 1` is the clamped-tail case and the only shortfall we reconstruct.
+    let last = (have + 1 == want).then(|| group.vertex_colors.last().copied())??;
+    let mut colors = group.vertex_colors.clone();
+    colors.push(last);
+    Some(colors)
 }
 
 /// Shared body of [`wmo_group_fixed_colors`] and the submesh build: clone the authored MOCV and run
 /// the fade over it. `None` when the group carries no MOCV parallel to its positions.
 fn fixed_colors(group: &WmoGroup, group_bytes: &[u8], root: &WmoRoot) -> Option<Vec<Color>> {
-    if group.vertex_colors.len() != group.vertex_positions.len() {
-        return None;
-    }
-    let mut colors = group.vertex_colors.clone();
+    let mut colors = parallel_colors(group)?;
     let refs =
         wmo_group_header(group_bytes).map_or((0, 0), |h| (h.portal_ref_start, h.portal_ref_count));
     fix_color_vertex_alpha(&mut colors, group, root, refs);

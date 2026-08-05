@@ -486,6 +486,9 @@ fn push_shadows(
                 texture: assets.texture.id(),
                 blend: EffectBlend::Multiply,
                 fog: EffectFog::Off,
+                // The modulate decal is its own darkening — the scene light is already in
+                // the ground it multiplies.
+                lit: false,
                 anchor: key.feet,
                 bias: SHADOW_SORT_BIAS,
                 raster_bias: SHADOW_RASTER_BIAS,

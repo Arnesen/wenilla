@@ -601,7 +601,11 @@ pub(super) fn spawn_loaded_placements(
                 ModelKind::Doodad,
                 handle_label(&d.handle),
                 unique_id,
-                format!("emitters: {} · WMO prop", m.emitters.len()),
+                format!(
+                    "emitters: {} · WMO prop · {}",
+                    m.emitters.len(),
+                    d.light.inspector_label()
+                ),
             );
             p.entities.extend(ents);
             d.spawned = true;

@@ -94,6 +94,12 @@ pub struct ModelSubmesh {
     /// [`benilla_formats::RenderSubmesh::additive`]): the spawn site builds it with `AlphaMode::Add` so
     /// its warm colour is added on top of the scene, not mixed with the background. `false` otherwise.
     pub additive: bool,
+    /// This batch's texture coordinates are **generated, not authored** (see
+    /// [`benilla_formats::RenderSubmesh::env_map`]): a sphere-map environment coordinate off the
+    /// view-space reflection vector. The spawn site marks the material so `wow_model.wgsl` derives
+    /// the UV instead of reading the (meaningless) vertex one. `false` for WMO batches and for the
+    /// M2 batches that name a real UV channel.
+    pub env_map: bool,
     /// M2 render flag **0x10 — disable depth write** (see [`benilla_formats::RenderSubmesh::no_depth_write`]):
     /// `specialize` keeps depth-write ON for transparent batches *unless* this is set, matching the real
     /// client (so a model's transparent cards occlude each other instead of bleeding through). `false` for WMO.

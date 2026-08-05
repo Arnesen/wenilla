@@ -5,7 +5,7 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use avian3d::prelude::SpatialQuery;
+use avian3d::character_controller::move_and_slide::MoveAndSlide;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_protocol::{CreateSpline, EntityKind};
 use bevy::prelude::*;
@@ -417,7 +417,7 @@ const GROUND_CLAMP_DOWN: f32 = 4.0;
 /// what we re-ground; an idle unit (no spline) is re-grounded in place each frame, which also catches
 /// it once its terrain collider loads.
 pub(in crate::net) fn ground_clamp_creatures(
-    spatial: SpatialQuery,
+    ms: MoveAndSlide,
     mut q: Query<(
         &NetEntity,
         Option<&Spline>,
@@ -438,7 +438,12 @@ pub(in crate::net) fn ground_clamp_creatures(
         }
         let origin = t.translation + Vec3::Y * GROUND_CLAMP_UP;
         let reach = GROUND_CLAMP_UP + GROUND_CLAMP_DOWN;
-        if let Some(hit) = spatial.cast_ray(origin, Dir3::NEG_Y, reach, true, &filter) {
+        // The one-sided down-ray (decision 0970): a creature grounds like the player grounds — a
+        // face whose winding points away is no floor, or an idle NPC would stand mid-air on the
+        // very shell face the player mover now falls through.
+        if let Some(hit) =
+            crate::collision::one_sided::cast_ray(&ms, origin, Dir3::NEG_Y, reach, &filter)
+        {
             t.translation.y = origin.y - hit.distance; // the down-ray's hit point Y = feet on the surface
         }
     }

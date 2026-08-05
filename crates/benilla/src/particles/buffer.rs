@@ -191,6 +191,8 @@ pub struct EffectDraw {
     pub blend: EffectBlend,
     pub topology: EffectTopology,
     pub fog: EffectFog,
+    /// Does the scene's light multiply this draw's RGB? See [`EffectDrawSpec::lit`].
+    pub lit: bool,
     /// The cloud's sort point — the emitter anchor / ribbon head node / decal center, exactly
     /// the sort point the material path used.
     pub anchor: Vec3,
@@ -257,6 +259,19 @@ pub struct EffectDrawSpec {
     pub texture: AssetId<Image>,
     pub blend: EffectBlend,
     pub fog: EffectFog,
+    /// Multiply this draw's RGB by the scene's matte light — `clamp(ambient + diffuse·max(N·L,0))`
+    /// against a camera-facing normal, the same term `wow_model.wgsl` applies to a mesh.
+    ///
+    /// The lane is unlit by default and every family but one passes `false`: ribbons, decals, the
+    /// rings/reticle and precipitation are all authored to burn at their own colour. **M2 particle
+    /// emitters are the exception** — the reference has no particle material, it synthesizes an
+    /// `M2Material` from the emitter's file record every draw and runs the ordinary batch state
+    /// producer over it, so `GL_LIGHTING` lands on a particle exactly as on a mesh
+    /// ([`benilla_formats::ParticleEmitterDef::lit`], byte law there). 400 of the corpus's 7792
+    /// emitters clear the unlit bit, nearly all of them `World\` environment sheets — waterfall
+    /// spray, chimney smoke, blown dust, snow — which read as full-white cutouts against shaded
+    /// terrain when the term is missing (the Zul'Gurub waterfall foam).
+    pub lit: bool,
     pub anchor: Vec3,
     pub bias: f32,
     pub raster_bias: i32,
@@ -302,6 +317,7 @@ impl EffectQuads {
                 blend: spec.blend,
                 topology,
                 fog: spec.fog,
+                lit: spec.lit,
                 anchor: spec.anchor,
                 bias: spec.bias,
                 raster_bias: spec.raster_bias,
@@ -414,6 +430,7 @@ mod tests {
                     texture: AssetId::default(),
                     blend: EffectBlend::Add,
                     fog: EffectFog::Off,
+                    lit: false,
                     anchor: Vec3::ZERO,
                     bias: 0.0,
                     raster_bias: 0,

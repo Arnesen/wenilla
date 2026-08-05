@@ -94,7 +94,7 @@ fn liquid_scene(map: &str, wow: [f32; 3]) -> Option<LiquidScene> {
             let Ok(tile) = benilla_formats::load_tile_mesh(&mut chain, map, tx, ty) else {
                 continue;
             };
-            for lq in tile.chunks.iter().filter_map(|c| c.liquid.as_ref()) {
+            for lq in tile.chunks.iter().flat_map(|c| c.liquids.iter()) {
                 scene.surfaces.push(wet_footprint(
                     lq,
                     &Transform::IDENTITY,

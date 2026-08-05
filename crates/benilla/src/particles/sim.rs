@@ -1072,6 +1072,7 @@ pub(super) fn simulate_particles(
                 texture: texture.id(),
                 blend: def.blend.into(),
                 fog: EffectFog::for_blend(def.flags, def.blend),
+                lit: def.lit,
                 anchor,
                 bias,
                 raster_bias: 0,
@@ -1102,6 +1103,10 @@ pub(super) fn simulate_particles(
                     texture: child.texture.id(),
                     blend: child.def.blend.into(),
                     fog: EffectFog::for_blend(child.def.flags, child.def.blend),
+                    // A child emitter is a whole emitter record of the recursion model, with its
+                    // own flag word and blend field — so it takes its OWN lighting verdict, never
+                    // the parent's (the same rule its texture/blend/fog identity follows above).
+                    lit: child.def.lit,
                     anchor,
                     bias,
                     raster_bias: 0,

@@ -266,6 +266,10 @@ fn build_char_materials(
             // no blend-mode fog policy of its own (body/hair are always opaque/alpha-cut, which the
             // byte table fogs toward the scene colour anyway).
             benilla_formats::FogPolicy::Scene,
+            // …and no generated texcoords: a composite body/hair sheet is sampled by the body's
+            // own authored UVs. Env-mapping reaches a character through the ArmorReflect batches
+            // of its HELD items, which spawn as ordinary M2 submeshes and carry their own flag.
+            false,
             // Steady/fade: LIT like every entity M2 — the owner's dynamic MCSH shade reaches these
             // parts per instance through the MeshTag shade byte (`entity_shade`), not the shared
             // material. Interior-matte: the plain pair at sun ×1.0 — the null-node fallback.

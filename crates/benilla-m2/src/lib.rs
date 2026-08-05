@@ -131,7 +131,9 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     p += 8;
     let texture_lookup_table = arr(p)?;
     p += 8;
-    // header 0x9c: texture_unit_lookup (the env-vs-UV mapping table) — skipped for now.
+    // header 0x9c: texture_unit_lookup — the **env-vs-UV mapping table**. `texUnit.texture_coord_combo_index`
+    // (+0x12) indexes it; a value `< 3` names a UV channel, `>= 3` (real art: `0xffff`) is a
+    // *generated* environment coordinate (wow-re `m2-texanim-uv` §`0x70b8bd`, models.md §944).
     //
     // The three lookup slots here follow wow-re's *stride-pin reconciliation* (renderFlags pinned
     // at 0x84 ⇒ texLookup 0x94 · texUnitLookup 0x9c · transLookup 0xa4 · texAnimLookup 0xac), NOT
@@ -139,6 +141,7 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     // ElwynnTallWaterfall01 (2 transforms, batch combos 0/1) has [0,1] at 0xac, and
     // StormwindMagePortal01 (4 weight tracks) has the identity [0,1,2,3] at 0xa4 with [0] at 0x9c
     // — reading 0x9c as the transparency lookup silently dropped the portal's combo-1..3 tracks.
+    let texture_unit_lookup_arr = arr(p)?;
     p += 8;
     // header 0xa4: transparency_lookup (u16) — `weight_combo_index` indexes it to reach a weight track.
     let transparency_lookup_arr = arr(p)?;
@@ -407,6 +410,19 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
     for i in 0..transparency_arr.0 as usize {
         transparency_tracks.push(track_fix16(b, transparency_arr.1 as usize + i * 0x1c));
     }
+    let tulookup_avail = b.len().saturating_sub(texture_unit_lookup_arr.1 as usize);
+    let mut texture_unit_lookup = Vec::with_capacity(capped(
+        texture_unit_lookup_arr.0 as usize,
+        2,
+        tulookup_avail,
+    ));
+    for i in 0..texture_unit_lookup_arr.0 as usize {
+        texture_unit_lookup.push(
+            get(texture_unit_lookup_arr.1 as usize + i * 2, 2)?
+                .u16_at(0)
+                .ok_or(Error::Truncated)?,
+        );
+    }
     let tlookup_avail = b.len().saturating_sub(transparency_lookup_arr.1 as usize);
     let mut transparency_lookup =
         Vec::with_capacity(capped(transparency_lookup_arr.0 as usize, 2, tlookup_avail));
@@ -482,6 +498,7 @@ pub fn parse_m2(cursor: &mut Cursor<&[u8]>) -> Result<M2Format> {
             color_rgb_tracks,
             transparency_tracks,
             transparency_lookup,
+            texture_unit_lookup,
             texture_transforms,
             texture_transform_lookup,
             global_sequences,

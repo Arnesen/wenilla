@@ -330,6 +330,7 @@ impl AssetLoader for M2ModelLoader {
                 sidn: None,             // WMO-only (MOMT SIDN night glow)
                 window: false,          // WMO-only (MOMT WINDOW interior light)
                 additive: sub.additive, // M2 blend 3/4 → additive (glow cards)
+                env_map: sub.env_map, // texture_unit_lookup > 2 → the runtime generates this stage's UVs
                 no_depth_write: sub.no_depth_write, // M2 render flag 0x10
                 no_depth_test: sub.no_depth_test, // M2 render flag 0x08
                 fog_policy: sub.fog_policy, // M2 render flag 0x02 / the per-blend fog table

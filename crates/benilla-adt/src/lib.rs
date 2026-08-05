@@ -21,31 +21,6 @@ use std::io::Cursor;
 
 use benilla_bytes::{chunks, ByteExt};
 
-/// Liquid surface type, from the MCNK flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LiquidType {
-    Water,
-    Ocean,
-    Magma,
-    Slime,
-}
-
-impl LiquidType {
-    /// Match wow-adt: ocean (0x08) → magma (0x10) → slime (0x20) → water (the default, incl. 0x04
-    /// river).
-    fn from_mcnk_flags(flags: u32) -> Self {
-        if flags & 0x08 != 0 {
-            Self::Ocean
-        } else if flags & 0x10 != 0 {
-            Self::Magma
-        } else if flags & 0x20 != 0 {
-            Self::Slime
-        } else {
-            Self::Water
-        }
-    }
-}
-
 /// A terrain vertex normal — stored on disk as `x, z, y` signed bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct VertexNormal {
@@ -130,6 +105,10 @@ impl McshChunk {
 }
 
 /// One MCLQ liquid vertex (8 bytes: 4 union bytes + an absolute height).
+///
+/// The leading 4 bytes are a **union whose meaning is the block's liquid type** — water/ocean spend
+/// them on a depth byte + flow/foam, magma/slime on a `u16` texture-coordinate pair. Both readers are
+/// below; which one applies is the caller's decision, from the cell nibble.
 #[derive(Debug, Clone, Copy)]
 pub struct LiquidVertex {
     pub union_data: [u8; 4],
@@ -137,20 +116,50 @@ pub struct LiquidVertex {
 }
 
 impl LiquidVertex {
-    /// The depth byte (union byte 0) — drives the water depth-swatch on the render side.
+    /// The depth byte (union byte 0) — drives the water depth-swatch on the render side. Water and
+    /// ocean blocks only; on a magma block these bytes are [`Self::texcoords`] instead.
     pub fn depth_byte(&self) -> u8 {
         self.union_data[0]
     }
+
+    /// The authored `(s, t)` texture-coordinate pair — two little-endian `u16`s over the same 4
+    /// union bytes. **Magma blocks only**: the reference's lava vert-fill is single-stage and reads
+    /// its `tc0` straight from here, where water/ocean instead write a UV into the depth-ramp
+    /// texture (VERIFIED bit-exact `WoW.exe 0x68d890` `liquid_render_verts`, emulation-diffed in
+    /// wow-re `crates/terrain`: `u = (s as i32 as f64 · 3/256) as f32`, same for `t`). The field is
+    /// authored world-continuous — a chunk's east edge repeats its neighbour's west edge exactly —
+    /// so lava tiles seamlessly across MCNK borders.
+    pub fn texcoords(&self) -> [u16; 2] {
+        [
+            u16::from_le_bytes([self.union_data[0], self.union_data[1]]),
+            u16::from_le_bytes([self.union_data[2], self.union_data[3]]),
+        ]
+    }
 }
 
-/// MCLQ — legacy per-MCNK liquid (9×9 height grid + 8×8 cell flags).
+/// One MCLQ liquid **block** — a 9×9 absolute-height grid + an 8×8 cell-flag grid, `0x324` bytes.
+///
+/// An MCNK carries **one block per set liquid header bit** (bits 2–5), packed back to back and with
+/// absent bits consuming nothing (VERIFIED wow-re `system/terrain/scratch/adt-format.md`, the cursor
+/// walk at `0x6af7a3`–`0x6af7cb`). Most liquid chunks set exactly one bit; **28 shipped Azeroth
+/// chunks set two** — a river *and* the sea, at a river mouth — and carry two blocks at different
+/// heights (measured: `sizeMCLQ` 1616 = 8 + 2·`0x324`, block 0 the stream at z≈5.0, block 1 the
+/// ocean at z=0). Reading only the first is how the sea goes missing there.
+///
+/// **No liquid type here on purpose.** The header-bit→type ordering (bit2 river / bit3 ocean /
+/// bit4 magma / bit5 slime) is *INFERRED* upstream — never byte-proven — while the per-cell flag low
+/// nibble IS the type, VERIFIED at both consumers (`0x6ba970` `and al,0xf`, `0x68d9b0`). So this
+/// reader takes only the block *count* from the flags and leaves the type to whoever reads
+/// [`Self::tile_flags`]. (The old `LiquidType::from_mcnk_flags` priority guess labelled all 28
+/// two-bit chunks "ocean" while handing back the river block's bytes.)
 #[derive(Debug, Clone)]
 pub struct MclqChunk {
     pub min_height: f32,
     pub max_height: f32,
     pub vertices: Vec<LiquidVertex>,
+    /// Per-cell flags, row-major 8×8. Low nibble = liquid type (`0xf` = dry/hole); `0x40` fishable,
+    /// `0x80` shared.
     pub tile_flags: [u8; 64],
-    pub liquid_type: LiquidType,
 }
 
 /// The fields of the 128-byte MCNK header the renderer reads. `pred_tex`/`no_effect_doodad`/
@@ -180,7 +189,9 @@ pub struct McnkChunk {
     pub layers: Option<MclyChunk>,
     pub alpha: Option<McalChunk>,
     pub shadow: Option<McshChunk>,
-    pub liquid: Option<MclqChunk>,
+    /// The chunk's MCLQ liquid blocks — **one per set liquid header bit**, in on-disk order (see
+    /// [`MclqChunk`]). Empty on a dry chunk; two at a river mouth.
+    pub liquids: Vec<MclqChunk>,
 }
 
 /// MDDF — a placed M2 doodad (36 bytes).
@@ -408,7 +419,7 @@ fn read_mcnk(data: &[u8]) -> Result<McnkChunk> {
         layers: None,
         alpha: None,
         shadow: None,
-        liquid: None,
+        liquids: Vec::new(),
     };
 
     // Locate sub-chunks by the MCNK header offsets (the authoritative method — sequential scanning
@@ -515,15 +526,41 @@ fn read_mcnk(data: &[u8]) -> Result<McnkChunk> {
         b"QLCM",
     ) {
         let size_liquid = h.u32_at(0x64).ok_or(Error::Truncated("MCNK header"))? as usize;
-        chunk.liquid = read_mclq(slice(p, size_liquid), chunk.header.flags);
+        chunk.liquids = read_mclq_blocks(slice(p, size_liquid), chunk.header.flags);
     }
 
     Ok(chunk)
 }
 
+/// Bytes per MCLQ block: `{f32 min, f32 max, 81×8B verts, 64B cell flags, u32 nFlow, 2×40B flow}`.
+const MCLQ_BLOCK: usize = 0x324;
+/// Liquid header bits (2–5) — their **count** is the number of packed MCLQ blocks. Only the count is
+/// read: the bit→type ordering is INFERRED, the cell nibble is VERIFIED (see [`MclqChunk`]).
+const MCNK_LIQUID_BITS: u32 = 0x3c;
+
+/// Read the packed MCLQ blocks — one per set liquid header bit, back to back (VERIFIED wow-re
+/// `adt-format.md`). Stops early on a block the payload can't cover, so a truncated tail degrades to
+/// the blocks that *are* whole rather than to nothing. A chunk with an MCLQ sub-chunk but no liquid
+/// bit set still yields one block, matching the pre-multi-block reader.
+fn read_mclq_blocks(sub: &[u8], mcnk_flags: u32) -> Vec<MclqChunk> {
+    let want = (mcnk_flags & MCNK_LIQUID_BITS).count_ones().max(1) as usize;
+    let mut out = Vec::with_capacity(want);
+    for i in 0..want {
+        let Some(rest) = sub.get(i * MCLQ_BLOCK..) else {
+            break;
+        };
+        match read_mclq_block(rest) {
+            Some(b) => out.push(b),
+            None => break,
+        }
+    }
+    out
+}
+
 /// `None` (not an error) below the minimum size: too-short MCLQ data is treated as "no liquid",
-/// matching the pre-0064 reader — a real-data tolerance, not a hardening carve-out.
-fn read_mclq(sub: &[u8], mcnk_flags: u32) -> Option<MclqChunk> {
+/// matching the pre-0064 reader — a real-data tolerance, not a hardening carve-out. (The minimum is
+/// the *read* span, short of the full [`MCLQ_BLOCK`]: the trailing flow vectors are unread.)
+fn read_mclq_block(sub: &[u8]) -> Option<MclqChunk> {
     const NEED: usize = 8 + 81 * 8 + 64;
     if sub.len() < NEED {
         return None;
@@ -544,7 +581,6 @@ fn read_mclq(sub: &[u8], mcnk_flags: u32) -> Option<MclqChunk> {
         max_height,
         vertices,
         tile_flags,
-        liquid_type: LiquidType::from_mcnk_flags(mcnk_flags),
     })
 }
 
@@ -663,6 +699,60 @@ mod tests {
         data.extend(chunk(b"QLCM", &[0u8; 4]));
         let b = chunk(b"KNCM", &data);
         let ParsedAdt::Root(root) = parse(&b).expect("parses");
-        assert!(root.mcnk_chunks[0].liquid.is_none());
+        assert!(root.mcnk_chunks[0].liquids.is_empty());
+    }
+
+    /// **One MCLQ block per set liquid header bit**, packed back to back — the shape that made the
+    /// sea vanish at 28 shipped river mouths when only the first was read (see [`MclqChunk`]).
+    /// Two bits set ⇒ two blocks, each keeping its OWN cell flags, so the consumer can tell the
+    /// river block from the ocean block by nibble.
+    #[test]
+    fn a_two_bit_mcnk_yields_two_mclq_blocks_in_disk_order() {
+        // One block: min/max, 81×8B verts, 64B cell flags, then the flow tail — 0x324 total.
+        let block = |height: f32, nibble: u8| {
+            let mut b = vec![0u8; MCLQ_BLOCK];
+            b[0..4].copy_from_slice(&height.to_le_bytes());
+            b[4..8].copy_from_slice(&height.to_le_bytes());
+            for i in 0..81 {
+                b[8 + i * 8 + 4..8 + i * 8 + 8].copy_from_slice(&height.to_le_bytes());
+            }
+            b[8 + 81 * 8..8 + 81 * 8 + 64].fill(nibble);
+            b
+        };
+        let mut payload = block(5.0, 4); // bit 2 (river) — first on disk
+        payload.extend(block(0.0, 1)); // bit 3 (ocean) — second
+
+        let mut data = vec![0u8; 128];
+        data[0x00..0x04].copy_from_slice(&0x0cu32.to_le_bytes()); // liquid bits 2 AND 3
+        data[0x60..0x64].copy_from_slice(&128u32.to_le_bytes());
+        data[0x64..0x68].copy_from_slice(&((payload.len() + 8) as u32).to_le_bytes());
+        data.extend(chunk(b"QLCM", &payload));
+        let b = chunk(b"KNCM", &data);
+        let ParsedAdt::Root(root) = parse(&b).expect("parses");
+
+        let liquids = &root.mcnk_chunks[0].liquids;
+        assert_eq!(liquids.len(), 2, "one block per set liquid bit");
+        assert_eq!(liquids[0].tile_flags[0] & 0xf, 4, "block 0 is the river");
+        assert_eq!(liquids[0].min_height, 5.0);
+        assert_eq!(liquids[1].tile_flags[0] & 0xf, 1, "block 1 is the ocean");
+        assert_eq!(liquids[1].min_height, 0.0);
+    }
+
+    /// The magma union bytes are an authored `(s, t)` u16 pair, little-endian over the same 4 bytes
+    /// the water blocks spend on a depth byte — VERIFIED `0x68d890` reads them as `u16 → i32`, so
+    /// `0xffff` is 65535 and never −1.
+    #[test]
+    fn magma_union_bytes_read_as_two_unsigned_u16_texcoords() {
+        let v = LiquidVertex {
+            union_data: [0xbd, 0x00, 0xe8, 0x00],
+            height: 1.0,
+        };
+        assert_eq!(v.texcoords(), [189, 232]); // a real Burning Steppes vertex
+        assert_eq!(v.depth_byte(), 0xbd, "the same bytes, read the water way");
+        let max = LiquidVertex {
+            union_data: [0xff, 0xff, 0xff, 0xff],
+            height: 1.0,
+        };
+        assert_eq!(max.texcoords(), [65535, 65535], "unsigned, not −1");
     }
 }

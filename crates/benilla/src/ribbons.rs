@@ -374,6 +374,11 @@ pub(crate) fn simulate_ribbons(
                 // alpha/opaque trails fog toward the scene colour. (No ribbon authors the
                 // particle "unfogged" file flag — pass 0.)
                 fog: EffectFog::for_blend(0, def.blend),
+                // Ribbons keep the lane's unlit default: the M2 ribbon record has no flag word
+                // to read the particle path's unlit bit off, and the trail corpus is additive
+                // weapon/spell art authored to burn at its own colour. Revisit only with a
+                // byte law for the ribbon batch state, not by analogy with particles.
+                lit: false,
                 anchor,
                 // The owner rung, dropped under the water pass when the MODEL sits on the eye's
                 // far side of its water plane — the model's bound centre with the bound-radius

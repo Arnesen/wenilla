@@ -381,6 +381,18 @@ pub struct RenderSubmesh {
     /// The batch's MOBA section for WMO group batches ([`WmoBatchClass`] — TRANS / INT / EXT, the
     /// per-class lighting law of an interior group). `None` for every M2 batch.
     pub wmo_batch: Option<WmoBatchClass>,
+    /// This batch's texture coordinates are **GENERATED, not authored** — a sphere-map environment
+    /// coordinate derived per frame from the view-space reflection vector, not the vertex UVs
+    /// ([`benilla_m2::M2Model::stage_is_env_mapped`]: `texture_unit_lookup[texCoordSet] > 2`).
+    ///
+    /// The renderer must compute `uv = normalize(P − 2(P·N)N).xy · 0.5 + 0.5` in view space
+    /// instead of reading [`Self::uvs`], because on such a batch **there are no UVs to read**: the
+    /// artist leaves the whole mesh at a single point (`GnomeSubwayGlass.m2` — all 330 vertices at
+    /// exactly `(0,0)`) precisely because the runtime supplies them. Drawing it from the vertex
+    /// data paints the entire surface in one corner texel of a reflection sheet — the Deeprun Tram
+    /// glass tube's flat yellow (`AKGNOMEREFLECT.BLP` texel 0,0 = `225,221,142`, doubled by its
+    /// Mod2x blend). `false` for every WMO batch and for the M2 batches that name a real UV channel.
+    pub env_map: bool,
 }
 
 /// A render batch that is a single flat **ground-plane quad**: four vertices sharing one authored
@@ -456,6 +468,7 @@ impl Default for RenderSubmesh {
             uv_anim: None,
             rgb_anim: None,
             wmo_batch: None,
+            env_map: false,
         }
     }
 }

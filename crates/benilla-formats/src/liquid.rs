@@ -1,29 +1,43 @@
 //! MCLQ liquid surfaces → per-chunk water meshes (Phase E; Phase 1 = inland water).
 //!
 //! Vanilla liquid is **MCLQ** — per-MCNK, a 9×9 absolute-height grid + an 8×8 cell-flag grid
-//! (no WotLK MH2O). `wow-adt`'s [`MclqChunk`] decodes it; we validated its output **byte-identical**
-//! to a hand-decode of the raw 804-B payload against `World\Maps\Azeroth\Azeroth_32_48.adt`
-//! (wow-adt 0.6.4, 2026-05-31): per-vertex `height`, raw `tile_flags`, `min/max_height`, and the
-//! MCNK-flag-derived `liquid_type` all match (the on-disk `QLCM` magic sits at the offset; the
-//! payload — and the crate's parse — start 8 bytes in).
+//! (no WotLK MH2O), one 804-byte block per set liquid header bit. [`MclqChunk`] decodes it; we
+//! validated the output **byte-identical** to a hand-decode of the raw payload against
+//! `World\Maps\Azeroth\Azeroth_32_48.adt` (2026-05-31): per-vertex `height`, raw `tile_flags` and
+//! `min/max_height` all match (the on-disk `QLCM` magic sits at the offset; the payload — and the
+//! crate's parse — start 8 bytes in).
 //!
 //! Output is in **raw WoW coords** (+X north, +Y west, +Z up, yards), like [`crate::terrain`]; the
 //! renderer applies the WoW→Bevy transform and ports the `ocean0_s.bls` shader. We emit a flat
 //! surface (normal `(0,0,1)`) of 2 triangles per **wet** cell; dry cells (flag low-nibble `0xf`,
-//! whose verts carry the FLT_MAX sentinel height) are skipped. Magma/slime is deferred to Phase 3.
+//! whose verts carry the FLT_MAX sentinel height) are skipped.
+//!
+//! **The cell nibble is the type** (VERIFIED `0x6ba970`/`0x68d9b0`) — the MCNK header bits only say
+//! how many blocks a chunk carries, and their bit→type ordering was never byte-proven. Reading the
+//! type off the header instead is what kept every open-world lava surface in the game from
+//! rendering (Burning Steppes, Searing Gorge, Un'Goro) and what put the ocean texture on 28 coastal
+//! river blocks while dropping the sea beside them. `build_liquid_mesh` runs the cells first for
+//! exactly that reason.
 
-use benilla_adt::{LiquidType, MclqChunk};
+use benilla_adt::MclqChunk;
 
 use crate::terrain::{snap_to_lattice, UNIT_SIZE};
 
 /// Which animated texture set + render path a liquid surface uses (selects the frame set in
-/// `benilla`). The MCLQ (ADT) path emits only Still/Rapids/Ocean; the WMO MLIQ path additionally
-/// emits Magma/Slime (canals, fountains, the Ironforge lava, dungeon pools).
+/// `benilla`). The MCLQ (ADT) path emits Still/Ocean/Magma — the reference's three fixed ADT liquid
+/// queues; the WMO MLIQ path additionally emits Slime and Rapids (canals, fountains, the Ironforge
+/// lava, Undercity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiquidKind {
     /// Still water — `XTextures\river\lake_a.*` (30 frames). Lakes, ponds, slow rivers, WMO canals.
     Still,
-    /// Rapids — `XTextures\river\fast_a.*` (16 frames). Fast streams (per-cell nibble `8`).
+    /// Rapids — `XTextures\river\fast_a.*` (16 frames). Per-cell nibble `8`.
+    ///
+    /// **Nothing in the shipped 1.12.1 data selects it**: a sweep of every MCLQ cell on all 12
+    /// terrain maps and every one of the 302 MLIQ-bearing WMO groups finds nibbles `{1, 4, 6}` and
+    /// `{0, 2, 3, 4, 6, 7}` respectively — never `8`. Kept because the name table `0x86a000` really
+    /// does map slot 8 here and the WMO path binds the raw nibble, so authored data *could*; the ADT
+    /// path can't reach it either way (its river queue hard-codes texcache type 4).
     Rapids,
     /// Ocean — `XTextures\ocean\ocean_h.*` (30 frames). Coastal / sea tiles.
     Ocean,
@@ -32,12 +46,20 @@ pub enum LiquidKind {
     /// wow-re `liquid-render-state-sided.md` §3/§5, which corrected the earlier
     /// `rf-water-liquid-type-texture-material.md` reading of the `0x68d890` vert-fill: its
     /// `0x3f800000` is an up normal's Z, not a colour or alpha, and it is byte-identical in the river
-    /// and ocean fills). WMO liquid only (nibbles `2`/`6`) — the Ironforge Great Forge.
+    /// and ocean fills).
+    ///
+    /// Reached from **both** paths: WMO MLIQ (the Ironforge Great Forge) and — since the ADT magma
+    /// queue landed — MCLQ, which is all the open-world lava there is: 124 chunks in Burning Steppes
+    /// and Searing Gorge, 4 in Un'Goro. Its UVs are authored per-vertex, not generated
+    /// ([`benilla_adt::LiquidVertex::texcoords`]).
     Magma,
     /// Slime — `XTextures\slime\slime.*`. Its own texture on the magma render category, and **code-path
     /// identical to magma** on the WMO side: one handler, no type-2-vs-3 branch anywhere (VERIFIED
-    /// wow-re `liquid-render-state-sided.md` §5). WMO liquid only (nibbles `3`/`7`) — Undercity, the
-    /// Sludge Fields.
+    /// wow-re `liquid-render-state-sided.md` §5).
+    ///
+    /// **WMO liquid only** (nibbles `3`/`7`) — Undercity, the Sludge Fields. Not a deferral: the
+    /// reference has no ADT queue for slime at all (VERIFIED — `0x68de40` dispatches only its three
+    /// queues, types 4/1/6), and no shipped MCLQ cell carries nibble 3 or 7 to feed one.
     Slime,
 }
 
@@ -54,6 +76,27 @@ impl LiquidKind {
             3 | 7 => Some(LiquidKind::Slime),
             8 => Some(LiquidKind::Rapids),
             _ => None, // 5, 9..=0xf — NULL name-table slots / the 0xf hole sentinel
+        }
+    }
+
+    /// The kind an **ADT** (MCLQ) cell nibble selects — which is *not* [`Self::from_nibble`].
+    ///
+    /// The reference's ADT liquid render is **three fixed queues, each hard-coding its texcache
+    /// type**: `0x6851b0` → type 4 `lake_a` (`mov ecx,4` @`0x68db9d`), `0x685010` → type 1 `ocean_h`
+    /// (@`0x68dabb`), `0x6855a0` → type 6 `lava` (@`0x68dcab`). The cell nibble selects queue
+    /// *membership* — via the class `nibble & 3` — not the texture, so an ADT nibble 0 and 8 both
+    /// draw `lake_a`, and 2 and 6 both draw `lava`. **Slime has no ADT queue at all**: it renders
+    /// only on the WMO path, so class 3 is `None` here (VERIFIED wow-re
+    /// `rf-water-liquid-type-texture-material.md` + `terrain.md`).
+    ///
+    /// The WMO path is the type-faithful one — it binds `0x68aac0(raw nibble)` — and keeps
+    /// [`Self::from_nibble`].
+    pub fn from_adt_nibble(nibble: u8) -> Option<LiquidKind> {
+        match nibble & 3 {
+            0 => Some(LiquidKind::Still),
+            1 => Some(LiquidKind::Ocean),
+            2 => Some(LiquidKind::Magma),
+            _ => None, // class 3 — slime, which the reference never dispatches from an ADT
         }
     }
 
@@ -95,14 +138,25 @@ pub struct LiquidMesh {
     pub wet: Vec<bool>,
     /// Vertex positions `[x, y, z]` in WoW yards — `cols·rows` entries, row-major.
     pub positions: Vec<[f32; 3]>,
-    /// Cell-index UVs (`¼` per cell, tiling) parallel to `positions`. No scroll for water.
+    /// Texture UVs parallel to `positions`. No scroll for water.
+    ///
+    /// Generated cell-index UVs (`¼` per cell, tiling) for **water and ocean** — and for WMO liquid,
+    /// anchored to model space over the same period. **Magma is different**: its UVs are *authored*
+    /// per vertex and read straight off the MCLQ union bytes (`u = s · 3/256`), because the reference's
+    /// lava batch is single-stage with a reset texture matrix, so `tc0` is the vertex's own coord
+    /// rather than anything the client generates ([`benilla_adt::LiquidVertex::texcoords`]).
     pub uvs: Vec<[f32; 2]>,
     /// Per-vertex liquid swatch coord **V** `0..1` from the MCLQ `SVert` depth byte, parallel to
     /// `positions`. River/lake = `clamp(byte/42)` (VERIFIED `c81768`, saturates ~5 yd); ocean = byte/255
     /// (placeholder — ocean uses a different non-LUT path, see `build_liquid_mesh`). The reference uses
     /// this single V to index the depth swatch for BOTH the body-colour band (shallow→deep water rows)
-    /// and the opacity ramp (`colorTex.a` = `127+2·row`, deeper = more opaque). Magma/slime reuse
-    /// the union bytes for UVs (N/A here).
+    /// and the opacity ramp (`colorTex.a` = `127+2·row`, deeper = more opaque).
+    ///
+    /// **Zero on ADT magma, and read by nothing**: those union bytes are texture coords, not a depth
+    /// byte, and the reference's magma vert-fill reads no ramp at all (`0x68d890` — no LUT load,
+    /// unlike the river/ocean fills). The shader's fullbright branch returns before it ever samples
+    /// this, so the zero is a statement, not a value. (The WMO builder fills its own flat
+    /// `WMO_WATER_DEPTH_V` for every kind, magma and slime included — equally unread there.)
     pub depths: Vec<f32>,
     /// Triangle indices into `positions` — 6 per wet cell, cells in row-major order. Derived from
     /// [`Self::wet`]; the render form.
@@ -124,8 +178,12 @@ const GRID: usize = 9;
 const CELLS: usize = 8;
 /// Cell-flag low nibble meaning "dry / do not render".
 const DRY_NIBBLE: u8 = 0x0f;
-/// Cell-flag low nibble meaning "rapids" (`river\fast_a`) rather than still water.
-const RAPIDS_NIBBLE: u8 = 0x08;
+/// The scale the reference applies to a magma vertex's authored `u16` texture coords:
+/// `u = (s as i32 as f64 · TEXC) as f32`, `TEXC = 0x3c400000 = 3/256`. VERIFIED bit-exact at
+/// `WoW.exe 0x68d890` (`liquid_render_verts`), emulation-diffed over 60 randomized fills in wow-re
+/// `crates/terrain/tests/difftest/fills.rs`. Authored steps run ≈42 units per 4.167-yd cell, so one
+/// lava repeat spans ≈8.5 yd — twice the density of the ¼-per-cell water field.
+const MAGMA_TEXCOORD_SCALE: f32 = f32::from_bits(0x3c40_0000);
 /// Verts under no liquid carry FLT_MAX (`0x7F7FFFFF`) — `is_finite()` is TRUE for it, so gate on
 /// magnitude instead.
 const HEIGHT_SENTINEL: f32 = 1.0e9;
@@ -138,27 +196,77 @@ const HEIGHT_SENTINEL: f32 = 1.0e9;
 /// the deep/teal swatch row until this. The river depth ramp is ≈8.5 byte/yd, so V saturates at ≈5 yd.)
 const RIVER_DEPTH_V_SATURATION: f32 = 42.0;
 
-/// Build a flat water surface mesh from a parsed MCLQ chunk at MCNK origin `position`
-/// (the chunk header's raw WoW `[x, y, z]`). Returns `None` when the chunk has no wet cells
-/// or is magma/slime (Phase 3).
+/// Build a flat liquid surface mesh from one parsed MCLQ **block** at MCNK origin `position` (the
+/// chunk header's raw WoW `[x, y, z]`). A chunk can hold more than one block — see [`MclqChunk`].
+///
+/// `None` when the block has no wet cell, or when its cells are slime, which the reference has no
+/// ADT queue for ([`LiquidKind::from_adt_nibble`]).
 pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<LiquidMesh> {
-    // Coarse kind from the MCNK-flag liquid type; magma/slime deferred.
-    let base_kind = match mclq.liquid_type {
-        LiquidType::Water => LiquidKind::Still,
-        LiquidType::Ocean => LiquidKind::Ocean,
-        LiquidType::Magma | LiquidType::Slime => return None,
-    };
+    if mclq.vertices.len() < GRID * GRID || mclq.tile_flags.len() < CELLS * CELLS {
+        return None;
+    }
+
+    // ── Cells first, because the CELLS decide the kind. ──
+    // 2 tris per wet cell. Skip dry cells (low nibble 0xf) and any cell with a sentinel-height
+    // corner (belt-and-suspenders).
+    let mut indices = Vec::with_capacity(CELLS * CELLS * 6);
+    let mut wet = vec![false; CELLS * CELLS];
+    // Wet-cell nibble tally → the block's majority nibble, which is BOTH its render kind and its
+    // sound class (`LiquidMesh::sound_nibble`). Counted over genuinely-wet cells only, so it
+    // describes what is actually drawn.
+    let mut nibble_counts = [0u32; 16];
+    for row in 0..CELLS {
+        for col in 0..CELLS {
+            let flag = mclq.tile_flags[row * CELLS + col] & 0x0f;
+            if flag == DRY_NIBBLE {
+                continue;
+            }
+            let tl = (row * GRID + col) as u32;
+            let tr = tl + 1;
+            let bl = ((row + 1) * GRID + col) as u32;
+            let br = bl + 1;
+            // Guard against a wet cell whose corner is the sentinel/NaN (data anomaly) — check the
+            // ORIGINAL heights, not the sanitized `positions`. Wet cells normally carry real heights.
+            if [tl, tr, bl, br].iter().any(|&i| {
+                let raw = mclq.vertices[i as usize].height;
+                !raw.is_finite() || raw.abs() >= HEIGHT_SENTINEL
+            }) {
+                continue;
+            }
+            nibble_counts[flag as usize] += 1;
+            // The cell is liquid AND its corners are real — the same gate the triangles pass, so
+            // the grid the queries read and the mesh the renderer draws can never disagree.
+            wet[row * CELLS + col] = true;
+            indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+        }
+    }
+    if indices.is_empty() {
+        return None;
+    }
+
+    // The kind comes from the CELL NIBBLE — the VERIFIED type source (`0x6ba970`/`0x68d9b0`) — not
+    // from the MCNK header bits, whose bit→type ordering was never byte-proven and which mislabelled
+    // every two-block river-mouth chunk as ocean. In shipped data a block's wet cells are of one
+    // class throughout, so the majority is the block; the tally is what breaks a tie.
+    let sound_nibble = nibble_counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(n, _)| n as u8)
+        .unwrap_or(0);
+    let kind = LiquidKind::from_adt_nibble(sound_nibble)?;
+
     // Depth-byte → swatch coord `V` divisor (VERIFIED). River/lake (the `c81768`/`FUN_0068d790` path)
     // saturates at byte 42 = ~5 yd, so the channel middle reaches the deep/teal swatch row. Ocean uses
     // a DIFFERENT mechanism (`FUN_0068d890` reads explicit per-vertex MCLQ UVs, not a depth LUT) — left
     // at /255 here pending its own RE + an in-game A/B; an ocean A/B has not been done since this fix.
-    let depth_v_div = match base_kind {
+    let depth_v_div = match kind {
         LiquidKind::Ocean => 255.0,
         _ => RIVER_DEPTH_V_SATURATION,
     };
-    if mclq.vertices.len() < GRID * GRID || mclq.tile_flags.len() < CELLS * CELLS {
-        return None;
-    }
+    // Magma reads its UVs off the vertex and its depth off nothing at all (see `LiquidMesh::uvs` /
+    // `::depths`); every other kind generates cell-index UVs and ramps by the depth byte.
+    let authored_uvs = kind == LiquidKind::Magma;
     let [wx, wy, _wz] = position;
 
     // 81 grid verts in raw WoW coords. Linear index `n`: row = n/9 (steps south, −X), col = n%9
@@ -188,65 +296,26 @@ pub(crate) fn build_liquid_mesh(mclq: &MclqChunk, position: [f32; 3]) -> Option<
             snap_to_lattice(wy - col * UNIT_SIZE),
             h,
         ]);
-        uvs.push([col * 0.25, row * 0.25]);
-        // SVert depth byte (water/ocean: union_data[0]) → swatch coord V (0..1). River/lake saturate at
-        // byte 42 (`clamp(byte/42)`, VERIFIED `c81768`) so the channel middle hits the deep/teal swatch
-        // row; ocean at /255 (see `depth_v_div`). The SAME V drives both the body-colour depth band and
-        // the opacity ramp on the shader side (one swatch row → colour + alpha).
-        depths.push((mclq.vertices[n].depth_byte() as f32 / depth_v_div).clamp(0.0, 1.0));
-    }
-
-    // 2 tris per wet cell. Skip dry cells (low nibble 0xf) and any cell with a sentinel-height
-    // corner (belt-and-suspenders). Track whether any wet cell is rapids → use fast_a for the
-    // whole chunk (still/rapids virtually never mix in one MCNK; per-cell sets are a refinement).
-    let mut indices = Vec::with_capacity(CELLS * CELLS * 6);
-    let mut wet = vec![false; CELLS * CELLS];
-    let mut any_rapids = false;
-    // Wet-cell nibble tally → the surface's majority sound-class nibble (`LiquidMesh::sound_nibble`).
-    let mut nibble_counts = [0u32; 16];
-    for row in 0..CELLS {
-        for col in 0..CELLS {
-            let flag = mclq.tile_flags[row * CELLS + col] & 0x0f;
-            if flag == DRY_NIBBLE {
-                continue;
-            }
-            nibble_counts[flag as usize] += 1;
-            let tl = (row * GRID + col) as u32;
-            let tr = tl + 1;
-            let bl = ((row + 1) * GRID + col) as u32;
-            let br = bl + 1;
-            // Guard against a wet cell whose corner is the sentinel/NaN (data anomaly) — check the
-            // ORIGINAL heights, not the sanitized `positions`. Wet cells normally carry real heights.
-            if [tl, tr, bl, br].iter().any(|&i| {
-                let raw = mclq.vertices[i as usize].height;
-                !raw.is_finite() || raw.abs() >= HEIGHT_SENTINEL
-            }) {
-                continue;
-            }
-            if flag == RAPIDS_NIBBLE {
-                any_rapids = true;
-            }
-            // The cell is liquid AND its corners are real — the same gate the triangles pass, so
-            // the grid the queries read and the mesh the renderer draws can never disagree.
-            wet[row * CELLS + col] = true;
-            indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
+        if authored_uvs {
+            // `u = (s as i32 as f64 · 3/256) as f32` — VERIFIED bit-exact `0x68d890`. Unsigned: the
+            // reference widens the u16 to i32, so 0xffff is 65535, never −1.
+            let [s, t] = mclq.vertices[n].texcoords();
+            let scale = f64::from(MAGMA_TEXCOORD_SCALE);
+            uvs.push([
+                ((f64::from(s)) * scale) as f32,
+                ((f64::from(t)) * scale) as f32,
+            ]);
+            depths.push(0.0);
+        } else {
+            uvs.push([col * 0.25, row * 0.25]);
+            // SVert depth byte (water/ocean: union_data[0]) → swatch coord V (0..1). River/lake saturate
+            // at byte 42 (`clamp(byte/42)`, VERIFIED `c81768`) so the channel middle hits the deep/teal
+            // swatch row; ocean at /255 (see `depth_v_div`). The SAME V drives both the body-colour depth
+            // band and the opacity ramp on the shader side (one swatch row → colour + alpha).
+            depths.push((mclq.vertices[n].depth_byte() as f32 / depth_v_div).clamp(0.0, 1.0));
         }
     }
 
-    if indices.is_empty() {
-        return None;
-    }
-    let kind = if any_rapids && base_kind == LiquidKind::Still {
-        LiquidKind::Rapids
-    } else {
-        base_kind
-    };
-    let sound_nibble = nibble_counts
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, &c)| c)
-        .map(|(n, _)| n as u8)
-        .unwrap_or(0);
     Some(LiquidMesh {
         grid: [GRID as u32, GRID as u32],
         wet,
@@ -271,6 +340,222 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data")
     }
 
+    /// Every liquid mesh a real tile builds, with the MCNK origin each came from.
+    fn tile_liquids(chain: &mut crate::Chain, map: &str, tx: u32, ty: u32) -> Vec<LiquidMesh> {
+        let bytes = chain
+            .read_file(&format!("World\\Maps\\{map}\\{map}_{tx}_{ty}.adt"))
+            .expect("read adt");
+        let ParsedAdt::Root(root) =
+            parse_adt(&mut std::io::Cursor::new(&bytes[..])).expect("parse adt");
+        root.mcnk_chunks
+            .iter()
+            .flat_map(|m| {
+                m.liquids
+                    .iter()
+                    .filter_map(|lq| build_liquid_mesh(lq, m.header.position))
+            })
+            .collect()
+    }
+
+    /// Whether a mesh's **wet** footprint covers a raw WoW `(x, y)`, and at what surface height —
+    /// the containment the swim/submersion queries do, done here off the grid directly.
+    fn wet_at(m: &LiquidMesh, x: f32, y: f32) -> Option<f32> {
+        let cols = m.grid[0] as usize;
+        for (c, _) in m.wet.iter().enumerate().filter(|(_, &w)| w) {
+            let (row, col) = (c / (cols - 1), c % (cols - 1));
+            let corners = [
+                row * cols + col,
+                row * cols + col + 1,
+                (row + 1) * cols + col,
+                (row + 1) * cols + col + 1,
+            ];
+            let xs: Vec<f32> = corners.iter().map(|&i| m.positions[i][0]).collect();
+            let ys: Vec<f32> = corners.iter().map(|&i| m.positions[i][1]).collect();
+            let (x0, x1) = (
+                xs.iter().cloned().fold(f32::MAX, f32::min),
+                xs.iter().cloned().fold(f32::MIN, f32::max),
+            );
+            let (y0, y1) = (
+                ys.iter().cloned().fold(f32::MAX, f32::min),
+                ys.iter().cloned().fold(f32::MIN, f32::max),
+            );
+            if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                return Some(corners.iter().map(|&i| m.positions[i][2]).sum::<f32>() / 4.0);
+            }
+        }
+        None
+    }
+
+    /// **B21 — "there should be lava here", `.go xyz -7845.99 -1065.50 123.60 0`.**
+    ///
+    /// Open-world lava is MCLQ magma, and the ADT mesher used to return `None` for it, so every
+    /// outdoor lava surface in the game was silently absent while Blackrock's (WMO MLIQ) rendered
+    /// fine — exactly the shape of the report. The pin is Burning Steppes, tile 33_46.
+    ///
+    /// This is the whole of it: a sweep of all 12 shipped terrain maps finds MCLQ magma on five
+    /// tiles only — 124 chunks across Burning Steppes/Searing Gorge and 4 in Un'Goro — and no MCLQ
+    /// slime anywhere at all.
+    #[test]
+    fn b21_burning_steppes_lava_builds_a_magma_surface_at_the_reported_pin() {
+        let data = data_dir();
+        if !data.is_dir() {
+            eprintln!("skipping: no WoW client at {}", data.display());
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let meshes = tile_liquids(&mut chain, "Azeroth", 33, 46);
+
+        let magma: Vec<&LiquidMesh> = meshes
+            .iter()
+            .filter(|m| m.kind == LiquidKind::Magma)
+            .collect();
+        assert_eq!(magma.len(), 64, "Burning Steppes tile 33_46 magma chunks");
+
+        // The reported spot itself is wet, with lava — not merely "somewhere on this tile".
+        let (px, py, pz) = (-7845.99f32, -1065.50, 123.60);
+        let hit = magma
+            .iter()
+            .find_map(|m| wet_at(m, px, py))
+            .expect("the reported pin stands on a magma surface");
+        assert!(
+            (hit - pz).abs() < 6.0,
+            "lava surface {hit} sits at the reported eye height {pz}"
+        );
+
+        // Fullbright + opaque, and carrying the lava-flow sound class (nibble 6: class 2 = magma,
+        // FluidSpeed 4 → LavaFlowLoop) — the whole magma contract, not just a mesh that exists.
+        assert!(magma.iter().all(|m| m.kind.is_fullbright()));
+        assert!(
+            magma.iter().all(|m| m.sound_nibble == 6),
+            "shipped ADT magma is nibble 6 throughout"
+        );
+        // No ADT slime exists to build, and the reference has no queue for it if it did.
+        assert!(
+            !meshes.iter().any(|m| m.kind == LiquidKind::Slime),
+            "slime never renders from an ADT"
+        );
+    }
+
+    /// Lava's UVs are **authored per vertex**, not generated — and authored *world-continuously*, so
+    /// a chunk's east edge repeats its neighbour's west edge exactly. That continuity is the check
+    /// that the `u16 → ·3/256` read (VERIFIED `0x68d890`) is being applied to the right bytes in the
+    /// right order: get the scale wrong and it still tiles, get the *field* wrong and the seam shows.
+    #[test]
+    fn magma_uvs_come_from_the_vertex_and_run_continuous_across_chunks() {
+        let data = data_dir();
+        if !data.is_dir() {
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let magma: Vec<LiquidMesh> = tile_liquids(&mut chain, "Azeroth", 33, 46)
+            .into_iter()
+            .filter(|m| m.kind == LiquidKind::Magma)
+            .collect();
+
+        // Not the generated ¼-per-cell field: authored steps are ≈42 units ≈ 0.49 UV per cell.
+        let stepped = magma.iter().any(|m| {
+            let du = (m.uvs[1][0] - m.uvs[0][0]).abs();
+            du > 0.001 && (du - 0.25).abs() > 0.05
+        });
+        assert!(
+            stepped,
+            "magma UVs are authored, not the water cell-index UVs"
+        );
+
+        // Two chunks adjacent along −Y: the west one's col-8 vertex column IS the east one's col-0.
+        let mut shared = 0;
+        for a in &magma {
+            for b in &magma {
+                let (pa, pb) = (a.positions[8], b.positions[0]);
+                if (pa[0] - pb[0]).abs() < 0.01 && (pa[1] - pb[1]).abs() < 0.01 {
+                    for row in 0..9 {
+                        let (ua, ub) = (a.uvs[row * 9 + 8], b.uvs[row * 9]);
+                        // Sentinel-height (dry) verts carry no authored coord — skip those.
+                        if ua == [0.0, 0.0] || ub == [0.0, 0.0] {
+                            continue;
+                        }
+                        assert!(
+                            (ua[0] - ub[0]).abs() < 1e-4 && (ua[1] - ub[1]).abs() < 1e-4,
+                            "shared lava edge vertex must carry one UV: {ua:?} vs {ub:?}"
+                        );
+                        shared += 1;
+                    }
+                }
+            }
+        }
+        assert!(shared > 0, "no shared lava chunk edge found to check");
+    }
+
+    /// **The sweep's second find: an MCNK can carry more than one MCLQ block**, one per set liquid
+    /// header bit (VERIFIED wow-re `adt-format.md`). 28 shipped Azeroth chunks are river mouths that
+    /// carry two — the stream *and* the sea beneath it — and reading only the first dropped the sea
+    /// while the old header-bit priority ("ocean wins") labelled the river block ocean.
+    ///
+    /// Hillsbrad's tile 33_33 is one. Both blocks must survive, each with its own kind and height.
+    #[test]
+    fn a_river_mouth_chunk_builds_both_its_river_and_its_sea() {
+        let data = data_dir();
+        if !data.is_dir() {
+            return;
+        }
+        let mut chain = crate::open_chain(&data).expect("open chain");
+        let bytes = chain
+            .read_file("World\\Maps\\Azeroth\\Azeroth_33_33.adt")
+            .expect("read adt");
+        let ParsedAdt::Root(root) =
+            parse_adt(&mut std::io::Cursor::new(&bytes[..])).expect("parse adt");
+
+        let two_block: Vec<&benilla_adt::McnkChunk> = root
+            .mcnk_chunks
+            .iter()
+            .filter(|m| m.liquids.len() > 1)
+            .collect();
+        assert!(
+            !two_block.is_empty(),
+            "Azeroth_33_33 carries river-mouth chunks with two liquid blocks"
+        );
+
+        for mcnk in two_block {
+            assert_eq!(mcnk.liquids.len(), 2, "two set liquid bits ⇒ two blocks");
+            let built: Vec<LiquidMesh> = mcnk
+                .liquids
+                .iter()
+                .filter_map(|lq| build_liquid_mesh(lq, mcnk.header.position))
+                .collect();
+            assert_eq!(built.len(), 2, "both blocks mesh");
+            // Disk order is header-bit order: bit 2 (river) then bit 3 (ocean) — and the KIND comes
+            // from each block's own cell nibble, so the river no longer reads as ocean.
+            assert_eq!(built[0].kind, LiquidKind::Still, "block 0 is the stream");
+            assert_eq!(built[1].kind, LiquidKind::Ocean, "block 1 is the sea");
+            let sea = built[1].positions[built[1].indices[0] as usize][2];
+            let river = built[0].positions[built[0].indices[0] as usize][2];
+            assert!(
+                river > sea + 1.0,
+                "the stream ({river}) sits above sea level ({sea})"
+            );
+            // **The invariant that makes spawning both safe at a river mouth.**
+            // `liquid::liquid_at` resolves overlapping footprints by taking the LOWEST surface
+            // (decision 0634/0701 — the volume you are actually in when two are stacked). If a
+            // river cell and an ocean cell covered the same XY, the sea at z≈0 would win under a
+            // stream 5 yd above it and the player would read as dry while standing in the water.
+            // At every real river mouth the two blocks are authored **disjoint** — each cell
+            // belongs to exactly one — so they never compete for a position.
+            //
+            // Swept game-wide: 28 two-block chunks, and the only 4 whose cells overlap are in
+            // Kalimdor tile 26_54 (a flat −23.47 sheet under a full-chunk sea at 0.0, in the dead
+            // water off the south-west corner). That patch read the same way *before* multi-block
+            // parsing — the first block was all there was — so it is a named residual of the
+            // lowest-wins rule, not a regression. See the decision record.
+            for (cell, (&r, &o)) in built[0].wet.iter().zip(&built[1].wet).enumerate() {
+                assert!(
+                    !(r && o),
+                    "cell {cell} is wet in BOTH blocks — the stacked-surface case liquid_at \
+                     resolves lowest-wins, which would read this stream as dry"
+                );
+            }
+        }
+    }
+
     /// Golden test against a real Elwynn tile: Crystal Lake area `Azeroth_32_48.adt` has 42 MCLQ
     /// water chunks (all river/still, surface ≈ 143.99 yd). Skips when the client isn't present.
     #[test]
@@ -289,7 +574,7 @@ mod tests {
 
         let mut meshes = Vec::new();
         for mcnk in &root.mcnk_chunks {
-            if let Some(mclq) = &mcnk.liquid {
+            for mclq in &mcnk.liquids {
                 if let Some(m) = build_liquid_mesh(mclq, mcnk.header.position) {
                     meshes.push(m);
                 }

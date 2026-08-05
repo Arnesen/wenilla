@@ -174,6 +174,7 @@ pub(crate) mod tests {
             bone: 0,
             shape,
             blend: benilla_formats::ParticleBlend::Add,
+            lit: false,
             texture: None,
             tile_rows: 1,
             tile_cols: 1,

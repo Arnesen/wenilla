@@ -12,10 +12,13 @@
 //!
 //! **World pass** ([`finalize_rig_worlds`], post-propagation, inside
 //! [`crate::billboard::BillboardPlace`]): per rig needing it — pose-dirty, `joints_root` moved,
-//! or camera-faced — compose the world chain `world_from_model × local…`, apply the byte-law
-//! bone replacements (`billboard_joint_palette`'s math verbatim: the arm again, in its world-space
-//! form, then billboard kinds take the camera basis, and descendants chain onto the replaced
-//! frames), write the palette rows (`world × inverse_bindpose`, decision 0720), and re-seat the
+//! or camera-faced — compose the chain `world_from_model × local…` **with the root's translation
+//! zeroed** (decision 0974: the whole chain runs rig-relative, because composing it at the map's
+//! ~9.5 k-yard coordinates spent an f32 ULP — ~1 mm — per matmul, freshly every frame), apply the
+//! byte-law bone replacements (`billboard_joint_palette`'s math verbatim: the arm again, in its
+//! world-space form, then billboard kinds take the camera basis, and descendants chain onto the
+//! replaced frames), write the palette rows (`frame × inverse_bindpose`, decision 0720) beside the
+//! rig's world origin (which the vertex stage adds back camera-relative), and re-seat the
 //! anchors sitting on replaced subtrees — including the same rigid-child re-walk and the same
 //! nested-rig do-not-enter rule as the entity pass. A re-seated subtree that carries another
 //! rig's model frame (the mounted rider's seat anchor, [`RigFrame`]) cascades: that rig
@@ -71,10 +74,19 @@ fn compose_rig_models(mut rigs: Query<&mut RigPose>, mut anchors: Query<&mut Tra
     }
 }
 
-/// One rig's world chain + which bones sit in a replaced subtree. `root_g` is the rig's
-/// `joints_root` propagated world — the model's own root frame `[model+0xfc]`, which is both what
-/// the `flags & 0x7` arm rebuilds a parent matrix out of and, for a mounted rider, its seat anchor
-/// (`0x714389`). `cam` is the camera basis (`None` = no camera, so only the arm applies).
+/// Translate a composed rig-relative frame back into world space (decision 0974).
+fn shift(g: GlobalTransform, origin: Vec3) -> GlobalTransform {
+    let mut a = g.affine();
+    a.translation += bevy::math::Vec3A::from(origin);
+    GlobalTransform::from(a)
+}
+
+/// One rig's chain + which bones sit in a replaced subtree, composed **in the root's frame**: the
+/// caller passes `root_g` with its translation zeroed, so every frame out is rig-relative
+/// (decision 0974) and the whole chain runs at rig-sized magnitudes. `root_g` is otherwise the
+/// rig's `joints_root` propagated world — the model's own root frame `[model+0xfc]`, which is both
+/// what the `flags & 0x7` arm rebuilds a parent matrix out of and, for a mounted rider, its seat
+/// anchor (`0x714389`). `cam` is the camera basis (`None` = no camera, so only the arm applies).
 /// The math mirrors `billboard_joint_palette` operation for operation — rewrite the parent matrix,
 /// compose the local, then face — so the collapsed lane is bit-compatible with the entity lane.
 fn rig_worlds(
@@ -186,9 +198,20 @@ pub(crate) fn finalize_rig_worlds(
             let Ok(root_g) = globals.get(rig.joints_root).map(|(_, g)| *g) else {
                 return;
             };
-            let (worlds, touched) = rig_worlds(rig, root_g, cam_basis);
+            // **The chain is composed RIG-RELATIVE** (decision 0974): same root basis, translation
+            // zeroed. Every operation below — the `flags & 0x7` arm, the local compose, the
+            // billboard replacement — is translation-equivariant (the arm is 3×3 work plus a
+            // pivot-preserving translation; the billboard rewrites rotation only), so this yields
+            // exactly the world chain shifted by `−origin`, at rig-sized magnitudes. That is the
+            // fix: composing at Elwynn's ~9.5 k yards spent an f32 ULP (~1 mm) per matmul, freshly
+            // every frame because the pose is recomposed every frame, and that is the shimmer.
+            // (`WOW_NO_RIG_REBASE=1` makes this the map origin — the A/B lever for what the
+            // rebase is worth; see `rig_palette::rebase_origin`.)
+            let origin = crate::rig_palette::rebase_origin(root_g.translation());
+            let root_rel = crate::rig_palette::rebase_global(root_g, origin);
+            let (worlds, touched) = rig_worlds(rig, root_rel, cam_basis);
             if let Some(ibp) = ibps.get(&skin.ibp) {
-                palettes.write_rig_worlds(skin, &worlds, ibp);
+                palettes.write_rig_worlds(skin, &worlds, ibp, origin);
             }
             if !rig.has_special && !root_moved {
                 return;
@@ -209,7 +232,11 @@ pub(crate) fn finalize_rig_worlds(
                 if !root_moved && !touched.get(b).copied().unwrap_or(false) {
                     continue;
                 }
-                let Some(&world) = worlds.get(b) else {
+                // Anchors are ordinary scene-graph entities: their `GlobalTransform` is world
+                // space and every consumer (propagation, colliders, the effect lane, item
+                // placement) reads it as such — so the rig-relative frame goes back to absolute
+                // here. Only the PALETTE stays relative; that is the whole seam (decision 0974).
+                let Some(world) = worlds.get(b).map(|&w| shift(w, origin)) else {
                     continue;
                 };
                 if let Ok((_, mut g)) = globals.get_mut(anchor) {
@@ -475,5 +502,125 @@ mod tests {
                 "bone {i}"
             );
         }
+    }
+
+    /// **The jitter pin** (decision 0974) — the measurement the rebase exists for.
+    ///
+    /// Compose the same idling six-bone chain frame by frame two ways — rooted at Goldshire's real
+    /// world coordinates, and rooted at the rig's own origin with the position carried alongside —
+    /// and score each against an f64 oracle of the identical chain. What matters is not the error
+    /// but its **frame-to-frame variation**: a constant offset is invisible, a per-frame one is
+    /// shimmer. The absolute route re-rounds to the f32 grid at ~9.5 k yards (1 ULP ≈ 0.98 mm)
+    /// every frame *because the pose changes every frame* — that is the long-standing "characters
+    /// look jittery up close" the director reported, and terrain is exempt only because it doesn't
+    /// move. The rebased chain runs at rig-sized magnitudes where an ULP is ~0.1 µm.
+    ///
+    /// Pinned as a ratio and an absolute ceiling: someone re-rooting this chain in world space
+    /// again — the natural-looking simplification — puts the shimmer straight back.
+    #[test]
+    fn the_rebased_chain_does_not_re_round_at_world_scale_every_frame() {
+        use bevy::math::{DAffine3, DVec3};
+
+        // Goldshire. `.go xyz -9464 62 56 0` — near the worst |coord| the 1.12 maps reach, and
+        // exactly where the report came from. Deliberately not integers: 9464.0 is exact in f32.
+        const ROOT: Vec3 = Vec3::new(-9464.31, 62.17, 56.91);
+        const AMP: [f32; 6] = [0.010, 0.012, 0.008, 0.015, 0.020, 0.014]; // a breathing idle
+
+        let sk = skeleton(vec![
+            joint(-1, Vec3::ZERO),
+            joint(0, Vec3::new(0.0, 1.02, 0.0)),
+            joint(1, Vec3::new(0.0, 0.34, 0.0)),
+            joint(2, Vec3::new(0.21, 0.26, 0.0)),
+            joint(3, Vec3::new(0.0, -0.31, 0.0)),
+            joint(4, Vec3::new(0.0, -0.29, 0.0)),
+        ]);
+        let mut rig = RigPose::new(Entity::PLACEHOLDER, &sk);
+        let tip = sk.joints.len() - 1;
+        // A FACING, and bones that swing on two axes. Without both, a chain whose motion happens to
+        // miss the large world axis measures almost nothing — an all-about-X rig at this root left
+        // the ~9.5 k x-coordinate static and scored 40× better than it has any right to. A real
+        // skeleton's limbs move in all three world axes; the pin has to too.
+        let root_yaw = Quat::from_rotation_y(0.9);
+
+        // The same chain in f64, from an identity root: the truth both routes are scored against.
+        let oracle = |rig: &RigPose| -> DVec3 {
+            let mut w: Vec<DAffine3> = Vec::with_capacity(rig.locals.len());
+            for i in 0..rig.locals.len() {
+                let l = DAffine3::from_scale_rotation_translation(
+                    rig.locals[i].scale.as_dvec3(),
+                    rig.locals[i].rotation.as_dquat(),
+                    rig.locals[i].translation.as_dvec3(),
+                );
+                w.push(
+                    match usize::try_from(rig.parents[i]).ok().filter(|&p| p < i) {
+                        Some(p) => w[p] * l,
+                        None => l,
+                    },
+                );
+            }
+            w[tip].translation
+        };
+
+        let root_abs =
+            GlobalTransform::from(Transform::from_translation(ROOT).with_rotation(root_yaw));
+        let root_rel = GlobalTransform::from(Transform::from_rotation(root_yaw));
+        let (mut abs_err, mut rel_err): (Vec<DVec3>, Vec<DVec3>) = (Vec::new(), Vec::new());
+        let mut truths: Vec<DVec3> = Vec::new();
+        for step in 0..180 {
+            let phase = std::f32::consts::TAU * step as f32 / 90.0; // a 1.5 s idle loop at 60 fps
+            for (i, amp) in AMP.iter().enumerate() {
+                let a = phase + i as f32 * 0.7;
+                rig.locals[i].rotation =
+                    Quat::from_rotation_x(amp * a.sin()) * Quat::from_rotation_z(amp * a.cos());
+            }
+            let truth = root_yaw.as_dquat() * oracle(&rig);
+            truths.push(truth);
+            let abs = rig_worlds(&rig, root_abs, None).0[tip].translation();
+            let rel = rig_worlds(&rig, root_rel, None).0[tip].translation();
+            abs_err.push(abs.as_dvec3() - (truth + ROOT.as_dvec3()));
+            rel_err.push(rel.as_dvec3() - truth);
+        }
+        let jitter = |e: &[DVec3]| e.windows(2).map(|w| w[1].distance(w[0])).sum::<f64>() / 179.0;
+        let (abs_j, rel_j) = (jitter(&abs_err), jitter(&rel_err));
+        // The real per-frame motion of the tip — what the noise above has to be read against.
+        let signal = jitter(&truths);
+
+        // `--nocapture` prints the measurement this pin was written from (yards):
+        //   abs_err 5.2e-4  rel_err 9.6e-8 | abs_j 7.4e-4  rel_j 1.0e-7 | signal 1.6e-3
+        // i.e. 0.74 mm of FRESH noise per frame against 1.65 mm of real motion — 45 % of a slow
+        // idle's apparent movement was rounding — and 1 Å after the rebase.
+        eprintln!(
+            "abs_err mean={:.3e} rel_err mean={:.3e} abs_j={abs_j:.3e} rel_j={rel_j:.3e} \
+             signal={signal:.3e} noise/signal abs={:.2} rel={:.5}",
+            abs_err.iter().map(|e| e.length()).sum::<f64>() / 180.0,
+            rel_err.iter().map(|e| e.length()).sum::<f64>() / 180.0,
+            abs_j / signal,
+            rel_j / signal,
+        );
+        // The sweep has to actually move the tip, or every number above is measuring nothing.
+        assert!(
+            signal > 1e-4,
+            "the idle really does move the tip: {signal:.3e}"
+        );
+        assert!(
+            abs_j > 3e-4,
+            "the absolute route spends a world-scale ULP per frame — got {abs_j:.3e} yd. If this \
+             ever fails, decision 0974's premise has stopped holding here (or the rig above has \
+             drifted into missing the large world axis again) — re-derive before deleting."
+        );
+        assert!(
+            abs_j / signal > 0.1,
+            "…and it is a large fraction of the real motion, which is why it READS as shake: \
+             {:.2}",
+            abs_j / signal
+        );
+        assert!(
+            rel_j < 1e-6,
+            "the rebased chain holds sub-micron — got {rel_j:.3e} yd"
+        );
+        assert!(
+            abs_j / rel_j > 100.0,
+            "the rebase is worth ≥2 orders of magnitude: {abs_j:.3e} vs {rel_j:.3e} yd/frame"
+        );
     }
 }

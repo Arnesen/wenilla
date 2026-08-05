@@ -63,6 +63,12 @@ pub(crate) struct MatKey {
     /// The batch's fog COLOUR policy ([`benilla_formats::FogPolicy`]) — packed into `clutter_fade.z`
     /// bits 4-6 (`wow_model.wgsl`'s step-5 fog).
     fog_policy: benilla_formats::FogPolicy,
+    /// This batch's texture coordinates are **generated** — the sphere-map environment coordinate,
+    /// not the vertex UVs ([`benilla_formats::RenderSubmesh::env_map`]). Packed into
+    /// `clutter_fade.z` bit 12; a key axis because two batches sharing a texture but differing here
+    /// sample it completely differently. **Not** a `WowModelKey` axis — it swaps which UV the
+    /// FRAGMENT stage samples, no pipeline state, so it mints no pipeline (decision 0837).
+    env_map: bool,
     /// The batch's static terrain-shade selector ([`ShadeSel`]). Static per placement, so it dedups a
     /// lit / matte / shaded material variant.
     shade: ShadeSel,
@@ -178,6 +184,9 @@ pub(crate) fn model_material(
     no_depth_write: bool,
     no_depth_test: bool,
     fog_policy: benilla_formats::FogPolicy,
+    // This batch's texture coordinates are GENERATED, not authored
+    // ([`benilla_formats::RenderSubmesh::env_map`]) — see [`MatKey::env_map`].
+    env_map: bool,
     shade: ShadeSel,
     // Authored batch index + 1 (0 = unordered): the transparent-pass ORDER of this batch among its
     // model's other batches — see [`MatKey::batch_order`] and [`BATCH_ORDER_SORT_EPS`].
@@ -205,6 +214,7 @@ pub(crate) fn model_material(
         no_depth_write,
         no_depth_test,
         fog_policy,
+        env_map,
         shade,
         batch_order,
         uv_anim: uv_anim.map(|a| std::sync::Arc::as_ptr(a) as usize),
@@ -335,7 +345,8 @@ pub(crate) fn model_material(
                         | (u16::from(fog_policy as u8) << 4)
                         | (u16::from(blend == ModelBlend::Mod) << 7)
                         | (u16::from(blend == ModelBlend::Mod2x) << 8)
-                        | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER),
+                        | (u16::from(fade_variant && source_cutout) * TWIN_CUTOUT_MARKER)
+                        | (u16::from(env_map) * ENV_MAP_MARKER),
                 ),
                 0.0,
             ),
@@ -344,7 +355,11 @@ pub(crate) fn model_material(
             // bypass lighting in wow_model.wgsl): the M2 UNLIT (0x01) flag, or WMO UNLIT on an
             // exterior-group batch (the interior drawer ignores it — section law, `wmo-lit-selector`).
             // Additive is NOT fullbright: the real client *lights* additive batches unless 0x01 is set
-            // (wow-re `m2-no-envmap-texgen`), so an un-flagged additive (e.g. ArmorReflect shine) is lit.
+            // (wow-re `m2-no-envmap-texgen`'s lighting section — `DAT_00811fa8[4] = 1`), so an
+            // un-flagged additive (e.g. ArmorReflect shine) is lit. **That note's headline is
+            // otherwise wrong and this cite reaches only its lighting table** (decision 0971): the
+            // M2 path DOES generate env-map texcoords — in the vertex program, which the note's
+            // `SetRenderState` sweep could not see. See [`ENV_MAP_MARKER`].
             // M2 Mod/Mod2x ARE fullbright regardless of 0x01 — the lighting table
             // `DAT_00811fa8 = {1,1,1,1,1,0,0}` clears GL_LIGHTING for modes 5/6 (wow-re
             // `m2-depth-blend-state`); WMO lighting stays flag-driven only (decision 0528).
@@ -433,6 +448,13 @@ pub(crate) const ZFILL_MARKER: u16 = 1 << 9;
 /// promoted alike (`m2-blend-promotion-zfill.md` §2; decision 0842).
 pub(crate) const TWIN_CUTOUT_MARKER: u16 = 1 << 10;
 
+/// `clutter_fade.z` marker bit 12: this batch's texture coordinates are **generated**, so
+/// `wow_model.wgsl` derives them from the view-space reflection vector instead of sampling the
+/// (meaningless) vertex UVs — the reference's `texture_unit_lookup > 2` env stage. Bit 11 is
+/// [`FAR_SIDE_MARKER`]. Deliberately **not** a [`crate::terrain::WowModelKey`] axis: it changes
+/// only what the fragment stage samples, so it needs no pipeline of its own (decision 0837).
+pub(crate) const ENV_MAP_MARKER: u16 = 1 << 12;
+
 /// The twin's `Transparent3d` sort bias (yards; **negative = drawn earlier** — the sign law is
 /// `sky_order`'s module doc). It must clear the spread of one model's part AABB centres, so **all**
 /// of a fading model's twins draw before **any** of its colour parts — the reference achieves the
@@ -485,6 +507,9 @@ pub(crate) fn zfill_material(
         no_depth_write: false,
         no_depth_test: false,
         fog_policy: benilla_formats::FogPolicy::Scene,
+        // A depth-prime twin writes no colour at all, so which UV it would have sampled cannot
+        // reach a pixel — one twin per source batch, whatever its texcoord source.
+        env_map: false,
         shade: ShadeSel::Lit,
         batch_order: 0,
         uv_anim: None,

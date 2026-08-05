@@ -56,8 +56,14 @@ fn census(
     *last = time.elapsed_secs();
 
     let mut per_cam: HashMap<Entity, usize> = HashMap::new();
+    // How many of this frame's draws take the SCENE-LIT pipeline arm. Only ~5% of the emitter
+    // corpus clears the unlit file bit, so "the lit variant compiles" and "the lit variant ever
+    // runs" are entirely different claims — and a scene with no lit emitter in it cannot tell
+    // them apart. This counter is what makes the second one checkable.
+    let mut lit_draws = 0usize;
     for d in &quads.draws {
         *per_cam.entry(d.cam).or_default() += 1;
+        lit_draws += usize::from(d.lit);
     }
     let mut rows: Vec<String> = per_cam
         .iter()
@@ -82,10 +88,11 @@ fn census(
         .collect();
     rows.sort();
     info!(
-        "[fx-census] {} frames · {} verts · {} distinct buffer states · draws: {}",
+        "[fx-census] {} frames · {} verts · {} distinct buffer states · {} lit · draws: {}",
         *frames,
         quads.verts.len(),
         states.len(),
+        lit_draws,
         rows.join(", ")
     );
     *frames = 0;

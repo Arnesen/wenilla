@@ -611,7 +611,7 @@ fn stream_terrain(
         let mut liquid_ents = Vec::new();
         spawn_liquids(
             &mut commands,
-            adt.chunks.iter().filter_map(|c| c.liquid.as_ref()),
+            adt.chunks.iter().flat_map(|c| c.liquids.iter()),
             liquid_assets.as_deref(),
             &mut meshes,
             &mut liquid_ents,

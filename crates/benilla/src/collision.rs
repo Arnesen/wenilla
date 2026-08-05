@@ -13,6 +13,8 @@
 use avian3d::prelude::*;
 use bevy::ecs::component::Component;
 
+pub(crate) mod one_sided;
+
 /// The collision audiences. avian reserves bit 0 for [`CollisionLayer::Default`], which every collider
 /// without an explicit `CollisionLayers` belongs to — so terrain/doodad/GameObject colliders are seen by
 /// both the player and camera queries automatically. Only the two per-WMO meshes carry an explicit layer.

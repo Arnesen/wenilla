@@ -465,6 +465,7 @@ pub(super) fn build_parts(
                         sub.no_depth_write, // M2 render flag 0x10
                         sub.no_depth_test,  // M2 render flag 0x08
                         sub.fog_policy,
+                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                         // Every entity M2 (unit/player/GameObject/held/fx) is built LIT — the verified
                         // §9 chain gives them the same 2.5/0.5 lane as ADT doodads, and the DYNAMIC half
                         // (the MCSH sample at their feet) rides the per-instance MeshTag shade byte
@@ -532,6 +533,7 @@ pub(super) fn build_parts(
                             sub.no_depth_write,
                             sub.no_depth_test,
                             sub.fog_policy,
+                            sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                             ShadeSel::Lit, // matches the exterior variant above
                             order,
                             None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
@@ -562,6 +564,7 @@ pub(super) fn build_parts(
                         sub.no_depth_write,
                         sub.no_depth_test,
                         sub.fog_policy,
+                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                         ShadeSel::Matte, // unread on the probe lane
                         order,
                         None,
@@ -596,6 +599,7 @@ pub(super) fn build_parts(
                                 sub.no_depth_write,
                                 sub.no_depth_test,
                                 sub.fog_policy,
+                                sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                                 ShadeSel::Matte, // unread on the probe lane
                                 order,
                                 None,
@@ -625,6 +629,7 @@ pub(super) fn build_parts(
                         sub.no_depth_write,
                         sub.no_depth_test,
                         sub.fog_policy,
+                        sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                         ShadeSel::Matte, // sun ×1.0, the forced indoor intensity — const so it dedups
                         order,
                         None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)
@@ -705,6 +710,7 @@ pub(super) fn build_parts(
                         sub.no_depth_write, // false for WMO (standard depth state)
                         sub.no_depth_test,
                         sub.fog_policy,  // always Scene for WMO
+                        false, // WMO batches never env-map — the M2 texcoord mechanism has no MOMT analogue
                         ShadeSel::Matte, // WMO uses the FFP N·L path, not the lobe — sun_scale unused
                         0,
                         None, // entities/portrait paths: UV anim deferred (0130 scope = placed doodads)

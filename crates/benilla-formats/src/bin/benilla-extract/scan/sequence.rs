@@ -1,0 +1,524 @@
+//! Corpus scans over **which sequence is playing** — the animation-arm side, where being on the
+//! wrong sequence (or on none at all) silently mis-renders everything keyed to it.
+//!
+//! The GameObject substate arm (`goanimscan`), the effect-model Stand/Hold/Decay lifecycle
+//! (`fxlifescan`), the loader-idle slot the per-sequence bakes degrade away from (`idleslotscan`),
+//! and the models with no keyed bone at all, so no clock ever advances (`seqclockscan`).
+
+use std::collections::{BTreeMap, HashSet};
+
+use anyhow::{Context, Result};
+use benilla_formats::Chain;
+
+use crate::model_key;
+
+/// The GameObject animation arm's LUT (wow-re `gameobject-anim-arm.md` §2c, `.data 0x8607e4`):
+/// internal **substate** → the `AnimationData.dbc` id the object layer arms.
+const SUBSTATE_ANIM: [u16; 13] = [
+    145, // 0  Spawn      — NO client path produces this substate (§2c census)
+    147, // 1  Closed     (rest)
+    148, // 2  Open       (motion)
+    149, // 3  Opened     (rest)
+    146, // 4  Close      (motion)
+    150, // 5  Destroy    (motion)
+    151, // 6  Destroyed  (rest)
+    152, // 7  Rebuild    (motion)
+    153, 154, 155, 156, // 8..11 Custom0-3 — reachable only via SMSG_GAMEOBJECT_CUSTOM_ANIM
+    157, // 12 Despawn
+];
+
+/// The six substates a `GAMEOBJECT_STATE` × `GAMEOBJECT_ANIMPROGRESS` pair can actually produce
+/// (§2b). Substate 0 (Spawn) has no producer at all, and 8..12 come from other opcodes entirely.
+const REACHABLE: [(usize, &str); 6] = [
+    (1, "READY  settled"),
+    (4, "READY  mid    "),
+    (3, "ACTIVE settled"),
+    (2, "ACTIVE mid    "),
+    (6, "ALT    settled"),
+    (5, "ALT    mid    "),
+];
+
+/// The §2c four-way remap: what the arm actually requests when the model doesn't author the
+/// substate's LUT id. Returns `(id, rate0)` — `rate0` marks the two legs that freeze a *motion*
+/// clip at frame 0 to stand in for a missing *rest* pose.
+fn go_remap(m: &benilla_m2::M2Model, id: u16) -> (u16, bool) {
+    if m.owns_animation(id) {
+        return (id, false);
+    }
+    match id {
+        // Close missing: keep it (op4 resolves onward) if Open exists, else fall to Closed.
+        146 => (if m.owns_animation(148) { 146 } else { 147 }, false),
+        // Closed missing: keep it if Close exists; else freeze Open at frame 0; else Stand.
+        147 if m.owns_animation(146) => (147, false),
+        147 if m.owns_animation(148) => (148, true),
+        147 => (0, false),
+        // Open missing: keep it if Close exists; else Destroy if present; else Opened.
+        148 => (
+            if m.owns_animation(146) {
+                148
+            } else if m.owns_animation(150) {
+                150
+            } else {
+                149
+            },
+            false,
+        ),
+        // Opened missing: keep it if Open exists; else freeze Close at frame 0; else Destroyed.
+        149 if m.owns_animation(148) => (149, false),
+        149 if m.owns_animation(146) => (146, true),
+        149 => (151, false),
+        // Outside the door group there is no remap — the id goes to op4 as-is.
+        other => (other, false),
+    }
+}
+
+/// op4's own id → played sequence resolve (`0x7121a0` via `0x711bf0`): the model's
+/// `playableAnimationLookup` row (when the id is in range), then `animationLookup` to a file slot.
+/// `None` when nothing playable comes out — the reference arms nothing and the pose simply stands.
+fn go_resolve_slot(m: &benilla_m2::M2Model, id: u16) -> Option<(u16, u16)> {
+    let played = m
+        .playable_animation_lookup
+        .get(id as usize)
+        .map_or(id, |p| p.resolved_id);
+    let slot = *m.animation_lookup.get(played as usize)?;
+    (slot != 0xffff).then_some((played, slot))
+}
+
+/// The generic loader seed (§1, `0x71019b`): resolve id 0, and arm **id 0** when the model owns what
+/// that resolves to — only the degenerate leg (owning nothing reachable) falls back to the raw
+/// `animations[0]` dword.
+fn go_loader_seed(
+    m: &benilla_m2::M2Model,
+    seqs: &[benilla_formats::ModelAnimation],
+) -> Option<(u16, u16)> {
+    let resolved = m
+        .playable_animation_lookup
+        .first()
+        .map_or(0, |p| p.resolved_id);
+    if m.owns_animation(resolved) {
+        go_resolve_slot(m, 0)
+    } else {
+        // The degenerate leg: `animations[0]`'s low16 — the file-order-first sequence's own id.
+        go_resolve_slot(m, seqs.first()?.anim_id)
+    }
+}
+
+/// Sweep every model named by **GameObjectDisplayInfo.dbc** and resolve, per model, what the
+/// reference's GameObject animation arm plays in each reachable `GAMEOBJECT_STATE` ×
+/// `GAMEOBJECT_ANIMPROGRESS` substate — see the `Goanimscan` command doc.
+pub fn goanimscan(chain: &mut Chain) -> Result<()> {
+    let catalog =
+        benilla_formats::load_gameobject_catalog(chain).context("GameObjectDisplayInfo.dbc")?;
+    // displayId → path, deduped to one entry per model (many displays share a model).
+    let mut models: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    for (id, path) in catalog.iter() {
+        let key = model_key(path);
+        if key.ends_with(".m2") {
+            models.entry(key).or_default().push(id);
+        }
+    }
+    for ids in models.values_mut() {
+        ids.sort_unstable();
+    }
+    let (mut parsed, mut no_seq, mut blind, mut sensitive, mut needs_remap, mut rate0) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    for (path, displays) in &models {
+        let Ok(bytes) = chain.read_file(path) else {
+            continue;
+        };
+        let Ok(fmt) = benilla_m2::parse_m2(&mut std::io::Cursor::new(&bytes)) else {
+            continue;
+        };
+        let m = fmt.model();
+        parsed += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            no_seq += 1;
+            continue;
+        }
+        let seed = go_loader_seed(m, &seqs);
+        let mut lines = Vec::new();
+        let (mut differs, mut remapped, mut froze) = (false, false, false);
+        for (sub, label) in REACHABLE {
+            let lut = SUBSTATE_ANIM[sub];
+            let (req, r0) = go_remap(m, lut);
+            let armed = go_resolve_slot(m, req);
+            remapped |= req != lut;
+            froze |= r0;
+            differs |= armed.map(|(_, s)| s) != seed.map(|(_, s)| s);
+            lines.push(format!(
+                "   {label} sub{sub}  lut {lut}{}  ->  {}{}",
+                if req == lut {
+                    String::new()
+                } else {
+                    format!(" (remap {req})")
+                },
+                match armed {
+                    Some((id, slot)) => format!("id {id} slot {slot}"),
+                    None => "NOTHING".to_string(),
+                },
+                if r0 { "  [rate 0 — frozen]" } else { "" },
+            ));
+        }
+        if differs {
+            sensitive += 1;
+        } else {
+            blind += 1;
+        }
+        remapped.then(|| needs_remap += 1);
+        froze.then(|| rate0 += 1);
+        // Only the state-SENSITIVE models are worth printing: on every other one the arm lands on
+        // the same sequence the loader seed already holds, so `GAMEOBJECT_STATE` is unobservable.
+        if differs {
+            println!("{path}  ({} sequences, displays {displays:?})", seqs.len());
+            println!(
+                "   loader seed              ->  {}",
+                match seed {
+                    Some((id, slot)) => format!("id {id} slot {slot}"),
+                    None => "NOTHING".to_string(),
+                }
+            );
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    println!(
+        "\n{} GameObjectDisplayInfo M2 models, {parsed} parsed, {no_seq} with no sequences",
+        models.len()
+    );
+    println!(
+        "  STATE-BLIND    {blind}  — every reachable substate lands on the loader seed's own \
+         sequence, so GAMEOBJECT_STATE cannot be seen on this model at all"
+    );
+    println!(
+        "  STATE-SENSITIVE {sensitive}  — at least one substate plays something else: exactly the \
+         models a GO type that skips the arm renders in the wrong pose"
+    );
+    println!("  needing the §2c remap on some substate: {needs_remap}");
+    println!("  hitting a rate-0 freeze leg (a motion clip standing in for a missing rest pose): {rate0}");
+    Ok(())
+}
+
+/// `AnimationData.dbc` ids of the effect-model lifecycle triple (names read from the real DBC).
+const ANIM_STAND: u16 = 0;
+const ANIM_HOLD: u16 = 158;
+const ANIM_DECAY: u16 = 159;
+
+/// Sweep every `.m2` (optionally under a path prefix) and census the **effect-model animation
+/// lifecycle**: which models author the `Stand`(0) → `Hold`(158) → `Decay`(159) triple, and what a
+/// consumer that arms ONE sequence and never advances would render for each.
+///
+/// The reference arms an effect instance's default track — `animationLookup[0]`, i.e. `Stand` — and
+/// a model that also owns `Hold` authors `Stand` as a **birth** (grow-in, clamp flag set) with the
+/// sustained pulse living in the separate looping `Hold` sequence, and the fade-out in `Decay`.
+/// A one-sequence consumer therefore FREEZES on the last frame of the birth for the effect's whole
+/// life — no pulse, no fade — which is exactly what "the Ice Barrier shield is frozen" looks like.
+///
+/// The classification is that failure, made countable:
+/// - **FREEZE** — owns `Hold`, and the armed `Stand` clamps: the reference pulses, we hold a pose.
+/// - **hold-loops** — owns `Hold` but `Stand` itself loops: still wrong (the wrong clip), but moving.
+/// - **decay-only** — owns `Decay` and no `Hold`: only the reap leg is unrendered.
+///
+/// It also counts the **file-order divergence**: the reference arms `animationLookup[0]`, so a
+/// consumer that arms the file's *first slot* instead is additionally wrong on any model whose slot
+/// 0 is not its `Stand` (the `DuelingFlag.m2` Spawn/Stand/Despawn shape, decision 0637). The two
+/// bugs are independent and the closing line separates them.
+///
+/// The population instrument for the mechanism, so it is closed corpus-wide rather than spell by
+/// spell; `m2seq` then explains one model in full.
+pub fn fxlifescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut freeze, mut hold_loops, mut decay_only) = (0u32, 0u32, 0u32, 0u32);
+    let (mut no_stand, mut slot0_not_stand) = (0u32, 0u32);
+    let mut by_dir: BTreeMap<String, u32> = BTreeMap::new();
+    let mut rows: Vec<(String, String, String, f32, f32, f32)> = Vec::new();
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            continue;
+        }
+        // What the reference arms: `animationLookup[0]` — Stand — never the file-order-first slot
+        // (they diverge on any model whose sequence 0 is not its Stand).
+        let armed = seqs.iter().find(|s| s.anim_id == ANIM_STAND);
+        let hold = seqs.iter().find(|s| s.anim_id == ANIM_HOLD);
+        let decay = seqs.iter().find(|s| s.anim_id == ANIM_DECAY);
+        if hold.is_none() && decay.is_none() {
+            continue; // neither leg authored — no lifecycle to miss
+        }
+        let class = match (hold.is_some(), armed) {
+            (true, Some(a)) if !a.looping => {
+                freeze += 1;
+                "FREEZE"
+            }
+            (true, _) => {
+                hold_loops += 1;
+                "hold-loops"
+            }
+            (false, _) => {
+                decay_only += 1;
+                "decay-only"
+            }
+        };
+        // The file-order divergence, independent of the lifecycle bug: what a slot-0 consumer arms
+        // versus the reference's `animationLookup[0]`.
+        let arm = match (armed, seqs[0].anim_id) {
+            (None, first) => {
+                no_stand += 1;
+                format!("no-Stand(slot0={first})")
+            }
+            (Some(_), ANIM_STAND) => "slot0".to_string(),
+            (Some(_), first) => {
+                slot0_not_stand += 1;
+                format!("slot0={first}!")
+            }
+        };
+        let top = name.split_once('\\').map(|(d, _)| d).unwrap_or("<root>");
+        *by_dir.entry(top.to_ascii_lowercase()).or_default() += 1;
+        rows.push((
+            name,
+            class.to_string(),
+            arm,
+            armed.map_or(0.0, |a| a.duration),
+            hold.map_or(0.0, |s| s.duration),
+            decay.map_or(0.0, |s| s.duration),
+        ));
+    }
+    rows.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    println!(
+        "model                                                        class       arm         stand   hold  decay"
+    );
+    for (name, class, arm, stand, hold, decay) in rows.iter().take(80) {
+        println!("{name:<60}  {class:<10}  {arm:<10}  {stand:>5.2}  {hold:>5.2}  {decay:>5.2}");
+    }
+    if rows.len() > 80 {
+        println!("… and {} more", rows.len() - 80);
+    }
+    println!(
+        "\n{} of {scanned} models author a Hold(158)/Decay(159) lifecycle leg",
+        rows.len()
+    );
+    println!("  FREEZE      {freeze:>5}  (owns Hold; the armed Stand clamps — a pose, where the reference pulses)");
+    println!("  hold-loops  {hold_loops:>5}  (owns Hold; the armed Stand loops — moving, but the wrong clip)");
+    println!("  decay-only  {decay_only:>5}  (owns Decay only — just the reap leg unrendered)");
+    println!(
+        "of those, the file-order divergence (a slot-0 consumer arms the wrong sequence outright): \
+         {slot0_not_stand} with slot 0 != Stand, {no_stand} with no Stand at all"
+    );
+    // Named in full, never left to the row cap: this set is small and each member is a distinct
+    // "arms the wrong sequence from frame one" case.
+    for (name, _, arm, ..) in rows.iter().filter(|r| r.2 != "slot0") {
+        println!("  {name:<58}  {arm}");
+    }
+    println!("by top-level directory:");
+    for (dir, n) in &by_dir {
+        println!("  {dir:<16} {n:>5}");
+    }
+    Ok(())
+}
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the models where the **loader-idle
+/// sequence is not file slot 0** while benilla's render content gate declines to arm it — so every
+/// per-sequence bake (`EmitTiming`/`EmitParams`/`AlphaAnim`) degrades to slot 0, a sequence the
+/// instance is not playing (decision 0936, found on the Stormwind battlefield banner).
+///
+/// The reference arms the loader-idle sequence on **every** M2 instance at load (`0x70ebd0`'s tail,
+/// wow-re `gameobject-anim-arm.md` §1), so "which sequence is this playing" always has an answer.
+/// benilla skips the arm when looping the idle would render identically to the static mesh — sound
+/// for the *mesh*, and silently wrong for anything keyed on the sequence *identity*. The two only
+/// disagree visibly when the idle is not slot 0, which is the `DuelingFlag` shape:
+/// `Spawn(145) / Stand(0) / Despawn(157)`, where slot 0 is the **Spawn flourish**.
+///
+/// Reports, per model: the emitters whose enabled/rate gate at t = 0 differs between slot 0 and the
+/// idle slot (`FX`), and the batches whose combined material-alpha factor differs (`ALPHA`).
+pub fn idleslotscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut unarmed, mut window) = (0u32, 0u32, 0u32);
+    let (mut fx_models, mut alpha_models) = (0u32, 0u32);
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        let anims = benilla_formats::parse_m2_animations(&bytes);
+        if anims.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        let idle_id = benilla_formats::parse_m2_playable_animation_lookup(&bytes)
+            .unwrap_or_default()
+            .first()
+            .map_or(0, |p| p.resolved_id);
+        // benilla's render content gate (`benilla_assets`' `idle_pose_differs`): a bind-pose idle
+        // is not armed at all, so nothing ever overrides the per-sequence bakes' opening slot.
+        if anims
+            .iter()
+            .any(|a| a.anim_id == idle_id && !a.is_rest_pose())
+        {
+            continue;
+        }
+        unarmed += 1;
+        let idle = anims
+            .iter()
+            .find(|a| a.anim_id == idle_id)
+            .map_or(0, |a| a.seq_index);
+        if idle == 0 {
+            continue; // degrading to slot 0 happens to BE the idle slot — no divergence
+        }
+        window += 1;
+        let mut lines = Vec::new();
+        let defs = benilla_formats::parse_m2_particle_emitters(&bytes).unwrap_or_default();
+        let mut fx = 0u32;
+        for (i, d) in defs.iter().enumerate() {
+            let on = |s: usize| {
+                d.timing.emitting(Some(s), 0.0, 0.0) && d.timing.rate(Some(s), 0.0, 0.0) > 0.0
+            };
+            if on(0) != on(idle) {
+                fx += 1;
+                lines.push(format!(
+                    "    FX    emitter {i:>2}: slot 0 {:>3}, idle slot {idle} {:>3}  tex {}",
+                    if on(0) { "ON" } else { "off" },
+                    if on(idle) { "ON" } else { "off" },
+                    d.texture.as_deref().unwrap_or("NONE"),
+                ));
+            }
+        }
+        let dir = name.rsplit_once('\\').map_or("", |(d, _)| d);
+        let subs = benilla_formats::parse_m2_render_submeshes(&bytes, dir, &[]).unwrap_or_default();
+        let mut alpha = 0u32;
+        for (i, s) in subs.iter().enumerate() {
+            let Some(a) = &s.alpha_anim else { continue };
+            let (f0, fi) = (a.sample(Some(0), 0.0, 0.0), a.sample(Some(idle), 0.0, 0.0));
+            if (f0 - fi).abs() > 1e-3 {
+                alpha += 1;
+                lines.push(format!(
+                    "    ALPHA batch   {i:>2}: slot 0 {f0:.2}, idle slot {idle} {fi:.2}"
+                ));
+            }
+        }
+        if !lines.is_empty() {
+            fx_models += u32::from(fx > 0);
+            alpha_models += u32::from(alpha > 0);
+            println!("{name}  (idle slot {idle} of {} sequences)", anims.len());
+            for l in lines {
+                println!("{l}");
+            }
+        }
+    }
+    eprintln!(
+        "{scanned} models with sequences, {unarmed} whose idle the content gate leaves unarmed, \
+         {window} of those with idle slot != 0 (the divergence window): \
+         {fx_models} model(s) whose EMITTERS gate differently, \
+         {alpha_models} whose MATERIAL ALPHA differs"
+    );
+    Ok(())
+}
+
+/// Sweep every `.m2` (optionally under a path prefix) and list the models whose animation is
+/// authored **entirely outside the bone tracks** — sequences exist, per-sequence consumers exist
+/// (particle emitters, ribbons, material alpha/colour, UV transforms), and **not one sequence
+/// keys a bone**.
+///
+/// That combination is the blind spot of a renderer whose sequence clock rides a *bone* animation
+/// clip: with no keyed bone there is no clip, so there is no player, so nothing ever says which
+/// sequence is playing or how far into it — and every per-sequence consumer degrades to "file slot
+/// 0, at t = 0", permanently. The emitters still build, pool and tick; they just read the wrong
+/// column of a table that never advances. Found on the Molten Core rune + flame ring (decision
+/// 0941): the rune's slot 0 is its *Closed* band, where every emission rate key is 0 (no flames at
+/// all), and the ring's spline spawn-window opens `0 → 1` over its first second, so frozen at t=0
+/// all 180 particles are born at one point of a 2.8-yd circle — one bright blob.
+///
+/// The `[GO]` mark is the cross-tab that matters: a `GameObjectDisplayInfo` model reaches the
+/// world through the **hosted** clock (`EmitClock::Host`), which is the lane that freezes at
+/// `t = 0`. A placed doodad of the same shape still runs its spawn-age clock (only its *slot* is
+/// pinned — decision 0760's axis), so it is wrong in a different, milder way.
+///
+/// PARTIAL models — some sequences key bones, some don't — are tallied, not listed: there the
+/// clock exists, but the unkeyed sequences are unreachable (no clip to arm), so a GameObject
+/// substate or a creature animation id that resolves to one plays nothing.
+pub fn seqclockscan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
+    // Which models a GameObject can display — the hosted-clock lane.
+    let go_models: HashSet<String> = benilla_formats::load_gameobject_catalog(chain)
+        .map(|c| c.iter().map(|(_, p)| model_key(p)).collect())
+        .unwrap_or_default();
+    let names = super::m2_names(chain, prefix)?;
+    let (mut scanned, mut with_seqs, mut frozen, mut frozen_go, mut partial, mut inert) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut frozen_emitters = 0usize;
+    for name in names {
+        let Ok(bytes) = chain.read_file(&name) else {
+            continue;
+        };
+        scanned += 1;
+        let seqs = benilla_formats::parse_m2_animations(&bytes);
+        if seqs.is_empty() {
+            continue;
+        }
+        with_seqs += 1;
+        // Exactly the runtime's own test (`build_animation_clip`): a sequence becomes a clip iff
+        // some bone track produced a key inside its band.
+        let keyed = seqs
+            .iter()
+            .filter(|a| {
+                a.bones.iter().any(|b| {
+                    !b.translation.is_empty() || !b.rotation.is_empty() || !b.scale.is_empty()
+                })
+            })
+            .count();
+        // Counted over EVERY model with sequences, consumers or not: it measures clip
+        // REACHABILITY (can an arm find this sequence at all), which is a property of the model.
+        if keyed > 0 && keyed < seqs.len() {
+            partial += 1;
+        }
+        let Ok(s) = benilla_formats::parse_m2_animation_summary(&bytes) else {
+            continue;
+        };
+        // The per-sequence consumers: everything that samples a track on the playing sequence's
+        // clock. A constant (≤1 key) colour/alpha track is excluded — it reads the same in every
+        // slot, so a frozen clock costs it nothing.
+        let consumers = s.particle_emitter_count
+            + s.ribbon_emitter_count
+            + s.color_alpha_tracks.1
+            + s.color_rgb_tracks.1
+            + s.transparency_tracks.1
+            + s.texture_transform_count;
+        if keyed == 0 && consumers == 0 {
+            // The same shape with nothing to sample: a clock costs it nothing and buys it
+            // nothing. Counted because it IS the cost side of giving every sequenced model a
+            // clock — these are the models that gain an inert one.
+            inert += 1;
+        }
+        if consumers > 0 && keyed == 0 {
+            frozen += 1;
+            frozen_emitters += s.particle_emitter_count;
+            let is_go = go_models.contains(&name.to_ascii_lowercase());
+            if is_go {
+                frozen_go += 1;
+            }
+            println!(
+                "{}{name}\n    seqs {:>3} (0 keyed) · emitters {:>2} ribbons {} · alpha {} rgb {} \
+                 transp {} · uvanim {} · gseq {}",
+                if is_go { "[GO] " } else { "     " },
+                seqs.len(),
+                s.particle_emitter_count,
+                s.ribbon_emitter_count,
+                s.color_alpha_tracks.1,
+                s.color_rgb_tracks.1,
+                s.transparency_tracks.1,
+                s.texture_transform_count,
+                s.global_seq_channels.len(),
+            );
+        }
+    }
+    eprintln!(
+        "{scanned} models scanned, {with_seqs} with sequences: {frozen} CLOCKLESS \
+         ({frozen_emitters} emitters) — sequences + per-sequence consumers, not one keyed bone; \
+         {frozen_go} of them GameObject display models (the hosted lane, frozen at slot 0 t=0). \
+         {partial} PARTIAL models have unkeyed sequences a clip lookup can never reach; \
+         {inert} more are boneless with nothing to sample (a clock there is inert)."
+    );
+    Ok(())
+}

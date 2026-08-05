@@ -522,6 +522,7 @@ pub(super) fn push_ring(
             texture: assets.texture.id(),
             blend: EffectBlend::Add,
             fog: EffectFog::Off,
+            lit: false,
             anchor: state.key.feet,
             bias: RING_DEPTH_BIAS,
             raster_bias: RING_DEPTH_BIAS as i32,

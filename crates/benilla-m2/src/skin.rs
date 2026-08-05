@@ -27,6 +27,10 @@ pub struct SkinBatch {
     pub shader_id: u16,
     pub skin_section_index: u16,
     pub texture_combo_index: u16,
+    /// Index into [`crate::M2Model::texture_unit_lookup`] → where this stage's texture coordinates
+    /// come from (a UV channel, or a generated environment coordinate). texUnit `+0x12`
+    /// (wow-re rf72 `0x70b8a4`).
+    pub texture_coord_combo_index: u16,
     pub material_index: u16,
     /// Direct index into [`crate::M2Model::color_alpha_tracks`] (`0xffff` = none). texUnit `+0x08`.
     pub color_index: u16,
@@ -116,8 +120,9 @@ impl M2Model {
             });
         }
         // M2TextureUnit (batch): 24 bytes — skinSectionIndex@4, colorIndex@8, materialIndex@0xa,
-        // textureCount@0xe, textureComboIndex@0x10, weightComboIndex@0x14 (the visibility-factor
-        // refs), textureTransformComboIndex@0x16 (UV animation).
+        // textureCount@0xe, textureComboIndex@0x10, textureCoordComboIndex@0x12 (the env-vs-UV
+        // source), weightComboIndex@0x14 (the visibility-factor refs), textureTransformComboIndex@0x16
+        // (UV animation).
         let bat_avail = bytes.len().saturating_sub(o_bat);
         let mut batches = Vec::with_capacity(capped(n_bat, 24, bat_avail));
         for i in 0..n_bat {
@@ -128,6 +133,7 @@ impl M2Model {
                 skin_section_index: u.u16_at(4).ok_or(Error::Truncated)?,
                 material_index: u.u16_at(0x0a).ok_or(Error::Truncated)?,
                 texture_combo_index: u.u16_at(0x10).ok_or(Error::Truncated)?,
+                texture_coord_combo_index: u.u16_at(0x12).ok_or(Error::Truncated)?,
                 color_index: u.u16_at(0x08).ok_or(Error::Truncated)?,
                 weight_combo_index: u.u16_at(0x14).ok_or(Error::Truncated)?,
                 texture_count: u.u16_at(0x0e).ok_or(Error::Truncated)?,

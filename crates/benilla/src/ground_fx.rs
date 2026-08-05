@@ -245,6 +245,9 @@ pub(crate) fn update_ground_fx_decals(
                 texture: decal.texture.id(),
                 blend: decal.blend,
                 fog: decal.fog,
+                // Spell ground-fx art is authored to burn at its own colour (the lane law in
+                // `EffectBlend::from_model`); no lit ground quad observed in the corpus.
+                lit: false,
                 anchor: decal.center,
                 bias: GROUND_FX_DEPTH_BIAS,
                 raster_bias: GROUND_FX_DEPTH_BIAS as i32,

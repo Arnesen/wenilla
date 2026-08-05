@@ -36,6 +36,13 @@ pub fn load_wmo(chain: &mut Chain, raw_path: &str) -> Result<Vec<super::RenderSu
 /// Find a top-level WMO chunk's data slice by its **on-disk (reversed) magic** — WMO/ADT store the
 /// FourCC reversed (`MODN` → `NDOM`). Top-level root chunks are laid out flat from byte 0
 /// (`[magic:4][size:u32 LE][data:size]`), so a linear walk locates any of them.
+///
+/// **The last chunk clamps to EOF; it never rejects the file.** The reference's walk "reads chunks
+/// while the 8-byte header is in-bounds and clamps the last chunk to EOF (never requires exact
+/// tiling)" — wow-re `models.md`, "WMO chunk-structure contract", whose own worked example is the
+/// file this rule exists for: `Undercity_144.wmo`'s MOGP declares one byte more than the file holds.
+/// Abandoning the walk there cost that group its MOGP entirely — flags, portal-ref span, area, fog,
+/// doodad and light refs — which dead-ended the portal flood at B26's doorway (decision 0972).
 pub(crate) fn find_wmo_chunk<'a>(bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a [u8]> {
     let mut off = 0usize;
     while off + 8 <= bytes.len() {
@@ -46,10 +53,10 @@ pub(crate) fn find_wmo_chunk<'a>(bytes: &'a [u8], magic: &[u8; 4]) -> Option<&'a
             bytes[off + 7],
         ]) as usize;
         let data_start = off + 8;
-        let data_end = data_start.checked_add(size)?;
-        if data_end > bytes.len() {
-            break; // truncated chunk — give up
-        }
+        // Saturating, then clamped: a garbage size can overflow, and an over-declared one is real
+        // data the reference tolerates. Either way `data_end >= data_start`, so the slice is valid
+        // and `off` still advances by at least 8 — the walk terminates.
+        let data_end = data_start.saturating_add(size).min(bytes.len());
         if &bytes[off..off + 4] == magic {
             return Some(&bytes[data_start..data_end]);
         }

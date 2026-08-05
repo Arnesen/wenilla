@@ -374,6 +374,7 @@ fn build_markers(
                 sub.no_depth_write,
                 sub.no_depth_test,
                 sub.fog_policy,
+                sub.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                 ShadeSel::Lit, // a floating marker never inherits ground shade
                 0,
                 None,                  // static UVs

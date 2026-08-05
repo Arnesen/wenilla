@@ -47,7 +47,6 @@
     pbr_functions::alpha_discard,
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::view,
-    view_transformations::position_world_to_clip,
     mesh_functions,
 }
 
@@ -149,8 +148,9 @@ struct WowLight {
     // The owned skin palette (decision 0720; rig_palette.rs mirrors both sizes). `rig_table`:
     // one base bone index per rig slot (2048 = mesh_tag's 11-bit rig field; the instance's slot
     // rides its MeshTag bits 19-29). `palettes`: 3 vec4 rows per bone — the rows of
-    // `world_from_joint × inverse_bindpose`, the same matrix Bevy's skin lane would feed
-    // `skin_model` — blended in the vertex stage below (WOW_RIG_SKIN).
+    // `rig_from_joint × inverse_bindpose`, the same matrix Bevy's skin lane would feed
+    // `skin_model` except measured from the RIG's own origin rather than the map's (decision
+    // 0974) — blended in the vertex stage below (WOW_RIG_SKIN).
     rig_table: array<u32, 2048>,
     // The per-instance body TINT, on the SAME slot index as `rig_table` (instance_tint.rs, decision
     // 0812): the CM2 `model+0x184/188/18c` modulate colour, packed `0xFFRRGGBB` exactly as the
@@ -158,6 +158,11 @@ struct WowLight {
     // — so slot 0 (every unskinned instance in the world), a zeroed studio buffer and an untinted
     // frame all cost nothing, while a genuine authored BLACK tint still reads as 0xFF000000.
     rig_tint: array<u32, 2048>,
+    // The rig ORIGIN table (decision 0974), on the SAME slot index again: `xyz` = the world
+    // position that rig's palette rows are measured from (`w` unused). The vertex stage adds it
+    // back as `origin − camera`, so a skinned vertex is never expressed as an absolute world
+    // coordinate in f32 — which is what the ~1 mm/frame character shimmer was.
+    rig_origin: array<vec4<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
@@ -289,14 +294,19 @@ struct WowVertex {
 }
 
 #ifdef WOW_RIG_SKIN
+// The instance's rig slot — the shared index into `rig_table`, `rig_tint` and `rig_origin`.
+fn wow_rig_slot(instance_index: u32) -> u32 {
+    return (mesh_functions::get_tag(instance_index) >> 19u) & 0x7ffu;
+}
+
 // The owned-palette skin model (decision 0720): the instance's rig slot from its MeshTag rig
 // field (bits 19-29) → the rig's base bone index → the four indexed bones' palette rows blended
-// by the vertex weights. Returns `world_from_local` exactly like Bevy's `skin_model` — the rows
-// ARE `world_from_joint × inverse_bindpose`, so the reconstruction below is the same matrix
-// Bevy's lane produced, and it REPLACES the mesh's world matrix (never composes with it).
+// by the vertex weights. Returns `rig_from_local` — structurally what Bevy's `skin_model` returns
+// (and it REPLACES the mesh's world matrix, never composes with it), except the translation is
+// measured from the rig's own origin rather than the map's (decision 0974). `rig_origin[slot]`
+// carries the missing piece; the vertex stage applies it camera-relative.
 fn wow_skin_model(instance_index: u32, indices: vec4<u32>, weights: vec4<f32>) -> mat4x4<f32> {
-    let tag = mesh_functions::get_tag(instance_index);
-    let base = wow_light.rig_table[(tag >> 19u) & 0x7ffu];
+    let base = wow_light.rig_table[wow_rig_slot(instance_index)];
     let b0 = 3u * (base + indices.x);
     let b1 = 3u * (base + indices.y);
     let b2 = 3u * (base + indices.z);
@@ -331,12 +341,14 @@ fn inverse_transpose_3x3m(in: mat3x3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(x / det, y / det, z / det);
 }
 
-fn wow_skin_normals(world_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
+// (Translation-free by construction — so the rig-relative frame of decision 0974 feeds it
+// unchanged: a normal never cared where the rig stands.)
+fn wow_skin_normals(frame_from_local: mat4x4<f32>, normal: vec3<f32>) -> vec3<f32> {
     return normalize(
         inverse_transpose_3x3m(mat3x3<f32>(
-            world_from_local[0].xyz,
-            world_from_local[1].xyz,
-            world_from_local[2].xyz
+            frame_from_local[0].xyz,
+            frame_from_local[1].xyz,
+            frame_from_local[2].xyz
         )) * normal
     );
 }
@@ -352,19 +364,29 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
     var out: WowVsOut;
 
     let mesh_world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+    // **Split the instance placement into (frame, origin)** — decision 0974. `frame_from_local`
+    // carries the orientation and a SMALL translation; `frame_origin` carries the ~9 k-yard world
+    // position. Skinned: the palette rows are already rig-relative and `rig_origin` is the rig's
+    // world position. Unskinned: the mesh matrix's own translation column moves over. Either way
+    // the world position is `frame_from_local · v + frame_origin`, and the point is that neither
+    // factor is a big-times-small product — that product is where a ~1 mm f32 ULP was landing on
+    // every animated vertex, freshly every frame.
 #ifdef WOW_RIG_SKIN
-    var world_from_local = wow_skin_model(
+    var frame_from_local = wow_skin_model(
         vertex.instance_index,
         vertex.joint_indices,
         vertex.joint_weights
     );
+    let frame_origin = wow_light.rig_origin[wow_rig_slot(vertex.instance_index)].xyz;
 #else
-    var world_from_local = mesh_world_from_local;
+    var frame_from_local = mesh_world_from_local;
+    let frame_origin = mesh_world_from_local[3].xyz;
+    frame_from_local[3] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
 #endif
 
 #ifdef VERTEX_NORMALS
 #ifdef WOW_RIG_SKIN
-    out.world_normal = wow_skin_normals(world_from_local, vertex.normal);
+    out.world_normal = wow_skin_normals(frame_from_local, vertex.normal);
 #else
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         vertex.normal,
@@ -374,9 +396,21 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 #endif
 
 #ifdef VERTEX_POSITIONS
-    out.world_position =
-        mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
-    out.position = position_world_to_clip(out.world_position.xyz);
+    // Camera-relative all the way to clip space. `p_cam` is built from two small quantities, so
+    // it keeps ~1e-7 yd of precision where the absolute route kept ~1e-3 — and `clip_from_view ×
+    // (R_view · p_cam)` has none of the catastrophic cancellation `clip_from_world × p_world`
+    // suffers when camera and geometry both sit at ~9 k (0733 §2 fixed the same defect on the
+    // effect lane; this is the model lane's). `world_position` goes back to absolute for the
+    // lighting/fog/shadow consumers downstream, which are not precision consumers.
+    let p_cam = (frame_from_local * vec4<f32>(vertex.position, 1.0)).xyz
+        + (frame_origin - view.world_position);
+    out.world_position = vec4<f32>(p_cam + view.world_position, 1.0);
+    let view_rot = mat3x3<f32>(
+        view.view_from_world[0].xyz,
+        view.view_from_world[1].xyz,
+        view.view_from_world[2].xyz,
+    );
+    out.position = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
     // WMO authored batch order (`m.sun_scale.y`; 0 = non-WMO ⇒ exact no-op): the client resolves
     // coplanar batches (wall + decal/trim) by strict MOBA draw order under depth-write + LEQUAL
     // (wow-5875-re `wmo-batch-blend-depth-state.md`, byte-verified); Bevy orders draws for
@@ -390,6 +424,39 @@ fn vertex(vertex: WowVertex) -> WowVsOut {
 
 #ifdef VERTEX_UVS_A
     out.uv = vertex.uv;
+    // **Environment-mapped batches GENERATE their texcoord — here, in the VERTEX stage, because
+    // that is where the reference generates it.** `Shaders\Vertex\Model2.bls` writes it as a
+    // vertex-program output and lets the rasteriser interpolate:
+    //
+    //     DP3 R0.x, R1.xyz, R2.xyz          ; dot(P, N)      P = view-space skinned position
+    //     MUL R0.x, c0.w, R0.x              ; ×2             N = normalize(view-space normal)
+    //     MAD R0.yzw, -R0.x, R2.xxyz, R1.xxyz   ; R = P − 2(P·N)N
+    //     DP3/RSQ/MUL                       ; normalize(R)
+    //     MAD result.texcoord[3].xy, R0.xyxx, c1.x, c1.x   ; ·0.5 + 0.5   (c0.w = 2, c1.x = 0.5)
+    //
+    // — the `(0.5,0,0,0.5 / 0,0.5,0,0.5)` remap wow-re byte-derived at `0x70b8d0` (models.md §944),
+    // reached whenever `texture_unit_lookup[texCoordSet] > 2` (`0x70b8bd`). Its space is pinned by
+    // the same program: `c2` (projection alone) × `c31` × vertex = clip, so `c31` — and therefore
+    // P and N — are **view space**, and wow-re's `lookat_v1` (`0x5c3e70`) stores row0 = side,
+    // row1 = up, row2 = forward, so `R.xy` is (camera-right, camera-up). Bevy's view basis is
+    // −Z-forward, which is exactly `F = diag(1,1,−1)`: `P'·N' = P·N`, hence `R' = F·R` and `R'.xy`
+    // is **identical**. No handedness fixup is needed or wanted.
+    //
+    // `view_rot * p_cam` is the view-space position already built for clip space above, so this
+    // costs one normalize and reuses the camera-relative precision (0974) instead of round-tripping
+    // an absolute world coordinate. Decision 0971 evaluated this per FRAGMENT instead; measured on
+    // `GnomeSubwayGlass` the two differ by ≤0.004 UV across a whole ring (the sphere-map disk has
+    // radius 0.5), so the deviation bought nothing and cost fidelity — see decision 0980.
+#ifdef VERTEX_POSITIONS
+#ifdef VERTEX_NORMALS
+    if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
+        let p_view = view_rot * p_cam;
+        let n_view = normalize(view_rot * out.world_normal);
+        let refl = normalize(p_view - 2.0 * dot(p_view, n_view) * n_view);
+        out.uv = refl.xy * 0.5 + vec2<f32>(0.5, 0.5);
+    }
+#endif
+#endif
 #endif
 #ifdef VERTEX_UVS_B
     out.uv_b = vertex.uv_b;
@@ -446,7 +513,22 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> FragmentOutp
     vo.world_position = in.world_position;
     vo.world_normal = in.world_normal;
 #ifdef VERTEX_UVS_A
-    vo.uv = in.uv + m.sun_scale.zw;
+    // **Environment-mapped batches GENERATE their texture coordinates** (`clutter_fade.z` bit 12,
+    // model_render's `ENV_MAP_MARKER`; the asset's `texture_unit_lookup[texCoordSet] > 2`). Such a
+    // batch authors NO usable UVs — GnomeSubwayGlass's 330 vertices all sit at exactly (0,0),
+    // because the runtime is meant to supply them — so reading the raw vertex UV paints the whole
+    // surface in one corner texel of a reflection sheet (the Deeprun Tram tube's flat yellow).
+    //
+    // The coordinate itself is generated in the VERTEX stage, where the reference generates it
+    // (see the derivation there); `in.uv` already carries it, interpolated. All that is left here
+    // is to keep the UV **animation** off it: the reference's gate excludes an env stage from
+    // `textureTransform` by construction (`m2-texanim-uv` §2), so adding the live translation
+    // would drift a reflection that must stay pinned to the view.
+    if ((u32(m.clutter_fade.z) & 4096u) != 0u) {
+        vo.uv = in.uv;
+    } else {
+        vo.uv = in.uv + m.sun_scale.zw;
+    }
 #endif
 #ifdef VERTEX_UVS_B
     vo.uv_b = in.uv_b;

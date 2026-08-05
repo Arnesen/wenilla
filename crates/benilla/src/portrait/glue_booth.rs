@@ -633,6 +633,7 @@ pub(super) fn sync_glue_scene(
                     s.no_depth_write,
                     s.no_depth_test,
                     s.fog_policy,
+                    s.env_map, // texture_unit_lookup > 2 ⇒ the runtime generates this batch's UVs
                     crate::model_render::ShadeSel::Rig, // lit by the scene's own authored rig
                     0,
                     s.uv_anim.as_ref(), // scene clouds/water scroll

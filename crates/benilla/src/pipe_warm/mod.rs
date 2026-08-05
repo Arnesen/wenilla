@@ -451,28 +451,36 @@ fn warm_effect_lane(
                 crate::ground_fx::GROUND_FX_DEPTH_BIAS as i32,
                 crate::blob_shadow::SHADOW_RASTER_BIAS,
             ] {
-                let start = quads.begin();
-                for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
-                    quads.verts.push(EffectVertex {
-                        pos: [u * 0.01, v * 0.01, 0.0],
-                        uv: [u, v],
-                        color: [1.0, 1.0, 1.0, 1.0],
-                    });
+                // `lit` is a pipeline-key axis (a shader def), so BOTH arms are warmed — a hole
+                // here is a first-lit-emitter compile mid-play, which is the whole failure this
+                // module exists to prevent (0937's holes, 0958's blind lanes). The lit arm is
+                // rare content (400 of 7792 emitters) which is exactly why it would otherwise
+                // never be warm when it finally shows up.
+                for lit in [false, true] {
+                    let start = quads.begin();
+                    for (u, v) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                        quads.verts.push(EffectVertex {
+                            pos: [u * 0.01, v * 0.01, 0.0],
+                            uv: [u, v],
+                            color: [1.0, 1.0, 1.0, 1.0],
+                        });
+                    }
+                    quads.commit_quads(
+                        start,
+                        EffectDrawSpec {
+                            cam,
+                            texture: tex.id(),
+                            blend,
+                            fog: EffectFog::Off,
+                            lit,
+                            anchor: Vec3::ZERO,
+                            bias: 0.0,
+                            raster_bias,
+                            main_entity: cam,
+                            light: None,
+                        },
+                    );
                 }
-                quads.commit_quads(
-                    start,
-                    EffectDrawSpec {
-                        cam,
-                        texture: tex.id(),
-                        blend,
-                        fog: EffectFog::Off,
-                        anchor: Vec3::ZERO,
-                        bias: 0.0,
-                        raster_bias,
-                        main_entity: cam,
-                        light: None,
-                    },
-                );
             }
         }
     }

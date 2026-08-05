@@ -104,6 +104,7 @@ fn remap_submesh(
             uv_anim: None,    // set by the M2 path from the batch's texture transform
             rgb_anim: None,   // set by the M2 path from the batch's colour RGB track
             wmo_batch: None,  // set by the WMO path from the MOGP batch-section counts
+            env_map: false,   // set by the M2 path from texture_unit_lookup[texCoordSet] > 2
         },
         globals,
     )

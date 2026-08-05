@@ -562,6 +562,9 @@ fn push_water_foam(
                 blend: EffectBlend::Add,
                 // The reference's foam render sets FOG off (VERIFIED `0x68fcc1`).
                 fog: EffectFog::Off,
+                // The reference's foam render is its own additive path (`0x68fae0`), not the
+                // M2 batch state producer — no GL_LIGHTING on it.
+                lit: false,
                 anchor: centroid / n as f32,
                 bias: FOAM_BIAS,
                 raster_bias: 0,

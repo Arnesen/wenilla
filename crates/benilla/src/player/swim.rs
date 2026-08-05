@@ -197,10 +197,10 @@ pub(super) fn breach_step(
 ) -> Outcome {
     player.vel_y = SWIM_JUMP_SPEED;
     let half_h = Vec3::Y * (CAPSULE_HEIGHT * 0.5);
-    let out = ms.move_and_slide(
+    let out = crate::collision::one_sided::move_and_slide(
+        ms,
         capsule,
         player.pos + half_h,
-        Quat::IDENTITY,
         player.horiz_vel + Vec3::Y * player.vel_y,
         time.delta(),
         &MoveAndSlideConfig::default(),
@@ -333,10 +333,10 @@ pub(super) fn swim_step(
     };
     let (vel, surface_pitch) = cap_redirect(input_vel, cap);
 
-    let out = ms.move_and_slide(
+    let out = crate::collision::one_sided::move_and_slide(
+        ms,
         capsule,
         center,
-        Quat::IDENTITY,
         vel,
         time.delta(),
         &MoveAndSlideConfig::default(),
@@ -381,16 +381,15 @@ pub(super) fn swim_step(
         if let Some(surface_now) = surface_at(c - half_h) {
             let excess = settle_to_rest(c.y - half_h.y, surface_now, player.collision_height.0);
             if excess > 0.0 {
-                let drop = ms
-                    .cast_move(
-                        capsule,
-                        c,
-                        Quat::IDENTITY,
-                        Vec3::NEG_Y * excess,
-                        SKIN_WIDTH,
-                        &filter,
-                    )
-                    .map_or(excess, |h| h.distance.min(excess));
+                let drop = crate::collision::one_sided::cast_move(
+                    ms,
+                    capsule,
+                    c,
+                    Vec3::NEG_Y * excess,
+                    SKIN_WIDTH,
+                    &filter,
+                )
+                .map_or(excess, |h| h.distance.min(excess));
                 c.y -= drop;
             }
         }
@@ -401,10 +400,10 @@ pub(super) fn swim_step(
     player.vel_y = 0.0;
     player.horiz_vel = Vec3::new(vel.x, 0.0, vel.z);
 
-    let probe = ms.cast_move(
+    let probe = crate::collision::one_sided::cast_move(
+        ms,
         capsule,
         c,
-        Quat::IDENTITY,
         Vec3::NEG_Y * GROUND_PROBE,
         SKIN_WIDTH,
         &filter,

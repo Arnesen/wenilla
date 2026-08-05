@@ -12,13 +12,28 @@
 //! and a `PrepareResources` upload that writes only what changed — here per-rig **dirty ranges**
 //! (a parked, stationary rig re-uploads nothing) plus the slot table on allocation changes.
 //!
-//! **Palettes are world-space, Bevy's exact semantics**: row `b` of rig `r` is
-//! `world_from_joint(b) × inverse_bindpose(b)` — the same matrix Bevy's `skin_model` would
-//! produce — stored as 3 `vec4` rows (the affine's rows; the fourth row is implicit
-//! `[0,0,0,1]`). The vertex stage reads the part's rig slot from its `MeshTag` rig field
-//! (`mesh_tag::rig_bits`), resolves the rig's base bone index through the slot table, and blends
-//! the four indexed bones' rows by the vertex weights — replacing (not composing with) the mesh's
-//! world matrix, exactly like Bevy skinning.
+//! **Palettes are RIG-RELATIVE** (decision 0974): row `b` of rig `r` is
+//! `rig_from_joint(b) × inverse_bindpose(b)`, where `rig_from_joint` is the joint's world frame
+//! with the rig's own world origin subtracted off — same 3×3 as Bevy's `skin_model` would
+//! produce, translation measured from the rig root instead of the map's. The origin itself rides
+//! a parallel per-slot table ([`rig_origin_region_offset`]), and the vertex stage
+//! adds it back **camera-relative**, so a vertex never exists as an absolute world coordinate in
+//! f32. That is the whole point: at Elwynn's ~9.5 k-yard coordinates one f32 ULP is ~1 mm, the
+//! bone chain and the palette each spend one, and because the pose is recomposed every frame the
+//! rounding is *fresh noise every frame* — the long-standing character shimmer. Rig-relative
+//! numbers are ~1 yard, where an ULP is ~0.1 µm. (Rows stay 3 `vec4`s — the affine's rows; the
+//! fourth is implicit `[0,0,0,1]`.)
+//!
+//! The vertex stage reads the part's rig slot from its `MeshTag` rig field (`mesh_tag::rig_bits`),
+//! resolves the rig's base bone index through the slot table, and blends the four indexed bones'
+//! rows by the vertex weights — replacing (not composing with) the mesh's world matrix, exactly
+//! like Bevy skinning, then offsets by `origin − camera`.
+//!
+//! Both writers keep the convention — the collapsed lane ([`RigPalettes::write_rig_worlds`]) is
+//! handed frames already composed from a zero-translation root, so its rows are exact; the entity
+//! lane ([`RigPalettes::write_rig`]) subtracts the holder's world translation off globals Bevy
+//! propagated in absolute space, so its rows inherit whatever rounding propagation already spent
+//! (a named residual — killing it needs a floating origin, not a palette change).
 //!
 //! **Dirtiness is structural, not assumed**: every joint entity carries a [`RigJoint`] marker
 //! (planted by `entities::spawn_joints`), and [`compute_rig_palettes`] runs one linear
@@ -58,18 +73,33 @@ pub(crate) fn rig_table_region_offset() -> u64 {
     crate::lighting::prop_probe_region_offset() + (7 * crate::lighting::MAX_PROP_PROBES * 16) as u64
 }
 
-/// Byte offset of the palette rows themselves — after the slot table AND the per-instance tint
-/// table that shares this slot index ([`crate::instance_tint`], decision 0812). The rows stay last
-/// because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
-pub(crate) fn palette_region_offset() -> u64 {
+/// Byte offset of the per-slot rig ORIGIN table (decision 0974) — one `vec4` per slot, `xyz` =
+/// the world position the rig's rows are measured from (`w` unused). Sits after the instance-tint
+/// table, mirroring `wow_model.wgsl`'s struct order.
+pub(crate) fn rig_origin_region_offset() -> u64 {
     crate::instance_tint::region_offset() + crate::instance_tint::region_bytes()
 }
 
+/// Bytes the origin table adds (32 KB at 2048 slots).
+fn rig_origin_region_bytes() -> u64 {
+    MAX_RIG_SLOTS as u64 * 16
+}
+
+/// Byte offset of the palette rows themselves — after the slot table, the per-instance tint table
+/// that shares this slot index ([`crate::instance_tint`], decision 0812), and the origin table.
+/// The rows stay last because `wow_model.wgsl` declares them as the struct's one runtime-sized
+/// array.
+pub(crate) fn palette_region_offset() -> u64 {
+    rig_origin_region_offset() + rig_origin_region_bytes()
+}
+
 /// Total bytes the slot-indexed regions add to every `wow_light`-layout buffer
-/// (`lighting::light_blob_bytes`): the rig slot table, the instance-tint table, the palette rows.
+/// (`lighting::light_blob_bytes`): the rig slot table, the instance-tint table, the origin table,
+/// the palette rows.
 pub(crate) fn palette_regions_bytes() -> u64 {
     (MAX_RIG_SLOTS * 4) as u64
         + crate::instance_tint::region_bytes()
+        + rig_origin_region_bytes()
         + MAX_PALETTE_BONES as u64 * BONE_BYTES
 }
 
@@ -81,6 +111,14 @@ pub(crate) struct RigPalettes {
     rows: Arc<Vec<[f32; 4]>>,
     /// Slot → base bone index. Slot 0 is the tag's "no rig" sentinel and never allocated.
     table: Arc<Vec<u32>>,
+    /// Slot → the world position this rig's rows are measured from (decision 0974); `w` unused.
+    /// Written by the same call that writes the rows, so the pair can never disagree.
+    origins: Arc<Vec<[f32; 4]>>,
+    /// Bumped whenever any origin changes — the origin table's upload gate for the shared buffer.
+    origin_generation: u64,
+    /// Bumped only when a MIRRORED slot's origin changes, so a world full of walking creatures
+    /// does not re-push 32 KB into every booth buffer each frame.
+    origin_mirror_generation: u64,
     /// Per-slot bone count; 0 = free slot.
     slot_len: Vec<u32>,
     free_slots: Vec<u16>,
@@ -115,6 +153,9 @@ impl Default for RigPalettes {
         Self {
             rows: Arc::new(vec![[0.0; 4]; 3 * MAX_PALETTE_BONES]),
             table: Arc::new(vec![0; MAX_RIG_SLOTS]),
+            origins: Arc::new(vec![[0.0; 4]; MAX_RIG_SLOTS]),
+            origin_generation: 0,
+            origin_mirror_generation: 0,
             slot_len: vec![0; MAX_RIG_SLOTS],
             mirrored: vec![false; MAX_RIG_SLOTS],
             free_slots: Vec::new(),
@@ -158,6 +199,38 @@ fn rows_make_mut<'a>(
         return out;
     }
     Arc::make_mut(rows)
+}
+
+/// Move a world affine into the rig's own frame (decision 0974): same 3×3, translation measured
+/// from `origin`. The subtraction is where the ~9 k-yard magnitude leaves the number — everything
+/// downstream of it is a rig-sized quantity.
+fn rebase(mut world: Affine3A, origin: Vec3) -> Affine3A {
+    world.translation -= bevy::math::Vec3A::from(origin);
+    world
+}
+
+/// [`rebase`]'s `GlobalTransform` face — for the lanes that hand
+/// [`RigPalettes::write_rig_worlds`] frames Bevy propagated in absolute space, and for the
+/// collapsed lane's root (which composes its chain *from* the rebased root).
+pub(crate) fn rebase_global(g: GlobalTransform, origin: Vec3) -> GlobalTransform {
+    GlobalTransform::from(rebase(g.affine(), origin))
+}
+
+/// The origin a rig's rows are measured from, given its root's world translation — the ONE place
+/// the decision-0974 rebase can be switched off, so no caller can hold half the convention.
+///
+/// `WOW_NO_RIG_REBASE=1` is the A/B lever (the `WOW_NO_MOUNT_TILT` shape): it makes every rig's
+/// origin the *map* origin, so the chain composes in absolute world space and the rows carry
+/// ~9 k-yard translations again — the pre-0974 f32 rounding, and its shimmer, back on animated
+/// characters. The shader needs no branch for it: `frame · v + (0 − camera)` spends the ULP inside
+/// the big-times-small product exactly where the old route spent it inside `clip_from_world ×
+/// p_world`. Zero-cost when unset: one env read, once.
+pub(crate) fn rebase_origin(root_world: Vec3) -> Vec3 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    match *ON.get_or_init(|| std::env::var_os("WOW_NO_RIG_REBASE").is_none()) {
+        true => root_world,
+        false => Vec3::ZERO,
+    }
 }
 
 impl RigPalettes {
@@ -219,6 +292,9 @@ impl RigPalettes {
         );
         rows[3 * base as usize..3 * (base + len) as usize].fill([0.0; 4]);
         self.dirty.push((base, len, self.mirrored[s]));
+        // …and the origin with them, so "collapsed at the origin" stays literally true for a
+        // stale tag during the one-frame despawn skew (decision 0974).
+        self.set_origin(slot, Vec3::ZERO);
         // Insert sorted + coalesce with both neighbours.
         let i = self.free_ranges.partition_point(|&(b, _)| b < base);
         self.free_ranges.insert(i, (base, len));
@@ -238,20 +314,43 @@ impl RigPalettes {
         }
     }
 
+    /// Publish the world position slot `slot`'s rows are measured from (decision 0974). Called by
+    /// both row writers with the same origin they subtracted, so the pair is atomic by
+    /// construction — there is no frame where the shader can add a stale origin to fresh rows.
+    fn set_origin(&mut self, slot: u16, origin: Vec3) {
+        let s = slot as usize;
+        let word = [origin.x, origin.y, origin.z, 0.0];
+        match self.origins.get(s) {
+            Some(&cur) if cur != word => {}
+            _ => return,
+        }
+        Arc::make_mut(&mut self.origins)[s] = word;
+        self.origin_generation += 1;
+        if self.mirrored[s] {
+            self.origin_mirror_generation += 1;
+        }
+    }
+
     /// Rewrite one rig's rows from its joints' world transforms × inverse bindposes, and mark the
     /// range dirty. `n` is clamped to the allocated length (a malformed model whose joint list
     /// and bindpose list disagree writes the shorter).
+    ///
+    /// `origin` is the rig holder's world translation: rows are written RELATIVE to it (decision
+    /// 0974) and the vertex stage adds it back. Unlike the collapsed lane, these globals were
+    /// propagated by Bevy in absolute world space, so subtracting the origin here cannot recover
+    /// precision propagation already spent — it buys the *clip-space* half of the fix only. Both
+    /// lanes must still agree on the convention, which is why it is not optional.
     fn write_rig(
         &mut self,
-        slot: u16,
-        base: u32,
-        alloc_len: u32,
-        joints: &[Entity],
+        rig: &RigSkin,
         ibp: &[Mat4],
+        origin: Vec3,
         worlds: &Query<Ref<GlobalTransform>>,
     ) {
-        let n = (joints.len().min(ibp.len()) as u32).min(alloc_len);
+        let (slot, base, joints) = (rig.slot, rig.base, &rig.joints);
+        let n = (joints.len().min(ibp.len()) as u32).min(rig.len);
         self.cost_rows += n;
+        self.set_origin(slot, origin);
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.cost_copies,
@@ -261,7 +360,7 @@ impl RigPalettes {
             let Ok(g) = worlds.get(joints[b]) else {
                 continue; // a torn-down joint keeps its last rows
             };
-            let m = g.affine() * Affine3A::from_mat4(ibp[b]);
+            let m = rebase(g.affine(), origin) * Affine3A::from_mat4(ibp[b]);
             let (m3, t) = (m.matrix3, m.translation);
             let r = 3 * (base as usize + b);
             rows[r] = [m3.x_axis.x, m3.y_axis.x, m3.z_axis.x, t.x];
@@ -275,18 +374,25 @@ impl RigPalettes {
     }
 
     /// The collapsed-rig lane's row write (decision 0724): the world pass hands the composed —
-    /// and billboard-replaced — per-bone world frames directly; rows are `world × ibp`, the same
-    /// product [`Self::write_rig`] reads off joint entities. `worlds` beyond the allocation (or
-    /// the bindpose list) is ignored, mirroring the entity path's clamp.
+    /// and billboard-replaced — per-bone frames directly; rows are `frame × ibp`, the same product
+    /// [`Self::write_rig`] reads off joint entities. `worlds` beyond the allocation (or the
+    /// bindpose list) is ignored, mirroring the entity path's clamp.
+    ///
+    /// The frames arrive already **rig-relative** (decision 0974) — the world pass composes the
+    /// chain from a zero-translation root — so nothing here spends a ~9 k-yard ULP and the rows
+    /// are exact to a rig-sized quantity. `origin` is the world position they are measured from;
+    /// the vertex stage adds it back camera-relative.
     pub(crate) fn write_rig_worlds(
         &mut self,
         rig: &RigSkin,
         worlds: &[GlobalTransform],
         ibp: &[Mat4],
+        origin: Vec3,
     ) {
         let n = (worlds.len().min(ibp.len()) as u32).min(rig.len);
         let (slot, base) = (rig.slot, rig.base);
         self.cost_rows += n;
+        self.set_origin(slot, origin);
         let rows = rows_make_mut(
             &mut self.rows,
             &mut self.cost_copies,
@@ -313,10 +419,18 @@ impl RigPalettes {
         if let Some(m) = self.mirrored.get_mut(slot as usize) {
             *m = true;
         }
+        // Push the ORIGIN table to the mirrors on this edge, unconditionally (decision 0974). The
+        // mirror upload is gated on `origin_mirror_generation`, which only moves when a slot that
+        // is ALREADY mirrored changes — so a booth rig whose origin was written before this call
+        // (or written again to the same value after it) would leave the studio buffers holding a
+        // zero origin, and the booth's subject would render an Elwynn's-worth of yards away.
+        self.origin_mirror_generation += 1;
     }
 
-    /// The mouseover picker's read side: rig slot → world-space `Mat4` palette (the same values
-    /// Bevy's `skin_model` would compute), reconstructed from the rows.
+    /// The mouseover picker's read side: rig slot → **world-space** `Mat4` palette (the same
+    /// values Bevy's `skin_model` would compute), reconstructed from the rows. The stored rows are
+    /// rig-relative (decision 0974), so the slot's origin goes back on here — the picker ray is a
+    /// world-space ray, and it is not a precision consumer.
     pub(crate) fn world_palette(&self, slot: u16, bones: usize) -> Option<Vec<Mat4>> {
         let s = slot as usize;
         let len = (*self.slot_len.get(s)? as usize).min(bones);
@@ -324,17 +438,17 @@ impl RigPalettes {
             return None;
         }
         let base = self.table[s] as usize;
+        let o = self.origins[s];
         Some(
             (0..len)
                 .map(|b| {
                     let r = 3 * (base + b);
-                    Mat4::from_cols(
-                        Vec4::from_array(self.rows[r]),
-                        Vec4::from_array(self.rows[r + 1]),
-                        Vec4::from_array(self.rows[r + 2]),
-                        Vec4::W,
-                    )
-                    .transpose()
+                    let row = |i: usize, off: f32| {
+                        let mut v = self.rows[r + i];
+                        v[3] += off;
+                        Vec4::from_array(v)
+                    };
+                    Mat4::from_cols(row(0, o[0]), row(1, o[1]), row(2, o[2]), Vec4::W).transpose()
                 })
                 .collect(),
         )
@@ -493,7 +607,17 @@ fn compute_rig_palettes(
         let Some(ibp) = ibps.get(&rig.ibp) else {
             continue;
         };
-        palettes.write_rig(rig.slot, rig.base, rig.len, &rig.joints, ibp, &worlds);
+        // The rig holder's own world translation is the rebasing origin (decision 0974): every
+        // joint is a descendant of it, so the rows come out rig-sized. Any origin would be
+        // *correct* — only precision cares that it sits near the geometry — so a holder without a
+        // global (mid-teardown) safely falls back to the map origin, i.e. the old behaviour.
+        let origin = rebase_origin(
+            worlds
+                .get(root)
+                .map(|g| g.translation())
+                .unwrap_or_default(),
+        );
+        palettes.write_rig(rig, ibp, origin, &worlds);
     }
 }
 
@@ -502,8 +626,11 @@ fn compute_rig_palettes(
 struct RigPaletteExtract {
     rows: Arc<Vec<[f32; 4]>>,
     table: Arc<Vec<u32>>,
+    origins: Arc<Vec<[f32; 4]>>,
     dirty: Arc<Vec<(u32, u32, bool)>>,
     table_generation: u64,
+    origin_generation: u64,
+    origin_mirror_generation: u64,
 }
 
 impl Default for RigPaletteExtract {
@@ -511,16 +638,22 @@ impl Default for RigPaletteExtract {
         Self {
             rows: Arc::new(Vec::new()),
             table: Arc::new(Vec::new()),
+            origins: Arc::new(Vec::new()),
             dirty: Arc::new(Vec::new()),
             // != RigPalettes' initial 0, so the first publish uploads even an empty table.
             table_generation: u64::MAX,
+            origin_generation: u64::MAX,
+            origin_mirror_generation: u64::MAX,
         }
     }
 }
 
 /// Main world, after the compute: hand the frame's dirty ranges + the shared rows to extraction.
 fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPaletteExtract>) {
-    if palettes.dirty.is_empty() && out.table_generation == palettes.table_generation {
+    if palettes.dirty.is_empty()
+        && out.table_generation == palettes.table_generation
+        && out.origin_generation == palettes.origin_generation
+    {
         return;
     }
     let p = palettes.as_mut();
@@ -536,8 +669,11 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
     }
     out.rows = Arc::clone(&p.rows);
     out.table = Arc::clone(&p.table);
+    out.origins = Arc::clone(&p.origins);
     out.dirty = Arc::new(std::mem::take(&mut p.dirty));
     out.table_generation = p.table_generation;
+    out.origin_generation = p.origin_generation;
+    out.origin_mirror_generation = p.origin_mirror_generation;
 }
 
 /// Extra `wow_light`-layout buffers that mirror the palette regions (the glue/portrait booths'
@@ -548,25 +684,48 @@ pub(crate) struct RigPaletteMirrors(
     pub(crate) std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
 );
 
-/// Render world (`PrepareResources`): write the dirty rows + (on change) the slot table into the
-/// shared buffer and every registered mirror. A parked, stationary world costs zero bytes here.
+/// What the last upload actually put on the GPU — the four independent change gates
+/// ([`upload_rig_palettes`]). `dirty` is an `Arc` pointer, not a counter: a new publish makes a
+/// new `Arc`.
+#[derive(Default)]
+struct UploadedGenerations {
+    table: Option<u64>,
+    dirty: u64,
+    origin: Option<u64>,
+    origin_mirror: Option<u64>,
+}
+
+/// Render world (`PrepareResources`): write the dirty rows + (on change) the slot table and the
+/// rig-origin table into the shared buffer and every registered mirror. A parked, stationary world
+/// costs zero bytes here.
 fn upload_rig_palettes(
     queue: Res<RenderQueue>,
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
     mirrors: Option<Res<RigPaletteMirrors>>,
     data: Option<Res<RigPaletteExtract>>,
-    mut last: Local<(Option<u64>, u64)>,
+    mut last: Local<UploadedGenerations>,
 ) {
     let Some(data) = data else { return };
-    // The extract clones every frame; gate on content. `last.1` counts published dirty batches
+    // The extract clones every frame; gate on content. `dirty` counts published dirty batches
     // via the Arc pointer (a new publish makes a new Arc).
     let dirty_ptr = Arc::as_ptr(&data.dirty) as u64;
-    let table_new = last.0 != Some(data.table_generation);
-    let dirty_new = last.1 != dirty_ptr && !data.dirty.is_empty();
-    if !table_new && !dirty_new {
+    let table_new = last.table != Some(data.table_generation);
+    let dirty_new = last.dirty != dirty_ptr && !data.dirty.is_empty();
+    // The origin table is 32 KB written whole (decision 0974): tiny beside the rows, and the
+    // mirrors take their own generation so a world full of walking creatures does not re-push it
+    // into every booth buffer each frame.
+    let origin_new = last.origin != Some(data.origin_generation) && !data.origins.is_empty();
+    let origin_mirror_new =
+        last.origin_mirror != Some(data.origin_mirror_generation) && !data.origins.is_empty();
+    if !table_new && !dirty_new && !origin_new && !origin_mirror_new {
         return;
     }
-    *last = (Some(data.table_generation), dirty_ptr);
+    *last = UploadedGenerations {
+        table: Some(data.table_generation),
+        dirty: dirty_ptr,
+        origin: Some(data.origin_generation),
+        origin_mirror: Some(data.origin_mirror_generation),
+    };
     let cost_t0 = rig_cost_enabled().then(std::time::Instant::now);
     let mut cost_calls = 0u32;
     let mut cost_bytes = 0u64;
@@ -594,6 +753,19 @@ fn upload_rig_palettes(
                 rig_table_region_offset(),
                 bytemuck::cast_slice(&data.table),
             );
+        }
+        if if mirror_only {
+            origin_mirror_new
+        } else {
+            origin_new
+        } {
+            queue.write_buffer(
+                buffer,
+                rig_origin_region_offset(),
+                bytemuck::cast_slice(&data.origins),
+            );
+            cost_calls += 1;
+            cost_bytes += rig_origin_region_bytes();
         }
         if dirty_new {
             let ranges = if mirror_only { &mirrored_only } else { &all };
@@ -800,29 +972,55 @@ mod tests {
         assert!(p.alloc(1).is_some());
     }
 
+    /// The picker's read side puts the slot's ORIGIN back on (decision 0974) — rows are stored
+    /// rig-relative, so a reconstruction that forgot the origin would ray-test every skinned unit
+    /// against a copy of itself sitting at the map origin.
     #[test]
-    fn world_palette_reconstructs_the_affine() {
+    fn world_palette_reconstructs_the_affine_including_the_rig_origin() {
         let mut p = RigPalettes::default();
         let (slot, base) = p.alloc(1).unwrap();
-        // A recognisable affine: rotate 90° about Y, translate (1,2,3).
+        // A recognisable affine: rotate 90° about Y, translate (1,2,3) — inside a rig standing a
+        // long way from the map origin.
+        let origin = Vec3::new(-9464.31, 62.17, 56.91);
         let m = Mat4::from_rotation_translation(
             Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
             Vec3::new(1.0, 2.0, 3.0),
         );
         let a = Affine3A::from_mat4(m);
+        p.set_origin(slot, origin);
         let rows = Arc::make_mut(&mut p.rows);
         let (m3, t) = (a.matrix3, a.translation);
         let r = 3 * base as usize;
         rows[r] = [m3.x_axis.x, m3.y_axis.x, m3.z_axis.x, t.x];
         rows[r + 1] = [m3.x_axis.y, m3.y_axis.y, m3.z_axis.y, t.y];
         rows[r + 2] = [m3.x_axis.z, m3.y_axis.z, m3.z_axis.z, t.z];
+        let want = Mat4::from_translation(origin) * m;
         let pal = p.world_palette(slot, 1).unwrap();
-        assert!(pal[0].abs_diff_eq(m, 1e-6), "{:?} vs {m:?}", pal[0]);
+        assert!(pal[0].abs_diff_eq(want, 1e-2), "{:?} vs {want:?}", pal[0]);
         // A transformed point round-trips through the reconstruction.
         let q = Vec3::new(0.5, -1.0, 2.0);
         assert!(pal[0]
             .transform_point3(q)
-            .abs_diff_eq(m.transform_point3(q), 1e-5));
+            .abs_diff_eq(want.transform_point3(q), 1e-2));
+        // And the origin is really load-bearing here, not a rounding-sized detail.
+        assert!(
+            p.world_palette(slot, 1).unwrap()[0]
+                .w_axis
+                .truncate()
+                .distance(origin + Vec3::new(1.0, 2.0, 3.0))
+                < 1e-2
+        );
+    }
+
+    /// A slot recycles: the freed rig's origin must not ride into the next unit that claims it.
+    #[test]
+    fn freeing_a_slot_clears_its_origin() {
+        let mut p = RigPalettes::default();
+        let (slot, _) = p.alloc(4).unwrap();
+        p.set_origin(slot, Vec3::new(-9464.31, 62.17, 56.91));
+        assert_ne!(p.origins[slot as usize], [0.0; 4]);
+        p.free(slot);
+        assert_eq!(p.origins[slot as usize], [0.0; 4]);
     }
 
     #[test]
@@ -837,27 +1035,36 @@ mod tests {
 
     #[test]
     fn region_layout_is_consistent() {
-        // The slot table sits after the probe region, the per-instance tint table (decision 0812 —
-        // same slot index) after it, the palette rows last, and the blob-size extension covers all
-        // three exactly (wow_model.wgsl mirrors this layout, and wgpu validates the bound size
-        // against the shader's struct at draw time — a mismatch here is a draw-time failure, which
-        // is why this is asserted rather than trusted).
+        // The slot table sits after the probe region, then the per-instance tint table (decision
+        // 0812 — same slot index), then the rig-origin table (decision 0974 — same slot index
+        // again), the palette rows last, and the blob-size extension covers all four exactly
+        // (wow_model.wgsl mirrors this layout, and wgpu validates the bound size against the
+        // shader's struct at draw time — a mismatch here is a draw-time failure, which is why this
+        // is asserted rather than trusted).
         assert_eq!(
             crate::instance_tint::region_offset() - rig_table_region_offset(),
             (MAX_RIG_SLOTS * 4) as u64,
             "the tint table follows the slot table"
         );
         assert_eq!(
-            palette_region_offset() - crate::instance_tint::region_offset(),
+            rig_origin_region_offset() - crate::instance_tint::region_offset(),
             crate::instance_tint::region_bytes(),
-            "the palette rows follow the tint table"
+            "the rig-origin table follows the tint table"
+        );
+        assert_eq!(
+            palette_region_offset() - rig_origin_region_offset(),
+            rig_origin_region_bytes(),
+            "the palette rows follow the origin table"
         );
         assert_eq!(
             palette_regions_bytes(),
             (MAX_RIG_SLOTS * 4) as u64
                 + crate::instance_tint::region_bytes()
+                + rig_origin_region_bytes()
                 + (MAX_PALETTE_BONES as u64) * BONE_BYTES
         );
+        // One `vec4` per addressable slot — the shader declares `array<vec4<f32>, 2048>`.
+        assert_eq!(rig_origin_region_bytes(), (MAX_RIG_SLOTS * 16) as u64);
         // One word per addressable slot — the shader declares `array<u32, 2048>` for both tables.
         assert_eq!(
             crate::instance_tint::region_bytes(),

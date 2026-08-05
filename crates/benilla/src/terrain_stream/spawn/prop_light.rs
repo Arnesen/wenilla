@@ -46,6 +46,33 @@ pub(crate) enum PropLight {
     },
 }
 
+impl PropLight {
+    /// The prop's lighting lane, as the mouseover inspector says it. A WMO prop that looks wrong is
+    /// almost always on the wrong *lane* or carrying an unbaked base — and neither is visible from
+    /// the model path alone, which is why Booty Bay's black entrance arch read as a texture bug for
+    /// as long as it did (decision 0969). `sky-lit` is the exterior lane; the interior lane prints
+    /// the MODD-colour words it actually commits, so a base of `#000000` names itself on hover.
+    pub(crate) fn inspector_label(&self) -> String {
+        let hex = |c: &[f32; 3]| {
+            let b = c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+            format!("#{:02x}{:02x}{:02x}", b[0], b[1], b[2])
+        };
+        match self {
+            PropLight::Exterior => "sky-lit".into(),
+            PropLight::Interior {
+                ambient,
+                diffuse,
+                lights,
+            } => format!(
+                "interior amb {} dif {} · {} MOLR",
+                hex(ambient),
+                hex(diffuse),
+                lights.len()
+            ),
+        }
+    }
+}
+
 /// One MOLR-referenced light as the interior fold consumes it (world Bevy space, colour
 /// pre-multiplied by the authored intensity). Shared by the MODD prop spawn fold and the
 /// GameObject footprint lane ([`crate::interior`] via [`crate::wmo_portal`]'s verdict).

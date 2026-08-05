@@ -42,6 +42,7 @@ use bevy::math::{Affine3A, Mat4, Vec3};
 use super::{compute_pvs, down_ray_seeds, floor_z_at, terrain_z_local, WmoModel, EXTERIOR};
 
 mod light_probe;
+mod pin;
 
 /// A building at its real spot on a real map: the model, plus the MODF placement to find (by its
 /// `uniqueId`) in `tile`, whose 3×3 tile block supplies the terrain the down-ray races.
@@ -85,6 +86,15 @@ const BLACKSMITH: Site = Site {
     map: "Azeroth",
     tile: (31, 49),
     uid: 96048,
+};
+
+/// Undercity — B26's site: 200+ groups under Tirisfal, whose one reported doorway culls the room on
+/// the far side from *both* sides of the arch (`.go xyz 1558.66 415.39 -62.16 0`).
+const UNDERCITY: Site = Site {
+    wmo: r"world\wmo\lorderon\undercity\undercity.wmo",
+    map: "Azeroth",
+    tile: (31, 28),
+    uid: 239598,
 };
 
 /// Eye height above a floor point for both the standing player and the seated camera samples.

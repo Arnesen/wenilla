@@ -532,6 +532,7 @@ pub(crate) fn simulate_chain_beams(
                 // Depth-write off and two-sided come with the lane's additive pipeline.
                 blend: crate::particles::buffer::EffectBlend::Add,
                 fog: EffectFog::Off,
+                lit: false,
                 anchor: anchor_sum / anchor_n,
                 // No owner rung: a beam is not a model's emitter (module docs, approximation (d)).
                 bias: 0.0,

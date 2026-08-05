@@ -100,9 +100,10 @@ pub struct ChunkMesh {
     /// `AreaTable.dbc` id of this chunk (MCNK +0x34) — the zone/subzone under the player's feet;
     /// drives zone music/ambience/reverb selection (decision 0070).
     pub area_id: u32,
-    /// The chunk's MCLQ liquid surface (lake/river/ocean), if any — a flat water mesh built
-    /// alongside the terrain (see [`crate::liquid`]). `None` for dry chunks and magma/slime (Phase 3).
-    pub liquid: Option<crate::liquid::LiquidMesh>,
+    /// The chunk's MCLQ liquid surfaces — flat meshes built alongside the terrain (see
+    /// [`crate::liquid`]). Empty on a dry chunk; **more than one** where the MCNK carries more than
+    /// one liquid block, as the 28 shipped river-mouth chunks do (a stream over the sea).
+    pub liquids: Vec<crate::liquid::LiquidMesh>,
 }
 
 impl ChunkMesh {
@@ -479,12 +480,13 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
             no_effect_doodad[k] = (ned8[k / 8] >> (k % 8)) & 0x1 == 1;
         }
 
-        // MCLQ liquid surface (lake/river/ocean), built on the same lattice as this chunk's
-        // terrain. `None` for dry chunks and (for now) magma/slime. See `crate::liquid`.
-        let liquid = mcnk
-            .liquid
-            .as_ref()
-            .and_then(|mclq| crate::liquid::build_liquid_mesh(mclq, h.position));
+        // MCLQ liquid surfaces (lake/river/ocean/lava), built on the same lattice as this chunk's
+        // terrain — one mesh per liquid block the MCNK carries. See `crate::liquid`.
+        let liquids: Vec<_> = mcnk
+            .liquids
+            .iter()
+            .filter_map(|mclq| crate::liquid::build_liquid_mesh(mclq, h.position))
+            .collect();
 
         chunks.push(ChunkMesh {
             positions,
@@ -502,7 +504,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
             index_x: h.index_x,
             index_y: h.index_y,
             area_id: h.area_id,
-            liquid,
+            liquids,
         });
     }
 
@@ -728,7 +730,7 @@ mod tests {
             index_x: 0,
             index_y: 0,
             area_id: 0,
-            liquid: None,
+            liquids: Vec::new(),
         }
     }
 

@@ -206,6 +206,7 @@ pub(super) fn push_reticle(
             texture,
             blend: EffectBlend::Alpha,
             fog: EffectFog::Off,
+            lit: false,
             anchor: state.key.center,
             bias: RETICLE_DEPTH_BIAS,
             raster_bias: RETICLE_DEPTH_BIAS as i32,
