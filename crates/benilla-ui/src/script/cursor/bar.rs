@@ -16,7 +16,7 @@
 
 use mlua::Lua;
 
-use crate::script::action::{ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use crate::script::action::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use crate::script::{ActionSlot, Model};
 
 use super::{queue_cursor_update, CursorAction, CursorPayload};
@@ -114,6 +114,11 @@ pub(crate) fn place_action(model: &mut Model, id: u32) -> bool {
         CursorPayload::Action(a) => (a.kind, a.action, a.texture.clone()),
         CursorPayload::Item(i) => (ACTION_KIND_ITEM, i.item_id, i.texture.clone()),
         CursorPayload::Spell(s) => (ACTION_KIND_SPELL, s.spell_id, s.texture.clone()),
+        // Mode 8 — the one non-item/non-spell payload the reference's `PlaceAction` accepts
+        // (`action-item-slot.md` §5's payload table: pet actions and class abilities are refused,
+        // macros are not). It packs the bare macro id under the MACRO tag, exactly as the SPELL
+        // and ITEM arms pack theirs.
+        CursorPayload::Macro(m) => (ACTION_KIND_MACRO, m.index, m.texture.clone()),
     };
     let displaced = model.actions.insert(
         id,

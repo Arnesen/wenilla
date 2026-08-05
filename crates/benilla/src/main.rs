@@ -120,12 +120,14 @@ mod ui_items;
 mod ui_logout;
 mod ui_loot;
 mod ui_loot_roll;
+mod ui_macro;
 mod ui_mail;
 mod ui_merchant;
 mod ui_mirror;
 mod ui_net;
 mod ui_party;
 mod ui_pass;
+mod ui_pet;
 mod ui_quest;
 mod ui_quest_log;
 mod ui_script;
@@ -209,6 +211,7 @@ use ui_mirror::UiMirrorPlugin;
 use ui_net::UiNetPlugin;
 use ui_party::UiPartyPlugin;
 use ui_pass::PlayerUiPlugin;
+use ui_pet::UiPetPlugin;
 use ui_quest::UiQuestPlugin;
 use ui_quest_log::UiQuestLogPlugin;
 use ui_script::UiScriptPlugin;
@@ -660,6 +663,11 @@ fn main() -> AppExit {
     // arc (bags/doll/bars/book). After UiActionPlugin (shares its `Spells` resource + the cast
     // tail `send_spell_cast`).
     .add_plugins(UiSpellbookPlugin)
+    // The macro system (decision 0983): the icon chooser's catalog, the `benilla/macros/`
+    // files, `UPDATE_MACROS`, and the macro→bound-spell table the action bar's MACRO slots
+    // resolve their cooldown/usability through. After UiSpellbookPlugin — the bound spell is
+    // resolved against the book that feed pushes, by the same law `CastSpellByName` uses.
+    .add_plugins(ui_macro::UiMacroPlugin)
     // The talent window feed (decision 0304): builds the class pages from Talent.dbc × the
     // known-spell set + PLAYER_CHARACTER_POINTS, drives TalentFrame.xml through the engine's
     // talent seam, and drains learn clicks into CMSG_LEARN_TALENT. After UiActionPlugin
@@ -670,6 +678,10 @@ fn main() -> AppExit {
     // the engine's shapeshift seam, and drains its clicks (cancel-if-active else cast). After
     // UiActionPlugin (shares `Spells`, the `usable` walk, and the cast tail).
     .add_plugins(UiShapeshiftPlugin)
+    // The pet action bar (decision 0982) — the stance bar's mirror image: server-authoritative,
+    // so this renders the ten packed words the last `SMSG_PET_SPELLS` delivered and sends
+    // intents back. After UiActionPlugin (shares `Spells` and the cooldown triple's clock).
+    .add_plugins(UiPetPlugin)
     // The connection-telemetry feed: the averaged ping RTT behind `GetNetStats()`, which the main
     // bar's performance meter polls (decision 0658).
     .add_plugins(UiNetPlugin)

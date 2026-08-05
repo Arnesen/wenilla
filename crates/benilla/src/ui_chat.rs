@@ -12,7 +12,7 @@ use bevy::prelude::*;
 
 use crate::ui_script::UiInput;
 
-mod commands;
+pub(crate) mod commands;
 mod edit;
 mod event;
 mod feed;

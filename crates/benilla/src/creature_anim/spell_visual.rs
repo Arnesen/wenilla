@@ -285,25 +285,33 @@ impl WeaponVisualSrc<'_, '_> {
 /// A spell's effective `SpellVisual` row (spell → `Spell.dbc` column 115 → `SpellVisual.dbc`).
 /// `None` = a silent cast (no visual chain at all).
 ///
-/// The one place the client's **ranged weapon-visual fallback** applies (`0x60d450`, bytes
-/// `60d465`–`60d4aa`; wow-re `throw-ranged-attack-anim.md`): a RANGED-attribute spell
-/// (`Attributes & 0x2`) whose own visual resolves to nothing borrows `weapon_visual` — the
-/// caster's equipped ranged weapon's substitute visual. Every basic shot rides this (they all
-/// have `SpellVisual1 = 0`): Throw → ReadyThrown/AttackThrown, Auto Shot → LoadBow/AttackBow,
-/// wand Shoot → the gun kits. A spell with its own visual never takes the fallback (the client's
-/// `60d4b4` test), and a non-ranged spell never pays the lookup (`FnOnce`).
-fn resolve_stages<'a>(
+/// The one place the client's **ranged weapon-visual merge** applies (`0x60d450`; the law is
+/// [`VisualStages::merged_over_weapon`], byte-read there): a RANGED-attribute spell
+/// (`Attributes & 0x2`) takes the caster's equipped ranged weapon's substitute visual for every
+/// slot its **own** row leaves at zero — precast/cast/impact kits, the missile block, the strike
+/// sound; never state/channel. A basic shot (`SpellVisual1 = 0`) is only the degenerate case of
+/// that fill — the whole zeroed row comes across (Throw → ReadyThrown/AttackThrown, Auto Shot →
+/// LoadBow/AttackBow, wand Shoot → the gun kits), which is what decision 0370 read as the *whole*
+/// mechanism; every hunter shot spell has its own impact + missile row and empty body-anim slots,
+/// so it needs the per-field arm (decision 0986, bug B153). A non-ranged spell never pays the
+/// lookup (`FnOnce`).
+fn resolve_stages(
     spells: &crate::ui_action::Spells,
-    visuals: &'a SpellVisualCatalog,
+    visuals: &SpellVisualCatalog,
     spell_id: u32,
     weapon_visual: impl FnOnce() -> Option<u32>,
-) -> Option<&'a VisualStages> {
+) -> Option<VisualStages> {
     let def = spells.catalog.get(spell_id)?;
-    match visuals.stages(def.visual) {
-        own @ Some(_) => own,
-        None if def.ranged_slot() => visuals.stages(weapon_visual()?),
-        None => None,
+    let own = visuals.stages(def.visual).copied();
+    if !def.ranged_slot() {
+        return own; // `ebx` stayed 0 at `60d468` — the fill block is a no-op
     }
+    // `60d46e`–`60d4aa`: the caster's ranged display → `ItemDisplayInfo` col 10 → its row.
+    let Some(weapon) = weapon_visual().and_then(|v| visuals.stages(v)) else {
+        return own;
+    };
+    // No own row = the client's `rep stosd` zeroed `outKit` before the same fill (`60d4bc`).
+    Some(own.unwrap_or_default().merged_over_weapon(weapon))
 }
 
 /// Resolve one lifecycle stage of `spell_id`'s visual chain to its kit (spell → `Spell.dbc`
@@ -317,7 +325,7 @@ fn resolve_kit(
     stage: impl Fn(&VisualStages) -> u32,
     weapon_visual: impl FnOnce() -> Option<u32>,
 ) -> Option<VisualKit> {
-    let kit_id = stage(resolve_stages(spells, visuals, spell_id, weapon_visual)?);
+    let kit_id = stage(&resolve_stages(spells, visuals, spell_id, weapon_visual)?);
     (kit_id != 0)
         .then(|| visuals.kit(kit_id).copied())
         .flatten()
@@ -793,6 +801,12 @@ pub(super) fn route_cast_visuals(
         let Some(display) = spells.catalog.get(go.spell_id) else {
             continue;
         };
+        // The caster's ranged weapon visual, resolved once per GO (the client's `0x6e802e` call
+        // into `0x60d450`) — its merged row `edi` is what EVERY consumer below reads: the dest
+        // one-shot (`[edi+0x18]`/`[edi+0x30]`), the cast kit (`[edi+0x8]`), the inline impacts
+        // (`6e8169 mov edx,edi`) and the missile spawn (`6e8199 mov edx,edi`).
+        let wv = weapon_src.caster(go.caster);
+        let stages = resolve_stages(spells, &visuals.0, go.spell_id, || wv);
         // The GO's dest one-shot (decision 0797, byte-pinned `0x6e8088`–`0x6e8143`): a
         // dest-carrying GO plays the SpellVisual field-12 model ONCE at the packet's point —
         // gate `field 6 == 0` (no missile owns the arrival) ∧ `field 12 ≠ 0`. NOT gated on the
@@ -800,7 +814,7 @@ pub(super) fn route_cast_visuals(
         // captured Flamestrike shape); fired here at the GO, never waiting on the dynobj
         // create (wow-re trap #6: the burst precedes the object).
         if let Some(dest) = go.dest {
-            if let Some(stages) = visuals.0.stages(display.visual) {
+            if let Some(stages) = stages {
                 if stages.missile_gate == 0 && stages.area_effect != 0 {
                     if let Some(path) = visuals.0.effect_path(stages.area_effect) {
                         bursts.write(crate::entities::dest_fx::GroundBurst {
@@ -811,9 +825,6 @@ pub(super) fn route_cast_visuals(
                 }
             }
         }
-        // The caster's ranged fallback visual, resolved once per GO (the client's `0x6e802e`
-        // call into `0x60d450`) — feeds the inline impacts, the missile chain, and the flight.
-        let wv = weapon_src.caster(go.caster);
         if display.speed <= 0.0 {
             for &target in &go.hits {
                 play_impact(
@@ -832,7 +843,6 @@ pub(super) fn route_cast_visuals(
             // flies). The missile-model chain: field 7 ≥ 1 → its effect model (the client's
             // literal ErrorCube when unresolvable); < 1 / no visual row → `None`, and the
             // spawner falls to the GO's wire ammo model (`0x479f40`, phase 5).
-            let stages = resolve_stages(spells, &visuals.0, go.spell_id, || wv);
             let path = stages.and_then(|s| {
                 (s.missile_model >= 1).then(|| {
                     visuals
@@ -859,9 +869,10 @@ pub(super) fn route_cast_visuals(
                 // The release gate (the client's `0x6e7a70` flush condition, inverted): a cast
                 // kit that plays a body animation defers the launch to its release keyframe;
                 // no kit / no anim (`kit+8 < 1` ⇔ our `anim_id: None`) launches at GO.
-                let awaits_release =
-                    resolve_kit(spells, &visuals.0, go.spell_id, |s| s.cast, || wv)
-                        .is_some_and(|k| k.anim_id.is_some());
+                let awaits_release = stages
+                    .filter(|s| s.cast != 0)
+                    .and_then(|s| visuals.0.kit(s.cast))
+                    .is_some_and(|k| k.anim_id.is_some());
                 missiles.write(MissileSpawn {
                     caster: go.caster,
                     spell_id: go.spell_id,

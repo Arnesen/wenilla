@@ -284,6 +284,56 @@ pub struct VisualStages {
     pub area_kit: u32,
 }
 
+impl VisualStages {
+    /// The client's **ranged weapon-visual merge** — a per-FIELD zero-fill, not a per-row
+    /// fallback (`0x60d450`, byte-read end to end for decision 0986; this SUPERSEDES 0370's
+    /// row-level reading, whose disassembly stopped at the null-own-visual arm).
+    ///
+    /// The resolver reaches the fill from **both** arms, and they converge on one block:
+    ///
+    /// ```text
+    /// 60d4b4  test esi,esi ; jne 0x60d555   ; esi = the spell's OWN SpellVisual row
+    /// 60d4bc  xor eax,eax                   ; -- null-own arm: zero outKit ...
+    /// 60d4c6  rep stosd                     ;    ... then fall through into the fill
+    /// 60d555  rep movsd                     ; -- own arm: copy the OWN row into outKit ...
+    /// 60d561  jmp 0x60d4d2                  ;    ... and jump INTO the same fill
+    /// 60d4d2  test ebx,ebx ; je 0x60d54c    ; ebx = the WEAPON's SpellVisual row (0 if none)
+    /// 60d4d6..60d54c                        ; per field: `if out.F == 0 { out.F = weapon.F }`
+    /// ```
+    ///
+    /// So a RANGED-attribute spell (`Attributes & 0x2`) that **has** its own visual still borrows
+    /// the equipped ranged weapon's row for every slot its own row leaves at zero. That is how a
+    /// hunter shot animates at all: Serpent Sting (visual 3179), Multi-Shot (567), Arcane Shot
+    /// (3299), Aimed/Concussive (3180), Viper/Scorpid Sting (3181/3219) and Volley (3300) every
+    /// one carry `precast = cast = 0` beside a populated impact + missile block, and take
+    /// **LoadBow (kit 7) → AttackBow (kit 164)** off the bow's `ItemDisplayInfo` col-10 visual 5
+    /// (thrown → 98, gun → 224). Read as a row-level fallback they got no caster fire clip at all.
+    ///
+    /// The merged set is exactly the client's eight sites. The two it pointedly does NOT touch are
+    /// [`Self::state`] and [`Self::channel`] (`+0x10`/`+0x14`), nor the dest-anchored
+    /// `+0x2c/+0x30/+0x34` block. Field 8 (`missilePathType`, `+0x20`) is merged there too; it is
+    /// dead-by-absence, so this struct does not carry it.
+    ///
+    /// The missile pair is the one non-uniform site (`60d4fd`–`60d517`): the gate is written as a
+    /// **literal 1**, not the weapon's own value, and the model only comes across with it.
+    #[must_use]
+    pub fn merged_over_weapon(&self, weapon: &VisualStages) -> VisualStages {
+        let fill = |own: u32, w: u32| if own == 0 { w } else { own };
+        let mut out = *self;
+        out.precast = fill(self.precast, weapon.precast); // 60d4d6
+        out.cast = fill(self.cast, weapon.cast); // 60d4e3
+        out.impact = fill(self.impact, weapon.impact); // 60d4f0
+        if self.missile_gate == 0 && weapon.missile_gate != 0 {
+            out.missile_gate = 1; // 60d50b — the literal, not the weapon's value
+            out.missile_model = weapon.missile_model; // 60d512
+        }
+        out.missile_attach = fill(self.missile_attach, weapon.missile_attach); // 60d525
+        out.missile_sound = self.missile_sound.or(weapon.missile_sound); // 60d532
+        out.strike_sound = self.strike_sound.or(weapon.strike_sound); // 60d53f
+        out
+    }
+}
+
 /// One `SpellVisualKit.dbc` row's body-animation + sound + the nine attach-point emitter slots
 /// (the columns consumed through decision 0099 phase 3; see the module doc for what remains).
 // No `Eq`: the `CharProc` params are floats (the client's own `fld` columns).

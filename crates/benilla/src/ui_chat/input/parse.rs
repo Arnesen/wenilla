@@ -172,6 +172,10 @@ pub(in crate::ui_chat) enum ParsedChat {
     /// only living assistable ones (the ref's filter mode 2); bare follows the current selection,
     /// creature or player. Client-side movement — nothing goes on the wire.
     Follow { name: Option<String> },
+    /// `/macrohelp` — the reference's `ChatFrame_DisplayMacroHelpText`: `MACRO_HELP_TEXT_LINE1..5`
+    /// straight out of the shipped `GlobalStrings.lua` (decision 0983). Resolved in the drain,
+    /// which holds the VM, so the text can never go stale against the install.
+    MacroHelp,
     /// A slash line matching neither a chat command nor an `EmotesText` name — dropped.
     Unknown,
 }
@@ -358,6 +362,26 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
             },
             None => ParsedChat::Unknown,
         },
+        // `/cast <name>` = the ref's `SlashCmdList["CAST"]` verbatim: `if msg ~= "" then
+        // CastSpellByName(msg) end` (ChatFrame.lua:1120). The binding does the book lookup
+        // (`benilla_ui::script::spellbook::resolve_spell_by_name`) and queues onto the ONE cast
+        // path, so a typed `/cast` and a macro's `/cast` line are the same code — decision 0983.
+        S::Cast => {
+            if args.is_empty() {
+                ParsedChat::Unknown
+            } else {
+                ParsedChat::Lua {
+                    body: format!("CastSpellByName(\"{}\")", escape_lua_string(args)),
+                }
+            }
+        }
+        // `/macro` `/m` = the ref's own body: `ShowMacroFrame()` (the `RunMacro(msg)` branch beside
+        // it is commented out in the shipped 1.12 ChatFrame.lua — there is no `RunMacro` binding in
+        // the client at all, confirmed against the registered-binding scan).
+        S::MacroUi => ParsedChat::Lua {
+            body: "ShowMacroFrame()".into(),
+        },
+        S::MacroHelp => ParsedChat::MacroHelp,
         // `/script` = the ref's `RunScript(msg)`: the typed text IS the chunk, un-escaped.
         S::Script => {
             if args.is_empty() {

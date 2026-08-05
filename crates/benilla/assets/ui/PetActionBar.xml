@@ -1,0 +1,435 @@
+<Ui>
+    <!--
+        The pet action bar (ref PetActionBarFrame.xml/.lua, extracted from patch.MPQ; decision
+        0982). Hunter, warlock, and every possessed/charmed unit: ten buttons over the ten packed
+        words the server sends in SMSG_PET_SPELLS, driven by `crate::ui_pet`'s feed through the
+        engine's pet seam (GetPetActionInfo & co.).
+
+        THE THING TO KNOW ABOUT THIS BAR: the server owns its CONTENTS (all ten slots arrive in
+        one SMSG_PET_SPELLS) but the CLIENT owns its lit state. A press repaints immediately and
+        is never confirmed, because the server does not answer these packets at all — the real
+        client writes its own state before the send (decision 0988). So a button whose ring does
+        not light on click is BROKEN, not patient.
+
+        The ten slots are not a layout. `GetPetActionInfo` reports each slot's own class off its
+        type byte, and the familiar 3 commands / 4 spells / 3 reactions arrangement is just what
+        vmangos's CharmInfo::InitPetActionBar happens to write; a charmed creature arrives with a
+        different mix through the same ten words. Nothing below indexes by position.
+
+        Token slots (the commands and reactions) return the NAMES OF GLOBALS rather than values,
+        which is the reference's own convention (`PetActionBarFrame.lua:98-104`): the name keys are
+        GlobalStrings' (PET_ACTION_ATTACK, PET_MODE_DEFENSIVE, …), and the texture globals are
+        declared below, quoted verbatim from `PetActionBarFrame.lua:6-12`.
+
+        Geometry QUOTED from the ref (PetActionBarFrame.xml): frame 509x43; the two UI-PetBar shelf
+        strips (256x44 at TOPLEFT with TexCoords 0..1 / 0.015625..0.359375, then 184x44 to its
+        right with 0..0.71875 / 0.375..0.71875); buttons 30x30, button1 at frame BOTTOMLEFT +(36,2),
+        chained +8 (with the ref's own +7 between 6 and 7); the 54x54 UI-Quickslot2 ring CENTER
+        (0,-1). The bar rides `BenillaActionBar` BOTTOMLEFT — our MainMenuBar, the same 1024x53
+        frame at screen BOTTOM the ref anchors to — at the managed PETACTIONBAR_YPOS (UIParent.xml
+        declares the row already).
+
+        Ref divergences, each deliberate:
+        - ONE refresh event. The app diffs the whole pushed bar and fires PET_BAR_UPDATE on any
+          change, so the ref's PET_BAR_UPDATE / PET_BAR_UPDATE_COOLDOWN / UNIT_PET / the
+          UNIT_FLAGS+UNIT_AURA pair it filters for arg1=="pet" collapse into one — the same
+          collapse StanceBar.xml makes, for the same reason.
+        - No PET_BAR_SHOWGRID/HIDEGRID. That pair exists for the drag-an-empty-slot state; the
+          bar's own drag is not built yet, so the grid has nothing to reveal.
+        - The autocast sparkle is TEXTURES, not the ref's <Model>. benilla has no Model widget
+          (the Cooldown and the bag ItemAnim took the same posture): model the mechanism, let our
+          own renderer draw it. The numbers below are the shipped model's own — see BENILLA_PET_
+          AUTOCAST_* .
+    -->
+    <Script><![CDATA[
+        BENILLA_NUM_PET_ACTION_SLOTS = 10
+
+        -- The token textures, quoted verbatim from ref PetActionBarFrame.lua:6-12. They are
+        -- GLOBALS on purpose: `GetPetActionInfo` returns the NAME of one for a token slot, and the
+        -- paint below resolves it with getglobal, exactly as the reference does.
+        PET_DEFENSIVE_TEXTURE  = "Interface\\Icons\\Ability_Defend"
+        PET_AGGRESSIVE_TEXTURE = "Interface\\Icons\\Ability_Racial_BloodRage"
+        PET_PASSIVE_TEXTURE    = "Interface\\Icons\\Ability_Seal"
+        PET_ATTACK_TEXTURE     = "Interface\\Icons\\Ability_GhoulFrenzy"
+        PET_FOLLOW_TEXTURE     = "Interface\\Icons\\Ability_Tracking"
+        PET_WAIT_TEXTURE       = "Interface\\Icons\\Spell_Nature_TimeStop"
+        PET_DISMISS_TEXTURE    = "Interface\\Icons\\Spell_Shadow_Teleport"
+
+        -- ── The autocast sparkle ──────────────────────────────────────────────────────────────
+        --
+        -- The reference's "autocast is on" mark is a <Model> playing
+        -- Interface\Buttons\UI-AutoCastButton.mdx, and what that model actually is came out of the
+        -- shipped .m2 with `benilla-extract m2bones`/`m2part`:
+        --
+        --   4 bones, pivoting at the corners of a 0.02 x 0.02 unit square, each keyed with the
+        --   SAME 5-key 2.000 s translation loop walking the square edge by edge (0.5 s per edge) —
+        --   the four phase-shifted by one corner each, so they chase one another round it.
+        --   4 particle emitters, one per bone: 300/s, life 1.000 s, Add blend, unlit, texture
+        --   Interface\Buttons\GlowStar.blp, size half-extent 0.005 -> 0.002 -> 0.001 over life,
+        --   colour (0.976,0.875,0.192,1) -> (0.996,0.945,0.745,1) -> (1,1,1,0). Its spline has 4
+        --   control points ALL AT THE ORIGIN, so a particle never travels: it is born where the
+        --   bone is and shrinks away there. The effect is therefore four comet trails running
+        --   round the button's rim, not a rotating ring.
+        --
+        -- Model units -> pixels is the same 1200 px/unit calibration BagFrame.xml derived from the
+        -- Cooldown model (its own header carries the derivation), and it CROSS-CHECKS here: the
+        -- lap square is 0.02 units, the ref's Model carries scale="1.2", and 0.02 * 1200 * 1.2 =
+        -- 28.8 px — the rim of a 30 px button, which is where the sparkles visibly run. That
+        -- agreement between two independently-authored UI models is the reason to trust the
+        -- number rather than eyeball a size.
+        --
+        -- OUR ONE DEPARTURE is the particle COUNT: 300 live per emitter is 12 000 quads across a
+        -- full bar, for a trail that reads identically at a fraction of that. We draw
+        -- BENILLA_PET_AUTOCAST_TRAIL per emitter, evenly spaced in AGE, which samples the same
+        -- position/size/colour ramps at the same times — the trail's shape, speed and colour are
+        -- the file's; only its density is ours.
+        BENILLA_PET_AUTOCAST_PX_PER_UNIT = 1200
+        BENILLA_PET_AUTOCAST_SCALE   = 1.2                                   -- the ref Model's
+        BENILLA_PET_AUTOCAST_PERIOD  = 2.0                                   -- seq0 loop, seconds
+        BENILLA_PET_AUTOCAST_LIFE    = 1.0                                   -- particle lifespan
+        BENILLA_PET_AUTOCAST_TRAIL   = 8                                     -- ours (see above)
+        BENILLA_PET_AUTOCAST_EMITTERS = 4
+        -- 0.02 units square, in pixels.
+        BENILLA_PET_AUTOCAST_SIZE = 0.02 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE
+        -- Half-extent -> full width, in pixels: {0.005, 0.002, 0.001} * 2 * K * scale.
+        BENILLA_PET_AUTOCAST_STAR = {
+            0.010 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
+            0.004 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
+            0.002 * BENILLA_PET_AUTOCAST_PX_PER_UNIT * BENILLA_PET_AUTOCAST_SCALE,
+        }
+        -- The over-life colour ramp's three keys (the file's), as {r, g, b, a}.
+        BENILLA_PET_AUTOCAST_COLOR = {
+            {0.976, 0.875, 0.192, 1.0},
+            {0.996, 0.945, 0.745, 1.0},
+            {1.000, 1.000, 1.000, 0.0},
+        }
+
+        -- Where an emitter sits at lap fraction `f` (0..1), as an offset from the button's CENTER
+        -- in pixels. The bone tracks walk the square anticlockwise from its bottom-left corner,
+        -- one edge per quarter-lap; this is that walk, re-centred (the model's square runs 0..0.02
+        -- in both axes, so its centre is at 0.01).
+        function BenillaPetAutocast_Point(f)
+            local h = BENILLA_PET_AUTOCAST_SIZE / 2
+            f = f - math.floor(f)                       -- wrap into 0..1
+            local edge = f * 4
+            local leg = math.floor(edge)
+            local t = edge - leg                        -- 0..1 along this edge
+            if leg == 0 then return -h, -h + t * 2 * h  -- bottom-left -> top-left
+            elseif leg == 1 then return -h + t * 2 * h, h  -- top-left -> top-right
+            elseif leg == 2 then return h, h - t * 2 * h   -- top-right -> bottom-right
+            else return h - t * 2 * h, -h                  -- bottom-right -> bottom-left
+            end
+        end
+
+        -- Sample a 3-key over-life ramp (the M2's own {k0, k1 at mid, k2} shape, linear between).
+        function BenillaPetAutocast_Ramp(keys, age)
+            local a, b, t
+            if age <= 0.5 then a, b, t = keys[1], keys[2], age * 2
+            else a, b, t = keys[2], keys[3], (age - 0.5) * 2 end
+            if type(a) == "number" then return a + (b - a) * t end
+            local out = {}
+            for i = 1, table.getn(a) do out[i] = a[i] + (b[i] - a[i]) * t end
+            return out
+        end
+
+        -- Build one button's sparkle pool: EMITTERS x TRAIL textures, hidden until autocast is on.
+        function BenillaPetAutocast_Create(button)
+            button.sparks = {}
+            for i = 1, BENILLA_PET_AUTOCAST_EMITTERS * BENILLA_PET_AUTOCAST_TRAIL do
+                local t = button:CreateTexture(nil, "OVERLAY")
+                t:SetTexture("Interface\\Buttons\\GlowStar")
+                t:SetBlendMode("ADD")
+                t:Hide()
+                table.insert(button.sparks, t)
+            end
+        end
+
+        -- Advance one button's sparkles to the bar's shared clock. Shared on purpose: the four
+        -- emitters are one model, and every autocasting button plays the same loop in step, which
+        -- is what the reference's per-button Models do too (each starts at sequence time 0 and
+        -- they never drift, the loop being exact).
+        function BenillaPetAutocast_Update(button, clock)
+            if not button.sparks then return end
+            if not button.autocasting then
+                for i = 1, table.getn(button.sparks) do button.sparks[i]:Hide() end
+                return
+            end
+            local n = 1
+            for e = 0, BENILLA_PET_AUTOCAST_EMITTERS - 1 do
+                -- The four bones are the same lap, a quarter apart.
+                local phase = clock / BENILLA_PET_AUTOCAST_PERIOD + e / BENILLA_PET_AUTOCAST_EMITTERS
+                for k = 0, BENILLA_PET_AUTOCAST_TRAIL - 1 do
+                    -- Evenly spaced in AGE: this star was emitted `age` seconds ago, so it sits
+                    -- where the bone was then and has aged that far along the ramps.
+                    local age = (k / BENILLA_PET_AUTOCAST_TRAIL) * BENILLA_PET_AUTOCAST_LIFE
+                    local x, y = BenillaPetAutocast_Point(phase - age / BENILLA_PET_AUTOCAST_PERIOD)
+                    local life = age / BENILLA_PET_AUTOCAST_LIFE
+                    local size = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_STAR, life)
+                    local c = BenillaPetAutocast_Ramp(BENILLA_PET_AUTOCAST_COLOR, life)
+                    local spark = button.sparks[n]
+                    n = n + 1
+                    spark:SetWidth(size)
+                    spark:SetHeight(size)
+                    spark:ClearAllPoints()
+                    spark:SetPoint("CENTER", button, "CENTER", x, y)
+                    spark:SetVertexColor(c[1], c[2], c[3])
+                    spark:SetAlpha(c[4])
+                    spark:Show()
+                end
+            end
+        end
+
+        -- ── The buttons ───────────────────────────────────────────────────────────────────────
+
+        function BenillaPetActionButton_OnLoad(button, index)
+            -- Ref PetActionButton_OnLoad l.234-235. The right-click registration is load-bearing,
+            -- not boilerplate: it is the whole autocast toggle, and without it a right click is
+            -- simply never delivered.
+            button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            button.index = index
+            button.icon = getglobal(button:GetName() .. "Icon")
+            button.cooldown = getglobal(button:GetName() .. "Cooldown")
+            button.autocastable = getglobal(button:GetName() .. "AutoCastable")
+            BenillaPetAutocast_Create(button)
+        end
+
+        -- Ref PetActionButton_OnClick. The CheckButton widget toggles itself BEFORE OnClick fires,
+        -- and the reference immediately clears that (`this:SetChecked(0)`) — nothing about this bar
+        -- is locally latched, because the server owns every bit of it. Left = run the slot, unless
+        -- the pet is already on the attack, in which case it calls off; right = flip autocast.
+        function BenillaPetActionButton_OnClick(button, mouseButton)
+            button:SetChecked(0)
+            if mouseButton == "RightButton" then
+                TogglePetAutocast(button.index)
+            elseif IsPetAttackActive(button.index) then
+                PetStopAttack()
+            else
+                CastPetAction(button.index)
+            end
+        end
+
+        -- Ref PetActionButton_OnEnter. A token slot has no spell to look up, so its tooltip is
+        -- built from the two strings the info call already returned (the ref's own `isToken` fork);
+        -- a spell slot goes through the engine's tooltip channel.
+        function BenillaPetActionButton_OnEnter(button)
+            if not GameTooltip then return end -- engine tests load file subsets
+            if not button.tooltipName then return end
+            GameTooltip_SetDefaultAnchor(GameTooltip, button)
+            if button.isToken then
+                GameTooltip:SetText(button.tooltipName, 1.0, 1.0, 1.0)
+                if button.tooltipSubtext then
+                    GameTooltip:AddLine(button.tooltipSubtext, "", 0.5, 0.5, 0.5)
+                end
+                GameTooltip:Show()
+            else
+                GameTooltip:SetPetAction(button.index)
+            end
+        end
+
+        function BenillaPetActionButton_OnLeave(button)
+            if GameTooltip then GameTooltip:Hide() end
+        end
+
+        -- ── The bar ───────────────────────────────────────────────────────────────────────────
+
+        -- Ref PetActionBar_Update + PetActionBar_UpdateCooldowns, fused (one refresh event, see the
+        -- header). Every branch below is the reference's, including the two that are easy to lose:
+        -- an unnamed slot HIDES its button, and a slot with no texture swaps the button's ring from
+        -- the filled UI-Quickslot2 to the empty UI-Quickslot.
+        function BenillaPetActionBar_Update()
+            local usable = GetPetActionsUsable()
+            for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
+                local button = getglobal("BenillaPetActionButton" .. i)
+                local name, subtext, texture, isToken, isActive, autoCastAllowed, autoCastEnabled = GetPetActionInfo(i)
+                button.isToken = isToken
+                button.tooltipSubtext = subtext
+                if isToken then
+                    -- The token convention: what came back are the NAMES of globals.
+                    button.icon:SetTexture(getglobal(texture))
+                    button.tooltipName = getglobal(name)
+                else
+                    button.icon:SetTexture(texture)
+                    button.tooltipName = name
+                end
+
+                if isActive then button:SetChecked(1) else button:SetChecked(0) end
+                if autoCastAllowed then button.autocastable:Show() else button.autocastable:Hide() end
+                button.autocasting = autoCastEnabled
+
+                if name then button:Show() else button:Hide() end
+
+                if texture then
+                    SetDesaturation(button.icon, not usable and 1 or nil)
+                    button.icon:Show()
+                    button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
+                else
+                    button.icon:Hide()
+                    button:SetNormalTexture("Interface\\Buttons\\UI-Quickslot")
+                end
+
+                local start, duration, enable = GetPetActionCooldown(i)
+                CooldownFrame_SetTimer(button.cooldown, start, duration, enable)
+            end
+        end
+
+        function BenillaPetActionBar_OnLoad(frame)
+            frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+            frame:RegisterEvent("PET_BAR_UPDATE")
+            frame.clock = 0
+            BenillaPetActionBar_OnEvent(frame)
+        end
+
+        -- The bar exists exactly while PetHasActionBar() does. Its show/hide re-fires the managed
+        -- bottom-stack pass (UIParent.xml, decision 0272) — the pet term of that stack is what
+        -- lifts the cast bar and the chat frame clear of it, which is the ref's own
+        -- PetActionBarFrame.xml:205-210.
+        function BenillaPetActionBar_OnEvent(frame)
+            if PetHasActionBar() then
+                BenillaPetActionBar_Update()
+                frame:Show()
+            else
+                frame:Hide()
+            end
+        end
+
+        -- The shared sparkle clock. One OnUpdate for the whole bar rather than ten: the four
+        -- emitters are one looping model, so every autocasting button is in step by construction.
+        function BenillaPetActionBar_OnUpdate(frame, elapsed)
+            frame.clock = (frame.clock or 0) + elapsed
+            if frame.clock > BENILLA_PET_AUTOCAST_PERIOD then
+                frame.clock = frame.clock - BENILLA_PET_AUTOCAST_PERIOD
+            end
+            for i = 1, BENILLA_NUM_PET_ACTION_SLOTS do
+                BenillaPetAutocast_Update(getglobal("BenillaPetActionButton" .. i), frame.clock)
+            end
+        end
+    ]]></Script>
+
+    <!--
+        One pet button (ref PetActionButtonTemplate: 30x30, inherits ActionButtonTemplate's art
+        set, plus the AutoCastable ring on OVERLAY at 58x58 CENTER). The sparkle textures are
+        created in OnLoad rather than declared: there are 32 of them per button, and they are the
+        one thing here whose count is ours rather than the reference's.
+    -->
+    <CheckButton name="BenillaPetActionButtonTemplate" virtual="true">
+        <Size><AbsDimension x="30" y="30"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentIcon"/>
+            </Layer>
+            <Layer level="OVERLAY">
+                <Texture name="$parentAutoCastable" file="Interface\Buttons\UI-AutoCastableOverlay" hidden="true">
+                    <Size><AbsDimension x="58" y="58"/></Size>
+                    <Anchors>
+                        <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
+                    </Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- Ref PetActionButton_OnLoad sizes this 33x33 at CENTER (-2,-1) by hand rather than
+                 taking the template's own rect — quoted. -->
+            <Cooldown name="$parentCooldown" hidden="true">
+                <Size><AbsDimension x="33" y="33"/></Size>
+                <Anchors>
+                    <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="-2" y="-1"/></Offset></Anchor>
+                </Anchors>
+            </Cooldown>
+        </Frames>
+        <NormalTexture name="$parentNormalTexture" file="Interface\Buttons\UI-Quickslot2">
+            <Size><AbsDimension x="54" y="54"/></Size>
+            <Anchors>
+                <Anchor point="CENTER" relativePoint="CENTER"><Offset><AbsDimension x="0" y="-1"/></Offset></Anchor>
+            </Anchors>
+        </NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Quickslot-Depress"/>
+        <HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+        <CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+        <Scripts>
+            <OnClick>BenillaPetActionButton_OnClick(self, arg1)</OnClick>
+            <OnEnter>BenillaPetActionButton_OnEnter(self)</OnEnter>
+            <OnLeave>BenillaPetActionButton_OnLeave(self)</OnLeave>
+        </Scripts>
+    </CheckButton>
+
+    <Frame name="BenillaPetActionBarFrame" hidden="true">
+        <Size><AbsDimension x="509" y="43"/></Size>
+        <!-- This anchor is the LOAD-TIME value only: UIParent_ManageFramePositions owns the real
+             one and re-seats the frame on every pass (OnShow/OnHide below fire it), because the
+             Y is a managed var — the ref's own PETACTIONBAR_YPOS, 97 here and 97+43 with the
+             bottom-left multibar up. Leaving it seated at the base 97 is what drew the bar across
+             that bar's buttons (decision 0988). The X likewise: 36, or past the last stance
+             button when the two bars share this row.
+             The ref also slides the frame in over 0.09 s; we don't. The slide's start and end
+             anchors are the same two points, and a frame that only ever appears with a pet reads
+             the same arriving seated as it does arriving in 90 ms (the stance bar's own posture,
+             decision 0270). -->
+        <Anchors>
+            <Anchor point="TOPLEFT" relativeTo="BenillaActionBar" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="97"/></Offset></Anchor>
+        </Anchors>
+        <Layers>
+            <Layer level="OVERLAY">
+                <Texture name="BenillaSlidingActionBarTexture0" file="Interface\PetActionBar\UI-PetBar">
+                    <Size><AbsDimension x="256" y="44"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"/></Anchors>
+                    <TexCoords left="0" right="1.0" top="0.015625" bottom="0.359375"/>
+                </Texture>
+                <Texture name="BenillaSlidingActionBarTexture1" file="Interface\PetActionBar\UI-PetBar">
+                    <Size><AbsDimension x="184" y="44"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="BenillaSlidingActionBarTexture0" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0" right="0.71875" top="0.375" bottom="0.71875"/>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <CheckButton name="BenillaPetActionButton1" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="BOTTOMLEFT" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="36" y="2"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 1)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton2" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton1" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 2)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton3" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton2" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 3)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton4" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton3" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 4)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton5" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton4" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 5)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton6" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton5" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 6)</OnLoad></Scripts>
+            </CheckButton>
+            <!-- The ref's own +7 here, not +8 (PetActionBarFrame.xml l.158-166). -->
+            <CheckButton name="BenillaPetActionButton7" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton6" relativePoint="RIGHT"><Offset><AbsDimension x="7" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 7)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton8" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton7" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 8)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton9" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton8" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 9)</OnLoad></Scripts>
+            </CheckButton>
+            <CheckButton name="BenillaPetActionButton10" inherits="BenillaPetActionButtonTemplate">
+                <Anchors><Anchor point="LEFT" relativeTo="BenillaPetActionButton9" relativePoint="RIGHT"><Offset><AbsDimension x="8" y="0"/></Offset></Anchor></Anchors>
+                <Scripts><OnLoad>BenillaPetActionButton_OnLoad(self, 10)</OnLoad></Scripts>
+            </CheckButton>
+        </Frames>
+        <Scripts>
+            <OnLoad>BenillaPetActionBar_OnLoad(self)</OnLoad>
+            <OnEvent>BenillaPetActionBar_OnEvent(self)</OnEvent>
+            <OnUpdate>BenillaPetActionBar_OnUpdate(self, arg1)</OnUpdate>
+            <OnShow>UIParent_ManageFramePositions()</OnShow>
+            <OnHide>UIParent_ManageFramePositions()</OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

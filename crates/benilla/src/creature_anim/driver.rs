@@ -35,7 +35,7 @@ use super::select::{
 use super::sheath::{advance_sheath_ceremony, start_sheath_ceremony};
 use super::{
     find_resolved, move_flags, AnimData, AnimDriver, AutoRepeatArmed, CastHold, DefenseAnim,
-    EmoteAnim, Engaged, MovementState, Overlay, OverlayFade, RangedHold, SheathRequest,
+    EmoteAnim, Engaged, MovementState, NockLatch, Overlay, OverlayFade, RangedHold, SheathRequest,
     SheathSwapMessage, SwingImpact, SwingMessage, SwingSlowdown, Wielded, WoundAnim,
 };
 
@@ -286,6 +286,10 @@ pub(super) fn drive_animations(
             Has<SelfPlayer>,
             Option<&crate::entities::mount::MountBody>,
             Has<crate::net::CreatureSwimming>,
+            // Is the in-hand arrow currently latched (the `$BWP`..`$BWR` window)? Read only by
+            // the leaving-the-stance un-nock at the tail of this pass, which is edge-triggered
+            // off it rather than issuing a remove every frame.
+            Has<NockLatch>,
             // The rendered model scale — `OBJECT_FIELD_SCALE_X`, baked onto the entity transform by
             // `entities::attach`. The locomotion playback rate divides by it (decision 0903), so an
             // ogre at 2.2× cycles its legs 2.2× slower than a same-speed human. Read-only: nothing
@@ -431,7 +435,16 @@ pub(super) fn drive_animations(
         wielded,
         cast_hold,
         facing_step,
-        (engaged, auto_repeat, ranged_hold, is_self, mount_body, creature_swimming, transform),
+        (
+            engaged,
+            auto_repeat,
+            ranged_hold,
+            is_self,
+            mount_body,
+            creature_swimming,
+            nock_latched,
+            transform,
+        ),
     ) in &mut units
     {
         // A mount child drives from its HOST's movement view (decision 0441) — same inputs the
@@ -1260,9 +1273,12 @@ pub(super) fn drive_animations(
         // Q-I, decision 0412): mid-volley the client plays the FULL fire clip (whose tail
         // is the visible quick re-nock) and returns to the hold; it NEVER replays the Load
         // and NEVER rate-scales a bow clip (the `0x5fee80` scaler gate excludes every bow
-        // id). 0411's RENOCK_RATE replay is refuted and removed. `ranged_hold` joins the
-        // gate so a REMOTE shooter's fire clip returns to its hold the same way.
-        if played_oneshot.is_some() && (auto_repeat || ranged_hold) && drv.sheath_cur == Some(2) {
+        // id). 0411's RENOCK_RATE replay is refuted and removed. Same gate as the idle's
+        // own ([`select::ranged_idle_gate`]) so the two cannot drift: a unit that could
+        // not have entered the family has no hold to return to.
+        if played_oneshot.is_some()
+            && select::ranged_idle_gate(auto_repeat, ranged_hold, drv.ranged_held, drv.sheath_cur)
+        {
             drv.ranged_held = true;
         }
 
@@ -1356,6 +1372,26 @@ pub(super) fn drive_animations(
             commands
                 .entity(entity)
                 .remove::<(super::NockedAmmo, super::NockLatch)>();
+        }
+        // …and MOVING un-nocks too (the arrow leaves the hand, the string relaxes; the cached
+        // ammo display survives for the next pull). The nock latch has exactly two authored
+        // writers — `$BWP` sets, `$BWR` clears — and both live in clips only a STANDING unit
+        // plays: the Load pull and the fire clip. Nothing in a run cycle can ever clear it, so a
+        // latch carried into locomotion is permanent: the director's report and screenshot
+        // (2026-08-05) are a warrior sprinting with the arrow still nocked and the bowstring
+        // still drawn. The hold-pick re-latch (decision 0409's INTERIM, still in the gait arm)
+        // guarantees the leak on every volley — it re-latches each time the drawn hold is picked,
+        // with no writer of its own to undo it.
+        //
+        // **Named approximation, director-grounded.** The reference's un-nock `0x60f530` has six
+        // callers; three (`0x6020ef`, `0x60c951`, `0x60e4ac`) are still uncensused (dispatched to
+        // wow-re 2026-08-05, alongside the asset finding that AttackBow(46) authors NO `$BWP` —
+        // only LoadBow/LoadRifle do — which refutes the Q-I §I2 re-attach inference our INTERIM
+        // stands in for). One of the three may well be exactly this edge. Until that lands, the
+        // rule is what the screen requires and what closes our state machine: every latch we can
+        // set has an owner that tears it down.
+        if moving && nock_latched {
+            commands.entity(entity).remove::<super::NockLatch>();
         }
     }
 }

@@ -32,6 +32,12 @@ impl ObjectFields {
     pub fn unit_channel_spell(&self) -> u32 {
         self.get_u32(FIELD_UNIT_CHANNEL_SPELL).unwrap_or(0)
     }
+    /// `UNIT_FIELD_SUMMON` — the guid of the unit this one has summoned, or `None`. On our own
+    /// descriptor that is **our pet**, and so the anchor of the `"pet"` unit token (decision 0982).
+    /// The inverse of [`Self::unit_summoned_by`].
+    pub fn unit_summon(&self) -> Option<u64> {
+        self.get_guid(FIELD_UNIT_SUMMON).filter(|&g| g != 0)
+    }
     /// `UNIT_FIELD_SUMMONEDBY` — the summoner's guid (pet/guardian/totem), or `None` (absent or
     /// explicit 0 — an unowned unit).
     pub fn unit_summoned_by(&self) -> Option<u64> {

@@ -63,6 +63,44 @@ pub(crate) fn str_at(rs: &RecordSet, r: &Record, i: usize) -> Option<String> {
     }
 }
 
+/// The **macro icon chooser** list — every `SpellIcon.dbc` texture path whose basename begins
+/// `Spell_` or `Ability_`, in DBC row order, deduplicated (decision 0983).
+///
+/// Those two prefixes are the client's own filter, byte-read from its string table: the literals
+/// `"Spell_"` (`0x44cb30`) and `"Ability_"` (`0x44cb38`) sit inside the `UIMacros.cpp` translation
+/// unit, beside `Interface\Icons\` (`0x44ca64`), the save format `MACRO %d "%s" %s` (`0x44cb60`)
+/// and the `GetNumMacroIcons`/`GetMacroIconInfo` binding names — and that TU owns nothing else
+/// that would want an icon-name prefix. It is also why the vanilla macro picker famously shows
+/// *spell and ability art only*, never the `INV_*` item icons: on build 5875 the filter keeps
+/// **519 of the 1018** distinct paths.
+///
+/// Row order is kept rather than sorted: the chooser is a scrolled grid, and the DBC's own order
+/// is the only order the reference could be reading.
+pub fn load_macro_icons(chain: &mut Chain) -> Result<Vec<String>> {
+    let bytes = chain
+        .read_file("DBFilesClient\\SpellIcon.dbc")
+        .context("reading SpellIcon.dbc")?;
+    let mut schema = Schema::new("SpellIcon");
+    schema.add_field(SchemaField::new("ID", FieldType::UInt32));
+    schema.add_field(SchemaField::new("TextureFilename", FieldType::String));
+    let set = parse(&bytes, schema, "SpellIcon.dbc")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut icons = Vec::new();
+    for r in set.records() {
+        let Some(path) = str_at(&set, r, 1) else {
+            continue;
+        };
+        let base = path.rsplit('\\').next().unwrap_or(&path);
+        let keeps = ["Spell_", "Ability_"].iter().any(|p| {
+            base.len() >= p.len() && base.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+        });
+        if keeps && seen.insert(path.to_ascii_lowercase()) {
+            icons.push(path);
+        }
+    }
+    Ok(icons)
+}
+
 /// `SpellIcon.dbc`: id → texture path (`Interface\Icons\…`, extensionless). 1033 records × 2
 /// fields (`ID(0)`, `TextureFilename(1, str)`) — verified against build 5875 (`spells.rs`'s own
 /// module doc). Shared by [`crate::spells`] (the action-bar catalog) and [`crate::skill_lines`]

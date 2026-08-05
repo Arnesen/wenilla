@@ -136,7 +136,26 @@ fn weather_slot(ghost: bool, stormy: bool, underwater: bool) -> usize {
     }
 }
 
+/// **The zero-match fallback record**, addressed by its `Light.dbc` **ID column** (not its row
+/// index) — wow-re `system/lighting/scratch/no-light-row-fallback.md`.
+///
+/// The client builds a per-map light array in `dn_light_array_build 0x6d6170` (`0x6d61a9 cmp
+/// [row+4], mapId`), and when **no row matches the map at all** its tail (`0x6d62b2`–`0x6d62c9`)
+/// writes `idMap[1]` — this record — into slot 0, unchecked. `dn_light_select 0x6d2d00` then
+/// no-ops (count ≤ 1 ⇒ empty blend heap) and the colour-table build commits that one record whole.
+/// The count is *seeded* at 1 (`0x6d6188 mov edi,1`), so the no-data white table (fog end 1e10) is
+/// the before-first-load state and is unreachable in world.
+///
+/// Shipped row 1 is the Azeroth global: map 0, `(0,0,0)`, falloff 0/0, params
+/// `(12, 13, 10, 11, 4)`. So a map with no `Light.dbc` row of its own — **Deeprun Tram (369) is the
+/// one that matters, and it is the only shipped map reachable in play with none** — renders under
+/// LightParams 12's ordinary six-key day curve, not under any invented constant.
+const FALLBACK_LIGHT_ID: u32 = 1;
+
 struct Light {
+    /// The row's own `Light.dbc` **ID column** — not its row index. Carried because the client's
+    /// zero-match fallback addresses one specific record *by id* ([`FALLBACK_LIGHT_ID`]).
+    id: u32,
     map: u32,
     /// WoW net-protocol **world** coords (yards), converted from the DBC's mirrored/axis-swapped
     /// inch frame via [`dbc_to_world`]. Meaningless when `global` (the sentinel was `(0,0,0)`).
@@ -243,7 +262,8 @@ impl LightCatalog {
             let rs = parse(&bytes, light_schema(), "Light")?;
             let mut v = Vec::with_capacity(rs.records().len());
             for r in rs.records() {
-                if let (Some(map), Some(x), Some(y), Some(z), Some(start), Some(end)) = (
+                if let (Some(id), Some(map), Some(x), Some(y), Some(z), Some(start), Some(end)) = (
+                    u32_at(r, 0),
                     u32_at(r, 1),
                     f32_at(r, 2),
                     f32_at(r, 3),
@@ -260,6 +280,7 @@ impl LightCatalog {
                     // values (it does NOT survive the world transform).
                     let global = x == 0.0 && y == 0.0 && z == 0.0;
                     v.push(Light {
+                        id,
                         map,
                         pos: if global {
                             [0.0; 3]
@@ -446,11 +467,27 @@ impl LightCatalog {
             (param >= 1).then(|| self.sample_param(param, time))
         };
 
-        // Base = the continent global light (lowest priority, covers everywhere).
+        // Base = the continent global light (lowest priority, covers everywhere), else — when the
+        // map has **no `Light.dbc` row at all** — the client's zero-match tail fallback, record
+        // [`FALLBACK_LIGHT_ID`] (`0x6d62b2`; see its doc). Deeprun Tram (369) is the shipped map
+        // this is for: with the old invented default it rendered as a bright noon scene (fog
+        // [140,183,234] @ 1000 yd) instead of LightParams 12's own curve (fog [77,120,143] @ 500).
+        //
+        // Scoped to zero-match ON PURPOSE. Seven shipped maps (33/37/129/169/209/489/531) carry
+        // positioned rows but no `(0,0,0)` global; there the reference seeds count = 1 and fills
+        // slots 1.. with the positioned rows, leaving slot 0 unwritten — what it then blends
+        // against is NOT settled by the finding this rests on, so that case keeps the behaviour it
+        // has rather than inheriting a guess.
+        let map_has_no_light = !self.lights.iter().any(|l| l.map == map);
         let mut acc = self
             .lights
             .iter()
             .find(|l| l.map == map && l.global)
+            .or_else(|| {
+                map_has_no_light
+                    .then(|| self.lights.iter().find(|l| l.id == FALLBACK_LIGHT_ID))
+                    .flatten()
+            })
             .and_then(atmo_of)
             .unwrap_or(Atmosphere::DEFAULT);
 
@@ -634,7 +671,9 @@ impl LightCatalog {
     fn pick_light(&self, map: u32, pos: [f32; 3]) -> Option<&Light> {
         let mut local: Option<&Light> = None;
         let mut global: Option<&Light> = None;
+        let mut any = false;
         for l in self.lights.iter().filter(|l| l.map == map) {
+            any = true;
             if l.global {
                 global = Some(l);
                 continue;
@@ -646,7 +685,16 @@ impl LightCatalog {
                 local = Some(l);
             }
         }
-        local.or(global)
+        // Same zero-match tail as `sample_blended` (see [`FALLBACK_LIGHT_ID`]): a map with no row
+        // of its own resolves record 1. Kept in step deliberately — this is the single-sphere
+        // approximation the water tint reads, and a rowless map that answered one thing to the
+        // area blend and another here would tint its water off a different atmosphere than it fogs
+        // with (decision 0706's split, in miniature).
+        local.or(global).or_else(|| {
+            (!any)
+                .then(|| self.lights.iter().find(|l| l.id == FALLBACK_LIGHT_ID))
+                .flatten()
+        })
     }
 
     /// Whether `LightParams` `p` actually has band rows in this chain — the client's `maxId` guard on

@@ -26,6 +26,7 @@ use super::Model;
 /// pack/unpack included) — this crate is deliberately engine-free (no protocol dependency, see
 /// the crate doc), so it can't just import `benilla_protocol::messages::ACTION_KIND_*`.
 pub(crate) const ACTION_KIND_SPELL: u8 = 0x00;
+pub(crate) const ACTION_KIND_MACRO: u8 = 0x40;
 pub(crate) const ACTION_KIND_ITEM: u8 = 0x80;
 
 /// What one action slot displays. The app resolves icons (Spell.dbc × SpellIcon.dbc for a spell,
@@ -163,7 +164,7 @@ impl super::UiScript {
 /// reads truthy. Deliberately NOT Lua's plain truthiness (where `0` is truthy) — the reference
 /// passes literal `0` from a keybind meaning "never place", which only a numeric-zero check
 /// reproduces.
-fn truthy_nonzero(v: &Value) -> bool {
+pub(super) fn truthy_nonzero(v: &Value) -> bool {
     match v {
         Value::Nil => false,
         Value::Boolean(b) => *b,

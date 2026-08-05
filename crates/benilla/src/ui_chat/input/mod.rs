@@ -562,6 +562,8 @@ pub(super) fn drain_chat_input(
                     "Duel: /duel [name — bare uses your target], /forfeit (/concede /yield)",
                     "Social: /who [filter], /friends, /ignore, /trade, /inspect",
                     "Emotes: /sit /stand /sleep /kneel and every /wave-style emote",
+                    "Spells: /cast <name> [(Rank N)]",
+                    "Macros: /macro (/m) opens the window, /macrohelp explains them",
                     "Misc: /afk, /dnd, /random [min] [max], /played, /logout, /quit",
                     "Instruments: /shot, /liquid, /reaction, /castvis, /chattest, /partytest",
                 ] {
@@ -569,6 +571,23 @@ pub(super) fn drain_chat_input(
                         super::event::ChatEventKind::System,
                         line.to_string(),
                     ));
+                }
+            }
+            // `ChatFrame_DisplayMacroHelpText` (ChatFrame.lua): the five shipped lines, read off
+            // the VM's own GlobalStrings so they are the install's text, never a transcription
+            // (decision 0983; the 0881 posture — the strings are data, the handler is ours).
+            ParsedChat::MacroHelp => {
+                for i in 1..=5 {
+                    let key = format!("MACRO_HELP_TEXT_LINE{i}");
+                    let Ok(line) = script.lua().globals().get::<String>(key.as_str()) else {
+                        continue;
+                    };
+                    if !line.is_empty() {
+                        chat_log.push_event(super::event::ChatEvent::text_only(
+                            super::event::ChatEventKind::System,
+                            line,
+                        ));
+                    }
                 }
             }
             // `DoEmote` (`0x5ef560`) end to end — wow-re `object-layer/scratch/emote-posture-

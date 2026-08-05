@@ -24,6 +24,7 @@ mod creatures;
 mod dbc;
 mod unit_blood;
 pub use creatures::{load_creature_catalog, CreatureCatalog, CreatureModel, NpcAppearance};
+pub use dbc::load_macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};

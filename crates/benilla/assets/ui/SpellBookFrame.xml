@@ -253,8 +253,27 @@
         function BenillaSpellButton_OnClick(button, drag)
             local id = BenillaSpellBook_GetSpellID(button:GetID())
             button:SetChecked("false")
-            if drag or IsShiftKeyDown() then
+            if drag then
                 PickupSpell(id, BenillaSpellBookFrame.bookType)
+            elseif IsShiftKeyDown() then
+                -- ref SpellButton_OnClick l.271-283 (LIVE since decision 0983): with the macro
+                -- editor open a shift-click APPENDS `/cast <name>[(<rank>)]` to the body instead of
+                -- picking the spell up — the behaviour MACRO_HELP_TEXT_LINE5 advertises ("shift
+                -- click a spell in your spellbook with the macro UI open to add it to your macro").
+                -- The `/cast` alias comes from the shipped strings (SLASH_CAST1), never typed here.
+                local macroFrame = getglobal("BenillaMacroFrame")
+                if macroFrame and macroFrame:IsVisible() then
+                    local spellName, subSpellName = GetSpellName(id, BenillaSpellBookFrame.bookType)
+                    if spellName and not IsSpellPassive(id, BenillaSpellBookFrame.bookType) then
+                        local line = (SLASH_CAST1 or "/cast") .. " " .. spellName
+                        if subSpellName and string.len(subSpellName) > 0 then
+                            line = line .. "(" .. subSpellName .. ")"
+                        end
+                        BenillaMacroFrame_AddMacroLine(line)
+                    end
+                else
+                    PickupSpell(id, BenillaSpellBookFrame.bookType)
+                end
             else
                 CastSpell(id, BenillaSpellBookFrame.bookType)
                 BenillaSpellButton_UpdateSelection(button) -- ref l.288: the ring re-reads at once

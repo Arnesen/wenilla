@@ -336,6 +336,32 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             set_spell_by_id(lua, &this, spell_id, name, false, false, None)
         })?,
     )?;
+    // GameTooltip:SetPetAction(index) — the pet-bar hover (decision 0982). Only ever reached for a
+    // SPELL slot: the reference's `PetActionButton_OnEnter` builds a token slot's tooltip inline
+    // from `tooltipName`/`tooltipSubtext` and never calls this. A slot with no spell (a token, an
+    // empty slot, an out-of-range index) is a no-op, leaving whatever was shown — the same shape
+    // as SetSpell's out-of-range.
+    m.set(
+        "SetPetAction",
+        lua.create_function(|lua, (this, index): (Table, usize)| {
+            let (spell_id, name) = {
+                let model = lua.app_data_mut::<Model>().expect("model app_data");
+                match model
+                    .pet_bar
+                    .slots
+                    .get(index.saturating_sub(1))
+                    .filter(|s| !s.view.is_token)
+                {
+                    Some(s) => match s.view.spell_id {
+                        Some(id) => (id, s.view.name.clone()),
+                        None => return Ok(()),
+                    },
+                    None => return Ok(()),
+                }
+            };
+            set_spell_by_id(lua, &this, spell_id, name, false, false, None)
+        })?,
+    )?;
     // GameTooltip:SetPlayerBuff(index [, filter]) — the buff-bar hover: the aura variant (white
     // AuraDescription) + the duration-remaining line only this entry point appends
     // (byte-verified; remaining computed live off the aura's GetTime expiry — the TEXT shape is

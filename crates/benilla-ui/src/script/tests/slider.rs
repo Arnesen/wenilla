@@ -104,37 +104,56 @@ fn slider_thumb_drag_maps_cursor_to_value() {
 }
 
 #[test]
-fn slider_track_click_and_disabled_thumb_do_not_drag() {
+fn slider_track_press_seats_the_thumb_and_a_disabled_slider_ignores_it() {
     let mut s = script();
     s.set_screen_size(1024.0, 768.0);
     s.run(
         r#"
-        bar = CreateFrame("Slider", "SlNoDrag")
+        bar = CreateFrame("Slider", "SlTrack")
         bar:SetPoint("BOTTOMLEFT", nil, "BOTTOMLEFT", 100, 100)
         bar:SetSize(16, 100)
         bar:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
         bar:GetThumbTexture():SetSize(16, 16)
         bar:SetMinMaxValues(0, 100)
         bar:SetValue(0)
+        fired = {}
+        bar:SetScript("OnValueChanged", function() table.insert(fired, arg1) end)
     "#,
     )
     .unwrap();
     s.resolve();
 
-    // A press on the TRACK below the thumb (108, 120) — inside the slider but not on the thumb
-    // [184,200] — captures nothing: only the thumb drags (the arrows step, decision 0250).
+    // A press on the TRACK below the thumb (108, 120) — inside the slider, not on the thumb
+    // [184,200] — SEATS the thumb's center under the cursor and fires OnValueChanged from the
+    // press itself (0989's track-press law; 0250 §5 covered only the thumb grab). Track
+    // y in [100, 200], travel 84: cursor 120 → thumb top 128 → fraction (200−128)/84 = 72/84.
     s.mouse_button(108.0, 120.0, "LeftButton", true);
-    s.mouse_move(108.0, 150.0);
-    let v: f32 = s.eval("return SlNoDrag:GetValue()").unwrap();
-    assert_eq!(v, 0.0, "track click does not drag");
-    s.mouse_button(108.0, 150.0, "LeftButton", false);
+    let v: f32 = s.eval("return SlTrack:GetValue()").unwrap();
+    assert!(
+        (v - 100.0 * (72.0 / 84.0)).abs() < 1e-3,
+        "the press seats the thumb center at the cursor (got {v})"
+    );
+    let n: usize = s.eval("return table.getn(fired)").unwrap();
+    assert_eq!(n, 1, "the jump fired OnValueChanged once, from the press");
 
-    // A disabled slider ignores a press even on the thumb.
-    s.run(r#"SlNoDrag:Disable()"#).unwrap();
-    s.mouse_button(108.0, 192.0, "LeftButton", true);
-    s.mouse_move(108.0, 150.0);
-    let v: f32 = s.eval("return SlNoDrag:GetValue()").unwrap();
-    assert_eq!(v, 0.0, "disabled slider does not drag");
+    // The SAME press keeps dragging — the capture began at the track press.
+    s.mouse_move(108.0, 108.0);
+    let v: f32 = s.eval("return SlTrack:GetValue()").unwrap();
+    assert_eq!(v, 100.0, "the gesture drags on without re-grabbing");
+    s.mouse_button(108.0, 108.0, "LeftButton", false);
+
+    // A disabled slider ignores a press anywhere — thumb and track alike.
+    s.run(r#"SlTrack:SetValue(0); SlTrack:Disable(); fired = {}"#)
+        .unwrap();
+    for y in [192.0, 150.0] {
+        s.mouse_button(108.0, y, "LeftButton", true);
+        s.mouse_move(108.0, 130.0);
+        let v: f32 = s.eval("return SlTrack:GetValue()").unwrap();
+        assert_eq!(v, 0.0, "disabled slider does not move (press at y={y})");
+        s.mouse_button(108.0, 130.0, "LeftButton", false);
+    }
+    let n: usize = s.eval("return table.getn(fired)").unwrap();
+    assert_eq!(n, 0, "disabled: no OnValueChanged at all");
 }
 
 #[test]

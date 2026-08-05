@@ -205,7 +205,10 @@ fn play_item_gesture_sounds(
                 &config,
             );
         }
-        CursorPayload::Spell(_) | CursorPayload::Action(_) => {
+        // Everything that is not a live item shares the generic grab/drop kit — the reference's
+        // own `0x494f60`/`0x494f80` grab path for a macro (mode 8) reaches the same
+        // `INTERFACESOUND_CURSOR*` pair the spell and bar-action modes do.
+        CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_) => {
             let kit_id = match gesture {
                 CursorGesture::Gain => INTERFACESOUND_CURSORGRABOBJECT,
                 CursorGesture::Loss => INTERFACESOUND_CURSORDROPOBJECT,

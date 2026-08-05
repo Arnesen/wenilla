@@ -236,10 +236,12 @@ impl UiScript {
         // drop — all under one short borrow. A press fires OnClick when the hit frame registered
         // "<Button>ButtonDown"; a release fires it when press+release landed on the same frame AND
         // it registered "<Button>ButtonUp" — UNLESS a started drag is being resolved instead.
-        let (click_id, drag_release, world_dropped): (
+        #[allow(clippy::type_complexity)]
+        let (click_id, drag_release, world_dropped, slider_jump): (
             Option<u32>,
             Option<cursor::DragRelease>,
             bool,
+            Option<(u32, f32)>,
         ) = {
             let mut model = self.model_mut();
             let hit_handle = hit_id.and_then(|id| model.id_to_frame.get(&id).copied());
@@ -253,16 +255,20 @@ impl UiScript {
                     }
                 }
                 cursor::arm_drag(&mut model, hit_handle, button, (x, y));
-                // A left press on a Slider's thumb begins the engine thumb drag (decision 0250 §5),
-                // independent of the click/drag-trio path above (a Slider isn't drag_registered).
-                if button == "LeftButton" {
-                    super::slider::begin_drag(&mut model, hit_handle, x, y);
-                }
+                // A left press on a Slider begins the engine drag (0250 §5): a thumb press grabs
+                // it in place; a track press seats the thumb under the cursor first (the returned
+                // value jump — 0989), independent of the click/drag-trio path above (a Slider
+                // isn't drag_registered).
+                let jump = if button == "LeftButton" {
+                    super::slider::begin_drag(&mut model, hit_handle, x, y)
+                } else {
+                    None
+                };
                 let wants = format!("{button}Down");
                 let click = hit_handle
                     .filter(|&h| button::wants_click(&model, h, &wants))
                     .and(hit_id);
-                (click, None, false)
+                (click, None, false, jump)
             } else {
                 let pressed = model.mouse_down_on.remove(button);
                 // A left release ends any in-flight thumb drag (decision 0250 §5).
@@ -294,9 +300,21 @@ impl UiScript {
                         .filter(|&h| same_frame && button::wants_click(&model, h, &wants))
                         .and(hit_id)
                 };
-                (click, release, dropped)
+                (click, release, dropped, None)
             }
         };
+        // A track press's value jump fires OnValueChanged first (outside the borrow), the same
+        // seam as `mouse_move`'s in-drag changes — the press IS the first move of the gesture.
+        if let Some((id, value)) = slider_jump {
+            if let Err(e) = event::fire_widget_handler(
+                &self.lua,
+                id,
+                "OnValueChanged",
+                vec![Value::Number(f64::from(value))],
+            ) {
+                self.push_error(e);
+            }
+        }
         let script = if down { "OnMouseDown" } else { "OnMouseUp" };
         if let Some(id) = hit_id {
             if let Err(e) = event::fire_widget_handler(&self.lua, id, script, vec![btn.clone()]) {

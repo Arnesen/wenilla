@@ -80,6 +80,39 @@ fn integrate_particle(p: &mut Particle, env: &StepEnv) -> bool {
     true
 }
 
+/// **How much of the emitter's per-frame world motion a live particle keeps** — the ride-vs-trail
+/// law, in one place (decision 0986; `speed` is `|Δ| / dt`, the yd/s the authored follow response
+/// is keyed on). Two inputs, and reading the first one off the *flag* is what left every hunter
+/// shot a compact blob where the reference draws a 20-yd bead trail (bug B153):
+///
+/// 1. **The baseline is the host class, not a flag** (wow-re `part-emitter-motion.md` §2b's own
+///    discriminator — 0513 read it as follow-vs-no-follow): a cloud whose model the scene graph
+///    carries keeps **100%** (the running kobold's candle rides, file flags `0x01`); a FREE world
+///    model that composes its own motion into the emitter matrix — §2b's "a translating missile
+///    whose own model IS the emitter" — keeps **0%**, its births baking world-absolute so each
+///    particle hangs where it was born. Multi-Shot's FLARE emitters are as unflagged as the
+///    kobold's candle (`0x0309`) and trail the arrow the length of its flight.
+/// 2. **The follow-delta term** (file `0x4000`, §5-resolved decision 0513) then *overrides* the
+///    baseline with the authored two-point response
+///    ([`benilla_formats::ParticleEmitterDef::follow_line`]). Which is exactly why the corpus
+///    authors it on missiles and nothing else: it exists to claw a fast projectile's head glow
+///    back onto the tip (ArcaneShot: 0.1 @ 2.5 yd/s → 0.9 @ 16.7) while the unflagged emitters on
+///    the same model stay behind. A degenerate response — equal authored speeds, which the
+///    reference answers by zeroing both — is no follow term at all, so the baseline stands.
+fn world_motion_kept(
+    def: &benilla_formats::ParticleEmitterDef,
+    world_composed: bool,
+    speed: f32,
+) -> f32 {
+    let baseline = if world_composed { 0.0 } else { 1.0 };
+    if !def.follow_emitter() {
+        return baseline;
+    }
+    def.follow_line().map_or(baseline, |(slope, intercept)| {
+        (slope * speed + intercept).clamp(0.0, 1.0)
+    })
+}
+
 /// The velocity-inherit trigger (wow-re `part-emitter-motion.md` §1, `0x7b5230` bytes
 /// 0x7b53ce–0x7b54ca): accumulate dt; once past 1/30 s (`_DAT_0081d82c`), hold
 /// `oneFrameΔ · ((1/30)/accum) · scale` — zeroed while nothing is live — and reset. Between
@@ -538,6 +571,7 @@ pub(super) fn simulate_particles(
             alpha_src,
             alpha,
             anchor,
+            world_composed,
             anchor_pos,
             particles,
             accumulator,
@@ -684,23 +718,18 @@ pub(super) fn simulate_particles(
                 ))
             }
         };
-        // FOLLOW-DELTA (file 0x4000 — wow-re `part-emitter-motion.md` §2 + §2b, §5-resolved):
-        // a flagged emitter's particles keep exactly `fraction = clamp(slope·|Δ|/dt +
-        // intercept, 0, 1)` of the emitter's per-frame WORLD motion (the authored two-point
-        // response, [`benilla_formats::ParticleEmitterDef::follow_line`]) — the reference's
-        // baseline for this content class is world-frozen (its emitter motion folds into the
-        // emitter matrix, so births bake world-absolute) and the `+fraction·Δ` integrator add
-        // recovers the ride. Over OUR anchor-riding storage the same observable is
-        // `(fraction − 1)·Δ`: zero at saturation (rigid ride, the fast missile), the full
-        // `−Δ` at fraction 0 (a world-frozen trail). Applied to every live particle after its
-        // first integrate (the fresh-bit skip).
-        let follow = if def.follow_emitter() && emitter_delta != Vec3::ZERO {
-            def.follow_line().map_or(Vec3::ZERO, |(slope, intercept)| {
-                let fraction = (slope * emitter_delta.length() / dt + intercept).clamp(0.0, 1.0);
-                to_stored((fraction - 1.0) * emitter_delta, attach_inv, placement)
-            })
-        } else {
+        // The per-frame world-motion carry ([`world_motion_kept`]), folded into the stored frame:
+        // keeping `fraction` of Δ over our anchor-RIDING storage is a `(fraction − 1)·Δ` move on
+        // every live particle after its first integrate (the fresh-bit skip).
+        let follow = if emitter_delta == Vec3::ZERO {
             Vec3::ZERO
+        } else {
+            let fraction = world_motion_kept(def, *world_composed, emitter_delta.length() / dt);
+            if fraction >= 1.0 {
+                Vec3::ZERO // the rigid ride — the overwhelming majority, kept free
+            } else {
+                to_stored((fraction - 1.0) * emitter_delta, attach_inv, placement)
+            }
         };
         // VELOCITY INHERIT (file 0x40): the ~30 Hz trigger holds the inherit velocity births
         // read; the live gate (rt+0x64) zeroes it while nothing is live.
@@ -1121,7 +1150,8 @@ pub(super) fn simulate_particles(
 #[cfg(test)]
 mod tests {
     use super::{
-        inherit_trigger, integrate_particle, is_above, ChildEmitter, Particle, StepEnv, Vec3,
+        inherit_trigger, integrate_particle, is_above, world_motion_kept, ChildEmitter, Particle,
+        StepEnv, Vec3,
     };
     use bevy::prelude::{Quat, Transform};
 
@@ -1194,6 +1224,51 @@ mod tests {
         // never does this — every kill author emits inward).
         let mut out = particle(origin + Vec3::X * 0.5, Vec3::X);
         assert!(!integrate_particle(&mut out, &kill));
+    }
+
+    /// [`world_motion_kept`] — the ride-vs-trail law (0986). The host class sets the baseline;
+    /// the follow flag overrides it with the authored response; a degenerate response falls back
+    /// to the baseline.
+    #[test]
+    fn world_motion_kept_reads_the_host_class_then_the_follow_response() {
+        let plain = crate::particles::tests::plain_def(); // no flags
+        assert_eq!(
+            world_motion_kept(&plain, false, 30.0),
+            1.0,
+            "scene-graph-carried, unflagged: the kobold's candle rides at any speed"
+        );
+        assert_eq!(
+            world_motion_kept(&plain, true, 30.0),
+            0.0,
+            "a free world model, unflagged: Multi-Shot's flares hang where they were born"
+        );
+        // ArcaneShot's authored pair: 0.1 @ 2.5 yd/s, 0.9 @ 16.667 — the head glow catching up.
+        let following = benilla_formats::ParticleEmitterDef {
+            flags: 0x4000,
+            follow_speed1: 2.5,
+            follow_scale1: 0.1,
+            follow_speed2: 16.667,
+            follow_scale2: 0.9,
+            ..crate::particles::tests::plain_def()
+        };
+        assert!(
+            (world_motion_kept(&following, true, 2.5) - 0.1).abs() < 1e-3,
+            "the flag overrides the world-frozen baseline with the authored response"
+        );
+        assert_eq!(
+            world_motion_kept(&following, true, 40.0),
+            1.0,
+            "clamped at a rigid ride on a fast missile — it never leads"
+        );
+        // Equal authored speeds: the reference zeroes both, so nothing overrides the baseline.
+        let degenerate = benilla_formats::ParticleEmitterDef {
+            flags: 0x4000,
+            follow_speed1: 4.0,
+            follow_speed2: 4.0,
+            ..crate::particles::tests::plain_def()
+        };
+        assert_eq!(world_motion_kept(&degenerate, true, 30.0), 0.0);
+        assert_eq!(world_motion_kept(&degenerate, false, 30.0), 1.0);
     }
 
     /// FOLLOW-DELTA (`0x7b2680` @0x7b2744, rt 0x40000): the shared per-frame vector moves every

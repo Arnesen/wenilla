@@ -52,8 +52,6 @@ mod editbox;
 pub(crate) use editbox::adopt_text_region;
 mod cvars;
 mod duel;
-#[cfg(test)]
-mod era_atlas_tests;
 mod event;
 mod extract;
 mod follow;
@@ -64,6 +62,7 @@ mod item_text;
 mod layout;
 mod loot;
 mod loot_roll;
+mod macros;
 mod mail;
 mod merchant;
 mod messageframe;
@@ -72,6 +71,7 @@ mod model;
 mod net_stats;
 mod object;
 mod party;
+mod pet;
 mod pointer;
 mod pvp;
 mod quest;
@@ -113,7 +113,8 @@ pub use char_stats::{
 pub use container::{ContainerMove, ContainerSlot, ContainerState, EnchantView, UiCursorMode};
 pub use craft::{CraftReagent, CraftRecipe, CraftState};
 pub use cursor::{
-    CursorAction, CursorItem, CursorPayload, CursorSpell, EnchantConfirm, WorldPick, EQUIPMENT_BAG,
+    CursorAction, CursorItem, CursorMacro, CursorPayload, CursorSpell, EnchantConfirm, WorldPick,
+    EQUIPMENT_BAG,
 };
 pub use death::{DeathAction, DeathUiState};
 pub use duel::DuelRequest;
@@ -124,10 +125,12 @@ pub use item_stats::{item_usable, ItemSetView, ItemTemplateView, PlayerReqState}
 pub use item_text::ItemTextState;
 pub use loot::{LootRow, LootState};
 pub use loot_roll::{LootRollEntry, LootRollsState};
+pub use macros::{MacroState, MacroView, MAX_MACROS, MAX_MACRO_BODY, MAX_MACRO_NAME};
 pub use mail::{MailInboxRow, MailSendRequest, MailState};
 pub use merchant::{ItemStatsHead, MerchantItem, MerchantState};
 pub(crate) use model::Model;
 pub use party::{PartyMemberInfo, PartyRequest, PartyState};
+pub use pet::PetActionView;
 pub use quest::{QuestAction, QuestItemView, QuestPanel, QuestSelect, QuestState};
 pub use quest_log::{QuestLogDetail, QuestLogEntryView, QuestLogObjectiveView, QuestLogState};
 pub use session::SessionRequest;
@@ -135,7 +138,7 @@ pub use shapeshift::ShapeshiftFormView;
 pub use skills::{SkillEntry, SkillsState};
 pub use social::{FriendInfo, SocialRequest, SocialState, WhoInfo};
 pub use sound::SoundRequest;
-pub use spellbook::{SpellBookState, SpellSlotView, SpellTabView};
+pub use spellbook::{resolve_spell_by_name, SpellBookState, SpellSlotView, SpellTabView};
 pub use talent::{TalentPrereqView, TalentTabView, TalentUiState, TalentView};
 pub use taxi::{TaxiNodeType, TaxiUiNode, TaxiUiState};
 pub use tooltip_spell::SpellTooltipView;
@@ -146,9 +149,9 @@ pub use trainer::{
     TrainerState,
 };
 pub use types::{
-    EditAction, EditBoxTextUi, EditOutcome, EditUnit, EraAtlasEntry, ExtractedQuad, FontObject,
-    FontShadow, JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent,
-    ScriptValue, TexCoords,
+    EditAction, EditBoxTextUi, EditOutcome, EditUnit, ExtractedQuad, FontObject, FontShadow,
+    JustifyH, JustifyV, LineMeasureRequest, MeasureRequest, Outline, QuadContent, ScriptValue,
+    TexCoords,
 };
 pub(crate) use types::{MeasuredText, RegionData};
 pub use unit::{grey_band, level_reads_unknown, power_token, unit_is_grey, UnitState};
@@ -276,8 +279,10 @@ impl UiScript {
         container::install(&lua)?;
         cursor::install(&lua)?;
         spellbook::install(&lua)?;
+        macros::install(&lua)?;
         talent::install(&lua)?;
         shapeshift::install(&lua)?;
+        pet::install(&lua)?;
         gossip::install(&lua)?;
         merchant::install(&lua)?;
         bank::install(&lua)?;
@@ -333,26 +338,6 @@ impl UiScript {
     }
 
     /// Replace the Era atlas table (decision 0950) — pushed once at boot, before the XML loads.
-    /// Keys are stored lowercased (the DB2 dump's own convention); `SetAtlas`/`atlas=` match
-    /// case-insensitively. The app builds the entries from `WoW-era/_extracted_ui/manifest.json`;
-    /// the script side only stores resolved paint, never touching disk.
-    pub fn set_era_atlases(&mut self, entries: impl IntoIterator<Item = (String, EraAtlasEntry)>) {
-        let mut model = self.model_mut();
-        model.era_atlas = entries
-            .into_iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v))
-            .collect();
-    }
-
-    /// Drain the atlas names `SetAtlas` failed to resolve (each reported once, sorted) — the app
-    /// logs them as WARNs pointing at `scripts/era-extract.py`: a stale extraction must name
-    /// itself, never silently draw blank.
-    pub fn take_era_atlas_misses(&mut self) -> Vec<String> {
-        let mut misses: Vec<String> = self.model_mut().era_atlas_missing.drain().collect();
-        misses.sort();
-        misses
-    }
-
     /// Push the modifier-key state (shift, ctrl, alt) behind `IsShiftKeyDown`/`IsControlKeyDown`/
     /// `IsAltKeyDown`. The app's input pass calls this BEFORE feeding the frame's mouse events, so
     /// a click handler's modifier fork (the reference's shift-split / ctrl-dressup /

@@ -202,9 +202,7 @@ impl Plugin for UiScriptPlugin {
                 arbitrate_pointer_over_ui
                     .after(UiInput)
                     .before(WorldStage::Input),
-            )
-            // Runtime era-atlas misses surface as WARNs the frame they happen (decision 0950).
-            .add_systems(Update, warn_era_atlas_misses.after(UiInput));
+            );
 
         // `WOW_CAPTURE_UI=1` on a capture: override the "player" token with a synthetic snapshot so
         // the unit frames are populated in a server-less capture. Ordered after the real feed (so it
@@ -240,7 +238,7 @@ fn arbitrate_pointer_over_ui(
 }
 
 fn setup_script(world: &mut World) {
-    let mut script = match UiScript::new() {
+    let script = match UiScript::new() {
         Ok(s) => s,
         Err(e) => {
             error!("ui_script: VM init failed: {e}");
@@ -249,12 +247,6 @@ fn setup_script(world: &mut World) {
     };
     load_global_strings(world, &script);
     load_emote_tokens(world, &script);
-    // The Era atlas table (decision 0950) — pushed BEFORE the XML loads so `atlas=` attributes
-    // resolve during materialization. A missing manifest already WARNed inside the loader; the
-    // windows then draw blank and every unresolved name is drained as a miss below.
-    if let Some(entries) = crate::assets::era::load_era_atlases() {
-        script.set_era_atlases(entries);
-    }
     // The unit frames are the default player UI — always loaded in a normal run. Captures stay
     // pristine (world-render baselines) unless WOW_CAPTURE_UI=1 opts the UI in.
     let capturing = world.contains_resource::<crate::capture::CaptureMode>();
@@ -263,21 +255,7 @@ fn setup_script(world: &mut World) {
         // assertion (`shipped_xml_tests`), not a second reporting channel.
         let _ = load_default_ui(&script);
     }
-    // Boot-time atlas misses (an `atlas=` or OnLoad `SetAtlas` the table couldn't serve) name
-    // themselves once, here; runtime misses drain per frame in `warn_era_atlas_misses`.
-    for name in script.take_era_atlas_misses() {
-        warn!("ui_script: unresolved era atlas '{name}' — stale extraction? run scripts/era-extract.py");
-    }
     world.insert_non_send_resource(script);
-}
-
-/// Per-frame drain of runtime `SetAtlas` misses (hover/selection swaps naming an atlas the boot
-/// table lacks) — warn-once per name, the boot drain's live twin. Free when nothing missed.
-fn warn_era_atlas_misses(script: Option<NonSendMut<UiScript>>) {
-    let Some(mut script) = script else { return };
-    for name in script.take_era_atlas_misses() {
-        warn!("ui_script: unresolved era atlas '{name}' — stale extraction? run scripts/era-extract.py");
-    }
 }
 
 /// Execute the real `Interface\FrameXML\GlobalStrings.lua` off the patch chain into the VM —
@@ -474,6 +452,13 @@ fn load_default_ui(script: &UiScript) -> Vec<String> {
         // (CooldownFrame_SetTimer) + ActionBar.xml (BENILLA_FALLBACK_ICON, the BenillaActionBar
         // anchor target).
         "StanceBar.xml",
+        // The pet action bar (decision 0982): hidden until `crate::ui_pet`'s feed reports a bar,
+        // i.e. until the server sends `SMSG_PET_SPELLS` for a live pet or charm — so a class that
+        // never has one never sees it. Right after the stance bar, whose row it shares (either
+        // one showing raises UIParent.xml's managed "pet" delta), and after Cooldown.xml
+        // (CooldownFrame_SetTimer), ActionBar.xml (the `BenillaActionBar` anchor target) and
+        // GameTooltip.xml (its hover).
+        "PetActionBar.xml",
         // The micro-button row in the bar's right-hand recess (the ref's own file split, its TOC
         // loads MainMenuBarMicroButtons right after MainMenuBar). After ActionBar.xml: it anchors
         // into BenillaActionBarArtFrame by name and seats itself with that file's
@@ -621,8 +606,18 @@ fn load_default_ui(script: &UiScript) -> Vec<String> {
         // alongside QuestFrame (same arc); the 'L' binding below calls its ToggleQuestLog().
         "QuestLogFrame.xml",
         "ChatFrame.xml",
-        // The options window (decision 0950): the era-skinned OptionsFrame the game menu's
-        // Options button opens. Needs only Fonts' objects and UiPanels' panel manager (both far
+        // The macro window (decision 0983): the editor + its name/icon popup, driven over the
+        // engine's OWN macro table (`benilla_ui::script::macros` — 1.12 macros have no server
+        // side, so this is the one window whose model is not an app feed). Needs UiPanels (the
+        // panel manager + `TabButtonTemplate`), ScrollTemplates (BOTH kits — the real one scrolls
+        // the body box, the faux one the icon grid), MicroMenu (`UpdateMicroButtons` on
+        // show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
+        // `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
+        "MacroFrame.xml",
+        // The options window (the 0985 provenance split: 0950's era structure, 0978's
+        // 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
+        // cuts — bare fully-live sliders, no corner X): the era-shaped
+        // OptionsFrame the game menu's Options button opens. Needs only Fonts' objects and UiPanels' panel manager (both far
         // above); sits right before GameMenuFrame so the menu — which reaches it by name at
         // click time — stays the last, outermost layer.
         "OptionsFrame.xml",
@@ -884,6 +879,9 @@ mod action_bar_tests;
 mod multibar_stance_tests;
 
 #[cfg(test)]
+mod pet_bar_tests;
+
+#[cfg(test)]
 mod micro_menu_tests;
 
 #[cfg(test)]
@@ -929,6 +927,9 @@ mod escape_tests;
 
 #[cfg(test)]
 mod game_menu_tests;
+
+#[cfg(test)]
+mod macro_tests;
 
 #[cfg(test)]
 mod options_tests;

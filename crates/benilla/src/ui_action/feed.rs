@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
-use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use benilla_ui::script::{ActionSlot, ScriptValue, UiScript};
 
 use crate::entities::ItemDisplays;
@@ -54,6 +54,10 @@ pub(super) struct FeedMemory {
     /// The [`Items::template_epoch`] the last identity resolve ran at — the feed's half of the
     /// landed-template redisplay (decision 0660). An advance re-resolves, exactly like a bar edit.
     template_epoch: u64,
+    /// The macro-table generation the last identity resolve ran at (decision 0983) — the THIRD
+    /// input, exactly like `template_epoch` above: editing a macro changes its bar icon while
+    /// touching neither the action table nor any item template.
+    macro_generation: u64,
 }
 
 #[allow(clippy::too_many_arguments)] // a Bevy system's full input set
@@ -229,9 +233,16 @@ pub(super) fn feed_actions(
     // ask and the one and only feed landed 0.5 ms apart, in that order, and nothing re-fed).
     // The epoch is the second input, so a landed answer redisplays like the ref's DBCACHECALLBACK.
     let template_epoch = items.template_epoch();
-    if actions.dirty || template_epoch != memory.template_epoch {
+    let macro_generation = script.macros_generation();
+    if actions.dirty
+        || template_epoch != memory.template_epoch
+        || macro_generation != memory.macro_generation
+    {
         actions.dirty = false;
         memory.template_epoch = template_epoch;
+        memory.macro_generation = macro_generation;
+        // Cloned once per re-resolve, never per frame: the gate above is a `u64` compare.
+        let macros = script.macros();
 
         // Resolve every occupied wire slot to its display, diff against what the VM holds, push +
         // fire ACTIONBAR_SLOT_CHANGED (arg1 = the Lua action id) per transition. Item icons/counts
@@ -275,8 +286,18 @@ pub(super) fn feed_actions(
                         .unwrap_or(0);
                     (Some(texture), count)
                 }
-                // Macro actions: no macro catalog yet (no macro window ships) — the engine-side
-                // fallback icon shows, matching the pre-slice-4 gap.
+                // A MACRO slot serves **the macro's own icon, never its bound spell's** — the one
+                // asymmetry in the icon resolver, byte-verified: `0x4e6a50`'s macro arm
+                // (`0x4e6bf9`) validates the slot and calls `0x4f0fd0(idx, buf, 0x104)`, the macro
+                // record's own icon-path builder, without ever touching `[rec+0x564]` (wow-re
+                // `action-spell-icon-apis.md` §3.7). Its dynamic state DOES go through the bound
+                // spell — that split is the whole design (`state`'s macro arm, decision 0983).
+                ACTION_KIND_MACRO => (
+                    macros
+                        .get(button.action as usize)
+                        .and_then(|m| m.texture.clone()),
+                    0,
+                ),
                 _ => (None, 0),
             };
             fresh.insert(

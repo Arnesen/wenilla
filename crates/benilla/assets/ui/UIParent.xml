@@ -36,20 +36,24 @@
           SHOW_MULTI_ACTIONBAR_1/2; benilla's bottom bars are always-on with no options state
           (decision 0270), so the flags read the bars' own visibility - identical values, no
           parallel global to drift.
-        - Frame names: our stance bar is BenillaShapeshiftBarFrame (0270), substituted in the
-          pet-bar visibility check. Rows whose frames don't exist here (GroupLootFrame1,
+        - Frame names: our stance bar is BenillaShapeshiftBarFrame (0270) and our pet bar is
+          BenillaPetActionBarFrame (0982), both substituted in the pet-bar visibility check —
+          either one showing raises the stack by the ref's "pet" delta, which is the ref's own
+          rule (the two bars share that row). Rows whose frames don't exist here (GroupLootFrame1,
           TutorialFrameParent, FramerateLabel, ChatFrame2, MultiBarBottomLeft - ours is
           BenillaMultiBarBottomLeft, statically anchored per 0270, like ShapeshiftBarFrame)
           no-op through the ref's own `if ( frame )` guard and self-activate if the frames
           ever land under those names.
-        - MultiBarLeft/MultiBarRight (the vertical bars), PetActionBarFrame,
+        - MultiBarLeft/MultiBarRight (the vertical bars),
           ReputationWatchBar, MainMenuExpBar, and MainMenuBarMaxLevelBar don't exist yet:
           nil-guarded (the ref reads them bare only because it always creates them).
         - No IsUserPlaced/IsObjectType/SIMPLE_CHAT legs on the SetPoint: benilla has no
           user-placed frames and no simple-chat option, so the ref's guarded SetPoint
           collapses to the plain one.
-        - The ref function's trailing custom positioning (BattlefieldMinimapTab, the
-          shapeshift-bar texture swap) is out of scope - none of those frames exist.
+        - Of the ref function's trailing custom positioning, the pet-bar half IS ours (the
+          sliding shelf art + the PETACTIONBAR_XPOS/YPOS re-seat, at the end of the pass,
+          decision 0988). BattlefieldMinimapTab and the shapeshift-bar art swap stay out of
+          scope - neither frame exists here, our stance bar shipping no end-caps at all (0270).
         - The isVar globals (CONTAINER_OFFSET_*, PETACTIONBAR_YPOS, BATTLEFIELD_TAB_OFFSET_Y)
           are pre-declared to their base values below - the ref declares them in
           ContainerFrame.lua/PetActionBarFrame.lua, which we don't ship - so the ref's
@@ -63,6 +67,9 @@
         CONTAINER_OFFSET_Y = 70
         BATTLEFIELD_TAB_OFFSET_Y = 210
         PETACTIONBAR_YPOS = 97
+        -- ref PetActionBarFrame.lua:3. Not a managed row (the manage pass computes only the Y);
+        -- the custom block at the end of the pass recomputes it, for the reason recorded there.
+        PETACTIONBAR_XPOS = 36
 
         -- ref UIParent.lua:2 — the model panes' held-button spin rate (half a turn per second),
         -- read by every `Model_OnUpdate` transcription (the character window's + inspect's).
@@ -111,7 +118,7 @@
                 table.insert(xOffsetFrames, "rightRight")
             end
 
-            if ( ( PetActionBarFrame and PetActionBarFrame:IsShown() ) or ( BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) ) then
+            if ( ( BenillaPetActionBarFrame and BenillaPetActionBarFrame:IsShown() ) or ( BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) ) then
                 table.insert(yOffsetFrames, "pet")
             end
             if ( ReputationWatchBar and MainMenuExpBar and ReputationWatchBar:IsShown() and MainMenuExpBar:IsShown() ) then
@@ -189,6 +196,53 @@
                         frame:SetPoint(point, anchorTo, rpoint, xOffset, yOffset)
                     end
                 end
+            end
+
+            -- Custom positioning the row table cannot express (ref l.1705-1738). Both rules
+            -- belong to the pet/stance ROW — the one row two different bars share — and without
+            -- them the pet bar lands on top of the bottom-left multibar's buttons
+            -- (director-caught: the bar drew across a row of spells, border and all).
+            --
+            -- (a) The shelf art IS the pet bar's border, and it only makes sense when the bar
+            --     sits directly on the main bar. Raised a row it would draw across whatever is
+            --     underneath, so the ref hides both strips (l.1707-1708) — the same move it makes
+            --     for the stance bar's own end-caps, which is why benilla's stance bar has none
+            --     (0270 anchors it statically at the raised position).
+            -- (b) The pet bar is the only managed entry whose row is a VAR: the loop above writes
+            --     the NUMBER PETACTIONBAR_YPOS (97, +43 with the bottom-left bar up) and anchors
+            --     nothing, so the ref re-seats the frame with it here (l.1735-1736).
+            --
+            -- Departure: the ref computes PETACTIONBAR_XPOS in ShowPetActionBar() and reads it
+            -- here, which only works because its bar slides in over several frames. Ours appears
+            -- at once, so the value is computed where it is used. Same rule
+            -- (PetActionBarFrame.lua:170-174): the two bars share this row, so a pet bar shown
+            -- while the stance bar is up starts 20px past the last stance button. That case is
+            -- rare but real — a possessed or charmed unit gives a pet bar to a class that also
+            -- has forms.
+            local bottomLeftUp = BenillaMultiBarBottomLeft and BenillaMultiBarBottomLeft:IsShown()
+            if ( BenillaSlidingActionBarTexture0 and BenillaSlidingActionBarTexture1 ) then
+                if ( bottomLeftUp ) then
+                    BenillaSlidingActionBarTexture0:Hide()
+                    BenillaSlidingActionBarTexture1:Hide()
+                else
+                    BenillaSlidingActionBarTexture0:Show()
+                    BenillaSlidingActionBarTexture1:Show()
+                end
+            end
+            if ( BenillaPetActionBarFrame ) then
+                PETACTIONBAR_XPOS = 36
+                local forms = GetNumShapeshiftForms and GetNumShapeshiftForms() or 0
+                if ( forms > 0 and BenillaShapeshiftBarFrame and BenillaShapeshiftBarFrame:IsShown() ) then
+                    local last = getglobal("BenillaShapeshiftButton"..forms)
+                    local right = last and last:GetRight()
+                    if ( right ) then
+                        PETACTIONBAR_XPOS = right + 20
+                    end
+                end
+                -- The ref guards this on IsShown() because a hidden bar of its is mid-slide and
+                -- owns its own anchor; ours has no slide, so re-seating a hidden frame is a
+                -- no-op and the guard would only add an ordering trap (OnShow fires the pass).
+                BenillaPetActionBarFrame:SetPoint("TOPLEFT", "BenillaActionBar", "BOTTOMLEFT", PETACTIONBAR_XPOS, PETACTIONBAR_YPOS)
             end
 
             -- The under-minimap right stack (ref l.1740-1770): anchorY walks down capture bars →

@@ -310,39 +310,59 @@ pub(crate) struct SliderDrag {
 }
 
 /// On a LeftButton press at `(x, y)` whose hit frame is `hit`: if that frame is an **enabled**
-/// Slider with a resolved rect and the cursor lies on its thumb, begin a drag capture (records
-/// [`Model::slider_drag`]). Returns whether a capture began — the caller needs nothing from it (the
-/// press still fires OnMouseDown normally). A press off the thumb (on the track) captures nothing:
-/// only the thumb drags, matching the vanilla scrollbar where the arrows do the stepping.
-pub(super) fn begin_drag(model: &mut Model, hit: Option<FrameHandle>, x: f32, y: f32) -> bool {
-    let Some(h) = hit else { return false };
-    let Some(r) = model.resolved.get(&h).copied() else {
-        return false;
-    };
+/// Slider with a resolved rect, begin a drag capture (records [`Model::slider_drag`]). A press ON
+/// the thumb grabs it **offset-preserving** (the grabbed point stays under the cursor — 0250 §5);
+/// a press on the TRACK seats the thumb's **center** under the cursor — the value jumps there and
+/// the same capture begins, one continuous press-drag gesture (decision 0989: "the only way to
+/// set the bar was the arrows"). Returns `Some((frame id, new value))` when the press itself
+/// changed the value (the track jump) — the caller fires `OnValueChanged` outside the model
+/// borrow, exactly like [`drag_move`]'s changes — else `None`.
+pub(super) fn begin_drag(
+    model: &mut Model,
+    hit: Option<FrameHandle>,
+    x: f32,
+    y: f32,
+) -> Option<(u32, f32)> {
+    let h = hit?;
+    let r = model.resolved.get(&h).copied()?;
     let (enabled, vertical, fraction, thumb) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::Slider(s)) => (s.enabled, s.vertical, s.fraction(), s.thumb),
-        _ => return false,
+        _ => return None,
     };
     if !enabled {
-        return false;
+        return None;
     }
     let size = thumb
         .and_then(|rh| model.region_data.get(&rh))
         .and_then(|d| d.size);
     let trect = thumb_rect(r, size, vertical, fraction);
-    if !point_in_rect(trect, x, y) {
-        return false;
-    }
-    let grab_offset = if vertical {
-        y - trect.top
+    let on_thumb = point_in_rect(trect, x, y);
+    let grab_offset = if on_thumb {
+        // The grabbed thumb point rides under the cursor for the whole drag.
+        if vertical {
+            y - trect.top
+        } else {
+            x - trect.left
+        }
     } else {
-        x - trect.left
+        // Track press: grab the thumb by its center, so the seat-under-cursor jump below and
+        // every subsequent move share one formula ([`drag_move`]). The offset is
+        // cursor − leading edge at grab: +tw/2 horizontal; −th/2 vertical (top is the leading
+        // edge and sits ABOVE the center in y-up, hence bottom − top, which is −th).
+        if vertical {
+            (trect.bottom - trect.top) * 0.5
+        } else {
+            (trect.right - trect.left) * 0.5
+        }
     };
     model.slider_drag = Some(SliderDrag {
         slider: h,
         grab_offset,
     });
-    true
+    if on_thumb {
+        return None; // no value change from the grab itself
+    }
+    drag_move(model, x, y)
 }
 
 /// On a pointer move at `(x, y)` while a thumb is captured: recompute the value from the cursor

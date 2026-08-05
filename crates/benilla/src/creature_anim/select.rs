@@ -576,6 +576,39 @@ pub(super) fn is_ranged_load(id: u16) -> bool {
     matches!(id, 105 | 106 | 112)
 }
 
+/// Does the drawn ranged Load/Hold family own this unit's standing idle? The **entry/sustain
+/// asymmetry**, byte-verified (wow-re `ranged-shot-anim.md` §b + `nocked-ammo-cancel.md` §Q-I-I0):
+///
+/// - **ENTRY is `[+0xd58] & 0x200` alone** — the resolver `0x5fd460` (tier 9 of `ComputeAnimation
+///   0x5fd8b0`) claims on `cmp [+0xd40],2` (sheath ranged) `&& test ah,0x2` and nothing else. That
+///   bit's ONLY writer image-wide is the LOCAL cast-send `0x6e593b`, gated `AttributesEx2 & 0x20`
+///   — so entry means *this client's player is actively auto-repeating*. Nothing else can start
+///   the family: 109/110/111 are reachable only through their Load clip's completion
+///   (`0x5fc3f0` slot 11 → `PlayAnimation(109)`), and the Load comes only from `0x5fd460`.
+/// - **`0x400` ([`super::RangedHold`], the any-caster weapon-visual hold) only SUSTAINS** — it
+///   appears in exactly one gait gate, HoldBow's self-loop at `0x5fc3f0` slot 13
+///   (`[+0xd24] != 0 && (channel || [+0xd58] & 0x600)`), which re-plays a hold **already on the
+///   base track**. It can never admit the family.
+///
+/// Folding `0x400` into the *entry* gate (which this codebase did, with the asymmetry knowingly
+/// "unmodeled") is what made a single Multi-Shot / Arcane Shot — any ranged-slot spell whose
+/// visual sets the hold bit — leave the shooter aiming a drawn bow forever, and left a REMOTE
+/// shooter permanently drawn where the reference stands it up (§c's verified negative: a remote
+/// unit never runs the local cast-send, so its standing pose is Stand). `held` is our
+/// "the Load pass finished, the hold is what's playing" latch — the base-track state the
+/// self-loop gate reads.
+///
+/// The caller applies the tier order: locomotion (tier 4) outranks tier 9, so a moving unit is
+/// never in the idle whatever these bits say.
+pub(super) fn ranged_idle_gate(
+    auto_repeat: bool,
+    ranged_hold: bool,
+    held: bool,
+    sheath_cur: Option<u8>,
+) -> bool {
+    sheath_cur == Some(2) && (auto_repeat || (held && ranged_hold))
+}
+
 /// The victim **defense-reaction** id (decision 0279 — the `$CPP` dispatch, byte-verified
 /// `0x624a01` → `0x60ec00`): DODGE/DEFLECTS → Dodge(30) · BLOCKS → ShieldBlock(24) · PARRY keys
 /// the victim's own **mainhand** through the `0x60ec98` LUT (read off `WoW.exe` `.text`, its

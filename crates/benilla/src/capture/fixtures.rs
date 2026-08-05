@@ -958,6 +958,24 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-options-graphics seed failed: {e}");
             }
         }
+        UiFixture::OptionsSearch => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // Mid-search (0984), same posture as the page fixtures: real CVar set, then the
+            // live open path and a typed query — "volume" reflows the four volume sliders
+            // under the Audio head (Master matched by the token too, so no pull-in here; the
+            // pull-in has its unit test). Focused (0989): captures pin the caret visible, so
+            // this baseline also pins the caret hugging the text's end — the drawn-space
+            // advance law's visual regression guard.
+            script.register_cvars(crate::cvars::REGISTERED.iter().copied());
+            if let Err(e) = script.run(
+                "ShowUIPanel(OptionsFrame); OptionsFrameSearchBox:SetText(\"volume\"); OptionsFrameSearchBox:SetFocus()",
+            )
+            {
+                warn!("capture: ui-options-search seed failed: {e}");
+            }
+        }
         UiFixture::SpellBook => {
             // The director's own report reproduced (decision 0228): a HUMAN WARRIOR (race 1,
             // class 1) who learned Fireball + Mind Flay via a GM command during testing. The book

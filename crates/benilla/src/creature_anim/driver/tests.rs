@@ -2628,3 +2628,137 @@ fn the_dismount_cuts_the_saddle_pose_where_the_mount_up_blends_into_it() {
         "the dismount CUTS: Mount(91) contributes nothing the frame the field clears"
     );
 }
+
+/// A shooter's model: Stand, Run, and the bow Load/Hold pair.
+fn archer_model() -> ModelAnimations {
+    ModelAnimations {
+        graph: Handle::default(),
+        clips: vec![
+            clip(0, 1, true),    // Stand
+            clip(5, 2, true),    // Run
+            clip(105, 3, false), // LoadBow — the pull
+            clip(109, 4, true),  // HoldBow — the drawn hold
+        ],
+        hand_close: [None, None],
+        playable_animation_lookup: Vec::new(),
+        animation_lookup: Vec::new(),
+        global_bones: Vec::new(),
+        first_seq: None,
+        pose: Default::default(),
+    }
+}
+
+/// The bow-and-arrow half of the director's 2026-08-05 report — the screenshot is a warrior
+/// **sprinting** with the arrow still nocked and the bowstring still drawn.
+///
+/// The nock latch has exactly two authored writers: `$BWP` sets it, `$BWR` clears it, and both
+/// tags live only in clips a STANDING unit plays (the Load pull and the fire clip; a real
+/// character M2's Run authors neither — verified by dumping every playable model's event tracks).
+/// So a latch carried into locomotion could never be cleared by anything, and the gait arm's
+/// hold-pick re-latch (0409's INTERIM) re-arms it on every volley — the leak was guaranteed.
+#[test]
+fn a_running_shooter_drops_the_nocked_arrow_and_keeps_its_ammo_cache() {
+    let mut app = app();
+    let unit = app
+        .world_mut()
+        .spawn((
+            archer_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::SelfPlayer,
+            Wielded {
+                ranged: Some((2, 0x2)), // bow
+                ..Default::default()
+            },
+            crate::creature_anim::NockedAmmo { display_id: 5996 },
+            crate::creature_anim::NockLatch,
+        ))
+        .id();
+    // The bow is drawn and the arrow is on the string: the steady state of a standing shooter.
+    app.world_mut().write_message(SheathRequest {
+        entity: unit,
+        state: 2,
+        ceremony: false,
+    });
+    app.update();
+    let latched = |app: &App| {
+        app.world()
+            .entity(unit)
+            .get::<crate::creature_anim::NockLatch>()
+            .is_some()
+    };
+    assert!(latched(&app), "standing drawn: the arrow stays nocked");
+
+    // They run.
+    app.world_mut().entity_mut(unit).insert(MovementState {
+        speed: 7.0,
+        flags: move_flags::FORWARD,
+        ..Default::default()
+    });
+    app.update();
+    assert!(
+        !latched(&app),
+        "moving un-nocks: the arrow leaves the hand and the string relaxes"
+    );
+    assert!(
+        app.world()
+            .entity(unit)
+            .get::<crate::creature_anim::NockedAmmo>()
+            .is_some(),
+        "…but the ammo DISPLAY cache survives — the next pull re-nocks the same arrow without \
+         waiting on a fresh SMSG_SPELL_START"
+    );
+}
+
+/// The aiming half of the same report ("they keep aiming like they are going to shoot at
+/// something"): the drawn Load/Hold idle is entered by the LOCAL auto-repeat bit `0x200` alone
+/// (`0x5fd460`'s only claim test). The any-caster weapon-visual hold `0x400` — which every
+/// ranged-slot spell's visual sets and nothing ever clears on volley end — must not admit it.
+#[test]
+fn the_weapon_visual_hold_alone_never_puts_a_shooter_in_the_drawn_idle() {
+    let spawn = |app: &mut App, auto_repeat: bool| {
+        let mut e = app.world_mut().spawn((
+            archer_model(),
+            AnimationPlayer::default(),
+            AnimationTransitions::new(),
+            AnimDriver::default(),
+            crate::net::SelfPlayer,
+            Wielded {
+                ranged: Some((2, 0x2)),
+                ..Default::default()
+            },
+            // Set by ANY ranged spell's visual play — one Multi-Shot is enough, and it is still
+            // set an hour later.
+            crate::creature_anim::RangedHold,
+        ));
+        if auto_repeat {
+            e.insert(crate::creature_anim::AutoRepeatArmed);
+        }
+        e.id()
+    };
+    let mut app = app();
+    let shot_once = spawn(&mut app, false);
+    let shooting = spawn(&mut app, true);
+    for unit in [shot_once, shooting] {
+        app.world_mut().write_message(SheathRequest {
+            entity: unit,
+            state: 2,
+            ceremony: false,
+        });
+    }
+    app.update();
+    app.update();
+    let gait = |app: &App, e: Entity| app.world().entity(e).get::<AnimDriver>().unwrap().gait;
+    assert_eq!(
+        gait(&app, shot_once),
+        Some(0),
+        "a hunter who fired one Multi-Shot and stopped stands normally — the bow stays drawn \
+         (nothing stows on combat end), but they are not aiming it"
+    );
+    assert_eq!(
+        gait(&app, shooting),
+        Some(105),
+        "…while an actively auto-repeating shooter pulls the bow: the `0x200` entry"
+    );
+}

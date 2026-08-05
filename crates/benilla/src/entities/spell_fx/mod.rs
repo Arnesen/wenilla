@@ -600,6 +600,12 @@ pub(super) fn attach_effect_visuals(
                 // This instance IS the model these particles belong to; its chain (set above)
                 // carries the host's fade down to them — decision 0833.
                 alpha: Some(root),
+                // The ride-vs-trail baseline (0986): an UNATTACHED instance is a free world model
+                // whose own transform IS its world placement, so its motion reaches the particles
+                // through the emitter matrix and each one hangs where it was born — the hunter
+                // arrow's bead trail. An attached one is carried by the model it hangs on (the
+                // reference's device-stack `S`), and its cloud rides.
+                world_composed: !host.attached,
             },
             // The emitters' rate/enabled windows ride the played sequence: a `CEffect` ADVANCES
             // (`Stand` → `Hold` → `Decay`), so it reads the live one off its own player like a

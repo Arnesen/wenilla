@@ -167,3 +167,82 @@ fn an_unknown_entry_answers_once_and_settles() {
         "the negative is cached — the feed must not re-ask on the next resolve"
     );
 }
+
+/// A MACRO slot serves **the macro's own icon**, and follows an EDIT of that macro without any
+/// bar-table change at all (decision 0983).
+///
+/// Two things are pinned. The icon rule is byte-verified: `GetActionTexture`'s macro arm
+/// (`0x4e6bf9`) builds the macro record's own icon path and never touches the bound spell
+/// (`action-spell-icon-apis.md` §3.7). And the *trigger* is the macro-table generation — the third
+/// input beside `dirty` and the item-template epoch — because renaming or re-iconing a macro moves
+/// neither of those, and gating on them alone leaves a stale icon on the bar until some unrelated
+/// edit happens to re-dirty the feed (exactly decision 0660's bug, one seam over).
+#[test]
+fn a_macro_slot_shows_the_macros_own_icon_and_follows_an_edit() {
+    use benilla_protocol::messages::ACTION_KIND_MACRO;
+    use benilla_ui::script::{MacroState, MacroView};
+
+    const SLOT: u8 = 0;
+    const ACTION: u32 = 1;
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut app = App::new();
+    let mut actions = PlayerActions::default();
+    actions.buttons.insert(
+        SLOT,
+        ActionButton {
+            slot: SLOT,
+            action: 1, // macro index 1
+            kind: ACTION_KIND_MACRO,
+        },
+    );
+    actions.dirty = true;
+    app.insert_resource(actions)
+        .init_resource::<Items>()
+        .init_resource::<CastErrors>()
+        .init_resource::<MountErrors>()
+        .init_resource::<UiErrorKeys>()
+        .insert_resource(NetCommands(tx));
+    let mut script = UiScript::new().unwrap();
+    script.set_macros(MacroState {
+        account: vec![MacroView {
+            name: "Ambush".into(),
+            texture: Some("Interface\\Icons\\Ability_Ambush".into()),
+            // The bound spell is deliberately NOT what the icon shows.
+            body: "/cast Ambush".into(),
+            local_only: false,
+        }],
+        character: Vec::new(),
+    });
+    app.insert_non_send_resource(script);
+    app.add_systems(Update, feed_actions);
+
+    app.update();
+    let icon = |app: &mut App| {
+        app.world_mut()
+            .non_send_resource::<UiScript>()
+            .eval::<Option<String>>(&format!("return GetActionTexture({ACTION})"))
+            .unwrap()
+    };
+    assert_eq!(
+        icon(&mut app).as_deref(),
+        Some("Interface\\Icons\\Ability_Ambush"),
+        "the MACRO's own icon"
+    );
+
+    // Re-icon the macro. Nothing touches `PlayerActions` — only the macro table moves.
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run(r#"EditMacro(1, nil, "Interface\\Icons\\Spell_Fire_FlameBolt")"#)
+        .unwrap();
+    assert!(
+        !app.world().resource::<PlayerActions>().dirty,
+        "the precondition: the bar table is UNtouched by a macro edit"
+    );
+
+    app.update();
+    assert_eq!(
+        icon(&mut app).as_deref(),
+        Some("Interface\\Icons\\Spell_Fire_FlameBolt"),
+        "the generation gate re-resolved the slot"
+    );
+}

@@ -124,6 +124,20 @@ pub const SMSG_LEARNED_SPELL: u16 = 0x012B; // 299
 pub const SMSG_SUPERCEDED_SPELL: u16 = 0x012C; // 300
 pub const SMSG_CAST_RESULT: u16 = 0x0130; // 304
 
+// The pet action bar's inbound wire (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:
+// 377/378/710/312). Bodies in [`super::pet`].
+/// The whole pet bar in one body — the ten slots, the react/command state, the pet's spell list
+/// and its cooldowns. Its **8-byte guid-only form is the teardown** (`Player::RemovePetActionBar`),
+/// and the only signal that the bar has gone away.
+pub const SMSG_PET_SPELLS: u16 = 0x0179; // 377
+/// The state-only refresh: the same four state bytes, with no bar behind them.
+pub const SMSG_PET_MODE: u16 = 0x017A; // 378
+/// One reason byte for a refused pet order (the red error line).
+pub const SMSG_PET_ACTION_FEEDBACK: u16 = 0x02C6; // 710
+/// The pet's twin of [`SMSG_CAST_RESULT`] — the same `SpellCastResult` vocabulary, its own opcode
+/// because the caster that failed is the pet, not us.
+pub const SMSG_PET_CAST_FAILED: u16 = 0x0138; // 312
+
 /// The client's ack that a server-authored spline (`SMSG_MONSTER_MOVE` to our own guid — Charge,
 /// knockback, taxi) finished. Body: a `MovementInfo` at the endpoint, the `splineId` being acked,
 /// and a trailing float the server `read_skip`s (VERIFIED vmangos `Opcodes_1_12_1.h`: 713;
@@ -224,6 +238,20 @@ pub const CMSG_CREATURE_QUERY: u16 = 0x0060; // 96
 /// VERIFIED vmangos `Opcodes_1_12_1.h:85`: 82. Body in [`super::client::pet_name_query`]. Answered
 /// by [`SMSG_PET_NAME_QUERY_RESPONSE`].
 pub const CMSG_PET_NAME_QUERY: u16 = 0x0052; // 82
+
+// The pet action bar's outbound verbs (decision 0982; VERIFIED vmangos `Opcodes_1_12_1.h`:
+// 373/372/755/746). Bodies in [`super::pet`].
+/// One pet bar press: the slot's own packed word, echoed back with a target guid. The server
+/// re-splits it and dispatches on the type byte — command, reaction, or cast.
+pub const CMSG_PET_ACTION: u16 = 0x0175; // 373
+/// Move/swap a pet bar slot (the drag). One or two `(position, packed)` pairs; the server tells
+/// the two forms apart **by body size alone**.
+pub const CMSG_PET_SET_ACTION: u16 = 0x0174; // 372
+/// Ask for a pet spell's autocast bit to be set to a given value (the right-click).
+pub const CMSG_PET_SPELL_AUTOCAST: u16 = 0x02F3; // 755
+/// Call the pet off — the Attack button's second press.
+pub const CMSG_PET_STOP_ATTACK: u16 = 0x02EA; // 746
+
 /// VERIFIED vmangos `Opcodes_1_12_1.h`: 94 (decision 0236). Body in
 /// [`super::gameobject::gameobject_query`] — the ask-once GO template lookup, identical shape to
 /// `CMSG_CREATURE_QUERY`.

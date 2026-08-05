@@ -101,9 +101,10 @@ fn the_menu_has_the_era_frame_and_button_ladder() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The four entries with nothing behind them — AddOns, Edit Mode, Support, Macros — are DISABLED
-/// (the pending idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry).
-/// Everything else in the ladder is live.
+/// The three entries with nothing behind them — AddOns, Edit Mode, Support — are DISABLED (the
+/// pending idiom: grey label, `-Disabled` art, exactly how the era menu greys a dead entry).
+/// Everything else in the ladder is live. **Macros left this list in decision 0983**, when the
+/// macro window landed behind it.
 #[test]
 fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     let s = harness();
@@ -113,7 +114,6 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
         "GameMenuButtonAddOns",
         "GameMenuButtonEditMode",
         "GameMenuButtonSupport",
-        "GameMenuButtonMacros",
     ] {
         assert!(
             !s.eval::<bool>(&format!("return {name}:IsEnabled()"))
@@ -123,6 +123,7 @@ fn the_unbacked_entries_are_disabled_and_the_rest_are_live() {
     }
     for name in [
         "GameMenuButtonOptions",
+        "GameMenuButtonMacros",
         "GameMenuButtonLogout",
         "GameMenuButtonQuit",
         "GameMenuButtonContinue",

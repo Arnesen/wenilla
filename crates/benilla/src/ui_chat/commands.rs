@@ -42,7 +42,7 @@ use bevy::prelude::*;
 /// `SLASH_<INDEX><n>` alias-string prefix ([`SlashIndex::key`]). Adding a command is adding a
 /// variant + its handler arm; its aliases arrive with the shipped strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SlashIndex {
+pub(crate) enum SlashIndex {
     Reply,
     Join,
     Leave,
@@ -74,6 +74,14 @@ pub(super) enum SlashIndex {
     Target,
     Assist,
     Follow,
+    /// `/cast <name>` — the reference's `SlashCmdList["CAST"]` is one line, `CastSpellByName(msg)`,
+    /// and that binding is the engine seam benilla implements over the spell book (decision 0983).
+    /// The command the whole macro system exists to run.
+    Cast,
+    /// `/macro` `/m` — opens the macro window (the ref's `ShowMacroFrame()`).
+    MacroUi,
+    /// `/macrohelp` — the reference's own five-line help text.
+    MacroHelp,
 }
 
 impl SlashIndex {
@@ -111,13 +119,16 @@ impl SlashIndex {
             Self::Target => "TARGET",
             Self::Assist => "ASSIST",
             Self::Follow => "FOLLOW",
+            Self::Cast => "CAST",
+            Self::MacroUi => "MACRO",
+            Self::MacroHelp => "MACROHELP",
         }
     }
 
     /// Every registered index — the registry proper. A reference command NOT in this list resolves
     /// nowhere and answers `HELP_TEXT_SIMPLE`, exactly as an unknown command does in the reference
     /// (better than a registered handler that silently does nothing).
-    const ALL: [Self; 31] = [
+    const ALL: [Self; 34] = [
         Self::Reply,
         Self::Join,
         Self::Leave,
@@ -149,6 +160,9 @@ impl SlashIndex {
         Self::Target,
         Self::Assist,
         Self::Follow,
+        Self::Cast,
+        Self::MacroUi,
+        Self::MacroHelp,
     ];
 }
 
@@ -156,7 +170,7 @@ impl SlashIndex {
 /// (decisions 0099 `/castvis`, 0288 `/chattest`, 0434 `/partytest`, 0600 `/shot`, 0634 `/liquid`,
 /// 0637 `/reaction`). Their aliases are literals because there is nothing shipped to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DevCmd {
+pub(crate) enum DevCmd {
     CastVis,
     ChatTest,
     PartyTest,
@@ -189,7 +203,7 @@ impl DevCmd {
 
 /// What a typed `/command` resolved to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Command {
+pub(crate) enum Command {
     /// A reference `SlashCmdList` command benilla implements.
     Slash(SlashIndex),
     /// An emote alias — carrying the `EmotesText` id its token resolved to (`/lol` → LAUGH → 45).
@@ -210,14 +224,14 @@ pub(crate) struct SlashCommands {
 
 impl SlashCommands {
     /// Resolve a typed command (no leading `/`, any case).
-    pub(super) fn lookup(&self, cmd: &str) -> Option<Command> {
+    pub(crate) fn lookup(&self, cmd: &str) -> Option<Command> {
         self.by_alias.get(&cmd.to_ascii_lowercase()).copied()
     }
 
     /// Build from the reference's alias strings. `get` reads a global string (the UI VM's globals in
     /// production, a stub map in tests); `text_id` resolves an `EmotesText` NAME to its id (the
     /// emote catalog). Pure over those two, so the whole table is testable without a VM.
-    pub(super) fn build(
+    pub(crate) fn build(
         get: impl Fn(&str) -> Option<String>,
         text_id: impl Fn(&str) -> Option<u32>,
     ) -> Self {

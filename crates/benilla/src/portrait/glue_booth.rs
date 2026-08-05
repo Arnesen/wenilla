@@ -700,6 +700,9 @@ pub(super) fn sync_glue_scene(
                     // A booth bake has no appear/despawn ramp and no self-avatar feather — its
                     // riders are always opaque (0827).
                     alpha: None,
+                    // Scene-graph-carried: this model's world motion arrives on the reference's
+                    // device stack, so its cloud RIDES (0986's baseline).
+                    world_composed: false,
                 },
                 // A glue scene loops its one authored clip forever — the doodad law.
                 crate::particles::EmitClock::Pinned,

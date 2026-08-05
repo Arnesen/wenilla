@@ -27,6 +27,7 @@ mod mount;
 mod names;
 mod npc;
 mod objects;
+mod pet;
 mod quests;
 mod session;
 mod spells;
@@ -51,6 +52,33 @@ use spells::{
     spell_chain_targets, spell_cooldowns, spell_delayed, spell_failed_other, spell_go, spell_start,
     superceded_spell,
 };
+
+/// Which unit's cooldown store a wire cooldown packet addresses (decision 0982).
+///
+/// All four of them (`SMSG_SPELL_COOLDOWN`, `_COOLDOWN_EVENT`, `_CLEAR_COOLDOWN`,
+/// `_COOLDOWN_CHEAT`) carry a caster guid, and until the pet bar existed all four answered it the
+/// same way: "is it us? then apply, else drop" — four copies of a self-only assumption, each
+/// inside its own arm. Since the server sends a pet's cooldowns on the pet's guid, that
+/// assumption silently discarded every one of them. Resolving the guid ONCE, here, is what let the
+/// pet bar sweep for real without a second copy of any arm; it also matches the reference, whose
+/// `SMSG_COOLDOWN_CHEAT` handler wipes "the self/pet cooldown list" off exactly this test.
+///
+/// `None` = a guid we hold no store for (another player's pet, a stale packet): dropped, as the
+/// client drops an unknown guid.
+fn addressed_store<'a>(
+    caster: u64,
+    self_guid: &SelfGuid,
+    player: &'a mut crate::cooldowns::Cooldowns,
+    pet: &'a mut crate::ui_pet::PetBar,
+) -> Option<&'a mut crate::cooldowns::Cooldowns> {
+    if self_guid.0 == Some(caster) {
+        Some(player)
+    } else if pet.has_bar() && pet.spells.pet_guid == caster {
+        Some(&mut pet.cooldowns)
+    } else {
+        None
+    }
+}
 
 // ── The per-frame bridge systems ─────────────────────────────────────────────────────────────────
 
@@ -149,6 +177,12 @@ pub(super) fn apply_net_updates(
             // The mirror-timer queue (decision 0874): the breath/fatigue START/PAUSE/STOP edges,
             // drained into the FrameXML bars by `crate::ui_mirror`.
             ResMut<crate::ui_mirror::MirrorTimerFeed>,
+            // The pet action bar's server-authoritative state + its own cooldown store
+            // (decision 0982), replaced wholesale on every `SMSG_PET_SPELLS`; and the by-key red
+            // error queue its refused-order feedback rides (the `DisplayError` route, resolved
+            // through the VM's own GlobalStrings by `ui_action::feed_actions`).
+            ResMut<crate::ui_pet::PetBar>,
+            ResMut<crate::ui_action::UiErrorKeys>,
         ),
     ),
     // One tuple param (the 16-SystemParam ceiling again): the action-bar- + merchant-facing errors
@@ -290,6 +324,8 @@ pub(super) fn apply_net_updates(
             area_table,
             exploration_sounds,
             mut mirror_timers,
+            mut pet_bar,
+            mut ui_error_keys,
         ),
     ) = caches;
     let (
@@ -1037,13 +1073,13 @@ pub(super) fn apply_net_updates(
                 &mut commands,
                 &net_commands,
             ),
-            SessionEvent::SpellCooldowns { caster, cooldowns } => spell_cooldowns(
-                caster,
-                cooldowns,
-                &self_guid,
-                ui_actions.11.as_deref(),
-                &mut ui_actions.10,
-            ),
+            SessionEvent::SpellCooldowns { caster, cooldowns } => {
+                if let Some(store) =
+                    addressed_store(caster, &self_guid, &mut ui_actions.10, &mut pet_bar)
+                {
+                    spell_cooldowns(caster, cooldowns, ui_actions.11.as_deref(), store);
+                }
+            }
             SessionEvent::ItemCooldown {
                 item_guid,
                 spell_id,
@@ -1056,13 +1092,37 @@ pub(super) fn apply_net_updates(
                 seconds,
             } => items.set_enchant_deadline(item_guid, slot, seconds),
             SessionEvent::CooldownEvent { spell_id, caster } => {
-                cooldown_event(spell_id, caster, &self_guid, &mut ui_actions.10)
+                if let Some(store) =
+                    addressed_store(caster, &self_guid, &mut ui_actions.10, &mut pet_bar)
+                {
+                    cooldown_event(spell_id, caster, store);
+                }
             }
             SessionEvent::ClearCooldown { spell_id, caster } => {
-                clear_cooldown(spell_id, caster, &self_guid, &mut ui_actions.10)
+                if let Some(store) =
+                    addressed_store(caster, &self_guid, &mut ui_actions.10, &mut pet_bar)
+                {
+                    clear_cooldown(spell_id, caster, store);
+                }
             }
             SessionEvent::CooldownCheat { caster } => {
-                cooldown_cheat(caster, &self_guid, &mut ui_actions.10)
+                if let Some(store) =
+                    addressed_store(caster, &self_guid, &mut ui_actions.10, &mut pet_bar)
+                {
+                    cooldown_cheat(caster, store);
+                }
+            }
+            // The pet action bar (decision 0982) — server-authoritative, so PET_SPELLS is a
+            // wholesale replace and its zero-guid form is the teardown.
+            SessionEvent::PetSpells(spells) => {
+                pet::pet_spells(*spells, ui_actions.11.as_deref(), &mut pet_bar)
+            }
+            SessionEvent::PetMode(mode) => pet::pet_mode(mode, &mut pet_bar),
+            SessionEvent::PetActionFeedback { reason } => {
+                pet::pet_action_feedback(reason, &mut ui_error_keys)
+            }
+            SessionEvent::PetCastFailed { spell_id, reason } => {
+                pet::pet_cast_failed(spell_id, reason, &mut ui_actions.1 .0)
             }
             SessionEvent::ChannelStart {
                 spell_id,

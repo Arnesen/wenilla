@@ -5,9 +5,9 @@ use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
     backdrop, bank, char_stats, container, craft, cursor, death, duel, follow, gossip, inspect,
-    item_text, loot, loot_roll, mail, merchant, party, quest, quest_log, session, skills, slider,
-    social, spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, EraAtlasEntry,
-    FontObject, ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
+    item_text, loot, loot_roll, macros, mail, merchant, party, quest, quest_log, session, skills,
+    slider, social, spellbook, taxi, trade, tradeskill, trainer, ActionSlot, AuraState, FontObject,
+    ItemTemplateView, PlayerReqState, RegionData, ScriptValue, SoundRequest, UnitState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -71,13 +71,6 @@ pub(crate) struct Model {
     pub(crate) chat_tab: bool,
     /// Region visuals (texture path/color/text) + region layout (anchors/size/justify).
     pub(crate) region_data: HashMap<RegionHandle, RegionData>,
-    /// The Era atlas table (decision 0950): lowercased member name → resolved paint. Pushed once
-    /// by [`super::UiScript::set_era_atlases`] before the XML loads; read by `SetAtlas` and the
-    /// loader's `atlas=` attribute.
-    pub(crate) era_atlas: HashMap<String, EraAtlasEntry>,
-    /// Atlas names `SetAtlas` could not resolve — warn-once, drained by
-    /// [`super::UiScript::take_era_atlas_misses`] for app-side WARNs.
-    pub(crate) era_atlas_missing: HashSet<String>,
     /// Per-frame installed [`Backdrop`] (the tooltip/dialog/panel plate — `<Backdrop>` or
     /// `SetBackdrop`). Absent ⇒ the frame draws no plate. Stored beside the arena like `region_data`
     /// (the arena models structure, not paint). The client's `frame+0x1ac` pointer.
@@ -242,6 +235,20 @@ pub(crate) struct Model {
     /// `GetSpellTabInfo`/`GetSpellName`/… bindings read ([`spellbook`]). Durable player state like
     /// `actions` above, never `Option` — "no known spells yet" is simply empty vectors.
     pub(crate) spellbook: spellbook::SpellBookState,
+    /// The player's **macros** (decision 0983) — the one game-state table this crate owns
+    /// outright, because 1.12 macros have no server side at all ([`macros`]'s module docs). The
+    /// app seeds it from `benilla/macros/…` and reads it back to persist.
+    pub(crate) macros: macros::MacroState,
+    /// A script mutated [`Self::macros`] since the app's last
+    /// [`super::UiScript::take_macros_dirty`] drain — the save + `UPDATE_MACROS` trigger.
+    pub(crate) macros_dirty: bool,
+    /// Bumped by every seed and every mutation — the *undrained* change signal per-frame
+    /// consumers gate on ([`super::UiScript::macros_generation`]), so the drained
+    /// [`Self::macros_dirty`] edge keeps its single owner.
+    pub(crate) macros_generation: u64,
+    /// The macro-icon chooser list (full texture paths, app-built off `SpellIcon.dbc`) —
+    /// `GetNumMacroIcons`/`GetMacroIconInfo`.
+    pub(crate) macro_icons: Vec<String>,
     /// Spell ids `CastSpell` queued since the app's last [`super::UiScript::take_spell_casts`]
     /// drain.
     pub(crate) spell_casts: Vec<u32>,
@@ -280,6 +287,19 @@ pub(crate) struct Model {
     /// Form spell ids `CastShapeshiftForm` queued since the app's last
     /// [`super::UiScript::take_shapeshift_casts`] drain.
     pub(crate) shapeshift_casts: Vec<u32>,
+
+    /// The pet action bar the app pushes — the ten slots plus the two bar-wide bits the
+    /// `PetHasActionBar`/`GetPetActionsUsable`/`GetPetActionInfo` family reads ([`super::pet`],
+    /// decision 0982). Unlike the stance bar's, this state is **server-authoritative**: it is
+    /// replaced wholesale on every `SMSG_PET_SPELLS`, and is empty whenever there is no pet.
+    pub(crate) pet_bar: super::pet::PetBarState,
+    /// 1-based slot indices `CastPetAction` queued since the app's last
+    /// [`super::UiScript::take_pet_actions`] drain.
+    pub(crate) pet_actions_pressed: Vec<u32>,
+    /// 1-based slot indices `TogglePetAutocast` queued.
+    pub(crate) pet_autocast_toggles: Vec<u32>,
+    /// `PetStopAttack()` calls queued — a count, since the verb takes no argument.
+    pub(crate) pet_stop_attacks: u32,
 
     /// The per-bag container snapshot (keyed by live-API bag id, 0 = backpack) the app pushes,
     /// and the `UseContainerItem` intents it drains — the container seam ([`container`]).
@@ -702,8 +722,6 @@ impl Model {
             link_spans: HashMap::new(),
             chat_tab: false,
             region_data: HashMap::new(),
-            era_atlas: HashMap::new(),
-            era_atlas_missing: HashSet::new(),
             backdrops: HashMap::new(),
             font_objects: HashMap::new(),
             region_resolved: HashMap::new(),
@@ -750,6 +768,10 @@ impl Model {
             action_sets: Vec::new(),
             ui_errors: Vec::new(),
             spellbook: spellbook::SpellBookState::default(),
+            macros: macros::MacroState::default(),
+            macros_dirty: false,
+            macros_generation: 0,
+            macro_icons: Vec::new(),
             spell_casts: Vec::new(),
             casting: false,
             spell_stop: false,
@@ -759,6 +781,10 @@ impl Model {
             talent_learns: Vec::new(),
             shapeshift_forms: Vec::new(),
             shapeshift_casts: Vec::new(),
+            pet_bar: super::pet::PetBarState::default(),
+            pet_actions_pressed: Vec::new(),
+            pet_autocast_toggles: Vec::new(),
+            pet_stop_attacks: 0,
             containers: HashMap::new(),
             container_uses: Vec::new(),
             container_cooldowns: HashMap::new(),

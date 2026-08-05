@@ -14,10 +14,10 @@ use crate::messages::{
     EnvironmentalDamageLog, ExplorationXp, FriendEntry, FriendStatusUpdate, GossipOption,
     GroupLootInfo, GroupMemberEntry, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo,
     LootAllPassed, LootItem, LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart,
-    MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete,
-    QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems, QuestTemplate,
-    SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, TaxiMask, TradeStatus,
-    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    MonsterMoveFacing, ObjectFields, PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells,
+    QuestComplete, QuestDetails, QuestGiverList, QuestOfferReward, QuestRequestItems,
+    QuestTemplate, SpellDamageLog, SpellEnergizeLog, SpellHealLog, SpellLogMiss, TaxiMask,
+    TradeStatus, TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// Coarse entity classification, free of wire types so the app can branch on it without depending on
@@ -418,6 +418,18 @@ pub enum SessionEvent {
         success: bool,
         reason: Option<u8>,
     },
+    /// The pet action bar's whole state (`SMSG_PET_SPELLS`, decision 0982) — or its **teardown**,
+    /// which is the same event carrying a zero `pet_guid`. Server-authoritative: this is not a
+    /// delta, it is the bar, and every visible pet-bar change arrives through it.
+    PetSpells(Box<PetSpells>),
+    /// The pet's react/command state alone (`SMSG_PET_MODE`) — a state change with no bar edit
+    /// behind it (the reaction buttons' usual wire).
+    PetMode(PetMode),
+    /// A refused pet order (`SMSG_PET_ACTION_FEEDBACK`): one reason code for the red error line.
+    PetActionFeedback { reason: u8 },
+    /// The pet's cast refusal (`SMSG_PET_CAST_FAILED`) — [`Self::CastResult`]'s vocabulary, but
+    /// the caster is the pet, so it never touches OUR cast state.
+    PetCastFailed { spell_id: u32, reason: Option<u8> },
     /// An item template's display head (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`, answering our
     /// `CMSG_ITEM_QUERY_SINGLE`). Keyed by template entry; `None` = the server doesn't know it
     /// (undiscovered) — cached negative, like an unknown creature entry. Boxed for the same reason

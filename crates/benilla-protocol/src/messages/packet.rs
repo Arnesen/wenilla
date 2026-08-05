@@ -10,11 +10,11 @@ use super::{
     FriendStatusUpdate, GameObjectQueryInfo, GossipOption, GroupLootInfo, GroupMemberEntry,
     InitWorldStates, ItemInfo, ItemPushResult, JumpInfo, LevelUpInfo, LootAllPassed, LootItem,
     LootRoll, LootRollWon, LootStartRoll, MailListEntry, MirrorTimerStart, MoveMode, Object,
-    PartyMemberStatsInfo, PeriodicAuraLog, QuestComplete, QuestDetails, QuestGiverList,
-    QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate, ResurrectRequestBody,
-    SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog, SpellEnergizeLog, SpellGo,
-    SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus, TradeStatusExtended,
-    TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
+    PartyMemberStatsInfo, PeriodicAuraLog, PetMode, PetSpells, QuestComplete, QuestDetails,
+    QuestGiverList, QuestOfferReward, QuestOption, QuestRequestItems, QuestTemplate,
+    ResurrectRequestBody, SpeedKind, SpellChainTargets, SpellCooldown, SpellDamageLog,
+    SpellEnergizeLog, SpellGo, SpellHealLog, SpellLogMiss, SpellStart, TaxiMask, TradeStatus,
+    TradeStatusExtended, TrainerSpell, TransportPose, VendorItem, WhoResults, XpGain,
 };
 
 /// The **final facing** a `SMSG_MONSTER_MOVE` dictates (its `moveType`): the unit snaps to face this
@@ -387,6 +387,21 @@ pub enum ServerPacket {
         spell_id: u32,
         outcome: CastOutcome,
     },
+    /// `SMSG_PET_SPELLS` — the pet action bar's whole state, or (with a zero `pet_guid`) its
+    /// teardown (layout in [`super::pet::read_pet_spells`], decision 0982).
+    PetSpells(PetSpells),
+    /// `SMSG_PET_MODE` — the pet's react/command state alone, no bar behind it
+    /// (layout in [`super::pet::read_pet_mode`]).
+    PetMode(PetMode),
+    /// `SMSG_PET_ACTION_FEEDBACK` — one reason byte for a refused pet order.
+    PetActionFeedback {
+        reason: u8,
+    },
+    /// `SMSG_PET_CAST_FAILED` — the pet's cast refusal, in `SMSG_CAST_RESULT`'s vocabulary.
+    PetCastFailed {
+        spell_id: u32,
+        outcome: CastOutcome,
+    },
     /// `SMSG_ATTACKSTART` — a unit began melee auto-attack (including our own echo).
     AttackStart {
         attacker: u64,
@@ -429,8 +444,10 @@ pub enum ServerPacket {
     },
     /// `SMSG_CANCEL_AUTO_REPEAT` — stop our own ranged auto-repeat visual; self-only, empty body
     /// (vmangos `WorldPackets::Misc::CancelAutoRepeat`). Consumed by the local cancel funnel
-    /// (`net/apply/spells.rs::cancel_auto_repeat`, decision 0406) — dormant against vmangos,
-    /// which never sends it (zero send sites; the cast-result fail is the live stop path).
+    /// (`net/apply/spells.rs::cancel_auto_repeat`, decision 0406). vmangos DOES send it —
+    /// `SpellCaster::InterruptSpell` → `Player::SendAutoRepeatCancel`, on every player autorepeat
+    /// interrupt, target death included (corrected 2026-08-05; the earlier "zero send sites" note
+    /// here was wrong).
     CancelAutoRepeat,
     /// `SMSG_SPELL_COOLDOWN` — server-pushed cooldowns for the player or pet, by caster guid
     /// (layout + the `cooldown_ms == 0` "use Spell.dbc" fork in [`super::spellbook::read_spell_cooldown`];
@@ -1094,6 +1111,10 @@ impl ServerPacket {
             ServerPacket::LearnedSpell { .. } => "SMSG_LEARNED_SPELL".into(),
             ServerPacket::SupercededSpell { .. } => "SMSG_SUPERCEDED_SPELL".into(),
             ServerPacket::CastResult { .. } => "SMSG_CAST_RESULT".into(),
+            ServerPacket::PetSpells(_) => "SMSG_PET_SPELLS".into(),
+            ServerPacket::PetMode(_) => "SMSG_PET_MODE".into(),
+            ServerPacket::PetActionFeedback { .. } => "SMSG_PET_ACTION_FEEDBACK".into(),
+            ServerPacket::PetCastFailed { .. } => "SMSG_PET_CAST_FAILED".into(),
             ServerPacket::AttackStart { .. } => "SMSG_ATTACKSTART".into(),
             ServerPacket::AttackStop { .. } => "SMSG_ATTACKSTOP".into(),
             ServerPacket::AttackerState(_) => "SMSG_ATTACKERSTATEUPDATE".into(),

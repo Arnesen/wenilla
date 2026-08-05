@@ -1,14 +1,17 @@
-//! The shipped `assets/ui/OptionsFrame.xml` — the era-skinned options window (decision 0950:
-//! the shell; 0957: the Audio page; 0959: the Graphics page).
+//! The shipped `assets/ui/OptionsFrame.xml` — the era-shaped, 1.12-skinned options window
+//! (0950: the shell; 0957: the Audio page; 0959: the Graphics page; 0978: the 1.12-native
+//! skin — no era extraction, every texture from the MPQ chain; 0981: the 1.14 System-window
+//! dialog chrome — translucent dark ground, outline boxes, hairline dividers; 0984: the 1.14
+//! select/hover wash mechanism, the working era search; 0985: the provenance split those
+//! cite; 0989: the directed cuts — steppers and the corner X gone, the whole bar live via
+//! the engine's track-press law, the search box at the era's verbatim seat).
 //!
 //! What these guard: the file loads clean inside the real neighbourhood (Fonts + UiPanels +
 //! GameMenuFrame); the menu's Options button is the door in (menu down, options up, on the ref's
 //! own kit); Controls is the default category and the page title follows the selection; both
-//! close spellings put the window away; and — against a hand-pushed atlas table, the
-//! era_atlas_tests idiom — the selected row actually wears `options_list_active` and drops it
-//! when the selection moves. The harness pushes NO atlas table by default: `SetAtlas` is a
-//! warn-once no-op there by design (a missing extraction must not kill the UI), which is exactly
-//! why the one atlas-backed test pushes its own two members.
+//! close spellings put the window away; the selected row wears the LOCKED GOLD additive wash
+//! and hover runs the steel-blue one (the 1.14 pair); and the search reflows the live rows
+//! under category heads and restores the authored page exactly.
 //!
 //! The page tests (0957 Audio, 0959 Graphics) run against the REAL registered CVar set
 //! (`crate::cvars`): rows read the table on select, writes land on the change queue the host
@@ -16,7 +19,7 @@
 //! farclip min-anchored 60), the 1.12 master→ambience dependency greys, and Defaults walks the
 //! visible page back to the registered defaults.
 
-use benilla_ui::script::{EraAtlasEntry, SoundRequest, UiScript};
+use benilla_ui::script::{QuadContent, SoundRequest, UiScript};
 
 /// The window's real neighbourhood, in the manifest's own order (options before the menu — the
 /// game_menu_tests::harness_with idiom, minus the extras this file never needs).
@@ -24,7 +27,7 @@ fn harness() -> UiScript {
     harness_on(UiScript::new().unwrap())
 }
 
-/// Load the four files onto a prepared script — split out so the atlas test can push its table
+/// Load the four files onto a prepared script — split out so page tests can seed CVars
 /// BEFORE the XML loads, the way the app does (ui_script::setup_script).
 fn harness_on(mut s: UiScript) -> UiScript {
     s.set_screen_size(1024.0, 768.0);
@@ -147,11 +150,11 @@ fn clicking_a_row_moves_the_selection_and_the_page_title() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// Both close spellings — the red Close and the corner X — hide the window on the shared
-/// igMainMenuClose kit; a page WITHOUT rows keeps Defaults disabled (Controls has rows since
-/// 0961, so the rowless check moved to Interface).
+/// The red Close hides the window on the igMainMenuClose kit, the corner X does not EXIST
+/// (0989's directed cut), and a page WITHOUT rows keeps Defaults disabled (Controls has rows
+/// since 0961, so the rowless check moved to Interface).
 #[test]
-fn both_close_buttons_hide_the_window_and_defaults_is_disabled() {
+fn the_close_button_hides_the_window_and_defaults_is_disabled() {
     let mut s = harness();
 
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
@@ -169,70 +172,357 @@ fn both_close_buttons_hide_the_window_and_defaults_is_disabled() {
         .take_sounds()
         .contains(&SoundRequest::KitName("igMainMenuClose".into())));
 
-    s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    let _ = s.take_sounds();
-    s.run("OptionsFrameClosePanelButton:Click()").unwrap();
-    assert!(!s.eval::<bool>("return OptionsFrame:IsVisible()").unwrap());
+    // No corner X (0989's directed cut — the era HAS one; the red button and ESC are the
+    // window's exits).
     assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuClose".into())));
+        .eval::<bool>("return OptionsFrameClosePanelButton == nil")
+        .unwrap());
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The row art, against a hand-pushed two-member atlas table (real manifest numbers, the
-/// era_atlas_tests idiom): the selected row's bg wears `options_list_active` at atlas size, and
-/// a moved selection strips the old row bare (`SetTexture(nil)` → GetAtlas nil). The window's
-/// OTHER atlas members (nine-slice, divider, inner panel) stay unserved here on purpose — they
-/// drain as warn-once misses, never errors.
+/// The row wash (0984: the 1.14 OptionsListButtonTemplate mechanism, verbatim — ONE
+/// UI-QuestLogTitleHighlight quad in ADD blend, two tints): the selected row's wash draws
+/// additive in the LOCKED GOLD (1,1,0) at the era plate seat (187x21 — sized once in
+/// OptionsCategoryRow_OnLoad); a moved selection reseats the single gold quad lower; and
+/// hovering an UNSELECTED row lights the same texture in the steel-blue hover tint
+/// (.196,.388,.8) while the locked gold stands — 1.14's LockHighlight guard.
 #[test]
-fn the_selected_row_wears_the_active_atlas_and_yields_it_on_reselect() {
-    let mut s = UiScript::new().unwrap();
-    s.set_era_atlases([
-        (
-            "options_list_active".to_string(),
-            EraAtlasEntry {
-                file: "era:textures/1318750.blp".to_string(),
-                uv: [604.0 / 1024.0, 791.0 / 1024.0, 1.0 / 1024.0, 22.0 / 1024.0],
-                size: [187.0, 21.0],
-            },
-        ),
-        (
-            "options_list_hover".to_string(),
-            EraAtlasEntry {
-                file: "era:textures/1318750.blp".to_string(),
-                uv: [793.0 / 1024.0, 980.0 / 1024.0, 1.0 / 1024.0, 22.0 / 1024.0],
-                size: [187.0, 21.0],
-            },
-        ),
-    ]);
-    let s = harness_on(s);
-
+fn the_selected_row_wears_the_gold_wash_and_hover_runs_blue() {
+    let mut s = harness();
+    // Pin the window at scale 1 so row rects and the pointer share coordinates (the fit
+    // clamp stays out of the way at 1024x768: both ratios sit above 1).
+    s.run("ERA_WINDOW_SCALE = 1").unwrap();
     s.run("ShowUIPanel(OptionsFrame)").unwrap();
-    assert_eq!(
-        s.eval::<String>("return OptionsFrameCategoryListRowControlsBg:GetAtlas()")
-            .unwrap(),
-        "options_list_active",
-        "the default selection wears the active art"
-    );
-    // useAtlasSize rode along: the bg is the member's nominal 187×21, wider than the 175 row —
-    // the era's own look.
+
+    // The plate seat: the era's 187x21, authored in the row OnLoad now that no
+    // SetAtlas(name, true) sizes it.
     assert_eq!(
         s.eval::<f64>("return OptionsFrameCategoryListRowControlsBg:GetWidth()")
             .unwrap(),
         187.0
     );
+    assert_eq!(
+        s.eval::<f64>("return OptionsFrameCategoryListRowControlsBg:GetHeight()")
+            .unwrap(),
+        21.0
+    );
+
+    // Every visible category wash: rect + tint + blend.
+    let washes = |s: &mut UiScript| -> Vec<(benilla_ui::layout::Rect, [f32; 4], bool)> {
+        s.resolve();
+        s.extract()
+            .into_iter()
+            .filter_map(|q| match &q.content {
+                QuadContent::Texture {
+                    path: Some(p),
+                    color,
+                    additive,
+                    ..
+                } if p.contains("UI-QuestLogTitleHighlight") => {
+                    q.rect.map(|r| (r, color.unwrap_or([1.0; 4]), *additive))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let gold =
+        |c: &[f32; 4]| (c[0] - 1.0).abs() < 1e-3 && (c[1] - 1.0).abs() < 1e-3 && c[2].abs() < 1e-3;
+    let blue = |c: &[f32; 4]| {
+        (c[0] - 0.196).abs() < 1e-3 && (c[1] - 0.388).abs() < 1e-3 && (c[2] - 0.8).abs() < 1e-3
+    };
+
+    let before = washes(&mut s);
+    assert_eq!(
+        before.len(),
+        1,
+        "exactly one wash shows: the locked selection"
+    );
+    assert!(before[0].2, "the wash draws ADD — 1.14's alphaMode");
+    assert!(gold(&before[0].1), "…in the locked gold: {:?}", before[0].1);
 
     s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    let after = washes(&mut s);
+    assert_eq!(after.len(), 1, "the wash moved, not multiplied");
+    assert!(gold(&after[0].1), "still the gold tint: {:?}", after[0].1);
     assert!(
-        s.eval::<bool>("return OptionsFrameCategoryListRowControlsBg:GetAtlas() == nil")
+        after[0].0.top < before[0].0.top,
+        "Audio sits below Controls, so the wash reseats lower (top {} -> {})",
+        before[0].0.top,
+        after[0].0.top
+    );
+
+    // Hover the now-unselected Controls row: its wash lights BLUE beside Audio's gold.
+    let (cx, cy) = {
+        let l: f32 = s
+            .eval("return OptionsFrameCategoryListRowControls:GetLeft()")
+            .unwrap();
+        let r: f32 = s
+            .eval("return OptionsFrameCategoryListRowControls:GetRight()")
+            .unwrap();
+        let t: f32 = s
+            .eval("return OptionsFrameCategoryListRowControls:GetTop()")
+            .unwrap();
+        let b: f32 = s
+            .eval("return OptionsFrameCategoryListRowControls:GetBottom()")
+            .unwrap();
+        ((l + r) * 0.5, (t + b) * 0.5)
+    };
+    s.mouse_move(cx, cy);
+    let hovered = washes(&mut s);
+    assert_eq!(
+        hovered.len(),
+        2,
+        "hover adds its wash beside the locked gold"
+    );
+    assert_eq!(hovered.iter().filter(|w| gold(&w.1)).count(), 1);
+    assert_eq!(
+        hovered.iter().filter(|w| blue(&w.1)).count(),
+        1,
+        "the hover tint is 1.14's steel-blue: {:?}",
+        hovered.iter().map(|w| w.1).collect::<Vec<_>>()
+    );
+
+    // Leaving puts the hover wash away; the lock stays.
+    s.mouse_move(5.0, 5.0);
+    let left = washes(&mut s);
+    assert_eq!(left.len(), 1);
+    assert!(gold(&left[0].1));
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// Search (0984: the era SettingsPanel mechanism transcribed): typing reflows the LIVE
+/// matching rows under a clickable category head — a matched CHILD pulls its parent volume
+/// row in above it (the era parentInitializer rule) — the title reads "Search Results" and
+/// Defaults hides; clearing the box lands every row back on its authored XML chain exactly
+/// (the one-layout-law pin) with the page view restored.
+#[test]
+fn search_reflows_live_rows_and_restores_the_page() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    s.resolve();
+    let authored_top: f32 = s
+        .eval("return OptionsFrameContainerBodyAudioRowMaster:GetTop()")
+        .unwrap();
+
+    s.run("OptionsFrameSearchBox:SetText(\"music\")").unwrap();
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
             .unwrap(),
-        "the old row stripped bare when the selection moved"
+        "Search Results"
+    );
+    assert!(
+        !s.eval::<bool>("return OptionsFrameContainerDefaults:IsVisible()")
+            .unwrap(),
+        "Defaults hides while the search holds the page (the era SetShown(not hasText))"
+    );
+    // One head — Audio's; the matches plus their pulled-in parent; nothing else.
+    for (frame, shown) in [
+        ("OptionsFrameContainerBodySearchHeadAudio", true),
+        ("OptionsFrameContainerBodySearchHeadControls", false),
+        ("OptionsFrameContainerBodySearchHeadGraphics", false),
+        ("OptionsFrameContainerBodyAudioRowMusic", true),
+        ("OptionsFrameContainerBodyAudioRowEnableMusic", true),
+        ("OptionsFrameContainerBodyAudioRowMaster", true), // the parent, pulled in unmatched
+        ("OptionsFrameContainerBodyAudioRowSound", false),
+        ("OptionsFrameContainerBodyAudioRowEnableAll", false),
+        ("OptionsFrameContainerBodyControlsRowAutoLoot", false),
+        ("OptionsFrameContainerBodyGraphicsRowUiScale", false),
+        ("OptionsFrameContainerBodyNoResults", false),
+    ] {
+        assert_eq!(
+            s.eval::<bool>(&format!("return {frame}:IsVisible()"))
+                .unwrap(),
+            shown,
+            "{frame} shown={shown}"
+        );
+    }
+    // The chain reads head → parent → the two matches, downward.
+    s.resolve();
+    let tops: Vec<f32> = [
+        "OptionsFrameContainerBodySearchHeadAudio",
+        "OptionsFrameContainerBodyAudioRowMaster",
+        "OptionsFrameContainerBodyAudioRowMusic",
+        "OptionsFrameContainerBodyAudioRowEnableMusic",
+    ]
+    .iter()
+    .map(|f| s.eval::<f32>(&format!("return {f}:GetTop()")).unwrap())
+    .collect();
+    assert!(
+        tops[0] > tops[1] && tops[1] > tops[2] && tops[2] > tops[3],
+        "head, parent, then the matches chain downward: {tops:?}"
+    );
+    // The reflowed row is LIVE: moving the music slider writes its CVar mid-search.
+    let _ = s.take_cvar_changes();
+    s.run("OptionsFrameContainerBodyAudioRowMusicControlSlider:SetValue(0.25)")
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("MusicVolume".to_string(), "0.25".to_string())]
+    );
+
+    // Clearing restores the page view and the authored chain EXACTLY.
+    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+            .unwrap(),
+        "Audio"
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerDefaults:IsVisible()")
+        .unwrap());
+    s.resolve();
+    let restored_top: f32 = s
+        .eval("return OptionsFrameContainerBodyAudioRowMaster:GetTop()")
+        .unwrap();
+    assert!(
+        (restored_top - authored_top).abs() < 0.01,
+        "the restore law equals the authored XML chain ({restored_top} vs {authored_top})"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The era's word scoring (Blizzard_Settings.lua MatchesSearchTags + the words list): the
+/// WHOLE query is the first word, so a phrase match outscores its own tokens and chains
+/// first within the group — "master volume" seats Master above the token-matched children.
+#[test]
+fn the_phrase_match_outranks_its_words() {
+    let mut s = harness_on(audio_harness());
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameSearchBox:SetText(\"master volume\")")
+        .unwrap();
+    s.resolve();
+    let tops: Vec<f32> = [
+        "OptionsFrameContainerBodyAudioRowMaster", // phrase hit, score 12
+        "OptionsFrameContainerBodyAudioRowSound",  // "VOLUME" hits, score 5, page order
+        "OptionsFrameContainerBodyAudioRowMusic",
+        "OptionsFrameContainerBodyAudioRowAmbience",
+    ]
+    .iter()
+    .map(|f| s.eval::<f32>(&format!("return {f}:GetTop()")).unwrap())
+    .collect();
+    assert!(
+        tops[0] > tops[1] && tops[1] > tops[2] && tops[2] > tops[3],
+        "phrase first, then the word matches in page order: {tops:?}"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The era's search exits: clicking a results head (the era's jump — SelectCategory clears
+/// the box) and a no-match query (the section-header "no results" line, nothing chained).
+#[test]
+fn a_head_click_ends_the_search_and_a_miss_shows_no_results() {
+    let s = harness();
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+
+    s.run("OptionsFrameSearchBox:SetText(\"volume\")").unwrap();
+    s.run("OptionsFrameContainerBodySearchHeadAudio:Click()")
+        .unwrap();
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameSearchBox:GetText()")
+            .unwrap(),
+        "",
+        "the head click cleared the search (the era SelectCategory law)"
     );
     assert_eq!(
-        s.eval::<String>("return OptionsFrameCategoryListRowAudioBg:GetAtlas()")
+        s.eval::<String>("return OptionsFrame.selectedCategory")
             .unwrap(),
-        "options_list_active"
+        "Audio"
     );
+    assert_eq!(
+        s.eval::<String>("return OptionsFrameContainerTitle:GetText()")
+            .unwrap(),
+        "Audio"
+    );
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyAudio:IsVisible()")
+        .unwrap());
+
+    s.run("OptionsFrameSearchBox:SetText(\"flibbertigibbet\")")
+        .unwrap();
+    assert!(s
+        .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
+        .unwrap());
+    for head in ["Controls", "Audio", "Graphics"] {
+        assert!(
+            !s.eval::<bool>(&format!(
+                "return OptionsFrameContainerBodySearchHead{head}:IsVisible()"
+            ))
+            .unwrap(),
+            "no head on a miss"
+        );
+    }
+    s.run("OptionsFrameSearchBox:SetText(\"\")").unwrap();
+    assert!(!s
+        .eval::<bool>("return OptionsFrameContainerBodyNoResults:IsVisible()")
+        .unwrap());
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
+/// The bar IS the control (0989: steppers cut by the director's call; the engine's
+/// track-press law): a LeftButton press on the slider's track — off the thumb — seats the
+/// thumb under the cursor (the value jumps, the CVar write queues), the SAME press keeps
+/// dragging (0250 §5's capture began), and the stepper buttons no longer exist.
+#[test]
+fn a_track_press_seats_the_thumb_and_keeps_dragging() {
+    let mut s = harness_on(audio_harness());
+    s.set_cvar_host("MasterVolume", "0.1");
+    s.run("ERA_WINDOW_SCALE = 1").unwrap(); // pointer and rects share coordinates
+    s.run("ShowUIPanel(OptionsFrame)").unwrap();
+    s.run("OptionsFrameCategoryListRowAudio:Click()").unwrap();
+    let _ = s.take_cvar_changes();
+
+    // The steppers are gone.
+    for btn in ["Back", "Forward"] {
+        assert!(s
+            .eval::<bool>(&format!(
+                "return OptionsFrameContainerBodyAudioRowMasterControl{btn} == nil"
+            ))
+            .unwrap());
+    }
+
+    let slider = "OptionsFrameContainerBodyAudioRowMasterControlSlider";
+    s.resolve(); // seat the rects before reading them (the wash test's idiom)
+    let (l, r, t, b) = (
+        s.eval::<f32>(&format!("return {slider}:GetLeft()"))
+            .unwrap(),
+        s.eval::<f32>(&format!("return {slider}:GetRight()"))
+            .unwrap(),
+        s.eval::<f32>(&format!("return {slider}:GetTop()")).unwrap(),
+        s.eval::<f32>(&format!("return {slider}:GetBottom()"))
+            .unwrap(),
+    );
+    let cy = (t + b) * 0.5;
+    // Press 1 unit inside the RIGHT end of the track — far from the 0.1-seated thumb. The
+    // center-grab seat clamps the fraction to 1.0 there (the cursor sits inside the thumb's
+    // half-width end zone), so the value lands exactly at the max.
+    s.mouse_button(r - 1.0, cy, "LeftButton", true);
+    assert!(
+        s.eval::<bool>(&format!(
+            "return math.abs({slider}:GetValue() - 1.0) < 0.0001"
+        ))
+        .unwrap(),
+        "the press itself seats the thumb"
+    );
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("MasterVolume".to_string(), "1".to_string())]
+    );
+    // Still held: the same gesture drags on. The slider's midpoint is exactly fraction 0.5
+    // ((mid − thumb/2 − left) / (width − thumb)), on the 0.05 grid, so no snap correction.
+    s.mouse_move((l + r) * 0.5, cy);
+    assert!(
+        s.eval::<bool>(&format!(
+            "return math.abs({slider}:GetValue() - 0.5) < 0.0001"
+        ))
+        .unwrap(),
+        "the capture began at the press — the drag follows without re-grabbing"
+    );
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("MasterVolume".to_string(), "0.5".to_string())]
+    );
+    s.mouse_button((l + r) * 0.5, cy, "LeftButton", false);
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -324,17 +614,6 @@ fn a_slider_move_snaps_and_writes_the_cvar() {
         vec![("MasterVolume".to_string(), "0.45".to_string())]
     );
 
-    // The steppers move one step on the era's own kit sound.
-    let _ = s.take_sounds();
-    s.run("OptionsFrameContainerBodyAudioRowMasterControlForward:Click()")
-        .unwrap();
-    assert_eq!(
-        s.take_cvar_changes(),
-        vec![("MasterVolume".to_string(), "0.5".to_string())]
-    );
-    assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
@@ -504,14 +783,11 @@ fn the_ui_scale_slider_defers_to_the_apply_button() {
         .eval::<bool>("return OptionsFrameApplyButton:IsEnabled()")
         .unwrap());
 
-    // The stepper still moves the slider (and plays its kit) — still nothing queues.
-    let _ = s.take_sounds();
-    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlForward:Click()")
+    // A second move re-stages the pending value — still nothing queues (0989: the steppers
+    // are gone; a drag's SetValue is the remaining move).
+    s.run("OptionsFrameContainerBodyGraphicsRowUiScaleControlSlider:SetValue(0.8)")
         .unwrap();
     assert!(s.take_cvar_changes().is_empty());
-    assert!(s
-        .take_sounds()
-        .contains(&SoundRequest::KitName("igMainMenuOptionCheckBoxOn".into())));
 
     // Apply commits the LAST pending value, once, and the button goes away.
     s.run("OptionsFrameApplyButton:Click()").unwrap();

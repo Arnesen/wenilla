@@ -697,6 +697,15 @@ fn writer_loop(
                     ClientCommand::SetActionButton { button, packed } => {
                         w.set_action_button(button, packed)
                     }
+                    ClientCommand::PetAction {
+                        pet_guid,
+                        packed,
+                        target_guid,
+                    } => w.pet_action(pet_guid, packed, target_guid),
+                    ClientCommand::PetSetAction { pet_guid, entries } => {
+                        w.pet_set_action(pet_guid, &entries)
+                    }
+                    ClientCommand::PetStopAttack { pet_guid } => w.pet_stop_attack(pet_guid),
                     ClientCommand::AttackSwing { guid } => w.attack_swing(guid),
                     ClientCommand::AttackStop => w.attack_stop(),
                     ClientCommand::SetSheathed { state } => w.set_sheathed(state),

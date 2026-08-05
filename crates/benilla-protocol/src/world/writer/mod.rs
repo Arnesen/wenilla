@@ -21,6 +21,7 @@
 //! | [`spells`] | casting, the four cancels, and the aura cancel |
 //! | [`attack`] | the auto-attack toggle: melee start/stop, ranged auto-repeat stop |
 //! | [`action_bar`] | the one client-authoritative slot write |
+//! | [`pet`] | the pet bar's four intents: press, autocast, call off, drag |
 //! | [`progression`] | the talent spend |
 //! | [`skills`] | the skills pane's abandon |
 //! | [`pose`] | the client-volunteered body state: sheath, stand, the mounted flourish |
@@ -65,6 +66,7 @@ mod lifecycle;
 mod loot;
 mod mail;
 mod names;
+mod pet;
 mod pose;
 mod progression;
 mod pvp;

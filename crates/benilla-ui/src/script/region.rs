@@ -231,11 +231,9 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                     Value::String(s) if s.to_str()?.is_empty() => {
                         data.texture = None;
                         data.color = None;
-                        data.atlas = None;
                     }
                     Value::String(s) => {
                         data.texture = Some(s.to_str()?.to_string());
-                        data.atlas = None;
                     }
                     Value::Number(_) | Value::Integer(_) => {
                         data.color = Some([
@@ -250,7 +248,6 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                     Value::Nil => {
                         data.texture = None;
                         data.color = None;
-                        data.atlas = None;
                     }
                     _ => {}
                 }
@@ -274,7 +271,6 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
             data.texture = Some(path);
             data.circular = true;
             data.portrait_unit = None;
-            data.atlas = None;
             Ok(())
         })?,
     )?;
@@ -638,54 +634,6 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
                 .map(|tc| tc.edges())
                 .unwrap_or([0.0, 1.0, 0.0, 1.0]);
             Ok((l, r, t, b))
-        })?,
-    )?;
-    // SetAtlas(name[, useAtlasSize]) — the Era atlas resolve (decision 0950): one call sets the
-    // sheet texture + UV sub-rect from the app-pushed table ([`super::UiScript::set_era_atlases`],
-    // baked offline from the UiTextureAtlas DB2s by scripts/era-extract.py), and with
-    // useAtlasSize the member's nominal size too. The reference's SetAtlas hard-errors on an
-    // unknown name; ours blanks the region and records a warn-once miss instead
-    // ([`super::UiScript::take_era_atlas_misses`]) — a stale extraction must not kill the whole
-    // XML load, but it must name itself.
-    m.set(
-        "SetAtlas",
-        lua.create_function(
-            |lua, (this, name, use_size): (Table, String, Option<bool>)| {
-                let rh = region_handle_of(lua, &this)?;
-                let mut model = lua.app_data_mut::<Model>().expect("model");
-                let key = name.to_ascii_lowercase();
-                let Some(entry) = model.era_atlas.get(&key).cloned() else {
-                    model.era_atlas_missing.insert(key);
-                    let d = model.region_data.entry(rh).or_default();
-                    d.texture = None;
-                    d.atlas = None;
-                    return Ok(());
-                };
-                let d = model.region_data.entry(rh).or_default();
-                d.circular = false;
-                d.portrait_unit = None;
-                d.texture = Some(entry.file);
-                d.tex_coords = Some(TexCoords::Rect(entry.uv));
-                d.atlas = Some(key);
-                if use_size.unwrap_or(false) {
-                    let new = Some((entry.size[0], entry.size[1]));
-                    let changed = !size_bits_eq(d.size, new);
-                    d.size = new;
-                    if changed {
-                        model.touch_layout();
-                    }
-                }
-                Ok(())
-            },
-        )?,
-    )?;
-    // GetAtlas() → the member name the last SetAtlas applied (nil for an ordinary texture).
-    m.set(
-        "GetAtlas",
-        lua.create_function(|lua, this: Table| {
-            let rh = region_handle_of(lua, &this)?;
-            let model = lua.app_data_ref::<Model>().expect("model");
-            Ok(model.region_data.get(&rh).and_then(|d| d.atlas.clone()))
         })?,
     )?;
     // SetFontObject("GameFontNormal") — re-point this FontString at a named virtual Font object: its

@@ -473,6 +473,43 @@ impl Cooldowns {
         );
     }
 
+    /// One `SMSG_PET_SPELLS` cooldown entry (decision 0982) — [`Self::seed_initial`]'s pet twin,
+    /// separate because the pet block's ids are `u32` where the player's login list packs them
+    /// into `u16`, and because its category duration carries a marker bit the player's does not.
+    ///
+    /// Both remainders are what is LEFT (vmangos computes them at send, `WritePetSpellsCooldown`),
+    /// so the record starts now and runs the remainder. The category word's
+    /// [`PET_COOLDOWN_PERMANENT`] bit marks a server-re-armed cooldown; it is stripped, because
+    /// carrying it would read as a ~37-hour sweep on the button.
+    pub(crate) fn seed_pet(
+        &mut self,
+        cd: &benilla_protocol::messages::PetSpellCooldown,
+        spell: Option<&SpellDisplay>,
+        now: Instant,
+    ) {
+        use benilla_protocol::messages::PET_COOLDOWN_PERMANENT;
+        let category_ms = cd.category_cd_ms & !PET_COOLDOWN_PERMANENT;
+        self.add(
+            cd.spell_id,
+            0,
+            Timer {
+                start: now,
+                duration: Duration::from_millis(u64::from(cd.spell_cd_ms)),
+            },
+            u32::from(cd.category),
+            // The wildcard row's flag comes off the catalog when we have it — the same resolve
+            // `start_spell` does. Absent catalog ⇒ false, the non-wildcard reading.
+            spell.is_some_and(|s| s.category_wildcard),
+            Timer {
+                start: now,
+                duration: Duration::from_millis(u64::from(category_ms)),
+            },
+            false,
+            0,
+            Timer::none(now),
+        );
+    }
+
     /// The client's `IsSpellOnCooldown 0x6e1690` — an **"has an on-hold (not-yet-started)
     /// record"** predicate, NOT a general on-cooldown test (the corrected decode, wow-re
     /// `gcd-power-gate.md` §3: both legs return 1 only when the matched node's onHold byte is

@@ -701,3 +701,124 @@ fn real_zero_param_chain_slots_are_padding() {
     );
     assert!(kit.chain_proc().is_none(), "…but none of them is a beam");
 }
+
+/// [`VisualStages::merged_over_weapon`] — the `60d4d2`–`60d54c` fill, field by field: a populated
+/// slot survives, an empty one takes the weapon's, and the two the client pointedly skips
+/// (`state`/`channel`) stay empty however loud the weapon's row is.
+#[test]
+fn the_weapon_merge_fills_only_the_empty_slots() {
+    let weapon = VisualStages {
+        precast: 7,
+        cast: 164,
+        impact: 1947,
+        state: 999,   // +0x10 — never merged
+        channel: 998, // +0x14 — never merged
+        missile_gate: 1,
+        missile_model: 42,
+        missile_attach: 3,
+        missile_sound: Some(4222),
+        strike_sound: Some(1143),
+        area_gate: 1,
+        area_effect: 7,
+        area_kit: 9,
+    };
+    // Multi-Shot's real shape: its own impact + missile, both body kits empty.
+    let own = VisualStages {
+        impact: 658,
+        missile_gate: 1,
+        missile_model: 528,
+        missile_attach: 1,
+        ..Default::default()
+    };
+    let merged = own.merged_over_weapon(&weapon);
+    assert_eq!((merged.precast, merged.cast), (7, 164), "empty slots fill");
+    assert_eq!(merged.impact, 658, "a populated slot is kept");
+    assert_eq!(
+        (merged.missile_model, merged.missile_attach),
+        (528, 1),
+        "its own missile block survives — the gate was already nonzero"
+    );
+    assert_eq!(
+        merged.missile_sound,
+        Some(4222),
+        "the flight loop fills from the bow (Serpent Sting / Multi-Shot carry none)"
+    );
+    assert_eq!(
+        (merged.state, merged.channel),
+        (0, 0),
+        "state/channel are NOT in the client's fill list"
+    );
+    assert_eq!(
+        (merged.area_gate, merged.area_effect, merged.area_kit),
+        (0, 0, 0),
+        "neither is the dest-anchored block"
+    );
+
+    // The missile pair's own arm: an own row with NO missile takes the weapon's — and the gate is
+    // written as the literal 1 (`60d50b`), not the weapon's value.
+    let no_missile = VisualStages::default().merged_over_weapon(&VisualStages {
+        missile_gate: 5,
+        missile_model: 42,
+        ..Default::default()
+    });
+    assert_eq!((no_missile.missile_gate, no_missile.missile_model), (1, 42));
+    // …and a weapon with no missile never plants one.
+    let neither = VisualStages::default().merged_over_weapon(&VisualStages::default());
+    assert_eq!((neither.missile_gate, neither.missile_model), (0, 0));
+}
+
+/// The real 5875 tables, end to end: every live hunter shot leaves both body-kit slots empty, so
+/// the bow's own visual 5 is the only source of a draw/release clip — and the merge lands
+/// **LoadBow (105) → AttackBow (46)** on each while its impact + missile survive untouched. The
+/// pin behind bug B153; a data change that filled these rows would make the merge a no-op and
+/// this test would say so.
+#[test]
+fn real_hunter_shots_take_the_bows_load_and_release_clips() {
+    let data = vanilla_data_dir();
+    if !data.is_dir() {
+        eprintln!("skipping: vanilla client not present at {}", data.display());
+        return;
+    }
+    let mut chain = crate::open_chain(&data).expect("open chain");
+    let cat = load_spell_visual_catalog(&mut chain).expect("load spell visuals");
+    // `ItemDisplayInfo` col 10 for every bow (wow-re `throw-ranged-attack-anim.md`'s table).
+    let bow = *cat.stages(5).expect("the bow's substitute visual 5");
+    assert_eq!(
+        (bow.precast, bow.cast),
+        (7, 164),
+        "visual 5 = LoadBow kit 7 → AttackBow kit 164"
+    );
+    for (spell_visual, own_impact) in [
+        (3179, 276),  // Serpent Sting
+        (567, 658),   // Multi-Shot
+        (3299, 419),  // Arcane Shot
+        (3180, 419),  // Aimed / Concussive Shot
+        (3181, 2850), // Viper Sting
+        (3219, 2893), // Scorpid Sting
+        (3300, 419),  // Volley
+    ] {
+        let own = *cat.stages(spell_visual).expect("a live hunter-shot row");
+        assert_eq!(
+            (own.precast, own.cast),
+            (0, 0),
+            "visual {spell_visual} authors no body kit of its own"
+        );
+        let merged = own.merged_over_weapon(&bow);
+        assert_eq!(
+            (merged.precast, merged.cast),
+            (7, 164),
+            "visual {spell_visual} takes the bow's Load/Attack pair"
+        );
+        assert_eq!(
+            merged.impact, own_impact,
+            "visual {spell_visual} keeps its own impact kit"
+        );
+        assert_eq!(
+            merged.missile_model, own.missile_model,
+            "visual {spell_visual} keeps its own projectile"
+        );
+    }
+    // The kit ids resolve to the AnimationData rows the caster actually plays.
+    assert_eq!(cat.kit(7).and_then(|k| k.anim_id), Some(105), "LoadBow");
+    assert_eq!(cat.kit(164).and_then(|k| k.anim_id), Some(46), "AttackBow");
+}

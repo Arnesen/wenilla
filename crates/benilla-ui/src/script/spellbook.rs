@@ -106,6 +106,15 @@ impl super::UiScript {
         self.model_mut().spellbook = state;
     }
 
+    /// Read the book back — for the ONE app-side consumer that must resolve a spell name by the
+    /// same law `CastSpellByName` does: a macro's bound spell (`benilla::ui_macro`, decision
+    /// 0983). Going through the pushed book rather than re-deriving from the catalog is what
+    /// stops the bar's cooldown swirl and the macro's own cast disagreeing about which rank a
+    /// bare `/cast Fireball` means.
+    pub fn spellbook(&self) -> SpellBookState {
+        self.model_mut().spellbook.clone()
+    }
+
     /// Drain the spell ids `CastSpell` queued since the last call.
     pub fn take_spell_casts(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.model_mut().spell_casts)
@@ -149,6 +158,81 @@ fn slot_index(id: u32, book_type: &str) -> Option<usize> {
         return None;
     }
     usize::try_from(id.checked_sub(1)?).ok()
+}
+
+/// Resolve a spell **by name** against the player's book — the law behind `CastSpellByName` and,
+/// through it, `/cast` and every macro's `/cast` line (decision 0983).
+///
+/// The grammar is the one the client documents in its own help text:
+/// `MACRO_HELP_TEXT_LINE4 = "- To cast a spell from a macro use the following syntax:
+/// /cast <name> (<subtext>)"`. So:
+///
+/// - **`Fireball`** — the highest-ranked *known* Fireball. Rank order is the book's own
+///   `NameSubtext` number (`"Rank 8"` → 8) through the reference's own leading-number parse
+///   ([`super::super::…`]'s twin lives in `benilla::ui_spellbook`); an unranked subtext sorts as 0,
+///   and ties fall to the later book slot, which is the order the book itself lists ranks in.
+/// - **`Fireball(Rank 1)`** / **`Fireball (Rank 1)`** — that exact subtext, case-insensitively.
+///   Both spacings, because vanilla macros in the wild are written both ways and the reference's
+///   own help text prints the spaced form while its FrameXML never re-spaces the argument.
+///
+/// Name matching is case-insensitive and whole-name — a *prefix* rule would silently cast
+/// "Frostbolt" for "Frost" and there is nothing in the reference suggesting one. A spell the
+/// player does not know resolves to `None` and the cast simply does not happen: the reference has
+/// no error line for it either (`SlashCmdList["CAST"]` discards the binding's result).
+///
+/// Passives are skipped, matching [`pickup_spell`]'s sibling rule in `CastSpell`: a passive is
+/// permanent player state, never something a macro casts.
+pub fn resolve_spell_by_name<'a>(
+    book: &'a SpellBookState,
+    query: &str,
+) -> Option<&'a SpellSlotView> {
+    let (name, subtext) = split_subtext(query);
+    if name.is_empty() {
+        return None;
+    }
+    book.slots
+        .iter()
+        .filter(|s| !s.passive && s.name.eq_ignore_ascii_case(name))
+        .filter(|s| match subtext {
+            Some(want) => s
+                .rank
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case(want)),
+            None => true,
+        })
+        // Highest rank wins when no subtext pinned one; the book's own later slot breaks a tie.
+        .enumerate()
+        .max_by_key(|(i, s)| (rank_number(s.rank.as_deref()), *i))
+        .map(|(_, s)| s)
+}
+
+/// `Name(Subtext)` / `Name (Subtext)` → `("Name", Some("Subtext"))`; a bare name → `(name, None)`.
+/// An unclosed parenthesis is not a subtext — the whole string stays the name, so a spell whose
+/// own name holds a `(` cannot be silently truncated.
+fn split_subtext(query: &str) -> (&str, Option<&str>) {
+    let q = query.trim();
+    let Some(open) = q.find('(') else {
+        return (q, None);
+    };
+    let Some(close) = q.rfind(')') else {
+        return (q, None);
+    };
+    if close < open {
+        return (q, None);
+    }
+    (q[..open].trim(), Some(q[open + 1..close].trim()))
+}
+
+/// The rank number inside a `NameSubtext` (`"Rank 8"` → 8), by the reference's own leading-number
+/// parse: skip to the first digit, fold the digit run. A subtext with no digits (`"Racial"`,
+/// `"Passive"`) and an absent one both read 0.
+fn rank_number(subtext: Option<&str>) -> u32 {
+    subtext
+        .unwrap_or("")
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .fold(0u32, |acc, c| acc * 10 + c.to_digit(10).unwrap_or(0))
 }
 
 /// `PickupSpell(id, bookType)` — the drag/shift-click entry point (ref `SpellButton_OnClick`'s
@@ -320,6 +404,26 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     let spell_id = slot.spell_id;
                     model.spell_casts.push(spell_id);
                 }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // CastSpellByName(name [, onSelf]) — the reference binding `0x4b4ab0`, whose only two callers
+    // share the `0x4b3300` dispatcher with `CastSpell` above (wow-re ledger), so this queues onto
+    // the same `spell_casts` list and the app's one cast tail handles both. `SlashCmdList["CAST"]`
+    // is literally `CastSpellByName(msg)`, which is why `/cast` needs nothing else, and it is the
+    // command the whole macro system is built to run.
+    //
+    // `onSelf` is accepted and carried no further (benilla has no self-cast modifier yet — the
+    // same named gap `UseAction`'s third argument already has).
+    g.set(
+        "CastSpellByName",
+        lua.create_function(|lua, (name, _on_self): (String, MultiValue)| {
+            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
+            if let Some(slot) = resolve_spell_by_name(&model.spellbook, &name) {
+                let spell_id = slot.spell_id;
+                model.spell_casts.push(spell_id);
             }
             Ok(())
         })?,

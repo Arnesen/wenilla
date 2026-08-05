@@ -105,6 +105,12 @@ pub(super) enum UiFixture {
     /// defaults (hermetic capture = no config file), so the pixels move only with the window,
     /// the atlas seam, or a registered default.
     OptionsGraphics,
+    /// The Options window MID-SEARCH (decision 0984) — the results-view look instrument: the
+    /// "volume" query reflows the four live volume sliders under the clickable Audio head
+    /// (GameFontNormalLarge), title "Search Results", Defaults hidden, the clear-X shown in
+    /// the box. Hermetic like the other options fixtures; pixels move only with the window
+    /// or a registered default.
+    OptionsSearch,
     /// A **floating overhead name with the river surface behind it** — the world-text-vs-liquid
     /// draw-order instrument. A named unit stands 25 yd out in the Elwynn river (the `water-noon`
     /// camera), so its name projects onto the water *beyond* it: the exact geometry of the
@@ -156,6 +162,7 @@ pub(super) const HOUSE_EYE: [f32; 3] = [-9439.1, 71.2, 68.0];
 /// `Map.dbc` ids the golden spots stand on.
 pub(super) const MAP_AZEROTH: u32 = 0;
 pub(super) const MAP_KALIMDOR: u32 = 1;
+pub(super) const MAP_DEEPRUN_TRAM: u32 = 369;
 
 /// THE golden baseline: **three spots FRAMED BY THE DIRECTOR, each at noon and at night — six
 /// captures, and that is the whole sweep.** A Stormwind canal view, Elwynn water, and a Felwood
@@ -327,6 +334,28 @@ pub(super) const SUBJECT_INDOOR: [f32; 3] = [-9469.4, 31.9, 57.9];
 /// fixtures, the house-compass and street scenes. Capturable by name (`WOW_CAPTURE=<name>`) for
 /// debugging and look passes, but NOT part of the blessed baseline sweep.
 pub(super) const ON_DEMAND: &[Scenario] = &[
+    // ---- The Deeprun Tram's undersea tube (map 369) ----
+    // The one shipped map with NO `Light.dbc` row at all — not even the falloff-0 global that maps
+    // 0/1 carry — so its whole atmosphere has to come from the building's own MFOG (record 2:
+    // RGB(30,53,100), end 236.1 yd, start scalar 0.05; the camera's group `Subway_002` names it).
+    // A global (WDT `MODF`) WMO too, the placement shape no other scenario exercises.
+    //
+    // ⚠ **This shot currently photographs NOTHING — do not baseline it.** The building registers
+    // ("terrain: map DeeprunTram has no tiles — its world is one WMO") but no group ever reaches
+    // the frame in server-less capture, so the shot is the bare sky dome from any eye, inside the
+    // tube or between the tubes, at `WOW_CAPTURE_STABLE` 30 or 1800 alike (the 1800 run reported
+    // "never settled", i.e. it was still waiting, not still loading). The live client draws this
+    // map fine — the director's screenshots are of it — so the gap is the harness's, and it is
+    // kept here as the reproducer rather than deleted: a WMO-only map is exactly the residency
+    // shape 0688 wired and nothing has ever photographed it.
+    Scenario {
+        name: "tram-undersea",
+        map: MAP_DEEPRUN_TRAM,
+        eye: TRAM_EYE,
+        look: TRAM_LOOK,
+        minute: 720,
+        ui: None,
+    },
     // ---- Evicted from the blessed sweep by decision 0817, NOT deleted ----
     // The sweep had grown from 0632's six to twenty-one, i.e. 42 windows on the director's screen per
     // `selfcheck`, and the director cut it back to three spots x two day times. Everything below this
@@ -858,6 +887,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::OptionsGraphics),
     },
+    // The same window MID-SEARCH (0984): the "volume" results view. Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-search`.
+    Scenario {
+        name: "ui-options-search",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::OptionsSearch),
+    },
     // An overhead NAME with the river surface behind it — the world-text-vs-liquid draw-order
     // instrument (see [`UiFixture::NameWater`]). Same camera as `water-noon`, plus a named unit
     // out in the water. Run with `WOW_CAPTURE=name-water`.
@@ -870,3 +909,9 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: Some(UiFixture::NameWater),
     },
 ];
+
+/// The Deeprun Tram undersea tube — see the `tram-undersea` scenario. Raw WoW coords; the Subway
+/// WMO is the map's global `MODF` at the origin with identity rotation, so these are also its
+/// model-space coords.
+pub(super) const TRAM_EYE: [f32; 3] = [-2.44, -1250.0, -120.0];
+pub(super) const TRAM_LOOK: [f32; 3] = [-2.44, -1400.0, -118.0];

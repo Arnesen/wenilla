@@ -464,6 +464,36 @@ fn ranged_load_idle_selects_by_weapon_and_ranks_below_ready() {
     )));
 }
 
+/// The drawn ranged idle's **entry/sustain asymmetry** ([`ranged_idle_gate`], byte-verified):
+/// `0x5fd460` claims on the local auto-repeat bit `0x200` ALONE, while the any-caster
+/// weapon-visual hold `0x400` appears only in `0x5fc3f0`'s HoldBow self-loop — it sustains a hold
+/// already playing and can never start one. Folding the two into one entry gate is the defect the
+/// director reported on 2026-08-05 ("they keep aiming like they are going to shoot at something"):
+/// a single Multi-Shot sets `0x400`, and nothing in the client ever clears it on volley end.
+#[test]
+fn the_ranged_idle_is_entered_by_auto_repeat_alone_and_only_sustained_by_the_hold_bit() {
+    // ENTRY: the local `0x200`, with the ranged sheath. This is the whole claim of `0x5fd460`.
+    assert!(ranged_idle_gate(true, false, false, Some(2)));
+    // …and it needs CUR == 2: a melee-drawn or stowed unit is never in the family.
+    assert!(!ranged_idle_gate(true, false, false, Some(1)));
+    assert!(!ranged_idle_gate(true, false, false, Some(0)));
+    assert!(!ranged_idle_gate(true, false, false, None));
+
+    // `0x400` ALONE never enters — the regression under the report. This is the state of a
+    // hunter who fired one Multi-Shot and stopped, and of every REMOTE shooter (which never
+    // runs the local cast-send, so `0x200` cannot exist on it — §c's verified negative).
+    assert!(!ranged_idle_gate(false, true, false, Some(2)));
+    // Nor does "no bits at all" with the stance still drawn.
+    assert!(!ranged_idle_gate(false, false, false, Some(2)));
+
+    // SUSTAIN: mid-volley the local shooter has both bits; the hold survives a frame where the
+    // auto-repeat bit is the only one to have dropped, exactly like 109's `& 0x600` self-loop.
+    assert!(ranged_idle_gate(true, true, true, Some(2)));
+    assert!(ranged_idle_gate(false, true, true, Some(2)));
+    // …and once BOTH bits are gone (the cancel `0x6ea080` clears them together), the hold ends.
+    assert!(!ranged_idle_gate(false, false, true, Some(2)));
+}
+
 #[test]
 fn state_emote_idle_only_fills_the_bare_stand_slot() {
     // Standing, nothing else going on: the one slot the state-emote idle may fill.

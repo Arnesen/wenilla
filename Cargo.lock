@@ -595,7 +595,6 @@ dependencies = [
  "rand 0.8.6",
  "raw-window-handle",
  "serde",
- "serde_json",
  "smithay-clipboard",
  "toml",
 ]

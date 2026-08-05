@@ -85,24 +85,20 @@ impl Loader<'_> {
                     this.call(wrapper, method, file.to_string(), dbg);
                 } else if let Some(c) = children_named(t, "Color").next().map(color_of) {
                     this.call(wrapper, method, (c[0], c[1], c[2], c[3]), dbg);
-                } else if t.attr("atlas").is_some() {
-                    // `atlas=` (decision 0950, the Era dialect — same seam as a `<Layers>`
-                    // texture's): the byte-verified 1.12 table knows only file=/<Color>, so the
-                    // setter first creates the slot empty and SetAtlas below resolves it.
+                } else if t.name().is_some() {
+                    // A NAMED state texture with no art of its own — `<NormalTexture
+                    // name="$parentIcon">` on the ref's own MacroFrameButtonTemplate, whose art
+                    // arrives later through `SetTexture`. The setter is what MATERIALIZES the
+                    // slot's region, so without this call the getter below finds nothing and the
+                    // name never publishes: `getglobal("MacroButton1Icon")` would be nil and the
+                    // window's whole Update would die on it. `""` is the live API's own blank form
+                    // (`set_slot_texture`'s empty-string arm), so this creates without painting.
                     this.call(wrapper, method, String::new(), dbg);
                 }
                 // alphaMode / <Size> / <Anchors> / <TexCoords> apply to the region the setter just
                 // created — fetch it back through the matching getter and use the region methods.
                 let getter = method.replacen("Set", "Get", 1);
                 if let Ok(region) = wrapper.call_method::<Table>(getter.as_str(), ()) {
-                    if let Some(atlas) = t.attr("atlas") {
-                        this.call_region(
-                            &region,
-                            "SetAtlas",
-                            (atlas.to_string(), t.attr_bool("useAtlasSize")),
-                            dbg,
-                        );
-                    }
                     if let Some(mode) = t.attr("alphaMode") {
                         this.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
                     }
@@ -338,28 +334,11 @@ impl Loader<'_> {
                 );
             } else if let Some(c) = children_named(tt, "Color").next().map(color_of) {
                 self.call(wrapper, "SetThumbTexture", (c[0], c[1], c[2], c[3]), dbg);
-            } else if tt.attr("atlas").is_some() {
-                // `atlas=` — the Era dialect (0950), same posture as the Button state textures
-                // above: create the slot empty, resolve via SetAtlas below.
-                self.call(
-                    wrapper,
-                    "SetThumbTexture",
-                    (String::new(), layer.clone()),
-                    dbg,
-                );
             }
             // alphaMode / <Size> / <Anchors> / <TexCoords> apply to the thumb region the setter just
             // created — fetch it back through the getter and use the region methods (same shape as a
             // Button's state textures).
             if let Ok(region) = wrapper.call_method::<Table>("GetThumbTexture", ()) {
-                if let Some(atlas) = tt.attr("atlas") {
-                    self.call_region(
-                        &region,
-                        "SetAtlas",
-                        (atlas.to_string(), tt.attr_bool("useAtlasSize")),
-                        dbg,
-                    );
-                }
                 if let Some(mode) = tt.attr("alphaMode") {
                     self.call_region(&region, "SetBlendMode", mode.to_string(), dbg);
                 }

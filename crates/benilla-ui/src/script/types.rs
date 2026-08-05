@@ -296,18 +296,6 @@ pub struct ExtractedQuad {
     pub scale: f32,
 }
 
-/// One Era atlas member (decision 0950): the resolved paint `SetAtlas`/`atlas=` apply. The app
-/// builds these from `WoW-era/_extracted_ui/manifest.json` — `file` is an app-resolvable texture
-/// path (the `era:` scheme), `uv` the normalized `[left, right, top, bottom]` sub-rect
-/// ([`TexCoords::Rect`] order), `size` the member's nominal draw size in UI units (what
-/// `useAtlasSize` applies).
-#[derive(Clone, Debug, PartialEq)]
-pub struct EraAtlasEntry {
-    pub file: String,
-    pub uv: [f32; 4],
-    pub size: [f32; 2],
-}
-
 /// The visual state of a region leaf (`Texture`/`FontString`), stored beside the arena because
 /// [`crate::widget::Region`] models only structure (kind/owner/layer), not paint. See [`object`]'s
 /// `SetTexture`/`SetVertexColor`/`SetText`.
@@ -334,10 +322,6 @@ pub(crate) struct RegionData {
     pub(crate) alpha: Option<f32>,
     /// A texture path (`SetTexture("Interface\\...")`).
     pub(crate) texture: Option<String>,
-    /// The Era atlas member this texture was last set from (`SetAtlas`, decision 0950) — what
-    /// `GetAtlas` reports. Bookkeeping only: `texture`/`tex_coords`/`size` carry the resolved
-    /// paint; any later `SetTexture` clears it (an ordinary region again).
-    pub(crate) atlas: Option<String>,
     /// A color: a solid fill (`SetTexture(r,g,b,a)`) or a vertex tint (`SetVertexColor`).
     pub(crate) color: Option<[f32; 4]>,
     /// This region is a **portrait**: draw its texture masked to the inscribed circle (set by

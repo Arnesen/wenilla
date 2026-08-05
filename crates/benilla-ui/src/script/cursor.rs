@@ -40,8 +40,8 @@ pub const EQUIPMENT_BAG: i64 = -100;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// What the cursor carries — the client's payload-mode global [0xb4d900] as a typed enum
-/// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell; our Action arm is the
-/// client's bar-slot pickup; the money/macro/preview arms stay unbuilt). One transition seam for
+/// (wow-re cursor-dragdrop-payload.md §1: 1 = live item, 3 = spell, **8 = macro**; our Action arm
+/// is the client's bar-slot pickup; the money/preview arms stay unbuilt). One transition seam for
 /// every surface, so sounds, CURSOR_UPDATE, and lock display can't drift apart per window
 /// (decision 0216).
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +49,7 @@ pub enum CursorPayload {
     Item(CursorItem),
     Spell(CursorSpell),
     Action(CursorAction),
+    Macro(CursorMacro),
 }
 
 /// The item currently held on the cursor (`PickupContainerItem`/`SplitContainerItem`/
@@ -107,6 +108,18 @@ pub struct CursorAction {
     pub src_slot: u32,
     pub kind: u8,
     pub action: u32,
+    pub texture: Option<String>,
+}
+
+/// A macro payload ([`super::macros`]'s `PickupMacro` produces it) — the client's cursor mode
+/// **8**, whose payload global is the bare macro id (`[0xb4e2fc]`, wow-re `action-item-slot.md`'s
+/// payload table, where mode 8 is the ONE non-item/non-spell payload `PlaceAction` accepts).
+/// Unlike every other arm this one carries no source slot to swap back to: a macro lives in the
+/// macro table, not in the surface it was dragged from, so a refused place just leaves it held.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorMacro {
+    /// The 1-based macro index (1..=18 account, 19..=36 character — [`super::macros`]'s space).
+    pub index: u32,
     pub texture: Option<String>,
 }
 
@@ -181,7 +194,7 @@ pub(crate) fn clear_cursor(model: &mut Model) {
             queue_cursor_update(model);
             queue_lock_changed(model, item.bag, item.slot);
         }
-        Some(CursorPayload::Spell(_) | CursorPayload::Action(_)) => {
+        Some(CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_)) => {
             queue_cursor_update(model);
         }
         None => {}
@@ -237,7 +250,7 @@ pub(crate) fn world_drop_click(model: &mut Model) -> bool {
             true
         }
         (
-            Some(CursorPayload::Spell(_) | CursorPayload::Action(_)),
+            Some(CursorPayload::Spell(_) | CursorPayload::Action(_) | CursorPayload::Macro(_)),
             WorldPick::Terrain | WorldPick::Nothing,
         ) => {
             clear_cursor(model);
@@ -440,6 +453,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 Some(CursorPayload::Action(a)) => Ok((
                     Value::String(lua.create_string("action")?),
                     Value::Integer(i64::from(a.src_slot)),
+                    Value::Nil,
+                    Value::Nil,
+                )),
+                // The Era `GetCursorInfo` shape for a macro: the kind word + the macro index.
+                Some(CursorPayload::Macro(m)) => Ok((
+                    Value::String(lua.create_string("macro")?),
+                    Value::Integer(i64::from(m.index)),
                     Value::Nil,
                     Value::Nil,
                 )),

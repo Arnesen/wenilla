@@ -5,7 +5,8 @@
 //!   (6603) sends `CMSG_ATTACKSWING` at the selection, or acquires the nearest enemy when there is
 //!   none; an ITEM action names an *entry*, not a position, so it must first find a copy and then
 //!   decide equip-vs-use — [`item_action_route`], the byte-verified two-stage law of decision 0666.
-//!   Macro actions are a stated gap (no macro window yet).
+//!   A MACRO action runs its body's lines through the chat-input door (`crate::ui_macro::run`,
+//!   decision 0983) — the `0x4f1460` fork of the reference's own `UseAction`.
 //! - **Set** ([`drain_action_sets`]): a queued `PickupAction`/`PlaceAction` mutation becomes one
 //!   `CMSG_SET_ACTION_BUTTON` per entry (0218 §4: the bar is client-authoritative, there is no
 //!   answer packet to lock against, and a drag-swap is two independent sends — never atomic).
@@ -15,7 +16,9 @@
 
 use bevy::prelude::*;
 
-use benilla_protocol::messages::{ActionButton, ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use benilla_protocol::messages::{
+    ActionButton, ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL,
+};
 use benilla_ui::script::UiScript;
 
 use crate::net::{ClientCommand, NetCommands};
@@ -252,9 +255,22 @@ pub(super) fn drain_action_uses(
                     );
                 }
             }
+            // The MACRO arm (`0x4e5ee0`'s `and ecx,0xbfffffff; call 0x4f1460` fork, wow-re
+            // `action-item-slot.md` §8): run the macro's body. Every line goes onto the chat-input
+            // queue — the door a typed line comes through — so `/cast`, `/target`, `/script`, the
+            // chat types and the 225 emotes all work in a macro by construction
+            // (`crate::ui_macro::run`'s module doc).
+            Some(b) if b.kind == ACTION_KIND_MACRO => {
+                if !crate::ui_macro::run_macro(&mut script, b.action) {
+                    debug!(
+                        "ui_action: macro action {action} (macro {}) is empty",
+                        b.action
+                    );
+                }
+            }
             Some(b) => {
                 debug!(
-                    "ui_action: action {action} kind {:#04x} not castable yet (macro)",
+                    "ui_action: action {action} kind {:#04x} has no use path",
                     b.kind
                 );
             }

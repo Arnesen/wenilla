@@ -125,8 +125,11 @@ pub(crate) struct Engaged;
 /// the local cast-send). A REMOTE shooter's drawn idle rides [`RangedHold`] instead. Cleared
 /// only by [`cancel_auto_repeat_local`]'s callers — the client's cancel `0x6ea080` (its `0x200`
 /// clear `0x6ea113`), reached from the cast-result fail of the cached spell, the button
-/// re-press toggle, melee attack-start, target death, the wand-only new-cast handoff, and the
-/// (vmangos-dead) `SMSG_CANCEL_AUTO_REPEAT` (wow-re `nocked-ammo-cancel.md`).
+/// re-press toggle, melee attack-start, target death, the wand-only new-cast handoff, and
+/// `SMSG_CANCEL_AUTO_REPEAT` — which vmangos DOES send (corrected 2026-08-05; see
+/// [`crate::net::apply::spells::cancel_auto_repeat`]), so against a live server that packet, not
+/// a local death watcher, is what ends a volley whose target dies (wow-re
+/// `nocked-ammo-cancel.md`).
 #[derive(Component)]
 pub(crate) struct AutoRepeatArmed;
 

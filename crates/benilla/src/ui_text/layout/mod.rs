@@ -199,7 +199,31 @@ pub(crate) fn line_advances(atlas: &mut UiFontAtlas, text: &str, font: FontSpec)
             cum[i] = cum[i - 1];
         }
     }
+    // Into DRAWN space ([`drawn_k`]): the caret/click/selection geometry these feed must land on
+    // the glyphs the 0581 rescale actually put on screen, not on the pre-rescale shaping.
+    let k = drawn_k(font.height, font_size);
+    if k != 1.0 {
+        for v in &mut cum {
+            *v *= k;
+        }
+    }
     cum
+}
+
+/// The exact-height rescale factor the DRAW applies (decision 0581, [`layout_text_quads_inner`]'s
+/// tail): a requested height between baked sizes shapes at the snapped `font_size` and scales the
+/// finished quads by `req / font_size` about the justify anchor. Every measure that hands geometry
+/// back onto the drawn glyphs — the editbox advance table, the caret cell, the row pitch — must
+/// return values in that DRAWN space, so they apply the same factor. Identity for a baked size and
+/// for `height: None` (the draw's rescale gate is `font.height`-Some too). This stopped being a
+/// theoretical case when the era-shaped windows started riding `SetScale` (0950): their frame
+/// scale multiplies into every drawn height, landing between bakes — the options search box's
+/// caret sat 28% past its own text (director, 2026-08-05; decision 0989).
+fn drawn_k(font_height: Option<f32>, font_size: f32) -> f32 {
+    match font_height {
+        Some(req) if ((req / font_size) - 1.0).abs() > 1e-3 => req / font_size,
+        _ => 1.0,
+    }
 }
 
 /// The multiline-EditBox row answer (the 2-D half of
@@ -256,7 +280,10 @@ pub(crate) fn line_rows(
     if rows.is_empty() {
         rows.push(0);
     }
-    (rows, font_size)
+    // Row PITCH in drawn space ([`drawn_k`] — vertical distances rescale with the quads). The row
+    // STARTS stay: both this wrap and the draw's break at unscaled steps against the same width,
+    // so the byte boundaries already agree.
+    (rows, font_size * drawn_k(font.height, font_size))
 }
 
 /// [`line_rows`]'s reconstruction walk for one `\n` segment: push the byte start of each wrapped
@@ -588,11 +615,14 @@ pub(crate) fn line_origin(
     let font_size = atlas.snap_for(&family, font.height.unwrap_or(DEFAULT_FONT_SIZE));
     let scale = atlas.scale;
     let step_extra = step_extra_of(font.outline);
+    // Everything below returns DRAWN-space geometry ([`drawn_k`]): the string's drawn width, the
+    // caret cell's height, and the cell top all carry the 0581 rescale the glyph quads take.
+    let k = drawn_k(font.height, font_size);
     // The line origin under justifyH (LEFT needs no width measure — the chat case).
     let x0 = match justify.h {
         JustifyH::Left => rect.min.x,
         JustifyH::Center | JustifyH::Right => {
-            let w = measure_line_width(
+            let w = k * measure_line_width(
                 &mut atlas.font_system,
                 &atlas.glyphs,
                 &attrs,
@@ -610,18 +640,25 @@ pub(crate) fn line_origin(
     };
     // The single-line block's v_offset — [`layout_text_quads_inner`]'s law with block_h = 1 line,
     // through the same ONE vertical snap ([`snap_block_top`]) so the caret/selection cell sits
-    // exactly on the drawn glyphs.
+    // exactly on the drawn glyphs — then the 0581 rescale about the same v anchor the draw
+    // scales its quads about (snap first, scale second: the draw's own order).
     let top = if rect.height() > f32::EPSILON {
         let v_offset = match justify.v {
             JustifyV::Top => 0.0,
             JustifyV::Middle => (rect.height() - font_size) * 0.5,
             JustifyV::Bottom => rect.height() - font_size,
         };
-        snap_block_top(rect.min.y + v_offset)
+        let snapped = snap_block_top(rect.min.y + v_offset);
+        let anchor_y = match justify.v {
+            JustifyV::Top => rect.min.y,
+            JustifyV::Middle => (rect.min.y + rect.max.y) * 0.5,
+            JustifyV::Bottom => rect.max.y,
+        };
+        anchor_y + (snapped - anchor_y) * k
     } else {
         rect.min.y
     };
-    (x0, top, font_size)
+    (x0, top, font_size * k)
 }
 
 /// The client's SINGLE vertical anchor snap (`anchor_justify_snap 0x5cdf70` @`0x5ce051`,
@@ -1127,6 +1164,18 @@ mod seat_tests {
         // The drawn seat = the byte law + the 1px taste nudge (decision 0351, director's call).
         assert_eq!(snap_block_top(10.5), snap_block_top_law(10.5) + 1.0);
         assert_eq!(snap_block_top(0.0), 1.0);
+    }
+
+    #[test]
+    fn the_measures_ride_the_drawn_space_factor() {
+        // [`drawn_k`] mirrors the 0581 rescale gate exactly: identity at a baked size and for
+        // height-None; the requested/snapped ratio between bakes (0989 — the era-scaled options
+        // window put every request between bakes, and the caret drifted 28% past its text).
+        assert_eq!(drawn_k(None, 8.0), 1.0);
+        assert_eq!(drawn_k(Some(8.0), 8.0), 1.0);
+        assert_eq!(drawn_k(Some(8.004), 8.0), 1.0); // inside the draw's 1e-3 gate
+        let k = drawn_k(Some(6.398), 8.203);
+        assert!((k - 6.398 / 8.203).abs() < 1e-6);
     }
 }
 

@@ -40,6 +40,7 @@ fn payload_icon(script: &benilla_ui::script::UiScript) -> Option<String> {
         CursorPayload::Item(i) => i.texture,
         CursorPayload::Spell(s) => s.texture,
         CursorPayload::Action(a) => a.texture,
+        CursorPayload::Macro(m) => m.texture,
     }
 }
 

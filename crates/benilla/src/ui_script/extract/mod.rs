@@ -594,6 +594,7 @@ pub(super) fn drive_script(
             CursorPayload::Item(i) => i.texture,
             CursorPayload::Spell(s) => s.texture,
             CursorPayload::Action(a) => a.texture,
+            CursorPayload::Macro(m) => m.texture,
         });
         if let (Some(texture), Some(pos)) = (texture, window.cursor_position()) {
             if let Some(handle) = assets

@@ -50,6 +50,36 @@ pub(crate) fn config_path() -> Option<PathBuf> {
     home().map(|h| h.join("config.toml"))
 }
 
+/// `benilla/macros/account.txt` — the account-wide macro tab (indices 1..=18; decision 0983). One
+/// file per scope rather than one file with two sections, because the two have different lifetimes:
+/// the account tab follows the install, a character tab dies with its character.
+pub(crate) fn macros_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("macros/account.txt"))
+}
+
+/// `benilla/macros/<realm>-<character>.txt` — the per-character macro tab (indices 19..=36). The
+/// reference nests these (`WTF/Account/<ACC>/<REALM>/<CHAR>/macros-cache.txt`); benilla flattens to
+/// one `macros/` folder because [`home`] is already account-scoped by the install it sits beside.
+pub(crate) fn macros_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    let key = format!("{}-{}", file_token(realm), file_token(character));
+    home().map(|h| h.join("macros").join(format!("{key}.txt")))
+}
+
+/// Make an arbitrary realm/character name safe as one path component: anything outside
+/// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
+/// escape the folder or collide with the path separator.
+fn file_token(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if t.is_empty() {
+        "unknown".into()
+    } else {
+        t
+    }
+}
+
 /// Write a state file atomically: parent dirs created, contents to `<path>.tmp`, then rename —
 /// a crash mid-write leaves the old file intact, never a truncated one. The one write path for
 /// every resident of the folder.
@@ -114,6 +144,21 @@ mod tests {
         let _d = EnvGuard::set("WOW_DATA", tmp.join("Data").to_str().unwrap());
         assert_eq!(home(), Some(tmp.join("benilla")));
         assert_eq!(config_path(), Some(tmp.join("benilla/config.toml")));
+        // The macro residents (decision 0983): one account file, one per character, and every
+        // realm/character name reduced to a safe single path component.
+        assert_eq!(
+            macros_account_path(),
+            Some(tmp.join("benilla/macros/account.txt"))
+        );
+        assert_eq!(
+            macros_character_path("Hydraxian Waterlords", "Probeone"),
+            Some(tmp.join("benilla/macros/Hydraxian_Waterlords-Probeone.txt"))
+        );
+        assert_eq!(
+            macros_character_path("../evil", "a/b"),
+            Some(tmp.join("benilla/macros/___evil-a_b.txt")),
+            "no name can escape the folder"
+        );
 
         // 1 · the explicit override wins over the install root.
         let _h2 = EnvGuard::set("BENILLA_HOME", tmp.join("elsewhere").to_str().unwrap());

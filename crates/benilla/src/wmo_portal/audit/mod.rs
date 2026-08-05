@@ -884,3 +884,52 @@ fn wmo_camera_void_audit() {
         "an eye above the terrain lid must remain OUTSIDE"
     );
 }
+
+/// **The Deeprun Tram's undersea tube — the map with no `Light.dbc` row.**
+///
+/// Map 369 carries no `Light.dbc` sphere at all (not even a falloff-0 global, unlike maps 0/1), so
+/// every scrap of its atmosphere has to come from the building: the root's MFOG. `Subway.wmo`
+/// authors four records, and the undersea stretch is record **2** — pos `(25, -1256, -117)`,
+/// radii 154/247, colour RGB(30,53,100), end 236.1 yd, start scalar 0.05. The camera's group
+/// there (`Subway_002`, flags `0x2805` ⇒ INTERIOR) names it: `fogIds = (2,0,0,0)`.
+///
+/// This pins the two links that have to hold for that fog to reach the frame — the down-ray seed
+/// claiming the tunnel group, and the selector resolving record 2 over the record-0 seed — on a
+/// **global (WDT `MODF`) WMO**, the placement shape the rest of this module's sites never exercise.
+#[test]
+#[ignore = "needs the local game data (WoW/Data); run with --ignored"]
+fn deeprun_tram_undersea_claims_its_own_mfog() {
+    let subject = load_subject(r"World\wmo\Dungeon\AZ_Subway\Subway.wmo", None);
+    let model = &subject.model;
+    // The undersea tunnel group, by its authored fog list rather than a hardcoded index.
+    let gi = 2usize;
+    let nav = &model.group_nav[gi];
+    assert_eq!(
+        nav.fog_indices,
+        [2, 0, 0, 0],
+        "g02 should name MFOG record 2"
+    );
+    assert_eq!(nav.flags & EXTERIOR, 0, "g02 should be an INTERIOR group");
+    assert!(model.fogs.len() >= 2, "4 MFOG records; no count==1 bail");
+
+    let eye = interior_standing_eye(model, gi).expect("a standing eye inside g02");
+    println!("eye_local = {eye:?}");
+    let seeds = subject.seeds(eye);
+    println!("down-ray seeds = {seeds:?}");
+    assert_eq!(
+        seeds.in_group,
+        Some(gi),
+        "the down-ray must claim the tunnel group — otherwise no MFOG ever engages"
+    );
+
+    let target = crate::wmo_portal::fog::select_wmo_fog(&model.fogs, nav.fog_indices, eye)
+        .expect("record 2 covers this eye, so a target must resolve");
+    println!("resolved MFOG target = {target:?}");
+    let rgb = target.color.map(|c| (c * 255.0).round() as i32);
+    assert_eq!(rgb, [30, 53, 100], "the undersea record's authored colour");
+    assert!(
+        (target.end - 236.1).abs() < 0.5,
+        "end {} should be the record's 236.1 yd",
+        target.end
+    );
+}

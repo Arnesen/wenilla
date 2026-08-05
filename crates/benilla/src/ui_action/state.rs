@@ -29,7 +29,7 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use benilla_formats::{SpellDisplay, SpellRange};
-use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_SPELL};
+use benilla_protocol::messages::{ACTION_KIND_ITEM, ACTION_KIND_MACRO, ACTION_KIND_SPELL};
 use benilla_ui::script::{ActionState, UiScript};
 
 use crate::cooldowns::Cooldowns;
@@ -193,6 +193,30 @@ fn resolve_range(
     Some((min, row.max + pad))
 }
 
+/// Resolve a slot's `(kind, id)` **through** a macro before any state is computed — the
+/// reference's own shape, and the reason a macro button on the bar wears its spell's cooldown
+/// swirl, usability tint, range colour and checked ring while showing its own icon.
+///
+/// Every `Is*Action`/`GetActionCooldown` binding routes through the one slot→spell resolver
+/// `0x4e5a50`, whose MACRO arm resolves the macro record and returns `[rec+0x564]` as the slot's
+/// spell id (wow-re `action-spell-icon-apis.md` §2, VERIFIED). So from here down, a macro that
+/// casts Fireball simply *is* the Fireball slot. `GetActionTexture` is the deliberate exception —
+/// its macro arm keeps the macro's own icon (`super::feed`).
+///
+/// `None` = nothing to report (a macro bound to no spell; the reference's `[rec+0x564] == 0`).
+/// Only the SPELL indirection is modelled: 1.12 has no `/use <item>` slash command, so no 1.12
+/// macro body can name an item and the resolver's item leg is unreachable from one.
+fn resolve_through_macro(
+    kind: u8,
+    action: u32,
+    bound: &crate::ui_macro::MacroBoundSpells,
+) -> Option<(u8, u32)> {
+    match kind {
+        ACTION_KIND_MACRO => bound.0.get(&action).map(|&s| (ACTION_KIND_SPELL, s)),
+        other => Some((other, action)),
+    }
+}
+
 /// Compute + diff-push every occupied slot's dynamic state, and fire the reference event edges.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)] // a Bevy system's full input set
 pub(super) fn feed_action_state(
@@ -204,12 +228,14 @@ pub(super) fn feed_action_state(
     auto_repeat: Res<AutoRepeatActive>,
     // One tuple param (Bevy's 16-SystemParam ceiling): our own cast tracking — the in-flight
     // guard, the queued on-next-swing strike, the running channel, and the awaiting-click
-    // ground targeting.
+    // ground targeting — plus the macro→spell binding the MACRO arm resolves through
+    // (decision 0983), which rides here for the same ceiling reason.
     cast_state: (
         Res<crate::ui_cast::PendingCast>,
         Res<crate::ui_cast::QueuedMeleeSpell>,
         Res<crate::ui_cast::ActiveChannel>,
         Res<super::SpellTargeting>,
+        Res<crate::ui_macro::MacroBoundSpells>,
     ),
     self_q: Query<(&ObjectStore, &Transform, Has<Engaged>, Option<&Casting>), With<SelfPlayer>>,
     selection: Res<Selection>,
@@ -241,7 +267,7 @@ pub(super) fn feed_action_state(
         memory.last_cd_trace = Some(now);
     }
 
-    let (pending, queued_melee, channel, targeting) = &cast_state;
+    let (pending, queued_melee, channel, targeting, bound) = &cast_state;
     let me = self_q.iter().next();
     let engaged = me.is_some_and(|(_, _, e, _)| e);
     let form_byte = me
@@ -266,6 +292,16 @@ pub(super) fn feed_action_state(
     for (&slot, button) in &actions.buttons {
         let action = u32::from(slot) + 1;
         let mut st = ActionState::default();
+        let Some((kind, id)) = resolve_through_macro(button.kind, button.action, bound) else {
+            // A macro that casts nothing reports nothing — the reference's `[rec+0x564] == 0`.
+            fresh.insert(action, st);
+            continue;
+        };
+        let button = &benilla_protocol::messages::ActionButton {
+            slot,
+            action: id,
+            kind,
+        };
         match button.kind {
             ACTION_KIND_SPELL => {
                 let d = spells.as_ref().and_then(|s| s.catalog.get(button.action));
@@ -367,7 +403,7 @@ pub(super) fn feed_action_state(
                     st.cooldown = info.ui_triple(anchor, ui_now);
                 }
             }
-            _ => {} // macros: everything cold until a macro window exists
+            _ => {}
         }
         // No between-generation carry: the triple holds the ABSOLUTE start, so one running
         // cooldown re-derives the same value every frame (no diff churn) and a re-arm derives a
@@ -628,6 +664,36 @@ mod tests {
         assert_eq!(
             cast_range_refusal(&d, Some(&auto_shot), 1.5, reach, None),
             None
+        );
+    }
+
+    /// A MACRO slot resolves through its bound spell for EVERY dynamic read (decision 0983) —
+    /// the `0x4e5a50` law — while an unbound macro reports nothing at all.
+    #[test]
+    fn a_macro_slot_resolves_through_its_bound_spell() {
+        use benilla_protocol::messages::ACTION_KIND_MACRO;
+
+        let mut bound = crate::ui_macro::MacroBoundSpells::default();
+        bound.0.insert(3, 133); // macro 3 casts Fireball
+
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_MACRO, 3, &bound),
+            Some((ACTION_KIND_SPELL, 133)),
+            "from here down the macro IS the Fireball slot"
+        );
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_MACRO, 4, &bound),
+            None,
+            "a macro that casts nothing has no cooldown, no range, no usability"
+        );
+        // Spell and item slots pass through untouched.
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_SPELL, 133, &bound),
+            Some((ACTION_KIND_SPELL, 133))
+        );
+        assert_eq!(
+            resolve_through_macro(ACTION_KIND_ITEM, 117, &bound),
+            Some((ACTION_KIND_ITEM, 117))
         );
     }
 

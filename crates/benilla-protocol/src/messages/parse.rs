@@ -12,9 +12,9 @@ use crate::wire::{
 
 use super::{
     action_bar, area_trigger, attack, bank, channel, chat, combat_log, death, duel, gameobject,
-    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, progression,
-    quest, social, spellbook, spells, taxi, trade, trainer, update_object, vendor, world_state,
-    Character, CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
+    gossip, group, items, loot, mail, mirror_timer, monster_move, movement, opcode, pet,
+    progression, quest, social, spellbook, spells, taxi, trade, trainer, update_object, vendor,
+    world_state, Character, CreatureQueryInfo, MoveMode, ServerPacket, SpeedKind,
 };
 
 /// Read one `SMSG_FORCE_*_SPEED_CHANGE` body — `[packed mover guid][u32 counter][f32 speed]`,
@@ -392,6 +392,15 @@ pub fn parse_server(opcode: u16, body: &[u8]) -> io::Result<ServerPacket> {
         opcode::SMSG_CAST_RESULT => {
             let (spell_id, outcome) = spells::read_cast_result(&mut r)?;
             ServerPacket::CastResult { spell_id, outcome }
+        }
+        opcode::SMSG_PET_SPELLS => ServerPacket::PetSpells(pet::read_pet_spells(&mut r)?),
+        opcode::SMSG_PET_MODE => ServerPacket::PetMode(pet::read_pet_mode(&mut r)?),
+        opcode::SMSG_PET_ACTION_FEEDBACK => ServerPacket::PetActionFeedback {
+            reason: pet::read_pet_action_feedback(&mut r)?,
+        },
+        opcode::SMSG_PET_CAST_FAILED => {
+            let (spell_id, outcome) = pet::read_pet_cast_failed(&mut r)?;
+            ServerPacket::PetCastFailed { spell_id, outcome }
         }
         opcode::SMSG_ATTACKSTART => {
             let (attacker, victim) = attack::read_attack_start(&mut r)?;

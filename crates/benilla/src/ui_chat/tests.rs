@@ -650,12 +650,43 @@ fn real_alias_table_resolves_the_shipped_commands() {
         }
     );
     assert_eq!(parse_line("/assist"), ParsedChat::Assist { name: None });
+    // The macro family (decision 0983): `/cast` (with its `/spell` alias — SLASH_CAST1-4 spell two
+    // distinct strings across four slots) runs the ref's own one-line body `CastSpellByName(msg)`;
+    // `/macro`/`/m` open the window; `/macrohelp` prints the shipped five lines.
+    assert_eq!(
+        parse_line("/cast Fireball(Rank 1)"),
+        ParsedChat::Lua {
+            body: "CastSpellByName(\"Fireball(Rank 1)\")".into()
+        }
+    );
+    assert_eq!(
+        parse_line("/spell Frostbolt"),
+        ParsedChat::Lua {
+            body: "CastSpellByName(\"Frostbolt\")".into()
+        }
+    );
+    assert_eq!(
+        parse_line("/cast"),
+        ParsedChat::Unknown,
+        "a bare /cast is the ref's own no-op (`if msg ~= \"\"`)"
+    );
+    for line in ["/macro", "/m"] {
+        assert_eq!(
+            parse_line(line),
+            ParsedChat::Lua {
+                body: "ShowMacroFrame()".into()
+            },
+            "{line}"
+        );
+    }
+    assert_eq!(parse_line("/macrohelp"), ParsedChat::MacroHelp);
     // The whole shipped surface, so a table that half-loaded fails loudly: **225 distinct emote
     // commands** over the 169 `EmotesText` names (the strings repeat — `EMOTE87_CMD1` and `_CMD2`
-    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **62 distinct
-    // aliases** across the 31 registered `SlashCmdList` indices (0886 added TARGET's `/target`
-    // `/tar` and ASSIST's `/assist` `/a` to 0881's 55; 0890 added FOLLOW's `/f` `/follow` `/fol`).
-    assert_eq!(table.counts(), (62, 225), "(slash, emote) aliases");
+    // are both "/sit" — and EMOTE27 "UNUSED" has no row, so it contributes none), and **67 distinct
+    // aliases** across the 34 registered `SlashCmdList` indices (0886 added TARGET's `/target`
+    // `/tar` and ASSIST's `/assist` `/a` to 0881's 55; 0890 added FOLLOW's `/f` `/follow` `/fol`;
+    // 0983 added CAST's `/cast` `/spell`, MACRO's `/macro` `/m`, and MACROHELP's `/macrohelp`).
+    assert_eq!(table.counts(), (67, 225), "(slash, emote) aliases");
 }
 
 // ── The send-side posture-eligibility gate (`emote_send_eligible`) — the director-verified rows

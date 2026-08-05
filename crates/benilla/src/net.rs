@@ -669,6 +669,33 @@ pub(crate) enum ClientCommand {
     /// engine's own `kind<<24 | action` word. Sent by the action drain on every queued
     /// `PickupAction`/`PlaceAction` mutation — client-authoritative, no answer packet.
     SetActionButton { button: u8, packed: u32 },
+    /// Press one pet bar slot (`CMSG_PET_ACTION`, decisions 0982/0988). `packed` is the slot's OWN
+    /// word as the server last sent it — command, reaction and spell all ride this one command,
+    /// because the server dispatches on the type byte inside the word. `target_guid` is the
+    /// player's current selection, which is what the client always sends (wow-re §10.1).
+    ///
+    /// **Nothing answers it.** Unlike [`Self::SetActionButton`], whose silence is because the
+    /// state is ours, this one is silent because the *server* simply does not reply — so the
+    /// caller has already applied the visible change locally before queueing it.
+    PetAction {
+        pet_guid: u64,
+        packed: u32,
+        target_guid: u64,
+    },
+    /// Write pet bar slots (`CMSG_PET_SET_ACTION`, decision 0988) — `(0-based position, the whole
+    /// new word)` pairs, one or two.
+    ///
+    /// **This is how the autocast toggle travels**, with one entry: the client flips bit 30 in the
+    /// slot's word and posts the result, and the server reads the direction back out of the type
+    /// byte it arrives in. `CMSG_PET_SPELL_AUTOCAST` (0x2F3) is a *different* binding's opcode —
+    /// the pet spellbook's `ToggleSpellAutocast`, which indexes the spellbook rather than the bar
+    /// and which we do not ship. The same send carries the drag when that lands.
+    PetSetAction {
+        pet_guid: u64,
+        entries: Vec<(u32, u32)>,
+    },
+    /// Call the pet off its target (`CMSG_PET_STOP_ATTACK`) — the Attack button's second press.
+    PetStopAttack { pet_guid: u64 },
     /// Start melee auto-attack on `guid` (`CMSG_ATTACKSWING`); echoed as `SMSG_ATTACKSTART`.
     AttackSwing { guid: u64 },
     /// Stop melee auto-attack (`CMSG_ATTACKSTOP`); echoed as `SMSG_ATTACKSTOP`, whose receive path

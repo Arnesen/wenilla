@@ -103,10 +103,14 @@ pub(super) fn cast_result(
         // `nocked-ammo-cancel.md`): iff the failing spellId == the cached auto-repeat spell AND
         // reason ≠ 0x17, the handler jumps into `0x6ea080` — the SAME routine the
         // SMSG_CANCEL_AUTO_REPEAT handler runs — clearing the key, the shooting-idle bits, and
-        // the nocked ammo. Against vmangos this path is the ONLY live disarm: the server never
-        // sends SMSG_CANCEL_AUTO_REPEAT (dead packet class, zero send sites); a
-        // deselect/interrupt surfaces solely as this CAST_RESULT failure
+        // the nocked ammo. A deselect/interrupt surfaces as this CAST_RESULT failure
         // (`HandleSetSelectionOpcode` → `Spell::cancel` → `SendCastResult(INTERRUPTED)`).
+        // **Correction (2026-08-05):** this is NOT the only live disarm — the long-standing note
+        // here that "vmangos never sends SMSG_CANCEL_AUTO_REPEAT (dead packet class, zero send
+        // sites)" is FALSE. `SpellCaster::InterruptSpell` (vmangos `SpellCaster.cpp:1826`) calls
+        // `Player::SendAutoRepeatCancel()` for every player autorepeat interrupt — target death
+        // included (`Unit::_UpdateAutoRepeatSpell` → `CheckCast` fails → `InterruptSpell`) — so
+        // [`cancel_auto_repeat`]'s handler is live, not dormant.
         let now = Instant::now();
         // Reason 0x17 DONT_REPORT exits the ref's handler at a bare epilogue BEFORE the GCD
         // clear and the display (`6e1ce1`/`6e1cf7 → 0x6e224f` — 0948's C4): a silent server
@@ -575,6 +579,14 @@ pub(super) fn spell_delayed(
 /// `[+0xd58] & 0x200` idle bit (0131 recorded "no clearing writer") or the hold-pose layer
 /// merely makes the ref look still is the dispatched question; the verdict corrects this
 /// if the mechanism differs.
+///
+/// **Live against vmangos, not dormant (corrected 2026-08-05).** The prior note here — "vmangos
+/// never sends this" — was wrong: `SpellCaster::InterruptSpell` (`SpellCaster.cpp:1826`) sends it
+/// on every player autorepeat interrupt, which is how **target death** stops a volley
+/// (`Unit::_UpdateAutoRepeatSpell` → `CheckCast(true)` returns dead/bad-targets →
+/// `InterruptSpell(CURRENT_AUTOREPEAT_SPELL)` → `SendAutoRepeatCancel`). Movement does NOT
+/// (`_UpdateAutoRepeatSpell` interrupts only Category 351, the wand, when moving) — Auto Shot
+/// stays armed across a run, exactly like vanilla.
 pub(super) fn cancel_auto_repeat(
     auto_repeat: &mut AutoRepeatActive,
     self_guid: &SelfGuid,
@@ -584,19 +596,19 @@ pub(super) fn cancel_auto_repeat(
 ) {
     debug!("net: cancel auto-repeat");
     // The packet thunk `0x6e99d0` funnels into the same cancel `0x6ea080` as every local
-    // trigger — including its CMSG ack (unconditional inside the routine). vmangos never sends
-    // this SMSG, so against it the arm is dormant; kept for wire fidelity.
+    // trigger — including its CMSG ack (unconditional inside the routine). Live against vmangos,
+    // not dormant: the doc block above has the send site and the target-death path to it.
     let self_e = self_guid.0.and_then(|g| index.0.get(&g)).copied();
     crate::creature_anim::cancel_auto_repeat_local(self_e, auto_repeat, commands, net);
 }
 
-/// `SMSG_SPELL_COOLDOWN` (`0x6e9460`) — server-pushed cooldowns for the player (school lockouts;
-/// the pet list has no benilla consumer yet, so a pet-guid packet for a pet we don't model is
-/// dropped like the client drops unknown guids).
+/// `SMSG_SPELL_COOLDOWN` (`0x6e9460`) — server-pushed cooldowns (school lockouts, and the pet's
+/// own list). **Which unit's store** it lands in is the caller's decision
+/// ([`super::addressed_store`]): the four cooldown packets all carry a caster guid, and resolving
+/// it in one place is what let the pet bar have real cooldowns without a second copy of this arm.
 pub(super) fn spell_cooldowns(
     caster: u64,
     pairs: Vec<(u32, u32)>,
-    self_guid: &SelfGuid,
     spells: Option<&Spells>,
     cooldowns: &mut Cooldowns,
 ) {
@@ -604,9 +616,6 @@ pub(super) fn spell_cooldowns(
         "net: spell cooldowns for {caster:#x} — {} pair(s)",
         pairs.len()
     );
-    if self_guid.0 != Some(caster) {
-        return;
-    }
     let now = Instant::now();
     for (spell_id, cooldown_ms) in pairs {
         let display = spells.and_then(|s| s.catalog.get(spell_id));
@@ -629,38 +638,24 @@ pub(super) fn item_cooldown(
 }
 
 /// `SMSG_COOLDOWN_EVENT` (`0x6e9670` → `0x6e3050(force=0)`) — start an on-hold cooldown's parked
-/// timers now (Stealth ends, Feign Death drops).
-pub(super) fn cooldown_event(
-    spell_id: u32,
-    caster: u64,
-    self_guid: &SelfGuid,
-    cooldowns: &mut Cooldowns,
-) {
+/// timers now (Stealth ends, Feign Death drops). Store chosen by [`super::addressed_store`].
+pub(super) fn cooldown_event(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown event — spell {spell_id} on {caster:#x}");
-    if self_guid.0 == Some(caster) {
-        cooldowns.cooldown_event(spell_id, Instant::now());
-    }
+    cooldowns.cooldown_event(spell_id, Instant::now());
 }
 
 /// `SMSG_CLEAR_COOLDOWN` (`0x6e9670` → `0x6e3050(force=1)`) — remove the spell's record outright.
-pub(super) fn clear_cooldown(
-    spell_id: u32,
-    caster: u64,
-    self_guid: &SelfGuid,
-    cooldowns: &mut Cooldowns,
-) {
+pub(super) fn clear_cooldown(spell_id: u32, caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: clear cooldown — spell {spell_id} on {caster:#x}");
-    if self_guid.0 == Some(caster) {
-        cooldowns.clear_spell(spell_id);
-    }
+    cooldowns.clear_spell(spell_id);
 }
 
-/// `SMSG_COOLDOWN_CHEAT` (`0x6e9730` → `0x6e9700`) — the GM reset wipes the whole list.
-pub(super) fn cooldown_cheat(caster: u64, self_guid: &SelfGuid, cooldowns: &mut Cooldowns) {
+/// `SMSG_COOLDOWN_CHEAT` (`0x6e9730` → `0x6e9700`) — the GM reset wipes the whole list. The
+/// reference's own handler wipes "the self/pet cooldown list" on a guid match, which is exactly
+/// what routing through [`super::addressed_store`] now reproduces.
+pub(super) fn cooldown_cheat(caster: u64, cooldowns: &mut Cooldowns) {
     debug!("net: cooldown cheat (wipe) for {caster:#x}");
-    if self_guid.0 == Some(caster) {
-        cooldowns.wipe();
-    }
+    cooldowns.wipe();
 }
 
 /// `MSG_CHANNEL_START` — self-only on the wire (no guid), so it goes straight to the cast bar; the
@@ -1034,10 +1029,11 @@ mod tests {
     }
 
     /// The director's stuck-shooting-idle report: click off the target during Auto Shot and the
-    /// Load/Hold stance never drops. vmangos never sends `SMSG_CANCEL_AUTO_REPEAT` (dead packet
-    /// class) — a deselect surfaces ONLY as a `SMSG_CAST_RESULT` failure for the cached
-    /// auto-repeat spell, and the client's `6e1cd9` jump into `0x6ea080` makes that the full
-    /// local cancel: the key AND the shooting idle both drop.
+    /// Load/Hold stance never drops. A deselect surfaces as a `SMSG_CAST_RESULT` failure for the
+    /// cached auto-repeat spell (vmangos `HandleSetSelectionOpcode` → `Spell::cancel` →
+    /// `SendCastResult(INTERRUPTED)`), and the client's `6e1cd9` jump into `0x6ea080` makes that
+    /// the full local cancel: the key AND the shooting idle both drop. (It is not the only live
+    /// disarm — see [`super::cancel_auto_repeat`]: vmangos does send `SMSG_CANCEL_AUTO_REPEAT`.)
     #[test]
     fn a_cast_result_fail_of_the_cached_auto_repeat_spell_disarms_the_shooting_idle() {
         use crate::creature_anim::AutoRepeatArmed;

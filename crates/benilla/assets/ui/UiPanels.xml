@@ -70,6 +70,11 @@
         -- (`UIPanelWindows["FriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }`,
         -- UIParent.lua l.29). whileDead: a corpse run is exactly when you want to whisper someone.
         UIPanelWindows["BenillaFriendsFrame"] = { area = "left", pushable = 0, whileDead = 1 }
+        -- The macro window (decision 0983, MacroFrame.xml) — the ref's own registration line
+        -- verbatim (`UIPanelWindows["MacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }`,
+        -- Blizzard_MacroUI.lua:7). whileDead is the ref's and it earns its keep: writing a macro
+        -- during a corpse run is a real thing people do.
+        UIPanelWindows["BenillaMacroFrame"] = { area = "left", pushable = 5, whileDead = 1 }
         -- The crafting window (decision 0437 phase 2, TradeSkillFrame.xml): NOT an NPC session (it
         -- opens off your own cast, TradeSkillFrame.xml's own header comment) — the ref Lua's own
         -- registration line (Blizzard_TradeSkillUI.lua:13) is `{ area = "left", pushable = 3 }`,

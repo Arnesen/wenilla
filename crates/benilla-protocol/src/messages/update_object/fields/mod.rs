@@ -36,6 +36,12 @@ const FIELD_GAMEOBJECT_LEVEL: u16 = 22;
 /// real client turns an idle unit's body to *face* this target (there is no wire facing for a
 /// stationary re-face — vmangos `SetInFront` is server-only); benilla mirrors that (`face_target`).
 const FIELD_UNIT_TARGET: u16 = 16;
+/// `UNIT_FIELD_SUMMON` (idx 8, `OBJECT_END(6) + 0x2`, a 2-field guid, PUBLIC — VERIFIED vmangos
+/// `UpdateFields_1_12_1.h:42`) — the **inverse** of [`FIELD_UNIT_SUMMONEDBY`] below: the unit this
+/// one has summoned. On our own descriptor it is the pet, and so the anchor of the `"pet"` unit
+/// token; the pet action bar reads its own guid off `SMSG_PET_SPELLS` instead, which is why the
+/// two can legitimately disagree for a beat around a summon (decision 0982).
+const FIELD_UNIT_SUMMON: u16 = 8;
 /// `UNIT_FIELD_SUMMONEDBY` (idx 12, `OBJECT_END(6) + 0x6`, a 2-field guid — vmangos
 /// `UpdateFields_1_12_1.h`) — the summoner of a pet/guardian/totem. With CREATEDBY below, the
 /// combat-text source-ownership classifier's "owned by me" test (wow-re `0x5efea0`).

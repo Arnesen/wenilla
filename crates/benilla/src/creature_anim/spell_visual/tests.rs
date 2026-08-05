@@ -338,16 +338,19 @@ fn same_frame_start_and_fail_leave_no_hold() {
     assert_eq!(hold(&app, unit), None, "the failed cast's hold is released");
 }
 
-/// The ranged weapon-visual fallback (`0x60d450`, wow-re `throw-ranged-attack-anim.md`, decision
-/// 0370), on [`super::resolve_stages`] directly: a RANGED-attribute spell (`Attributes & 0x2`)
-/// whose own visual is null resolves through the caster's weapon visual; a non-ranged spell
-/// never does; a spell with its own visual never takes the fallback.
+/// The ranged weapon-visual MERGE (`0x60d450`, decision 0986 correcting 0370's row-level
+/// reading), on [`super::resolve_stages`] directly: a RANGED-attribute spell (`Attributes & 0x2`)
+/// fills every ZERO slot of its own row from the caster's weapon visual — so a basic shot with no
+/// row at all takes the lot, a hunter shot keeps its impact/missile and gains the body kits, and a
+/// non-ranged spell never looks.
 #[test]
-fn ranged_spells_fall_back_to_the_weapon_visual() {
+fn ranged_spells_merge_the_weapon_visual_into_their_empty_slots() {
     const THROW: u32 = 2764; // Attributes 0x410012, SpellVisual1 0 — the real Throw shape
     const FIREBALL: u32 = 133; // its own visual; the fallback must stay unused
+    const MULTI_SHOT: u32 = 2643; // RANGED, own visual 567: impact + missile, no body kits
     const NO_VIS_MELEE: u32 = 772; // no visual, no RANGED attribute — stays silent
     const WEAPON_VISUAL: u32 = 98; // the real thrown ItemDisplayInfo col-10 substitute
+    const MULTI_SHOT_VISUAL: u32 = 567;
 
     let visuals = SpellVisualCatalog::from_tables(
         HashMap::from([
@@ -363,6 +366,18 @@ fn ranged_spells_fall_back_to_the_weapon_visual() {
                 VISUAL,
                 VisualStages {
                     precast: PRECAST_KIT,
+                    ..Default::default()
+                },
+            ),
+            (
+                // The real 5875 row: impact kit 658, missile model 528, gate 1, attach 1 — and
+                // both body-kit slots empty, which is the whole of B153.
+                MULTI_SHOT_VISUAL,
+                VisualStages {
+                    impact: 658,
+                    missile_gate: 1,
+                    missile_model: 528,
+                    missile_attach: 1,
                     ..Default::default()
                 },
             ),
@@ -384,6 +399,14 @@ fn ranged_spells_fall_back_to_the_weapon_visual() {
                 SpellDisplay {
                     visual: VISUAL,
                     attributes: 0x2, // ranged bit set AND an own visual: own wins (`60d4b4`)
+                    ..Default::default()
+                },
+            ),
+            (
+                MULTI_SHOT,
+                SpellDisplay {
+                    visual: MULTI_SHOT_VISUAL,
+                    attributes: 0x10002, // the real word: RANGED set, own visual present
                     ..Default::default()
                 },
             ),
@@ -413,7 +436,24 @@ fn ranged_spells_fall_back_to_the_weapon_visual() {
         super::resolve_stages(&spells, &visuals, FIREBALL, || Some(WEAPON_VISUAL))
             .map(|s| s.precast),
         Some(PRECAST_KIT),
-        "an own visual is never displaced by the fallback"
+        "a populated slot is never displaced by the weapon's"
+    );
+    let multi = super::resolve_stages(&spells, &visuals, MULTI_SHOT, || Some(WEAPON_VISUAL))
+        .expect("Multi-Shot has its own row");
+    assert_eq!(
+        (multi.precast, multi.cast),
+        (171, 172),
+        "the empty body-kit slots fill from the weapon — the missing draw/release (B153)"
+    );
+    assert_eq!(
+        (multi.impact, multi.missile_model, multi.missile_attach),
+        (658, 528, 1),
+        "its own impact + missile block survives the merge untouched"
+    );
+    assert_eq!(
+        super::resolve_stages(&spells, &visuals, MULTI_SHOT, || None).map(|s| (s.cast, s.impact)),
+        Some((0, 658)),
+        "no ranged weapon equipped → the own row stands alone, unfilled"
     );
     assert!(
         super::resolve_stages(&spells, &visuals, NO_VIS_MELEE, || Some(WEAPON_VISUAL)).is_none(),

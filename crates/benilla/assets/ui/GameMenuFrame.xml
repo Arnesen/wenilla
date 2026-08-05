@@ -4,6 +4,16 @@
         outermost layer: until now ESC's chain ran out of things to close and did nothing, and the
         Main Menu micro button was drawn but dead (MicroMenu.xml's SCOPE note).
 
+        PROVENANCE (0985 — the three-source split, stated the same way in every era-shaped
+        window; OptionsFrame.xml carries the sibling block):
+        · STRUCTURE & BEHAVIOR — the 1.15 era client (wow-ui-source-era @ 1.15.9.68940): the
+          ladder shape, its groups and gaps, which entries exist (the SCOPE section below).
+          If 1.15 has the mechanism, it STAYS.
+        · CHROME MECHANISM — this window predates 1.13: the 1.12 client's OWN GameMenuFrame
+          is the chrome ground truth (the dialog backdrop, header plate, red buttons — the
+          same dialog family the 1.13/1.14 options windows kept), quoted below.
+        · ART BYTES — the 1.12 MPQ chain only; nothing later-client at runtime (0978's law).
+
         Ground truth, all quoted rather than re-derived:
         · **The frame** — ref `GameMenuFrame.xml` (patch.MPQ, extracted): 195x246, `frameStrata`
           DIALOG, the UI-DialogBox backdrop with the 11/12/12/11 insets and 32px tile/edge, the
@@ -263,7 +273,16 @@
                 <Anchors>
                     <Anchor point="TOPLEFT" relativeTo="GameMenuButtonSupport" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor>
                 </Anchors>
-                <Scripts><OnLoad>GameMenuButton_Pending(self, MACROS)</OnLoad></Scripts>
+                <!-- LIVE since decision 0983 (MacroFrame.xml). The ref's own body
+                     (GameMenuFrame.xml l.118-122): hide the menu, then ShowMacroFrame(). -->
+                <Scripts>
+                    <OnLoad>self:SetText(MACROS)</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOption")
+                        HideUIPanel(getglobal("GameMenuFrame"))
+                        ShowMacroFrame()
+                    </OnClick>
+                </Scripts>
             </Button>
 
             <!-- The three that are live. The ref's OnShow on both Logout and Quit disables the

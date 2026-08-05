@@ -365,13 +365,14 @@ pub(super) fn run(
                 // Normal gait: select, cross-fade on change, keep the rate synced each frame.
                 // The engaged standing idle: the weapon-class Ready pick (decision 0073).
                 let ready = (engaged && !moving).then(|| ready_anim(wielded.and_then(|w| w.main)));
-                // The ranged standing idle (0099 phase 5): sheath ranged + either armed
-                // bit → the ranged weapon's Load/Hold clip. `auto_repeat` is the local
-                // `0x200` (the resolver `0x5fd460`'s own gate); `ranged_hold` is the
-                // any-caster `0x400` weapon-visual hold — what puts a REMOTE shooter (an
-                // NPC archer, another hunter) in the drawn idle between shots (HoldBow
-                // sustains on `0x200|0x400`, rifle/thrown on `0x400`; the per-weapon
-                // asymmetry is folded into this one gate — no benilla-visible difference).
+                // The ranged standing idle (0099 phase 5): the byte-verified entry/sustain
+                // gate ([`select::ranged_idle_gate`]) → the ranged weapon's Load/Hold clip.
+                // ENTRY is the local `0x200` ([`auto_repeat`]) alone — the resolver
+                // `0x5fd460`'s own and only claim test; the any-caster `0x400`
+                // ([`ranged_hold`]) merely SUSTAINS a hold already on the base track
+                // (`0x5fc3f0`'s self-loop). Folding the two into one entry gate is what
+                // left a shooter permanently aiming after any single ranged spell and a
+                // remote archer permanently drawn (director-reported 2026-08-05).
                 // After one full pass of the Load clip the idle swaps to the drawn HOLD
                 // twin — nock once, then HOLD through every shot: a mid-volley fire clip
                 // returns straight to the hold, never a full re-pull (director-refuted;
@@ -382,16 +383,21 @@ pub(super) fn run(
                 // `0x200`-gated resolver) would leave a remote in plain Stand — unobserved
                 // on the ref, and the derivation rests on the LOAD-ANIM-RECOMPUTE-MODE
                 // open item; revisit if the ref's remote hunters visibly differ.
-                let ranged_load =
-                    ((auto_repeat || ranged_hold) && !moving && drv.sheath_cur == Some(2))
-                        .then(|| select::ranged_load_anim(wielded.and_then(|w| w.ranged)))
-                        .map(|id| {
-                            if drv.ranged_held {
-                                select::ranged_hold_anim(id)
-                            } else {
-                                id
-                            }
-                        });
+                let ranged_load = (!moving
+                    && select::ranged_idle_gate(
+                        auto_repeat,
+                        ranged_hold,
+                        drv.ranged_held,
+                        drv.sheath_cur,
+                    ))
+                .then(|| select::ranged_load_anim(wielded.and_then(|w| w.ranged)))
+                .map(|id| {
+                    if drv.ranged_held {
+                        select::ranged_hold_anim(id)
+                    } else {
+                        id
+                    }
+                });
                 let cands = gait_candidates(&mv, walk, ready, ranged_load);
                 // The stationary cast/channel hold pins its pose **full-body in the gait slot**
                 // (decision 0107 — the client's `[CGUnit+0xb4]` stationary-cast gate),

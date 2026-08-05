@@ -75,6 +75,18 @@ pub fn decode(packet: ServerPacket) -> Vec<SessionEvent> {
                 CastOutcome::Failed { reason } => Some(reason),
             },
         }],
+        ServerPacket::PetSpells(spells) => vec![SessionEvent::PetSpells(Box::new(spells))],
+        ServerPacket::PetMode(mode) => vec![SessionEvent::PetMode(mode)],
+        ServerPacket::PetActionFeedback { reason } => {
+            vec![SessionEvent::PetActionFeedback { reason }]
+        }
+        ServerPacket::PetCastFailed { spell_id, outcome } => vec![SessionEvent::PetCastFailed {
+            spell_id,
+            reason: match outcome {
+                CastOutcome::Ok => None,
+                CastOutcome::Failed { reason } => Some(reason),
+            },
+        }],
         ServerPacket::ItemQueryResponse { entry, info } => {
             vec![SessionEvent::ItemTemplate { entry, info }]
         }
