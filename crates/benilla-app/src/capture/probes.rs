@@ -197,16 +197,35 @@ struct ProbeKeyTap {
 }
 
 /// Press each due tap (in-world gated, like the chat probe) and release it after its hold window.
+///
+/// Both input currencies, deliberately (0997): `ButtonInput` for every held-state reader (and
+/// the binding dispatch's stuck-latch sweep, which treats "latched but not pressed" as a missed
+/// release), plus the raw [`KeyboardInput`] message the binding dispatch's press/release edges
+/// actually consume — a state-only synthetic press was invisible to the chord latcher, which
+/// would have silently killed this instrument the day the dispatch landed.
 fn fire_probe_key(
     mut probe: ResMut<ProbeKeys>,
     time: ProbeClock,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
 ) {
     if probe.taps.is_empty() || self_player.is_empty() {
         return;
     }
     let now = time.elapsed_secs();
+    let mut synth = |key: KeyCode, state: bevy::input::ButtonState| {
+        events.write(bevy::input::keyboard::KeyboardInput {
+            key_code: key,
+            logical_key: bevy::input::keyboard::Key::Unidentified(
+                bevy::input::keyboard::NativeKey::Unidentified,
+            ),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    };
     for tap in &mut probe.taps {
         if !tap.pressed && now >= tap.at {
             info!(
@@ -214,9 +233,11 @@ fn fire_probe_key(
                 tap.key, tap.hold
             );
             keys.press(tap.key);
+            synth(tap.key, bevy::input::ButtonState::Pressed);
             tap.pressed = true;
         } else if tap.pressed && !tap.released && now >= tap.at + tap.hold {
             keys.release(tap.key);
+            synth(tap.key, bevy::input::ButtonState::Released);
             tap.released = true;
         }
     }
@@ -666,6 +687,7 @@ fn drive_live_fps(
     palettes: Option<Res<crate::rig_palette::RigPalettes>>,
     mut residency: ResidencyMeter,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut key_events: MessageWriter<bevy::input::keyboard::KeyboardInput>,
     mut exit: MessageWriter<AppExit>,
     mut occlusions: MessageReader<bevy::window::WindowOccluded>,
 ) {
@@ -691,8 +713,20 @@ fn drive_live_fps(
             );
             if probe.run {
                 // A synthetic held key: `ButtonInput` persists a press until its release, and the
-                // winit feed only releases keys it saw go down, so this holds across frames.
+                // winit feed only releases keys it saw go down, so this holds across frames. The
+                // raw KeyboardInput message rides along for the binding dispatch's press edge
+                // (0997 — MOVEFORWARD latches off the event, holds off the state).
                 keys.press(KeyCode::KeyW);
+                key_events.write(bevy::input::keyboard::KeyboardInput {
+                    key_code: KeyCode::KeyW,
+                    logical_key: bevy::input::keyboard::Key::Unidentified(
+                        bevy::input::keyboard::NativeKey::Unidentified,
+                    ),
+                    state: bevy::input::ButtonState::Pressed,
+                    text: None,
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                });
             }
             probe.phase = LiveFpsPhase::Warmup(0);
         }

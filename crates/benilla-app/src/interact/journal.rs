@@ -124,9 +124,10 @@ pub(super) fn record_casts(
                     impacts: 0,
                 });
             }
-            // The struck-target edge: credit the newest launched row for this spell (the caster
-            // isn't on the message — decision 0099 phase 4's impact hand-off).
-            CastEventKind::Impact { .. } => {
+            // The arrival edges: credit the newest launched row for this spell (the caster isn't
+            // on the unit hand-off's message — decision 0099 phase 4). A ground arrival is an
+            // arrival too — a pure dest cast's only one, and the journal's proof it landed.
+            CastEventKind::Impact { .. } | CastEventKind::GroundImpact { .. } => {
                 if let Some(row) = journal
                     .records
                     .iter_mut()

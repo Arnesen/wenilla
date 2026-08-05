@@ -675,6 +675,20 @@ pub fn m2bones(chain: &mut Chain, internal_path: &str) -> Result<()> {
                     );
                 }
             }
+            // Scale keys. A bone whose ONLY channel is scale — the pulsing card a spell
+            // effect hangs off a billboard, the freezing trap's ice shard — printed nothing
+            // here at all: the header row said `S2` and no detail line followed, so "how big
+            // does this thing actually get, and in which sequence" could not be answered from
+            // the dump. Non-uniform scale is exactly the interesting case (a square card
+            // stretched into a column), so all three components print.
+            if !bk.scale.is_empty() && bk.scale.len() <= 8 {
+                let keys: Vec<String> = bk
+                    .scale
+                    .iter()
+                    .map(|(t, v)| format!("{t:.3}s ({:.3}, {:.3}, {:.3})", v[0], v[1], v[2]))
+                    .collect();
+                println!("       seq{si} (anim {}) S: {}", s.anim_id, keys.join("  "));
+            }
         }
     }
     eprintln!("{} bones", m.bones.len());

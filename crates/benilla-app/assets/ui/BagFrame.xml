@@ -725,16 +725,20 @@
         -- plate opens toward screen center off a bottom-right button), NOT at the default corner.
         --
         -- ref MainMenuBarBackpackButton OnEnter (ref-MainMenuBarBagButtons.xml l.91-99). The ref
-        -- appends the live TOGGLEBACKPACK key with GameTooltip:AppendText; this engine has neither
-        -- GetBindingKey nor AppendText, so the suffix is concatenated from the one bare-key binding
-        -- we actually ship (ui_script/input.rs `bare_key_binding`: KeyB) — MicroMenu.xml's own shape
-        -- for the same problem, and the rendered line is identical.
+        -- appends the live binding key with GameTooltip:AppendText; ours concatenates the same
+        -- suffix from a LIVE GetBindingKey read since 0997 (our one bag knob is OPENALLBAGS —
+        -- the toggle this very button runs), rendered through the Key Bindings window's display
+        -- law when it is loaded. Unbound: the bare label, the ref's own read.
         function BenillaBagToggle_OnEnter(button)
             if not GameTooltip then return end -- engine tests load file subsets
             GameTooltip:SetOwner(button, "ANCHOR_LEFT")
-            GameTooltip:SetText(
-                BACKPACK_TOOLTIP .. " " .. NORMAL_FONT_COLOR_CODE .. "(B)" .. FONT_COLOR_CODE_CLOSE,
-                1.0, 1.0, 1.0)
+            local text = BACKPACK_TOOLTIP
+            local key = GetBindingKey("OPENALLBAGS")
+            if key then
+                if KeyBindings_KeyText then key = KeyBindings_KeyText(key) end
+                text = text .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. key .. ")" .. FONT_COLOR_CODE_CLOSE
+            end
+            GameTooltip:SetText(text, 1.0, 1.0, 1.0)
         end
 
         -- ref BagSlotButton_OnEnter (ref-MainMenuBarBagButtons.lua l.86-96): the equipped bag's own

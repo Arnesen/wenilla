@@ -92,6 +92,12 @@ pub(crate) struct PetBar {
     /// different question with a different answer: a defensive pet that retaliates on its own has
     /// a target the player never ordered, and the reference does not light the Attack button for
     /// it.
+    ///
+    /// **It is not the source of `PET_ATTACK_START`/`PET_ATTACK_STOP`**, however much it reads like
+    /// one — decision 0990 made exactly that inference and it was wrong. Those ride the pet's
+    /// server-owned `UNIT_FIELD_FLAGS` bit `0x800` instead ([`feed_pet_unit`]). This latch answers
+    /// "did the player order an attack", the flag answers "is the pet fighting", and the pet's own
+    /// initiative is the gap between them.
     pub(crate) attacking: bool,
 }
 
@@ -351,8 +357,42 @@ struct PetUnitMemory {
     /// The last pet guid — `UNIT_PET`'s trigger. `None` until the first feed, so a login with a
     /// pet already out still announces it once.
     guid: Option<u64>,
-    /// The last attack-latch state — the `PET_ATTACK_START`/`PET_ATTACK_STOP` pair's trigger.
-    attacking: bool,
+    /// The pet's last `UNIT_FIELD_FLAGS & 0x800` — the `PET_ATTACK_START`/`PET_ATTACK_STOP` pair's
+    /// trigger. `None` until the first resolved pet, so a login with a pet already fighting
+    /// announces it once instead of reading as a transition from "calm".
+    in_combat: Option<bool>,
+}
+
+/// `UNIT_FIELD_FLAGS` bit `0x800` — the **pet-in-combat** flag, and the whole trigger for
+/// `PET_ATTACK_START`/`PET_ATTACK_STOP` (`0x5ff75e test ah,8`, wow-re
+/// `object-layer/scratch/pet-command-validators.md` §4).
+///
+/// Server-owned and server-written: nothing client-side sets it, which is exactly why it — and not
+/// the local click latch — is what the reference watches.
+const UNIT_FLAG_PET_IN_COMBAT: u32 = 0x0000_0800;
+
+/// **The unit behind [`PetBar`]'s cached guid, plus our own identity** — the one lookup both pet
+/// systems need and neither owns.
+///
+/// It exists because the client's two newest pet answers are both *about the pet's own
+/// descriptor* rather than about the bar: the `PET_ATTACK_*` edge reads the pet's
+/// `UNIT_FIELD_FLAGS`, and the ATTACK order's validator reads the pet's whole eligibility. Both
+/// also need the active player's guid, because both test **ownership** before they trust what they
+/// read (`0x5ff780` and `0x612e33`).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct PetUnit<'w, 's> {
+    index: Res<'w, GuidIndex>,
+    stores: Query<'w, 's, &'static ObjectStore>,
+    self_guid: Res<'w, crate::net::SelfGuid>,
+}
+
+impl PetUnit<'_, '_> {
+    /// The pet's streamed descriptor, or `None` while the bar names a guid whose object has not
+    /// arrived (or has left) — the case the reference treats as "no pet", never as "a bad pet".
+    fn store(&self, pet_guid: u64) -> Option<&ObjectStore> {
+        let e = *self.index.0.get(&pet_guid)?;
+        self.stores.get(e).ok()
+    }
 }
 
 /// Feed the **`"pet"` unit token** and the pet frame's three events (decision 0990).
@@ -372,8 +412,7 @@ struct PetUnitMemory {
 fn feed_pet_unit(
     script: Option<NonSendMut<UiScript>>,
     bar: Res<PetBar>,
-    index: Res<GuidIndex>,
-    stores: Query<&ObjectStore>,
+    pet: PetUnit,
     mut names: ResMut<NameCache>,
     commands: Res<NetCommands>,
     mut memory: Local<PetUnitMemory>,
@@ -386,9 +425,8 @@ fn feed_pet_unit(
     // reads false and the frame hides, which is honest — we have the guid but none of the fields
     // the frame draws.
     let fresh = (pet_guid != 0)
-        .then(|| index.0.get(&pet_guid))
+        .then(|| pet.store(pet_guid))
         .flatten()
-        .and_then(|&e| stores.get(e).ok())
         .map(|store| {
             let name = names.resolve(pet_guid, &commands).map(str::to_string);
             let mut s = snapshot(store, name, 0);
@@ -432,21 +470,46 @@ fn feed_pet_unit(
         script.fire_event("UNIT_PET", vec![ScriptValue::Str("player".into())]);
     }
 
-    // PET_ATTACK_START / PET_ATTACK_STOP — the pet frame's flashing `UI-Player-AttackStatus`
-    // overlay. DERIVED, not carved: the two events' own fire sites are outside the pet TU and
-    // wow-re has not pinned them, but the attack latch `[0xb714b0]` IS "the pet is attacking" and
-    // its three writers are carved exhaustively (§1, and [`PetBar::attacking`]), so its edges are
-    // the honest source. Named as derived in decision 0990 rather than claimed verified.
-    if memory.attacking != bar.attacking {
-        memory.attacking = bar.attacking;
-        script.fire_event(
-            if bar.attacking {
-                "PET_ATTACK_START"
-            } else {
-                "PET_ATTACK_STOP"
-            },
-            vec![],
-        );
+    // PET_ATTACK_START (334) / PET_ATTACK_STOP (335) — the pet frame's flashing
+    // `UI-Player-AttackStatus` overlay.
+    //
+    // **CORRECTED.** Decision 0990 derived these from the attack latch `[0xb714b0]`'s edges and
+    // said so honestly; the derivation was wrong. wow-re later carved the real fire site —
+    // `0x5ff793`/`0x5ff79a` inside `0x5ff580`, a per-field change callback registered *by field
+    // byte offset* (`0x6042e2 mov edx,0xa0`), which is why walking the call graph out of the pet
+    // TU never reached it. The trigger is the unit's own server-supplied
+    // `UNIT_FIELD_FLAGS & 0x800` **transition**, gated on the unit's owner guid being ours.
+    //
+    // The two are not the same question and they visibly diverge: the latch is a local click
+    // record with exactly three writers, so a pet that disengages on its own — its target dies, it
+    // runs out of range, it is feared off — clears the flag with no client-side call at all, and
+    // the latch-driven version would hold the frame's combat glow lit until the player pressed
+    // something. Conversely a defensive pet that retaliates unbidden raises the flag without any
+    // press, and the latch never moves.
+    //
+    // (`PetActionBarFrame`'s Attack *button* is the other mechanism and keeps the latch — it is
+    // driven by `PET_BAR_UPDATE` + `IsPetAttackActive`. Two frames, two sources, genuinely
+    // independent.)
+    let in_combat = fresh
+        .as_ref()
+        .and_then(|_| pet_combat_flag(pet.store(pet_guid)?, pet.self_guid.0));
+    if let Some(now) = in_combat {
+        if memory.in_combat != Some(now) {
+            memory.in_combat = Some(now);
+            debug!("ui_pet: pet in-combat flag → {now}");
+            script.fire_event(
+                if now {
+                    "PET_ATTACK_START"
+                } else {
+                    "PET_ATTACK_STOP"
+                },
+                vec![],
+            );
+        }
+    } else {
+        // No pet, or not ours: forget the edge rather than firing a STOP the reference never
+        // sends. `0x5ff580` is a *change* callback — a unit going away does not call it.
+        memory.in_combat = None;
     }
 }
 
@@ -478,6 +541,8 @@ fn drain_pet_actions(
     mut bar: ResMut<PetBar>,
     selection: Res<Selection>,
     commands: Res<NetCommands>,
+    pet: PetUnit,
+    mut ui_errors: ResMut<crate::ui_action::UiErrorKeys>,
 ) {
     let Some(mut script) = script else {
         return;
@@ -495,10 +560,21 @@ fn drain_pet_actions(
     }
     let target_guid = selection.guid.unwrap_or(0);
 
+    // The pet's own descriptor — the ATTACK arm's validator reads it, not ours (see below).
+    let pet_store = pet.store(pet_guid);
+
     for slot in pressed {
         let Some(entry) = slot_entry(&bar, slot) else {
             continue;
         };
+        // The ATTACK order's validator runs FIRST, and its actor is the pet — see
+        // [`commit_press`], which owns what a veto actually costs.
+        let refused = is_attack_order(entry)
+            && crate::ui_action::attack_actor_refusal(pet_store, pet.self_guid.0, &mut ui_errors);
+        if !commit_press(&mut bar, entry, refused) {
+            debug!("ui_pet: slot {slot} refused by the pet's own state — no packet");
+            continue;
+        }
         debug!(
             "ui_pet: press slot {slot} (action {} kind {:#04x}) at {target_guid:#x}",
             entry.action(),
@@ -509,7 +585,6 @@ fn drain_pet_actions(
             packed: entry.packed,
             target_guid,
         });
-        latch_press(&mut bar, entry);
     }
     for slot in toggles {
         let Some(entry) = slot_entry(&bar, slot).filter(|e| e.autocast_allowed()) else {
@@ -568,10 +643,59 @@ fn drain_pet_actions(
 /// the Attack button lit forever (`isActive`'s state compare keeps matching), blanks Follow and
 /// Stay, and survives the `PetStopAttack` that should have put it out.
 ///
-/// The latch is raised unconditionally here, where the client first clears two gates —
-/// `0x612df0` (which also picks the target, and vetoes the whole press when it refuses) and
-/// `0x5ee5a0`. Both are UNRESOLVED in wow-re's own note, so this is the all-gates-pass case and
-/// nothing else; a refused attack currently lights the button where the real client would not.
+/// Reaching here at all means the press already cleared the client's two ATTACK gates, because
+/// [`drain_pet_actions`] runs them first — so the latch is still raised unconditionally, and now
+/// that is *correct* rather than a residual. Both gates are carved
+/// (`object-layer/scratch/pet-command-validators.md`): `0x612df0` refuses on the **pet's** own
+/// state and never reaches the send, and `0x5ee5a0` re-derives the pet from the player's own
+/// descriptor. The second is structurally true whenever we hold a bar — the bar's guid *came* from
+/// the server naming us this pet's controller — so only the first is a test we can fail.
+/// What the `PET_ATTACK_*` field-change callback would see for this unit: `Some(fighting)` when
+/// the unit is **ours**, `None` when it is nobody's business of ours and no event may fire.
+///
+/// Both halves are `0x5ff580`'s, in its order: the owner test at `0x5ff780` first — CHARMEDBY when
+/// set, else SUMMONEDBY, which is *not* the fallback `0x5ee5a0` uses for the same-shaped read — and
+/// only then the flag at `0x5ff78d`. Reading the flag without the owner test would let any unit in
+/// the world flash our pet frame.
+fn pet_combat_flag(store: &ObjectStore, self_guid: Option<u64>) -> Option<bool> {
+    (store
+        .0
+        .unit_owner(benilla_protocol::OwnerFallback::SummonedBy)
+        == self_guid)
+        .then(|| store.0.unit_flags() & UNIT_FLAG_PET_IN_COMBAT != 0)
+}
+
+/// Is this press the ATTACK **order** — the one slot word that runs a validator before it sends?
+///
+/// Type 7 action 2 and nothing else. The reference's type-7 arm branches exactly twice
+/// (`cmp ecx,1; jle` then `cmp ecx,2; jne`), so DISMISS, every `action >= 4`, and both mode
+/// commands leave down paths that send unconditionally.
+fn is_attack_order(entry: PetActionEntry) -> bool {
+    entry.kind() == benilla_protocol::messages::PET_ACT_COMMAND
+        && entry.action() == PET_COMMAND_ATTACK
+}
+
+/// Commit one press against the bar and answer **whether it goes on the wire** — the composition
+/// of the gate and the latch, in one place because that composition is where the last bug lived.
+///
+/// `refused` is the shared attack-start validator's verdict on the **pet** as actor (`0x4bd40d`
+/// passes `ecx = edi`, the pet object resolved four instructions earlier). A veto costs
+/// everything: `0x4bd414 je 0x4bd4c6` jumps to the **function epilogue, not the send**, so there
+/// is no packet, no `[0xb714b0] = 1`, and no `PET_BAR_UPDATE`. The click is as if it never
+/// happened, except for the red line the validator itself raised.
+///
+/// This closes the residual decision 0998 named in its own text — *"a refused attack currently
+/// lights the button where the real client would not"* — and it is deliberately the one function
+/// that both decides and records, because 0998's bug was invisible to thirteen tests that checked
+/// the read side and the write side separately and never their join.
+fn commit_press(bar: &mut PetBar, entry: PetActionEntry, refused: bool) -> bool {
+    if refused {
+        return false;
+    }
+    latch_press(bar, entry);
+    true
+}
+
 fn latch_press(bar: &mut PetBar, entry: PetActionEntry) {
     let action = entry.action();
     match entry.kind() {
@@ -983,5 +1107,116 @@ mod tests {
         // Stay is still reachable as a mode — the command byte was never hijacked.
         latch_press(&mut bar, packed(PET_COMMAND_STAY, PET_ACT_COMMAND));
         assert_eq!(bar.spells.command_state(), PET_COMMAND_STAY);
+    }
+
+    /// **A refused ATTACK costs everything** — no packet, no latch, no light. The reference's veto
+    /// jumps to the function epilogue rather than the shared send (`0x4bd414 je 0x4bd4c6`), so a
+    /// pet that is dead, stunned, feared, confused, pacified or charmed away simply does not take
+    /// the order, and the button must not report that it did.
+    ///
+    /// This is the join decision 0998 could not test: the gate and the latch, composed.
+    #[test]
+    fn a_refused_attack_neither_sends_nor_lights_the_button() {
+        let mut bar = PetBar {
+            spells: state(PET_COMMAND_FOLLOW, PET_REACT_DEFENSIVE),
+            ..Default::default()
+        };
+        let attack = packed(PET_COMMAND_ATTACK, PET_ACT_COMMAND);
+
+        assert!(
+            !commit_press(&mut bar, attack, true),
+            "a vetoed order never reaches the wire"
+        );
+        assert!(!bar.attacking, "and never raises the latch");
+        assert!(
+            !slot_view(attack, &bar.spells, None, None, bar.attacking).active,
+            "so the button stays dark — the bug the director saw was it lighting anyway"
+        );
+        assert_eq!(
+            bar.spells.command_state(),
+            PET_COMMAND_FOLLOW,
+            "a refusal cannot move the standing command either"
+        );
+
+        // The same press with the gate clear is the ordinary attack, unchanged.
+        assert!(commit_press(&mut bar, attack, false));
+        assert!(bar.attacking);
+        assert!(slot_view(attack, &bar.spells, None, None, bar.attacking).active);
+    }
+
+    /// `PET_ATTACK_START`/`STOP` read the pet's **server-owned** in-combat flag, and only for a
+    /// unit we own — the correction to decision 0990, which derived them from the local click
+    /// latch. The owner test uses SUMMONEDBY as its fallback, which is the callback's own choice
+    /// and not the one `0x5ee5a0` makes for the same-shaped read.
+    #[test]
+    fn the_attack_events_read_the_pets_combat_flag_not_the_click_latch() {
+        const FLAGS: u16 = 46;
+        const CHARMEDBY: u16 = 10;
+        const SUMMONEDBY: u16 = 12;
+        let unit =
+            |pairs: &[(u16, u32)]| ObjectStore(benilla_protocol::ObjectFields::from_pairs(pairs));
+        let me = Some(0x77u64);
+
+        // Ours by SUMMONEDBY, fighting / not fighting.
+        let mine = |flags: u32| unit(&[(SUMMONEDBY, 0x77), (SUMMONEDBY + 1, 0), (FLAGS, flags)]);
+        assert_eq!(
+            pet_combat_flag(&mine(UNIT_FLAG_PET_IN_COMBAT), me),
+            Some(true)
+        );
+        assert_eq!(pet_combat_flag(&mine(0), me), Some(false));
+        // An unrelated flag bit is not combat — the callback tests one bit.
+        assert_eq!(pet_combat_flag(&mine(0x1000), me), Some(false));
+
+        // Somebody else's minion never fires, however hard it is fighting.
+        let theirs = unit(&[
+            (SUMMONEDBY, 0x99),
+            (SUMMONEDBY + 1, 0),
+            (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
+        ]);
+        assert_eq!(pet_combat_flag(&theirs, me), None);
+
+        // CHARMEDBY wins over SUMMONEDBY: a mob WE mind-controlled is ours even though it was
+        // summoned by nobody, and a minion charmed AWAY from us stops being ours.
+        let charmed_by_me = unit(&[
+            (CHARMEDBY, 0x77),
+            (CHARMEDBY + 1, 0),
+            (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
+        ]);
+        assert_eq!(pet_combat_flag(&charmed_by_me, me), Some(true));
+        let stolen = unit(&[
+            (CHARMEDBY, 0x99),
+            (CHARMEDBY + 1, 0),
+            (SUMMONEDBY, 0x77),
+            (SUMMONEDBY + 1, 0),
+            (FLAGS, UNIT_FLAG_PET_IN_COMBAT),
+        ]);
+        assert_eq!(pet_combat_flag(&stolen, me), None);
+    }
+
+    /// Only the ATTACK order consults the validator. The reference's type-7 arm branches exactly
+    /// twice, and every other action — the two modes, DISMISS, and anything `>= 4` — leaves down a
+    /// path that sends unconditionally. Gating them too would make a stunned pet impossible to
+    /// dismiss or to put back on Follow, which is not what the binary does.
+    #[test]
+    fn only_the_attack_order_is_gated() {
+        assert!(is_attack_order(packed(PET_COMMAND_ATTACK, PET_ACT_COMMAND)));
+        for action in [
+            PET_COMMAND_STAY,
+            PET_COMMAND_FOLLOW,
+            PET_COMMAND_DISMISS,
+            4,
+            9,
+        ] {
+            assert!(
+                !is_attack_order(packed(action, PET_ACT_COMMAND)),
+                "command {action} sends unconditionally"
+            );
+        }
+        // A REACTION slot whose action happens to equal ATTACK's 2 (that is Aggressive) is a
+        // different word entirely — the type byte decides, never the action alone.
+        assert!(!is_attack_order(packed(
+            PET_REACT_AGGRESSIVE,
+            PET_ACT_REACTION
+        )));
     }
 }

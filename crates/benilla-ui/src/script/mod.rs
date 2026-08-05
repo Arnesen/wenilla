@@ -59,6 +59,7 @@ mod gossip;
 mod inspect;
 mod item_stats;
 mod item_text;
+pub mod keybind;
 mod layout;
 mod loot;
 mod loot_roll;
@@ -273,6 +274,7 @@ impl UiScript {
         death::install(&lua)?;
         aura::install(&lua)?;
         cvars::install(&lua)?;
+        keybind::install(&lua)?;
         sound::install(&lua)?;
         pointer::install(&lua)?;
         action::install(&lua)?;

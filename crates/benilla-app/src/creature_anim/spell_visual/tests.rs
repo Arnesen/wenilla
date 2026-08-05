@@ -703,6 +703,115 @@ fn missile_spawn_defers_iff_the_cast_kit_animates() {
     );
 }
 
+/// The **location fallback** and its arrival, end to end through the router (wow-re
+/// `spell-go-dest-effect.md` §3 + `spell-visual-lifecycle.md` §Q4): a Speed>0 GO whose hit and
+/// miss lists are empty but which carries a ground point spawns one projectile aimed at the
+/// point — the flight a pure ground cast (Flare, a bomb thrown at empty dirt) shows — and that
+/// projectile's ground arrival rings `SpellVisual` field 13's kit sound **at the landing point**,
+/// not at the caster.
+#[test]
+fn a_targetless_dest_go_spawns_a_ground_missile_whose_arrival_sounds_at_the_point() {
+    const GROUND: u32 = 1543; // Flare's shape: speed>0, dest-targeted, empty hit list
+    const VISUAL: u32 = 318;
+    const AREA_KIT: u32 = 3270;
+    const BOOM: u32 = 4100;
+    let at = Vec3::new(11.0, 2.0, -3.0);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.add_message::<CastEvent>()
+        .add_message::<SpellGoTargets>()
+        .add_message::<KitPush>()
+        .add_message::<EmoteAnim>()
+        .add_message::<WoundAnim>()
+        .add_message::<SpellKitSound>()
+        .add_message::<SpellKitFx>()
+        .add_message::<MissileSpawn>()
+        .add_message::<crate::entities::dest_fx::GroundBurst>()
+        .add_message::<super::ChainProcPlay>()
+        .add_message::<SheathRequest>();
+    app.insert_resource(SpellVisuals(SpellVisualCatalog::from_tables(
+        HashMap::from([(
+            VISUAL,
+            VisualStages {
+                // Field 6 ≠ 0: the missile owns the arrival, so the GO plays no dest burst.
+                missile_gate: 1,
+                area_effect: 3021,
+                area_kit: AREA_KIT,
+                ..Default::default()
+            },
+        )]),
+        HashMap::from([(
+            AREA_KIT,
+            VisualKit {
+                sound: Some(BOOM),
+                ..Default::default()
+            },
+        )]),
+    )));
+    app.insert_resource(crate::ui_action::Spells {
+        catalog: SpellCatalog::from_displays(HashMap::from([(
+            GROUND,
+            SpellDisplay {
+                visual: VISUAL,
+                speed: 5.0,
+                ..Default::default()
+            },
+        )])),
+        ..crate::ui_action::Spells::empty_for_tests()
+    });
+    app.add_systems(Update, route_cast_visuals);
+
+    let caster = app.world_mut().spawn_empty().id();
+    app.world_mut().write_message(SpellGoTargets {
+        caster,
+        spell_id: GROUND,
+        hits: Vec::new(),
+        misses: Vec::new(),
+        dest: Some(at),
+        ammo_display_id: None,
+        seq: 1,
+    });
+    app.update();
+    let spawns: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<MissileSpawn>>()
+        .drain()
+        .collect();
+    assert_eq!(spawns.len(), 1, "one projectile at the point");
+    assert_eq!(spawns[0].ground_aim, Some(at));
+    assert!(spawns[0].targets.is_empty(), "no unit owns it");
+    assert!(
+        app.world_mut()
+            .resource_mut::<Messages<crate::entities::dest_fx::GroundBurst>>()
+            .drain()
+            .next()
+            .is_none(),
+        "field 6 ≠ 0 suppresses the GO's dest one-shot — the missile owns the arrival"
+    );
+
+    // The arrival the missile lane writes back.
+    app.world_mut().write_message(CastEvent {
+        entity: caster,
+        spell_id: GROUND,
+        kind: CastEventKind::GroundImpact { pos: at },
+        seq: 2,
+    });
+    app.update();
+    let sounds: Vec<_> = app
+        .world_mut()
+        .resource_mut::<Messages<SpellKitSound>>()
+        .drain()
+        .collect();
+    assert!(
+        matches!(
+            sounds[..],
+            [SpellKitSound::PlayAt { pos, kit_sound }] if pos == at && kit_sound == BOOM
+        ),
+        "the area kit's sound, at the landing point: {sounds:?}"
+    );
+}
+
 /// **B130's crash** — the second ever reported: a release build panicked on `insert<CastHold>`
 /// while flying at high speed through the Wetlands, applying hold commands to a unit that had
 /// despawned. Both windows are exercised here, because they fail for different reasons:

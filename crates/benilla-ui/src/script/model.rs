@@ -208,6 +208,12 @@ pub(crate) struct Model {
     /// Unknown CVar names already warned about (warn-once, the era-atlas-miss posture).
     pub(crate) cvars_warned: HashSet<String>,
 
+    /// The key-binding table (decision 0997, [`super::keybind`]) — the chord→command store the
+    /// Key Bindings window edits, plus its stored account/character sets. The CVar table's twin:
+    /// host-registered commands, Lua reads/writes synchronously, the app re-derives dispatch when
+    /// [`super::UiScript::keybinds_generation`] moves and persists on the queued save requests.
+    pub(crate) keybinds: super::keybind::KeybindState,
+
     /// The action-slot snapshot (keyed by Lua action id 1..120) + the stance page offset the app
     /// pushes, and the `UseAction` intents it drains — the action seam ([`action`]).
     pub(crate) actions: HashMap<u32, ActionSlot>,
@@ -761,6 +767,7 @@ impl Model {
             cvars: HashMap::new(),
             cvar_changes: Vec::new(),
             cvars_warned: HashSet::new(),
+            keybinds: super::keybind::KeybindState::default(),
             actions: HashMap::new(),
             action_states: HashMap::new(),
             bonus_bar_offset: 0,

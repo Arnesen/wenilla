@@ -24,7 +24,7 @@ use benilla_ui::script::UiScript;
 use crate::net::{ClientCommand, NetCommands};
 
 use super::cast_send::{CastCommit, CastLadder};
-use super::{attack_mounted_refusal, cast_target, PlayerActions, UiErrorKeys, SPELL_ATTACK};
+use super::{attack_actor_refusal, cast_target, PlayerActions, UiErrorKeys, SPELL_ATTACK};
 
 /// What clicking an ITEM action does, and to which copy — [`item_action_route`]'s verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,54 @@ pub(super) fn item_action_route(
     }
 }
 
+/// ATTACKTARGET through the binding table (0997; default T — 1.12's `AttackTarget()`): exactly
+/// the action-bar attack arm below, without the action slot — the Phase A actor refusal first
+/// ([`attack_actor_refusal`], the full `0x612df0` gate set), then the with-target attack-start
+/// (auto-draw + swing) or the no-target nearest-acquire. One law, two doors, the reference's
+/// own shape (`AttackTarget` and `UseAction`'s SPELL_ATTACK both land in `0x612df0`).
+pub(super) fn attack_target_binding(
+    binds: Res<crate::bindings::BindingsState>,
+    targeting: cast_target::CastTargeting,
+    mut acquire: MessageWriter<crate::target::AttackNearestRequest>,
+    mut ui_errors: ResMut<UiErrorKeys>,
+    mut ladder: CastLadder,
+) {
+    if !binds.fired(crate::bindings::cmd::ATTACK_TARGET) {
+        return;
+    }
+    if attack_actor_refusal(
+        targeting.self_store.iter().next(),
+        targeting.context().self_guid,
+        &mut ui_errors,
+    ) {
+        return;
+    }
+    match targeting.selection.guid {
+        Some(guid) => {
+            debug!("bindings: ATTACKTARGET swing at {guid:#x}");
+            if let Ok((e, _)) = ladder.self_player.single() {
+                ladder.sheath.write(crate::creature_anim::SheathRequest {
+                    entity: e,
+                    state: 1,
+                    ceremony: false,
+                });
+            }
+            let self_e = ladder.self_player.single().ok().map(|(e, _)| e);
+            crate::creature_anim::cancel_auto_repeat_local(
+                self_e,
+                &mut ladder.auto_repeat,
+                &mut ladder.ecs,
+                &ladder.commands,
+            );
+            let _ = ladder.commands.0.send(ClientCommand::AttackSwing { guid });
+        }
+        None => {
+            debug!("bindings: ATTACKTARGET with no target — acquiring nearest");
+            acquire.write(crate::target::AttackNearestRequest);
+        }
+    }
+}
+
 pub(super) fn drain_action_uses(
     script: Option<NonSendMut<UiScript>>,
     actions: Res<PlayerActions>,
@@ -105,10 +153,17 @@ pub(super) fn drain_action_uses(
         };
         match actions.buttons.get(&slot) {
             Some(b) if b.kind == ACTION_KIND_SPELL && b.action == SPELL_ATTACK => {
-                // The mounted attack block ([`attack_mounted_refusal`]): the ref's validator
-                // refuses BEFORE the with-target swing and before the nearest-enemy scan
-                // (`0x613039` precedes `0x6130b5`), so both arms gate here.
-                if attack_mounted_refusal(targeting.self_store.iter().next(), &mut ui_errors) {
+                // The attack-start validator's Phase A ([`attack_actor_refusal`]) — for a melee
+                // swing the actor is US. It refuses BEFORE the with-target swing and before the
+                // nearest-enemy scan (every Phase A gate precedes `0x6130b5`), so both arms gate
+                // here. Widened from mounted-only when wow-re carved the rest of `0x612df0`:
+                // stunned, pacified, fleeing, confused, charmed by somebody else, and dead now
+                // refuse the swing too, each with its own red line.
+                if attack_actor_refusal(
+                    targeting.self_store.iter().next(),
+                    targeting.context().self_guid,
+                    &mut ui_errors,
+                ) {
                     continue;
                 }
                 match selection.guid {

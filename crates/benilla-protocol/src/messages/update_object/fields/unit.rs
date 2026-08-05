@@ -4,6 +4,17 @@
 
 use super::*;
 
+/// Which field [`ObjectFields::unit_owner`] falls back to when `CHARMEDBY` is clear — the one
+/// thing the client's two owner-guid readers do differently. Named rather than defaulted because
+/// picking the wrong one is invisible until a totem or a guardian behaves like a pet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerFallback {
+    /// `UNIT_FIELD_CREATEDBY` — what `0x5ee5a0` ("resolve my own pet") uses.
+    CreatedBy,
+    /// `UNIT_FIELD_SUMMONEDBY` — what the `PET_ATTACK_*` callback `0x5ff580` uses.
+    SummonedBy,
+}
+
 impl ObjectFields {
     /// `OBJECT_FIELD_SCALE_X` — the per-object size multiplier.
     pub fn object_scale_x(&self) -> Option<f32> {
@@ -42,6 +53,25 @@ impl ObjectFields {
     /// explicit 0 — an unowned unit).
     pub fn unit_summoned_by(&self) -> Option<u64> {
         self.get_guid(FIELD_UNIT_SUMMONEDBY).filter(|&g| g != 0)
+    }
+    /// `UNIT_FIELD_CHARMEDBY` — whoever is charming this unit, or `None` when nobody is.
+    pub fn unit_charmed_by(&self) -> Option<u64> {
+        self.get_guid(FIELD_UNIT_CHARMEDBY).filter(|&g| g != 0)
+    }
+    /// The unit's **owner** as the client's own two owner-guid readers compute it:
+    /// `charmedBy` when set, else the caller's fallback field.
+    ///
+    /// Both readers are `(charmedBy != 0) ? charmedBy : <fallback>` and **they disagree on the
+    /// fallback**, which is why this takes it rather than picking one. `0x5ee5a0` — "resolve my own
+    /// pet" — falls back to `CREATEDBY` (`0x5ee62f`: `fields+0x10` else `fields+0x20`); the
+    /// `PET_ATTACK_*` field-change callback `0x5ff580` falls back to `SUMMONEDBY` (`0x5ff769`:
+    /// `+0x10` else `+0x18`). Reading one where the reference reads the other silently changes
+    /// which units count as yours (wow-re `object-layer/scratch/pet-command-validators.md` §1, §4).
+    pub fn unit_owner(&self, fallback: OwnerFallback) -> Option<u64> {
+        self.unit_charmed_by().or_else(|| match fallback {
+            OwnerFallback::CreatedBy => self.unit_created_by(),
+            OwnerFallback::SummonedBy => self.unit_summoned_by(),
+        })
     }
     /// `UNIT_FIELD_CREATEDBY` — the creator's guid (totems and created objects), or `None`.
     pub fn unit_created_by(&self) -> Option<u64> {

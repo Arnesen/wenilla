@@ -60,10 +60,19 @@
         -- CooldownFrame_SetTimer moved to Cooldown.xml (the ref's own file split) — the bag
         -- slots share it, so it loads before both consumers.
 
-        -- The static key-binding label each button i shows in its HotKey corner (our bar binds
-        -- 1..9,0,-,= to slots 1..12). The real client derives these from GetBindingKey; we render
-        -- them statically since the bindings are fixed.
-        BENILLA_ACTIONBAR_HOTKEYS = { "1","2","3","4","5","6","7","8","9","0","-","=" }
+        -- The key-binding label each main-bar button shows in its HotKey corner — LIVE off
+        -- GetBindingKey("ACTIONBUTTON"..i) since 0997 (the ref's own ActionButton_UpdateHotkeys
+        -- source), repainted on UPDATE_BINDINGS. Raw chord tokens for now (the ref abbreviates
+        -- through its KEY_ABBR set — 0997 residue); an unbound slot shows nothing, and so does
+        -- a harness with no registered bindings.
+        function BenillaActionBar_UpdateHotkeys()
+            for i = 1, table.getn(BENILLA_ACTION_BUTTONS) do
+                local button = BENILLA_ACTION_BUTTONS[i]
+                if button.hotkeyIndex then
+                    button.hotkey:SetText(GetBindingKey("ACTIONBUTTON" .. button.hotkeyIndex) or "")
+                end
+            end
+        end
 
         -- Whether a placeable cursor payload is held (decision 0216 §7's ACTIONBAR_SHOWGRID/
         -- _HIDEGRID pair, simplified to a boolean — see the SCOPE note above).
@@ -209,12 +218,14 @@
             button.rangeTimer = nil
             if base then
                 -- Multibar buttons are unbound (ref Bindings.xml ships no default MULTIACTIONBAR*
-                -- keys): no static label. Their hotkey corner instead carries the ref's
+                -- keys): no label. Their hotkey corner instead carries the ref's
                 -- RANGE_INDICATOR dot (ActionButton_UpdateHotkeys' no-binding leg, net effect:
                 -- a red dot only while out of range), painted by the OnUpdate range timer.
                 button.hotkey:SetText("")
             else
-                button.hotkey:SetText(BENILLA_ACTIONBAR_HOTKEYS[index])
+                -- Main-bar buttons read their ACTIONBUTTON<i> binding live (0997).
+                button.hotkeyIndex = index
+                button.hotkey:SetText(GetBindingKey("ACTIONBUTTON" .. index) or "")
             end
             table.insert(BENILLA_ACTION_BUTTONS, button)
             -- BOTH mouse buttons, ref-verbatim (ActionButton_OnLoad, ActionButton.lua:108-109):
@@ -466,6 +477,9 @@
             frame:RegisterEvent("PLAYER_LEAVE_COMBAT")
             frame:RegisterEvent("START_AUTOREPEAT_SPELL")
             frame:RegisterEvent("STOP_AUTOREPEAT_SPELL")
+            -- The binding table moved (a rebind, a set switch, the seed) — repaint the HotKey
+            -- corners (0997; the ref's own UPDATE_BINDINGS consumer is UpdateHotkeys too).
+            frame:RegisterEvent("UPDATE_BINDINGS")
         end
 
         -- Run one ref per-button handler over the OCCUPIED buttons (the bar-level fan — SCOPE
@@ -493,6 +507,10 @@
                         BenillaActionButton_Update(button)
                     end
                 end
+                return
+            end
+            if event == "UPDATE_BINDINGS" then
+                BenillaActionBar_UpdateHotkeys()
                 return
             end
             -- The ref ActionButton_OnEvent dispatch (l.332-362), fanned bar-level:

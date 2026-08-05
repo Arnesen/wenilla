@@ -74,6 +74,13 @@ pub(crate) enum SpellKitSound {
     /// The cast/channel hold ended (GO / fail / channel-clear / a replacing cast) — reap the
     /// unit's tracked hold loop, if any (the client kills the effect's sound at `0x614150`).
     StopHold { entity: Entity },
+    /// Ring this kit at a bare **world point**, with no owning unit — the kit-sound leg's
+    /// `extra`-override arm (wow-re `kit-sound-leg.md`: "position = `extra` if non-NULL else the
+    /// unit's own position", `60f49e`–`60f4bc`). Its one caller is the missile's ground arrival,
+    /// where `0x61d870` passes the landing point: the bomb's boom belongs where it landed, not at
+    /// the thrower. Always a one-shot — a LOOPING sound here would need a tracked node with an
+    /// owner, and none of the six shipped ground-arrival kits carries one (census below).
+    PlayAt { pos: Vec3, kit_sound: u32 },
     /// Stop exactly `kit_sound`'s channels on this unit — the aura-drop reap of a LOOPING
     /// **state**-kit sound (wow-re `kit-sound-leg.md`: a looping kit sound rides a tracked,
     /// spell-id-tagged CEffect on the unit's list, and `0x614150` stops it with a 0.15 s fade
@@ -202,6 +209,17 @@ pub(crate) struct MissileSpawn {
     /// wire's `SpellMissInfo`: the missile still flies, and arrival plays the victim's defense
     /// clip for DODGE(3)/BLOCK(5) instead (the client's `Missile_C::Update` dispatch).
     pub(crate) targets: Vec<(Entity, Option<u8>)>,
+    /// The **location fallback**: when [`Self::targets`] is empty and the GO carried a ground
+    /// point, exactly ONE projectile flies at it instead (the client's `0x6e8a50` empty-hit-array
+    /// arm — `0x6e8aa2 test al,0x60; setne cl` latches "SOURCE or DEST location present",
+    /// `0x6e8bd4` then calls the spawner once, `0x60a5b6`–`0x60a5c9` copies `targets+0x3c` into
+    /// the aim point and `0x60a5ec` forces the owning unit slot to −1; wow-re
+    /// `spell-go-dest-effect.md` §3). This is what a pure ground cast — Flare, a bomb thrown at
+    /// empty dirt — actually shows travelling. Its arrival is [`super::CastEventKind::GroundImpact`],
+    /// never the unit hand-off. Named divergence: the reference latches on `flags & 0x60` and then
+    /// reads the DEST vector regardless, so a SOURCE-only cast aims at whatever the zero-initialised
+    /// DEST slot holds; we carry only a real DEST (`flags & 0x40`) and launch nothing without one.
+    pub(crate) ground_aim: Option<Vec3>,
     /// The caster's ranged-weapon fallback `SpellVisual` id, resolved at GO time — rides the
     /// flight and returns in [`super::CastEventKind::Impact`] so a basic shot's impact kit
     /// resolves through it at arrival (the caster may be gone by then; decision 0370).
@@ -777,6 +795,32 @@ pub(super) fn route_cast_visuals(
                     &mut out,
                 );
             }
+            CastEventKind::GroundImpact { pos } => {
+                // A missile arrived at a POINT (`0x61e1d0`'s ground arm → `0x61d870`): play
+                // `SpellVisual` field 13 — the **area kit** — at stage 3 on the caster, with
+                // `extra` = the landing point. The reference then walks the missile's own
+                // server-recorded hit array (`CMissile+0x58/+0x5c`) for per-unit impact/state
+                // kits; ours is empty by construction — this arm is only reached because the
+                // GO's hit list was empty, which is what selected the location fallback.
+                //
+                // The kit legs, against the shipped data: all six `SpellVisual` rows that can
+                // reach here (Volley 3229, the bomb/dynamite family 1704/3270, Goblin Mortar
+                // 695, Arcane Bomb 4831, Firecrackers 6447 — the whole census of speed>0 ∧
+                // `Targets & 0x40` ∧ field 6 ≠ 0 ∧ field 13 ≠ 0) carry **no body animation and
+                // no effect slots, only a sound**. So the arrival is exactly the kit's field-13
+                // `SoundEntries` id at the landing point, and the anim/slot legs that would need
+                // stage 3's forever-relive lifetime ([`FxStage::Relive`]) are dead data here —
+                // left unbuilt rather than guessed at.
+                // `|| None`: the weapon merge pointedly skips the dest-anchored `+0x2c/+0x30/
+                // +0x34` block ([`VisualStages::merged_over_weapon`]), so even Volley's area kit
+                // is its own row's — the lookup would be paid for nothing.
+                if let Some(kit_sound) =
+                    resolve_kit(spells, &visuals.0, ev.spell_id, |s| s.area_kit, || None)
+                        .and_then(|k| k.sound)
+                {
+                    out.sounds.write(SpellKitSound::PlayAt { pos, kit_sound });
+                }
+            }
             CastEventKind::Fail => {
                 if held_spell(&pending, ev.entity) == Some(ev.spell_id) {
                     commands.entity(ev.entity).try_remove::<CastHold>();
@@ -865,7 +909,12 @@ pub(super) fn route_cast_visuals(
                 .map(|&e| (e, None))
                 .chain(go.misses.iter().map(|&(e, code)| (e, Some(code))))
                 .collect();
-            if !targets.is_empty() {
+            // The location fallback ([`MissileSpawn::ground_aim`]): an empty hit array plus a
+            // point on the wire flies ONE projectile at the point. The hit array wins whenever
+            // it has anything in it — the client only consults the latch after
+            // `0x6e8abc … je 0x6e8ba2` has found the array empty.
+            let ground_aim = targets.is_empty().then_some(go.dest).flatten();
+            if !targets.is_empty() || ground_aim.is_some() {
                 // The release gate (the client's `0x6e7a70` flush condition, inverted): a cast
                 // kit that plays a body animation defers the launch to its release keyframe;
                 // no kit / no anim (`kit+8 < 1` ⇔ our `anim_id: None`) launches at GO.
@@ -881,6 +930,7 @@ pub(super) fn route_cast_visuals(
                     dest_tag,
                     speed: display.speed,
                     targets,
+                    ground_aim,
                     weapon_visual: wv,
                     missile_sound,
                     awaits_release,

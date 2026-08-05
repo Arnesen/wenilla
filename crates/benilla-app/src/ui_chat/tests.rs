@@ -489,21 +489,33 @@ fn castvis_parses_id_and_phase() {
         parse_line("/castvis 133"),
         ParsedChat::CastVis {
             spell_id: 133,
-            kind: CastEventKind::Start
+            kind: CastEventKind::Start,
+            ground: false
         }
     );
     assert_eq!(
         parse_line("/castvis 133 go"),
         ParsedChat::CastVis {
             spell_id: 133,
-            kind: CastEventKind::Go
+            kind: CastEventKind::Go,
+            ground: false
+        }
+    );
+    // `ground` is a GO too — the pure-dest shape, the only one that flies the location fallback.
+    assert_eq!(
+        parse_line("/castvis 1543 GROUND"),
+        ParsedChat::CastVis {
+            spell_id: 1543,
+            kind: CastEventKind::Go,
+            ground: true
         }
     );
     assert_eq!(
         parse_line("/castvis 689 FAIL"),
         ParsedChat::CastVis {
             spell_id: 689,
-            kind: CastEventKind::Fail
+            kind: CastEventKind::Fail,
+            ground: false
         }
     );
     assert_eq!(parse_line("/castvis"), ParsedChat::Unknown);

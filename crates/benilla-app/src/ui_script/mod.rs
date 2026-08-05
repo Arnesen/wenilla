@@ -193,6 +193,10 @@ impl Plugin for UiScriptPlugin {
                 )
                     .chain()
                     .in_set(UiInput)
+                    // The binding dispatch (0997) runs in this same set, after the feed: it
+                    // reads the capture gate the feed just wrote, so a key a focused box
+                    // consumed this frame never also fires a binding.
+                    .before(crate::bindings::BindingSet)
                     .before(WorldStage::Input),
             )
             // Combine the two pointer contributions (dev overlay + player UI) into the single
@@ -614,6 +618,13 @@ pub(crate) fn load_default_ui(script: &UiScript) -> Vec<String> {
         // show/hide), and it must come AFTER SpellBookFrame, whose shift-click reaches
         // `BenillaMacroFrame_AddMacroLine`. Before GameMenuFrame, whose Macros button opens it.
         "MacroFrame.xml",
+        // The Key Bindings window (decision 0997): the era-shaped standalone KeyBindingFrame
+        // over the engine's binding table (benilla_ui::script::keybind + crate::bindings — the
+        // 1.12 GetBinding/SetBinding Lua API). Needs Fonts, UiPanels (panel manager + popup
+        // engine + the ESC ladder rung that reverts it), ScrollTemplates (the faux kit), and
+        // GameTooltip (the character-specific checkbox's hover); before GameMenuFrame, whose
+        // Key Bindings button reaches it by name at click time.
+        "KeyBindingsFrame.xml",
         // The options window (the 0985 provenance split: 0950's era structure, 0978's
         // 1.12-native art, 0981/0984's 1.14 chrome + working era search, 0989's directed
         // cuts — bare fully-live sliders, no corner X; 0992's dropdown rows + the Nameplates
@@ -935,6 +946,8 @@ mod game_menu_tests;
 #[cfg(test)]
 mod macro_tests;
 
+#[cfg(test)]
+mod keybindings_tests;
 #[cfg(test)]
 mod options_tests;
 

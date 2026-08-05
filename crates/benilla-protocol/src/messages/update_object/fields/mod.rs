@@ -42,6 +42,14 @@ const FIELD_UNIT_TARGET: u16 = 16;
 /// token; the pet action bar reads its own guid off `SMSG_PET_SPELLS` instead, which is why the
 /// two can legitimately disagree for a beat around a summon (decision 0982).
 const FIELD_UNIT_SUMMON: u16 = 8;
+/// `UNIT_FIELD_CHARMEDBY` (idx 10, `OBJECT_END(6) + 0x4`, a 2-field guid — vmangos
+/// `UpdateFields_1_12_1.h`) — whoever is currently charming this unit, `0` when nobody is.
+/// Byte-verified client-side as `[unit+0x110]+0x10`: the shared attack-start validator
+/// `0x612df0` reads it at `0x612e33` and refuses the swing when it is nonzero and is **not** the
+/// active player's own guid (`ERR_ATTACK_CHARMED`), and the owner-guid pair in both `0x5ee5a0`
+/// and the `PET_ATTACK_*` callback `0x5ff580` prefers it over their respective fallbacks
+/// (wow-re `object-layer/scratch/pet-command-validators.md` §1/§2/§4).
+const FIELD_UNIT_CHARMEDBY: u16 = 10;
 /// `UNIT_FIELD_SUMMONEDBY` (idx 12, `OBJECT_END(6) + 0x6`, a 2-field guid — vmangos
 /// `UpdateFields_1_12_1.h`) — the summoner of a pet/guardian/totem. With CREATEDBY below, the
 /// combat-text source-ownership classifier's "owned by me" test (wow-re `0x5efea0`).
@@ -589,6 +597,8 @@ impl ObjectFields {
 
 mod player;
 mod unit;
+
+pub use unit::OwnerFallback;
 
 #[cfg(test)]
 mod tests;

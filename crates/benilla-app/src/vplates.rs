@@ -274,42 +274,34 @@ pub(crate) fn text_px(h: f32, basis: f32) -> f32 {
     (h * basis).round().min(32.0)
 }
 
-/// V / Shift-V — the FrameXML default bindings for the Show/Hide nameplate script pairs.
-/// Inert while the UI captures the keyboard.
-fn toggle_vplates(
-    keys: Res<ButtonInput<KeyCode>>,
-    ui_capture: Res<crate::ui_script::UiKeyboardCapture>,
-    mut mode: ResMut<VPlateMode>,
-) {
-    if ui_capture.0 || !keys.just_pressed(KeyCode::KeyV) {
-        return;
-    }
-    // SHIFT is this pair's own binding modifier — but CTRL/ALT/Cmd are not, and `CTRL-V` is a
-    // different binding name from `V` in the reference's scheme, so a press carrying one must fall
-    // through to neither half (the bare-binding rule the key feed applies — decision 0585).
-    if keys.any_pressed([
-        KeyCode::ControlLeft,
-        KeyCode::ControlRight,
-        KeyCode::AltLeft,
-        KeyCode::AltRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]) {
-        return;
-    }
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if shift {
-        mode.friends = !mode.friends;
-        info!(
-            "nameplates: friendly {}",
-            if mode.friends { "ON" } else { "OFF" }
-        );
-    } else {
+/// NAMEPLATES / FRIENDNAMEPLATES / ALLNAMEPLATES through the binding table (0997; defaults V /
+/// SHIFT-V / CTRL-V). The typing gate and 0585's modifier law live in the dispatch now.
+///
+/// The V and SHIFT-V halves stay benilla's **independent** toggles (the shipped behavior) rather
+/// than 1.12's exclusive dance (whose NAMEPLATES body also force-hides friendly plates — a
+/// recorded divergence, 0997 residue). ALLNAMEPLATES arrives with the table and takes the 1.12
+/// body's semantics as-is: both on unless both already on, else both off.
+fn toggle_vplates(binds: Res<crate::bindings::BindingsState>, mut mode: ResMut<VPlateMode>) {
+    use crate::bindings::cmd;
+    if binds.fired(cmd::NAMEPLATES) {
         mode.enemies = !mode.enemies;
         info!(
             "nameplates: enemy {}",
             if mode.enemies { "ON" } else { "OFF" }
         );
+    }
+    if binds.fired(cmd::FRIEND_NAMEPLATES) {
+        mode.friends = !mode.friends;
+        info!(
+            "nameplates: friendly {}",
+            if mode.friends { "ON" } else { "OFF" }
+        );
+    }
+    if binds.fired(cmd::ALL_NAMEPLATES) {
+        let both = mode.enemies && mode.friends;
+        mode.enemies = !both;
+        mode.friends = !both;
+        info!("nameplates: all {}", if !both { "ON" } else { "OFF" });
     }
 }
 

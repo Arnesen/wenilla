@@ -65,6 +65,21 @@ pub(crate) fn macros_character_path(realm: &str, character: &str) -> Option<Path
     home().map(|h| h.join("macros").join(format!("{key}.txt")))
 }
 
+/// `benilla/bindings/account.txt` — the account-wide key bindings (decision 0997; the
+/// `bindings-cache.wtf` analog, command-centric diff-vs-defaults so a growing command set keeps
+/// its new defaults).
+pub(crate) fn bindings_account_path() -> Option<PathBuf> {
+    home().map(|h| h.join("bindings/account.txt"))
+}
+
+/// `benilla/bindings/<realm>-<character>.txt` — the character-specific binding set (decision
+/// 0997). Its existence IS the "character specific key bindings" state: the window's checkbox
+/// writes it, Okay-back-to-general deletes it (the reference's confirmed permanent delete).
+pub(crate) fn bindings_character_path(realm: &str, character: &str) -> Option<PathBuf> {
+    let key = format!("{}-{}", file_token(realm), file_token(character));
+    home().map(|h| h.join("bindings").join(format!("{key}.txt")))
+}
+
 /// Make an arbitrary realm/character name safe as one path component: anything outside
 /// `[A-Za-z0-9_]` becomes `_`, so a realm called `Hydraxian Waterlords` or one with a slash cannot
 /// escape the folder or collide with the path separator.

@@ -101,6 +101,10 @@
         -- the client. (The ref's l.17-18 register SoundOptionsFrame/UIOptionsFrame the same way;
         -- those panels are this one window's category rows now, so the rows have no frames.)
         UIPanelWindows["OptionsFrame"] = { area = "center", pushable = 0, whileDead = 1 }
+        -- The Key Bindings window (decision 0997, KeyBindingsFrame.xml) — the ref's own
+        -- registration verbatim (`UIPanelWindows["KeyBindingFrame"] = { area = "center",
+        -- pushable = 0, whileDead = 1 }`, 1.12 Blizzard_BindingUI.lua l.8).
+        UIPanelWindows["KeyBindingFrame"] = { area = "center", pushable = 0, whileDead = 1 }
         -- The world map (decision 0203 phase 2) — the ref's own line verbatim (UIParent.lua l.30)
         -- and the first **full** row. It was a plain toplevel until now, showing itself with a bare
         -- `WorldMapFrame:Show()` and so bypassing this manager entirely: with the game menu up it
@@ -548,6 +552,16 @@
             -- defined with the popup engine below): OnCancel(data, "clicked") + hide, but ONLY for
             -- hideOnEscape entries, so e.g. the DEATH release popup ignores ESC like the ref's.
             if StaticPopup_EscapePressed() then
+                return
+            end
+            -- The Key Bindings window (decision 0997): ESC with nothing armed is the Cancel
+            -- gesture — revert to the saved set and close (both references' own law; while a
+            -- capsule IS armed the host's capture seam swallowed the press before this chain
+            -- ever saw it, and ESC became a bind — 1.12's law). Its OnHide reopens the menu.
+            -- Looked up like the rest (headless tests load this file without the window).
+            local keybinds = getglobal("KeyBindingFrame")
+            if keybinds and keybinds:IsVisible() then
+                KeyBindingFrame_Cancel()
                 return
             end
             -- The options window next (l.1483-1484, live since decision 0950 — this rung sat
@@ -1308,70 +1322,70 @@
             getglobal(name .. "Middle"):SetWidth(width)
             getglobal(name .. "MiddleDisabled"):SetWidth(width)
             tab:SetWidth(tabWidth)
+            -- benilla addition: hand back the width just declared. `tab:GetWidth()` cannot serve
+            -- it — that reads the last RESOLVED rect, which inside a settle is this frame's stale
+            -- input, not the value one line above just set. A clamp that read it back saw the old
+            -- width, declined to fire, and the settle's gate then locked the un-clamped result in
+            -- for good (decision 1002).
+            return tabWidth
         end
 
-        -- The tab template's per-frame settle: the ref does TabResize(0) + the highlight width
-        -- in OnShow (CharacterFrameTemplates.xml l.77-80), trusting a synchronous text measure.
-        -- Our GetStringWidth has a frame of latency, so the template's OnUpdate calls this until
-        -- the measured width settles (then it's a no-op compare per frame).
+        -- The tab template's per-frame settle: the ref does TabResize(0) once, in OnShow
+        -- (CharacterFrameTemplates.xml l.77-80), trusting a synchronous text measure. Our
+        -- GetStringWidth has a frame of latency, so the template's OnUpdate calls this until the
+        -- measured width settles (then it's a no-op compare per frame). The ref sizes the hover
+        -- highlight alongside it; this kit does not — both tab templates anchor their highlight to
+        -- their own side edges, so it is the tab by construction and no settle can desync it
+        -- (decision 1004).
         --
         -- The fit PARAMETERS live on the tab (`benillaTabPadding`/`benillaTabMaxWidth`, defaulting
         -- to the +0 fit every window tab has always used) rather than at the call site, because
         -- there is exactly one call site and it is this settle loop: an instance that ran its own
         -- TabResize in OnLoad — as the reference's macro tabs do — would just be overwritten on the
         -- next frame. Setting the two fields IS how an instance asks for the reference's own fit.
-        -- THE STRUCTURAL CAP — a tab may never grow past its parent's right edge, whatever the
-        -- instance asked for (decision 0997, the director's "fix this properly to prevent it ever
-        -- again"). The reference's own caps are hand-tuned numbers against ITS font metrics: the
-        -- macro window's 150 is enough for the enUS FRIZQT__ the 1.12 client rasterizes and not
-        -- obviously enough for anything else, and a character name — the one label whose width no
-        -- window author can know — is exactly where that runs out. So the per-instance cap becomes
-        -- a PREFERENCE and the window's own edge becomes the law.
+        -- THE STRUCTURAL CLAMP — a tab may never grow past its window's drawn right edge, whatever
+        -- the instance asked for (decision 1002; the director's "fix this properly to prevent it
+        -- ever again"). The reference's own caps are numbers hand-tuned to ITS font: the macro
+        -- window's 150 is right for the enUS FRIZQT__ the 1.12 client rasterizes and for nothing
+        -- else in particular, and the label it guards carries a CHARACTER NAME — the one string
+        -- whose width no window author can know. So the instance's cap is a preference and the
+        -- window's edge is the law.
         --
-        -- The arithmetic is TabResize's, inverted: its capped branch yields
-        -- `tabWidth = cap + padding + sideWidths`, so `cap = room - padding - sideWidths`.
-        function BenillaTab_Cap(tab, padding)
-            local cap = tab.benillaTabMaxWidth
+        -- `benillaTabRightInset` is how a window declares how far its DRAWN plate stops short of
+        -- its frame rect, because no kit can introspect an art margin. The macro window's is 40:
+        -- its 384-unit frame is painted by a 256-wide slice plus a 128-wide one that carries a
+        -- transparent tail. Clamping to the frame rect instead — the first attempt — clamped to a
+        -- boundary the player cannot see, and the tab still walked out over the world.
+        --
+        -- The clamp is applied to the RESULT, through TabResize's own `absoluteSize` arm, rather
+        -- than folded into `maxWidth`: that parameter is compared against `text + padding` but
+        -- assigned as `maxWidth + padding`, so a room budget expressed through it is off by the
+        -- padding and silently fails to bind. `absoluteSize` sets the tab width outright, which is
+        -- exactly what a room budget is.
+        function BenillaTab_Room(tab)
             local parent = tab:GetParent()
-            if not parent then return cap end
+            if not parent then return nil end
             local left, right = tab:GetLeft(), parent:GetRight()
-            if not left or not right then return cap end
-            local sideWidths = 2 * getglobal(tab:GetName() .. "Left"):GetWidth()
-            local room = (right - left) - padding - sideWidths - (tab.benillaTabRightInset or 0)
+            if not left or not right then return nil end
+            local room = (right - (tab.benillaTabRightInset or 0)) - left
             if room < 1 then room = 1 end
-            if not cap or room < cap then cap = room end
-            return cap
+            return room
         end
 
-        -- The tab template's per-frame settle: the ref does TabResize(0) + the highlight width
-        -- in OnShow (CharacterFrameTemplates.xml l.77-80), trusting a synchronous text measure.
-        -- Our GetStringWidth has a frame of latency, so the template's OnUpdate calls this until
-        -- the measured width settles (then it's a no-op compare per frame).
-        --
-        -- The fit PARAMETERS live on the tab (`benillaTabPadding`/`benillaTabMaxWidth`, defaulting
-        -- to the +0 fit every window tab has always used) rather than at the call site, because
-        -- there is exactly one call site and it is this settle loop: an instance that ran its own
-        -- TabResize in OnLoad — as the reference's macro tabs do — would just be overwritten on the
-        -- next frame. Setting the two fields IS how an instance asks for the reference's own fit.
-        --
-        -- The settle compares BOTH inputs. Watching only the string width used to be enough; it
-        -- isn't once the cap can move, because a tab's room depends on where the tab to its left
-        -- ended up — so tab 2 must be able to re-fit on a frame where its own label did not change.
         function BenillaTabButton_OnUpdate(tab)
             local text = getglobal(tab:GetName() .. "Text")
             local w = (text and text:GetStringWidth()) or 0
             if w <= 0 then return end
             local pad = tab.benillaTabPadding or 0
-            local cap = BenillaTab_Cap(tab, pad)
-            if tab.benillaFitWidth == w and tab.benillaFitCap == cap then return end
-            tab.benillaFitWidth, tab.benillaFitCap = w, cap
-            PanelTemplates_TabResize(pad, tab, nil, cap)
-            -- The ref sizes the highlight off the label too (MacroFrame's tabs spell it
-            -- `GetTextWidth() + 31`); +30 is this kit's long-standing number for the +0 fit. Capped
-            -- at the tab so a clamped tab never wears a highlight wider than itself.
-            local hl = w + 30
-            if hl > tab:GetWidth() + 14 then hl = tab:GetWidth() + 14 end
-            getglobal(tab:GetName() .. "HighlightTexture"):SetWidth(hl)
+            local room = BenillaTab_Room(tab)
+            if tab.benillaFitWidth == w and tab.benillaFitRoom == room then return end
+            tab.benillaFitWidth, tab.benillaFitRoom = w, room
+            local fitted = PanelTemplates_TabResize(pad, tab, nil, tab.benillaTabMaxWidth)
+            if room and fitted > room then
+                PanelTemplates_TabResize(pad, tab, room)
+            end
+            -- No highlight sizing here on purpose — BOTH tab templates anchor their highlight to
+            -- their own two side edges, so it IS the tab by construction (decision 1004).
         end
     ]]></Script>
 
@@ -1389,10 +1403,13 @@
         mpqx, transcribed VERBATIM: 115x32, the Active/InActive three-slice pair with the ref's
         exact TexCoords, text CENTER +2, the ADD highlight inset 10px). "Disabled" IS "selected"
         here — PanelTemplates_SelectTab (script kit above) disables the button and shows the
-        *Disabled (= Active) slices. The ref's OnShow text-fit (PanelTemplates_TabResize(0) +
-        the highlight width) runs from OnUpdate here instead — BenillaTabButton_OnUpdate settles
-        once the async text measure lands, then no-ops (the ref's C measure is synchronous; the
-        115px XML width is just the pre-fit state). One deliberate deviation: the ref's OnLoad
+        *Disabled (= Active) slices. The ref's OnShow text-fit (PanelTemplates_TabResize(0)) runs
+        from OnUpdate here instead — BenillaTabButton_OnUpdate settles once the async text measure
+        lands, then no-ops (the ref's C measure is synchronous; the 115px XML width is just the
+        pre-fit state). Its OnShow *also* sets the highlight width, which is dead code in the
+        reference and dropped here: this highlight is anchored LEFT/RIGHT, and two opposing anchors
+        resolve the size from the span without consulting the width at all (wow-re layout.md,
+        VERIFIED). The small tab now says the same thing the same way (1004). One deviation: the ref's OnLoad
         SetFrameLevel(+4) raise (our loader has no cross-frame level raise wired into templates
         yet; the tabs sit below the window art's hit-rect so nothing overlaps them). OnClick is
         the instance's to define (the ref merchant overrides it too).
@@ -1453,7 +1470,8 @@
     <!--
         The SMALL tab button (ref `TabButtonTemplate`, UIPanelTemplates.xml l.303-402, transcribed
         VERBATIM: the HelpFrameTab Active/Inactive three-slice pair on 16/32/16 slices, text at
-        BOTTOM +5, the ADD highlight at BOTTOM +2,-8). Not the same thing as
+        BOTTOM +5, the ADD highlight at +2,-8 — anchored to both side edges rather than sized in
+        Lua, the one departure, and why: see the highlight below). Not the same thing as
         `CharacterFrameTabButtonTemplate` above — that one is the big *window* tab along a panel's
         bottom edge; this is the compact tab a panel uses to switch a list INSIDE itself. The
         social window's Friends/Ignore pair is the first customer (decision 0668); the reference
@@ -1506,9 +1524,22 @@
         <NormalFont inherits="GameFontNormalSmall"/>
         <HighlightFont inherits="GameFontHighlightSmall"/>
         <DisabledFont inherits="GameFontHighlightSmall"/>
+        <!-- The highlight spans the tab's own two side edges, so it tracks any fit for free. The
+             ref sizes it in Lua instead — `SetWidth(GetTextWidth() + 31)` at OnLoad, which on the
+             template's own +0 fit (tab = text + 32) lands at tab − 1: "the highlight is the tab",
+             said in arithmetic. It only stops meaning that when an instance passes a padding or a
+             cap, and the macro window's tabs pass both — which is how the director got a highlight
+             13 units proud of tab 1 and 35 short of tab 2 in the same screenshot (decision 1004).
+             The big tab template above already says it this way (LEFT/RIGHT, no Lua); this is the
+             same statement on 16-unit end slices. Two opposing anchors resolve the size from the
+             span and never consult the width, so the declared 5 is inert on x (wow-re layout.md,
+             VERIFIED); the y anchors are both BOTTOM, so 32 still sets the height. -->
         <HighlightTexture name="$parentHighlightTexture" file="Interface\PaperDollInfoFrame\UI-Character-Tab-Highlight" alphaMode="ADD">
             <Size><AbsDimension x="5" y="32"/></Size>
-            <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor></Anchors>
+            <Anchors>
+                <Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor>
+                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="2" y="-8"/></Offset></Anchor>
+            </Anchors>
         </HighlightTexture>
         <Scripts>
             <OnUpdate>BenillaTabButton_OnUpdate(self)</OnUpdate>

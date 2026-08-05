@@ -655,7 +655,11 @@ pub(super) fn drain_chat_input(
                     Err(_) => warn!("chat: not connected; dropped {msg:?}"),
                 }
             }
-            ParsedChat::CastVis { spell_id, kind } => {
+            ParsedChat::CastVis {
+                spell_id,
+                kind,
+                ground,
+            } => {
                 // The dev instrument: fire the synthesized cast edge at the selection, else self —
                 // the same message the net bridge writes, so it exercises the whole resolve/hold/
                 // release path (decision 0099's iteration loop).
@@ -663,7 +667,7 @@ pub(super) fn drain_chat_input(
                 let subject = selection.target.or(me);
                 match subject {
                     Some(entity) => {
-                        info!("castvis: spell {spell_id} {kind:?} on {entity}");
+                        info!("castvis: spell {spell_id} {kind:?} ground={ground} on {entity}");
                         cast_events.write(crate::creature_anim::CastEvent {
                             entity,
                             spell_id,
@@ -673,9 +677,27 @@ pub(super) fn drain_chat_input(
                         // A selected caster's GO also fires its target list at *us* — the one
                         // live unit the dev loop always has — so a Speed>0 spell's missile and
                         // impact run end to end (0099 phase 4). A self-cast has no target: no
-                        // missile, matching a hit-less GO.
+                        // missile, matching a hit-less GO. `ground` instead sends the pure DEST
+                        // shape — empty lists, a point 15 yd ahead of the player at the player's
+                        // own height (a dev stand-in for the terrain pick; flat enough to watch a
+                        // Flare fly) — which is the only shape that reaches the location fallback.
                         if kind == crate::creature_anim::CastEventKind::Go {
-                            if let Some(me) = me.filter(|&m| m != entity) {
+                            let dest = ground.then(|| {
+                                self_player.single().ok().map(|(_, _, tf)| {
+                                    tf.translation() + tf.forward().as_vec3() * 15.0
+                                })
+                            });
+                            if let Some(dest) = dest {
+                                go_targets.write(crate::creature_anim::SpellGoTargets {
+                                    caster: entity,
+                                    spell_id,
+                                    hits: Vec::new(),
+                                    misses: Vec::new(),
+                                    dest,
+                                    ammo_display_id: None,
+                                    seq: play_seq.next(),
+                                });
+                            } else if let Some(me) = me.filter(|&m| m != entity) {
                                 go_targets.write(crate::creature_anim::SpellGoTargets {
                                     caster: entity,
                                     spell_id,

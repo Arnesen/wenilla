@@ -103,8 +103,9 @@ fn load_icon_catalog(script: Option<NonSendMut<UiScript>>, assets: Option<Res<Wo
 }
 
 /// Who we are, for the per-character file: `(realm, character)` off the roster's own login pick.
-/// `None` until the roster and the pick agree — the load simply waits a frame.
-fn identity(roster: &crate::char_select::Roster) -> Option<(String, String)> {
+/// `None` until the roster and the pick agree — the load simply waits a frame. Shared with the
+/// bindings load ([`crate::bindings`]), whose per-character file is keyed the same way (0997).
+pub(crate) fn identity(roster: &crate::char_select::Roster) -> Option<(String, String)> {
     let guid = roster.pending_pick?;
     let name = roster.chars.iter().find(|c| c.guid == guid)?.name.clone();
     let realm = roster

@@ -16,7 +16,7 @@
 //!
 //! Movement is a thin kinematic capsule controller over avian's `MoveAndSlide` (decision 0009).
 
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 
@@ -265,12 +265,9 @@ fn control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
-    // Nested into one param to stay within Bevy's 16-element system-param tuple limit.
-    mouse: (
-        Res<AccumulatedMouseMotion>,
-        Res<AccumulatedMouseScroll>,
-        Res<camera::LookConfig>,
-    ),
+    // Nested into one param to stay within Bevy's 16-element system-param tuple limit. (The
+    // scroll wheel left this tuple with 0997: zoom reads the CAMERAZOOM bindings now.)
+    mouse: (Res<AccumulatedMouseMotion>, Res<camera::LookConfig>),
     // The net bridge, bundled into one param (16-param limit): the outbound command channel + the
     // inbound teleport/worldport messages `apply_net_updates` wrote earlier this frame
     // (WorldStage::Net), + the sheath-setter queue (the Z toggle's request — decision 0080).
@@ -308,6 +305,10 @@ fn control(
         Res<InspectMode>,
         Res<crate::ui_script::UiKeyboardCapture>,
         Res<crate::ui_script::PlayerUiClickConsumed>,
+        // The binding dispatch (decision 0997): every rebindable input below reads command
+        // state from here — raw `keys` remain only for the dev instruments (F free-fly, the
+        // Ctrl boost) and the look-session mouse.
+        Res<crate::bindings::BindingsState>,
     ),
     mut commands: Commands,
     mut player: ResMut<Player>,
@@ -380,8 +381,8 @@ fn control(
         return;
     };
     let (mut window, mut cursor_opts) = window.into_inner();
-    let (mouse_motion, mouse_scroll) = (&mouse.0, &mouse.1);
-    let invert_pitch = mouse.2.invert_pitch;
+    let mouse_motion = &mouse.0;
+    let invert_pitch = mouse.1.invert_pitch;
     let (move_speed, capsule, cam_probe, pointer_over_ui, inspect, ui_capture, click_consumed) = (
         &speed_capsule.0,
         &speed_capsule.1 .0,
@@ -391,6 +392,7 @@ fn control(
         &speed_capsule.5,
         &speed_capsule.6,
     );
+    let binds = &speed_capsule.7;
     let dt = time.delta_secs();
     // While a focused UI EditBox (the chat input, a mail field) owns the keyboard, keyboard reads see
     // "no keys held" — so WASD/F/Ctrl/Z don't also drive the avatar while typing (a `.tele` command).
@@ -398,13 +400,11 @@ fn control(
     let typing = ui_capture.0;
     let keys_pressed = |k: KeyCode| !typing && keys.pressed(k);
     let keys_just_pressed = |k: KeyCode| !typing && keys.just_pressed(k);
-    // Decision 0585's bare-binding rule, for this module's discrete letter bindings (F/X/Z): the
-    // reference names a binding `[ALT-][CTRL-][SHIFT-]<key>` and matches it by string equality, so a
-    // modified press is a *different* entry and must never fall through to the unmodified one —
-    // `CTRL-Z` is TOGGLEUI ([`crate::ui_hide`]), not the sheath toggle. Same definition of "modified"
-    // as the key feed's (`ui_script::input`, which adds our Cmd plane to the reference's three).
-    // Held-state reads (WASD, Space, the Ctrl sprint) stay outside the rule deliberately: they read
-    // keys as *state*, not as binding edges, and must keep working with a modifier down.
+    // The rebindable inputs all read `binds` (decision 0997): the dispatch already enforced the
+    // typing gate and 0585's exact-modifier law when it latched, so this module carries neither
+    // anymore. What stays on raw keys: the F free-fly toggle and the Ctrl boost (dev
+    // instruments, not 1.12 bindings — F still wants the bare-binding rule locally so CTRL-F
+    // and friends stay distinct) and the mouse look session.
     let modified = keys.any_pressed([
         KeyCode::ShiftLeft,
         KeyCode::ShiftRight,
@@ -420,7 +420,11 @@ fn control(
     // Both mouse buttons held together = vanilla's "both-button run": the avatar runs forward while
     // the character steers with the mouse (turns like a right-drag), regardless of which button went
     // down first. Checked directly here rather than through the single-button look mode below.
-    let both_buttons = buttons.pressed(MouseButton::Left) && buttons.pressed(MouseButton::Right);
+    // MOVEANDSTEER (default Middle Mouse) is the same state through a binding — 1.12's own body
+    // runs the identical CameraOrSelectOrMove + TurnOrAction pair a both-button press does.
+    let steer_held = binds.pressed(crate::bindings::cmd::MOVE_AND_STEER);
+    let both_buttons =
+        (buttons.pressed(MouseButton::Left) && buttons.pressed(MouseButton::Right)) || steer_held;
 
     // The look session gets a SHADOW copy of `CursorOptions`, written back only on a real change:
     // handing it the component's `Mut` directly reborrowed mutably every frame, which marks it
@@ -484,11 +488,13 @@ fn control(
         }
     }
 
-    // The wheel belongs to whatever UI frame the cursor is over (the quest log's list/detail
-    // scroll, chat) — the client's own routing: a consumed wheel never also zooms the camera.
-    if !pointer_over_ui.0 {
-        apply_zoom_scroll(mouse_scroll, dt, &mut rig);
-    }
+    // Camera zoom rides the CAMERAZOOMIN/OUT bindings (0997; defaults = the wheel pair). The
+    // wheel-over-UI routing lives in the dispatch now — a wheel the quest log consumed never
+    // reaches these commands — and a rebound zoom KEY steps 1.0 per press, 1.12's own
+    // `CameraZoomIn(1.0)` argument.
+    let zoom = binds.amount(crate::bindings::cmd::CAMERA_ZOOM_IN)
+        - binds.amount(crate::bindings::cmd::CAMERA_ZOOM_OUT);
+    apply_zoom_scroll(zoom, dt, &mut rig);
 
     if bare_binding(KeyCode::KeyF) {
         player.detached = !player.detached;
@@ -590,16 +596,14 @@ fn control(
             );
             return;
         }
-        // ── Autorun ── mouse button 5 is our TOGGLEAUTORUN (the reference's own default is Numlock;
-        // benilla has no keybind table yet, so the binding is a host choice — wow-re RF-0078's note).
-        // On macOS winit maps NSEvent `buttonNumber` 4 → `MouseButton::Forward` (`macos/view.rs:1096`),
-        // which is the thumb-forward button most mice call "5"; a mouse that reports something else
-        // lands in the `Other(n)` log below rather than silently doing nothing.
-        // The toggle is deliberately NOT gated on `typing`: it's a latched mode, not a held key — and
-        // the reference agrees explicitly, its focus-loss handler releasing every direction bit while
-        // preserving `0x1000` (`0x514490`'s `and eax,0xfffff00f`, VERIFIED).
+        // ── Autorun ── TOGGLEAUTORUN through the binding table (0997; 1.12 defaults NUMLOCK +
+        // BUTTON4 — the latter is winit's `Forward`, the thumb button this toggle lived on before
+        // the table existed, kept by the codec's BUTTON4 mapping). A latched mode, not a held key:
+        // the keyboard chord is typing-gated at dispatch like every binding, the mouse chord is
+        // not — and the reference agrees, its focus-loss handler releasing every direction bit
+        // while preserving `0x1000` (`0x514490`'s `and eax,0xfffff00f`, VERIFIED).
         let mut autorun_armed = false;
-        if buttons.just_pressed(MouseButton::Forward) {
+        if binds.fired(crate::bindings::cmd::TOGGLE_AUTORUN) {
             player.autorun = !player.autorun;
             autorun_armed = player.autorun;
         }
@@ -607,7 +611,7 @@ fn control(
         // "nothing happened" is the least debuggable report there is. Name what did arrive.
         for b in buttons.get_just_pressed() {
             if let MouseButton::Other(n) = b {
-                info!("mouse: unmapped button Other({n}) — autorun is on MouseButton::Forward");
+                info!("mouse: unmapped button Other({n}) — bindings know BUTTON4/BUTTON5 as winit Forward/Back");
             }
         }
         // ── The cancel set ── autorun is NOT simply "held forward" — the thing that makes it its own
@@ -631,12 +635,13 @@ fn control(
         //
         // Deliberately absent, each VERIFIED as a *survivor*: a jump, a chat EditBox taking focus, and
         // a zone change. Mounting is genuinely unsettled in the reference and left alone here.
-        let both_buttons_engaged = both_buttons
+        let both_buttons_engaged = (both_buttons
             && (buttons.just_pressed(MouseButton::Left)
-                || buttons.just_pressed(MouseButton::Right));
+                || buttons.just_pressed(MouseButton::Right)))
+            || binds.just_pressed(crate::bindings::cmd::MOVE_AND_STEER);
         if state::autorun_cancelled(
-            keys_just_pressed(KeyCode::KeyW),
-            keys_just_pressed(KeyCode::KeyS),
+            binds.just_pressed(crate::bindings::cmd::MOVE_FORWARD),
+            binds.just_pressed(crate::bindings::cmd::MOVE_BACKWARD),
             both_buttons_engaged,
             player.modes.rooted || player.server_riding,
         ) {
@@ -658,8 +663,8 @@ fn control(
         // rides the HELD state and not the key-DOWN edge, so it never trips the autorun cancel set
         // above — which is right: synthesized input is not a keypress.
         let fwd_axis = state::forward_axis(
-            keys_pressed(KeyCode::KeyW) || player.follow_forward,
-            keys_pressed(KeyCode::KeyS),
+            binds.pressed(crate::bindings::cmd::MOVE_FORWARD) || player.follow_forward,
+            binds.pressed(crate::bindings::cmd::MOVE_BACKWARD),
             both_buttons,
             autorun,
         );
@@ -677,30 +682,33 @@ fn control(
         // packets in one session, 0 received by a watching client, against 0 in the reference
         // client's entire 1.12.1 capture. That is decision 0056's invariant — the wire mirrors the
         // avatar's actual motion — violated on this one axis only; the swim branch already nets.
-        let side_axis = i32::from(keys_pressed(KeyCode::KeyE))
-            - i32::from(keys_pressed(KeyCode::KeyQ))
+        let strafe_left = binds.pressed(crate::bindings::cmd::STRAFE_LEFT);
+        let strafe_right = binds.pressed(crate::bindings::cmd::STRAFE_RIGHT);
+        let turn_left = binds.pressed(crate::bindings::cmd::TURN_LEFT);
+        let turn_right = binds.pressed(crate::bindings::cmd::TURN_RIGHT);
+        let side_axis = i32::from(strafe_right) - i32::from(strafe_left)
             + if mouselook {
-                i32::from(keys_pressed(KeyCode::KeyD)) - i32::from(keys_pressed(KeyCode::KeyA))
+                i32::from(turn_right) - i32::from(turn_left)
             } else {
                 0
             };
-        // A/D turn the facing when not mouse-looking (yaw increases turning left, matching mouse-left).
-        // …and never while stunned: the reference skips the keyboard turn emitter `0x514f50`
-        // entirely (and force-stops an in-flight turn) behind the same `0x514755` gate. Killing the
-        // turn here is also what ends B179's *second* half — the walk animation a stunned character
-        // was still playing was the turn-in-place shuffle, which `gait` derives from real yaw change.
-        let turning =
-            !mouselook && !stunned && (keys_pressed(KeyCode::KeyA) || keys_pressed(KeyCode::KeyD));
+        // TURNLEFT/TURNRIGHT turn the facing when not mouse-looking (yaw increases turning left,
+        // matching mouse-left). …and never while stunned: the reference skips the keyboard turn
+        // emitter `0x514f50` entirely (and force-stops an in-flight turn) behind the same
+        // `0x514755` gate. Killing the turn here is also what ends B179's *second* half — the walk
+        // animation a stunned character was still playing was the turn-in-place shuffle, which
+        // `gait` derives from real yaw change.
+        let turning = !mouselook && !stunned && (turn_left || turn_right);
         // This frame's keyboard-turn rotation — `seat_camera` carries the camera by it rigidly
         // (char and camera turn as one on the reference; director's call, closing 0050's open
         // "camera follow on turn" feel item).
         let mut turn_delta = 0.0;
         if turning {
             let mut turn = 0.0;
-            if keys_pressed(KeyCode::KeyA) {
+            if turn_left {
                 turn += 1.0;
             }
-            if keys_pressed(KeyCode::KeyD) {
+            if turn_right {
                 turn -= 1.0;
             }
             // 0.75× while also translating — the verified `flags & 0x200f` case, so it reads the
@@ -760,7 +768,7 @@ fn control(
         // the key is read now. The last writer wins, and every one of them lands on the single
         // commit-and-send below.
         let mut request_stand = net.10.read().last().map(|r| r.state);
-        if bare_binding(KeyCode::KeyX) {
+        if binds.fired(crate::bindings::cmd::SIT_OR_STAND) {
             request_stand = Some(u8::from(stand_state == 0));
         }
         // Any movement input stands the avatar back up (the client volunteers the stand — the
@@ -773,7 +781,7 @@ fn control(
         // director's ref observation (it stands you up) is the ground truth this keeps; the
         // byte trigger is flagged LIVE-CAPTURE in the wow-re note.
         let turned = turn_delta != 0.0 || mouse_turned;
-        if (moving || turned || keys_just_pressed(KeyCode::Space))
+        if (moving || turned || binds.fired(crate::bindings::cmd::JUMP))
             && stand_state != 0
             && request_stand.is_none()
         {
@@ -808,7 +816,7 @@ fn control(
         // in the whole client that plays it (`bInstant = 0` at the 4 ToggleSheath sites — wow-re
         // `sheath-policy.md`). No body model yet (no driver) drops the toggle, the client's own
         // refusal.
-        if bare_binding(KeyCode::KeyZ) {
+        if binds.fired(crate::bindings::cmd::TOGGLE_SHEATH) {
             if let Ok((e, _, _, _, Some(drv), store, engaged, _, _, wielded)) = self_player.single()
             {
                 // The manual toggle's guard chain (decision 0080d) — the guards of the client's
@@ -878,7 +886,7 @@ fn control(
             } else {
                 run_speed
             };
-        let mut want_jump = keys_just_pressed(KeyCode::Space) && !player.modes.rooted;
+        let mut want_jump = binds.fired(crate::bindings::cmd::JUMP) && !player.modes.rooted;
 
         // Swim vs walk: the water over our feet decides. Hysteresis-latched (`update_swimming`,
         // the verified `0x6030c0` boundary — B7 resolved, decision 0226) so wading the line
@@ -913,17 +921,17 @@ fn control(
         let mut swim_side = 0.0_f32; // +right
         if swimming {
             swim_fwd += fwd_axis.signum() as f32;
-            if keys_pressed(KeyCode::KeyE) {
+            if strafe_right {
                 swim_side += 1.0;
             }
-            if keys_pressed(KeyCode::KeyQ) {
+            if strafe_left {
                 swim_side -= 1.0;
             }
             if mouselook {
-                if keys_pressed(KeyCode::KeyD) {
+                if turn_right {
                     swim_side += 1.0;
                 }
-                if keys_pressed(KeyCode::KeyA) {
+                if turn_left {
                     swim_side -= 1.0;
                 }
             }
@@ -1222,10 +1230,10 @@ fn control(
                 _ => {}
             }
             if !mouselook {
-                if keys_pressed(KeyCode::KeyA) {
+                if binds.pressed(crate::bindings::cmd::TURN_LEFT) {
                     move_flags_now |= move_flags::TURN_LEFT;
                 }
-                if keys_pressed(KeyCode::KeyD) {
+                if binds.pressed(crate::bindings::cmd::TURN_RIGHT) {
                     move_flags_now |= move_flags::TURN_RIGHT;
                 }
             }

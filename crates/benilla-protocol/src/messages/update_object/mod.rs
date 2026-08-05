@@ -13,7 +13,7 @@ mod fields;
 mod movement;
 
 pub use fields::{
-    quest_slot_state, ObjectFields, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot,
+    quest_slot_state, ObjectFields, OwnerFallback, PlayerSkillSlot, QuestLogSlot, UnitAuraSlot,
     AURA_FLAG_CANCELABLE, AURA_FLAG_EFF_INDEX_MASK, PLAYER_EXPLORED_ZONES_SLOTS,
     PLAYER_QUEST_LOG_SLOTS, PLAYER_SKILL_SLOTS, UNIT_AURA_POSITIVE_SLOTS, UNIT_AURA_SLOTS,
 };

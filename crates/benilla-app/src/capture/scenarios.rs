@@ -126,6 +126,14 @@ pub(super) enum UiFixture {
     /// the box. Hermetic like the other options fixtures; pixels move only with the window
     /// or a registered default.
     OptionsSearch,
+    /// The KEY BINDINGS window (decision 0997) — the era-shaped standalone KeyBindingFrame on
+    /// its Movement page: the category sidebar (gold-locked Movement Keys), Command/Key 1/
+    /// Key 2 columns over the honest tree's rows with the byte-real 1.12 defaults ("Move and
+    /// Steer — Middle Mouse" leading, straight off the real GlobalStrings the capture VM loads
+    /// like any run), the character-specific checkbox, the four bottom buttons. The registry
+    /// registers in-fixture (hermetic capture = the plugin's PostStartup seed is not raced),
+    /// so the pixels move only with the window, a registered default, or a 1.12 string.
+    KeyBindings,
     /// A **floating overhead name with the river surface behind it** — the world-text-vs-liquid
     /// draw-order instrument. A named unit stands 25 yd out in the Elwynn river (the `water-noon`
     /// camera), so its name projects onto the water *beyond* it: the exact geometry of the
@@ -931,6 +939,16 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: GROUND_LOOK,
         minute: 720,
         ui: Some(UiFixture::OptionsWorldDetail),
+    },
+    // The Key Bindings window on its Movement page (0997). Run with
+    // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-keybindings`.
+    Scenario {
+        name: "ui-keybindings",
+        map: MAP_AZEROTH,
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
+        ui: Some(UiFixture::KeyBindings),
     },
     // The same window MID-SEARCH (0984): the "volume" results view. Run with
     // `WOW_CAPTURE_UI=1 WOW_CAPTURE=ui-options-search`.

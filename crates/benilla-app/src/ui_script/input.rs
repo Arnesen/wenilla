@@ -191,38 +191,7 @@ pub(super) fn feed_ui_input(
         sup,
     };
     let mac = cfg!(target_os = "macos");
-    // A *bare*-key binding is exactly that: bare. The reference names a binding
-    // `[ALT-][CTRL-][SHIFT-]<key>` and matches it by string equality — its own FrameXML rebuilds the
-    // name that way to recognise a press (`WorldMapFrame.xml:615-627`, the three prefixes prepended
-    // around `arg1` and compared to `GetBindingKey("TOGGLEWORLDMAP")`), and `ALT-`/`CTRL-`/`SHIFT-`
-    // are three separate strings in `WoW.exe`. So `CTRL-P` is a *different* entry from `P` and a
-    // modified press never falls through to the unmodified binding. Ours must not either — otherwise
-    // the dev-overlay chords would ALSO fire the letter's game action (`Ctrl`+`Shift`+key —
-    // decisions 0585/0867/0870). `sup` is our one addition to the reference's three: Cmd is not a
-    // binding modifier in any client's scheme, so a bare binding has no business firing under it
-    // either. (A binding that *wants* a modifier declares it — see `vplates::toggle_vplates`, which
-    // spends SHIFT itself for the V / SHIFT-V pair.)
-    let modified = shift || ctrl || alt || sup;
     for ev in keyboard.read() {
-        // ACTIONBUTTON1..12 (the number row 1..9,0,-,= — the bar's own HotKey labels): the ref's
-        // two-edge binding (Bindings.xml:121-127 `runOnUp` → ActionButton.lua:15-45) — DOWN shows
-        // the pushed visual, UP fires the action; the PUSHED/NORMAL state gate in the Lua makes a
-        // held key's auto-repeat DOWNs no-ops. Gated on no EditBox holding the keyboard — else
-        // "1" is a typed character — plus the bare-binding rule (`modified`), and consumed either
-        // edge so a bar key never also lands as text.
-        if let Some(i) = action_button_index(ev.key_code) {
-            if !capture.0 && !modified {
-                let edge = if ev.state == ButtonState::Pressed {
-                    "Down"
-                } else {
-                    "Up"
-                };
-                if let Err(e) = script.run(&format!("BenillaActionButton{edge}({i})")) {
-                    warn!("ui_script(actionbutton): {e}");
-                }
-                continue;
-            }
-        }
         if ev.state != ButtonState::Pressed {
             continue;
         }
@@ -237,18 +206,13 @@ pub(super) fn feed_ui_input(
         // read arrows after UiInput see them exactly as before).
         let chord = keymap::chord(ev.key_code, mods, mac);
         if let Some(name) = named {
-            let consumed = script.key_input(name);
-            // ESCAPE with no EditBox focused runs the escape binding: the reference's own
-            // TOGGLEGAMEMENU action (UiPanels.xml `ToggleGameMenu`) — one eater per press down the
-            // close/cancel ladder, and the game menu when nothing is left to eat. No argument: the
-            // `clicked` form is the micro button's plain toggle. A focused box consumes ESCAPE
-            // first (`key_input` returns true), so this never fires while typing — the real
-            // client's ESC precedence.
-            if name == "ESCAPE" && !consumed {
-                if let Err(e) = script.run("ToggleGameMenu()") {
-                    warn!("ui_script(escape): {e}");
-                }
-            }
+            // The three box-event keys. An unconsumed press is not acted on here: every GAME
+            // action of a key — ESCAPE's close/cancel ladder (TOGGLEGAMEMENU), TAB's targeting,
+            // ENTER's chat open, the number row's action buttons — now lives in the binding
+            // dispatch (decision 0997, `crate::bindings`), which runs right after this pass and
+            // reads the capture gate written above, so a key a focused box consumed this frame
+            // never also fires its binding — the real client's ESC precedence, table-wide.
+            script.key_input(name);
         } else if let Some(chord) = chord {
             match chord {
                 keymap::Chord::Edit(action) => {
@@ -274,16 +238,6 @@ pub(super) fn feed_ui_input(
                     }
                 }
             }
-        } else if let Some((lua, tag)) =
-            bare_key_binding(ev.key_code).filter(|_| !capture.0 && !modified)
-        {
-            // A default bare-key binding ([`bare_key_binding`]) — the key-feed seam ESCAPE uses; the
-            // action itself lives in Lua. Both gates are in the *branch condition*, not the body, so a
-            // gated-out key still falls through to plain character input below ('b' typed into a chat
-            // line is text, not the bag toggle).
-            if let Err(e) = script.run(lua) {
-                warn!("ui_script({tag}): {e}");
-            }
         } else if !(sup || (ctrl && !alt)) {
             // Plain character input. Command-modified chars never insert (an unbound Cmd/Ctrl
             // chord like Cmd+L must not type "l") — but Ctrl+Alt passes: that's AltGr, the char
@@ -305,55 +259,7 @@ pub(super) fn feed_ui_input(
     }
 }
 
-/// The main-bar button (1-based) a key drives — the vanilla default ACTIONBUTTON1..12 row
-/// (`1..9,0,-,=`), the exact labels the bar's HotKey corners render (`BENILLA_ACTIONBAR_HOTKEYS`).
-fn action_button_index(key: KeyCode) -> Option<u8> {
-    Some(match key {
-        KeyCode::Digit1 => 1,
-        KeyCode::Digit2 => 2,
-        KeyCode::Digit3 => 3,
-        KeyCode::Digit4 => 4,
-        KeyCode::Digit5 => 5,
-        KeyCode::Digit6 => 6,
-        KeyCode::Digit7 => 7,
-        KeyCode::Digit8 => 8,
-        KeyCode::Digit9 => 9,
-        KeyCode::Digit0 => 10,
-        KeyCode::Minus => 11,
-        KeyCode::Equal => 12,
-        _ => return None,
-    })
-}
-
-/// The default **bare-key** game bindings we've implemented: key → (the Lua the binding runs, its
-/// `warn!` tag). One table so the two gates every one of them needs — no EditBox holding the keyboard,
-/// no command modifier held (decision 0585) — are written once at the single call site instead of
-/// re-derived per branch, which is how a seventh binding would quietly have shipped without them.
-///
-/// Vanilla names, for the ref cross-check:
-/// - **B** OPENALLBAGS — open/close ALL bags at once, the real client's behavior, shared with the
-///   backpack button (`BagFrame.xml` `BenillaBagToggle_OnClick` → `BenillaOpenAllBags`/`…Close…`).
-/// - **L** TOGGLEQUESTLOG — ref `Bindings.xml:603-605` → `QuestLogFrame.lua:24-30`.
-/// - **C** TOGGLECHARACTER0 — ref `CharacterFrame.lua:3-23`'s `ToggleCharacter`, tab-aware (hides the
-///   window if the paper doll is already the visible tab, else shows/switches to it).
-/// - **M** TOGGLEWORLDMAP — the fullscreen map (decision 0203 phase 2).
-/// - **P** TOGGLESPELLBOOK — ref `Bindings.xml:582-583` (decision 0216 §8).
-/// - **N** TOGGLETALENTS — ref `Bindings.xml`: `ToggleTalentFrame()` (decision 0304).
-/// - **O** TOGGLEFRIENDSTAB — ref `Bindings.xml:618-620`: `ToggleFriendsFrame(1)`, the social
-///   window on its Friends tab (decision 0668). The bare TOGGLESOCIAL binding is the same window
-///   without a tab argument; 'O' is the tab-1 one in the client's default set.
-fn bare_key_binding(key: KeyCode) -> Option<(&'static str, &'static str)> {
-    Some(match key {
-        KeyCode::KeyB => ("BenillaBagToggle_OnClick()", "togglebackpack"),
-        KeyCode::KeyL => ("ToggleQuestLog()", "togglequestlog"),
-        KeyCode::KeyC => (
-            "ToggleCharacter(\"BenillaPaperDollFrame\")",
-            "togglecharacter",
-        ),
-        KeyCode::KeyM => ("ToggleWorldMap()", "toggleworldmap"),
-        KeyCode::KeyP => ("ToggleSpellBook(BOOKTYPE_SPELL)", "togglespellbook"),
-        KeyCode::KeyN => ("ToggleTalentFrame()", "toggletalents"),
-        KeyCode::KeyO => ("ToggleFriendsFrame(1)", "togglesocial"),
-        _ => return None,
-    })
-}
+// The two hardcoded key tables that used to live here — the ACTIONBUTTON number row and the
+// bare-key window toggles — moved into the command registry (`crate::bindings::commands`,
+// decision 0997): one chord→command table, rebindable, with 0585's modifier law enforced once
+// in the dispatch instead of per branch here.

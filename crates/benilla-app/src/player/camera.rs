@@ -5,7 +5,7 @@
 //! avatar/movement/networking [`super::control`] drives with it.
 
 use bevy::ecs::entity::EntityHashSet;
-use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
@@ -353,22 +353,13 @@ pub(super) fn run_look_session(
     }
 }
 
-/// Wheel-zoom: the scroll wheel sets a new target orbit distance, and the actual distance glides toward
-/// it at a constant `cameraDistanceMoveSpeed` (vanilla's linear, frame-delta-scaled glide — not an
-/// ease). Runs every frame regardless of active/detached state, mirroring the reference camera.
-pub(super) fn apply_zoom_scroll(
-    mouse_scroll: &AccumulatedMouseScroll,
-    dt: f32,
-    rig: &mut CameraControl,
-) {
-    // Scroll wheel zooms the third-person orbit distance (wheel up = closer). Trackpads report pixel
-    // deltas (much larger than a wheel's per-notch line), so normalize them to line-equivalents.
-    let scroll = match mouse_scroll.unit {
-        MouseScrollUnit::Line => mouse_scroll.delta.y,
-        MouseScrollUnit::Pixel => {
-            mouse_scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR
-        }
-    };
+/// Wheel-zoom: the CAMERAZOOMIN/OUT bindings set a new target orbit distance, and the actual
+/// distance glides toward it at a constant `cameraDistanceMoveSpeed` (vanilla's linear,
+/// frame-delta-scaled glide — not an ease). Runs every frame regardless of active/detached state,
+/// mirroring the reference camera. `scroll` is this frame's net zoom-in amount (wheel notches in
+/// line-equivalents — the binding dispatch normalizes trackpad pixels — or the 1.12 key step of
+/// 1.0 per press; positive = closer), so a rebound zoom key feels exactly like a wheel notch.
+pub(super) fn apply_zoom_scroll(scroll: f32, dt: f32, rig: &mut CameraControl) {
     if scroll != 0.0 {
         rig.target_distance =
             (rig.target_distance - scroll * CAM_ZOOM_STEP).clamp(CAM_DIST_MIN, CAM_DIST_MAX);

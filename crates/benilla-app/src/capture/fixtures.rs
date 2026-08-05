@@ -973,6 +973,19 @@ pub(super) fn seed_ui_fixture(
                 warn!("capture: ui-options-worlddetail seed failed: {e}");
             }
         }
+        UiFixture::KeyBindings => {
+            let Some(mut script) = script else {
+                return;
+            };
+            // The Key Bindings window (0997), the page fixtures' posture: the real command
+            // registry first (hermetic capture — the plugin's PostStartup seed isn't raced,
+            // the register_cvars precedent), then the live open path. Movement is the default
+            // category; the rows read the registry's byte-real 1.12 defaults.
+            script.register_bindings(&crate::bindings::registry_commands());
+            if let Err(e) = script.run("ShowUIPanel(KeyBindingFrame)") {
+                warn!("capture: ui-keybindings seed failed: {e}");
+            }
+        }
         UiFixture::OptionsSearch => {
             let Some(mut script) = script else {
                 return;

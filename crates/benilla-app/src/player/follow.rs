@@ -250,32 +250,34 @@ fn steer(face: f32, bearing: f32, dt: f32) -> f32 {
 /// the motion.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct FollowInput<'w> {
-    keys: Res<'w, ButtonInput<KeyCode>>,
     buttons: Res<'w, ButtonInput<MouseButton>>,
+    /// The binding dispatch (0997) — the movement commands' press edges, wherever they are bound.
+    /// It already carries the typing gate this struct used to hold `UiKeyboardCapture` for
+    /// (typing "we should go" in chat must not break the follow).
+    binds: Res<'w, crate::bindings::BindingsState>,
     /// The camera rig, for the mouse-look level. Read one frame behind `control`'s own update,
     /// which is deliberate and harmless: the cancel then lands on the frame *after* the look
     /// begins, versus the reference's same-frame commit.
     rig: Res<'w, CameraControl>,
-    /// While a focused UI EditBox owns the keyboard, keyboard reads see "no keys held" — so typing
-    /// "we should go" in chat must not break your follow. `control`'s own gate, applied here for
-    /// the same reason.
-    capture: Res<'w, crate::ui_script::UiKeyboardCapture>,
 }
 
 impl FollowInput<'_> {
-    /// The key-DOWN edge of any movement start. A/D are turn keys normally and strafe keys under
-    /// mouse-look; either way they are a movement start and either way they cancel, so the
-    /// distinction the controller draws does not matter here.
+    /// The press edge of any movement command (0997: wherever the six are bound today). The turn
+    /// pair are turn commands normally and strafe under mouse-look; either way they are a
+    /// movement start and either way they cancel, so the distinction the controller draws does
+    /// not matter here.
     fn move_start(&self) -> bool {
-        !self.capture.0
-            && self.keys.any_just_pressed([
-                KeyCode::KeyW,
-                KeyCode::KeyS,
-                KeyCode::KeyA,
-                KeyCode::KeyD,
-                KeyCode::KeyQ,
-                KeyCode::KeyE,
-            ])
+        use crate::bindings::cmd;
+        [
+            cmd::MOVE_FORWARD,
+            cmd::MOVE_BACKWARD,
+            cmd::TURN_LEFT,
+            cmd::TURN_RIGHT,
+            cmd::STRAFE_LEFT,
+            cmd::STRAFE_RIGHT,
+        ]
+        .iter()
+        .any(|&c| self.binds.just_pressed(c))
     }
 }
 

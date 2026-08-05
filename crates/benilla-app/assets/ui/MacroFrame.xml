@@ -724,10 +724,21 @@
                 <Scripts>
                     <!-- ref l.511: `PanelTemplates_TabResize(-15, nil, nil, 150)`. The cap is
                          load-bearing here and nowhere else — this label carries a player name, so
-                         it is the one tab whose width is not known when the window is written. -->
+                         it is the one tab whose width is not known when the window is written.
+
+                         `benillaTabRightInset` is what makes it hold: **this window is narrower
+                         than its frame says.** The rect is 384 wide, but the art is
+                         `UI-Character-General-TopLeft` (256) + `-TopRight` (128 — VERIFIED 128 in
+                         the BLP header, so no squash), and that second slice carries a transparent
+                         tail: decoding its DXT3 alpha, the last opaque column is 92 of 128, so the
+                         **drawn plate ends at unit 349**. 40 is that boundary with a few units of
+                         breathing room, so a clamped tab's end cap doesn't sit flush on the border.
+                         Clamping to the frame rect — the first attempt (0997) — clamped to an edge
+                         the player cannot see, and the tab still walked out over the world. -->
                     <OnLoad>
                         self.benillaTabPadding = -15
                         self.benillaTabMaxWidth = 150
+                        self.benillaTabRightInset = 40
                         self:SetText(BenillaMacroFrame_TabTwoLabel())
                     </OnLoad>
                     <OnClick>

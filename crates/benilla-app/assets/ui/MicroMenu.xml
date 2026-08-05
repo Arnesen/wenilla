@@ -35,11 +35,10 @@
           greyed with the ref's `-Disabled` art: a dead grey button mid-row reads as a broken bar,
           and the point of this slice is that the bar reads whole. It is one OnClick line from live.
           (Socials went live with decision 0668, Main Menu with 0674.)
-        - No GetBindingKey in this engine, so MicroButtonTooltipText's "(key)" suffix comes from a
-          static table of the bindings we actually ship (ui_script/input.rs `bare_key_binding`:
-          C/P/N/L/M/O) rather than from a live binding lookup — the same call ActionBar.xml makes
-          for its HotKey corners. The two unbound buttons (Main Menu, Help) show a bare label —
-          ESCAPE is a real binding, but not one that table carries.
+        - The "(key)" suffix is LIVE since 0997: `button.binding` carries the binding ACTION
+          name (TOGGLECHARACTER0, TOGGLESPELLBOOK, ...) and the tooltip looks the key up through
+          GetBindingKey at hover time — the ref MicroButtonTooltipText's own contract, restored
+          now that the binding table exists. A genuinely unbound action shows the bare label.
         - The hover is the ref's real two-line GameTooltip_AddNewbieTip (GameTooltip.xml): the label,
           then the button's NEWBIE_TOOLTIP_* explanation, at the default screen corner. An earlier
           note here claimed detailed tips were OFF in 1.12 and open-coded the else branch — the ref
@@ -109,13 +108,17 @@
             button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         end
 
-        -- ref MicroButtonTooltipText (l.11-18) with a static binding label — see the SCOPE note.
-        -- Benilla-named, not the ref global: the ref's takes (text, bindingAction) and looks the key
-        -- up live, so reusing that name for a different contract would be a trap for the next
-        -- ref-quoted transcription that calls it.
+        -- ref MicroButtonTooltipText (l.11-18), the LIVE contract since 0997: `button.binding`
+        -- is the binding ACTION name and the key resolves through GetBindingKey at hover time
+        -- (rendered through the Key Bindings window's display law when it is loaded — the
+        -- shipped order always has it; a lone-file harness shows the raw token).
         function BenillaMicroButton_TooltipText(button)
             if button.binding then
-                return button.label .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. button.binding .. ")" .. FONT_COLOR_CODE_CLOSE
+                local key = GetBindingKey(button.binding)
+                if key then
+                    if KeyBindings_KeyText then key = KeyBindings_KeyText(key) end
+                    return button.label .. " " .. NORMAL_FONT_COLOR_CODE .. "(" .. key .. ")" .. FONT_COLOR_CODE_CLOSE
+                end
             end
             return button.label
         end
@@ -196,7 +199,7 @@
             SetPortraitTexture(MicroButtonPortrait, "player")
             button:SetNormalTexture("Interface\\Buttons\\UI-MicroButtonCharacter-Up")
             button:SetPushedTexture("Interface\\Buttons\\UI-MicroButtonCharacter-Down")
-            BenillaMicroButton_OnLoad(button, nil, CHARACTER_BUTTON, "C", NEWBIE_TOOLTIP_CHARACTER)
+            BenillaMicroButton_OnLoad(button, nil, CHARACTER_BUTTON, "TOGGLECHARACTER0", NEWBIE_TOOLTIP_CHARACTER)
         end
 
         -- ref UpdateTalentButton (l.133-141): no talents before level 10, so the button goes away
@@ -216,7 +219,7 @@
         end
 
         function TalentMicroButton_OnLoad(button)
-            BenillaMicroButton_OnLoad(button, "Talents", TALENTS_BUTTON, "N", NEWBIE_TOOLTIP_TALENTS)
+            BenillaMicroButton_OnLoad(button, "Talents", TALENTS_BUTTON, "TOGGLETALENTS", NEWBIE_TOOLTIP_TALENTS)
             button:RegisterEvent("UNIT_LEVEL")
             button:RegisterEvent("PLAYER_ENTERING_WORLD")
         end
@@ -269,7 +272,7 @@
             <Anchor point="BOTTOMLEFT" relativeTo="CharacterMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
-            <OnLoad>BenillaMicroButton_OnLoad(self, "Spellbook", SPELLBOOK_ABILITIES_BUTTON, "P", NEWBIE_TOOLTIP_SPELLBOOK)</OnLoad>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Spellbook", SPELLBOOK_ABILITIES_BUTTON, "TOGGLESPELLBOOK", NEWBIE_TOOLTIP_SPELLBOOK)</OnLoad>
             <OnClick>ToggleSpellBook(BOOKTYPE_SPELL)</OnClick>
         </Scripts>
     </Button>
@@ -294,7 +297,7 @@
                  is the button UpdateTalentButton re-anchors, so it must already exist. (The ref gets
                  its first pass from PLAYER_ENTERING_WORLD, which we register too — this just means
                  the row is right before any event lands, e.g. under the capture harness.) -->
-            <OnLoad>BenillaMicroButton_OnLoad(self, "Quest", QUESTLOG_BUTTON, "L", NEWBIE_TOOLTIP_QUESTLOG); UpdateTalentButton()</OnLoad>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Quest", QUESTLOG_BUTTON, "TOGGLEQUESTLOG", NEWBIE_TOOLTIP_QUESTLOG); UpdateTalentButton()</OnLoad>
             <OnClick>ToggleQuestLog()</OnClick>
         </Scripts>
     </Button>
@@ -304,7 +307,7 @@
             <Anchor point="BOTTOMLEFT" relativeTo="QuestLogMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
-            <OnLoad>BenillaMicroButton_OnLoad(self, "Socials", SOCIAL_BUTTON, "O", NEWBIE_TOOLTIP_SOCIAL)</OnLoad>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "Socials", SOCIAL_BUTTON, "TOGGLESOCIAL", NEWBIE_TOOLTIP_SOCIAL)</OnLoad>
             <OnClick>ToggleFriendsFrame(1)</OnClick>
         </Scripts>
     </Button>
@@ -314,7 +317,7 @@
             <Anchor point="BOTTOMLEFT" relativeTo="SocialsMicroButton" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="-3" y="0"/></Offset></Anchor>
         </Anchors>
         <Scripts>
-            <OnLoad>BenillaMicroButton_OnLoad(self, "World", WORLDMAP_BUTTON, "M", NEWBIE_TOOLTIP_WORLDMAP)</OnLoad>
+            <OnLoad>BenillaMicroButton_OnLoad(self, "World", WORLDMAP_BUTTON, "TOGGLEWORLDMAP", NEWBIE_TOOLTIP_WORLDMAP)</OnLoad>
             <OnClick>ToggleWorldMap()</OnClick>
         </Scripts>
     </Button>

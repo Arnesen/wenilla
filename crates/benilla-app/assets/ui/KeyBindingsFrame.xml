@@ -1,0 +1,798 @@
+<Ui>
+    <!--
+        The KEY BINDINGS window (decision 0997) — the era-shaped standalone KeyBindingFrame the
+        game menu's Key Bindings button opens, over the engine's binding table
+        (benilla_ui::script::keybind + crate::bindings — GetNumBindings/GetBinding/SetBinding/
+        GetBindingKey/GetBindingAction/LoadBindings/SaveBindings/GetCurrentBindingSet, the 1.12
+        Lua API verbatim). Rows are the HONEST TREE: only commands the engine really dispatches
+        are registered, so only they (and only their non-empty categories) appear.
+
+        PROVENANCE (0985 — the three-source split; OptionsFrame.xml carries the sibling block):
+        · STRUCTURE & BEHAVIOR — the era Blizzard_BindingUI (wow-ui-source-era @ 1.15.9.68940,
+          Interface/AddOns/Blizzard_BindingUI — shipped there though 1.15's Settings supersedes
+          it; per 0985's per-window rule the newest classic-dialog form of THIS window is the
+          1.13/1.14 one, and that source IS this file's blueprint, the director's own screenshot):
+          858x660 CENTER dialog, the 175-wide category sidebar replacing 1.12's inline headers
+          (only non-empty categories appear), the bordered bindings container, Command/Key 1/
+          Key 2 columns over 25-tall rows, the top-right Character Specific checkbox, and the
+          Reset To Default / Unbind Key / Okay / Cancel row. Behavior deltas the era added and
+          this file keeps: Reset To Default confirms first; checkbox-kit click sounds.
+        · CAPTURE & SET LAW — 1.12's own Blizzard_BindingUI (extracted from patch.MPQ this
+          session, `_extracted_addons/`), which the era Lua descends from line-for-line: click a
+          key capsule to arm it; the next key or mouse-3/4/5 press binds IMMEDIATELY (the host's
+          capture seam hands the canonical ALT-CTRL-SHIFT chord to KeyBindingFrame_OnHostKey);
+          a stolen key names its victim in red (KEY_UNBOUND_ERROR); left/right clicks select/
+          deselect, never bind; lone modifiers are ignored; the wheel binds click-commands but
+          refuses press+release ones (SetBinding returns nil - KEYBINDINGFRAME_MOUSEWHEEL_ERROR);
+          binds take effect LIVE; Okay saves (SaveBindings), Cancel/ESC reverts
+          (LoadBindings(GetCurrentBindingSet())); the character-specific set is real 1.12
+          (DEFAULT/ACCOUNT/CHARACTER = 0/1/2, both confirm popups).
+        · ART BYTES — the 1.12 MPQ chain only (0978/0985): the same dialog chrome as
+          OptionsFrame.xml (BACKDROP_DIALOG_32_32 recipe: tiled UI-DialogBox-Background at its
+          uniform black-60% + the UI-DialogBox-Border rope; UI-DialogBox-Header title plate),
+          the tooltip-border OUTLINE boxes, the QuestLogTitleHighlight category wash law, the
+          UI-Panel-Button four-state red buttons, the UI-CheckBox set, the shared scroll kit.
+          The era's key capsules are UIMenuButtonStretchTemplate over UI-Silver-Button-* —
+          VERIFIED ABSENT from the 1.12 chain — so the capsules wear what 1.12's OWN binding
+          window wore: UIPanelButtonTemplate2's panel-button art (the selected state is the
+          1.12 window's own LockHighlight glow, not the era's silver overlay).
+        All strings are the 1.12 GlobalStrings globals (the VM executes the real file at boot):
+        KEY_BINDINGS, COMMAND/KEY1/KEY2, NOT_BOUND, BIND_KEY_TO_COMMAND, KEY_BOUND,
+        KEY_UNBOUND_ERROR, RESET_TO_DEFAULT, UNBIND, CHARACTER_SPECIFIC_KEYBINDINGS(+TOOLTIP),
+        CHARACTER_KEY_BINDINGS, CONFIRM_LOSE_BINDING_CHANGES,
+        CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS, KEYBINDINGFRAME_MOUSEWHEEL_ERROR, the
+        BINDING_HEADER_*/BINDING_NAME_* row text and the KEY_* key display names — each read
+        through a `getglobal(...) or raw` fallback (the era's own `_G[category] or category`
+        posture), so a headless test without GlobalStrings still renders raw tokens.
+        The era's CONFIRM_RESET_KEYBINDINGS string is 2.x-era text absent from 1.12
+        GlobalStrings; the fallback literal below carries it (structure kept, string ours).
+
+        SCOPE / divergences (noted, not bugs):
+        - 20 display rows, not the era's 21: the -52 box top (the title plate's clearance, the
+          options window's own band) plus the column-label band leaves 500 units of row run.
+        - No push-to-talk row, no gamepad arm, no quick-keybind mode (era furniture with no
+          benilla mechanism).
+        - ESC while a capsule is armed BINDS Escape — 1.12's own law (its OnKeyDown has no
+          ESCAPE filter while selected); ESC with nothing armed cancels and closes through the
+          shared ladder (UiPanels.xml), reopening the game menu (both references' OnHide).
+    -->
+
+    <!-- The red panel button at this window's sizes (GameMenuFrame.xml l.145 is the shared
+         original; templates don't cross files — OptionsFrame.xml carries the same copy). -->
+    <Button name="KeyBindingsRedButtonTemplate" virtual="true">
+        <Size><AbsDimension x="96" y="22"/></Size>
+        <ButtonText name="$parentText"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <DisabledTexture file="Interface\Buttons\UI-Panel-Button-Disabled"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></DisabledTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+        <NormalFont inherits="GameFontHighlight"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+    </Button>
+
+    <!-- One KEY CAPSULE (1.12 KeyBindingFrameBindingButtonTemplate: UIPanelButtonTemplate2 at
+         180x22 with the small-highlight font trio; its RegisterForClicks takes all five
+         buttons so middle/4/5 presses reach the capture law). The SELECTED state is 1.12's
+         LockHighlight — the ADD highlight held on. -->
+    <Button name="KeyBindingButtonTemplate" virtual="true">
+        <Size><AbsDimension x="180" y="22"/></Size>
+        <ButtonText name="$parentText"/>
+        <NormalTexture file="Interface\Buttons\UI-Panel-Button-Up"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></NormalTexture>
+        <PushedTexture file="Interface\Buttons\UI-Panel-Button-Down"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></PushedTexture>
+        <HighlightTexture file="Interface\Buttons\UI-Panel-Button-Highlight" alphaMode="ADD"><TexCoords left="0" right="0.625" top="0" bottom="0.6875"/></HighlightTexture>
+        <NormalFont inherits="GameFontHighlightSmall"/>
+        <HighlightFont inherits="GameFontHighlightSmall"/>
+        <DisabledFont inherits="GameFontDisableSmall"/>
+        <Scripts>
+            <OnLoad>this:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp", "Button4Up", "Button5Up")</OnLoad>
+            <OnClick>KeyBindingButton_OnClick(arg1)</OnClick>
+        </Scripts>
+    </Button>
+
+    <!-- One BINDING ROW (1.12 KeyBindingFrameBindingTemplate at the era row seat: 25 tall,
+         command name 170 wide at LEFT, the two capsules at 175/355 — no inline header slot:
+         the sidebar replaced 1.12's in-list headers, and the honest tree has no sub-headers). -->
+    <Frame name="KeyBindingRowTemplate" virtual="true">
+        <Size><AbsDimension x="560" y="25"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <FontString name="$parentDescription" inherits="GameFontNormalSmall" justifyH="LEFT">
+                    <Size><AbsDimension x="170" y="24"/></Size>
+                    <Anchors><Anchor point="LEFT"/></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentKey1Button" inherits="KeyBindingButtonTemplate" id="1">
+                <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="175" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentKey2Button" inherits="KeyBindingButtonTemplate" id="2">
+                <Anchors><Anchor point="LEFT" relativeTo="$parentKey1Button" relativePoint="RIGHT"><Offset><AbsDimension x="0" y="0"/></Offset></Anchor></Anchors>
+            </Button>
+        </Frames>
+    </Frame>
+
+    <!-- One CATEGORY row — the options window's 1.14 list-button wash law verbatim (0984:
+         ONE UI-QuestLogTitleHighlight quad in ADD, steel-blue hover / locked gold selection,
+         white text both ways; the era KeybindingsCategoryListButtonTemplate is the same
+         OptionsListButtonTemplate family). 175 wide at the era sidebar seat. -->
+    <Button name="KeyBindingsCategoryRowTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="175" y="20"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentBg" file="Interface\QuestFrame\UI-QuestLogTitleHighlight" alphaMode="ADD" hidden="true">
+                    <Size><AbsDimension x="163" y="21"/></Size>
+                    <Anchors><Anchor point="CENTER"/></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <ButtonText name="$parentText" justifyH="LEFT">
+            <Anchors>
+                <Anchor point="TOPLEFT"><Offset><AbsDimension x="16" y="1"/></Offset></Anchor>
+                <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="1"/></Offset></Anchor>
+            </Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontNormal"/>
+        <HighlightFont inherits="GameFontHighlight"/>
+        <DisabledFont inherits="GameFontDisable"/>
+        <Scripts>
+            <OnClick>KeyBindingsCategory_OnClick(this)</OnClick>
+            <OnEnter>
+                if KeyBindingFrame.selectedCategory ~= this.categoryIndex then
+                    local bg = getglobal(this:GetName() .. "Bg")
+                    bg:SetVertexColor(0.196, 0.388, 0.8)
+                    bg:Show()
+                end
+            </OnEnter>
+            <OnLeave>
+                if KeyBindingFrame.selectedCategory ~= this.categoryIndex then
+                    getglobal(this:GetName() .. "Bg"):Hide()
+                end
+            </OnLeave>
+        </Scripts>
+    </Button>
+
+    <Script><![CDATA[
+        -- ── Strings ── the 1.12 GlobalStrings globals, each with the raw fallback (a headless
+        -- harness without GlobalStrings still works; the era's own `_G[x] or x` posture).
+        function KeyBindings_String(name, fallback)
+            local s = getglobal(name)
+            if s then return s end
+            return fallback
+        end
+
+        -- ── The category model (era KeyBindingFrame_LoadCategories, simplified by the honest
+        -- tree): walk GetBinding(i), group runs of one category token; order = first
+        -- appearance, which IS 1.12's Bindings.xml order (the registry registers in it).
+        -- Rebuilt on every show, not load: the app seeds the table at PostStartup, after this
+        -- file's OnLoads ran.
+        function KeyBindings_LoadCategories()
+            local frame = KeyBindingFrame
+            frame.categories = {}
+            local byToken = {}
+            for i = 1, GetNumBindings() do
+                local _, category = GetBinding(i)
+                local cat = byToken[category]
+                if not cat then
+                    cat = { token = category, indices = {} }
+                    byToken[category] = cat
+                    table.insert(frame.categories, cat)
+                end
+                table.insert(cat.indices, i)
+            end
+            for n = 1, 12 do
+                local row = getglobal("KeyBindingFrameCategory" .. n)
+                local cat = frame.categories[n]
+                if cat then
+                    row.categoryIndex = n
+                    row:SetText(KeyBindings_String(cat.token, cat.token))
+                    row:Show()
+                else
+                    row:Hide()
+                end
+            end
+            if not frame.categories[frame.selectedCategory or 0] then
+                frame.selectedCategory = 1
+            end
+            KeyBindings_PaintCategories()
+        end
+
+        -- The selection paint (the options window's gold-lock / blue-hover law).
+        function KeyBindings_PaintCategories()
+            for n = 1, 12 do
+                local bg = getglobal("KeyBindingFrameCategory" .. n .. "Bg")
+                if n == KeyBindingFrame.selectedCategory then
+                    bg:SetVertexColor(1, 1, 0)
+                    bg:Show()
+                else
+                    bg:Hide()
+                end
+            end
+        end
+
+        function KeyBindingsCategory_OnClick(row)
+            PlaySound("igMainMenuOptionCheckBoxOn")
+            KeyBindingFrame.selectedCategory = row.categoryIndex
+            KeyBindings_SetSelected(nil)
+            KeyBindingFrameOutputText:SetText("")
+            KeyBindings_PaintCategories()
+            KeyBindingFrameScrollFrameScrollBar:SetValue(0)
+            KeyBindingFrame_Update()
+        end
+
+        -- ── Key display ── the 1.12 GetBindingText law by hand: modifier prefixes stay the
+        -- canonical uppercase tokens, the base key reads its KEY_* global (Spacebar, Up Arrow,
+        -- Mouse Button 4...) else itself. "CTRL--" renders CTRL + the minus key.
+        function KeyBindings_KeyText(key)
+            if not key then
+                return NORMAL_FONT_COLOR_CODE .. KeyBindings_String("NOT_BOUND", "Not Bound") .. FONT_COLOR_CODE_CLOSE
+            end
+            local prefix = ""
+            local rest = key
+            while true do
+                local p = string.sub(rest, 1, 4)
+                if p == "ALT-" then
+                    prefix = prefix .. "ALT-"
+                    rest = string.sub(rest, 5)
+                elseif string.sub(rest, 1, 5) == "CTRL-" then
+                    prefix = prefix .. "CTRL-"
+                    rest = string.sub(rest, 6)
+                elseif string.sub(rest, 1, 6) == "SHIFT-" then
+                    prefix = prefix .. "SHIFT-"
+                    rest = string.sub(rest, 7)
+                else
+                    break
+                end
+            end
+            return prefix .. KeyBindings_String("KEY_" .. rest, rest)
+        end
+
+        -- ── The list repaint (1.12 KeyBindingFrame_Update over the era category page). -->
+        KEY_BINDINGS_DISPLAYED = 20
+        KEY_BINDING_HEIGHT = 25
+
+        function KeyBindingFrame_Update()
+            local frame = KeyBindingFrame
+            local cat = frame.categories and frame.categories[frame.selectedCategory]
+            local indices = cat and cat.indices or {}
+            local numBindings = table.getn(indices)
+            local offset = BenillaFauxScrollFrame_GetOffset(KeyBindingFrameScrollFrame)
+            for i = 1, KEY_BINDINGS_DISPLAYED do
+                local row = getglobal("KeyBindingFrameBinding" .. i)
+                local index = indices[offset + i]
+                if index then
+                    local command, _, key1, key2 = GetBinding(index)
+                    local b1 = getglobal("KeyBindingFrameBinding" .. i .. "Key1Button")
+                    local b2 = getglobal("KeyBindingFrameBinding" .. i .. "Key2Button")
+                    b1.commandName = command
+                    b2.commandName = command
+                    b1:SetText(KeyBindings_KeyText(key1))
+                    b2:SetText(KeyBindings_KeyText(key2))
+                    if key1 then b1:SetAlpha(1) else b1:SetAlpha(0.8) end
+                    if key2 then b2:SetAlpha(1) else b2:SetAlpha(0.8) end
+                    getglobal("KeyBindingFrameBinding" .. i .. "Description"):SetText(
+                        KeyBindings_String("BINDING_NAME_" .. command, command))
+                    -- The 1.12 selection highlight: the pressed capsule holds its glow.
+                    if frame.selected == command and frame.keyID == 1 then
+                        b1:LockHighlight()
+                    else
+                        b1:UnlockHighlight()
+                    end
+                    if frame.selected == command and frame.keyID == 2 then
+                        b2:LockHighlight()
+                    else
+                        b2:UnlockHighlight()
+                    end
+                    row:Show()
+                else
+                    row:Hide()
+                end
+            end
+            BenillaFauxScrollFrame_Update(KeyBindingFrameScrollFrame, numBindings,
+                KEY_BINDINGS_DISPLAYED, KEY_BINDING_HEIGHT)
+            KeyBindings_UpdateUnbindKey()
+        end
+
+        -- ── Selection + the capture arm ── selecting a capsule arms the HOST's capture seam
+        -- (BenillaBindCapture): raw input is swallowed there and comes back canonical through
+        -- KeyBindingFrame_OnHostKey. Deselecting (either way) disarms.
+        function KeyBindings_SetSelected(command, keyID)
+            KeyBindingFrame.selected = command
+            KeyBindingFrame.keyID = keyID
+            BenillaBindCapture(command ~= nil)
+        end
+
+        function KeyBindingButton_OnClick(button)
+            -- The 1.12 law: while something is selected, only LEFT/RIGHT on a capsule
+            -- re-select or deselect — a middle/4/5 press is a BIND, and the host's armed
+            -- capture seam (which runs after this click) takes it, so this handler must not
+            -- touch the selection for those buttons.
+            if KeyBindingFrame.selected then
+                if button ~= "LeftButton" and button ~= "RightButton" then
+                    return
+                end
+                if KeyBindingFrame.selected == this.commandName and KeyBindingFrame.keyID == this:GetID() then
+                    KeyBindings_SetSelected(nil)
+                    KeyBindingFrameOutputText:SetText("")
+                else
+                    KeyBindings_SetSelected(this.commandName, this:GetID())
+                    KeyBindingFrameOutputText:SetText(string.format(
+                        KeyBindings_String("BIND_KEY_TO_COMMAND", "Press Key to Bind to Command -> %s"),
+                        KeyBindings_String("BINDING_NAME_" .. this.commandName, this.commandName)))
+                end
+            else
+                KeyBindings_SetSelected(this.commandName, this:GetID())
+                KeyBindingFrameOutputText:SetText(string.format(
+                    KeyBindings_String("BIND_KEY_TO_COMMAND", "Press Key to Bind to Command -> %s"),
+                    KeyBindings_String("BINDING_NAME_" .. this.commandName, this.commandName)))
+            end
+            KeyBindingFrame_Update()
+        end
+
+        -- The host's capture callback: `chord` is canonical (ALT-CTRL-SHIFT-TOKEN). The body is
+        -- 1.12's OnKeyDown selected-branch verbatim: steal message, clear the command's keys,
+        -- rebind in slot order so the pressed slot takes the new chord.
+        function KeyBindingFrame_OnHostKey(chord)
+            local frame = KeyBindingFrame
+            if not frame.selected then
+                return
+            end
+            local selected = frame.selected
+            local oldAction = GetBindingAction(chord)
+            if oldAction ~= "" and oldAction ~= selected then
+                local k1, k2 = GetBindingKey(oldAction)
+                if (not k1 or k1 == chord) and (not k2 or k2 == chord) then
+                    KeyBindingFrameOutputText:SetText(string.format(
+                        KeyBindings_String("KEY_UNBOUND_ERROR", "|cffff0000%s Function is Now Unbound!|r"),
+                        KeyBindings_String("BINDING_NAME_" .. oldAction, oldAction)))
+                else
+                    KeyBindingFrameOutputText:SetText(KeyBindings_String("KEY_BOUND", "Key Bound Successfully"))
+                end
+            else
+                KeyBindingFrameOutputText:SetText(KeyBindings_String("KEY_BOUND", "Key Bound Successfully"))
+            end
+            local key1, key2 = GetBindingKey(selected)
+            if key1 then SetBinding(key1) end
+            if key2 then SetBinding(key2) end
+            if frame.keyID == 1 then
+                KeyBindings_SetOrRestore(chord, selected, key1)
+                if key2 then SetBinding(key2, selected) end
+            else
+                if key1 then SetBinding(key1, selected) end
+                KeyBindings_SetOrRestore(chord, selected, key2)
+            end
+            frame.bindingsChanged = 1
+            KeyBindings_SetSelected(nil)
+            KeyBindingFrame_Update()
+        end
+
+        -- 1.12 KeyBindingFrame_SetBinding: a refused bind (the wheel on a press+release
+        -- command) restores the slot's old key and says why.
+        function KeyBindings_SetOrRestore(key, command, oldKey)
+            if not SetBinding(key, command) then
+                if oldKey then SetBinding(oldKey, command) end
+                KeyBindingFrameOutputText:SetText(KeyBindings_String(
+                    "KEYBINDINGFRAME_MOUSEWHEEL_ERROR",
+                    "Can't bind mousewheel to actions with up and down states"))
+            end
+        end
+
+        function KeyBindings_UpdateUnbindKey()
+            if KeyBindingFrame.selected then
+                KeyBindingFrameUnbindButton:Enable()
+            else
+                KeyBindingFrameUnbindButton:Disable()
+            end
+        end
+
+        -- ── The bottom row + checkbox (1.12 bodies, era confirm on Reset To Default) ──
+        function KeyBindings_Unbind()
+            local frame = KeyBindingFrame
+            local key1, key2 = GetBindingKey(frame.selected)
+            if key1 then SetBinding(key1) end
+            if key2 then SetBinding(key2) end
+            if key1 and frame.keyID == 1 then
+                if key2 then SetBinding(key2, frame.selected) end
+            else
+                if key1 then SetBinding(key1, frame.selected) end
+            end
+            frame.bindingsChanged = 1
+            KeyBindings_SetSelected(nil)
+            KeyBindingFrameOutputText:SetText("")
+            KeyBindingFrame_Update()
+        end
+
+        function KeyBindings_UpdateHeader()
+            if KeyBindingFrameCharacterButton:GetChecked() then
+                KeyBindingFrameTitleText:SetText(string.format(
+                    KeyBindings_String("CHARACTER_KEY_BINDINGS", "Key Bindings for %s"),
+                    UnitName("player") or UNKNOWNOBJECT or "Unknown"))
+            else
+                KeyBindingFrameTitleText:SetText(KeyBindings_String("KEY_BINDINGS", "Key Bindings"))
+            end
+        end
+
+        function KeyBindings_ChangeBindingProfile()
+            if KeyBindingFrameCharacterButton:GetChecked() then
+                LoadBindings(2)
+            else
+                LoadBindings(1)
+            end
+            KeyBindings_UpdateHeader()
+            KeyBindingFrameOutputText:SetText("")
+            KeyBindings_SetSelected(nil)
+            KeyBindingFrame_Update()
+        end
+
+        function KeyBindings_Okay()
+            local which
+            if KeyBindingFrameCharacterButton:GetChecked() then
+                which = 2
+            else
+                which = 1
+                -- 1.12 guards on `GetCurrentBindingSet() == 2` here; in benilla's set model a
+                -- character set EXISTS exactly while it is the active one (its file's presence
+                -- IS the state — decision 0997), so the honest guard for "this Okay will
+                -- permanently delete the character set" is existence, which also catches the
+                -- uncheck-then-Okay path 1.12's literal guard let slip past its own warning.
+                if BenillaCharacterBindingsExist() and not CONFIRMED_DELETING_CHARACTER_SPECIFIC_BINDINGS then
+                    StaticPopup_Show("CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS")
+                    return
+                end
+            end
+            SaveBindings(which)
+            KeyBindingFrameOutputText:SetText("")
+            KeyBindings_SetSelected(nil)
+            HideUIPanel(KeyBindingFrame)
+        end
+
+        -- Cancel / the ESC ladder's rung (UiPanels.xml): revert to the saved set and close.
+        function KeyBindingFrame_Cancel()
+            LoadBindings(GetCurrentBindingSet())
+            KeyBindingFrameOutputText:SetText("")
+            KeyBindings_SetSelected(nil)
+            HideUIPanel(KeyBindingFrame)
+        end
+
+        StaticPopupDialogs["CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS"] = {
+            text = KeyBindings_String("CONFIRM_DELETING_CHARACTER_SPECIFIC_BINDINGS",
+                "Really switch to general key bindings?  All key bindings specific to this character will be permanantly deleted."),
+            button1 = KeyBindings_String("OKAY", "Okay"),
+            button2 = KeyBindings_String("CANCEL", "Cancel"),
+            OnAccept = function()
+                SaveBindings(1)
+                KeyBindingFrameOutputText:SetText("")
+                KeyBindings_SetSelected(nil)
+                CONFIRMED_DELETING_CHARACTER_SPECIFIC_BINDINGS = 1
+                HideUIPanel(KeyBindingFrame)
+            end,
+        }
+        StaticPopupDialogs["CONFIRM_LOSE_BINDING_CHANGES"] = {
+            text = KeyBindings_String("CONFIRM_LOSE_BINDING_CHANGES",
+                "You will lose any unsaved changes if you switch between general and character specific key bindings."),
+            button1 = KeyBindings_String("OKAY", "Okay"),
+            button2 = KeyBindings_String("CANCEL", "Cancel"),
+            OnAccept = function()
+                KeyBindings_ChangeBindingProfile()
+                KeyBindingFrame.bindingsChanged = nil
+            end,
+            OnCancel = function()
+                if KeyBindingFrameCharacterButton:GetChecked() then
+                    KeyBindingFrameCharacterButton:SetChecked(nil)
+                else
+                    KeyBindingFrameCharacterButton:SetChecked(1)
+                end
+            end,
+        }
+        -- Era addition kept (structure law): Reset To Default confirms first. 1.12 has no
+        -- string for it; the literal is ours (the era's lives in its client binary).
+        StaticPopupDialogs["CONFIRM_RESET_KEYBINDINGS"] = {
+            text = "Are you sure you want to reset all keybindings to their defaults?",
+            button1 = KeyBindings_String("OKAY", "Okay"),
+            button2 = KeyBindings_String("CANCEL", "Cancel"),
+            OnAccept = function()
+                PlaySound("igMainMenuOptionCheckBoxOn")
+                LoadBindings(0)
+                KeyBindingFrameOutputText:SetText("")
+                KeyBindings_SetSelected(nil)
+                KeyBindingFrame_Update()
+            end,
+        }
+    ]]></Script>
+
+    <Frame name="KeyBindingFrame" frameStrata="DIALOG" enableMouse="true" hidden="true">
+        <Size><AbsDimension x="858" y="660"/></Size>
+        <Anchors><Anchor point="CENTER"/></Anchors>
+        <!-- The 1.14 dialog recipe, OptionsFrame.xml's own block (BACKDROP_DIALOG_32_32 —
+             which is ALSO the era KeyBindingFrame's declared backdrop, a rare exact meet). -->
+        <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+            <TileSize><AbsValue val="32"/></TileSize>
+            <EdgeSize><AbsValue val="32"/></EdgeSize>
+            <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+        </Backdrop>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentHeader" file="Interface\DialogFrame\UI-DialogBox-Header">
+                    <Size><AbsDimension x="300" y="68"/></Size>
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="0" y="12"/></Offset></Anchor></Anchors>
+                </Texture>
+                <!-- The column labels + their hairline (the options divider idiom: a 1-unit
+                     white fill at 0.3 — what the era's atlas hairline actually is), across the
+                     bindings box's label band. Seats echo the era chain (command at the box
+                     left; Key 1/Key 2 over their capsule columns). -->
+                <FontString name="$parentCommandLabel" inherits="GameFontNormal" text="Command">
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="227" y="-64"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentKey1Label" inherits="GameFontNormal" text="Key 1">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="60" y="-64"/></Offset></Anchor></Anchors>
+                </FontString>
+                <FontString name="$parentKey2Label" inherits="GameFontNormal" text="Key 2">
+                    <Anchors><Anchor point="TOP"><Offset><AbsDimension x="240" y="-64"/></Offset></Anchor></Anchors>
+                </FontString>
+                <Texture name="$parentColumnLine">
+                    <Size><AbsDimension y="1"/></Size>
+                    <Anchors>
+                        <Anchor point="TOPLEFT"><Offset><AbsDimension x="221" y="-82"/></Offset></Anchor>
+                        <Anchor point="TOPRIGHT"><Offset><AbsDimension x="-30" y="-82"/></Offset></Anchor>
+                    </Anchors>
+                    <Color r="1" g="1" b="1" a="0.3"/>
+                </Texture>
+            </Layer>
+            <Layer level="OVERLAY">
+                <FontString name="$parentTitleText" inherits="GameFontNormal" text="Key Bindings">
+                    <Anchors>
+                        <Anchor point="TOP" relativeTo="$parentHeader"><Offset><AbsDimension x="0" y="-14"/></Offset></Anchor>
+                    </Anchors>
+                </FontString>
+                <FontString name="$parentOutputText" inherits="GameFontNormal">
+                    <Anchors><Anchor point="BOTTOM"><Offset><AbsDimension x="90" y="46"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <!-- The two outline boxes (the options window's tooltip-border law). -->
+            <Frame name="$parentCategoryBox">
+                <Anchors>
+                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="14" y="-52"/></Offset></Anchor>
+                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-669" y="52"/></Offset></Anchor>
+                </Anchors>
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+                    <EdgeSize><AbsValue val="16"/></EdgeSize>
+                    <TileSize><AbsValue val="16"/></TileSize>
+                    <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+                </Backdrop>
+                <Scripts>
+                    <OnLoad>
+                        this:SetBackdropColor(0, 0, 0, 0)
+                        this:SetBackdropBorderColor(0.6, 0.6, 0.6)
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+            <Frame name="$parentBindingsBox">
+                <Anchors>
+                    <Anchor point="TOPLEFT"><Offset><AbsDimension x="215" y="-88"/></Offset></Anchor>
+                    <Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-14" y="52"/></Offset></Anchor>
+                </Anchors>
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+                    <EdgeSize><AbsValue val="16"/></EdgeSize>
+                    <TileSize><AbsValue val="16"/></TileSize>
+                    <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+                </Backdrop>
+                <Scripts>
+                    <OnLoad>
+                        this:SetBackdropColor(0, 0, 0, 0)
+                        this:SetBackdropBorderColor(0.6, 0.6, 0.6)
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+            <!-- The category rows (12 static slots; the honest tree has 8 categories today —
+                 spares stay hidden, the fill is KeyBindings_LoadCategories). -->
+            <Button name="$parentCategory1" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategoryBox"><Offset><AbsDimension x="6" y="-8"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory2" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory1" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory3" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory2" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory4" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory3" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory5" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory4" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory6" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory5" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory7" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory6" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory8" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory7" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory9" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory8" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory10" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory9" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory11" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory10" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <Button name="$parentCategory12" inherits="KeyBindingsCategoryRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentCategory11" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-2"/></Offset></Anchor></Anchors>
+            </Button>
+            <!-- The 20 binding rows, chained at the era +2 spacing inside the bindings box. -->
+            <Frame name="$parentBinding1" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBindingsBox"><Offset><AbsDimension x="12" y="-8"/></Offset></Anchor></Anchors>
+            </Frame>
+            <Frame name="$parentBinding2" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding1" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding3" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding2" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding4" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding3" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding5" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding4" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding6" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding5" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding7" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding6" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding8" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding7" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding9" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding8" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding10" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding9" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding11" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding10" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding12" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding11" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding13" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding12" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding14" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding13" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding15" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding14" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding16" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding15" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding17" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding16" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding18" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding17" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding19" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding18" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <Frame name="$parentBinding20" inherits="KeyBindingRowTemplate">
+                <Anchors><Anchor point="TOPLEFT" relativeTo="$parentBinding19" relativePoint="BOTTOMLEFT"/></Anchors>
+            </Frame>
+            <!-- The faux scroll over the rows (the shared kit; the ref's FauxScrollFrame at the
+                 same seam). The wheel guard is the era's own: while a capsule is armed, the
+                 wheel is a BIND (the host arm swallows it) — never a scroll. -->
+            <Frame name="$parentScrollFrame" inherits="BenillaFauxScrollFrameTemplate">
+                <Anchors>
+                    <Anchor point="TOPLEFT" relativeTo="$parentBindingsBox"><Offset><AbsDimension x="8" y="-8"/></Offset></Anchor>
+                    <Anchor point="BOTTOMRIGHT" relativeTo="$parentBindingsBox"><Offset><AbsDimension x="-26" y="8"/></Offset></Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnLoad>
+                        BenillaFauxScrollFrame_OnLoad(this)
+                        this.updateFunc = KeyBindingFrame_Update
+                    </OnLoad>
+                    <OnMouseWheel>
+                        if not KeyBindingFrame.selected then
+                            BenillaFauxScrollFrame_OnMouseWheel(this, arg1)
+                        end
+                    </OnMouseWheel>
+                </Scripts>
+            </Frame>
+            <!-- Character Specific Key Bindings — the 1.12 checkbox at the era's top-right seat,
+                 with 1.12's own confirm-on-unsaved-changes law and tooltip. -->
+            <CheckButton name="$parentCharacterButton">
+                <Size><AbsDimension x="20" y="20"/></Size>
+                <Anchors><Anchor point="TOPLEFT" relativePoint="TOPRIGHT"><Offset><AbsDimension x="-260" y="-24"/></Offset></Anchor></Anchors>
+                <Layers>
+                    <Layer level="OVERLAY">
+                        <FontString name="$parentLabel" inherits="GameFontHighlightSmall" justifyH="LEFT">
+                            <Anchors><Anchor point="LEFT" relativePoint="RIGHT"><Offset><AbsDimension x="2" y="0"/></Offset></Anchor></Anchors>
+                        </FontString>
+                    </Layer>
+                </Layers>
+                <NormalTexture file="Interface\Buttons\UI-CheckBox-Up"/>
+                <PushedTexture file="Interface\Buttons\UI-CheckBox-Down"/>
+                <CheckedTexture file="Interface\Buttons\UI-CheckBox-Check"/>
+                <DisabledCheckedTexture file="Interface\Buttons\UI-CheckBox-Check-Disabled"/>
+                <Scripts>
+                    <OnLoad>
+                        getglobal(this:GetName() .. "Label"):SetText(
+                            KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDINGS", "Character Specific Key Bindings"))
+                    </OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOptionCheckBoxOn")
+                        if KeyBindingFrame.bindingsChanged then
+                            StaticPopup_Show("CONFIRM_LOSE_BINDING_CHANGES")
+                        else
+                            KeyBindings_ChangeBindingProfile()
+                        end
+                    </OnClick>
+                    <OnEnter>
+                        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                        GameTooltip:SetText(KeyBindings_String("CHARACTER_SPECIFIC_KEYBINDING_TOOLTIP",
+                            "Click this to toggle between general key bindings and key bindings specific to this character."), nil, nil, nil, nil, 1)
+                    </OnEnter>
+                    <OnLeave>GameTooltip:Hide()</OnLeave>
+                </Scripts>
+            </CheckButton>
+            <!-- The bottom row — the era seats verbatim (defaults left; unbind/okay/cancel right). -->
+            <Button name="$parentDefaultButton" inherits="KeyBindingsRedButtonTemplate">
+                <Size><AbsDimension x="130" y="22"/></Size>
+                <Anchors><Anchor point="BOTTOMLEFT"><Offset><AbsDimension x="16" y="16"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(KeyBindings_String("RESET_TO_DEFAULT", "Reset To Default"))</OnLoad>
+                    <OnClick>StaticPopup_Show("CONFIRM_RESET_KEYBINDINGS")</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="$parentUnbindButton" inherits="KeyBindingsRedButtonTemplate">
+                <Size><AbsDimension x="130" y="22"/></Size>
+                <Anchors><Anchor point="BOTTOMRIGHT"><Offset><AbsDimension x="-205" y="16"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(KeyBindings_String("UNBIND", "Unbind Key"))</OnLoad>
+                    <OnClick>
+                        PlaySound("igMainMenuOptionCheckBoxOn")
+                        KeyBindings_Unbind()
+                    </OnClick>
+                </Scripts>
+            </Button>
+            <Button name="$parentOkayButton" inherits="KeyBindingsRedButtonTemplate">
+                <Anchors><Anchor point="BOTTOMLEFT" relativeTo="$parentUnbindButton" relativePoint="BOTTOMRIGHT"/></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(KeyBindings_String("OKAY", "Okay"))</OnLoad>
+                    <OnClick>KeyBindings_Okay()</OnClick>
+                </Scripts>
+            </Button>
+            <Button name="$parentCancelButton" inherits="KeyBindingsRedButtonTemplate">
+                <Anchors><Anchor point="BOTTOMLEFT" relativeTo="$parentOkayButton" relativePoint="BOTTOMRIGHT"/></Anchors>
+                <Scripts>
+                    <OnLoad>this:SetText(KeyBindings_String("CANCEL", "Cancel"))</OnLoad>
+                    <OnClick>KeyBindingFrame_Cancel()</OnClick>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnShow>
+                KeyBindings_LoadCategories()
+                KeyBindingFrameCharacterButton:SetChecked(GetCurrentBindingSet() == 2 and 1 or nil)
+                KeyBindings_UpdateHeader()
+                KeyBindingFrame.bindingsChanged = nil
+                KeyBindingFrameScrollFrameScrollBar:SetValue(0)
+                KeyBindingFrame_Update()
+            </OnShow>
+            <OnHide>
+                -- Both references reopen the game menu (1.12 + era OnHide); a straggling
+                -- selection disarms the host capture seam.
+                KeyBindings_SetSelected(nil)
+                KeyBindingFrameOutputText:SetText("")
+                ShowUIPanel(GameMenuFrame)
+            </OnHide>
+        </Scripts>
+    </Frame>
+</Ui>

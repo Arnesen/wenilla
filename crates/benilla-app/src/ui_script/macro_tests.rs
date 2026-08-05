@@ -352,9 +352,16 @@ fn the_two_tabs_fit_inside_the_window() {
     for (label_width, expect_tab2) in [
         // A short name: under the cap, so the tab is text + PAD + SIDES.
         (121.0, 121.0 + PAD + SIDES),
-        // A long one: the cap engages and the tab stops growing at CAP + PAD + SIDES.
-        (240.0, CAP + PAD + SIDES),
+        // A long one: the reference's cap would give CAP + PAD + SIDES = 167, but the structural
+        // clamp is tighter here and wins at 164 — the room left between tab 1's right edge and the
+        // window's DRAWN edge (decision 1002). Pinned as the smaller of the two on purpose: the
+        // whole point of the clamp is that it, not the hand-tuned cap, is what holds the line.
+        (240.0, 164.0),
     ] {
+        assert!(
+            expect_tab2 <= CAP + PAD + SIDES,
+            "the clamp may tighten the reference's cap, never loosen it"
+        );
         let mut s = harness();
         s.run("ShowMacroFrame()").unwrap();
         s.resolve();
@@ -487,9 +494,11 @@ fn the_tab_row_settles_and_stays_inside_the_window() {
         settled.iter().all(|w| *w == last),
         "the tab fit never settles — it changes every frame: {widths:?}"
     );
+    // 344, not 384: this window's art stops 40 units short of its frame rect (MacroFrame.xml's
+    // `benillaTabRightInset`), and the frame rect is not what the player sees.
     assert!(
-        last.2 <= 384.0,
-        "tab 2 ends at {} of a 384-wide window: {widths:?}",
+        last.2 <= 344.0,
+        "tab 2 ends at {} of a window whose plate stops at 344: {widths:?}",
         last.2
     );
     no_errors(&s, "tab settle");
@@ -533,9 +542,65 @@ fn no_character_name_can_push_the_tab_row_off_the_window() {
             )
             .unwrap();
         assert!(
-            right <= 384.0,
-            "{name:?}: the tab row ends at {right} of a 384-wide window (tab 2 is {w2} wide)"
+            right <= 344.0,
+            "{name:?}: the tab row ends at {right}, past the drawn plate's edge at 344 \
+             (tab 2 is {w2} wide)"
         );
         no_errors(&s, name);
+    }
+}
+
+/// **The hover highlight IS the tab, at every width and from the first frame** — the director's
+/// report on the landed 1002 build: in one screenshot the glow stood proud of tab 1 and fell well
+/// short of tab 2.
+///
+/// Both halves were the same defect, and it is 1002's own read-back trap in the one line 1002 did
+/// not fix: the old kit sized the highlight from the label and then capped it at `tab:GetWidth()`,
+/// which serves the last RESOLVED rect — inside a settle, the template's pre-fit 115. So every tab
+/// in the client wore a 129-unit highlight regardless of its own width, and the settle's change-gate
+/// latched it there. The fix is structural (the highlight anchors to the tab's two side edges), so
+/// this test asserts the property that makes the whole class of bug impossible: **no frame, no
+/// label, no clamp can put the glow at a width other than its tab's.**
+#[test]
+fn the_tab_highlight_is_exactly_its_tab() {
+    // A name under the reference's cap, one over it, and one long enough that the structural
+    // drawn-edge clamp (1002) is what sets the width — all three must hold the same property.
+    for name in ["Ai", "Onehunter", &"W".repeat(40)] {
+        let mut s = harness();
+        s.run(&format!("UnitName = function() return \"{name}\" end"))
+            .unwrap();
+        s.run("ShowMacroFrame()").unwrap();
+        s.run("BenillaMacroFrameTab2:SetText(BenillaMacroFrame_TabTwoLabel())")
+            .unwrap();
+
+        for frame in 0..12 {
+            s.resolve();
+            pump_measures(&mut s);
+            s.tick(0.016);
+            s.resolve();
+            for tab in ["BenillaMacroFrameTab1", "BenillaMacroFrameTab2"] {
+                let (tl, tr, hl, hr): (f64, f64, f64, f64) = s
+                    .eval(&format!(
+                        "return {tab}:GetLeft(), {tab}:GetRight(), \
+                         {tab}HighlightTexture:GetLeft(), {tab}HighlightTexture:GetRight()"
+                    ))
+                    .unwrap();
+                assert_eq!(
+                    hr - hl,
+                    tr - tl,
+                    "{tab} f{frame} ({name}): highlight {} wide on a {} tab",
+                    hr - hl,
+                    tr - tl
+                );
+                // …and seated where the reference seats it: its own +2 nudge off the tab's edges
+                // (TabButtonTemplate's highlight anchor offset), not centred on some other rect.
+                assert_eq!(
+                    hl,
+                    tl + 2.0,
+                    "{tab} f{frame} ({name}): highlight not on the tab"
+                );
+            }
+        }
+        no_errors(&s, "tab highlight");
     }
 }

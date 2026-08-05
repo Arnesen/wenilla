@@ -47,8 +47,18 @@
 //! homing aims at the dest attach point rather than solving the client's
 //! ray-vs-bounding-sphere intercept (`0x61d230` — same body point in practice); a missed
 //! target's arrival plays its dodge/block clip but the projectile itself still ends there
-//! rather than deflecting (`0x61dd50`'s bounce); and the ground/dest-location arrival path
-//! (`0x61d870` — needs the wire's dest position and positional effect spawning) stays deferred.
+//! rather than deflecting (`0x61dd50`'s bounce).
+//!
+//! A GO with **no unit targets at all** but a point on the wire flies **one** projectile at the
+//! point — the client's location fallback (`0x6e8a50`'s empty-hit-array arm → `0x60a3d0` once,
+//! owning unit slot −1; wow-re `spell-go-dest-effect.md` §3). That is the whole visible flight of
+//! a pure ground cast: the hunter's Flare arcing out to where it was placed, a bomb thrown at
+//! empty dirt. Such a missile homes to nothing — its aim is a fixed world point ([`Aim::Ground`])
+//! — and it arrives as [`CastEventKind::GroundImpact`] on the CASTER (`0x61e1d0`'s ground arm
+//! `0x61d870`), never through the unit hand-off. Named approximation: it flies the same straight
+//! arrive-on-time line a unit missile does; the reference's trajectory *class* comes from
+//! `CMissile+0x48` through `0x61d720`'s remap table, whose wire origin wow-re traced to
+//! consumption only — so a lobbed shot reads as a straight glide here.
 
 use bevy::animation::transition::AnimationTransitions;
 use bevy::ecs::entity::EntityHashMap;
@@ -128,20 +138,38 @@ pub(crate) enum MissileSound {
     Stop { entity: Entity },
 }
 
+/// What a projectile flies at — the client's two `CMissile` flavours, split by whether the spawn
+/// had an owning unit slot (`0x60a5ec` writes −1 for the location fallback) and dispatched apart
+/// on arrival by `0x61e1d0` (`0x61dc50` a live unit, `0x61d870` the ground).
+#[derive(Clone, Copy)]
+enum Aim {
+    /// A unit target: the flight homes to its live attach point, so a moving target bends the path.
+    Unit {
+        /// The unit it flies at (despawn quietly if it streams out mid-flight).
+        target: Entity,
+        /// The M2 attach tag it homes to on the target (`SpellVisual` field 9), `None` = base.
+        dest_tag: Option<u16>,
+        /// `None` — the spell landed: arrival plays the impact hand-off. `Some(code)` — the wire's
+        /// `SpellMissInfo` miss: arrival instead plays the victim's defense clip for DODGE(3)/
+        /// BLOCK(5) (the client's `Missile_C::Update 0x61ceb0` dispatch — Dodge 30 / ShieldBlock
+        /// 24, never Parry; wow-re `smsg-attackerstate-consequences.md` §Q4) and no impact kit.
+        miss: Option<u8>,
+    },
+    /// A fixed world point — the GO's dest, with no unit to home to and nothing that can make the
+    /// flight end early. Arrival is the ground hand-off on the caster.
+    Ground(Vec3),
+}
+
 /// One projectile in flight.
 #[derive(Component)]
 pub(super) struct Missile {
     /// The spell that fired it — the impact event's key.
     spell_id: u32,
-    /// The unit it flies at (despawn quietly if it streams out mid-flight).
-    target: Entity,
-    /// The M2 attach tag it homes to on the target (`SpellVisual` field 9), `None` = base.
-    dest_tag: Option<u16>,
-    /// `None` — the spell landed: arrival plays the impact hand-off. `Some(code)` — the wire's
-    /// `SpellMissInfo` miss: arrival instead plays the victim's defense clip for DODGE(3)/
-    /// BLOCK(5) (the client's `Missile_C::Update 0x61ceb0` dispatch — Dodge 30 / ShieldBlock 24,
-    /// never Parry; wow-re `smsg-attackerstate-consequences.md` §Q4) and no impact kit.
-    miss: Option<u8>,
+    /// The unit that launched it — the ground arrival's kit subject (`0x61d870` plays on the
+    /// caster). Unused by a unit arrival, which plays on the target.
+    caster: Entity,
+    /// Where it is going.
+    aim: Aim,
     /// The model-cache key ([`SpellFx`]); parts attach once the M2 loads. `None` = nothing to
     /// show (no visual-chain model, no resolvable ammo) — an invisible flight that still impacts.
     path: Option<String>,
@@ -176,6 +204,27 @@ pub(super) fn attach_world_pos(
             None => base.translation(),
         },
     )
+}
+
+/// Where a missile is heading **this frame**: a unit target's live dest attach point (so the
+/// path bends as it moves — the client's re-solve per tick), or the ground shot's fixed point.
+/// `None` only when a unit target is gone.
+fn aim_point(
+    aim: Aim,
+    units: &Query<(&GlobalTransform, Option<&BoneAttach>)>,
+    joints: &Query<&GlobalTransform>,
+) -> Option<Vec3> {
+    match aim {
+        Aim::Unit {
+            target, dest_tag, ..
+        } => attach_world_pos(
+            target,
+            dest_tag.into_iter().chain(DEST_FALLBACKS),
+            units,
+            joints,
+        ),
+        Aim::Ground(pos) => Some(pos),
+    }
 }
 
 /// The caster's **launch position**: the fired release event's own marker when there is one (the
@@ -270,31 +319,40 @@ fn miss_defense_state(code: u8) -> Option<u32> {
     }
 }
 
-/// The arrival hand-off — the client's `Missile_C::Update` (`0x61ceb0`) outcome dispatch: a
-/// landed spell routes back to the router as [`CastEventKind::Impact`] (the impact/state kits +
-/// wound flinch); a missed one instead plays the victim's defense clip per
-/// [`miss_defense_state`], and no impact kit plays.
+/// The arrival hand-off — the client's per-tick outcome dispatch (`0x61e1d0` over `0x61ceb0`'s
+/// clock): a landed spell routes back to the router as [`CastEventKind::Impact`] on the target
+/// (the impact/state kits + wound flinch); a missed one instead plays the victim's defense clip
+/// per [`miss_defense_state`], and no impact kit plays; a **ground** arrival routes
+/// [`CastEventKind::GroundImpact`] to the CASTER carrying the landing point (`0x61d870`).
 fn arrival_handoff(
-    target: Entity,
-    spell_id: u32,
-    weapon_visual: Option<u32>,
-    miss: Option<u8>,
+    missile: &Missile,
+    at: Vec3,
     impacts: &mut MessageWriter<CastEvent>,
     defenses: &mut MessageWriter<DefenseAnim>,
     play_seq: &mut crate::creature_anim::PlaySeq,
 ) {
-    match miss {
-        None => {
-            impacts.write(CastEvent {
-                entity: target,
-                spell_id,
-                kind: CastEventKind::Impact { weapon_visual },
-                // Scene-time stamp: the client plays the impact at arrival, after the frame's
-                // packet handlers — a fresh tick sorts it the same way.
-                seq: play_seq.next(),
-            });
+    // Scene-time stamp: the client plays the arrival after the frame's packet handlers — a fresh
+    // tick sorts it the same way.
+    let mut event = |entity, kind| CastEvent {
+        entity,
+        spell_id: missile.spell_id,
+        kind,
+        seq: play_seq.next(),
+    };
+    match missile.aim {
+        Aim::Unit {
+            target, miss: None, ..
+        } => {
+            let kind = CastEventKind::Impact {
+                weapon_visual: missile.weapon_visual,
+            };
+            impacts.write(event(target, kind));
         }
-        Some(code) => {
+        Aim::Unit {
+            target,
+            miss: Some(code),
+            ..
+        } => {
             if let Some(victim_state) = miss_defense_state(code) {
                 defenses.write(DefenseAnim {
                     victim: target,
@@ -302,10 +360,17 @@ fn arrival_handoff(
                 });
             }
         }
+        Aim::Ground(_) => {
+            impacts.write(event(
+                missile.caster,
+                CastEventKind::GroundImpact { pos: at },
+            ));
+        }
     }
 }
 
-/// Launch one queued GO's projectiles from `launch`: one missile entity per target, its
+/// Launch one queued GO's projectiles from `launch`: one missile entity per target — or the
+/// single ground projectile when the GO had no unit targets and a point instead — its
 /// **remaining** travel time `distance / speed − time queued` (the client's `0x61ceb0` — the
 /// arrival deadline was fixed at GO). A release already past its deadline arrives on the spot:
 /// the arrival hand-off plays now, no flight entity, no flight loop — the melee-range cast
@@ -322,38 +387,43 @@ fn launch_go(
     defenses: &mut MessageWriter<DefenseAnim>,
     play_seq: &mut crate::creature_anim::PlaySeq,
 ) {
-    for &(target, miss) in &go.spawn.targets {
-        let dest = go.spawn.dest_tag.into_iter().chain(DEST_FALLBACKS);
-        let Some(aim) = attach_world_pos(target, dest, units, joints) else {
+    // The unit targets, else the location fallback's lone ground shot (the client consults the
+    // `flags & 0x60` latch only once the hit array has come back empty).
+    let aims: Vec<Aim> = if go.spawn.targets.is_empty() {
+        go.spawn.ground_aim.map(Aim::Ground).into_iter().collect()
+    } else {
+        go.spawn
+            .targets
+            .iter()
+            .map(|&(target, miss)| Aim::Unit {
+                target,
+                dest_tag: go.spawn.dest_tag,
+                miss,
+            })
+            .collect()
+    };
+    for aim_at in aims {
+        let Some(aim) = aim_point(aim_at, units, joints) else {
             continue; // target already gone — its impact would be invisible anyway
         };
-        let arrive_in = launch.distance(aim) / go.spawn.speed.max(f32::EPSILON) - go.queued;
-        if arrive_in <= 0.0 {
-            arrival_handoff(
-                target,
-                go.spawn.spell_id,
-                go.spawn.weapon_visual,
-                miss,
-                impacts,
-                defenses,
-                play_seq,
-            );
+        let missile = Missile {
+            spell_id: go.spawn.spell_id,
+            caster: go.spawn.caster,
+            aim: aim_at,
+            path: go.key.clone(),
+            arrive_in: launch.distance(aim) / go.spawn.speed.max(f32::EPSILON) - go.queued,
+            // Nothing to show → nothing to wait on (the invisible flight).
+            parts_spawned: go.key.is_none(),
+            weapon_visual: go.spawn.weapon_visual,
+        };
+        if missile.arrive_in <= 0.0 {
+            arrival_handoff(&missile, aim, impacts, defenses, play_seq);
             continue;
         }
         let dir = (aim - launch).normalize_or(-Vec3::Z);
         let entity = commands
             .spawn((
-                Missile {
-                    spell_id: go.spawn.spell_id,
-                    target,
-                    dest_tag: go.spawn.dest_tag,
-                    miss,
-                    path: go.key.clone(),
-                    arrive_in,
-                    // Nothing to show → nothing to wait on (the invisible flight).
-                    parts_spawned: go.key.is_none(),
-                    weapon_visual: go.spawn.weapon_visual,
-                },
+                missile,
                 Transform::from_translation(launch).with_rotation(missile_facing(dir)),
                 Visibility::default(),
             ))
@@ -600,25 +670,16 @@ pub(super) fn move_missiles(
 ) {
     let dt = time.delta_secs();
     for (entity, mut missile, mut transform) in &mut missiles {
-        let dest = missile.dest_tag.into_iter().chain(DEST_FALLBACKS);
-        let Some(aim) = attach_world_pos(missile.target, dest, &units, &joints) else {
+        let Some(aim) = aim_point(missile.aim, &units, &joints) else {
             // The target streamed out mid-flight (the client's dead-handle ground path — ours
-            // just ends the flight).
+            // just ends the flight). A ground shot has no target to lose.
             sounds.write(MissileSound::Stop { entity });
             commands.entity(entity).despawn();
             continue;
         };
         let to_target = aim - transform.translation;
         if missile.arrive_in <= dt {
-            arrival_handoff(
-                missile.target,
-                missile.spell_id,
-                missile.weapon_visual,
-                missile.miss,
-                &mut impacts,
-                &mut defenses,
-                &mut play_seq,
-            );
+            arrival_handoff(&missile, aim, &mut impacts, &mut defenses, &mut play_seq);
             sounds.write(MissileSound::Stop { entity });
             commands.entity(entity).despawn();
             continue;
@@ -700,9 +761,19 @@ mod tests {
             dest_tag: None,
             speed: SPEED,
             targets: vec![(target, None)],
+            ground_aim: None,
             weapon_visual: None,
             missile_sound: None,
             awaits_release,
+        }
+    }
+
+    /// The location-fallback flavour of [`go`]: no unit targets, one point on the wire.
+    fn ground_go(caster: Entity, at: Vec3) -> MissileSpawn {
+        MissileSpawn {
+            targets: Vec::new(),
+            ground_aim: Some(at),
+            ..go(caster, caster, false)
         }
     }
 
@@ -777,6 +848,94 @@ mod tests {
         assert_eq!(impacts.len(), 1, "the impact plays at release");
         assert_eq!(impacts[0].entity, target);
         assert_eq!(impacts[0].spell_id, 133);
+    }
+
+    /// The location fallback (`0x6e8a50`'s empty-hit-array arm): a GO with no unit targets and a
+    /// point on the wire flies **exactly one** projectile, at the point — a pure ground cast's
+    /// whole visible flight, which before this had none at all.
+    #[test]
+    fn a_targetless_dest_go_flies_one_projectile_at_the_point() {
+        let mut app = app();
+        let hand = Vec3::new(0.0, 1.5, 0.0);
+        let caster = caster(&mut app, hand);
+        let at = Vec3::new(24.0, 1.5, 0.0);
+        app.world_mut().write_message(ground_go(caster, at));
+        step(&mut app, 0.016);
+        let launched = missiles(&mut app);
+        assert_eq!(launched.len(), 1, "one shot, not one per (absent) target");
+        assert_eq!(launched[0].1, hand, "launched from the caster's marker");
+        // 24 units at speed 24, no cast-kit anim to wait on (`awaits_release: false`).
+        assert!(
+            (launched[0].0 - 1.0).abs() < 1e-3,
+            "flight {}",
+            launched[0].0
+        );
+        let ground = app
+            .world_mut()
+            .query::<&Missile>()
+            .iter(app.world())
+            .filter(|m| matches!(m.aim, Aim::Ground(p) if p == at))
+            .count();
+        assert_eq!(ground, 1, "aimed at the point, homing to nothing");
+    }
+
+    /// The hit array wins: the client consults the location latch only after finding the array
+    /// empty (`0x6e8abc … je 0x6e8ba2`), so a dest-carrying GO that *did* hit units flies at the
+    /// units — never an extra shot at the ground.
+    #[test]
+    fn a_dest_go_that_hit_units_flies_at_the_units_not_the_point() {
+        let mut app = app();
+        let caster = caster(&mut app, Vec3::ZERO);
+        let target = app
+            .world_mut()
+            .spawn(GlobalTransform::from_xyz(24.0, 0.0, 0.0))
+            .id();
+        let mut spawn = go(caster, target, false);
+        spawn.ground_aim = Some(Vec3::new(-50.0, 0.0, 0.0));
+        app.world_mut().write_message(spawn);
+        step(&mut app, 0.016);
+        let aims: Vec<bool> = app
+            .world_mut()
+            .query::<&Missile>()
+            .iter(app.world())
+            .map(|m| matches!(m.aim, Aim::Unit { .. }))
+            .collect();
+        assert_eq!(aims, vec![true], "one unit-homing shot, no ground shot");
+    }
+
+    /// A ground arrival hands off as [`CastEventKind::GroundImpact`] on the **caster**, carrying
+    /// the landing point — the client's `0x61e1d0` ground arm (`0x61d870`), whose kit plays on the
+    /// caster with `extra` = that position. Never the unit impact hand-off.
+    #[test]
+    fn a_ground_arrival_hands_off_to_the_caster_with_the_landing_point() {
+        let mut app = app();
+        let caster = caster(&mut app, Vec3::ZERO);
+        // 2.4 units at speed 24 = a 0.1 s flight, parked 0.2 s → it arrives at the release.
+        let at = Vec3::new(2.4, 0.0, 0.0);
+        let mut spawn = ground_go(caster, at);
+        spawn.awaits_release = true;
+        app.world_mut().write_message(spawn);
+        step(&mut app, 0.10);
+        step(&mut app, 0.10);
+        app.world_mut().write_message(AnimSoundEvent {
+            entity: caster,
+            ident: *b"$CSL",
+            data: 0,
+        });
+        step(&mut app, 0.016);
+        assert!(missiles(&mut app).is_empty(), "no flight entity");
+        let events: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<CastEvent>>()
+            .drain()
+            .collect();
+        assert_eq!(events.len(), 1, "exactly one arrival edge");
+        assert_eq!(events[0].entity, caster, "the kit plays on the caster");
+        assert_eq!(
+            events[0].kind,
+            CastEventKind::GroundImpact { pos: at },
+            "the ground arm, carrying the landing point"
+        );
     }
 
     /// A one-shot that never starts (the kit anim didn't resolve on this model) flushes after

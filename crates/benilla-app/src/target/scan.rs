@@ -483,14 +483,13 @@ pub(super) fn commit(
     }
 }
 
-/// TAB / Shift-TAB — the `TargetNearestEnemy` command, Classic-priority style: re-score the
+/// TARGETNEARESTENEMY / TARGETPREVIOUSENEMY (0997: two commands through the binding table now,
+/// defaults TAB / SHIFT-TAB — no shift fork here anymore), Classic-priority style: re-score the
 /// live world, pool by tier, skip the recent history forward (or walk it backward), commit
-/// through the byte-law [`commit`]. Inert while the UI captures the keyboard (a focused
-/// EditBox owns TAB).
-#[allow(clippy::too_many_arguments)] // one Bevy system's full input set
+/// through the byte-law [`commit`]. The dispatch already applied the typing gate (a focused
+/// EditBox owns TAB) and the exact-modifier law.
 pub(super) fn tab_target(
-    keys: Res<ButtonInput<KeyCode>>,
-    ui_capture: Res<crate::ui_script::UiKeyboardCapture>,
+    binds: Res<crate::bindings::BindingsState>,
     time: Res<Time>,
     scan: EnemyScan,
     mut history: ResMut<TabHistory>,
@@ -498,10 +497,10 @@ pub(super) fn tab_target(
     net: Res<NetCommands>,
     engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
 ) {
-    if ui_capture.0 || !keys.just_pressed(KeyCode::Tab) {
+    let reverse = binds.fired(crate::bindings::cmd::TARGET_PREVIOUS_ENEMY);
+    if !reverse && !binds.fired(crate::bindings::cmd::TARGET_NEAREST_ENEMY) {
         return;
     }
-    let reverse = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let now = time.elapsed_secs_f64();
     history.prune(now);
     let trace = tab_trace_on();
@@ -615,15 +614,33 @@ pub(super) fn acquire_and_attack(
     if selection.guid.is_some() {
         return; // something got selected between the action and this frame — the normal path owns it
     }
-    // The mounted attack block (decision 0481): the ref's `0x613039` refusal sits BEFORE the
-    // nearest-core `0x6130b5` — a mounted press never even scans. Gated at the responder so
-    // every requester (the Attack button's no-target arm, the melee probe) shares it.
-    if crate::ui_action::attack_mounted_refusal(self_store.iter().next(), &mut ui_error_keys) {
+    // The actor-eligibility block (decision 0481, widened to `0x612df0`'s full Phase A): every one
+    // of its refusals sits BEFORE the nearest-core `0x6130b5` — a mounted, stunned or dead press
+    // never even scans. Gated at the responder so every requester (the Attack button's no-target
+    // arm, the melee probe) shares it. The actor here is us.
+    let self_guid = scan
+        .self_q
+        .iter()
+        .next()
+        .and_then(|(_, _, g)| g)
+        .map(|g| g.0);
+    if crate::ui_action::attack_actor_refusal(
+        self_store.iter().next(),
+        self_guid,
+        &mut ui_error_keys,
+    ) {
         return;
     }
     let cands = scan.build();
     let Some(c) = cands.first() else {
-        debug!("attack acquire: nothing to attack (error 0xa0 path)");
+        // `0x6130d9` — the acquire ran and came back empty, so the selection re-read at `0x6130c1`
+        // still finds nothing: errorId `0xa0` `ERR_NO_ATTACK_TARGET`. Logged only until wow-re
+        // named the key (`pet-command-validators.md` §2); it is a red line, like every other
+        // `ERR_ATTACK_*` in that registry run.
+        debug!("attack acquire: nothing to attack (ERR_NO_ATTACK_TARGET)");
+        ui_error_keys
+            .0
+            .push(crate::ui_action::UiError::key("ERR_NO_ATTACK_TARGET"));
         return;
     };
     debug!(

@@ -95,6 +95,24 @@ fn route_spell_kit_sounds(
                     Err(e) => warn!("spell kit sound {kit_sound}: {e:#}"),
                 }
             }
+            SpellKitSound::PlayAt { pos, kit_sound } => {
+                // The kit-sound leg's `extra`-override arm: a bare positional one-shot, no owner
+                // to track a loop on and no dedup ledger — its one caller is a missile's ground
+                // arrival, and two projectiles never land on the same point in the same frame.
+                debug!("spell kit sound {kit_sound} at {pos:?}");
+                if let Err(e) = play_kit(
+                    &mut kits,
+                    &assets,
+                    &mut out,
+                    &config,
+                    listener,
+                    KitRef::Id(kit_sound),
+                    Some(pos),
+                    SoundCategory::Sfx,
+                ) {
+                    warn!("spell kit sound {kit_sound}: {e:#}");
+                }
+            }
             SpellKitSound::StopHold { entity } => {
                 if let Some(kit_sound) = hold_loops.remove(&entity) {
                     super::kit::stop_source_kit(&mut out, entity, kit_sound);

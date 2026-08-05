@@ -64,7 +64,7 @@ pub(crate) struct CooldownEvents;
 // `cast_send`, so a second send path cannot be written by accident (decision 0914).
 pub(crate) use cast_send::{CastCommit, CastLadder};
 pub(crate) use errors::{
-    attack_mounted_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
+    attack_actor_refusal, reagent_totem_refusal, ui_error_text, CastErrors, MountErrors, UiError,
     UiErrorKeys,
 };
 // `pub(crate)`: the target chain registers the cursor pre-empt + the click commit, and the
@@ -272,6 +272,9 @@ impl Plugin for UiActionPlugin {
                         .before(UiInput),
                     drain::drain_action_sets.after(UiInput),
                     drain::drain_action_uses.after(UiInput),
+                    // The T binding (0997): the attack arm's twin door, after the dispatch wrote
+                    // this frame's fires.
+                    drain::attack_target_binding.after(UiInput),
                     // The learned-ability latches must be current before the target chain's
                     // cursor classifier reads them; the book feed runs in `UnitFeed`, so sitting
                     // right after it is enough.

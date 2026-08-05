@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 
 use crate::char_select::ClientState;
-use crate::ui_script::{UiInput, UiKeyboardCapture};
+use crate::ui_script::UiInput;
 
 /// Is the player UI hidden right now? (`ALT-Z` — [`toggle_ui_hidden`].)
 ///
@@ -45,52 +45,21 @@ impl Plugin for UiHidePlugin {
     }
 }
 
-/// `ALT-Z` — the reference's own TOGGLEUI default (`BINDING_NAME_TOGGLEUI` in `GlobalStrings.lua`),
-/// on every platform.
-///
-/// **This binding was `CTRL-Z` here until 0870, and that was wrong** — a fidelity error worth naming
-/// because of *how* it got in. The source was this install's `bindings-cache.wtf`, which reads
-/// `bind CTRL-Z TOGGLEUI` on all three of its accounts; that file is what the client last *wrote*,
-/// not what it ships with, and all three accounts descend from one profile whose TOGGLEUI had been
-/// rebound. `ALT-Z` is the shipped default (director's correction; vanilla binding lists agree, and
-/// `ALT-Z` is unbound in that same cache — exactly the hole a rebind leaves). A saved-state file is
-/// evidence about a *player*, never about the client.
-///
-/// `ALT` and nothing else: the reference names a binding `[ALT-][CTRL-][SHIFT-]<key>` and matches it
-/// by string equality, so `CTRL-ALT-Z` is a *different* entry and a modified press must never fall
-/// through to another binding (decision 0585's bare-binding rule — the discipline
-/// `vplates::toggle_vplates` spends `SHIFT` under). That block also keeps this clear of the
-/// dev-overlay plane (`Ctrl`+`Shift` — [`crate::debug_panel::dev_chord`]). Inert while an EditBox
-/// holds the keyboard: an `Alt-Z` in a chat line is the box's business.
-///
-/// Read off `ButtonInput`'s edge. It used to be driven off the raw key message stream because AppKit
-/// swallows `keyUp` for a key released while **Cmd** is held, which would have latched the old
-/// `Cmd-Z` twin after one use; with no Cmd anywhere in the binding that hazard doesn't exist, and
-/// `just_pressed` doesn't repeat, so the repeat filter went with it (0870).
-fn toggle_ui_hidden(
-    keys: Res<ButtonInput<KeyCode>>,
-    ui_capture: Res<UiKeyboardCapture>,
-    mut hidden: ResMut<UiHidden>,
-) {
-    if !keys.just_pressed(KeyCode::KeyZ) || ui_capture.0 || !toggle_chord(&keys) {
+/// TOGGLEUI through the binding table (0997; default `ALT-Z` — 0870's finding stands: the
+/// install's `bindings-cache.wtf` says `CTRL-Z` on all three accounts, but they descend from one
+/// rebound profile, and a saved-state file is evidence about a *player*, never about the client).
+/// The exact-modifier law (0585) and the typing gate this site used to enforce by hand — the
+/// `toggle_chord` alt-and-nothing-else check, the AppKit `keyUp` repeat hazard — now live once,
+/// in the dispatch.
+fn toggle_ui_hidden(binds: Res<crate::bindings::BindingsState>, mut hidden: ResMut<UiHidden>) {
+    if !binds.fired(crate::bindings::cmd::TOGGLE_UI) {
         return;
     }
     hidden.0 = !hidden.0;
-    info!("ui: {} (Alt-Z)", if hidden.0 { "HIDDEN" } else { "shown" });
-}
-
-/// The modifier half of the binding: `ALT` held, and nothing else. See [`toggle_ui_hidden`].
-fn toggle_chord(keys: &ButtonInput<KeyCode>) -> bool {
-    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
-    let blocked = keys.any_pressed([
-        KeyCode::ControlLeft,
-        KeyCode::ControlRight,
-        KeyCode::ShiftLeft,
-        KeyCode::ShiftRight,
-        KeyCode::SuperLeft,
-        KeyCode::SuperRight,
-    ]);
-    alt && !blocked
+    info!(
+        "ui: {} (TOGGLEUI)",
+        if hidden.0 { "HIDDEN" } else { "shown" }
+    );
 }
 
 /// Leaving the world clears the hide — safety, not fidelity: the binding is `InWorld`-only, so a UI
@@ -101,114 +70,27 @@ fn show_ui(mut hidden: ResMut<UiHidden>) {
 
 #[cfg(test)]
 mod tests {
-    use bevy::input::keyboard::KeyboardInput;
-    use bevy::input::ButtonState;
-
     use super::*;
 
-    /// The plugin's own wiring, driven the way winit drives it: the modifier mirror plus a real
-    /// `Z` edge. Covers what the pure-chord tests can't — the typing gate and the toggle itself.
-    fn app(held: &[KeyCode]) -> App {
+    /// The consumer half only: TOGGLEUI fired → the flag flips, both ways. The chord/typing laws
+    /// this file used to test by hand (ALT-and-nothing-else, the capture gate, bare Z belonging
+    /// to the sheath toggle) are the DISPATCH's now, tested table-wide in
+    /// `crate::bindings::tests` against real key events.
+    #[test]
+    fn a_fired_toggleui_flips_the_flag_both_ways() {
         let mut app = App::new();
-        app.add_plugins((
-            MinimalPlugins,
-            bevy::input::InputPlugin,
-            bevy::state::app::StatesPlugin,
-        ))
-        .insert_state(ClientState::InWorld)
-        .init_resource::<UiKeyboardCapture>()
-        .add_plugins(UiHidePlugin);
-        for &k in held {
-            app.world_mut()
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(k);
-        }
-        app
-    }
-
-    /// One `Z` keystroke, down then up, fed the way winit feeds it — as [`KeyboardInput`] messages
-    /// that Bevy's own input system turns into the `just_pressed` edge this binding reads. The
-    /// release matters: `ButtonInput::press` only raises the edge for a key that wasn't already
-    /// down, so a second tap without one is not a second press (which is also why a held key's
-    /// auto-repeat can't strobe the toggle).
-    fn tap_z(app: &mut App) {
-        for state in [ButtonState::Pressed, ButtonState::Released] {
-            app.world_mut().write_message(KeyboardInput {
-                key_code: KeyCode::KeyZ,
-                logical_key: bevy::input::keyboard::Key::Character("z".into()),
-                state,
-                text: Some("z".into()),
-                repeat: false,
-                window: Entity::PLACEHOLDER,
-            });
-            app.update();
-        }
-    }
-
-    fn hidden(app: &App) -> bool {
-        app.world().resource::<UiHidden>().0
-    }
-
-    /// `ALT-Z` toggles both ways — the reference's own TOGGLEUI default (0870).
-    #[test]
-    fn alt_z_hides_and_shows_again() {
-        let mut app = app(&[KeyCode::AltLeft]);
-        tap_z(&mut app);
-        assert!(hidden(&app), "Alt-Z hides");
-        tap_z(&mut app);
-        assert!(!hidden(&app), "Alt-Z again shows");
-    }
-
-    /// While an EditBox owns the keyboard the binding is inert — an `Alt-Z` in a chat line is the
-    /// box's business, not a binding.
-    #[test]
-    fn inert_while_typing() {
-        let mut app = app(&[KeyCode::AltLeft]);
-        app.world_mut().resource_mut::<UiKeyboardCapture>().0 = true;
-        tap_z(&mut app);
-        assert!(!hidden(&app), "a captured keyboard eats the binding");
-    }
-
-    /// The bare-binding rule at the wiring level: an unmodified `Z` is the sheath toggle
-    /// (`player::control`, and `Z TOGGLESHEATH` in the reference), and it must not also hide the UI.
-    #[test]
-    fn bare_z_is_not_the_binding() {
-        let mut app = app(&[]);
-        tap_z(&mut app);
-        assert!(!hidden(&app), "bare Z belongs to the sheath toggle");
-    }
-
-    fn keys(held: &[KeyCode]) -> ButtonInput<KeyCode> {
-        let mut k = ButtonInput::default();
-        for &c in held {
-            k.press(c);
-        }
-        k
-    }
-
-    /// `ALT` alone is the binding, either side of the family.
-    #[test]
-    fn either_alt_alone_fires() {
-        for held in [KeyCode::AltLeft, KeyCode::AltRight] {
-            assert!(toggle_chord(&keys(&[held])), "{held:?} alone fires");
-        }
-    }
-
-    /// Decision 0585's bare-binding rule, both directions: an unmodified `Z` is the *sheath*
-    /// binding, and a press carrying an extra modifier names a different entry (`CTRL-ALT-Z`,
-    /// `ALT-SHIFT-Z`) that this one must not answer for. The old `CTRL-Z`/`Cmd-Z` arms are gone
-    /// (0870) — neither is the reference's default, and `Win+Z` is Snap Layouts.
-    #[test]
-    fn bare_and_over_modified_presses_are_not_the_binding() {
-        assert!(!toggle_chord(&keys(&[])), "bare Z is the sheath binding");
-        for held in [
-            vec![KeyCode::ControlLeft],
-            vec![KeyCode::SuperLeft],
-            vec![KeyCode::AltLeft, KeyCode::ControlRight],
-            vec![KeyCode::AltLeft, KeyCode::ShiftRight],
-            vec![KeyCode::AltLeft, KeyCode::SuperLeft],
-        ] {
-            assert!(!toggle_chord(&keys(&held)), "{held:?} is another binding");
-        }
+        app.add_systems(Update, toggle_ui_hidden)
+            .init_resource::<UiHidden>()
+            .insert_resource(crate::bindings::BindingsState::test_fired(&[
+                crate::bindings::cmd::TOGGLE_UI,
+            ]));
+        app.update();
+        assert!(app.world().resource::<UiHidden>().0, "fired → hidden");
+        app.update();
+        assert!(!app.world().resource::<UiHidden>().0, "fired again → shown");
+        app.world_mut()
+            .insert_resource(crate::bindings::BindingsState::default());
+        app.update();
+        assert!(!app.world().resource::<UiHidden>().0, "no fire → no change");
     }
 }

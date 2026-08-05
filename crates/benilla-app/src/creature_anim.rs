@@ -281,7 +281,7 @@ pub(crate) struct CastEvent {
 }
 
 /// Which cast edge fired (decision 0107 verdict 2's stage wiring).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum CastEventKind {
     /// `SMSG_SPELL_START` — the precast kit persists from here (subliminal for an instant, whose
     /// GO follows at once).
@@ -300,6 +300,14 @@ pub(crate) enum CastEventKind {
     /// flight (the caster may despawn mid-flight; the client's missile carries its kit context)
     /// — the `0x60d450` fallback a basic shot's impact kit resolves through (decision 0370).
     Impact { weapon_visual: Option<u32> },
+    /// A projectile arrived at a **ground point** instead of on a unit — the client's per-tick
+    /// missile dispatch taking its ground arm (`0x61e1d0` → `0x61d870`), reached by the single
+    /// missile a dest-targeted GO with an empty hit list launches
+    /// ([`spell_visual::MissileSpawn::ground_aim`]). `entity` is the **caster** — `0x61d870`
+    /// plays the kit on it, not on anything at the point — and `pos` is the arrival position,
+    /// the client's `extra` override (`0x61d8e7`: `lea edx,[esi+0x20]`). Plays `SpellVisual`
+    /// **field 13 at stage 3** (wow-re `spell-visual-lifecycle.md` §Q4).
+    GroundImpact { pos: Vec3 },
 }
 
 /// The resolved casting **hold** — the animation a unit sustains while a cast or channel is in

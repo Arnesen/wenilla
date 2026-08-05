@@ -431,27 +431,27 @@ pub(super) fn parse_type_switch(
     None
 }
 
-/// The open keys (Bindings.xml: OPENCHAT = Enter, OPENCHATSLASH = `/`, REPLY = R): Enter opens
-/// with the sticky type, downgrading an invalid PARTY/RAID to SAY against the live group state
-/// (the ref's `ChatEdit_UpdateHeader` invalid-type law; the sticky itself keeps its value, so
-/// rejoining a group restores it — GUILD/BG downgrades wait on their arcs' state); `/` opens
-/// pre-slashed; R opens as a reply to the last teller. All gated on nothing owning the keyboard.
+/// The open commands through the binding table (0997; 1.12 defaults OPENCHAT = Enter,
+/// OPENCHATSLASH = `/`, REPLY = R): OPENCHAT opens with the sticky type, downgrading an invalid
+/// PARTY/RAID to SAY against the live group state (the ref's `ChatEdit_UpdateHeader`
+/// invalid-type law; the sticky itself keeps its value, so rejoining a group restores it —
+/// GUILD/BG downgrades wait on their arcs' state); OPENCHATSLASH opens pre-slashed; REPLY opens
+/// as a reply to the last teller. The dispatch already gated on nothing owning the keyboard
+/// (a focused box's Enter is the box's), and Shift-Enter no longer opens chat — `SHIFT-ENTER`
+/// is a different chord than `ENTER`, the exact-modifier law the reference applies.
 pub(super) fn open_chat_keys(
     script: Option<NonSendMut<benilla_ui::script::UiScript>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    ui_capture: Res<UiKeyboardCapture>,
+    binds: Res<crate::bindings::BindingsState>,
     mut state: ResMut<ChatEditState>,
     group: Res<crate::ui_party::GroupState>,
 ) {
     let Some(mut script) = script else {
         return;
     };
-    if ui_capture.0 {
-        return;
-    }
-    let open_plain = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter);
-    let open_slash = keys.just_pressed(KeyCode::Slash);
-    let open_reply = keys.just_pressed(KeyCode::KeyR) && !state.last_tell.is_empty();
+    use crate::bindings::cmd;
+    let open_plain = binds.fired(cmd::OPEN_CHAT);
+    let open_slash = binds.fired(cmd::OPEN_CHAT_SLASH);
+    let open_reply = binds.fired(cmd::REPLY) && !state.last_tell.is_empty();
     if !(open_plain || open_slash || open_reply) {
         return;
     }

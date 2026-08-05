@@ -323,12 +323,13 @@ pub(super) fn act_on_right_click(
         attack,
     );
     if attack {
-        // The mounted attack block (decision 0481, the shared `0x613039` refusal): the click
-        // still SELECTED — the commit above already ran, matching the ref's select-then-refuse
-        // order — but the melee auto-draw and the swing never happen; the red
-        // ERR_ATTACK_MOUNTED line shows instead.
-        if crate::ui_action::attack_mounted_refusal(
+        // The actor-eligibility block (decision 0481, widened to `0x612df0`'s full Phase A): the
+        // click still SELECTED — the commit above already ran, matching the ref's
+        // select-then-refuse order — but the melee auto-draw and the swing never happen; the red
+        // `ERR_ATTACK_*` line shows instead.
+        if crate::ui_action::attack_actor_refusal(
             me.and_then(|(e, _, _)| stores.get(e).ok()).map(|(s, _)| s),
+            me.map(|(_, g, _)| g.0),
             &mut ui_error_keys,
         ) {
             // refused — selection stands, no swing

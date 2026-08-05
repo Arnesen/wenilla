@@ -28,6 +28,7 @@ mod assets;
 mod aura_visual;
 mod bgwin;
 mod billboard;
+mod bindings;
 mod blob_shadow;
 mod bowstring;
 mod build_id;
@@ -653,6 +654,9 @@ pub fn run(build: BuildId) -> AppExit {
     // The CVar host (decision 0954): registration, knob sync, config.toml persistence. After
     // UiScriptPlugin only for reading order — its systems gate on the VM existing anyway.
     .add_plugins(cvars::CvarPlugin)
+    // The key-binding engine (decision 0997): the chord→command dispatch every rebindable input
+    // runs through, its persistence, and the Key Bindings window's capture seam.
+    .add_plugins(bindings::BindingsPlugin)
     // The unit snapshot + event feed (decision 0068 §3): pushes ECS game state into the VM as the
     // plain data the `Unit*` bindings read, and fires the matching WoW events.
     .add_plugins(UiUnitPlugin)

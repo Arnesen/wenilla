@@ -102,6 +102,11 @@ pub(in crate::ui_chat) enum ParsedChat {
     CastVis {
         spell_id: u32,
         kind: crate::creature_anim::CastEventKind,
+        /// `ground` — send the GO as a **pure dest cast**: empty hit and miss lists, a point on
+        /// the wire. That is the only shape that reaches the location fallback (one projectile at
+        /// the point, the ground arrival), so without it the instrument cannot see Flare or a
+        /// bomb thrown at empty dirt at all. Ignored on the non-GO edges.
+        ground: bool,
     },
     /// A command whose reference handler is a **one-line call** into FrameXML — `/trade`
     /// (`InitiateTrade("target")`), `/inspect` (`InspectUnit("target")`), the loot-method trio
@@ -398,21 +403,28 @@ fn slash_command(index: SlashIndex, args: &str) -> ParsedChat {
 /// Benilla's own instruments' grammar ([`DevCmd`] — no reference strings behind these).
 fn dev_command(dev: DevCmd, args: &str) -> ParsedChat {
     match dev {
-        // `/castvis <spell_id> [go|fail]` — bare = Start (the precast hold begins), `go` = the
-        // release, `fail` = the reap. Malformed → Unknown (dropped loudly).
+        // `/castvis <spell_id> [go|ground|fail]` — bare = Start (the precast hold begins), `go` =
+        // the release at the selection, `ground` = the release as a pure DEST cast (a point in
+        // front of the player, no unit targets — the ground-missile lane), `fail` = the reap.
+        // Malformed → Unknown (dropped loudly).
         DevCmd::CastVis => {
             use crate::creature_anim::CastEventKind;
             let mut words = args.split_whitespace();
             let Some(spell_id) = words.next().and_then(|w| w.parse::<u32>().ok()) else {
                 return ParsedChat::Unknown;
             };
-            let kind = match words.next() {
-                None => CastEventKind::Start,
-                Some(w) if w.eq_ignore_ascii_case("go") => CastEventKind::Go,
-                Some(w) if w.eq_ignore_ascii_case("fail") => CastEventKind::Fail,
+            let (kind, ground) = match words.next() {
+                None => (CastEventKind::Start, false),
+                Some(w) if w.eq_ignore_ascii_case("go") => (CastEventKind::Go, false),
+                Some(w) if w.eq_ignore_ascii_case("ground") => (CastEventKind::Go, true),
+                Some(w) if w.eq_ignore_ascii_case("fail") => (CastEventKind::Fail, false),
                 Some(_) => return ParsedChat::Unknown,
             };
-            ParsedChat::CastVis { spell_id, kind }
+            ParsedChat::CastVis {
+                spell_id,
+                kind,
+                ground,
+            }
         }
         DevCmd::ChatTest => ParsedChat::ChatTest,
         DevCmd::PartyTest => ParsedChat::PartyTest {

@@ -1169,6 +1169,9 @@ fn bag_slot_cooldown_sweeps_through_the_xml() {
 #[test]
 fn the_bar_bag_buttons_name_themselves_on_hover() {
     let mut s = UiScript::new().unwrap();
+    // The suffix reads GetBindingKey live since 0997 — register the real command set the way
+    // the app's seed does, so the pin below is OPENALLBAGS's actual default.
+    s.register_bindings(&crate::bindings::registry_commands());
     s.set_screen_size(1024.0, 768.0);
     for file in [
         "Fonts.xml",
@@ -1184,7 +1187,7 @@ fn the_bar_bag_buttons_name_themselves_on_hover() {
     }
     s.resolve();
 
-    // The backpack: its label plus the one bare-key binding benilla actually ships ('B').
+    // The backpack: its label plus OPENALLBAGS's live key (default B; 0997's divergence note).
     s.run("BenillaBagToggle_OnEnter(BenillaBagToggle)").unwrap();
     let line = s
         .eval::<String>("return GameTooltipTextLeft1:GetText()")

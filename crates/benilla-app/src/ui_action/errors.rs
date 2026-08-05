@@ -80,22 +80,77 @@ pub(crate) fn ui_error_text(e: &UiError, get: &dyn Fn(&str) -> Option<String>) -
     (!text.is_empty()).then_some(text)
 }
 
-/// The client-side attack-start mounted refusal (decision 0481; wow-re
-/// `mounted-action-gate.md` §5: the shared attack-start validator `0x612df0` reads
-/// `UNIT_FIELD_MOUNTDISPLAYID` at `0x613039` and, if live, shows `DisplayError` errorId `0xa4`
-/// = `ERR_ATTACK_MOUNTED` "Can't attack while mounted." — BEFORE the nearest-enemy core at
-/// `0x6130b5`). The ref checks once at its single attack-start funnel; our attack initiations
-/// (the Attack button, the right-click attack, the nearest-acquire) each ask here first.
-pub(crate) fn attack_mounted_refusal(
-    self_store: Option<&ObjectStore>,
+/// `UNIT_FIELD_FLAGS` bits the attack-start validator refuses on, paired with the message each
+/// raises — read at `0x612eec`+ in the binary's own test order (wow-re
+/// `object-layer/scratch/pet-command-validators.md` §2). All four are crowd control: the actor is
+/// not refusing, it is unable.
+///
+/// Each has a second face in the reference — errorId `0xa9`
+/// `ERR_ATTACK_PREVENTED_BY_MECHANIC_S`, which substitutes a resolved mechanic name — chosen by
+/// five `0x6e9…` resolvers whose bodies wow-re records as **not carved**. We raise the plain form
+/// only; the fill is a strictly better message for the same refusal, never a different one.
+const ATTACK_FLAG_REFUSALS: [(u32, &str); 4] = [
+    (0x0004_0000, "ERR_ATTACK_STUNNED"),
+    (0x0002_0000, "ERR_ATTACK_PACIFIED"),
+    (0x0080_0000, "ERR_ATTACK_FLEEING"),
+    (0x0040_0000, "ERR_ATTACK_CONFUSED"),
+];
+
+/// Phase A of the shared attack-start validator `0x612df0` — **the actor's own eligibility**
+/// (wow-re `object-layer/scratch/pet-command-validators.md` §2, carved 2026-08-05; it supersedes
+/// the mounted-only fragment decision 0481 built from the one gate that was known then).
+///
+/// `0x612df0(ecx = actor, &outGuid)` is ONE function with three call sites, and **the actor is
+/// whoever the caller passes in `ecx`** — the player for the melee attack-start router `0x6131aa`,
+/// and **the pet** for the pet bar's ATTACK arm (`0x4bd40d` passes `edi`, the pet object). Every
+/// gate below reads the actor's own descriptor, so one function answers both; that is why this
+/// takes an actor rather than reaching for the self store the way the fragment did.
+///
+/// A veto is total: `EAX = 0`, one of the ten consecutive `ERR_ATTACK_*` registry ids `0xa0`–`0xa9`
+/// through `CGGameUI::DisplayError`, and **no packet at all** — on the pet arm the refusal's
+/// `0x4bd414 je 0x4bd4c6` lands on the function epilogue, not on the shared send.
+///
+/// Order is the binary's, and it is observable: a dead **and** mounted actor says "Can't attack
+/// while dead."
+///
+/// `dead` is `0x605f30(actor)`, which for any non-player actor — a pet never carries the player
+/// typemask bit — degenerates to exactly `health <= 0`. Its further leg for a *player* actor
+/// (`[[obj+0xe68]+8]` bit 4, reached only when health is positive, so plainly the ghost state) is
+/// byte-read but unnamed in wow-re's note, so it is left to the caller: pass `dead` yourself when
+/// you know more than the health field does.
+pub(crate) fn attack_actor_refusal(
+    actor: Option<&ObjectStore>,
+    self_guid: Option<u64>,
     errors: &mut UiErrorKeys,
 ) -> bool {
-    let mounted = self_store.is_some_and(|s| s.0.unit_mount_display_id() > 0);
-    if mounted {
-        debug!("attack refused locally — mounted (ERR_ATTACK_MOUNTED)");
-        errors.0.push(UiError::key("ERR_ATTACK_MOUNTED"));
-    }
-    mounted
+    // No descriptor is no refusal. The reference resolves the actor object first and skips the
+    // whole chain when it cannot (`0x4bd403`: no pet ⇒ send unmodified) — an un-streamed unit is
+    // not an ineligible one.
+    let Some(fields) = actor.map(|s| &s.0) else {
+        return false;
+    };
+    let key = if fields.unit_health().is_some_and(|h| h == 0) {
+        "ERR_ATTACK_DEAD"
+    } else if fields
+        .unit_charmed_by()
+        .is_some_and(|g| Some(g) != self_guid)
+    {
+        // Charmed by somebody who is not us. Charmed BY US is not a refusal — a mind-controlled
+        // unit is one you are allowed to swing with.
+        "ERR_ATTACK_CHARMED"
+    } else if let Some((_, key)) = ATTACK_FLAG_REFUSALS
+        .iter()
+        .find(|(bit, _)| fields.unit_flags() & bit != 0)
+    {
+        key
+    } else if fields.unit_mount_display_id() > 0 {
+        "ERR_ATTACK_MOUNTED"
+    } else {
+        return false;
+    };
+    debug!("attack refused locally by the actor's own state — {key}");
+    errors.0.push(UiError::key(key));
+    true
 }
 
 /// The ref's pre-send totem/reagent possession check — `CheckReagentsAndTotems 0x6e4000`,
@@ -337,6 +392,136 @@ mod ui_error_tests {
             ui_error_text(&vein, &g).as_deref(),
             Some("Requires Mining 155")
         );
+    }
+}
+
+#[cfg(test)]
+mod attack_actor_tests {
+    use super::*;
+    use benilla_protocol::ObjectFields;
+
+    const HEALTH: u16 = 22;
+    const FLAGS: u16 = 46;
+    const CHARMEDBY: u16 = 10;
+    const MOUNT: u16 = 133;
+
+    fn actor(pairs: &[(u16, u32)]) -> ObjectStore {
+        // A live, unowned, unmounted, unimpaired unit unless a case says otherwise.
+        let mut all = vec![(HEALTH, 100)];
+        all.extend_from_slice(pairs);
+        ObjectStore(ObjectFields::from_pairs(&all))
+    }
+
+    fn refusal(store: Option<&ObjectStore>, self_guid: Option<u64>) -> Option<&'static str> {
+        let mut errors = UiErrorKeys::default();
+        let refused = attack_actor_refusal(store, self_guid, &mut errors);
+        assert_eq!(
+            refused,
+            !errors.0.is_empty(),
+            "a refusal and a message are the same event — the ref raises one per veto"
+        );
+        errors.0.first().map(|e| e.key)
+    }
+
+    /// Every gate of `0x612df0`'s Phase A, each on its own, against an otherwise-healthy actor.
+    #[test]
+    fn each_actor_gate_raises_its_own_error() {
+        assert_eq!(
+            refusal(Some(&actor(&[])), Some(7)),
+            None,
+            "a fit actor swings"
+        );
+        assert_eq!(
+            refusal(Some(&actor(&[(HEALTH, 0)])), Some(7)),
+            Some("ERR_ATTACK_DEAD")
+        );
+        assert_eq!(
+            refusal(Some(&actor(&[(MOUNT, 1147)])), Some(7)),
+            Some("ERR_ATTACK_MOUNTED")
+        );
+        for (bit, key) in ATTACK_FLAG_REFUSALS {
+            assert_eq!(
+                refusal(Some(&actor(&[(FLAGS, bit)])), Some(7)),
+                Some(key),
+                "unit flag {bit:#x}"
+            );
+        }
+        // An unrelated flag bit is not a refusal — the mask is four specific bits, not "any flag".
+        assert_eq!(refusal(Some(&actor(&[(FLAGS, 0x1000)])), Some(7)), None);
+    }
+
+    /// `0x612e33`'s charm test compares against the ACTIVE PLAYER's guid, so being charmed **by
+    /// us** is not a refusal — that is the whole point of mind control, and reading the field as a
+    /// plain "is charmed" boolean would make every controlled unit unable to swing.
+    #[test]
+    fn charmed_by_us_still_swings_and_charmed_away_does_not() {
+        let mine = actor(&[(CHARMEDBY, 7), (CHARMEDBY + 1, 0)]);
+        assert_eq!(refusal(Some(&mine), Some(7)), None);
+
+        let theirs = actor(&[(CHARMEDBY, 9), (CHARMEDBY + 1, 0)]);
+        assert_eq!(refusal(Some(&theirs), Some(7)), Some("ERR_ATTACK_CHARMED"));
+        // Not knowing our own guid yet cannot make somebody else's charm look like ours.
+        assert_eq!(refusal(Some(&theirs), None), Some("ERR_ATTACK_CHARMED"));
+    }
+
+    /// The order is the binary's, and it is observable: the FIRST gate to fail names the message,
+    /// so a dead-and-mounted actor says "Can't attack while dead."
+    #[test]
+    fn the_first_failing_gate_names_the_message() {
+        let both = actor(&[(HEALTH, 0), (MOUNT, 1147), (FLAGS, 0x0004_0000)]);
+        assert_eq!(refusal(Some(&both), Some(7)), Some("ERR_ATTACK_DEAD"));
+        // …and with the death removed, the flag block still precedes the mount check.
+        let cc = actor(&[(MOUNT, 1147), (FLAGS, 0x0004_0000)]);
+        assert_eq!(refusal(Some(&cc), Some(7)), Some("ERR_ATTACK_STUNNED"));
+    }
+
+    /// An un-streamed actor is not an ineligible one: the reference skips the whole chain when it
+    /// cannot resolve the object (`0x4bd403` — no pet ⇒ send unmodified). A descriptor that simply
+    /// has not sent a health field yet must not read as a corpse.
+    #[test]
+    fn an_unresolved_actor_is_never_a_refusal() {
+        assert_eq!(refusal(None, Some(7)), None);
+        assert_eq!(
+            refusal(Some(&ObjectStore(ObjectFields::default())), Some(7)),
+            None
+        );
+    }
+
+    /// The RUNTIME leg (the mount/lock-refusal pattern): all ten of the consecutive `ERR_ATTACK_*`
+    /// registry ids `0xa0`–`0xa9` resolve to non-empty strings in the shipped 1.12
+    /// `GlobalStrings.lua`. This is the guard against a typo'd key turning a refusal into a silent
+    /// one — a veto that shows nothing is indistinguishable from a click that did nothing.
+    #[test]
+    fn every_attack_error_key_resolves_in_the_real_global_strings() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WoW/Data");
+        if !data.is_dir() {
+            eprintln!("skipping: vanilla client not present at {}", data.display());
+            return;
+        }
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        let src = chain
+            .read_file("Interface\\FrameXML\\GlobalStrings.lua")
+            .expect("GlobalStrings.lua in the chain");
+        let s = benilla_ui::script::UiScript::new().expect("VM");
+        s.run(&String::from_utf8_lossy(&src)).expect("runs clean");
+        let g = |key: &str| s.lua().globals().get::<String>(key).ok();
+
+        for key in [
+            "ERR_NO_ATTACK_TARGET",               // 0xa0
+            "ERR_INVALID_ATTACK_TARGET",          // 0xa1
+            "ERR_ATTACK_STUNNED",                 // 0xa2
+            "ERR_ATTACK_PACIFIED",                // 0xa3
+            "ERR_ATTACK_MOUNTED",                 // 0xa4
+            "ERR_ATTACK_FLEEING",                 // 0xa5
+            "ERR_ATTACK_CONFUSED",                // 0xa6
+            "ERR_ATTACK_CHARMED",                 // 0xa7
+            "ERR_ATTACK_DEAD",                    // 0xa8
+            "ERR_ATTACK_PREVENTED_BY_MECHANIC_S", // 0xa9
+        ] {
+            assert!(!g(key).unwrap_or_default().is_empty(), "{key} missing");
+        }
+        // The one wow-re quotes from the file, as a spot check that the ids line up with the keys.
+        assert_eq!(g("ERR_ATTACK_DEAD").unwrap(), "Can't attack while dead.");
     }
 }
 
