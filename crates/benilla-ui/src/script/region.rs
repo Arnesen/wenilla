@@ -418,9 +418,34 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         let h = m.map(|m| m.h).or(size.map(|s| s.1)).unwrap_or(0.0);
         Ok((w, h))
     }
+    // GetStringWidth is the **natural, unwrapped** extent — never the declared box, and never the
+    // wrapped one (wow-re `fontstring-overflow.md`, "The measurement echo": the reference's getter
+    // re-measures the raw text with NO wrap constraint). Unlike `GetWidth` below it deliberately
+    // does NOT fall back to an explicit `SetSize`: the declared width is the very thing a caller
+    // asks this to be independent of. A kit that sizes a box from this number and then sets a width
+    // on the string — which is what the reference's own `PanelTemplates_TabResize` does — would
+    // otherwise read its own output back as its next input and never settle (decision 0997, the
+    // macro window's character tab changing width every frame). `0` until measured, as ever.
+    fn natural_w(lua: &Lua, this: &Table) -> mlua::Result<f32> {
+        let rh = region_handle_of(lua, this)?;
+        let model = lua.app_data_ref::<Model>().expect("model");
+        let Some(d) = model.region_data.get(&rh) else {
+            return Ok(0.0);
+        };
+        let scale = model
+            .arena
+            .region(rh)
+            .and_then(|r| model.arena.frame(r.owner))
+            .map(|f| f.effective_scale)
+            .unwrap_or(1.0);
+        Ok(d.measured
+            .filter(|m| m.key == d.measure_key(scale))
+            .map(|m| m.natural_w)
+            .unwrap_or(0.0))
+    }
     m.set(
         "GetStringWidth",
-        lua.create_function(|lua, this: Table| Ok(measured_wh(lua, &this)?.0))?,
+        lua.create_function(|lua, this: Table| natural_w(lua, &this))?,
     )?;
     m.set(
         "GetStringHeight",

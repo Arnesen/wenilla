@@ -227,7 +227,10 @@ impl Loader<'_> {
             }
         } else {
             if let Some(text) = region.attr("text") {
-                self.call_region(region_wrapper, "SetText", Some(text.to_string()), dbg);
+                // `<FontString text=>` is a global-string lookup, not a literal — rf28 l.115
+                // (`0x703bf0`). See `Loader::resolve_text`.
+                let text = self.resolve_text(text, dbg);
+                self.call_region(region_wrapper, "SetText", Some(text), dbg);
             }
             if let Some(c) = color {
                 self.call_region(

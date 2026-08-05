@@ -37,6 +37,10 @@ const MLIQ_UV_PERIOD: f32 = 4.0 * MLIQ_CELL_STEP;
 /// which the zone's `Light.dbc` rows still colour per-zone. Tunable; the exact shore LUT is deferred.
 const WMO_WATER_DEPTH_V: f32 = 1.0;
 
+/// MOGP `groupLiquid`'s sentinel: **this group holds no liquid of its own**. Any other value is the
+/// whole-group submersion override — see [`WmoGroupHeader::group_liquid`].
+pub const NO_GROUP_LIQUID: u32 = 0xf;
+
 /// The per-group fields the visibility pass reads from a **group file**'s MOGP header: the group
 /// `flags` (offset `0x08`) and the group's slice into [`super::WmoPortals::refs`]
 /// (`portal_ref_start` @ `0x24`, `portal_ref_count` @ `0x26`). VERIFIED layout (`grp+0x10` flags,
@@ -62,6 +66,23 @@ pub struct WmoGroupHeader {
     /// no-liquid sentinel `@0x34` self-validate the layout; see `tests/wmo_fogs.rs`).
     /// `[0; 4]` when the header is too short to carry them.
     pub fog_indices: [u8; 4],
+    /// MOGP `groupLiquid` @ `0x34` — and `0xf` on all but **13 of the 5220 shipped group files**,
+    /// where it means "this group holds no liquid of its own".
+    ///
+    /// The other value is the client's **whole-group submersion override**: `0x6b9f10` reads it
+    /// first and, when it is not `0xf`, returns an unconditional hit — the raw value as the liquid
+    /// type, height `FLT_MAX`, **no Z compare and no MLIQ test at all**. That is how a flooded
+    /// tunnel or an underwater cave reads wet with no liquid grid in the file, and all 13 carry no
+    /// `MLIQ` chunk (census reproduced with our own reader; wow-re
+    /// `models/scratch/wmo-liquid-scoping.md` §5).
+    ///
+    /// [`super::wmo_group_liquid_mesh`] already reads the same word for a different purpose — it
+    /// overrides the *kind* of a grid that exists. This field is the other half: the groups where
+    /// there is no grid to override.
+    ///
+    /// `0xf` when the header is too short to carry it, which reads as "no liquid" — the safe way
+    /// round, since the override only ever adds water.
+    pub group_liquid: u32,
 }
 
 /// Read one WMO **group** file's MOGP header fields used by the visibility pass (see
@@ -85,6 +106,7 @@ pub fn wmo_group_header(group_bytes: &[u8]) -> Option<WmoGroupHeader> {
         } else {
             [0; 4]
         },
+        group_liquid: u32_at(0x34).unwrap_or(NO_GROUP_LIQUID),
     })
 }
 
@@ -249,7 +271,7 @@ fn build_wmo_liquid_mesh(lq: &WmoLiquid, group_liquid: u32) -> Option<LiquidMesh
 
     // Resolve ONE kind for the whole surface: the `groupLiquid` override when set (`!= 0xf`), else
     // the first wet tile's nibble (`0x6ba970` returns the first non-hole nibble). Unmapped ⇒ None.
-    let type_nibble = if group_liquid != 0xf {
+    let type_nibble = if group_liquid != NO_GROUP_LIQUID {
         (group_liquid & 0xf) as u8
     } else {
         let first_wet = lq.tile_flags.iter().map(|&f| f & 0xf).find(|&n| n != 0xf)?;
@@ -803,5 +825,50 @@ mod tests {
         assert_eq!(h.portal_ref_start, 5);
         assert_eq!(h.portal_ref_count, 3);
         assert_eq!(h.fog_indices, [2, 0, 0, 0]);
+        assert_eq!(
+            h.group_liquid, 0,
+            "0x34 is read raw: a zeroed header says liquid type 0, NOT the 0xf sentinel — the \
+             reader must never conflate 'no liquid' with 'this whole group is water'"
+        );
+    }
+
+    /// The whole-group submersion override at MOGP `0x34`, and the two ways a header can fail to
+    /// carry one. `0` is a live value (all 13 shipped groups that set it say `0` = water), so the
+    /// sentinel has to be spelled out rather than defaulted to zero.
+    #[test]
+    fn reads_the_whole_group_liquid_override() {
+        let group_with = |liquid: u32| {
+            let mut hdr = vec![0u8; 68];
+            hdr[0x34..0x38].copy_from_slice(&liquid.to_le_bytes());
+            let mut group = Vec::new();
+            group.extend(chunk(b"REVM", &17u32.to_le_bytes()));
+            group.extend(chunk(b"PGOM", &hdr));
+            group
+        };
+
+        // The shipped case: water, over the whole group, with no MLIQ anywhere in the file.
+        let flooded = wmo_group_header(&group_with(0)).expect("group header");
+        assert_eq!(flooded.group_liquid, 0);
+        assert_ne!(flooded.group_liquid, NO_GROUP_LIQUID);
+
+        // The other 5207 groups.
+        assert_eq!(
+            wmo_group_header(&group_with(NO_GROUP_LIQUID))
+                .expect("group header")
+                .group_liquid,
+            NO_GROUP_LIQUID
+        );
+
+        // A header truncated before 0x34 reads as "no liquid" — the safe way round, since the
+        // override only ever adds water and a short header is not evidence of a flooded room.
+        let mut short = Vec::new();
+        short.extend(chunk(b"REVM", &17u32.to_le_bytes()));
+        short.extend(chunk(b"PGOM", &[0u8; 0x30]));
+        assert_eq!(
+            wmo_group_header(&short)
+                .expect("a short header still parses")
+                .group_liquid,
+            NO_GROUP_LIQUID
+        );
     }
 }

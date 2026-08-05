@@ -594,10 +594,13 @@ impl UiScript {
         let handles: Vec<RegionHandle> = model
             .region_data
             .iter()
-            .filter(|(_, d)| {
-                d.size.is_none_or(|s| s.0 == 0.0 || s.1 == 0.0)
-                    && d.text.as_deref().is_some_and(|t| !t.is_empty())
-            })
+            // ANY FontString with text — not only the auto-sized ones. A region with both axes
+            // declared needs no measure for its *layout*, but `GetStringWidth` still has to answer
+            // with the string's natural width, and only a measure can supply it (decision 0997: a
+            // kit that reads that number and then SETS a width on the string would otherwise stop
+            // receiving measures the instant it did so, and start reading its own box back). The
+            // key cache below is what keeps this from costing a re-measure per frame.
+            .filter(|(_, d)| d.text.as_deref().is_some_and(|t| !t.is_empty()))
             .map(|(&rh, _)| rh)
             .collect();
         for rh in handles {

@@ -45,6 +45,11 @@ pub struct WmoGroupNav {
     /// up to four indices into [`WmoModel::fogs`], walked by the camera-in-interior fog selector
     /// (`0x69de20`, wow-re `rf-weather-emission-timeline` ROUND 5).
     pub fog_indices: [u8; 4],
+    /// MOGP `groupLiquid` (`0xf` = none) — the **whole-group submersion override**. On the 13
+    /// shipped groups that set it, the client's liquid probe answers "submerged" for the entire
+    /// group at every Z with no grid involved at all; see
+    /// [`benilla_formats::WmoGroupHeader::group_liquid`].
+    pub group_liquid: u32,
 }
 
 /// A loaded WMO building: the render batches across all its groups, flattened, plus the flattened
@@ -525,6 +530,7 @@ impl AssetLoader for WmoModelLoader {
                     ref_count: 0,
                     area_table_id: 0,
                     fog_indices: [0; 4],
+                    group_liquid: benilla_formats::NO_GROUP_LIQUID,
                 }
             })
             .collect();
@@ -567,6 +573,7 @@ impl AssetLoader for WmoModelLoader {
                 nav.ref_count = h.portal_ref_count;
                 nav.area_table_id = h.area_table_id;
                 nav.fog_indices = h.fog_indices;
+                nav.group_liquid = h.group_liquid;
             }
             // Walking gather once per group: the per-group down-ray face set AND the flat collider
             // (appended with an index offset) come from the same buffers.

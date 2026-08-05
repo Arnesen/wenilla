@@ -18,7 +18,7 @@ fn measure_all(s: &mut UiScript, sizes: &[(&str, f32, f32)]) {
                 .map(|&(_, w, h)| (r.id, w, h, r.key))
         })
         .collect();
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
 }
 

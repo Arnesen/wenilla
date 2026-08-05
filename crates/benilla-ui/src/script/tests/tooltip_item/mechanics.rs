@@ -156,7 +156,7 @@ fn wrap_lines_measure_wrapped_in_one_pass_and_survive_the_reenter_loop() {
                 }
             })
             .collect();
-        s.set_measured_text(&answers);
+        s.set_measured_text_unwrapped(&answers);
         s.resolve();
     };
     answer(&mut s);

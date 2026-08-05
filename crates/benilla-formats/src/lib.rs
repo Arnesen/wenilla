@@ -170,7 +170,7 @@ pub use models::{
     ModelAnimation, ModelBlend, ParentArm, ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim,
     ScalarAnim, Skeleton, SkeletonBone, StringAnchors, UvAnim, WmoBatchClass, WmoDoodad,
     WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot, OWNER_RUNG_BUCKETS,
+    WmoPortals, WmoRoot, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

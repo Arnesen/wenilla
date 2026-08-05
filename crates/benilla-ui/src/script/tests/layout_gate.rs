@@ -235,7 +235,7 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
                     (r.id, w, h, r.key)
                 })
                 .collect();
-            s.set_measured_text(&answers);
+            s.set_measured_text_unwrapped(&answers);
             s.resolve();
         }
         shaped
@@ -319,7 +319,7 @@ fn the_hover_re_enter_loop_neither_re_measures_nor_re_solves() {
             (r.id, w, h, r.key)
         })
         .collect();
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
     assert!(
         solves(&s) > solves_before,

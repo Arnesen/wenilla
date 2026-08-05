@@ -1,5 +1,6 @@
-//! Stamps the **commit this binary was built from** into the binary, for
-//! [`build_id`](../src/build_id.rs) to read back at runtime.
+//! Stamps the **commit this binary was built from** into the binary: `src/main.rs` reads the
+//! four vars back with `env!` and hands them to `benilla_app::run` as its `BuildId` resource
+//! (`benilla-app/src/build_id.rs` — the runtime side and its two surfaces).
 //!
 //! Why it exists: people run benilla from a clone of the public snapshot repo, and a report ("this
 //! looks wrong", "it crashed here") is only actionable if we know *which* code they ran. A git sha
@@ -23,6 +24,17 @@
 //! so `ship` and `release` would be indistinguishable; the profile *directory* inside `OUT_DIR`
 //! carries the real name, which is what a "why is this slow" report needs to say.
 //!
+//! ## Why this lives in a ~30-line shim package, not the app crate (decision 0993)
+//!
+//! Cargo dirties the compile units of the package that owns a `rerun-if-changed` path on the
+//! file's **mtime alone** — before the build script even runs, identical output or not
+//! (`cargo build -v` says it plainly: `Dirty benilla v0.1.0: the file …/HEAD has changed`). The
+//! watched paths below move on every commit, rebase, and checkout, so the package carrying this
+//! script re-compiles and relinks that often — and `cargo test` re-links every integration test
+//! of that package too, sha-relevant or not. Stamped into the app crate (as it originally was,
+//! 0787), that cost ~2 minutes of pure stamp tax per commit across the gates; in this shim it is
+//! the shim's recompile plus one relink of the app. 0993 has the measurements.
+//!
 //! ## Staleness — the only thing that could make this lie
 //!
 //! A stamp is worthless if it can report a commit the binary isn't. The rerun triggers below are
@@ -32,10 +44,6 @@
 //! slot `.git` is a *file*, `HEAD` lives in `<primary>/.git/worktrees/<slot>/`, and `refs/heads/*`
 //! stay in the common dir. Only paths that exist are emitted: cargo reruns a build script whose
 //! watched path is *missing* on every build, and every one of those reruns relinks the app crate.
-//!
-//! The cost of that honesty is one app-crate recompile once the sha actually changes (measured at
-//! ~37 s, 0787) — the previous binary genuinely no longer matches it. A rerun that produces the
-//! same output does *not* recompile: cargo compares it, and the build settles for a relink (~7 s).
 //!
 //! What the stamp deliberately does **not** claim is that the working tree was clean: it names the
 //! commit the build came *from*. A dirty flag can only be as fresh as the last build-script run, so

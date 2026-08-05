@@ -1,0 +1,950 @@
+//! Movement-driven character & creature animation (decision 0019, Milestone C; the locomotion controller
+//! of decisions 0047 + 0049). Each animated unit carries a [`ModelAnimations`] component (its clips, by
+//! `AnimationData.dbc` id), an [`AnimationPlayer`], and an
+//! [`AnimationTransitions`][bevy::animation::transition::AnimationTransitions]; this module is a
+//! small per-unit state machine that picks the animation from the unit's movement state, **cross-fades**
+//! into it over the clip's blend-in time, and scales a locomotion clip's playback rate to the unit's
+//! speed.
+//!
+//! Regimes (decisions 0049 → 0083/0087):
+//! - **Gait** — the directly-cross-faded ground/swim gaits + idle: Stand / Walk / Run / Fast-run by speed,
+//!   WalkBackwards when moving back, the swim ids when swimming (verified client selector, wow-5875-re
+//!   RF-0057). A change cross-fades to the new clip over its `blend_time` instead of snapping.
+//! - **Special** — the stand-state poses (sit/sleep/kneel: down → loop → up) as one-shot-bracketed
+//!   loops, **preemptible** (decision 0055), plus the jump's enter/hang. The jump's *landing* is NOT a
+//!   bracket: [`select::Mode::Land`] is a plain pick from the input at touchdown, freely overwritten the
+//!   instant a movement flag changes (decisions 0083/0087 — land-then-press runs immediately).
+//! - **One-shots (swings, emotes)** — routed **per play from live state** (decision 0087, the
+//!   byte-verified `0x5fe2f0` route): a standing-idle unit plays them full-body on the base track
+//!   ([`select::Mode::Swing`]); a moving / seated / combat-airborne unit plays them on the SpineLow
+//!   torso-masked overlay ([`AnimClip::upper_node`]) while the base keeps driving the legs underneath —
+//!   never dropped, never bracket-gated.
+//!
+//! The playback **rate** of a locomotion clip is `speed / sequence.moveSpeed` (wow-5875-re `0x5fe2f0`), so
+//! a unit moving faster than the clip's design speed cycles its legs proportionally faster (the fix for a
+//! backpedal that otherwise drags). Non-locomotion clips (idle, the jump/sit transitions — `moveSpeed 0`)
+//! play at 1×. Death (decoded health 0) overrides everything.
+//!
+//! The movement view is unified per unit ([`select::unify`]): the self-avatar's [`MovementState`] is
+//! filled by the player controller from input; a **remote player**'s comes from its relayed
+//! `MSG_MOVE_*` stream (live CMovement flags + extrapolation speed, via [`crate::net::RemoteMotion`]),
+//! so its walk/run/ strafe/backpedal/turn animate from the real flags; a **creature**'s is derived from
+//! its server [`crate::net::Spline`] (forward + speed). Stand-state (sit/sleep/kneel/chairs) comes from
+//! the unit's `UNIT_FIELD_BYTES_1` byte for streamed units, and from the controller (echo + in-flight
+//! request) for our own avatar (decision 0080c).
+
+use std::time::Instant;
+
+use benilla_assets::{AnimClip, ModelAnimations};
+use benilla_formats::AnimDataCatalog;
+use bevy::prelude::*;
+
+use crate::assets::AssetSet;
+use crate::schedule::WorldStage;
+
+/// The pure animation-selection logic (RF-0057/0073 tables, movement/Special state, gait/swing/ready
+/// picks, playback-rate math) — kept in its own file as it carries the bulk of the unit-tested selector
+/// logic, separate from the Bevy driver systems in [`driver`].
+mod select;
+pub(crate) use select::{ease_strafe_yaw, move_flags, strafe_body_offset, MovementState};
+use select::{Mode, Special};
+
+/// The display-facing counter-twist (the strafe body pose): the [`BodyTwist`] component + the
+/// post-animation system that composes the SpineLow/Head counter-rotation onto the frame's pose.
+mod twist;
+pub(crate) use twist::{wrap_pi, BodyTwist};
+
+/// Global-sequence bone channels (the eye-blink eyelid scale, resting fidget pulses): free-clock loops
+/// the per-sequence reader drops, driven on their own clock over the gait.
+mod global_seq;
+pub(crate) use global_seq::GlobalSeqDrive;
+
+/// The unit animation-LOD gate (decision 0448): park an off-frustum rig's per-bone pose
+/// evaluation — the clocks, the driver state machine, and the event tracks keep running, so
+/// off-screen combat stays audible (0075) and a re-appearing unit snaps to the absolute-clock
+/// pose. A modernization, not fidelity — the reference animates every in-range unit (wow-re
+/// `unit-anim-visibility-gate.md`).
+mod lod;
+pub(crate) use lod::AnimParked;
+mod pose;
+pub(crate) use pose::{RigAnchor, RigFrame, RigPose};
+
+/// The collapsed rig's composition passes (decision 0724): the pre-propagation model compose +
+/// anchor re-seat, and the post-propagation world pass (palette rows + billboard replacements).
+mod compose;
+pub(crate) use compose::{finalize_rig_worlds, PosePost};
+
+/// The unit's wielded weapon classes — `(item class, item subclass)` per hand, `None` for an empty
+/// (or non-item) hand. Written by the held-item resolution ([`crate::entities`], decision 0072) from
+/// the same descriptor data that places the weapon models; read by the swing/ready animation
+/// selectors (decision 0073 — the byte-verified `GetWeapon` byte pair `0x605e30`).
+#[derive(Component, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Wielded {
+    pub(crate) main: Option<(u8, u8)>,
+    pub(crate) off: Option<(u8, u8)>,
+    /// The **ranged-slot** item's `(class, subclass)` — the local auto-repeat idle's selector
+    /// ([`select::ranged_load_anim`], the client's `0x5fd530` LUT; decision 0099 phase 5).
+    pub(crate) ranged: Option<(u8, u8)>,
+    /// The mainhand/offhand items' sheath *types* (1 back-2H · 2 back-staff · 3 hip · 4 shield ·
+    /// 0 none) — each picks its arm's draw/stow one-shot independently (VERIFIED wow-re
+    /// `sheath-anim-pick.md`: `(1 << (rec[+4] & 0x1f)) & 0x88` → HipSheath 90 for types {3, 7},
+    /// Sheath 89 otherwise; the slot's own byte is the *only* input).
+    pub(crate) main_sheath: u8,
+    pub(crate) off_sheath: u8,
+    /// The ranged item's sheath type, same pick — the ranged **draw** clip reads it
+    /// (`0x6118a0`/`0x611960`/`0x611a20` all run `(1 << (rng[+4] & 0x1f)) & 0x88` on the ranged
+    /// record). Its **stow** clip does not: `0x611b60`'s PREV==2 legs push a literal `0x59`
+    /// (`0x611c8c`/`0x611cd3`), so a bow is always put away with Sheath 89.
+    pub(crate) ranged_sheath: u8,
+    /// The ranged item's `InventoryType` — the byte-verified **arm** pick: `0x1a`
+    /// (RANGEDRIGHT: gun/crossbow/wand) and `0x19` (THROWN) go to the right arm, everything else
+    /// (`0x0f`, a bow) to the left (`0x611b60` @ `0x611c74`, and the same compare in both
+    /// drawers). `0` when nothing is in the ranged slot.
+    pub(crate) ranged_inv: u32,
+    /// Each slot's `Material` id — the **only** key the draw/stow sound pick uses
+    /// (`SheatheSoundLookups`, decision 0882). Not derivable from the weapon class: real 5875 data
+    /// has maces (subclass 4) in both metal and wood, and puts every bow, crossbow and wand in
+    /// wood while guns and thrown are metal. It rides the wire — `SMSG_ITEM_QUERY_SINGLE_RESPONSE`
+    /// for players, the `UNIT_VIRTUAL_ITEM_INFO` byte triple for creatures — so nothing here is a
+    /// guess. Indexed by held slot: 0 mainhand · 1 offhand · 2 ranged.
+    pub(crate) materials: [u8; 3],
+}
+
+/// The unit is engaged in melee auto-attack (`SMSG_ATTACKSTART` .. `ATTACKSTOP`, decision 0073):
+/// standing still it plays the weapon-class Ready idle — the client's `0x5fd360` arm gates on the
+/// auto-attack-target GUID being set, i.e. engagement, **not** sheath state.
+#[derive(Component)]
+pub(crate) struct Engaged;
+
+/// The local player has fired an auto-repeat spell (Auto Shot / wand Shoot) — the client's
+/// `[+0xd58] & 0x200`, whose **only writer binary-wide** is the local cast-send tail (`0x6e593b`,
+/// gated `AttributesEx2 & 0x20`; byte-verified, wow-re `ranged-shot-anim.md`). While it and the
+/// ranged **sheath** gate (`CUR == 2`) both hold, a standing unit's base idle is the ranged
+/// weapon's Load clip ([`select::ranged_load_anim`]) — the client's resolver `0x5fd460`,
+/// which gates on exactly this bit; local-player-only by construction (remote units never run
+/// the local cast-send). A REMOTE shooter has no drawn idle at all: it plays LoadBow **once** at
+/// the volley's single `SMSG_SPELL_START` through the PrecastKit ([`CastHold`]), then the fire
+/// clip per GO over its ordinary idle (wow-re `shooter-stop-law.md` §J6 claim 2). Cleared
+/// only by [`cancel_auto_repeat_local`]'s callers — the client's cancel `0x6ea080` (its `0x200`
+/// clear `0x6ea113`), reached from the cast-result fail of the cached spell, the button
+/// re-press toggle, melee attack-start, target death, the wand-only new-cast handoff, and
+/// `SMSG_CANCEL_AUTO_REPEAT` — which vmangos DOES send (corrected 2026-08-05; see
+/// [`crate::net::apply::spells::cancel_auto_repeat`]), so against a live server that packet, not
+/// a local death watcher, is what ends a volley whose target dies (wow-re
+/// `nocked-ammo-cancel.md`).
+#[derive(Component)]
+pub(crate) struct AutoRepeatArmed;
+
+/// The weapon-visual hold — the client's `[+0xd58] & 0x400`, set for **ANY caster** (self,
+/// remote players, NPCs) whose **ranged** spell visual plays (`0x60d020`, sole caller `0x6ec2cf`
+/// inside `PlaySpellVisual`; byte-verified, wow-re `ranged-sheath-exempt-autorepeat.md` §Q4).
+/// Cleared like the client's id-matched `0x60d040` + its unconditional sibling `0x60fc50`: a
+/// **non-ranged** visual play by the same caster (the stale-visual cleanup `0x6ec39e`), the
+/// local cancel (`0x6ea12b`), melee attack-start, and the spline-move apply (`0x6020e8`, wow-re
+/// `shooter-stop-law.md` §J1.3). Deliberately NOT cleared on sheath change or volley end — the
+/// client's bit persists latent.
+///
+/// **It gates nothing here, and that is the reference's own shape.** `0x400` is tested in
+/// exactly one place image-wide — `0x5fc3f0`'s Hold self-loop gates (`test ah,0x6` for HoldBow
+/// 109, `test ah,0x4` for 110/111/112) — and that dispatcher is never reached for a bow id
+/// (`shooter-stop-law.md` §J4.1), so no `0x400` test ever executes for a shooter. Reading it as
+/// a second *entry* into the drawn idle is what left a shooter aiming forever after one Serpent
+/// Sting (decision 0991) and what kept a fabricated Hold twin alive (0994). It is kept modelled,
+/// not deleted: §J4.1 is a proof-by-absence carrying an open `LIVE-CAPTURE` item, and this bit is
+/// what a correction would need. Nothing may gate on it until that capture lands.
+#[derive(Component)]
+pub(crate) struct RangedHold;
+
+/// A unit's displayed **nocked ammo** — the client's `[+0xd28]`/`[+0xd2c]` ammo-model pair,
+/// written only by `CGUnit::UpdateAmmoDisplay 0x60ba30` (byte-verified, wow-re
+/// `nocked-ammo-cancel.md`): the ammo's `ItemDisplayInfo` id, rendered as a model on the unit's
+/// **body** at HandArrow (35) — the ONE bone attach, bow-only (§E2; the old Special2/Special3
+/// reading is refuted — those are model-directory selectors, §E1). Set per shot from the
+/// `SMSG_SPELL_START` `CAST_FLAG_AMMO` tail (any caster — the only source for a remote/NPC
+/// shooter). This is the display-id CACHE; whether the arrow is visibly in the hand is the
+/// [`NockLatch`] (the `$BWP`/`$BWR` cycle). Removed by the un-nock `0x60f530` paths: the local
+/// cancel, leaving the ranged sheath stance (`0x60fc72`), or a weapon change.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NockedAmmo {
+    /// The ammo's `ItemDisplayInfo` id (never 0 — an id-0 refresh removes the component instead).
+    pub(crate) display_id: u32,
+}
+
+/// The client's nock latch `[+0xd58] & 0x4000` (wow-re `nocked-ammo-cancel.md` §G1/G4): SET at
+/// the body clip's **`$BWP`** BowPull keyframe (LoadBow 105 carries it at ~0.6 s — the visible
+/// pull-from-quiver moment, which also (re)attaches the in-hand arrow), CLEARED at **`$BWR`**
+/// BowRelease (AttackBow 46 carries it at ~0.067 s — the arrow leaves the hand as the missile
+/// flies) and by the un-nock paths. The equipment attach leg shows the [`NockedAmmo`] model only
+/// while this holds, and the bowstring's middle vertex tracks the draw hand on the same gate.
+#[derive(Component)]
+pub(crate) struct NockLatch;
+
+/// Drive [`NockLatch`] from the anim-event stream ([`AnimSoundEvent`] — the same `$`-tag
+/// keyframes the sound/impact consumers ride): `$BWP` latches (only a unit with a [`NockedAmmo`]
+/// display cached — the client's handler gates on the cached ranged spell), `$BWR` clears.
+/// Ordered after [`events::fire_anim_events`] so a tag lands the frame it's crossed.
+pub(crate) fn drive_nock_latch(
+    mut events: MessageReader<AnimSoundEvent>,
+    nocked: Query<Has<NockedAmmo>>,
+    mut commands: Commands,
+) {
+    for ev in events.read() {
+        match &ev.ident {
+            b"$BWP" if nocked.get(ev.entity) == Ok(true) => {
+                // `try_insert`, matching the `$BWR` arm's guard below: the tag names a unit that
+                // may be despawned by the time these commands apply (the fade lane is unordered
+                // against this chain — B130's second window, in the same defect class).
+                commands.entity(ev.entity).try_insert(NockLatch);
+            }
+            b"$BWR" => {
+                if let Ok(mut e) = commands.get_entity(ev.entity) {
+                    e.remove::<NockLatch>();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The one local auto-repeat cancel — benilla's `0x6ea080` (byte-verified whole, wow-re
+/// `nocked-ammo-cancel.md`): clear the live key (`[0xceac30]`), drop the Load/Hold idle gates
+/// (the `0x200`/`0x400` bits — [`AutoRepeatArmed`] + [`RangedHold`]), un-nock the ammo
+/// (`0x60f530` — [`NockedAmmo`]), and ack the server (`CMSG_CANCEL_AUTO_REPEAT_SPELL`, the
+/// client's sole send site `0x6ea0c6`) — **sheath untouched**: the weapon stays drawn, the idle
+/// falls back to the ordinary stand. Every cancel trigger funnels here, like the client's 8
+/// live callers.
+pub(crate) fn cancel_auto_repeat_local(
+    entity: Option<Entity>,
+    auto_repeat: &mut crate::ui_action::AutoRepeatActive,
+    commands: &mut Commands,
+    net: &crate::net::NetCommands,
+) {
+    if auto_repeat.0.is_none() {
+        // The client's `[0xceac30] == 0` early-out — nothing running, nothing sent.
+        return;
+    }
+    auto_repeat.0 = None;
+    if let Some(e) = entity {
+        commands
+            .entity(e)
+            .remove::<(AutoRepeatArmed, RangedHold, NockedAmmo, NockLatch)>();
+    }
+    let _ = net.0.send(crate::net::ClientCommand::CancelAutoRepeat);
+}
+
+/// A unit is mid-cast (`SMSG_SPELL_START` .. `GO`/`FAILED_OTHER`, decision 0099 phase 1) — the
+/// wire-truth state seam. Inserted on `SpellStart` only when it carries a nonzero cast time (an
+/// instant cast's `SpellGo` follows with nothing to interrupt, so it never gets one); removed on
+/// the matching-spell-id `SpellGo`/`SpellFailedOther` (the client's reap `0x614150(spellId, 0)` is
+/// keyed — a triggered proc's GO mid-cast never clears a different spell's precast, decision 0107).
+/// The *animation* side rides [`CastEvent`]/[`CastHold`] (the resolved layer,
+/// [`spell_visual::route_cast_visuals`]), not this component. `until` is `Option` rather than a
+/// bare deadline so a later channel (an open-ended cast, no fixed end) can land here without a
+/// sentinel.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct Casting {
+    pub(crate) spell_id: u32,
+    #[allow(dead_code)]
+    pub(crate) until: Option<Instant>,
+}
+
+/// The client's PlayAnimation **call order**, reconstructed. The real client has no pecking
+/// order between a swing and a spell kit's anim landing in the same frame — its handlers run
+/// synchronously in packet order and the LATER `PlayAnimation` call simply overwrites bone 0
+/// (wow-re, the Eviscerate-timing round's arm C). benilla's swing and cast pipelines are
+/// separate message streams, so that order must ride the messages: every emitter of an
+/// animation-bearing request ([`SwingMessage`], [`CastEvent`], [`EmoteAnim`], [`KitPush`])
+/// stamps `next()` at emission — the wire drain stamps in packet order; scene-time emitters
+/// (a missile arriving, an interact emote) stamp when they fire, which is after that frame's
+/// packets, exactly where the client's scene-update calls sit. [`driver::drive_animations`]
+/// resolves a same-frame collision by the highest stamp.
+#[derive(Resource, Default)]
+pub(crate) struct PlaySeq(u64);
+
+impl PlaySeq {
+    pub(crate) fn next(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+}
+
+/// A cast lifecycle edge on a streamed unit, straight off the wire (written by the net bridge,
+/// consumed by [`spell_visual::route_cast_visuals`], which resolves spell → `SpellVisual` → kit →
+/// animation/sound — the DBC knowledge stays in the anim layer, decision 0107).
+#[derive(Message, Clone, Copy)]
+pub(crate) struct CastEvent {
+    pub(crate) entity: Entity,
+    pub(crate) spell_id: u32,
+    pub(crate) kind: CastEventKind,
+    /// [`PlaySeq`] stamp at emission — carried through to the kit's [`EmoteAnim`].
+    pub(crate) seq: u64,
+}
+
+/// Which cast edge fired (decision 0107 verdict 2's stage wiring).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CastEventKind {
+    /// `SMSG_SPELL_START` — the precast kit persists from here (subliminal for an instant, whose
+    /// GO follows at once).
+    Start,
+    /// `SMSG_SPELL_GO` — reaps the precast, plays the cast/release kit.
+    Go,
+    /// The cast died without a release (`SMSG_SPELL_FAILED_OTHER`, or our own failed
+    /// `SMSG_CAST_RESULT`) — reap only, nothing plays.
+    Fail,
+    /// The spell **landed on this unit** (`entity` = the struck target, not the caster — decision
+    /// 0099 phase 4): a missile arrival, written back by `crate::entities::missile`. Plays the
+    /// impact kit (stage 1) + the state kit (stage 2) on the target — the client's unit-impact
+    /// hand-off `0x61dc50`. A speed-0 spell's impacts never come through here: the router plays
+    /// them inline at the GO (same resolve, no round-trip). `weapon_visual` = the caster's
+    /// ranged-weapon substitute `SpellVisual` id, resolved at GO time and carried through the
+    /// flight (the caster may despawn mid-flight; the client's missile carries its kit context)
+    /// — the `0x60d450` fallback a basic shot's impact kit resolves through (decision 0370).
+    Impact { weapon_visual: Option<u32> },
+}
+
+/// The resolved casting **hold** — the animation a unit sustains while a cast or channel is in
+/// flight (`SpellVisualKit` field 2 of the precast/channel kit, decision 0107). Managed entirely
+/// by [`spell_visual::route_cast_visuals`]; the driver renders it per frame: **standing → the
+/// gait slot, full-body** (the client's stationary-cast pin — the settled `[CGUnit+0xb4]` gate) —
+/// **moving → a looping masked overlay** (the ordinary torso-masked route a moving caster falls
+/// through to). A Special (jump/pose) outranks it — the server interrupts such casts anyway.
+/// `spell_id` keys the reap, like everything in this pipeline (the client's `0x614150(spellId, …)`):
+/// an unrelated spell's GO/fail never drops another cast's hold.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct CastHold {
+    pub(crate) anim_id: u16,
+    pub(crate) spell_id: u32,
+    /// A ranged-slot shot's wind-up (`Attributes & 0x2` — Throw's ReadyThrown, the bow's
+    /// LoadBow): the client brackets every ranged kit play with ranged snaps (`0x60f34c`
+    /// before, the outer `0x6e5930`/`0x6e78f3` after — wow-re
+    /// `ranged-sheath-exempt-autorepeat.md`), so while this hold is live the sheath
+    /// reconcile's force-stow never survives the frame ([`driver`]'s bracket override).
+    pub(crate) ranged: bool,
+}
+
+/// Per-hand weapon-grip state: whether a weapon is held in the right/left hand, so that hand's fingers
+/// curl into a grip. The real client arms `HandsClosed` (AnimationData 15) on a hand's finger key-bones
+/// **purely by that hand's attach point being occupied by a weapon** — not combat, not sheath state; a
+/// forearm-mounted shield or an empty hand stays open (wow-re `hand-grip-mechanism.md`, `0x60b590` /
+/// paperdoll `0x5059a0`). Written by the held-item resolver ([`crate::entities`], decision 0072) from the
+/// weapon's hand attach point; read by [`driver::drive_hand_grip`] to hold/release the finger overlay.
+#[derive(Component, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandGrip {
+    /// A weapon occupies the right-hand attach point (mainhand, id 1).
+    pub(crate) right: bool,
+    /// A weapon occupies the left-hand attach point (a non-shield offhand, id 2).
+    pub(crate) left: bool,
+}
+
+/// The weight of the per-hand weapon-grip finger overlay ([`benilla_assets::ModelAnimations::hand_close`])
+/// over the base gait on the finger key-bones both drive. The base clip animates the whole skeleton
+/// (fingers at Stand's flat 0°) and isn't masked out of the finger subtree, so grip and base blend there —
+/// this makes the grip dominate ≈ 8:1 (the fingers read closed, not a half-open wash). Same rationale/value
+/// as the sheath ceremony and the upper-body one-shot overlays. Shared by the live driver
+/// ([`driver::drive_hand_grip`]) and the glue-booth spawn ([`crate::portrait`]) so both blend the grip
+/// identically.
+pub(crate) const HAND_GRIP_WEIGHT: f32 = 8.0;
+
+/// One completed melee swing for `attacker` (`SMSG_ATTACKERSTATEUPDATE` → the net bridge; decision
+/// 0073: one packet = one swing animation, no client-side timer). `hit_info` bit `0x4` = offhand
+/// swing; bit `0x10000` suppresses the animation. The outcome fields (`victim`, `victim_state`,
+/// `damage`) ride along for the combat-audio consumer (`sound::combat`), which plays the swing's
+/// sounds when the animation's `$CSS`/`$CAH`/`$HIT` events fire. A fully-absorbed swing's
+/// "Absorb" word keys `hit_info & 0x20`, not a magnitude (`0x6243e0` never reads one — decision
+/// 0279), so no absorb field rides here; the full-block synthesis likewise rewrites
+/// `victim_state` in the net bridge before this message is built.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct SwingMessage {
+    pub(crate) attacker: Entity,
+    /// The swing's target, when it's streamed to us.
+    pub(crate) victim: Option<Entity>,
+    pub(crate) hit_info: u32,
+    /// vmangos `VictimState`: 1 hit · 2 dodge · 3 parry · 4 interrupt · 5 blocks · 6 evades ·
+    /// 7 immune · 8 deflects (decision 0279's byte-verified consequence table keys off it).
+    pub(crate) victim_state: u32,
+    pub(crate) damage: u32,
+    /// [`PlaySeq`] stamp at emission (the wire drain, in packet order).
+    pub(crate) seq: u64,
+}
+
+/// Play a one-shot **anim-emote** on a unit: the given `AnimationData.dbc` id, played over the
+/// gait and returning to it when it finishes (the [`select::Mode::Swing`] one-shot pattern). The
+/// gossip/vendor interact route ([`crate::target`], decision 0081) uses it to play EmoteTalk
+/// (id 60) on the self-player: the per-animation sheath reconcile then reads that clip's
+/// WeaponFlags (`0x10`) and stows the drawn weapon — a committed state change that *persists*
+/// after the emote (nothing restores it; weapons stay stowed until re-triggered — decision 0080).
+/// The stow is the emote's flags, not a sheath wire. Also fed by the `SMSG_EMOTE` receive path
+/// ([`emote_anim::emote_to_anim`]), which maps a bridged anim emote's `Emotes.dbc` id to its
+/// `AnimID` — `/wave`, `/bow`, `/laugh`, `/cheer`, … all play through this same one-shot.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct EmoteAnim {
+    pub(crate) entity: Entity,
+    pub(crate) anim_id: u16,
+    /// [`PlaySeq`] stamp — a kit anim inherits its [`CastEvent`]'s; scene-time emitters stamp
+    /// fresh at fire time. The driver's same-frame swing collision resolves by the higher stamp.
+    pub(crate) seq: u64,
+}
+
+/// Rear up a rider's mount (decision 0441 P2): resolved to a [`EmoteAnim`] one-shot of
+/// MountSpecial(94) on the unit's MOUNT CHILD entity by [`flourish_to_anim`] — the §5-verified
+/// routing (the flourish plays on the mount model; the rider holds Mount(91) throughout).
+/// Written by the net drain (`SMSG_MOUNTSPECIAL_ANIM` — observed riders only; our own echo
+/// is dropped there) and by the self space-bar gate (`crate::player`, locally at send time).
+/// A unit with no mount child (a race with dismount) drops silently — nothing to rear.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct MountFlourish {
+    pub(crate) unit: Entity,
+}
+
+/// [`MountFlourish`] → [`EmoteAnim`]: hop unit → its mount child and fire the one-shot there.
+/// The mount child runs the untouched creature machinery (it is not itself "mounted"), so the
+/// general one-shot player takes it from here — full-body 94 over the mount's gait, returning
+/// to it when done.
+fn flourish_to_anim(
+    mut msgs: MessageReader<MountFlourish>,
+    mut out: MessageWriter<EmoteAnim>,
+    mut play_seq: ResMut<PlaySeq>,
+    mounts: Query<&crate::entities::mount::MountChild>,
+) {
+    for m in msgs.read() {
+        let Ok(child) = mounts.get(m.unit) else {
+            debug!("flourish: {:?} has no mount child — dropped", m.unit);
+            continue; // dismounted before the flourish landed — nothing to rear
+        };
+        debug!(
+            "flourish: MountSpecial(94) one-shot on {:?} (mount of {:?})",
+            child.0, m.unit
+        );
+        out.write(EmoteAnim {
+            entity: child.0,
+            anim_id: select::MOUNT_SPECIAL,
+            seq: play_seq.next(),
+        });
+    }
+}
+
+/// Play a **wound-flinch** on a unit: the given `AnimationData.dbc` id (8–10, the CombatWound
+/// family) laid into the wound SECONDARY-blend slot — a decaying overlay that never interrupts
+/// what plays underneath (decision 0111). The spell pipeline's counterpart to the melee flinch:
+/// the client's kit player itself branches here (`0x60edf0` @ `0x60f3ad`: anim in `[8,10]` →
+/// the wound trigger `0x60ea70`, anything else → `PlayAnimation`), so an impact kit's wound anim
+/// must never ride the [`EmoteAnim`] one-shot route — that replaces the base track, the exact
+/// routing decision 0111 falsified. Written by [`spell_visual::route_cast_visuals`]; consumed by
+/// [`driver::drive_animations`] into the same per-frame wound slot as a melee hit.
+#[derive(Message, Clone, Copy)]
+pub(crate) struct WoundAnim {
+    pub(crate) entity: Entity,
+    pub(crate) anim_id: u16,
+}
+
+/// The target lists off one `SMSG_SPELL_GO` (decision 0099 phase 4) — the payload [`CastEvent`]'s
+/// `Copy` shape can't carry. Written by the net bridge alongside the GO's [`CastEvent`]; consumed
+/// by [`spell_visual::route_cast_visuals`], which resolves `Spell.dbc` Speed and either plays the
+/// impacts inline (speed 0) or launches missiles ([`spell_visual::MissileSpawn`]) — the client's
+/// two GO branches (`0x6e8bf0` instant vs `0x6e8a50 → 0x60a3d0` projectile).
+#[derive(Message, Clone)]
+pub(crate) struct SpellGoTargets {
+    pub(crate) caster: Entity,
+    pub(crate) spell_id: u32,
+    /// Units the spell landed on — each gets the impact hand-off (inline or on missile arrival).
+    pub(crate) hits: Vec<Entity>,
+    /// Units it missed, with the wire's `SpellMissInfo` code — a projectile still flies at
+    /// each, and its **arrival** plays the victim's defense clip for DODGE(3)/BLOCK(5) (the
+    /// client's `Missile_C::Update 0x61ceb0` dispatch — Dodge 30 / ShieldBlock 24, never Parry;
+    /// wow-re `smsg-attackerstate-consequences.md` §Q4). No impact kit plays. The deflect
+    /// *flight* visual (the projectile glancing off) stays a named approximation — ours ends
+    /// the flight at the target.
+    pub(crate) misses: Vec<(Entity, u8)>,
+    /// The ground point a dest-targeted cast launched at (`TARGET_FLAG_DEST_LOCATION`), in
+    /// **bevy** coords (converted at the apply seam like every scene position). A ground AOE's
+    /// GO arrives with empty hit/miss lists and only this. No consumer reads it yet — the
+    /// dest-anchored launch visual is pending the dispatched wow-re read (the persistent area
+    /// effect anchors to the DynamicObject create, not to this packet).
+    pub(crate) dest: Option<Vec3>,
+    /// The GO's ammo block (`castFlags & 0x20`, a ranged shot): the `ItemDisplayInfo` id of the
+    /// caster's ammo/thrown — the missile's model when the spell's visual chain has none (the
+    /// client's `0x479f40` fallback, decision 0099 phase 5).
+    pub(crate) ammo_display_id: Option<u32>,
+    /// [`PlaySeq`] stamp — same packet as the GO's [`CastEvent`], same stamp: the inline
+    /// impacts play from the one handler call.
+    pub(crate) seq: u64,
+}
+
+/// The sheath **policy layer**'s types + ceremony mechanics (decision 0080) — the one-setter
+/// request, the ceremony overlays, the `AnimationData.dbc` policy table. The driver below
+/// executes them, so every sheath transition has exactly one author.
+mod sheath;
+use sheath::{load_anim_data, SheathSwap};
+pub(crate) use sheath::{
+    toggle_sheath_next, AnimData, SheathRequest, SheathSwapMessage, VisualSheath,
+};
+
+/// The `SMSG_EMOTE` → [`EmoteAnim`] consumer (Part 1 of the emote-animation wiring) — kept
+/// alongside `sheath` as its own small concern.
+mod emote_anim;
+use emote_anim::emote_to_anim;
+
+/// The Bevy driver systems that execute the state machine [`select`] picks (decision 0049 + 0073,
+/// decision 0087's one-shot routing, decision 0080's sheath execution) — kept in its own file as
+/// it carries the bulk of the per-frame system logic, separate from this module face and from the
+/// pure selector logic in [`select`].
+mod driver;
+pub(crate) use driver::oneshot_is_live;
+use driver::{drive_animations, drive_hand_grip};
+
+/// The model event-keyframe scanner (decision 0070 slice 3) — kept in its own file as its own
+/// small concern, separate from the driver ([`driver`]) that advances the clips it scans.
+mod events;
+use events::fire_anim_events;
+pub(crate) use events::{is_footstep, scan_events, AnimSoundEvent};
+
+mod impact;
+use impact::route_swing_impacts;
+pub(crate) use impact::{DefenseAnim, PendingImpacts, SwingFlush, SwingImpact, SwingSlowdown};
+
+/// The spell-visual data plane + the cast-edge router (decision 0099 phase 2 / 0107):
+/// `SpellVisual.dbc` × `SpellVisualKit.dbc` loaded alongside [`AnimData`], and
+/// [`spell_visual::route_cast_visuals`] resolving wire [`CastEvent`]s into [`CastHold`]s, release
+/// one-shots ([`EmoteAnim`]) and kit sounds ([`spell_visual::SpellKitSound`]).
+mod blood;
+mod env_damage;
+mod spell_visual;
+use blood::{blood_spurts, load_blood_tables};
+use env_damage::{hard_landing_dust, load_env_damage_table};
+pub(crate) use env_damage::{EnvDamageTable, HardLanding, HARD_LANDING_DESCENT};
+use spell_visual::{
+    arm_aura_state_fx, arm_level_up_fx, arm_loot_fx, arm_mount_poof_fx, load_spell_visuals,
+    route_cast_visuals,
+};
+// The aura-slot watcher is the shared trigger for BOTH halves of a state kit, so the CharProc half's
+// own tests (`crate::aura_visual`) drive it directly rather than re-deriving the slot diff.
+#[cfg(test)]
+pub(crate) use spell_visual::arm_aura_state_fx as arm_aura_state_fx_for_test;
+pub(crate) use spell_visual::{
+    held_strike_sound, ChainProcPlay, FxClass, FxStage, KitPush, MissileSpawn, SpellKitFx,
+    SpellKitSound, SpellVisuals,
+};
+
+/// The per-unit animation state machine.
+///
+/// `Transform` is required, not optional: the driver reads the entity's render scale as the
+/// locomotion rate divisor (decision 0903), so a driver on a transform-less entity would silently
+/// stop being driven at all. Every real unit is spawned with one — the requirement is here so a
+/// hand-assembled entity (a test world, a future harness) can't quietly miss it.
+#[derive(Component)]
+#[require(Transform)]
+pub(crate) struct AnimDriver {
+    mode: Mode,
+    /// The gait id currently targeted while in [`Mode::Gait`] (so we cross-fade only on a change). `None`
+    /// forces a fresh selection (first eval, or after a Special state exits).
+    gait: Option<u16>,
+    /// The movement flags the **base slot** was last armed for — the reference has no per-one-shot
+    /// latch, so "the movement state changed" means *since the base last took a request*, never
+    /// "since this one-shot started" (decision 0894). The distinction is invisible until a one-shot
+    /// and a movement change land on the SAME frame: Ice Block's root wipes the direction bits in
+    /// the very frame the cast one-shot arrives, so an arm-time comparison sees no edge at all and
+    /// the cast keeps bone 0 — where the reference's next base request overwrites it and leaves the
+    /// character neutral.
+    gait_flags: u32,
+    /// The unit's **client-side sheath state** — the mirror of the client's committed CUR cache
+    /// (`[unit+0xd40]`, decision 0080): what the weapon placement renders (absent a
+    /// [`VisualSheath`] ceremony pin) and what the setter/reconcile test against. Seeded from
+    /// the descriptor byte at first sight; re-adopted whenever the server byte *changes* (the
+    /// `0x604c70` field-apply); overwritten by requests ([`SheathRequest`]) and the
+    /// per-animation reconcile. `None` = not yet seen (arms silently).
+    sheath_cur: Option<u8>,
+    /// The `UNIT_FIELD_BYTES_2` sheath byte last seen, to detect inbound field *changes* (our
+    /// own `CMSG_SETSHEATHED` echo arrives already-committed and adopts as a no-op).
+    sheath_byte: Option<u8>,
+    /// The pending mid-animation weapon swap, while a draw/stow one-shot is in flight.
+    sheath_swap: Option<SheathSwap>,
+    /// A **masked upper-body one-shot** in flight (decision 0087): a swing/emote the live-state route
+    /// sent to the SpineLow overlay (moving / seated / airborne-in-combat), playing *beside* [`Mode`]
+    /// while the base track keeps driving the legs (run / sit / jump-arc). `None` = no overlay; a
+    /// finished overlay **fades** the subtree back to the base ([`Self::overlay_fade`]) rather than
+    /// dropping it. The full-body route never uses this — it replaces the base via [`Mode::Swing`]
+    /// — until a locomotion request **transplants** that clip up here (decision 0878).
+    overlay: Option<Overlay>,
+    /// The key-bone slot's **cross-fade in flight** (decision 0878) — the client's per-bone
+    /// SECONDARY as an upper-body arm or release seeds it. Two producers, one curve
+    /// ([`select::blend_lambda`], λ decaying 1 → 0): the **fade-to-rest** that releases a finished
+    /// one-shot over a fixed 150 ms (`0x5fc920` → op4 `param_3 = −1`, `0x7123af`), and a **blended
+    /// re-arm** cross-fading a new masked clip in over the incoming clip's own blendTime
+    /// (`0x7125f2`). A **transplant** arm carries `blendFlag = 0` and seeds nothing — it resumes
+    /// the clip at its live frame with no fade at all.
+    overlay_fade: Option<OverlayFade>,
+    /// The victim **wound-flinch** in flight (decision 0111) — the client's per-bone **SECONDARY
+    /// blend slot**: a decaying cross-fade overlay (`λ` smoothstep `0.75 → 0` over the wound
+    /// clip's own span) layered over whatever else plays, then self-releasing. Deliberately a
+    /// separate slot from [`Self::overlay`] — in the client they are two independent per-bone
+    /// slots (primary arm vs secondary blend), so a masked swing and a wound decay **coexist**;
+    /// folding the wound into the one-shot slot is exactly the falsified 0107 routing.
+    wound: Option<Wound>,
+    /// Whether the current airborne arc launched **upward** — a jump (the JumpStart/Jump bracket)
+    /// vs a step-off fall (the gait freeze). Decided from `vertical_speed` on the arc's first
+    /// airborne frame — the MSG_MOVE_JUMP-vs-StartFalling distinction the real client carries as
+    /// an event, read off the launch velocity in our flag-collapsed machine. Stale on the ground.
+    jump_arc: bool,
+    /// FALLING was set last frame — marks the arc edges: takeoff (decide [`Self::jump_arc`]) and
+    /// the landing of a bracket-less step-off fall (which must still run the `0x602c60` land pick
+    /// even though no Special drove the arc).
+    was_falling: bool,
+    /// The **deferred combat one-shot** — the client's `CGUnit+0xd60` cache (wow-re
+    /// `combat-anim-fastpath.md`, decision 0406): a combat clip requested while another combat
+    /// clip plays is NOT armed — the playing clip's rate doubles (op6 2.0f) and the request
+    /// parks here, played by the driver the moment no one-shot is live (the client's
+    /// base-recompute read). Any normal arm clears it (the client's `0x5fe48e` writes −1 on
+    /// every non-fast-path PlayAnimation; the driver clears at its play sites).
+    deferred: Option<u16>,
+    /// The armed looping arm's **replay window** (decision 0516 — wow-re `loop-replay-fidget`
+    /// §7/§7d): the variation node the loop armed + its rolled budget `R` (the client's
+    /// `block+0xbc`; the window is `R` clip-lengths wide, op4 `0x7126d8` — live for LOOPS too,
+    /// correcting 0117's "loops ignore it"). The per-frame watchdog (`0x719370`'s transcription
+    /// in `drive_animations`) re-arms the id when the node — still the MAIN armed animation —
+    /// completes `R` passes: the fresh weighted pick that alternates a gryphon's flap/glide and
+    /// walks a multi-part dance. `None` = the main arm is a one-shot (its budget is a `Count`
+    /// repeat) or a deliberate freeze (ranged Load / Loot).
+    loop_window: Option<(bevy::animation::graph::AnimationNodeIndex, u32)>,
+    /// The playback rate last written to the base slot — `speed / (moveSpeed · |modelScale|)`
+    /// ([`select::playback_rate`], decision 0903); `1.0` for anything that is not a rate-scaled
+    /// locomotion clip. Purely an **instrument**: the hover inspector's anim line reads it, so
+    /// "this creature's walk looks too fast" is answerable by hovering the creature instead of by
+    /// working the divisor out by hand. Recorded rather than re-derived, so the card can never
+    /// disagree with what is actually playing.
+    gait_rate: f32,
+    /// `UNIT_FIELD_MOUNTDISPLAYID` as of the last pass — the driver's **mount-transition edge**
+    /// detector, the local twin of the client's own UpdateField change-watcher (`0x604329`:
+    /// TYPEID Unit, descriptor offset `0x1fc`, width 4, thunk `0x604570` → `0x5ffa50`). Any
+    /// change is an edge — 0→N (mount), N→N′ (swap) and N→0 (dismount) alike — because the
+    /// reference's handler is one watcher whose two legs BOTH arm bone 0 of the body: the build
+    /// `0x607b44` op4(bone 0, **91 `Mount`**, cross-fade, PRIMARY), the teardown `0x607ce0` op4
+    /// seq **0 `Stand`**. The arm is a plain last-writer-wins play, so it *displaces a full-body
+    /// one-shot the transition catches in flight* — which our gait-slot mount pin alone never did
+    /// (decision 0927).
+    mount_display: u32,
+    /// The Special wanted LAST frame — the driver's Special **edge** detector (decision 0864).
+    /// An edge is a play in the client (the jump/pose entry, the FALLINGFAR latch's Fall, the
+    /// land pick), so it clears the deferred-combat cache like any normal arm (`0x5fe48e`);
+    /// the *level* must not (mid-air the airborne-freeze issues no plays, so a fast-path park
+    /// survives to its clip's end).
+    last_special: Option<Special>,
+    /// The **airborne snapshot** node whose clock [`driver::play::leave_special`] stopped
+    /// (decision 0503 — the client blends out of a cut airborne clip from a frozen pose, not from
+    /// a still-running one). The per-frame rate write
+    /// ([`driver::play::sync_base_rate`](driver::play)) must not restart it, so it is named here
+    /// rather than inferred from a zero speed — a rate-scaled clip legitimately reads 0 when the
+    /// body is standing still, and skipping *that* would strand it frozen forever. Self-clearing:
+    /// the moment anything else is armed the node stops being the main animation and the sync
+    /// drops the name (decision 0906).
+    frozen: Option<bevy::animation::graph::AnimationNodeIndex>,
+}
+
+impl AnimDriver {
+    /// The `AnimationData` ids currently driving this unit — `(base, masked overlay)` — the
+    /// inspector card's anim readout. The base is whatever occupies the full-body slot (gait /
+    /// special / landing / swing), as the *requested* ids before any missing-clip substitution
+    /// (the layer the selectors chose — also what the reconcile tests, decision 0125); the
+    /// overlay is a masked upper-body one-shot playing beside it, if any. A `None` base = no
+    /// gait selected yet (first frame).
+    pub(crate) fn playing(&self) -> (Option<u16>, Option<u16>) {
+        let base = match self.mode {
+            Mode::Gait => self.gait,
+            Mode::Entering(s) => Some(s.enter()),
+            Mode::Looping(s) => Some(s.loop_id()),
+            Mode::Exiting(_, id) => Some(id),
+            Mode::Land { id, .. } => Some(id),
+            Mode::Swing { id, .. } => Some(id),
+        };
+        (base, self.overlay.map(|o| o.id))
+    }
+
+    /// The playback rate the base slot is running at ([`Self::gait_rate`]) — the inspector card's
+    /// `rate` readout. `1.0` for every clip outside the locomotion whitelist.
+    pub(crate) fn rate(&self) -> f32 {
+        self.gait_rate
+    }
+}
+
+/// A masked upper-body play over the base ([`AnimDriver::overlay`]): the graph node it drives
+/// ([`AnimClip::upper_node`]) and the requested `AnimationData.dbc` id (for the event scan +
+/// the sheath reconcile — both must see this play, decision 0087 (d)). `looping` marks the cast
+/// hold's sustained variant (decision 0107): a one-shot auto-releases when its clip finishes; a
+/// looping hold never finishes and is released only by [`driver::drive_animations`]'s hold logic
+/// (the [`CastHold`] gone, or the unit stopping — the hold then moves to the gait slot).
+#[derive(Clone, Copy)]
+struct Overlay {
+    node: bevy::animation::graph::AnimationNodeIndex,
+    id: u16,
+    looping: bool,
+}
+
+/// A key-bone cross-fade in flight ([`AnimDriver::overlay_fade`], decision 0878 — wow-re
+/// `oneshot-lifecycle.md` §5.4). `out` is the **retiring** node, holding the outgoing pose the
+/// client snapshots into the bone's secondary slot (`rep movsd +0x98 → +0xc4`); it is `None` when
+/// a fresh clip fades in over the *inherited base* pose, which needs no node of its own — the base
+/// is already there. `left`/`total` are the window: the fixed 150 ms of a fade-to-rest, or the
+/// incoming clip's own blendTime on a blended re-arm.
+#[derive(Clone, Copy)]
+struct OverlayFade {
+    out: Option<bevy::animation::graph::AnimationNodeIndex>,
+    /// Seconds still to run — λ = [`select::blend_lambda`]`(left / total)`, decaying 1 → 0.
+    left: f32,
+    total: f32,
+}
+
+/// A wound-flinch decay in flight ([`AnimDriver::wound`], decision 0111): the graph node the
+/// blend drives (the clip's masked [`AnimClip::upper_node`], or its full-body node when the
+/// bone-selection forces bone 0 — [`select::wound_full_body`]) and the decay window's inputs.
+/// The client seeds `end = clock + span, rate = 1/span, λ₀ = 0.75` (op4 `linkFlag=0`,
+/// `0x712647-0x712682`); the driver's per-frame upkeep replays that decay off the clip's own
+/// playback clock and stops the node when it expires — the kernel's self-release (`0x7147b9`).
+#[derive(Clone, Copy)]
+struct Wound {
+    node: bevy::animation::graph::AnimationNodeIndex,
+    /// The wound clip's full length (seconds) — the decay denominator (the client's `1/span`).
+    span: f32,
+    /// Masked to the upper-body subtree — where the base *and* a live one-shot overlay both
+    /// blend, so the λ-anchoring weight must count them ([`select::wound_weight`]'s `others`).
+    masked: bool,
+}
+
+impl Default for AnimDriver {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Gait,
+            gait: None,
+            gait_flags: 0,
+            sheath_cur: None,
+            sheath_byte: None,
+            sheath_swap: None,
+            overlay: None,
+            overlay_fade: None,
+            wound: None,
+            jump_arc: false,
+            was_falling: false,
+            deferred: None,
+            loop_window: None,
+            gait_rate: 1.0,
+            mount_display: 0,
+            last_special: None,
+            frozen: None,
+        }
+    }
+}
+
+impl AnimDriver {
+    /// The `AnimationData.dbc` id of the clip this unit is currently playing (target gait, a Special's
+    /// enter/loop/exit one-shot, or Death — which the death override records as the gait). `None` before
+    /// the first selection. The mouse pick reads it for the **current animation's** bounds sphere — the
+    /// real client's broad-phase volume tracks the playing sequence (wow-re pick-volume RE).
+    pub(crate) fn active_anim(&self) -> Option<u16> {
+        match self.mode {
+            Mode::Gait => self.gait,
+            Mode::Entering(sp) => Some(sp.enter()),
+            Mode::Looping(sp) => Some(sp.loop_id()),
+            Mode::Exiting(_, exit) => Some(exit),
+            Mode::Land { id, .. } => Some(id),
+            Mode::Swing { id, .. } => Some(id),
+        }
+    }
+
+    /// The **resolved** id of the clip actually driving playback right now (decision 0082):
+    /// [`Self::active_anim`] (the selector's *requested* semantic id) run through the model's own
+    /// fallback resolution. This is what the real client's per-animation sheath reconcile tests
+    /// (`0x5fdb50` reads the record of the sequence **actually playing**, not the semantic pick that
+    /// was asked for) and what the event-fire path needs (a clip crossed via resolution is the one
+    /// whose timeline is actually advancing). [`Self::active_anim`] itself stays the raw requested id
+    /// — the state machine's `Mode`/`gait` identity comparisons key on the *selector's* choice, which
+    /// resolution must not perturb (two candidates that happen to resolve to the same baked substitute
+    /// are still a different selection). `catalog` absent (a brief window before `AnimationData.dbc`
+    /// loads) degrades to identity, matching [`find_resolved`]'s own degrade.
+    pub(crate) fn resolved_anim(
+        &self,
+        anims: &ModelAnimations,
+        catalog: Option<&AnimDataCatalog>,
+    ) -> Option<u16> {
+        self.active_anim().map(|id| resolved_id(anims, id, catalog))
+    }
+
+    /// The unit's client-side sheath state (0 stowed · 1 melee · 2 ranged) — the committed CUR
+    /// cache the placement renders and the Z toggle flips. `None` until first driven.
+    pub(crate) fn sheath_state(&self) -> Option<u8> {
+        self.sheath_cur
+    }
+
+    /// Whether a draw/stow ceremony is in flight — the manual toggle's mid-ceremony debounce
+    /// (guards 11–12 of the client's `ToggleSheath` chain, decision 0080d).
+    pub(crate) fn sheath_ceremony_active(&self) -> bool {
+        self.sheath_swap.is_some()
+    }
+}
+
+/// Drives unit animation from movement state. Runs after [`WorldStage::Net`] (where the net bridge updates
+/// splines and the controller writes our avatar's state), so what it reads is the current frame's.
+pub(crate) struct CreatureAnimPlugin;
+
+impl Plugin for CreatureAnimPlugin {
+    fn build(&self, app: &mut App) {
+        twist::plugin(app);
+        global_seq::plugin(app);
+        lod::plugin(app);
+        pose::plugin(app);
+        compose::plugin(app);
+        app.add_message::<AnimSoundEvent>()
+            .add_message::<SwingMessage>()
+            .add_message::<SwingImpact>()
+            .add_message::<SwingFlush>()
+            .add_message::<DefenseAnim>()
+            .add_message::<SwingSlowdown>()
+            .init_resource::<PendingImpacts>()
+            .init_resource::<PlaySeq>()
+            .add_message::<EmoteAnim>()
+            .add_message::<MountFlourish>()
+            .add_message::<WoundAnim>()
+            .add_message::<SheathSwapMessage>()
+            .add_message::<SheathRequest>()
+            .add_message::<CastEvent>()
+            .add_message::<SpellGoTargets>()
+            .add_message::<SpellKitSound>()
+            .add_message::<SpellKitFx>()
+            .add_message::<MissileSpawn>()
+            // The kit's beam edge (0955) — `crate::entities` owns what it becomes.
+            .add_message::<ChainProcPlay>()
+            .add_message::<KitPush>()
+            // The aura CharProc edges the slot watcher emits alongside its effect-model ones —
+            // drained by `crate::aura_visual`, which owns the body's alpha/tint for an aura's life.
+            .add_message::<crate::aura_visual::AuraProc>()
+            .add_message::<HardLanding>()
+            .add_systems(
+                Startup,
+                (
+                    load_anim_data,
+                    load_spell_visuals,
+                    load_blood_tables,
+                    load_env_damage_table,
+                )
+                    .after(AssetSet::Open),
+            )
+            .add_systems(
+                Update,
+                (
+                    route_cast_visuals,
+                    // The lootable-corpse sparkle's edge watcher — a SpellKitFx writer like the
+                    // router above, consumed by the same entity-visuals chain this set precedes.
+                    arm_loot_fx,
+                    // Its level-edge sibling: the ding (decision 0305) — same shape, same home.
+                    arm_level_up_fx,
+                    // …and its mount-edge sibling: the poof (decision 0927). Same hardcoded-effect
+                    // spawn shape, one field over.
+                    arm_mount_poof_fx,
+                    // The aura-slot watcher: state kits persist for the aura's life (the bread).
+                    arm_aura_state_fx,
+                    blood_spurts,
+                    // The landing predictor's dust leg (the vocal leg lives in `sound`).
+                    hard_landing_dust,
+                    emote_to_anim,
+                    // The flourish hop (unit → mount child) — before the driver so the
+                    // one-shot lands the same frame the packet (or space press) arrived.
+                    flourish_to_anim,
+                    drive_animations,
+                    drive_hand_grip,
+                    fire_anim_events,
+                    // After the event scan: consume this frame's impact tags; the SwingImpact
+                    // consumers (blood, flinch, floating text) read it next frame — noise against
+                    // the ~300–600 ms deferral itself.
+                    route_swing_impacts,
+                    // The `$BWP`/`$BWR` nock latch, same-frame off the same scan — before the
+                    // entity-visuals chain so the arrow appears/vanishes the frame the keyframe
+                    // lands, not one behind.
+                    drive_nock_latch,
+                )
+                    .chain()
+                    .after(WorldStage::Net)
+                    // After Input so a sheath request (the Z toggle) executes the same frame.
+                    .after(WorldStage::Input)
+                    // Before the entity-visuals chain: [`VisualSheath`] writes must be applied
+                    // before `resolve_equipment` reads them, or a sheath transition double-swaps
+                    // the weapon placement for a frame (the flash).
+                    .before(crate::entities::EntityVisualsSet),
+            )
+            // The freeze (CharProc 11, decision 0889): **after the driver**, so this frame's arms
+            // are already in when the clocks are held — the Ice Block observable is precisely that
+            // the cast one-shot gets armed and then never advances a frame. After the drain too, so
+            // the node it reads is this frame's.
+            .add_systems(
+                Update,
+                crate::aura_visual::apply_aura_anim_rate
+                    .after(drive_animations)
+                    .after(crate::aura_visual::drain_aura_procs),
+            );
+    }
+}
+
+/// Resolve `id` to the id this model actually plays (decision 0082, wow-re `anim-id-resolution.md`):
+/// [`ModelAnimations::resolve`] via `catalog` when `AnimationData.dbc` has loaded, else identity — a
+/// brief window at startup ([`load_anim_data`](sheath::load_anim_data) runs at `Startup`, so this
+/// degrade is only ever live for the first few frames, same shape as `anim_data.map_or(0, ..)`
+/// elsewhere in this module).
+fn resolved_id(anims: &ModelAnimations, id: u16, catalog: Option<&AnimDataCatalog>) -> u16 {
+    catalog.map_or(id, |cat| anims.resolve(id, cat).id)
+}
+
+/// The clip for a *requested* id, resolved through the model's own baked fallback first (decision
+/// 0082) — so a model lacking `id` exactly still plays its baked substitute (e.g. the chicken's
+/// Attack2H request landing on AttackUnarmed) instead of coming back empty.
+fn find_resolved<'a>(
+    anims: &'a ModelAnimations,
+    id: u16,
+    catalog: Option<&AnimDataCatalog>,
+) -> Option<&'a AnimClip> {
+    anims.find(resolved_id(anims, id, catalog))
+}
+
+#[cfg(test)]
+mod nock_latch_tests {
+    use super::*;
+
+    /// The `$BWP`/`$BWR` nock cycle (wow-re `nocked-ammo-cancel.md` §G1/G4): the pull keyframe
+    /// latches (only a unit with a cached ammo display), the release keyframe clears — the arrow
+    /// appears as she draws it and leaves the hand with the shot.
+    #[test]
+    fn bwp_latches_and_bwr_clears_the_nock() {
+        let mut app = App::new();
+        app.add_message::<AnimSoundEvent>();
+        app.add_systems(Update, drive_nock_latch);
+        let unit = app.world_mut().spawn(NockedAmmo { display_id: 5996 }).id();
+        app.world_mut().write_message(AnimSoundEvent {
+            entity: unit,
+            ident: *b"$BWP",
+            data: 0,
+        });
+        app.update();
+        assert!(
+            app.world().entity(unit).contains::<NockLatch>(),
+            "$BWP latches a unit with a cached ammo display"
+        );
+        app.world_mut().write_message(AnimSoundEvent {
+            entity: unit,
+            ident: *b"$BWR",
+            data: 0,
+        });
+        app.update();
+        assert!(
+            !app.world().entity(unit).contains::<NockLatch>(),
+            "$BWR clears — the arrow leaves with the shot"
+        );
+        // No cached ammo display → the pull nocks nothing (the client's handler gates on the
+        // cached ranged spell).
+        let bare = app.world_mut().spawn_empty().id();
+        app.world_mut().write_message(AnimSoundEvent {
+            entity: bare,
+            ident: *b"$BWP",
+            data: 0,
+        });
+        app.update();
+        assert!(
+            !app.world().entity(bare).contains::<NockLatch>(),
+            "no ammo display, no latch"
+        );
+    }
+}

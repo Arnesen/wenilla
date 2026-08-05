@@ -784,7 +784,7 @@ mod loader_tests {
             .iter()
             .map(|r| (r.id, 30.0, 12.0, r.key))
             .collect();
-        s.set_measured_text(&answers);
+        s.set_measured_text_unwrapped(&answers);
         s.resolve();
 
         let quads = s.extract();
@@ -846,6 +846,87 @@ mod loader_tests {
             "the dead 18-unit header must not capture"
         );
         assert!(s.hit_test(14.0, 20.0).is_some(), "the art band still hits");
+    }
+    /// **`text=` is a GLOBAL-STRING LOOKUP, not a literal** (wow-re rf28 l.36/l.115 →
+    /// `FrameScript_GetText 0x703bf0`). Every arm of [`Loader::resolve_text`] in one document:
+    /// a `<Button text=>`, a `<ButtonText text=>` and a `<FontString text=>` all resolve through
+    /// the VM's globals; a value with no matching global falls back to the LITERAL (benilla's own
+    /// divergence, so its plain-English FrameXML keeps working); and a **key-shaped** miss warns,
+    /// which is the tripwire that "CREATE_MACROS" across a title bar never had.
+    #[test]
+    fn a_text_attribute_resolves_through_the_global_strings() {
+        let mut s = UiScript::new().unwrap();
+        s.set_screen_size(800.0, 600.0);
+        // The reference boots GlobalStrings.lua before any XML; so does the app.
+        s.run(r#"DELETE = "Delete" EXIT_GAME = "Exit Game" TITLE = "The Title""#)
+            .unwrap();
+
+        let doc = parse(
+            r#"<Ui>
+                <Frame name="Holder">
+                    <Layers>
+                        <Layer level="ARTWORK">
+                            <FontString name="$parentTitle" text="TITLE"/>
+                            <FontString name="$parentProse" text="No results found."/>
+                        </Layer>
+                    </Layers>
+                    <Frames>
+                        <Button name="$parentDelete" text="DELETE"/>
+                        <Button name="$parentQuit">
+                            <ButtonText name="$parentText" text="EXIT_GAME"/>
+                        </Button>
+                        <Button name="$parentGhost" text="NO_SUCH_KEY"/>
+                    </Frames>
+                </Frame>
+            </Ui>"#,
+        );
+        let report = load(&s, &doc, &no_files);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        let texts: Vec<String> = s
+            .eval(
+                "return HolderTitle:GetText(), HolderProse:GetText(), HolderDelete:GetText(), \
+                 HolderQuit:GetText(), HolderGhost:GetText()",
+            )
+            .map(|(a, b, c, d, e): (String, String, String, String, String)| vec![a, b, c, d, e])
+            .unwrap();
+        assert_eq!(
+            texts,
+            vec![
+                // The key's VALUE, on all three element shapes…
+                "The Title",
+                // …a non-key literal untouched (the divergence that keeps our own XML working)…
+                "No results found.",
+                "Delete",
+                "Exit Game",
+                // …and a key-shaped MISS keeps its key on screen rather than blanking.
+                "NO_SUCH_KEY",
+            ]
+        );
+        // Exactly one warning, and it names the miss — the plain-English literal must not warn.
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|w| w.contains("GlobalStrings key"))
+                .count(),
+            1,
+            "warnings: {:?}",
+            report.warnings
+        );
+        assert!(report.warnings.iter().any(|w| w.contains("NO_SUCH_KEY")));
+    }
+
+    /// The key SHAPE test itself: `SCREAMING_SNAKE`, two characters or more. The floor is what
+    /// keeps a close button's `text="X"` from being reported as a missing string.
+    #[test]
+    fn key_shape_is_screaming_snake_of_two_or_more() {
+        for yes in ["DELETE", "EXIT_GAME", "CHARACTER_POINTS1_COLON", "AB", "A1"] {
+            assert!(is_global_string_key(yes), "{yes} is key-shaped");
+        }
+        for no in ["X", "", "Send Mail", "No results found.", "Okay", "1", "12"] {
+            assert!(!is_global_string_key(no), "{no} is not key-shaped");
+        }
     }
 }
 

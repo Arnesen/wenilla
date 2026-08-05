@@ -86,7 +86,7 @@ fn region_fontstring_unpinned_edge_collapses_until_measured() {
         .iter()
         .map(|r| (r.id, 40.0, 12.0, r.key))
         .collect();
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
     assert_eq!(
         region_text_rect(&s, "Name"),

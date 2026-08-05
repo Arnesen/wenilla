@@ -1,0 +1,990 @@
+<!--
+    The dropdown kit — transcribed from the 1.12 FrameXML UIDropDownMenuTemplates.xml +
+    UIDropDownMenu.lua (decision 0203 phase 2's closing sub-slice, widened for decision 0434
+    phase 5: the unit popups are the first MENU-mode + submenu customer; the world map's
+    continent/zone pickers and the trainer/tradeskill filters stay on the level-1 capsule path).
+
+    IN: UIDropDownMenuTemplate (the capsule: LabelFrame art trio, $parentText, the scroll-down
+    toggle button), UIDropDownMenuButtonTemplate (row: highlight, check, right-side icon, expand
+    arrow, the disabled-row InvisibleButton), UIDropDownListTemplate (Backdrop + MenuBackdrop
+    swap, 32 rows) instanced as DropDownList1/2, and the reference API: Initialize (displayMode +
+    level), AddButton(info, level) with isTitle/disabled/notClickable/notCheckable/hasArrow/
+    icon+texcoords/textR-G-B/justifyH/keepShownOnClick, Refresh, SetWidth/SetText/GetText,
+    SetSelectedID/Name/Value + getters, ClearAll, ToggleDropDownMenu(level, value, frame,
+    anchorName ["cursor" included], x, y) with the off-screen flip, HideDropDownMenu,
+    CloseDropDownMenus(level), Disable/EnableButton, SetButtonText, SetAnchor, JustifyText,
+    GetCurrentDropDown, the 2-second hover-away auto-close counting through the level chain.
+
+    OUT (each waits for its first customer): menu level 3 (UIDROPDOWNMENU_MAXLEVELS is 2 — the
+    unit popups' deepest law; the XML gains DropDownList3 the day a customer needs it), color
+    swatches + the color picker + opacity, info.textHeight's per-row SetFont, the newbie
+    tooltips on rows (the ref gates them behind a default-off cvar), message() on the row/level
+    overflow guards (no dev-error dialog surface; the guard returns silently). The uiScale
+    correction came IN with its first scaled customer (0992, the options window's dropdown
+    rows): Toggle wears the owner's effective scale on the list.
+
+    Deviations, deliberate:
+    - THE WIDTH SETTLE. The ref sizes each row at AddButton time from normalText:GetWidth() and
+      applies the list max in OnShow — but our text measures land at extract, AFTER the script
+      tick that set the text (ui_script/extract's measure round-trip), so an AddButton-time
+      read is stale. The ref's width FORMULA (text + 60, arrow +10, icon +10, notCheckable -30,
+      list = max + 15) runs in the list's OnUpdate instead and applies on the first update
+      whose measures are real — one frame after open, imperceptible. A capsule that declared a
+      width (UIDropDownMenu_SetWidth → dropWidth/noResize: the world map pickers) keeps the
+      declared width applied synchronously at Toggle, the proven pre-0434 path (rows dropWidth,
+      list dropWidth + 32).
+    - THE FLIP SETTLES TOO: the off-screen check needs the list's resolved rect, which also
+      lands a frame late — it runs from the same OnUpdate chain, after the width applies.
+    - The default (no anchorName) seat anchors the list to the dropdown FRAME at (8, 7) —
+      pixel-identical to the reference's "$parentLeft BOTTOMLEFT (8, 22)" through the Left
+      texture's own (0, 17) seat.
+    - MENU displayMode hides the capsule art trio when present but skips the ref's toggle-button
+      texture blanking + re-anchor (every MENU customer here is a born-hidden 10x10 frame whose
+      capsule never draws).
+    - The disabled-row InvisibleButton spans to the row's RIGHT (the ref stops it at the color
+      swatch, which is OUT).
+    - The list OnShow resets showTimer AND isCounting (the ref writes `showTime`, a field
+      nothing reads — transcribed as the intent, not the typo).
+-->
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+    <Script><![CDATA[
+        UIDROPDOWNMENU_MAXBUTTONS = 32;
+        UIDROPDOWNMENU_MAXLEVELS = 2;
+        UIDROPDOWNMENU_BUTTON_HEIGHT = 16;
+        UIDROPDOWNMENU_BORDER_HEIGHT = 15;
+        UIDROPDOWNMENU_OPEN_MENU = nil;
+        UIDROPDOWNMENU_INIT_MENU = nil;
+        UIDROPDOWNMENU_MENU_LEVEL = 1;
+        UIDROPDOWNMENU_MENU_VALUE = nil;
+        UIDROPDOWNMENU_SHOW_TIME = 2;
+        -- List of open menus (ref verbatim; UnitPopup's OnUpdate enable/disable pass walks it).
+        OPEN_DROPDOWNMENUS = {};
+
+        -- ref Initialize: reset every list at or above the current level (or all of them when a
+        -- different dropdown takes over), store + run the init function, apply displayMode.
+        function UIDropDownMenu_Initialize(frame, initFunction, displayMode, level)
+            if ( not frame ) then
+                frame = this;
+            end
+            if ( frame:GetName() ~= UIDROPDOWNMENU_OPEN_MENU ) then
+                UIDROPDOWNMENU_MENU_LEVEL = 1;
+            end
+            UIDROPDOWNMENU_INIT_MENU = frame:GetName();
+            for i = 1, UIDROPDOWNMENU_MAXLEVELS, 1 do
+                local dropDownList = getglobal("DropDownList"..i);
+                if ( i >= UIDROPDOWNMENU_MENU_LEVEL or frame:GetName() ~= UIDROPDOWNMENU_OPEN_MENU ) then
+                    dropDownList.numButtons = 0;
+                    for j=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                        getglobal("DropDownList"..i.."Button"..j):Hide();
+                    end
+                end
+            end
+            frame:SetHeight(UIDROPDOWNMENU_BUTTON_HEIGHT * 2);
+            if ( initFunction ) then
+                frame.initialize = initFunction;
+                initFunction(level);
+            end
+            if ( displayMode == "MENU" ) then
+                -- Hide the capsule art when the frame has it (see the header deviation).
+                local left = getglobal(frame:GetName().."Left");
+                if ( left ) then
+                    left:Hide();
+                    getglobal(frame:GetName().."Middle"):Hide();
+                    getglobal(frame:GetName().."Right"):Hide();
+                end
+                frame.displayMode = "MENU";
+            end
+        end
+
+        -- The ref's width law, run from the list's OnUpdate (the header's WIDTH SETTLE): rows
+        -- measure text + 60, +10 for an arrow, +10 for an icon, -30 when notCheckable; the list
+        -- takes max + 15. Waits until every text row has a real (nonzero) measure.
+        function UIDropDownMenu_SettleWidth(listFrame)
+            local listFrameName = listFrame:GetName();
+            if ( listFrame.fixedWidth ) then
+                listFrame.pendingWidth = nil;
+                return;
+            end
+            local maxWidth = 0;
+            local want, seen = 0, 0;
+            for i=1, listFrame.numButtons, 1 do
+                local button = getglobal(listFrameName.."Button"..i);
+                local text = button:GetText();
+                if ( text and text ~= "" ) then
+                    want = want + 1;
+                    local width = getglobal(button:GetName().."NormalText"):GetWidth();
+                    if ( width > 0 ) then
+                        seen = seen + 1;
+                        width = width + 60;
+                        if ( button.hasArrow ) then
+                            width = width + 10;
+                        end
+                        if ( button.notCheckable ) then
+                            width = width - 30;
+                        end
+                        if ( button.icon ) then
+                            width = width + 10;
+                        end
+                        if ( width > maxWidth ) then
+                            maxWidth = width;
+                        end
+                    end
+                end
+            end
+            if ( want > 0 and seen < want ) then
+                return; -- measures not landed yet; next update
+            end
+            if ( maxWidth == 0 ) then
+                maxWidth = 130;
+            end
+            for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                getglobal(listFrameName.."Button"..i):SetWidth(maxWidth);
+            end
+            listFrame:SetWidth(maxWidth + 15);
+            listFrame.pendingWidth = nil;
+        end
+
+        -- The ref's off-screen flip, from the same OnUpdate chain (needs the resolved rect —
+        -- header's second settle). Level 1 re-seats against its stored anchor; level 2+ flips
+        -- around its anchor row with the ref's (-11/0, -14/+14) offset table.
+        function UIDropDownMenu_SettleFlip(listFrame)
+            local x, y = listFrame:GetCenter();
+            if ( not x or not y ) then
+                return; -- not resolved yet; next update
+            end
+            listFrame.pendingFlip = nil;
+            local offscreenY, offscreenX;
+            if ( (y - listFrame:GetHeight()/2) < 0 ) then
+                offscreenY = 1;
+            end
+            if ( listFrame:GetRight() and listFrame:GetRight() > GetScreenWidth() ) then
+                offscreenX = 1;
+            end
+            if ( not offscreenY and not offscreenX ) then
+                return;
+            end
+            if ( listFrame:GetID() == 1 ) then
+                local anchorPoint, relativePoint;
+                if ( offscreenY and offscreenX ) then
+                    anchorPoint = "BOTTOMRIGHT";
+                    relativePoint = "BOTTOMLEFT";
+                elseif ( offscreenY ) then
+                    anchorPoint = "BOTTOMLEFT";
+                    relativePoint = "TOPLEFT";
+                elseif ( offscreenX ) then
+                    anchorPoint = "TOPRIGHT";
+                    relativePoint = "TOPLEFT";
+                end
+                listFrame:ClearAllPoints();
+                if ( listFrame.cursorMode ) then
+                    -- Cursor menus keep their screen-space seat, only the corner changes.
+                    listFrame:SetPoint(anchorPoint, "UIParent", "BOTTOMLEFT", listFrame.seatX, listFrame.seatY);
+                else
+                    listFrame:SetPoint(anchorPoint, listFrame.seatTo, relativePoint, listFrame.seatX, listFrame.seatY);
+                end
+            else
+                local anchorPoint, relativePoint, offsetX, offsetY;
+                if ( offscreenY and offscreenX ) then
+                    anchorPoint = "BOTTOMRIGHT";
+                    relativePoint = "BOTTOMLEFT";
+                    offsetX = -11;
+                    offsetY = -14;
+                elseif ( offscreenY ) then
+                    anchorPoint = "BOTTOMLEFT";
+                    relativePoint = "BOTTOMRIGHT";
+                    offsetX = 0;
+                    offsetY = -14;
+                else
+                    anchorPoint = "TOPRIGHT";
+                    relativePoint = "TOPLEFT";
+                    offsetX = -11;
+                    offsetY = 14;
+                end
+                listFrame:ClearAllPoints();
+                listFrame:SetPoint(anchorPoint, listFrame.anchorFrame, relativePoint, offsetX, offsetY);
+            end
+        end
+
+        -- The list OnUpdate: settle width, then the flip, then the 2s hover-away auto-close
+        -- (ref verbatim: counting starts on OnLeave, never on open).
+        function UIDropDownMenu_OnUpdate(elapsed)
+            if ( this.pendingWidth ) then
+                UIDropDownMenu_SettleWidth(this);
+            elseif ( this.pendingFlip ) then
+                UIDropDownMenu_SettleFlip(this);
+            end
+            if ( this:IsVisible() ) then
+                if ( not this.showTimer or not this.isCounting ) then
+                    return;
+                elseif ( this.showTimer < 0 ) then
+                    this:Hide();
+                    this.showTimer = nil;
+                    this.isCounting = nil;
+                else
+                    this.showTimer = this.showTimer - elapsed;
+                end
+            end
+        end
+
+        -- The countdown pair walks the level chain (ref verbatim): a submenu's hover state
+        -- drives its PARENT list's timer, so the whole stack lives or dies together.
+        function UIDropDownMenu_StartCounting(frame)
+            if ( frame.parent ) then
+                UIDropDownMenu_StartCounting(frame.parent);
+            else
+                frame.showTimer = UIDROPDOWNMENU_SHOW_TIME;
+                frame.isCounting = 1;
+            end
+        end
+
+        function UIDropDownMenu_StopCounting(frame)
+            if ( frame.parent ) then
+                UIDropDownMenu_StopCounting(frame.parent);
+            else
+                frame.isCounting = nil;
+            end
+        end
+
+        -- ref AddButton: configure the row from the info table (the attribute list is the ref's
+        -- own doc block — text/value/func/checked/isTitle/disabled/notClickable/notCheckable/
+        -- hasArrow/icon+tCoords/textR-G-B/justifyH/keepShownOnClick/owner/arg1/arg2/tooltips).
+        -- Width rides the settle (header), not an AddButton-time measure.
+        function UIDropDownMenu_AddButton(info, level)
+            if ( not level ) then
+                level = 1;
+            end
+            local listFrame = getglobal("DropDownList"..level);
+            local listFrameName = listFrame:GetName();
+            local index = listFrame.numButtons + 1;
+            if ( index > UIDROPDOWNMENU_MAXBUTTONS or level > UIDROPDOWNMENU_MAXLEVELS ) then
+                return; -- ref raises a dev-error dialog here (OUT, header)
+            end
+            listFrame.numButtons = index;
+
+            local button = getglobal(listFrameName.."Button"..index);
+            local normalText = getglobal(button:GetName().."NormalText");
+            local icon = getglobal(button:GetName().."Icon");
+            -- Captures OnEnter/OnLeave over a disabled row so the menu doesn't time out (ref).
+            local invisibleButton = getglobal(button:GetName().."InvisibleButton");
+
+            button:SetDisabledTextColor(GRAY_FONT_COLOR.r, GRAY_FONT_COLOR.g, GRAY_FONT_COLOR.b);
+            invisibleButton:Hide();
+            button:Enable();
+
+            if ( info.text ) then
+                button:SetText(info.text);
+                if ( info.icon ) then
+                    icon:SetTexture(info.icon);
+                    if ( info.tCoordLeft ) then
+                        icon:SetTexCoord(info.tCoordLeft, info.tCoordRight, info.tCoordTop, info.tCoordBottom);
+                    end
+                    icon:Show();
+                else
+                    icon:Hide();
+                end
+                if ( info.textR ) then
+                    button:SetTextColor(info.textR, info.textG, info.textB);
+                    button:SetHighlightTextColor(info.textR, info.textG, info.textB);
+                else
+                    button:SetTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
+                    button:SetHighlightTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
+                end
+            else
+                button:SetText("");
+                icon:Hide();
+            end
+
+            button.func = info.func;
+            button.owner = info.owner;
+            button.keepShownOnClick = info.keepShownOnClick;
+            button.tooltipTitle = info.tooltipTitle;
+            button.tooltipText = info.tooltipText;
+            button.arg1 = info.arg1;
+            button.arg2 = info.arg2;
+            button.hasArrow = info.hasArrow;
+            button.notCheckable = info.notCheckable;
+            button.icon = info.icon;
+            if ( info.value ) then
+                button.value = info.value;
+            elseif ( info.text ) then
+                button.value = info.text;
+            else
+                button.value = nil;
+            end
+
+            if ( info.hasArrow ) then
+                getglobal(listFrameName.."Button"..index.."ExpandArrow"):Show();
+            else
+                getglobal(listFrameName.."Button"..index.."ExpandArrow"):Hide();
+            end
+
+            -- The ref's per-row anchor dance: notCheckable rows pull the text to the row's left
+            -- edge (titles/actions); checkable rows leave the 27px check column; MENU mode
+            -- tucks checkable rows 6px tighter.
+            local xPos = 5;
+            local yPos = -((button:GetID() - 1) * UIDROPDOWNMENU_BUTTON_HEIGHT) - UIDROPDOWNMENU_BORDER_HEIGHT;
+            normalText:ClearAllPoints();
+            if ( info.notCheckable ) then
+                if ( info.justifyH and info.justifyH == "CENTER" ) then
+                    normalText:SetPoint("CENTER", button:GetName(), "CENTER", -7, 0);
+                else
+                    normalText:SetPoint("LEFT", button:GetName(), "LEFT", 0, 0);
+                end
+                xPos = xPos + 10;
+            else
+                xPos = xPos + 12;
+                normalText:SetPoint("LEFT", button:GetName(), "LEFT", 27, 0);
+            end
+
+            local frame;
+            if ( UIDROPDOWNMENU_OPEN_MENU ) then
+                frame = getglobal(UIDROPDOWNMENU_OPEN_MENU);
+            end
+            if ( frame and frame.displayMode == "MENU" ) then
+                if ( not info.notCheckable ) then
+                    xPos = xPos - 6;
+                end
+            end
+            if ( not frame ) then
+                frame = getglobal(UIDROPDOWNMENU_INIT_MENU);
+            end
+            button:SetPoint("TOPLEFT", listFrameName, "TOPLEFT", xPos, yPos);
+
+            -- Selection by name/id/value against the owning frame (ref verbatim).
+            if ( frame ) then
+                if ( UIDropDownMenu_GetSelectedName(frame) ) then
+                    if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
+                        info.checked = 1;
+                    end
+                elseif ( UIDropDownMenu_GetSelectedID(frame) ) then
+                    if ( button:GetID() == UIDropDownMenu_GetSelectedID(frame) ) then
+                        info.checked = 1;
+                    end
+                elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
+                    if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
+                        info.checked = 1;
+                    end
+                end
+            end
+
+            if ( info.checked ) then
+                button:LockHighlight();
+                getglobal(listFrameName.."Button"..index.."Check"):Show();
+            else
+                button:UnlockHighlight();
+                getglobal(listFrameName.."Button"..index.."Check"):Hide();
+            end
+            button.checked = info.checked;
+
+            -- notClickable disables white; isTitle disables gold (ref order — title wins).
+            if ( info.notClickable ) then
+                info.disabled = 1;
+                button:SetDisabledTextColor(HIGHLIGHT_FONT_COLOR.r, HIGHLIGHT_FONT_COLOR.g, HIGHLIGHT_FONT_COLOR.b);
+            end
+            if ( info.isTitle ) then
+                info.disabled = 1;
+                button:SetDisabledTextColor(NORMAL_FONT_COLOR.r, NORMAL_FONT_COLOR.g, NORMAL_FONT_COLOR.b);
+            end
+            if ( info.disabled ) then
+                button:Disable();
+                invisibleButton:Show();
+            end
+
+            listFrame:SetHeight((index * UIDROPDOWNMENU_BUTTON_HEIGHT) + (UIDROPDOWNMENU_BORDER_HEIGHT * 2));
+            button:Show();
+        end
+
+        -- ref Refresh: re-derive each row's check + lock state and push the selected row's label
+        -- into the capsule text. Width stays the settle's job (header).
+        function UIDropDownMenu_Refresh(frame, useValue, dropdownLevel)
+            if ( not frame ) then
+                frame = this;
+            end
+            if ( not dropdownLevel ) then
+                dropdownLevel = UIDROPDOWNMENU_MENU_LEVEL;
+            end
+            for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                local button = getglobal("DropDownList"..dropdownLevel.."Button"..i);
+                local checked = nil;
+                if ( UIDropDownMenu_GetSelectedName(frame) ) then
+                    if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
+                        checked = 1;
+                    end
+                elseif ( UIDropDownMenu_GetSelectedID(frame) ) then
+                    if ( button:GetID() == UIDropDownMenu_GetSelectedID(frame) ) then
+                        checked = 1;
+                    end
+                elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
+                    if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
+                        checked = 1;
+                    end
+                end
+                local checkImage = getglobal("DropDownList"..dropdownLevel.."Button"..i.."Check");
+                if ( checked ) then
+                    if ( useValue ) then
+                        UIDropDownMenu_SetText(button.value, frame);
+                    else
+                        UIDropDownMenu_SetText(button:GetText(), frame);
+                    end
+                    button:LockHighlight();
+                    checkImage:Show();
+                else
+                    button:UnlockHighlight();
+                    checkImage:Hide();
+                end
+                button.checked = checked;
+            end
+        end
+
+        function UIDropDownMenu_SetSelectedName(frame, name, useValue)
+            frame.selectedName = name;
+            frame.selectedID = nil;
+            frame.selectedValue = nil;
+            UIDropDownMenu_Refresh(frame, useValue);
+        end
+
+        function UIDropDownMenu_SetSelectedValue(frame, value, useValue)
+            frame.selectedName = nil;
+            frame.selectedID = nil;
+            frame.selectedValue = value;
+            UIDropDownMenu_Refresh(frame, useValue);
+        end
+
+        function UIDropDownMenu_SetSelectedID(frame, id, useValue)
+            frame.selectedID = id;
+            frame.selectedName = nil;
+            frame.selectedValue = nil;
+            UIDropDownMenu_Refresh(frame, useValue);
+        end
+
+        function UIDropDownMenu_GetSelectedName(frame)
+            return frame.selectedName;
+        end
+
+        -- ref: falls back to scanning the current level's rows for a name/value match.
+        function UIDropDownMenu_GetSelectedID(frame)
+            if ( frame.selectedID ) then
+                return frame.selectedID;
+            else
+                for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                    local button = getglobal("DropDownList"..UIDROPDOWNMENU_MENU_LEVEL.."Button"..i);
+                    if ( UIDropDownMenu_GetSelectedName(frame) ) then
+                        if ( button:GetText() == UIDropDownMenu_GetSelectedName(frame) ) then
+                            return i;
+                        end
+                    elseif ( UIDropDownMenu_GetSelectedValue(frame) ) then
+                        if ( button.value == UIDropDownMenu_GetSelectedValue(frame) ) then
+                            return i;
+                        end
+                    end
+                end
+            end
+        end
+
+        function UIDropDownMenu_GetSelectedValue(frame)
+            return frame.selectedValue;
+        end
+
+        -- ref verbatim: run the row's func (`this` stays the row through the call), then either
+        -- toggle the check in place (keepShownOnClick) or close this list.
+        function UIDropDownMenuButton_OnClick()
+            local func = this.func;
+            if ( func ) then
+                func(this.arg1, this.arg2);
+            else
+                return;
+            end
+            if ( this.keepShownOnClick ) then
+                if ( this.checked ) then
+                    getglobal(this:GetName().."Check"):Hide();
+                    this.checked = nil;
+                else
+                    getglobal(this:GetName().."Check"):Show();
+                    this.checked = 1;
+                end
+            else
+                this:GetParent():Hide();
+            end
+            PlaySound("UChatScrollButton");
+        end
+
+        function HideDropDownMenu(level)
+            getglobal("DropDownList"..(level or 1)):Hide();
+        end
+
+        -- ref ToggleDropDownMenu(level, value, dropDownFrame, anchorName, xOffset, yOffset):
+        -- same-owner toggle closes; otherwise (re)build via the stored initialize, seat the
+        -- list (default capsule seat / named anchor / "cursor"), swap the backdrop for MENU
+        -- mode, and show. Width + off-screen flip settle from OnUpdate (header).
+        function ToggleDropDownMenu(level, value, dropDownFrame, anchorName, xOffset, yOffset)
+            if ( not level ) then
+                level = 1;
+            end
+            UIDROPDOWNMENU_MENU_LEVEL = level;
+            UIDROPDOWNMENU_MENU_VALUE = value;
+            local listFrame = getglobal("DropDownList"..level);
+            local listFrameName = "DropDownList"..level;
+            local tempFrame;
+            if ( not dropDownFrame ) then
+                tempFrame = this:GetParent();
+            else
+                tempFrame = dropDownFrame;
+            end
+            if ( listFrame:IsVisible() and (UIDROPDOWNMENU_OPEN_MENU == tempFrame:GetName()) ) then
+                listFrame:Hide();
+                return;
+            end
+            listFrame:Hide();
+
+            -- The ref's uiScale correction, arriving with its first scaled customer (0992: the
+            -- options window rides SetScale, and a list at scale 1 would draw its rows ~28%
+            -- larger than the capsule they serve): the shared list wears the OWNER's effective
+            -- scale for this open. Every pre-0992 customer sits at effective scale 1 — no-op.
+            local listScale = tempFrame:GetEffectiveScale();
+            listFrame:SetScale(listScale);
+
+            if ( level == 1 ) then
+                if ( not dropDownFrame ) then
+                    dropDownFrame = this:GetParent();
+                end
+                UIDROPDOWNMENU_OPEN_MENU = dropDownFrame:GetName();
+                listFrame:ClearAllPoints();
+                listFrame.cursorMode = nil;
+                local point, relativeTo, relativePoint;
+                if ( not anchorName ) then
+                    -- The capsule seat (header deviation), overridable via SetAnchor.
+                    xOffset = dropDownFrame.xOffset or 8;
+                    yOffset = dropDownFrame.yOffset or 7;
+                    point = dropDownFrame.point or "TOPLEFT";
+                    relativeTo = dropDownFrame.relativeTo or dropDownFrame:GetName();
+                    relativePoint = dropDownFrame.relativePoint or "BOTTOMLEFT";
+                elseif ( anchorName == "cursor" ) then
+                    -- Cursor coords are scale-1 units; a scaled list's anchor offsets are in
+                    -- ITS space, so divide (the ref's own cursor/uiScale dance).
+                    local cursorX, cursorY = GetCursorPosition();
+                    point = "TOPLEFT";
+                    relativeTo = "UIParent";
+                    relativePoint = "BOTTOMLEFT";
+                    xOffset = cursorX / listScale + (xOffset or 0);
+                    yOffset = cursorY / listScale + (yOffset or 0);
+                    listFrame.cursorMode = 1;
+                else
+                    point = "TOPLEFT";
+                    relativeTo = anchorName;
+                    relativePoint = "BOTTOMLEFT";
+                    if ( not xOffset or not yOffset ) then
+                        xOffset = 8;
+                        yOffset = 22;
+                    end
+                end
+                listFrame:SetPoint(point, relativeTo, relativePoint, xOffset, yOffset);
+                -- The flip's re-seat data (SettleFlip).
+                listFrame.seatTo = relativeTo;
+                listFrame.seatX = xOffset;
+                listFrame.seatY = yOffset;
+            else
+                if ( not dropDownFrame ) then
+                    dropDownFrame = getglobal(UIDROPDOWNMENU_OPEN_MENU);
+                end
+                listFrame:ClearAllPoints();
+                -- Anchor to the row itself whether `this` is the row (whose parent is the bare
+                -- list, name length 13) or its ExpandArrow child (ref's strsub/strlen check).
+                local anchorFrame;
+                if ( string.sub(this:GetParent():GetName(), 1, 12) == "DropDownList" and string.len(this:GetParent():GetName()) == 13 ) then
+                    anchorFrame = this:GetName();
+                else
+                    anchorFrame = this:GetParent():GetName();
+                end
+                listFrame:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 0, 0);
+                listFrame.anchorFrame = anchorFrame;
+            end
+
+            -- MENU mode swaps the dialog box for the tooltip-style backdrop (ref).
+            if ( dropDownFrame and dropDownFrame.displayMode == "MENU" ) then
+                getglobal(listFrameName.."Backdrop"):Hide();
+                getglobal(listFrameName.."MenuBackdrop"):Show();
+            else
+                getglobal(listFrameName.."Backdrop"):Show();
+                getglobal(listFrameName.."MenuBackdrop"):Hide();
+            end
+
+            UIDropDownMenu_Initialize(dropDownFrame, dropDownFrame.initialize, nil, level);
+            if ( listFrame.numButtons == 0 ) then
+                return;
+            end
+
+            -- Declared-width capsules apply synchronously (the proven pre-0434 path); auto-sized
+            -- menus ride the settle.
+            listFrame.fixedWidth = nil;
+            if ( dropDownFrame.noResize and dropDownFrame.dropWidth ) then
+                listFrame.fixedWidth = dropDownFrame.dropWidth;
+                for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                    getglobal(listFrameName.."Button"..i):SetWidth(listFrame.fixedWidth);
+                end
+                listFrame:SetWidth(listFrame.fixedWidth + 32);
+            end
+            listFrame:Show();
+        end
+
+        function CloseDropDownMenus(level)
+            if ( not level ) then
+                level = 1;
+            end
+            for i=level, UIDROPDOWNMENU_MAXLEVELS, 1 do
+                getglobal("DropDownList"..i):Hide();
+            end
+        end
+
+        -- CloseMenus() — in the ref a C function (the ESC ladder's rung between the game-menu
+        -- checks and SpellStopCasting, UIParent.lua l.1488): close any open menu, truthy iff one
+        -- was open so the ladder eats the press. Every menu we have is a DropDownList, so the
+        -- Lua equivalent lives here with them (decision 0454).
+        function CloseMenus()
+            local closed
+            for i=1, UIDROPDOWNMENU_MAXLEVELS, 1 do
+                local list = getglobal("DropDownList"..i)
+                if list and list:IsVisible() then
+                    closed = 1
+                end
+            end
+            if closed then
+                CloseDropDownMenus()
+            end
+            return closed
+        end
+
+        -- ref verbatim + dropWidth (the declared width the fixed path reuses — see the header).
+        function UIDropDownMenu_SetWidth(width, frame)
+            if ( not frame ) then
+                frame = this;
+            end
+            getglobal(frame:GetName().."Middle"):SetWidth(width);
+            frame:SetWidth(width + 25 + 25);
+            getglobal(frame:GetName().."Text"):SetWidth(width - 25);
+            frame.dropWidth = width;
+            frame.noResize = 1;
+        end
+
+        function UIDropDownMenu_SetButtonWidth(width, frame)
+            if ( not frame ) then
+                frame = this;
+            end
+            if ( width == "TEXT" ) then
+                width = getglobal(frame:GetName().."Text"):GetWidth();
+            end
+            getglobal(frame:GetName().."Button"):SetWidth(width);
+            frame.noResize = 1;
+        end
+
+        function UIDropDownMenu_SetText(text, frame)
+            if ( not frame ) then
+                frame = this;
+            end
+            getglobal(frame:GetName().."Text"):SetText(text);
+        end
+
+        function UIDropDownMenu_GetText(frame)
+            if ( not frame ) then
+                frame = this;
+            end
+            return getglobal(frame:GetName().."Text"):GetText();
+        end
+
+        function UIDropDownMenu_ClearAll(frame)
+            frame.selectedID = nil;
+            frame.selectedName = nil;
+            frame.selectedValue = nil;
+            UIDropDownMenu_SetText("", frame);
+            for i=1, UIDROPDOWNMENU_MAXBUTTONS, 1 do
+                local button = getglobal("DropDownList"..UIDROPDOWNMENU_MENU_LEVEL.."Button"..i);
+                button:UnlockHighlight();
+                getglobal(button:GetName().."Check"):Hide();
+            end
+        end
+
+        function UIDropDownMenu_JustifyText(justification, frame)
+            if ( not frame ) then
+                frame = this;
+            end
+            local text = getglobal(frame:GetName().."Text");
+            text:ClearAllPoints();
+            if ( justification == "LEFT" ) then
+                text:SetPoint("LEFT", frame:GetName().."Left", "LEFT", 27, 2);
+            elseif ( justification == "RIGHT" ) then
+                text:SetPoint("RIGHT", frame:GetName().."Right", "RIGHT", -43, 2);
+            elseif ( justification == "CENTER" ) then
+                text:SetPoint("CENTER", frame:GetName().."Middle", "CENTER", -5, 2);
+            end
+        end
+
+        function UIDropDownMenu_SetAnchor(xOffset, yOffset, dropdown, point, relativeTo, relativePoint)
+            if ( not dropdown ) then
+                dropdown = this;
+            end
+            dropdown.xOffset = xOffset;
+            dropdown.yOffset = yOffset;
+            dropdown.point = point;
+            dropdown.relativeTo = relativeTo;
+            dropdown.relativePoint = relativePoint;
+        end
+
+        function UIDropDownMenu_GetCurrentDropDown()
+            if ( UIDROPDOWNMENU_OPEN_MENU ) then
+                return getglobal(UIDROPDOWNMENU_OPEN_MENU);
+            end
+            return this;
+        end
+
+        function UIDropDownMenuButton_GetChecked()
+            return getglobal(this:GetName().."Check"):IsVisible();
+        end
+
+        function UIDropDownMenuButton_GetName()
+            return getglobal(this:GetName().."NormalText"):GetText();
+        end
+
+        function UIDropDownMenu_DisableButton(level, id)
+            getglobal("DropDownList"..level.."Button"..id):Disable();
+        end
+
+        function UIDropDownMenu_EnableButton(level, id)
+            getglobal("DropDownList"..level.."Button"..id):Enable();
+        end
+
+        function UIDropDownMenu_SetButtonText(level, id, text, r, g, b)
+            local button = getglobal("DropDownList"..level.."Button"..id);
+            button:SetText(text);
+            if ( r ) then
+                button:SetTextColor(r, g, b);
+                button:SetHighlightTextColor(r, g, b);
+            end
+        end
+    ]]></Script>
+
+    <!-- One menu row (ref UIDropDownMenuButtonTemplate: highlight, check, right-side icon, the
+         expand arrow, the disabled-row InvisibleButton; text re-anchored per AddButton). -->
+    <Button name="UIDropDownMenuButtonTemplate" virtual="true" hidden="true">
+        <Size><AbsDimension x="128" y="16"/></Size>
+        <Layers>
+            <Layer level="BACKGROUND">
+                <Texture name="$parentHighlight" file="Interface\QuestFrame\UI-QuestTitleHighlight" alphaMode="ADD" setAllPoints="true" hidden="true"/>
+            </Layer>
+            <Layer level="ARTWORK">
+                <Texture name="$parentCheck" file="Interface\Buttons\UI-CheckBox-Check">
+                    <Size><AbsDimension x="24" y="24"/></Size>
+                    <Anchors><Anchor point="LEFT"/></Anchors>
+                </Texture>
+                <Texture name="$parentIcon" hidden="true">
+                    <Size><AbsDimension x="15" y="15"/></Size>
+                    <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-5" y="0"/></Offset></Anchor></Anchors>
+                </Texture>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentExpandArrow" hidden="true">
+                <Size><AbsDimension x="16" y="16"/></Size>
+                <Anchors><Anchor point="RIGHT"><Offset><AbsDimension x="-6" y="0"/></Offset></Anchor></Anchors>
+                <Scripts>
+                    <OnClick>
+                        ToggleDropDownMenu(this:GetParent():GetParent():GetID() + 1, this:GetParent().value);
+                    </OnClick>
+                    <OnEnter>
+                        ToggleDropDownMenu(this:GetParent():GetParent():GetID() + 1, this:GetParent().value);
+                        UIDropDownMenu_StopCounting(this:GetParent():GetParent());
+                    </OnEnter>
+                    <OnLeave>
+                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                    </OnLeave>
+                </Scripts>
+                <NormalTexture file="Interface\ChatFrame\ChatFrameExpandArrow"/>
+            </Button>
+            <!-- Disabled rows don't get mouse events; this transparent cover keeps the hover
+                 alive (timeout + deeper-level close). Spans to the row's RIGHT (header note). -->
+            <Button name="$parentInvisibleButton" hidden="true">
+                <Anchors>
+                    <Anchor point="TOPLEFT"/>
+                    <Anchor point="BOTTOMLEFT"/>
+                    <Anchor point="RIGHT"/>
+                </Anchors>
+                <Scripts>
+                    <OnEnter>
+                        UIDropDownMenu_StopCounting(this:GetParent():GetParent());
+                        CloseDropDownMenus(this:GetParent():GetParent():GetID() + 1);
+                    </OnEnter>
+                    <OnLeave>
+                        UIDropDownMenu_StartCounting(this:GetParent():GetParent());
+                    </OnLeave>
+                </Scripts>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                UIDropDownMenuButton_OnClick();
+            </OnClick>
+            <OnEnter>
+                if ( this.hasArrow ) then
+                    ToggleDropDownMenu(this:GetParent():GetID() + 1, this.value);
+                else
+                    CloseDropDownMenus(this:GetParent():GetID() + 1);
+                end
+                getglobal(this:GetName().."Highlight"):Show();
+                UIDropDownMenu_StopCounting(this:GetParent());
+            </OnEnter>
+            <OnLeave>
+                getglobal(this:GetName().."Highlight"):Hide();
+                UIDropDownMenu_StartCounting(this:GetParent());
+            </OnLeave>
+        </Scripts>
+        <ButtonText name="$parentNormalText">
+            <Anchors><Anchor point="LEFT"><Offset><AbsDimension x="27" y="0"/></Offset></Anchor></Anchors>
+        </ButtonText>
+        <NormalFont inherits="GameFontHighlightSmall" justifyH="LEFT"/>
+        <HighlightFont inherits="GameFontHighlightSmall" justifyH="LEFT"/>
+        <DisabledFont inherits="GameFontDisableSmall" justifyH="LEFT"/>
+    </Button>
+
+    <!-- The list (ref UIDropDownListTemplate): the two swappable backdrops + 32 rows.
+         FULLSCREEN_DIALOG, not the ref's DIALOG: the list must sort above ANY opener, and the
+         world map is FULLSCREEN strata — DIALOG would render the list underneath it (the strata
+         escalation later reference versions added to ToggleDropDownMenu, applied statically
+         here since our customer set is known). -->
+    <Button name="UIDropDownListTemplate" frameStrata="FULLSCREEN_DIALOG" virtual="true" hidden="true">
+        <Size><AbsDimension x="180" y="32"/></Size>
+        <Frames>
+            <Frame name="$parentBackdrop" setAllPoints="true">
+                <Backdrop bgFile="Interface\DialogFrame\UI-DialogBox-Background" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+                    <BackgroundInsets><AbsInset left="11" right="12" top="12" bottom="11"/></BackgroundInsets>
+                    <TileSize><AbsValue val="32"/></TileSize>
+                    <EdgeSize><AbsValue val="32"/></EdgeSize>
+                </Backdrop>
+            </Frame>
+            <Frame name="$parentMenuBackdrop" setAllPoints="true" hidden="true">
+                <Backdrop bgFile="Interface\Tooltips\UI-Tooltip-Background" edgeFile="Interface\Tooltips\UI-Tooltip-Border" tile="true">
+                    <BackgroundInsets><AbsInset left="5" right="5" top="5" bottom="5"/></BackgroundInsets>
+                    <TileSize><AbsValue val="16"/></TileSize>
+                    <EdgeSize><AbsValue val="16"/></EdgeSize>
+                </Backdrop>
+                <Scripts>
+                    <OnLoad>
+                        this:SetBackdropBorderColor(TOOLTIP_DEFAULT_COLOR.r, TOOLTIP_DEFAULT_COLOR.g, TOOLTIP_DEFAULT_COLOR.b);
+                        this:SetBackdropColor(TOOLTIP_DEFAULT_BACKGROUND_COLOR.r, TOOLTIP_DEFAULT_BACKGROUND_COLOR.g, TOOLTIP_DEFAULT_BACKGROUND_COLOR.b);
+                    </OnLoad>
+                </Scripts>
+            </Frame>
+            <Button name="$parentButton1" inherits="UIDropDownMenuButtonTemplate" id="1"/>
+            <Button name="$parentButton2" inherits="UIDropDownMenuButtonTemplate" id="2"/>
+            <Button name="$parentButton3" inherits="UIDropDownMenuButtonTemplate" id="3"/>
+            <Button name="$parentButton4" inherits="UIDropDownMenuButtonTemplate" id="4"/>
+            <Button name="$parentButton5" inherits="UIDropDownMenuButtonTemplate" id="5"/>
+            <Button name="$parentButton6" inherits="UIDropDownMenuButtonTemplate" id="6"/>
+            <Button name="$parentButton7" inherits="UIDropDownMenuButtonTemplate" id="7"/>
+            <Button name="$parentButton8" inherits="UIDropDownMenuButtonTemplate" id="8"/>
+            <Button name="$parentButton9" inherits="UIDropDownMenuButtonTemplate" id="9"/>
+            <Button name="$parentButton10" inherits="UIDropDownMenuButtonTemplate" id="10"/>
+            <Button name="$parentButton11" inherits="UIDropDownMenuButtonTemplate" id="11"/>
+            <Button name="$parentButton12" inherits="UIDropDownMenuButtonTemplate" id="12"/>
+            <Button name="$parentButton13" inherits="UIDropDownMenuButtonTemplate" id="13"/>
+            <Button name="$parentButton14" inherits="UIDropDownMenuButtonTemplate" id="14"/>
+            <Button name="$parentButton15" inherits="UIDropDownMenuButtonTemplate" id="15"/>
+            <Button name="$parentButton16" inherits="UIDropDownMenuButtonTemplate" id="16"/>
+            <Button name="$parentButton17" inherits="UIDropDownMenuButtonTemplate" id="17"/>
+            <Button name="$parentButton18" inherits="UIDropDownMenuButtonTemplate" id="18"/>
+            <Button name="$parentButton19" inherits="UIDropDownMenuButtonTemplate" id="19"/>
+            <Button name="$parentButton20" inherits="UIDropDownMenuButtonTemplate" id="20"/>
+            <Button name="$parentButton21" inherits="UIDropDownMenuButtonTemplate" id="21"/>
+            <Button name="$parentButton22" inherits="UIDropDownMenuButtonTemplate" id="22"/>
+            <Button name="$parentButton23" inherits="UIDropDownMenuButtonTemplate" id="23"/>
+            <Button name="$parentButton24" inherits="UIDropDownMenuButtonTemplate" id="24"/>
+            <Button name="$parentButton25" inherits="UIDropDownMenuButtonTemplate" id="25"/>
+            <Button name="$parentButton26" inherits="UIDropDownMenuButtonTemplate" id="26"/>
+            <Button name="$parentButton27" inherits="UIDropDownMenuButtonTemplate" id="27"/>
+            <Button name="$parentButton28" inherits="UIDropDownMenuButtonTemplate" id="28"/>
+            <Button name="$parentButton29" inherits="UIDropDownMenuButtonTemplate" id="29"/>
+            <Button name="$parentButton30" inherits="UIDropDownMenuButtonTemplate" id="30"/>
+            <Button name="$parentButton31" inherits="UIDropDownMenuButtonTemplate" id="31"/>
+            <Button name="$parentButton32" inherits="UIDropDownMenuButtonTemplate" id="32"/>
+        </Frames>
+        <Scripts>
+            <OnClick>
+                this:Hide();
+            </OnClick>
+            <OnEnter>
+                UIDropDownMenu_StopCounting(this);
+            </OnEnter>
+            <OnLeave>
+                UIDropDownMenu_StartCounting(this);
+            </OnLeave>
+            <OnUpdate>
+                UIDropDownMenu_OnUpdate(arg1);
+            </OnUpdate>
+            <OnShow>
+                if ( this:GetID() > 1 ) then
+                    this.parent = getglobal("DropDownList"..(this:GetID() - 1));
+                end
+                this.showTimer = nil;
+                this.isCounting = nil;
+                if ( not this.fixedWidth ) then
+                    this.pendingWidth = 1;
+                end
+                this.pendingFlip = 1;
+            </OnShow>
+        </Scripts>
+    </Button>
+
+    <!-- The capsule (ref UIDropDownMenuTemplate, verbatim art + geometry). -->
+    <Frame name="UIDropDownMenuTemplate" virtual="true">
+        <Size><AbsDimension x="40" y="32"/></Size>
+        <Layers>
+            <Layer level="ARTWORK">
+                <Texture name="$parentLeft" file="Interface\Glues\CharacterCreate\CharacterCreate-LabelFrame">
+                    <Size><AbsDimension x="25" y="64"/></Size>
+                    <Anchors><Anchor point="TOPLEFT"><Offset><AbsDimension x="0" y="17"/></Offset></Anchor></Anchors>
+                    <TexCoords left="0" right="0.1953125" top="0" bottom="1"/>
+                </Texture>
+                <Texture name="$parentMiddle" file="Interface\Glues\CharacterCreate\CharacterCreate-LabelFrame">
+                    <Size><AbsDimension x="115" y="64"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentLeft" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.1953125" right="0.8046875" top="0" bottom="1"/>
+                </Texture>
+                <Texture name="$parentRight" file="Interface\Glues\CharacterCreate\CharacterCreate-LabelFrame">
+                    <Size><AbsDimension x="25" y="64"/></Size>
+                    <Anchors><Anchor point="LEFT" relativeTo="$parentMiddle" relativePoint="RIGHT"/></Anchors>
+                    <TexCoords left="0.8046875" right="1" top="0" bottom="1"/>
+                </Texture>
+                <FontString name="$parentText" inherits="GameFontHighlightSmall" justifyH="RIGHT">
+                    <Size><AbsDimension x="0" y="10"/></Size>
+                    <Anchors><Anchor point="RIGHT" relativeTo="$parentRight"><Offset><AbsDimension x="-43" y="2"/></Offset></Anchor></Anchors>
+                </FontString>
+            </Layer>
+        </Layers>
+        <Frames>
+            <Button name="$parentButton">
+                <Size><AbsDimension x="24" y="24"/></Size>
+                <Anchors>
+                    <Anchor point="TOPRIGHT" relativeTo="$parentRight">
+                        <Offset><AbsDimension x="-16" y="-18"/></Offset>
+                    </Anchor>
+                </Anchors>
+                <Scripts>
+                    <OnClick>
+                        ToggleDropDownMenu();
+                        PlaySound("igMainMenuOptionCheckBoxOn");
+                    </OnClick>
+                </Scripts>
+                <NormalTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Up"/>
+                <PushedTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Down"/>
+                <DisabledTexture file="Interface\ChatFrame\UI-ChatIcon-ScrollDown-Disabled"/>
+                <HighlightTexture file="Interface\Buttons\UI-Common-MouseHilight" alphaMode="ADD"/>
+            </Button>
+        </Frames>
+        <Scripts>
+            <OnHide>
+                CloseDropDownMenus();
+            </OnHide>
+        </Scripts>
+    </Frame>
+
+    <!-- The two shared lists (the ref authors DropDownList1..3; level 3 waits for a customer). -->
+    <Button name="DropDownList1" inherits="UIDropDownListTemplate" id="1" parent="UIParent"/>
+    <Button name="DropDownList2" inherits="UIDropDownListTemplate" id="2" parent="UIParent"/>
+</Ui>

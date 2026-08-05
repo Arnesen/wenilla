@@ -117,6 +117,39 @@ impl Loader<'_> {
         }
     }
 
+    /// A `text=` attribute is a **GLOBAL-STRING LOOKUP, not a literal** — the single most load-bearing
+    /// thing about the attribute, and the one this loader used to get wrong.
+    ///
+    /// wow-re `system/ui/scratch/rf28-typed-widget-loadxml.md`: `<Button text=>` (l.36) and
+    /// `<FontString text=>` (l.115) BOTH resolve through `FrameScript_GetText 0x703bf0`, which
+    /// `scratch/inventory-change-failure-display.md` l.119 carves VERIFIED — it resolves the value as
+    /// a Lua global and, **when that global is not a string, returns a pre-seeded EMPTY string**
+    /// (`0x882748`), never the key name. That is why the reference's `text="LOGOUT"` renders "Logout",
+    /// and why `GlobalStrings.lua` runs before any XML (`ui_script::load_global_strings`).
+    ///
+    /// **One deliberate divergence: a miss falls back to the LITERAL** rather than the reference's
+    /// empty string. benilla authors its own FrameXML (0068) and writes plain English in it —
+    /// `text="Send Mail"`, `text="No results found."` — which the reference's rule would blank. The
+    /// fallback is a strict superset for transcriptions (every real key resolves identically) and it
+    /// fails LOUDER than the reference: a **key-shaped** value that misses keeps its key on screen
+    /// *and* warns here — exactly the signal that was missing when the macro window shipped with
+    /// "CREATE_MACROS" across its title bar (0983 → 0991).
+    pub(super) fn resolve_text(&mut self, raw: &str, dbg: &str) -> String {
+        if let Ok(s) = self.lua().globals().get::<String>(raw) {
+            return s;
+        }
+        if is_global_string_key(raw) {
+            self.warn_once(
+                &format!("gs:{raw}"),
+                format!(
+                    "{dbg}: text=\"{raw}\" is shaped like a GlobalStrings key but no such string \
+                     global exists — showing the key"
+                ),
+            );
+        }
+        raw.to_string()
+    }
+
     /// Walk one document's top-level items in order (rf24-framexml-loader.md, `0x6ede10`).
     pub(super) fn load_doc(&mut self, doc: &ParsedDocument) {
         for item in &doc.items {
@@ -339,6 +372,20 @@ pub(super) fn children_named<'a>(
     el.children
         .iter()
         .filter(move |c| c.tag.eq_ignore_ascii_case(tag))
+}
+
+/// Does this `text=` value LOOK like a GlobalStrings key? `SCREAMING_SNAKE`, two characters or more —
+/// at least one letter, and nothing but `A-Z`, `0-9`, `_`. The reference's whole string table is
+/// written this way (`CREATE_MACROS`, `DELETE`, `EXIT_GAME`), and benilla's own literals never are
+/// ("Send Mail", "No results found."), so the shape cleanly separates "you meant a key" from "you
+/// meant these words" — all [`Loader::resolve_text`] needs it for. The length floor is the one real
+/// false positive it buys off: a single-character label (`text="X"` on a close button) is a glyph,
+/// never a key.
+fn is_global_string_key(s: &str) -> bool {
+    s.len() >= 2
+        && s.chars().any(|c| c.is_ascii_uppercase())
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Read an `x`/`y` dimension from a `<Size>`/`<Offset>` element: prefer a `<AbsDimension>` child,

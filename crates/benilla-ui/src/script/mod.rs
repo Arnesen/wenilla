@@ -486,17 +486,28 @@ impl UiScript {
         Self::resolve_layout(&mut model);
     }
 
-    /// Store host measurements for [`MeasureRequest`]s (`(id, w, h, key)` — id/key verbatim from
-    /// the request). The next [`UiScript::resolve`] uses them as the FontStrings' implicit size.
-    pub fn set_measured_text(&mut self, measures: &[(u32, f32, f32, u64)]) {
+    /// Store host measurements for [`MeasureRequest`]s (`(id, w, h, natural_w, key)` — id/key
+    /// verbatim from the request). The next [`UiScript::resolve`] uses `w`/`h` as the FontStrings'
+    /// implicit size.
+    ///
+    /// `w`/`h` are the text **as laid out** (wrapped inside a declared width); `natural_w` is what
+    /// it would take **unwrapped**, and is what `GetStringWidth` reports — see [`MeasuredText`] for
+    /// why the two must not be conflated. For a region with no declared width they are the same
+    /// number, which is why [`Self::set_measured_text_unwrapped`] exists for tests.
+    pub fn set_measured_text(&mut self, measures: &[(u32, f32, f32, f32, u64)]) {
         let mut model = self.model_mut();
         let mut changed = false;
-        for &(id, w, h, key) in measures {
+        for &(id, w, h, natural_w, key) in measures {
             let Some(&rh) = model.id_to_region.get(&id) else {
                 continue;
             };
             if let Some(d) = model.region_data.get_mut(&rh) {
-                let new = MeasuredText { w, h, key };
+                let new = MeasuredText {
+                    w,
+                    h,
+                    natural_w,
+                    key,
+                };
                 changed |= d.measured != Some(new);
                 d.measured = Some(new);
             }
@@ -505,6 +516,18 @@ impl UiScript {
             // Measured extents are the auto-size axes' inputs — the layout gate's read set.
             model.touch_layout();
         }
+    }
+
+    /// [`Self::set_measured_text`] for text with **no wrap constraint**, where the laid-out and
+    /// natural widths are by definition the same number. Test-facing: a hand-fed measure for an
+    /// unconstrained string should not have to say `w` twice, and a test that DOES care about the
+    /// distinction (a declared-width region) should be forced to spell it out.
+    pub fn set_measured_text_unwrapped(&mut self, measures: &[(u32, f32, f32, u64)]) {
+        let widened: Vec<_> = measures
+            .iter()
+            .map(|&(id, w, h, key)| (id, w, h, w, key))
+            .collect();
+        self.set_measured_text(&widened);
     }
 
     /// Drop every cached host text metric — FontString measures, message-line row counts, editbox

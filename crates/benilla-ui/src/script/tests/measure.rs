@@ -32,7 +32,7 @@ fn measured_fontstring_height_feeds_frame_anchors() {
     assert_eq!(r.wrap_width, Some(270.0));
     assert_eq!(r.text, "a long greeting that wraps");
     // Host answers: 3 wrapped lines of 16px ⇒ 48 tall.
-    s.set_measured_text(&[(r.id, 250.0, 48.0, r.key)]);
+    s.set_measured_text_unwrapped(&[(r.id, 250.0, 48.0, r.key)]);
     s.resolve();
     assert!(
         s.fontstrings_needing_measure().is_empty(),
@@ -86,7 +86,7 @@ fn a_changed_text_reads_zero_until_its_own_measure_lands() {
     assert_eq!(reqs.len(), 1);
     let r = reqs[0].clone();
     assert_eq!(r.text, "Say: ");
-    s.set_measured_text(&[(r.id, 30.0, 16.0, r.key)]);
+    s.set_measured_text_unwrapped(&[(r.id, 30.0, 16.0, r.key)]);
     assert_eq!(
         s.eval::<f64>(r#"return getglobal("Header"):GetWidth()"#)
             .unwrap(),
@@ -108,7 +108,7 @@ fn a_changed_text_reads_zero_until_its_own_measure_lands() {
     let r2 = reqs[0].clone();
     assert_eq!(r2.text, "Tell Alice: ");
     assert_ne!(r2.key, r.key, "the key tracks the text");
-    s.set_measured_text(&[(r2.id, 72.0, 16.0, r2.key)]);
+    s.set_measured_text_unwrapped(&[(r2.id, 72.0, 16.0, r2.key)]);
     assert_eq!(
         s.eval::<f64>(r#"return getglobal("Header"):GetWidth()"#)
             .unwrap(),
@@ -156,7 +156,7 @@ fn zero_width_fontstring_autosizes_to_its_line() {
         (label_req.id, 40.0, 16.0, label_req.key),
         (value_req.id, 45.0, 16.0, value_req.key),
     ];
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
     // Label: right edge pinned at Win left +114, measured width 40 ⇒ [74, 114].
     let (l_left, l_right, l_w): (f32, f32, f32) = s
@@ -197,7 +197,7 @@ fn frame_scale_rides_the_quads_and_the_measure_key() {
     assert_eq!(r.scale, 0.8, "request names the drawn-size scale");
     let old_key = r.key;
     let (id, key) = (r.id, r.key);
-    s.set_measured_text(&[(id, 50.0, 16.0, key)]);
+    s.set_measured_text_unwrapped(&[(id, 50.0, 16.0, key)]);
     s.resolve();
     assert!(s.fontstrings_needing_measure().is_empty(), "cache warm");
     // Every quad of the scaled frame carries the scale — frame slot and region alike.
@@ -245,7 +245,7 @@ fn invalidate_text_measures_reopens_the_round_trip() {
     let reqs = s.fontstrings_needing_measure();
     assert_eq!(reqs.len(), 1);
     let (id, key) = (reqs[0].id, reqs[0].key);
-    s.set_measured_text(&[(id, 74.0, 12.0, key)]);
+    s.set_measured_text_unwrapped(&[(id, 74.0, 12.0, key)]);
     s.resolve();
     assert!(s.fontstrings_needing_measure().is_empty(), "cache warm");
     assert_eq!(
@@ -269,4 +269,74 @@ fn invalidate_text_measures_reopens_the_round_trip() {
         "content key unchanged — only the answer was stale"
     );
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// **`GetStringWidth` is the NATURAL width — never the box, never the wrapped extent** (wow-re
+/// `fontstring-overflow.md`, "The measurement echo": the reference re-measures the raw text with no
+/// wrap constraint, so "Lua sees the natural, unwrapped, un-truncated width at the DRAWN size").
+///
+/// This is the distinction whose absence made the reference's own `PanelTemplates_TabResize` a
+/// feedback loop in this engine (decision 0997): the kit sized a tab from `GetStringWidth`, set that
+/// width on the label, and read its own output back next frame — a tab that changed width every
+/// single frame. Three separate things are pinned here because each one was wrong on its own:
+///
+/// 1. a region with a DECLARED width still gets a measure request (it used to be skipped: no
+///    auto-sized axis, no request — so a constrained label could never learn its natural width);
+/// 2. `GetStringWidth` answers with the natural width, while `GetWidth` keeps echoing the laid-out
+///    extent that auto-size depends on;
+/// 3. the answer does not move when the declared width does.
+#[test]
+fn get_string_width_is_the_natural_width_not_the_box() {
+    let mut s = UiScript::new().unwrap();
+    s.set_screen_size(800.0, 600.0);
+    s.run(
+        r#"
+        Win = CreateFrame("Frame")
+        Win:SetWidth(400) Win:SetHeight(300)
+        Win:SetPoint("TOPLEFT", 0, 0)
+        Label = Win:CreateFontString("Label")
+        Label:SetText("a string that is wider than its box")
+        Label:SetWidth(60) Label:SetHeight(13)
+        Label:SetPoint("TOPLEFT", 10, -10)
+    "#,
+    )
+    .unwrap();
+    s.resolve();
+
+    // 1 · Both axes are declared, so nothing about the LAYOUT needs a measure — and the request is
+    //     issued anyway, because `GetStringWidth` has no other way to learn the natural width.
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1, "a fully-sized FontString still measures");
+    let r = &reqs[0];
+    assert_eq!(r.wrap_width, Some(60.0), "the request carries the box");
+
+    // The host answers with both: laid out inside 60, natural 200.
+    s.set_measured_text(&[(r.id, 60.0, 39.0, 200.0, r.key)]);
+    s.resolve();
+
+    // 2 · The two getters answer different questions.
+    assert_eq!(
+        s.eval::<f64>("return Label:GetStringWidth()").unwrap(),
+        200.0,
+        "GetStringWidth is the natural, unwrapped extent"
+    );
+    assert_eq!(
+        s.eval::<f64>("return Label:GetWidth()").unwrap(),
+        60.0,
+        "GetWidth is the laid-out box the auto-size path depends on"
+    );
+
+    // 3 · Narrowing the box re-opens the round trip (the key carries the wrap) and, once answered,
+    //     leaves the natural width exactly where it was. This is the loop that used to close.
+    s.run("Label:SetWidth(30)").unwrap();
+    s.resolve();
+    let reqs = s.fontstrings_needing_measure();
+    assert_eq!(reqs.len(), 1, "a new box is a new measure key");
+    s.set_measured_text(&[(reqs[0].id, 30.0, 91.0, 200.0, reqs[0].key)]);
+    s.resolve();
+    assert_eq!(
+        s.eval::<f64>("return Label:GetStringWidth()").unwrap(),
+        200.0,
+        "the string did not change, so neither did its natural width"
+    );
 }

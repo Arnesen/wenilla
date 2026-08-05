@@ -139,12 +139,13 @@ impl Loader<'_> {
             // `<Size>/<Anchors>`/justify to it — the ref anchors ButtonText all over (the quest
             // greeting rows hang theirs at TOPLEFT+20 beside the bullet; without this every
             // labelled Button centered its text over the whole face).
-            self.call(
-                wrapper,
-                "SetText",
-                bt.attr("text").unwrap_or_default().to_string(),
-                dbg,
-            );
+            // `<ButtonText text=>` is a FontString's own attribute — the same global-string lookup
+            // rf28 l.115 gives every `<FontString text=>`. See `Loader::resolve_text`.
+            let label = match bt.attr("text") {
+                Some(raw) => self.resolve_text(raw, dbg),
+                None => String::new(),
+            };
+            self.call(wrapper, "SetText", label, dbg);
             if let Ok(region) = wrapper.call_method::<Table>("GetFontString", ()) {
                 self.apply_region_layout(bt, &region, self_name, dbg);
                 // Publish the label under its resolved name (`<ButtonText name="$parentText">`) —
@@ -160,7 +161,10 @@ impl Loader<'_> {
             }
         }
         if let Some(text) = el.attr("text") {
-            self.call(wrapper, "SetText", text.to_string(), dbg);
+            // `<Button text=>` → the ButtonText fontstring, global-string resolved (rf28 l.36,
+            // `0x703bf0`). This is what makes the reference's `text="DELETE"` read "Delete".
+            let text = self.resolve_text(text, dbg);
+            self.call(wrapper, "SetText", text, dbg);
         }
         // The per-state label fonts (`<NormalFont inherits=>` etc. — UIPanelButtonTemplate's
         // gold/white/gray label trio) → the 1.12 setter trio; every occurrence applies in

@@ -311,7 +311,7 @@ fn world_hover_drive_and_health_watcher() {
         .iter()
         .map(|r| (r.id, 80.0, 10.0, r.key))
         .collect();
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
     s.run(
         r#"assert(GameTooltip:GetRight() == 787 and GameTooltip:GetBottom() == 70,
@@ -369,7 +369,7 @@ fn minimap_blip_tooltip_shows_and_fades() {
         .iter()
         .map(|r| (r.id, 80.0, 10.0, r.key))
         .collect();
-    s.set_measured_text(&answers);
+    s.set_measured_text_unwrapped(&answers);
     s.resolve();
     s.run(
         r#"assert(GameTooltip:GetRight() <= 800, "clamped inside the screen, got " .. tostring(GameTooltip:GetRight()))"#,
